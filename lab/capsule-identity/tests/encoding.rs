@@ -3,8 +3,11 @@
 //! with its own test.
 mod common;
 
-use capsule_identity::{encode_entries, lab_cid, BundleEntry, Refusal};
+use capsule_identity::{
+    encode_chunked_files, encode_entries, lab_cid, BundleEntry, ChunkedFile, Refusal,
+};
 use common::*;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 fn entry(path: &str, content: &[u8]) -> BundleEntry {
@@ -192,55 +195,300 @@ fn file_over_one_leaf_has_the_pinned_cid() {
     }
 }
 
-#[test]
-fn file_of_174_leaves_is_named_and_one_byte_more_is_refused() {
-    // 174 leaves of 262144 bytes (45613056 bytes) is the most one file root
-    // links (`max-file-links`). One byte more needs a 175th leaf and so a
-    // second tree level, which the lab refuses. In memory: no folder.
-    let limit = 174 * 262_144;
-    assert_eq!(limit, 45_613_056);
-    let mut file = vec![0; limit];
-    let named = encode_entries(&[entry("full.bin", &file)])
-        .unwrap_or_else(|refusal| panic!("174 leaves: {refusal}"));
-    assert!(named.to_string().starts_with("bafybei"), "{named}");
+/// The leaves of task 072's file, in order: leaf `i`'s digest is the SHA-256
+/// of `i` as 8 little-endian bytes; the 30276 full leaves are 262144 bytes
+/// and the last is 1 byte.
+fn three_level_leaves() -> Vec<([u8; 32], u64)> {
+    (0..30_277u64)
+        .map(|index| {
+            let size = if index < 30_276 { 262_144 } else { 1 };
+            (Sha256::digest(index.to_le_bytes()).into(), size)
+        })
+        .collect()
+}
 
-    file.push(0);
-    let refusal = encode_entries(&[entry("full.bin", &file)])
-        .expect_err("a file of 175 leaves must be refused");
+/// One [`ChunkedFile`] at `sample.example` over `chunks`.
+fn chunked(chunks: Vec<([u8; 32], u64)>) -> ChunkedFile {
+    ChunkedFile {
+        path: "sample.example".to_owned(),
+        chunks,
+    }
+}
+
+#[test]
+fn file_past_174_leaves_keeps_a_second_tree_level() {
+    // One leaf past 174: 45613057 bytes (174 leaves of 262144 bytes and one
+    // of 1 byte) needs a second tree level, a root of two depth-1 file nodes,
+    // the first over 174 leaves and the second over one leaf. The pin was
+    // first printed by README's Python rule. 174 leaves (45613056 bytes)
+    // still encode, as one depth-1 root, with another CID. The file is made
+    // in memory and never committed.
+    let manifest = entry(
+        "capsule.json",
+        &read_fixture(&CONTENT_SAMPLE, "capsule.json"),
+    );
+    let mut file = vec![0; 45_613_057];
+    let pin = SECOND_LEVEL_FILE_LAB_CID;
+    let named = encode_entries(&[manifest.clone(), entry("sample.example", &file)])
+        .unwrap_or_else(|refusal| panic!("175 leaves: {refusal}"));
+    assert_eq!(named.to_string(), pin, "encode_entries against the pin");
+    assert!(pin.starts_with("bafybei"), "{pin}");
+    assert_eq!(pin.len(), 59, "{pin}");
+
+    file.truncate(45_613_056);
+    let one_level = encode_entries(&[manifest, entry("sample.example", &file)])
+        .unwrap_or_else(|refusal| panic!("174 leaves: {refusal}"));
+    assert_ne!(one_level.to_string(), pin, "174 leaves has another CID");
+}
+
+#[test]
+fn file_past_174_squared_leaves_keeps_a_third_tree_level() {
+    // 30277 leaves: 30276 of 262144 bytes then one of 1 byte, 7936671745
+    // bytes. 174^2 is 30276, so a third level is needed: 175 depth-1 nodes
+    // (174 over 174 leaves, one over the single leaf), then 2 (one over the
+    // 174 nodes, one over the single node), then the root. The pin was first
+    // printed by README's Python rule through THREE_LEVEL_FILE_DRIVER; Kubo is
+    // not run, because the file is 7936671745 bytes and is never written.
+    let leaves = three_level_leaves();
+    assert_eq!(leaves.len(), 30_277, "the file's leaf count");
+    assert_eq!(
+        leaves.iter().map(|(_, size)| *size).sum::<u64>(),
+        7_936_671_745,
+        "the file's size"
+    );
+    assert_eq!(
+        leaves.last().map(|(_, size)| *size),
+        Some(1),
+        "the last leaf"
+    );
+    // The driver holds no part of the rule: no grouping limit, varint, CID
+    // prefix or base32 alphabet of its own.
+    for rule in [
+        "174",
+        "varint",
+        "0x55",
+        "0x70",
+        "B32",
+        "abcdefghijklmnopqrstuvwxyz234567",
+        "base64",
+        "def ",
+        "lambda",
+    ] {
+        assert!(
+            !THREE_LEVEL_FILE_DRIVER.contains(rule),
+            "the driver holds {rule:?}: {THREE_LEVEL_FILE_DRIVER}"
+        );
+    }
+    assert_eq!(THREE_LEVEL_FILE_DRIVER.matches("directory(").count(), 1);
+    assert_eq!(THREE_LEVEL_FILE_DRIVER.matches("printed(").count(), 1);
+
+    let pin = THREE_LEVEL_FILE_LAB_CID;
+    let python = readme_python_three_level_file().unwrap_or_else(|reason| panic!("{reason}"));
+    assert_eq!(python, pin, "README's Python rule against the pin");
+    let named = encode_chunked_files(&[chunked(leaves.clone())])
+        .unwrap_or_else(|refusal| panic!("30277 leaves: {refusal}"));
+    assert_eq!(
+        named.to_string(),
+        pin,
+        "encode_chunked_files against the pin"
+    );
+    assert!(pin.starts_with("bafybei"), "{pin}");
+    assert_eq!(pin.len(), 59, "{pin}");
+
+    // 30276 full leaves still finish in two passes, with another CID. That
+    // CID is not pinned.
+    let mut full = leaves;
+    full.pop();
+    assert_eq!(full.len(), 30_276, "the two-pass file's leaf count");
+    let two_levels = encode_chunked_files(&[chunked(full)])
+        .unwrap_or_else(|refusal| panic!("30276 leaves: {refusal}"));
+    assert_ne!(two_levels.to_string(), pin, "30276 leaves has another CID");
+}
+
+#[test]
+fn chunked_file_without_leaves_is_refused() {
+    // An empty file is one empty raw leaf, so no leaf names nothing.
+    let refusal = encode_chunked_files(&[chunked(Vec::new())]).expect_err("no leaves");
     assert_eq!(
         refusal,
-        Refusal::FileOverLeafLimit {
-            path: "full.bin".into(),
-            length: 45_613_057
+        Refusal::ChunkedFileWithoutLeaves {
+            path: "sample.example".to_owned()
         }
     );
     assert_eq!(
         refusal.to_string(),
-        "full.bin is 45613057 bytes, over the 174-leaf limit of one file root (45613056 bytes): the lab names no deeper file tree"
+        "sample.example is a chunked file with no leaves: an empty file is one empty raw leaf, so it holds one chunk of 0 bytes"
     );
 }
 
 #[test]
-fn directory_over_the_hamt_threshold_is_refused() {
-    // 1100 empty files with 200-byte names give the root about 270 KB of
-    // links: over the 262144-byte block limit, where Kubo would shard. The
-    // lab refuses it rather than name a HAMT, and returns no CID.
-    let bundle = assemble(&CONTENT_SAMPLE);
-    for number in 0..1100 {
-        write_file(bundle.path(), &format!("{number:0>200}"), b"");
+fn chunked_file_with_a_bad_chunk_size_is_refused() {
+    // Every chunk but the last is 262144 bytes, the last is 1 to 262144
+    // bytes, and only a one-chunk file may be 0 bytes. Each bad chunk names
+    // its own position and size.
+    let digest: [u8; 32] = Sha256::digest(b"chunk").into();
+    // Valid splits, so the refusals below are the size rule alone.
+    for chunks in [
+        vec![(digest, 0)],
+        vec![(digest, 1)],
+        vec![(digest, 262_144)],
+        vec![(digest, 262_144), (digest, 1)],
+        vec![(digest, 262_144), (digest, 262_144), (digest, 3)],
+    ] {
+        encode_chunked_files(&[chunked(chunks)]).expect("a chunk the split can give");
     }
-    let refusal = lab_cid(bundle.path()).expect_err("a root block over the limit must be refused");
-    let Refusal::DirectoryOverBlockLimit { path, length } = &refusal else {
-        panic!("another refusal: {refusal}");
-    };
-    assert_eq!(path, ".", "the refusal does not name the root");
-    assert!(*length > 262_144, "{refusal}");
+    let mut three = vec![(digest, 262_144u64), (digest, 262_144)];
+    three.push((digest, 0));
+    for (chunks, index, length) in [
+        (vec![(digest, 262_145)], 0, 262_145),
+        (vec![(digest, 1), (digest, 262_144)], 0, 1),
+        (three, 2, 0),
+        (vec![(digest, 262_144), (digest, 262_145)], 1, 262_145),
+    ] {
+        let refusal = encode_chunked_files(&[chunked(chunks)]).expect_err("a bad chunk");
+        assert_eq!(
+            refusal,
+            Refusal::BadChunkSize {
+                path: "sample.example".to_owned(),
+                index,
+                length,
+            }
+        );
+    }
     assert_eq!(
-        refusal.to_string(),
-        format!(
-            "the directory . encodes to {length} bytes, over the 262144-byte block limit: the lab names no HAMT-sharded directory"
-        )
+        Refusal::BadChunkSize {
+            path: "sample.example".to_owned(),
+            index: 1,
+            length: 0,
+        }
+        .to_string(),
+        "sample.example chunk 1 is 0 bytes: each chunk but the last is 262144 bytes, the last is 1 to 262144, and only a one-chunk file may be 0"
     );
+}
+
+#[test]
+fn one_chunk_chunked_file_names_the_bytes_call() {
+    // The digest-input path is the same file rule: one empty leaf and one
+    // full chunk name what `encode_entries` names for the same bytes.
+    let empty: &[u8] = b"";
+    let full = vec![0; 262_144];
+    for content in [empty, &full[..]] {
+        let digest: [u8; 32] = Sha256::digest(content).into();
+        let by_digests = encode_chunked_files(&[chunked(vec![(digest, content.len() as u64)])])
+            .unwrap_or_else(|refusal| panic!("one leaf: {refusal}"));
+        let by_bytes = encode_entries(&[entry("sample.example", content)])
+            .unwrap_or_else(|refusal| panic!("one leaf: {refusal}"));
+        assert_eq!(by_digests, by_bytes, "{} bytes", content.len());
+    }
+}
+
+fn estimate(names: impl IntoIterator<Item = usize>) -> usize {
+    names.into_iter().map(|length| length + 36).sum()
+}
+
+/// The estimate of content-sample's own two files at a bundle root.
+fn content_sample_estimate() -> usize {
+    estimate(CONTENT_SAMPLE.files.iter().map(|name| name.len()))
+}
+
+#[test]
+fn directory_at_the_hamt_threshold_stays_basic() {
+    // Kubo's estimate is the sum, over a directory's direct children, of the
+    // child's name plus 36. At exactly 262144 the directory stays one basic
+    // block, even though that block is 279500 bytes; only a greater estimate
+    // is a HAMT shard. The helper measures the one name it lengthens.
+    let (entries, names, extra) = flat_bundle_at("", 262_144);
+    assert_eq!(
+        content_sample_estimate() + estimate(names.iter().map(String::len)),
+        262_144,
+        "the bundle's links estimate"
+    );
+    assert_eq!(
+        names.iter().map(String::len).max(),
+        Some(100 + extra),
+        "the helper measured the lengthened name"
+    );
+    let pin = HAMT_THRESHOLD_LAB_CID;
+    let bundle = bundled(&entries);
+    let encoded = encode_entries(&entries)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    assert_eq!(
+        (name(&bundle), encoded.as_str()),
+        (pin.to_owned(), pin),
+        "(lab_cid, encode_entries) against the at-threshold pin"
+    );
+    assert!(pin.starts_with("bafybei"), "{pin}");
+    assert_eq!(pin.len(), 59, "{pin}");
+}
+
+#[test]
+fn directory_over_the_hamt_threshold_is_a_shard() {
+    // One byte more in one name takes the estimate to 262145, so the same
+    // directory is a HAMT shard with another pin.
+    let (entries, names, extra) = flat_bundle_at("", 262_145);
+    assert_eq!(
+        content_sample_estimate() + estimate(names.iter().map(String::len)),
+        262_145,
+        "the bundle's links estimate"
+    );
+    assert_eq!(
+        names.iter().map(String::len).max(),
+        Some(100 + extra),
+        "the helper measured the lengthened name"
+    );
+    let pin = HAMT_OVER_THRESHOLD_LAB_CID;
+    let bundle = bundled(&entries);
+    let encoded = encode_entries(&entries);
+    assert_eq!(
+        encoded.as_ref().map(ToString::to_string),
+        Ok(pin.to_owned()),
+        "encode_entries returns the over-threshold pin"
+    );
+    let encoded = encoded
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    assert_eq!(
+        (name(&bundle), encoded.as_str()),
+        (pin.to_owned(), pin),
+        "(lab_cid, encode_entries) against the over-threshold pin"
+    );
+    assert_ne!(pin, HAMT_THRESHOLD_LAB_CID, "a shard names another value");
+    assert!(pin.starts_with("bafybei"), "{pin}");
+    assert_eq!(pin.len(), 59, "{pin}");
+}
+
+#[test]
+fn child_directory_over_the_hamt_threshold_is_a_shard() {
+    // The 262145 file set under `photos/`: the child is judged on its own
+    // estimate and is a shard, while the root counts only its three direct
+    // children and stays basic.
+    let (entries, names, _extra) = flat_bundle_at("photos/", 262_145);
+    assert_eq!(
+        estimate(names.iter().map(String::len)),
+        262_145,
+        "the child directory's estimate"
+    );
+    let root = content_sample_estimate() + estimate(["photos".len()]);
+    assert_eq!(root, 140, "the root's three direct children");
+    assert!(root < 262_144, "the root stays basic");
+    let pin = HAMT_CHILD_LAB_CID;
+    let bundle = bundled(&entries);
+    let encoded = encode_entries(&entries)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    assert_eq!(
+        (name(&bundle), encoded.as_str()),
+        (pin.to_owned(), pin),
+        "(lab_cid, encode_entries) against the child pin"
+    );
+    assert_ne!(
+        pin, HAMT_OVER_THRESHOLD_LAB_CID,
+        "the root adds three links"
+    );
+    assert_ne!(pin, HAMT_THRESHOLD_LAB_CID);
+    assert!(pin.starts_with("bafybei"), "{pin}");
+    assert_eq!(pin.len(), 59, "{pin}");
 }
 
 #[test]
