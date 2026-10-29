@@ -1554,6 +1554,92 @@ fn model_early_timeout_is_refused() {
 }
 
 #[test]
+fn model_forged_ceiling_does_not_set_the_timeout_deadline() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    verifier.set_verifier_deadline(100);
+    let request = GuestRequest {
+        forged_ceiling: 1,
+        ..guest(handle)
+    };
+    assert!(request.forged_ceiling > 0);
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let early = verifier
+        .timeout_hold(&call, &request, reservation, 50)
+        .expect_err("guest ceiling does not set the deadline");
+    assert_eq!(early, TimeoutRefuse::Early);
+    assert_eq!(early.to_string(), "timeout is before the verifier deadline");
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert!(!stayed.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_reported_usage_does_not_set_the_timeout_deadline() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    verifier.set_verifier_deadline(100);
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..guest(handle)
+    };
+    assert!(request.reported_usage > 0);
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let early = verifier
+        .timeout_hold(&call, &request, reservation, 50)
+        .expect_err("reported usage does not set the deadline");
+    assert_eq!(early, TimeoutRefuse::Early);
+    assert_eq!(early.to_string(), "timeout is before the verifier deadline");
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert!(!stayed.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_later_deadline_does_not_move_the_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = guest(handle);
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    verifier.set_verifier_deadline(100);
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    verifier.set_verifier_deadline(0);
+    let early = verifier
+        .timeout_hold(&call, &request, reservation, 50)
+        .expect_err("a later deadline does not move this hold");
+    assert_eq!(early, TimeoutRefuse::Early);
+    assert_eq!(early.to_string(), "timeout is before the verifier deadline");
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert!(!stayed.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
 fn model_forged_instance_does_not_move_the_settle() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
