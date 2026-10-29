@@ -3760,10 +3760,10 @@ mod tests {
             "the stand-in keeps the sibling request pending after the other start returns"
         );
         // #1090 gives the sibling resident a posted `request-2` and a
-        // finished start. This test owns no request path, so it seeds both
-        // records and checks what any reader can see at this instant: the
-        // sibling request stays pending and its unused grant leaves.
-        standin.seed_request("request-2", "component-2", "res", "read", "");
+        // finished start. `request-2` is already pending from the request
+        // route calls above. This test owns no request path, so it seeds only
+        // the unused grant and checks what any reader can see at this
+        // instant: the sibling request stays pending and its grant leaves.
         standin.seed_grant(
             "request-2",
             "component-2",
@@ -3774,7 +3774,9 @@ mod tests {
             Life::Live,
             false,
         );
-        standin.finish_start("component-2");
+        standin
+            .finish_start("component-2")
+            .expect("the sibling start finishes");
         assert_eq!(
             request_entries(&standin, "component-2"),
             vec![pending_request("request-2", "component-2")],
