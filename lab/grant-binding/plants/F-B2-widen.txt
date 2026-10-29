@@ -2,8 +2,16 @@ id: F-B2-widen
 file: src/ops.rs
 test: ops::model_forged_rights_do_not_widen_the_child_grant
 --- old
-        self.bind_grant(grant.instance, path, grant.rights)
-            .map_err(OperateRefuse::Binding)
+        self.bind_grant(
+            grant.instance,
+            path,
+            crate::Rights {
+                append: grant.rights.append,
+                overwrite: grant.rights.overwrite,
+                child_journal: false,
+            },
+        )
+        .map_err(OperateRefuse::Binding)
 --- new
         self.bind_grant(
             grant.instance,
