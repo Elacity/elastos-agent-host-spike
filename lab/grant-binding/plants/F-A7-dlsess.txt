@@ -1,0 +1,12 @@
+id: F-A7-dlsess
+file: src/ledger.rs
+test: ledger::model_forged_session_does_not_set_the_timeout_deadline
+--- old
+                            open.deadline = ledger.verifier_deadline;
+--- new
+                            open.deadline = if request.forged_session.is_some() {
+                                0
+                            } else {
+                                ledger.verifier_deadline
+                            };
+--- end
