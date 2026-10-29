@@ -37,10 +37,14 @@
   Runtime file was read again, every Runtime citation stays at `c641bcff2`, and no issue was read.
 - **Revision (task 040, 2026-10-27):** adds one dated paragraph after task 033's in "B1 through a lab stand-in (27
   Oct, tasks 032 and 033)": #309 has no launch-by-CID ask, and the lane routes it to Flint. Its lab base is
-  `c6e2d58d5e298e3fa7d07908841ce4ca0a64f6f2` (`git rev-parse HEAD` before the task's first commit). It reads #309 at
+  `c6e2d58d5e298e3fa7d07908841ce4ca0a64f6f2` (task 038's head): 040 read its files there, where its build started.
+  The runner then moved the build onto `9bd83949183e18ee4f343ef830af0e7467e78b3c` (task 039's head) before the
+  commit, so `9bd839491` is the commit's parent. The two differ only in `lab/capsule-identity/SECOND-REVIEW.md`
+  (`git diff --name-only`), so no citation changes. It reads #309 at
   `513988ebd` and one more Runtime file, `elastos/crates/elastos-server/src/api/routes.rs`, at that base, which
   `git diff --quiet` finds the same as at `c641bcff2`. Every other Runtime citation stays at `c641bcff2`, and no
-  issue was read.
+  issue was read. Corrected by task 043, on 2026-10-27: the bullet said `c6e2d58d5` was `git rev-parse HEAD` before
+  the first commit; the parent is `9bd839491` (Cursor's FOLLOWUP on 040).
 
 Each cited file under `elastos/` or `scripts/`, checked with
 `git diff --stat 3beb816438fd567145a8d725e22465bd83277cf0 c641bcff21d9ceaad769b1ed89529d541ffd8766 -- <file>`:
