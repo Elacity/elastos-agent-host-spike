@@ -42,9 +42,12 @@ directories. This crate runs no Kubo, and no Kubo is installed on this Mac.
 So the lab CID follows the Kubo v0.40.1 profile, computed by the lab: no Kubo has
 computed any pin, and [Claim scope](#claim-scope) states the gate before the
 lab CID may be called more than that.
-The tests pin only the single-block, non-sharded subset of that profile: one
-raw leaf per file and one block per directory. Anything bigger is refused, not
-named another way.
+The tests pin only the non-sharded subset of that profile with files of up to
+one tree level: a file of one raw leaf, a file of 2 to 174 raw leaves under one
+balanced file root (trickle off, `max-file-links` 174; task 048), and one
+block per directory. Anything bigger is refused, not named another way. The
+file root's bytes are the lab's reading of the profile, which no Kubo has
+checked (see [Claim scope](#claim-scope)).
 
 To recompute a lab CID by hand:
 
@@ -54,12 +57,25 @@ To recompute a lab CID by hand:
    file's bytes (an empty file is an empty block). Its CID is the 36 bytes
    `01 55 12 20` and the SHA-256 of the block: CID version 1, the raw codec
    `0x55`, the multihash code `0x12` (sha2-256) and length `0x20` (32). Its
-   Tsize is its length. A file of 262145 bytes or more is refused with its
-   path, its length and the limit: there is no chunked file DAG.
-3. Each path part but the last is a **directory**: `browser/app.js` is a
+   Tsize is its length.
+3. A file of more than 262144 bytes is split into 262144-byte chunks, the
+   last one shorter, and each chunk is a raw leaf as in step 2. One dag-pb
+   **file root** links them all (the balanced layout, one level). Its block
+   is, for each leaf in order, field 2 (`0x12`, length) holding a link: field
+   1 (`0x0a`, length) the leaf's CID bytes, field 2 with an empty name
+   (`12 00`), field 3 (`0x18`) the leaf's length as a varint. Then field 1
+   (`0x0a`, length) holds the UnixFS data: `08 02` (type 2, a file), `18` and
+   the file's length as a varint (filesize, field 3), and for each leaf `20`
+   and its length as a varint (blocksizes, field 4, one tag per value, not
+   packed). There is no Data field (field 2). The root's CID is
+   `01 70 12 20` and the SHA-256 of its block, and the Tsize of a link to it
+   is its block's length plus its leaves' lengths. A file needing more than
+   174 leaves (`max-file-links`), so more than 45613056 bytes, would need a
+   second tree level and is refused with its path, its length and the limit.
+4. Each path part but the last is a **directory**: `browser/app.js` is a
    directory `browser` with a link named `app.js`. The root is the directory
    of the bundle's entries. No empty directory is ever made.
-4. A directory's **block** is dag-pb. Sort its children by name bytes. For each
+5. A directory's **block** is dag-pb. Sort its children by name bytes. For each
    child, write protobuf field 2 (tag `0x12`, then the length as a varint)
    holding a link: field 1 (`0x0a`, length) the child's CID bytes, field 2
    (`0x12`, length) its name in UTF-8, field 3 (`0x18`) its Tsize as a varint.
@@ -70,11 +86,11 @@ To recompute a lab CID by hand:
    is the root) and the limit: there is no HAMT shard. Kubo shards later, by
    an estimate of its links' size, so this refusal comes first and fails
    closed.
-5. A directory's CID is `01 70 12 20` and the SHA-256 of its block (the dag-pb
+6. A directory's CID is `01 70 12 20` and the SHA-256 of its block (the dag-pb
    codec `0x70`). The Tsize of a link to a directory is the length of its
    block plus the Tsizes of its own links. Every varint inside a CID here is
    one byte.
-6. **Print** the root's 36 CID bytes as `b` (the multibase prefix) and their
+7. **Print** the root's 36 CID bytes as `b` (the multibase prefix) and their
    RFC 4648 base32, in the lowercase alphabet
    `abcdefghijklmnopqrstuvwxyz234567`, with no `=` padding: 288 bits make 58
    characters, the last one padded with two zero bits. The result is 59
@@ -113,6 +129,20 @@ def field(number, data):  # protobuf, wire type 2
 def cid(codec, block):
     return bytes([0x01, codec, 0x12, 0x20]) + hashlib.sha256(block).digest()
 
+def file_node(data):  # a file's bytes; returns (CID bytes, Tsize)
+    if len(data) <= 262144:
+        return cid(0x55, data), len(data)
+    chunks = [data[at:at + 262144] for at in range(0, len(data), 262144)]
+    assert len(chunks) <= 174
+    links = b""
+    unixfs = b"\x08\x02\x18" + varint(len(data))
+    for chunk in chunks:
+        link = field(1, cid(0x55, chunk)) + field(2, b"")
+        links += field(2, link + b"\x18" + varint(len(chunk)))
+        unixfs += b"\x20" + varint(len(chunk))
+    block = links + field(1, unixfs)
+    return cid(0x70, block), len(block) + len(data)
+
 def directory(tree):  # {name: bytes or a dict}; returns (CID bytes, Tsize)
     links = b""
     total = 0
@@ -121,8 +151,7 @@ def directory(tree):  # {name: bytes or a dict}; returns (CID bytes, Tsize)
         if isinstance(child, dict):
             child_cid, tsize = directory(child)
         else:
-            assert len(child) <= 262144
-            child_cid, tsize = cid(0x55, child), len(child)
+            child_cid, tsize = file_node(child)
         link = field(1, child_cid) + field(2, name.encode("utf-8"))
         links += field(2, link + b"\x18" + varint(tsize))
         total += tsize
@@ -142,13 +171,19 @@ def lab_cid(files):  # {bundle path: bytes}
     return "b" + "".join(B32[int(bits[i:i + 5], 2)] for i in range(0, 290, 5))
 ```
 
-In Rust, the walk (`checked_bundle`, which `lab_cid` runs too) reads a bundle
-and `encode_entries` is the encoder. They are the only code that names a
-bundle; tests call them and copy neither. `encode_entries` holds the one
-naming hash, and leaves and directory blocks share it. It also refuses what
-the walk can never give but a caller of the encoder could: a path with an
-empty, `.` or `..` part, two entries with one path, and one path that is both
-a file and a directory (`a` and `a/b`, in either order). `check_name` checks a
+In Rust, the walk (`checked_bundle`, which `lab_cid` runs too) reads a bundle,
+and `encode_entries` makes each file's node from its bytes with `file_node`
+(one raw leaf, or `file_root` over its leaves) and hands the nodes to
+`encode_tree`, the one tree builder. `encode_listed_files` (task 047; see
+[naming a closure listing](#naming-a-closure-listing)) makes one raw leaf per
+listed file and hands them to the same `encode_tree` (task 048). Every leaf is
+made by `raw_leaf`, and directory blocks and file roots write their links with
+one `put_links`. They are the only code that names a bundle; tests call them
+and copy none. `naming_hash` holds the one naming hash, and leaves, file roots
+and directory blocks share it. The encoder also
+refuses what the walk can never give but a caller of the encoder could: a path
+with an empty, `.` or `..` part, two entries with one path, and one path that
+is both a file and a directory (`a` and `a/b`, in either order). `check_name` checks a
 claimed name by calling `lab_cid`; it computes no name of its own.
 
 The CIDv1 bytes and the base32 text are one marked lab copy inside
@@ -170,7 +205,9 @@ rules and not from the Rust code, in
 | Raw leaves, codec `0x55` | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18c (`0x70`) |
 | Directory codec `0x70`, dag-pb | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18r (`0x71`) |
 | Chunk size 262144: a file of exactly that size is one block | `single_block_at_the_chunk_limit_has_the_pinned_cid` | F-CI18d (262143) |
-| A larger file is refused | `file_over_the_chunk_limit_is_refused` | F-CI18e (no refusal) |
+| A file over one leaf is a balanced root of raw leaves: empty link names, type 2, filesize, blocksizes, and a Tsize of its block and its leaves | `file_over_one_leaf_has_the_pinned_cid` | F-CI48a (no name field), F-CI48b (no blocksizes), F-CI48c (no filesize), F-CI48d (Tsize without the root block) |
+| At most 174 leaves; one more is refused | `file_of_174_leaves_is_named_and_one_byte_more_is_refused` | F-CI18e (no leaf-limit refusal), F-CI48e (the limit is 175) |
+| The listing call names a file of at most one leaf; a listed file over one chunk is refused and named from its bytes instead | `listed_file_over_the_chunk_limit_is_refused`, `listed_file_over_one_leaf_names_the_bytes_call` | F-CI47c (`encode_listed_files` has no size refusal) |
 | Links sorted by name bytes | `lab_cid_matches_the_pinned_value_for_each_fixture`, `lab_cid_does_not_depend_on_listing_order` | F-CI18f (reverse), F-CI1a (no sort) |
 | Directory type 1 | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18g (5) |
 | A directory block over 262144 bytes is refused, no HAMT | `directory_over_the_hamt_threshold_is_refused` | F-CI18h (no refusal) |
@@ -193,6 +230,17 @@ committed) is `bafybeibt53faomuek2j4yihvseuib2h6fosmkzympgilbnay2xevciasb4`;
 `bafybeic2y3c3met6txd62reatxwqjnodhfejchfmltmd6dnpyhtah7l5we`; and
 `content-sample` with a file named fifty `名` and `.txt` holding `long name`
 and a newline is `bafybeih6g5cy7asndjexb7bazovwryqyj4faxvababcjrbe4jxayhzvgmy`.
+Task 048 adds two more, also built in a temp dir and in memory and never
+committed: `content-sample` with `sample.example` as 262145 zero bytes (two
+leaves, 262144 and 1 bytes) is
+`bafybeidbd7gfhommypeks66twpnbbb3lwovdqe6iwtmdxptgcq5jqbaaby`; and
+`content-sample` with an added `core/big.bin` of 600000 bytes, byte `i` being
+`i % 251` (three leaves, 262144, 262144 and 75712 bytes, one directory down),
+is `bafybeidpgwbsi22cbsmthqupvn37xphujhs6fnzyuy64uc6nsauc6bftqe`. Both were
+first computed by a `python3 -I` script written from the hand rules above,
+before any Rust code named them; that script used Python's own `base64` for
+the printed form and gave `content-sample`'s pin too. The 174-leaf test builds
+a 45613056-byte file and one of 45613057 bytes in memory and pins no value.
 The directory-block test builds 1100 empty files with 200-byte names in a temp
 dir.
 
@@ -219,20 +267,22 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    (`python3 -I could not run: <error>`), a non-zero exit (even after it
    printed a valid CID), no output, or more than one line is refused with its
    own reason, and the test asserts each of these reasons.
-5. For each of the 11 pins, the Python answer, the pin constant and the
+5. For each of the 14 pins, the Python answer, the pin constant and the
    printed `encode_entries` result for the same files must be equal, and the
-   test asserts that it checked exactly 11 bundles. The 11 are the seven
+   test asserts that it checked exactly 14 bundles. The 14 are the seven
    pinned fixtures (`content-sample`, `web-app`, `agent-host`, `provider`,
-   `model`, `provider-variant-a`, `provider-variant-b`), the recipe, and the
+   `model`, `provider-variant-a`, `provider-variant-b`), the recipe, the
    chunk-limit, empty-file and long-name bundles above, which are built as
-   entries in memory. `wc001-core` has no pin, because its `capsule.wasm` is
+   entries in memory, the photo stand-in consumer copy (task 047, see
+   [naming a closure listing](#naming-a-closure-listing)), and the two-leaf
+   and three-leaf file bundles (task 048), also built in memory. `wc001-core` has no pin, because its `capsule.wasm` is
    built on each machine, so it is not checked here.
 
 | Rule | Named test | Falsifier |
 | --- | --- | --- |
 | README's rule agrees with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19a (the block's `0x55` becomes `0x70` before it runs) |
 | Rust agrees with README's rule, not only with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19b (the encoder's `RAW_CODEC` becomes `0x56`) |
-| A missing block is no pass: exactly 11 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
+| A missing block is no pass: exactly 14 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
 | An interpreter that cannot start fails the test | `readme_python_recomputes_every_lab_cid_pin` | F-CI19d (a program that does not exist) |
 | A non-zero exit is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19e (exit status not checked) |
 | No output is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19f (empty answer taken) |
@@ -670,6 +720,87 @@ stops failing and the runner reads F-CI27d as not caught; the entry's test
 names must then change. `the_consumer_scan_uses_cargos_reader` catches it
 either way, on synthetic metadata with no consumer file involved.
 
+## Naming a closure listing
+
+A lab whose own walk already lists each file's path, size and SHA-256 gets the
+lab CID from `encode_listed_files(&[ListedFile])` (task 047). `ListedFile` is
+`{ path: String, size: u64, sha256: [u8; 32] }`. A raw leaf needs only the
+SHA-256 and the length of its bytes (step 2 of [the encoding](#the-encoding)),
+so such a listing is enough for a file of one leaf. It is no second
+encoder: `encode_listed_files` makes each leaf with `raw_leaf`, the leaf rule
+`encode_entries` uses too, and both hand their nodes to `encode_tree`, the one
+tree builder, and `lab_cid` is the walk and then `encode_entries`, so the
+directory encoding exists once (`check_name_uses_the_single_naming_path`
+checks it). It reads no file and
+checks no manifest. So the lab CID names the bytes only if each `sha256` and
+`size` are those of the bytes: the caller's walk owns that. A `size` over
+262144 is refused with `FileOverChunkLimit` and the file's path, and the path
+refusals are the ones `encode_entries` gives. Since task 048 a file over one
+leaf has a lab CID, but only from its bytes: a listed file's one SHA-256 names
+a single raw leaf, and a file root needs each leaf's SHA-256. So the refusal's
+text says to name such a file with `encode_entries` (or `lab_cid`), which take
+the bytes; `ListedFile` keeps its three fields. There is no hex form: a caller
+decodes its own hex.
+
+It is for the photo lane (Flint's 28 Oct note; Rong's DR-1, one identity rule;
+Anders's Q3). On `spike/spike/photo-viewer` at `d047a069a`, the photo bundle
+tool names a closure by a second rule, a raw CIDv1 over a JSON listing of
+`{path, size, sha256}` (`examples/photo-viewer/bundle/src/listing.rs:478-485`,
+`cid.rs:5`), so one bundle gets two lab names. The photo lane switches its
+`cid_of` to this call itself; this lane edits none of its files.
+
+**Signing the name.** A listing-named closure is signed with
+`sign_cid_record(key, cid)` and checked with `verify_cid_record(cid, record,
+accepted)` (task 049), the one package record
+([below](#lab-package-record-outside-the-bundle)) that the folder and checked
+record calls also make and check, so the photo lane needs no signed record of
+its own.
+
+**The pin.** `consumer-fixtures/photo-stand-in-photo-set/` is a byte-for-byte
+copy of the photo lane's PH6 fixture folder
+`examples/photo-viewer/host-test/fixtures/stand-in-photo-set/` at `d047a069a`.
+`git hash-object` of each copy equals its blob id there:
+
+| File | Bytes | Git blob |
+| --- | --- | --- |
+| `README.md` | 1585 | `1b4548402e4618ca21569d918fe1914b8692e7f4` |
+| `capsule.json` | 387 | `5ec198ec721267ce8b629b78f7bd6b9462a4b60c` |
+| `images/01.png` | 180 | `1ec336b5402de32a9d9969bb7a718bf744b1e8b1` |
+| `images/02.jpg` | 293 | `58d489a1eb0e4a24bb517f8d6345372a8e416aaa` |
+| `images/03.webp` | 350 | `c4ecc5b848a405c1a79f02fd53ada7da7c1aeb97` |
+
+The lab CID of the five files is
+`bafybeiepelczjykxjbhpwaqjnmxx346l52alcxfzgg52ip2ejf5yijiuna`
+(`PHOTO_STAND_IN_LAB_CID`). It was first computed by this README's Python block
+run on the five copied files, before any Rust code named them, and
+`readme_python_recomputes_every_lab_cid_pin` recomputes it. The pin is of this
+five-file folder. The photo lane's own pack keeps `README.md` out of the packed
+closure (its README says so), so a packed PH6 bundle holds four files and gets
+another name by the same rule.
+
+**The snag.** The copy sits outside `fixtures/`. Its `capsule.json` has
+`"viewer": {"name": ..., "cid": ...}`, an object, while the Runtime's
+`CapsuleManifest` has `viewer: Option<String>` and refuses what does not fit
+(`deny_unknown_fields`; `elastos/crates/elastos-common/src/manifest.rs:126-128`).
+So `lab_cid` on the exact folder refuses with `ManifestUnparsed`, and the copy
+cannot be a fixture: every folder in `fixtures/` must pass that parse. The
+photo lane's switch reaches this lane's name through `encode_listed_files`, and
+through `lab_cid` only once its `viewer` fits the Runtime type. The lab does
+not loosen, skip or copy the manifest check.
+
+| Rule | Named test | Falsifiers |
+| --- | --- | --- |
+| The listing of the copy's five files gets the pin, the value `encode_entries` gives for the same files; on a temp copy whose `viewer` is the Runtime type's string, `lab_cid` of the folder equals `encode_listed_files` of that folder's listing | `photo_listing_gets_the_lab_cid_of_its_folder` | F-CI47a (the root is the photo rule's raw-listing CID: the SHA-256 of a `{path,size,sha256}` JSON listing, not of the directory block), F-CI47b (every leaf's Tsize is 0) |
+| README's Python rule recomputes the photo pin | `readme_python_recomputes_every_lab_cid_pin` | F-CI47a |
+| `lab_cid` refuses the exact PH6 folder with `ManifestUnparsed`, as the Runtime type does | `lab_cid_refuses_the_photo_manifest_the_runtime_type_refuses` | F-CI1g (a manifest the Runtime type refuses is read as plain JSON) |
+| A listed file over one chunk is refused with its path; one of exactly one chunk is a leaf | `listed_file_over_the_chunk_limit_is_refused` | F-CI47c (`encode_listed_files` has no size refusal) |
+| A listed file over one leaf is still refused, its text names its path, its length and `encode_entries`, and `encode_entries` names the same file from its bytes (task 048) | `listed_file_over_one_leaf_names_the_bytes_call` | F-CI47c |
+| The listing's lab CID gets the one package record from `sign_cid_record`, with the record's exact payload, and `verify_cid_record` passes it; no folder is walked (task 049) | `a_closure_listing_gets_a_package_record_by_its_cid` | F-CI49c |
+
+The tests are in `tests/closure_listing.rs`. Task 047 also named
+`lab_cid_refuses_the_photo_manifest_the_runtime_type_refuses` on F-CI1g, task
+005's entry. The listing names bytes; it is no admission, grant or launch step.
+
 ## Test-key publisher signature (lab proposal)
 
 A test key can sign a bundle's printed lab CID. The check answers only "did
@@ -847,7 +978,9 @@ signs it:
   `verify_checked_signature` and `verify_name_signature`, and task 011's
   package record: `domain_separated_digest`,
   `PackageRecord::package_record_payload`, `sign_package_record`,
-  `verify_checked_package_record` and `verify_package_record`. Each answers
+  `verify_checked_package_record` and `verify_package_record`, and task
+  049's `sign_cid_record` and `verify_cid_record`, the record's one signer
+  and one verifier over a lab CID. Each answers
   "do these bytes match this name" or "did this key sign this name or this
   record". None takes
   or returns a grant, an admission or a launch value. A test keeps the list:
@@ -909,6 +1042,12 @@ Claim scope: one Mac, these fixtures, test keys only.
 Anders's answer splits the package CID from the publisher. The CID names
 the bytes. A separate signed record names the signer and binds that CID.
 `PackageRecord` is that record, in the lab. It stays outside the bundle.
+The record binds a lab CID however it was computed: a folder walk
+(`lab_cid`), a checked bundle (`checked_bundle`), entries (`encode_entries`)
+or a closure listing (`encode_listed_files`). Since task 049 one call signs it
+and one call checks it, both over a `LabCid`: `sign_cid_record` and
+`verify_cid_record`. The folder and checked calls are the walk, or the checked
+bundle's CID, and then those calls.
 
 **The record.** `PackageRecord` has three fields: `cid` (the printed lab
 CID, exactly as `LabCid`'s `Display` prints it), `signer_did` (a canonical
@@ -963,23 +1102,25 @@ signature must verify, in Rust, over Python's digest. A short driver
 (`RECORD_DRIVER`) calls the two functions; the test checks that it holds no
 hash, domain, schema, JSON layout or function of its own.
 
-**Sign.** `sign_package_record(key, bundle)` names the bundle with `lab_cid`.
-A refusal from that walk passes through unchanged, and a refused bundle gets
-no record. It sets `signer_did` with the one DID encoder
-(`elastos_identity::encode_signing_key_did`, the same call `sign_bundle`
-uses) and signs the digest above. It writes no file and changes no bundle
-byte. The manifest's `signature` field stays empty.
+**Sign.** `sign_cid_record(key, cid)` is the one place a record is built and
+signed. It sets `cid` to the `LabCid`'s printed form and `signer_did` with the
+one DID encoder (`elastos_identity::encode_signing_key_did`, the same call
+`sign_bundle` uses), and signs the digest above. It reads and writes no file.
+`sign_package_record(key, bundle)` is `lab_cid(bundle)` and then
+`sign_cid_record`. A refusal from that walk passes through unchanged, and a
+refused bundle gets no record. Neither call changes a bundle byte, and the
+manifest's `signature` field stays empty.
 
-**Verify.** `verify_checked_package_record(checked, record, accepted)` checks
-009's `CheckedBundle` in this order. The first refusal is the answer, and it
-reads nothing from disk:
+**Verify.** `verify_cid_record(cid, record, accepted)` is the one place a
+record is checked. It checks in this order. The first refusal is the answer,
+and it reads nothing from disk:
 
 1. Decode `record.signer_did` with the one DID decoder. On error: `signer DID <did> is not a canonical Ed25519 did:key: <the decoder's own text>`.
 2. The DID is an exact member of `accepted`, the explicit list (no trust
    policy). An empty list refuses every signer: `signer <did> is not in the
    accepted list`.
-3. `record.cid` equals `checked.cid()`'s printed form. Otherwise: `record
-   names <record cid>; the bundle names <bundle cid>`.
+3. `record.cid` equals `cid`'s printed form. Otherwise: `record names
+   <record cid>; the bundle names <cid>`.
 4. Ed25519 over the digest of the record domain and
    `package_record_payload(record)`, with the key from step 1. On failure:
    `signature by <did> does not verify over <record cid>`.
@@ -988,10 +1129,19 @@ Steps 1, 2 and 4 are the name signature's own checks and reasons, from the
 same functions (`decode_signer`, `require_accepted` and one shared Ed25519
 check). Step 3 runs before step 4, so when the payload is hashed its CID is a
 printed lab CID and its DID is canonical: neither holds a character JSON
-would escape. `verify_package_record(bundle, record, accepted)` is
-`checked_bundle(bundle)` and then the checked form. It holds no check of its
-own, so a bundle the walk refuses is refused first, with the walk's reason.
+would escape. `verify_checked_package_record(checked, record, accepted)` is
+`verify_cid_record` over 009's `checked.cid()`, and
+`verify_package_record(bundle, record, accepted)` is `checked_bundle(bundle)`
+and then the checked form. Neither holds a check of its own, so a bundle the
+walk refuses is refused first, with the walk's reason.
 `Ok(())` grants nothing: it is no trust, admission or launch value.
+
+**A name, not bytes.** `sign_cid_record` and `verify_cid_record` sign and
+check a name. They read no byte, so the `LabCid` must come from
+`encode_listed_files`, `encode_entries`, `lab_cid` or `checked_bundle`, which
+name the bytes they read or were given. For a closure listing, the caller's
+walk owns that each `sha256` and `size` are those of the bytes
+([naming a closure listing](#naming-a-closure-listing)).
 
 **What stays.** `NameSignature`, `sign_bundle`, `verify_checked_signature`
 and `verify_name_signature` stay as they are: the in-memory name signature
@@ -1021,7 +1171,10 @@ several CIDs.
 | A malformed DID is refused with the decoder's text, even when listed | `record_malformed_signer_did_is_refused` | F-CI11g, F-CI11p |
 | Two faults at once: the earlier check answers | `record_refusal_order_is_stable` | F-CI11h, F-CI11i, F-CI11j |
 | Signing and the path verifier keep the walk's refusal, whatever the record | `record_paths_preserve_walk_refusals` | F-CI11k, F-CI11l, F-CI11m, F-CI11n, F-CI11o |
-| One payload builder, one digest, one DID encoder and decoder, one Ed25519 check; the path form holds no check of its own | `record_paths_share_one_implementation` | F-CI11t, F-CI11u, F-CI11v, F-CI11w |
+| One payload builder, one digest, one DID encoder and decoder, one Ed25519 check; the record is built and signed only in `sign_cid_record` and checked only in `verify_cid_record`; the folder and checked calls hold no build or check of their own | `record_paths_share_one_implementation` | F-CI11t, F-CI11u, F-CI11v, F-CI11w, F-CI49b |
+| A closure listing's lab CID (the PH6 copy's pin) gets a record with the exact payload, and `verify_cid_record` passes it | `a_closure_listing_gets_a_package_record_by_its_cid` (`tests/closure_listing.rs`) | F-CI49c |
+| For every pinned fixture, `sign_package_record` of the folder equals `sign_cid_record` of its `lab_cid`; on the PH6 copy with `viewer` as a string, a record over the listing's CID passes `verify_package_record` of the folder, and a record from the folder passes `verify_cid_record` over the listing's CID | `the_folder_record_is_the_cid_record` (`tests/closure_listing.rs`) | F-CI49b |
+| `verify_cid_record` refuses as `verify_checked_package_record` does, with the same refusal and text: a record over the PH6 listing checked against the listing with one `sha256` byte changed (naming both CIDs), and the other way round; a signer not listed; an empty list; a flipped signature byte; a malformed DID | `cid_record_refuses_as_the_checked_record_does` (`tests/closure_listing.rs`) | F-CI49a |
 | README's `record_payload` and `record_digest` give `package_record_payload`'s bytes and the signed digest for test-key records over `content-sample` and `web-app` | `readme_python_matches_the_package_record_bytes` (`tests/cross_implementation.rs`) | F-CI20a, F-CI20b, F-CI20c, F-CI20f, F-CI19d |
 
 The tests are in `tests/package_record.rs`. Every refusal test runs both
@@ -1031,7 +1184,9 @@ from the pins in `tests/common/mod.rs`, never from a literal, so a change of
 the printed form changes the pins in one place. The domains in these tests
 are written out, not read from the library, so a changed domain constant
 fails them (F-CI11x). F-CI11u, F-CI11v and F-CI11w also fail 004's
-`signature_paths_share_one_implementation`.
+`signature_paths_share_one_implementation`. Task 049's three tests are in
+`tests/closure_listing.rs`, beside the listing they sign. Every key in them is
+generated in memory.
 
 Claim scope: one Mac, these fixtures, test keys only.
 
@@ -1414,7 +1569,7 @@ Each route, field and state, and where it comes from. #309 is draft PR #309,
 | A refused launch leaves no instance | `standin_launches_by_cid_only`, `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32f (the instance is added before the checks) |
 | A launched answer has its listed instance | `standin_launches_a_signed_bundle_by_its_cid` | F-CI32g (answers launched, adds no instance) |
 | A valid signature alone yields no grant: a launch adds none, and the answer and the list hold no grant key | `standin_valid_signature_alone_yields_no_grant` | F-CI33a (a launch grants each `capabilities` entry of the manifest) |
-| The grant view lists every held grant, so it is not a constant | `standin_grant_view_lists_a_seeded_grant` | F-CI33b (the view answers no entries whatever is held) |
+| The grant view lists every held grant of every session, so it is not a constant | `standin_grant_view_lists_a_seeded_grant`, `standin_grant_view_lists_every_held_grant_of_every_session` | F-CI33b (the view answers no entries whatever is held), F-CI37a (only the first held grant), F-CI37b (only the first held grant's session), F-CI37c (one `request_id` for every grant) |
 | The grant view answers under the `all_sessions_live` marker | `standin_valid_signature_alone_yields_no_grant`, `standin_grant_view_lists_a_seeded_grant` | F-CI33c (the marker dropped) |
 
 Not shown:
@@ -1440,7 +1595,11 @@ checked bundle that passed every check above. `checked_launch` takes the
 manifest's `name` (`CheckedBundle::manifest_name()`) and the content of the
 `asks.json` entry (`CheckedBundle::entries()`) from the same `CheckedBundle`,
 the one walk (P10), and the launch keeps that content in the instance, once: `Some(bytes)`, or `None` when
-the bundle has no `asks.json`. Nothing reads the folder again.
+the bundle has no `asks.json`. Nothing reads the folder again. Task 044 shows
+that for the launch itself: `set_after_walk`, a lab test seam, not a route,
+gives `checked_launch` a hook that it calls once on the stored folder, right
+after the one walk and before (e), so a test can change the bytes on disk
+between the walk and the launch. With no hook set, nothing is called.
 `asks_of(session_id)`, a lab test seam, not a route (#309 has no asks field on
 any route), answers that instance's bytes, and `None` for an unknown session.
 The launch answer, the `get_capsules` entry and the grant view keep exactly
@@ -1456,12 +1615,20 @@ no new instance and an empty grant view.
 (which has no `asks.json`), each signed by a fresh test key, in both orders:
 the `agent-host` session answers its bytes, the `web-app` session answers
 `None`, and so does an unknown session.
+`standin_takes_the_asks_from_the_walk_not_the_folder` launches the same signed
+bundle with a hook that changes one byte of the stored `asks.json`: the launch
+answers `launched`, the stored `asks.json` no longer equals the committed
+fixture bytes (so the hook ran), and the session answers the committed fixture
+bytes, which the test reads itself. Before task 044, a launch that read
+`asks.json` from the folder after the walk passed both tests above, because
+neither changes the folder between the walk and the launch.
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
 | The instance keeps the signed bytes from launch; a change on disk after launch does not reach it | `standin_hands_an_instance_only_its_signed_asks_bytes` | F-CI35a (the planted accept-anything stub: `asks_of` reads `asks.json` from the stored folder at call time) |
 | Each session answers its own asks | `standin_gives_each_session_its_own_asks` | F-CI35b (`asks_of` ignores the session and answers the first instance's asks) |
 | A bundle with no `asks.json` is handed `None`, not empty bytes | `standin_gives_each_session_its_own_asks` | F-CI35c (`Some(Vec::new())` for a bundle with no `asks.json`) |
+| A change on disk between the walk and the launch does not reach the instance | `standin_takes_the_asks_from_the_walk_not_the_folder` | F-CI44a (the 041 review's stub: `checked_launch` reads `asks.json` from the stored folder at launch), F-CI44b (the hook is never called), F-CI44c (the hook runs before the walk, so (e) refuses) |
 
 Not shown:
 
@@ -1509,8 +1676,10 @@ Kubo itself (none is installed on this Mac). The outside check is the
 README's Python block, written from the byte rules: the committed test
 `readme_python_recomputes_every_lab_cid_pin` runs it with `python3 -I` (Python
 3.9.6 on this Mac) and requires it to give every pin and the Rust encoder's
-value for the same files. The tests pin the single-block, non-sharded subset
-of the profile only.
+value for the same files. The tests pin the non-sharded subset of the
+profile only, with files of up to one tree level (one raw leaf, or since task
+048 a balanced file root over 2 to 174 raw leaves). The file root's bytes are
+the lab's reading of the profile, and Kubo has not checked them either.
 
 The claim is "Kubo v0.40.1 profile, computed by the lab", and nothing more.
 No offline Kubo cross-check has been run (Kubo v0.40.1, the same profile
@@ -1585,6 +1754,10 @@ src/lib.rs               checked_bundle, lab_cid, check_name and its checked for
                          digest, the lab package record and the lab variant binding
 fixtures/                content-sample, web-app, wc001-core, agent-host, provider,
                          model, provider-variant-a, provider-variant-b
+consumer-fixtures/       photo-stand-in-photo-set: the photo lane's PH6 fixture,
+                         byte for byte from examples/photo-viewer/host-test/
+                         fixtures/stand-in-photo-set/ at d047a069a; not a
+                         fixture (its manifest fails the Runtime parse)
 recipes/                 provider-variant.recipe, the variants' lab stand-in recipe
 tests/common/mod.rs      assembly, pins, the bounded call, observers, wc-001 driver,
                          the library's code for tests that read it, fresh test keys,
@@ -1600,6 +1773,9 @@ tests/bytes.rs           every byte is the name: manifest, payload, asks.json, f
 tests/check_name.rs      a claimed name is checked, never trusted; one naming path
 tests/checked_bundle.rs  the name and the bytes it covers; the checked name check
 tests/claims.rs          the claim stays "Kubo v0.40.1 profile, computed by the lab"
+tests/closure_listing.rs a closure listing gets the lab CID of its folder; the PH6
+                         manifest is refused; a listed file over one chunk is refused;
+                         the listing's CID gets the one package record
 tests/cross_implementation.rs
                          README's Python rule, the pins and the encoder agree;
                          README's two digest blocks and the signed bytes agree
@@ -1625,7 +1801,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 259 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 276 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1662,7 +1838,16 @@ and task 032's F-CI32a to F-CI32g, task 033's F-CI33a to F-CI33c and task
 035's F-CI35a to F-CI35c (all three: see
 [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)), and task 036's
 F-CI36a (see [the checked bundle](#checked-bundle-the-name-and-the-bytes-it-covers))
-and F-CI36b (see [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)).
+and F-CI36b (see [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)),
+and task 037's F-CI37a to F-CI37c (see
+[the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)), and task 044's
+F-CI44a to F-CI44c (see
+[asks come only from the signed bytes](#asks-come-only-from-the-signed-bytes-m1-check-b2-no-schema-part)),
+and task 047's F-CI47a to F-CI47c (see
+[naming a closure listing](#naming-a-closure-listing)), and task 048's
+F-CI48a to F-CI48e (see [the encoding](#the-encoding)), and task 049's
+F-CI49a to F-CI49c (see
+[the lab package record](#lab-package-record-outside-the-bundle)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -1753,6 +1938,70 @@ The stand-in's record lookup moved into `check_records`, so F-CI32c now
 replaces the record check there and F-CI32d answers `Ok(())` where no record
 binds the CID. The stand-in imports neither `CapsuleManifest` nor
 `MANIFEST_FILE` now, so F-CI33a's planted code names both by their paths.
+Task 037's entries also edit `tests/common/mod.rs`, in `StandInRuntime`:
+F-CI37a and F-CI37b in `get_capability_list_all_sessions_live`, on F-CI33b's
+anchor line (found exactly once; entries may share an anchor), and F-CI37c in
+`seed_grant`, its anchor a line task 033 added, found exactly once. Task 037
+changed no older edit's text.
+Task 044's entries also edit `tests/common/mod.rs`, in `checked_launch`:
+F-CI44a on the answer line, F-CI44b on the hook call, and F-CI44c on the walk
+line and the hook call together. Each anchor is found exactly once (F-CI44b's
+line is part of F-CI44c's anchor). Task 044 changed no older edit's text, and
+F-CI35a to F-CI35c's anchor lines stay byte for byte.
+Task 047's entries all edit `src/lib.rs`, in `encode_listed_files`: F-CI47a on
+the root line (`encode_directory(&root, "", &naming_hash)`), F-CI47b on the
+leaf's `tsize` line, and F-CI47c on the size refusal. Each anchor is a line
+task 047 added, found exactly once; F-CI47c shares F-CI18e's anchor (entries
+may share one) and names its own test. Task 047 moved the leaf and the size
+refusal from `encode_entries` into `encode_listed_files`, so four of task
+018's edits anchor there now, each with its same tests: F-CI18c gives the leaf
+the dag-pb codec, F-CI18e removes the size refusal, and F-CI18n makes an empty
+file a dag-pb file node, each as before. F-CI18i still gives a file of at most
+32 bytes an inline CID (identity multihash `0x00` and its length), but the
+encoder holds a digest and no bytes now, so the first bytes of the digest stand
+in for the file's bytes; its title says so. F-CI1g (task 005's) also names
+`lab_cid_refuses_the_photo_manifest_the_runtime_type_refuses`. Every other
+older edit's text is still found exactly once.
+Task 048's entries all edit `src/lib.rs`: F-CI48a on the link-name line of
+`put_links` (F-CI1b's and F-CI1p's anchor; entries may share one), which it
+skips for an empty name, so only a file root's links change; F-CI48b and
+F-CI48c in `file_root_block`; F-CI48d on `file_root`'s Tsize line; F-CI48e on
+`MAX_FILE_LINKS`. Each anchor is found exactly once. Task 048 moved the leaf
+into one `raw_leaf`, which `encode_listed_files`, `file_node` and `file_root`
+all call, so the leaf's line is now `(cid_bytes(RAW_CODEC, sha256), size)`.
+Four edits anchor there now, each with its same bug and tests: F-CI18c (the
+dag-pb codec), F-CI18i (an inline CID for at most 32 bytes), F-CI18n (an empty
+file as a dag-pb file node) and F-CI47b (every leaf's Tsize 0). Without the
+move they would plant only in the listing call, and `lab_cid` would no longer
+see them. The root line F-CI47a anchors on is now in `encode_tree`, where no
+`ListedFile` is in scope, so its planted code lists the tree's files (path,
+the leaf CID's digest, Tsize) itself; its title, bug and tests are the same.
+The one-leaf refusal F-CI18e removed is now only the listing call's (F-CI47c
+removes it), so F-CI18e, keeping its id, now removes the 174-leaf refusal and
+names `file_of_174_leaves_is_named_and_one_byte_more_is_refused`; its title
+says so. F-CI47c also names `listed_file_over_one_leaf_names_the_bytes_call`.
+Task 048 split `directory_block`'s link loop into `put_links` with the same
+lines, so F-CI1b, F-CI1p and F-CI1q keep their text, and every other older
+edit's text is still found exactly once.
+Task 049's entries all edit `src/lib.rs`: F-CI49a removes the CID compare
+call from `verify_cid_record`, F-CI49b makes `sign_package_record` build and
+sign its own record under the name-signature domain, and F-CI49c makes
+`sign_cid_record` sign the payload of a record with an empty `cid`. Each
+anchor is found exactly once (F-CI49a shares F-CI11r's first anchor, and
+F-CI49b F-CI11e's; entries may share one). Task 049 moved the record's build
+into `sign_cid_record` and its four checks into `verify_cid_record`, and
+`require_record_cid` now takes the `LabCid`. So six edits anchor on lines
+whose text changed, each with its same bug and tests: F-CI11c, F-CI11i,
+F-CI11j, F-CI11p and F-CI11r read `require_record_cid(cid, record)` (F-CI11c's
+rebound record takes `cid.to_string()`, and F-CI11r's path form compares
+against `held.cid()`), and F-CI15ae's anchor is the compare line
+`if record.cid != cid.to_string() {`. `sign_package_record` is now
+`lab_cid(bundle)?` and then `sign_cid_record`, so F-CI11k drops the
+walk's refusal on `let cid = lab_cid(bundle)?;`, and F-CI11e writes the record
+next to the bundle after that call. The titles of F-CI11p to F-CI11v name
+`verify_cid_record`, and F-CI11w's names `sign_cid_record`, where their bug
+is planted now. Every other older edit's text is the same and still found
+exactly once.
 
 ### The inventory check
 
@@ -1888,7 +2137,23 @@ At task 032 it reported `summary: 251 CAUGHT of 251` (`baseline: 130 named
 tests pass without an edit, 0 do not`; with the id prefix `F-CI32`: 7 of 7).
 At task 036 it reported `summary: 259 CAUGHT of 259` (`baseline: 136 named
 tests pass without an edit, 0 do not`; with the id prefix `F-CI36`: 2 of 2,
-and the seventeen moved edits each CAUGHT).
+and the seventeen moved edits each CAUGHT). At task 037 it reported
+`summary: 262 CAUGHT of 262` (`baseline: 137 named tests pass without an
+edit, 0 do not`; with the id prefix `F-CI37`: 3 of 3). At task 044 it
+reported `summary: 265 CAUGHT of 265` (`baseline: 138 named tests pass
+without an edit, 0 do not`; with the id prefix `F-CI44`: 3 of 3, and with
+`F-CI35`: 3 of 3).
+At task 047, run with the ids `F-CI47 F-CI18 F-CI1g` (the new entries, the
+four task 018 entries it moved, with the rest of task 018's, and F-CI1g, which
+gained a test), it reported `summary: 23 CAUGHT of 23` (`baseline: 16 named
+tests pass without an edit, 0 do not`). The whole list was not run at task 047.
+At task 048, run with the ids `F-CI48 F-CI18e F-CI47c`, it reported
+`summary: 7 CAUGHT of 7` (`baseline: 4 named tests pass without an edit, 0 do
+not`); run with the prefixes `F-CI1 F-CI18 F-CI19 F-CI47 F-CI48` (every edit in
+`src/lib.rs`'s encoder and every entry task 048 moved, with F-CI10 to F-CI17,
+which the prefix `F-CI1` also selects), it reported
+`summary: 134 CAUGHT of 134` (`baseline: 80 named tests pass without an edit,
+0 do not`). The whole list was not run at task 048.
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029,
 030, 031 and 032 prove each of their falsifiers by break, named test fails, revert.
