@@ -6297,16 +6297,6 @@ fn read_declared_rights(name: &str, path: &Path) -> Result<Value, String> {
 /// callers make. The startup rows carry the loader's start reads and the kernel
 /// facts `sysctl-read` names.
 ///
-/// The `file-write*` row carries both permission-change spellings, `fchmod` and
-/// `fchmodat`, because the right names the change and the kernel offers it under
-/// either call. `did-provider` reaches the `at` form: its `set_nickname` ends in
-/// `set_permissions` on the file it just wrote, which the C library issues as
-/// `fchmodat(AT_FDCWD, path, 0600)` on this target. The did journey measured
-/// that call refused with the deny marker and the start then failed with
-/// `the confined provider must return the stored nickname`, so the row admits it
-/// by name. `wallet-provider` makes no permission call of its own, which is why
-/// the wallet journey alone never showed the gap.
-///
 /// `ptrace`, `mount`, `bpf` and `keyctl` appear in no row, so the program's
 /// default decision is the only answer they receive. Adding one of them to a
 /// row would grant it and turn
@@ -6339,7 +6329,6 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
         &[
             "faccessat",
             "fchmod",
-            "fchmodat",
             "fdatasync",
             "fstat",
             "fsync",
@@ -6393,7 +6382,6 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("exit_group", Some(231), Some(94)),
     ("faccessat", Some(269), Some(48)),
     ("fchmod", Some(91), Some(52)),
-    ("fchmodat", Some(268), Some(53)),
     ("fdatasync", Some(75), Some(83)),
     ("fstat", Some(5), Some(80)),
     ("fsync", Some(74), Some(82)),
@@ -7394,7 +7382,7 @@ fn seccomp_allow_list_follows_the_declared_rights() {
             allow.syscalls
         );
     }
-    for syscall in ["mkdirat", "write", "unlinkat", "renameat2", "fchmodat"] {
+    for syscall in ["mkdirat", "write", "unlinkat", "renameat2", "fchmod"] {
         assert!(
             allow.admits(syscall),
             "the storage rows must admit {syscall}: {:?}",
@@ -7409,7 +7397,7 @@ fn seccomp_allow_list_follows_the_declared_rights() {
         .retain(|entry| entry["id"] != "storage");
     let reduced = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &without_storage)
         .unwrap_or_else(|err| panic!("{err}"));
-    for syscall in ["mkdirat", "write", "unlinkat", "renameat2", "fchmodat"] {
+    for syscall in ["mkdirat", "write", "unlinkat", "renameat2", "fchmod"] {
         assert!(
             allow.admits(syscall),
             "the storage right must admit {syscall}: {:?}",
@@ -8357,7 +8345,7 @@ fn seccomp_allow_list_names_the_provider_it_was_built_for() {
                 allow.syscalls
             );
         }
-        for syscall in ["ptrace", "mount", "bpf", "keyctl"] {
+        for syscall in ["ptrace", "mount", "bpf", "keyctl", "fchmodat"] {
             assert!(
                 !allow.admits(syscall),
                 "{name}'s list must admit no undeclared call, and it admits {syscall}"
@@ -9264,7 +9252,6 @@ fn seccomp_journey_runs_beneath_an_inherited_filter(name: &str, test_name: &str)
 /// sibling is derived from `storage_parent` for both providers, so a path that
 /// drifts out of the grant shows as a present file. `expected_fixture` is the
 /// provider's own known bytes, so a run that wrote the wrong file fails.
-#[cfg(target_os = "linux")]
 struct SeccompJourneyFiles {
     inside: PathBuf,
     inside_fixture: PathBuf,
@@ -9275,31 +9262,106 @@ struct SeccompJourneyFiles {
 /// The named journey fixtures of `name` under `base`, or a panic naming the
 /// provider whose layout this function does not know. The lab serves two
 /// providers and a guessed layout would be a fallback (P11).
-#[cfg(target_os = "linux")]
 fn seccomp_journey_files(name: &str, base: &Path) -> SeccompJourneyFiles {
     let root = provider_storage_root(name, base);
-    let outside = storage_parent(name, base).join("seccomp-outside-write");
-    match name {
-        WALLET_PROVIDER => SeccompJourneyFiles {
-            inside: root.join(WALLET_KEY_FILE),
-            inside_fixture: root.join("seccomp-inside-write"),
-            outside,
-            expected_fixture: b"wallet seccomp journey fixture\n",
-        },
-        DID_PROVIDER => SeccompJourneyFiles {
-            inside: root.join("nickname.enc"),
-            inside_fixture: root.join("seccomp-inside-write"),
-            outside,
-            expected_fixture: b"did seccomp journey fixture\n",
-        },
+    let (inside_name, expected_fixture): (&str, &[u8]) = match name {
+        WALLET_PROVIDER => (WALLET_KEY_FILE, b"wallet seccomp journey fixture\n"),
+        DID_PROVIDER => ("nickname.enc", b"did seccomp journey fixture\n"),
         other => panic!("the journey names no provider whose fixtures it knows: {other}"),
+    };
+    SeccompJourneyFiles {
+        inside: root.join(inside_name),
+        inside_fixture: root.join("seccomp-inside-write"),
+        outside: storage_parent(name, base).join("seccomp-outside-write"),
+        expected_fixture,
+    }
+}
+
+/// Both callers use these same comparisons after shutdown. Wallet's key-format
+/// assertions then inspect the returned bytes separately.
+fn assert_seccomp_journey_files(
+    name: &str,
+    files: &SeccompJourneyFiles,
+    expected_inside: &[u8],
+) -> Vec<u8> {
+    let inside_reason = match name {
+        WALLET_PROVIDER => {
+            "the read-only journey must keep the exact key bytes from init".to_owned()
+        }
+        DID_PROVIDER => format!(
+            "the {name} journey must keep the exact bytes set_nickname wrote under STORAGE_ROOT"
+        ),
+        other => panic!("the journey names no provider whose file evidence it knows: {other}"),
+    };
+    let written = fs::read(&files.inside)
+        .unwrap_or_else(|err| panic!("the launch must write {}: {err}", files.inside.display()));
+    assert_eq!(written, expected_inside, "{inside_reason}");
+    assert_eq!(
+        fs::read(&files.inside_fixture).expect("the named inside fixture must remain readable"),
+        files.expected_fixture,
+        "the named inside fixture must keep its exact expected bytes"
+    );
+    assert!(
+        !files.outside.exists(),
+        "the named sibling outside STORAGE_ROOT must stay absent after the run: {}",
+        files.outside.display()
+    );
+    written
+}
+
+/// A changed provider file, a corrupt fixed-byte fixture and a present outside
+/// sibling each fail the journey's one comparison for both provider layouts.
+#[test]
+fn seccomp_journey_file_comparison_catches_corruption_for_each_provider() {
+    for name in [WALLET_PROVIDER, DID_PROVIDER] {
+        for changed in ["inside", "inside_fixture", "outside"] {
+            let base = tempfile::tempdir().expect("temporary journey comparison root");
+            let files = seccomp_journey_files(name, base.path());
+            fs::create_dir_all(provider_storage_root(name, base.path()))
+                .expect("the provider fixture root must exist");
+            let expected_inside = b"bytes written by the provider";
+            fs::write(&files.inside, expected_inside).expect("the provider file must be writable");
+            fs::write(&files.inside_fixture, files.expected_fixture)
+                .expect("the named inside fixture must be writable");
+            assert_seccomp_journey_files(name, &files, expected_inside);
+
+            let changed_path = match changed {
+                "inside" => &files.inside,
+                "inside_fixture" => &files.inside_fixture,
+                "outside" => &files.outside,
+                _ => unreachable!(),
+            };
+            fs::write(changed_path, b"corrupt journey bytes")
+                .expect("the plant must write its file");
+            let failure = std::panic::catch_unwind(|| {
+                assert_seccomp_journey_files(name, &files, expected_inside)
+            })
+            .expect_err("each changed file must fail the shared journey comparison");
+            let reason = failure
+                .downcast_ref::<String>()
+                .expect("the comparison must report its assertion reason");
+            let expected_reason = match changed {
+                "inside" => match name {
+                    WALLET_PROVIDER => "the read-only journey must keep the exact key bytes from init",
+                    DID_PROVIDER => "the did-provider journey must keep the exact bytes set_nickname wrote under STORAGE_ROOT",
+                    _ => unreachable!(),
+                },
+                "inside_fixture" => "the named inside fixture must keep its exact expected bytes",
+                "outside" => "the named sibling outside STORAGE_ROOT must stay absent after the run",
+                _ => unreachable!(),
+            };
+            assert!(
+                reason.contains(expected_reason),
+                "{name} {changed} must fail its own comparison: {reason}"
+            );
+        }
     }
 }
 
 /// One provider's Linux journey: `name` starts under the seccomp allow list built
 /// from that provider's own committed declared-rights file, its permitted calls
-/// answer under the filter, and one probe child under the same filter shows the
-/// four refused calls answering the filter's own marker.
+/// answer under the filter. Wallet also runs the one probe child under that
+/// filter to show the four refused calls answering the filter's own marker.
 ///
 /// `binary` is that provider's own binary and `declared` its own declared rights,
 /// so the one body serves both providers through `standin_spawn_confined_provider`
@@ -9319,8 +9381,8 @@ fn seccomp_journey_files(name: &str, base: &Path) -> SeccompJourneyFiles {
 /// the launcher's record must additionally show the marker answering differently
 /// before and after this launcher's own install.
 ///
-/// Then one probe child records what `ptrace(PTRACE_TRACEME)`, `mount`, `bpf` and
-/// `keyctl` answer before the filter, installs the filter through
+/// For wallet, one probe child records what `ptrace(PTRACE_TRACEME)`, `mount`,
+/// `bpf` and `keyctl` answer before the filter, installs the filter through
 /// `install_seccomp`, and records the same four after. Each filtered answer must
 /// be the deny marker, and the marker must differ from the unfiltered answer the
 /// same probe recorded, so a host that already refuses a call cannot stand in
@@ -9331,15 +9393,15 @@ fn seccomp_journey_files(name: &str, base: &Path) -> SeccompJourneyFiles {
 /// host, and the call whose failure named each `LAUNCH_ESSENTIALS` entry.
 #[cfg(target_os = "linux")]
 fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_name: &str) {
-    if seccomp_journey_runs_beneath_an_inherited_filter(name, test_name) {
-        let inherited_status =
-            fs::read_to_string("/proc/self/status").expect("the fixture's status");
-        assert!(
-            inherited_status.lines().any(|line| line == "Seccomp:\t2"),
-            "the journey fixture must already carry an inherited filter"
-        );
-        eprintln!("journey fixture before provider launch: Seccomp: 2 (inherited)");
+    if !seccomp_journey_runs_beneath_an_inherited_filter(name, test_name) {
+        return;
     }
+    let inherited_status = fs::read_to_string("/proc/self/status").expect("the fixture's status");
+    assert!(
+        inherited_status.lines().any(|line| line == "Seccomp:\t2"),
+        "the journey fixture must already carry an inherited filter"
+    );
+    eprintln!("journey fixture before provider launch: Seccomp: 2 (inherited)");
     // Ran on spark1.local: aarch64, Ubuntu 24.04.4, kernel 6.17.0-1029-nvidia.
     // The deny marker is EACCES (13). Each unfiltered answer differed from it on
     // that host: ptrace(PTRACE_TRACEME) returned 0, mount answered ENOENT (2),
@@ -9350,7 +9412,9 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
     //
     // Each LAUNCH_ESSENTIALS entry was dropped alone from the whole list on that
     // host and the call that then failed was read, for wallet's binary and again
-    // for did's. All seven entries are both providers', so the set is one table:
+    // for did's. The did measurement used the wider fchmodat policy recorded in
+    // CONFINEMENT-LINUX.md; its journey still needs a policy-owner decision.
+    // Both measurements named the same seven entries, so the set is one table:
     // close -> close(3) in the loader, refused before the first mapping;
     // exit_group -> exit_group(0) as the provider ended its own run; getrandom ->
     // getrandom(0xec92ac7c6700, 8, GRND_NONBLOCK) in the loader; mmap ->
@@ -9397,11 +9461,16 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
     .unwrap_or_else(|err| panic!("the linux {name} start must be confined: {err}"));
 
     let label = format!("{name} seccomp journey");
+    // Wallet init has made its root; did first creates it when writing a
+    // nickname. Prepare the sentinel before either provider's operation suite
+    // so an operation that corrupts it leaves the evidence for the comparison.
+    fs::create_dir_all(provider_storage_root(name, &base))
+        .expect("the provider fixture root must exist");
+    fs::write(&files.inside_fixture, files.expected_fixture)
+        .expect("the named inside fixture must be writable");
     // The bytes of the file the run wrote under STORAGE_ROOT, read at the point
     // the provider wrote it: wallet's `init` writes the random key, and did's
-    // `set_nickname` writes the encrypted nickname. The fixed-byte fixture goes
-    // down beside it, after it, because the provider's own storage root exists
-    // only once it has been created.
+    // `set_nickname` writes the encrypted nickname.
     let expected_inside = match name {
         WALLET_PROVIDER => {
             // Init creates the random key. Keep those exact bytes as the expected
@@ -9432,9 +9501,6 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
         }
         other => panic!("the journey names no provider whose permitted calls it knows: {other}"),
     };
-    fs::write(&files.inside_fixture, files.expected_fixture)
-        .expect("the named inside fixture must be writable");
-
     assert_eq!(
         provider.launched_seccomp_mode(),
         SECCOMP_MODE_FILTER,
@@ -9461,81 +9527,49 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
     );
     provider.shutdown();
 
-    match name {
-        WALLET_PROVIDER => {
-            let written = fs::read(&files.inside).unwrap_or_else(|err| {
-                panic!("the launch must write {}: {err}", files.inside.display())
-            });
-            assert_eq!(
-                written, expected_inside,
-                "the read-only journey must keep the exact key bytes from init"
-            );
-            let text = String::from_utf8(written).expect("the storage key must be hex text");
-            let digits = text
-                .strip_suffix('\n')
-                .expect("the storage key must end with a newline");
-            assert_eq!(
-                digits.len(),
-                2 * WALLET_KEY_BYTES,
-                "the storage key must hold its {} hex digits and a newline: {}",
-                2 * WALLET_KEY_BYTES,
-                files.inside.display()
-            );
-            assert_eq!(
-                fs::read(&files.inside_fixture)
-                    .expect("the named inside fixture must remain readable"),
-                files.expected_fixture,
-                "the named inside fixture must keep its exact expected bytes"
-            );
-            assert!(
-                digits.bytes().all(|byte| byte.is_ascii_hexdigit()),
-                "the storage key must be hex: {}",
-                files.inside.display()
-            );
-        }
-        DID_PROVIDER => {
-            let written = fs::read(&files.inside).unwrap_or_else(|err| {
-                panic!("the launch must keep {}: {err}", files.inside.display())
-            });
-            assert_eq!(
-                written, expected_inside,
-                "the {name} journey must keep the exact bytes set_nickname wrote under STORAGE_ROOT"
-            );
-            assert_eq!(
-                fs::read(&files.inside_fixture)
-                    .expect("the named inside fixture must remain readable"),
-                files.expected_fixture,
-                "the named inside fixture must keep its exact expected bytes"
-            );
-        }
-        other => panic!("the journey names no provider whose file evidence it knows: {other}"),
-    }
-    assert!(
-        !files.outside.exists(),
-        "the named sibling outside STORAGE_ROOT must stay absent after the run: {}",
-        files.outside.display()
-    );
-
-    let probe = seccomp_denied_call_probe(&allow, SeccompProbeRun::Filter)
-        .unwrap_or_else(|failure| panic!("{failure}"));
-    for (call, before, after) in &probe.records {
+    let written = assert_seccomp_journey_files(name, &files, &expected_inside);
+    if name == WALLET_PROVIDER {
+        let text = String::from_utf8(written).expect("the storage key must be hex text");
+        let digits = text
+            .strip_suffix('\n')
+            .expect("the storage key must end with a newline");
         assert_eq!(
-            *after,
-            SeccompAnswer::Errno(SECCOMP_DENY_ERRNO),
-            "{call} must answer the deny marker {SECCOMP_DENY_ERRNO} under the filter, \
-             and it answered {after:?}"
+            digits.len(),
+            2 * WALLET_KEY_BYTES,
+            "the storage key must hold its {} hex digits and a newline: {}",
+            2 * WALLET_KEY_BYTES,
+            files.inside.display()
         );
-        assert_ne!(
-            after, before,
-            "{call} answered {after:?} both with and without the filter, so this probe \
-             does not show the filter's own answer"
+        assert!(
+            digits.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "the storage key must be hex: {}",
+            files.inside.display()
         );
-        eprintln!("{call}: before {}, after {}", before.text(), after.text());
     }
-    assert_eq!(
-        probe.allocations, 0,
-        "the probe child must allocate nothing after its fork"
-    );
+
+    // Wallet owns the four-call kernel proof; did proves program equality.
+    if name == WALLET_PROVIDER {
+        let probe = seccomp_denied_call_probe(&allow, SeccompProbeRun::Filter)
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        for (call, before, after) in &probe.records {
+            assert_eq!(
+                *after,
+                SeccompAnswer::Errno(SECCOMP_DENY_ERRNO),
+                "{call} must answer the deny marker {SECCOMP_DENY_ERRNO} under the filter, \
+                 and it answered {after:?}"
+            );
+            assert_ne!(
+                after, before,
+                "{call} answered {after:?} both with and without the filter, so this probe \
+                 does not show the filter's own answer"
+            );
+            eprintln!("{call}: before {}, after {}", before.text(), after.text());
+        }
+        assert_eq!(
+            probe.allocations, 0,
+            "the probe child must allocate nothing after its fork"
+        );
+    }
 }
 
 /// The wallet half of the Linux journey, and the body is
@@ -9564,8 +9598,8 @@ fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
 }
 
 /// The did half of the Linux journey: the same body, the same installer and the
-/// same probe, with did's own binary, did's own committed declared-rights file and
-/// did's own operations.
+/// program as wallet, with did's own binary, did's own committed declared-rights
+/// file and did's own operations. Wallet owns the four-call probe run.
 ///
 /// The permitted calls are `did_standin_permitted_operations`, judged by
 /// `assert_suite_outcomes` against the permitted prefix of `DID_SUITE_CASES`, so

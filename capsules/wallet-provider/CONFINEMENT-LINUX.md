@@ -8,9 +8,9 @@ no network allow, only the `PROVIDER_EXECUTABLE`, `STORAGE_ROOT` and
 `STORAGE_PARENT` tokens, and the three shared rules verbatim.
 This contract has no Linux enforcement yet. Its only current Linux behaviour is
 the seccomp allow list in "The seccomp allow list" below: a generated allow
-list, source that builds, and one real Linux run behind it in which
-`wallet-provider` and then `did-provider` each start under the filter built from
-their own declared rights, and the refused calls answer the filter's own marker.
+list and a recorded wallet Linux run in which the refused calls answer the
+filter's own marker. The did caller uses the same path and awaits the policy
+decision described under "The kernel proof".
 `confine.sb` stays each provider's one oracle. The contract is shared, so its
 Linux mapping is written once here, beside the one contract check (P10). The
 Linux policy that the Runtime would generate from the same approved declared
@@ -19,11 +19,11 @@ file exists (P10).
 
 ## The seccomp allow list
 
-One part of this design exists today as source, for both confined providers: a
-seccomp allow list generated from each provider's own declared rights, and one
-real Linux run behind each of them. Those runs start `wallet-provider` and
-`did-provider` under the filters their own files build and prove the four denied
-calls. Namespaces, Landlock, capability dropping and every file row of the
+One part of this design exists today as source for both providers: a seccomp
+allow list generated from each provider's own declared rights. Wallet supplies
+the recorded Linux proof of the four denied calls; did compares its full
+program with wallet's and awaits acceptance of its operation journey.
+Namespaces, Landlock, capability dropping and every file row of the
 contract stay unbuilt, so a seccomp filter is the only Linux confinement this lab
 applies.
 
@@ -62,7 +62,7 @@ carries:
 | --- | --- |
 | `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))` | `execve`, `execveat` |
 | `(allow file-read* (literal (param "STORAGE_PARENT")))` | `faccessat`, `fstat`, `getdents64`, `lseek`, `newfstatat`, `openat`, `openat2`, `pread64`, `read`, `readlinkat`, `readv`, `statx` |
-| `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` | the file-read row, plus `fchmod`, `fchmodat`, `fdatasync`, `fsync`, `ftruncate`, `linkat`, `mkdirat`, `pwrite64`, `renameat2`, `unlinkat`, `write`, `writev` |
+| `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` | the file-read row, plus `fchmod`, `fdatasync`, `fsync`, `ftruncate`, `linkat`, `mkdirat`, `pwrite64`, `renameat2`, `unlinkat`, `write`, `writev` |
 | `(allow file-read* (literal "/"))` | the file-read row |
 | `(allow sysctl-read)` | `uname`, `sysinfo` |
 
@@ -86,8 +86,9 @@ list and one install path (P10).
 each entry was dropped alone from the whole list, the probe re-run, and the call
 that then failed named it. The set is one table for both providers, and the two
 runs measured it separately: wallet's set of seven calls is the table below, and
-did's measured set is the same seven. So the equality holds for the second
-provider too, and no per-provider row was needed:
+did's recorded set is the same seven. That did measurement used the wider
+`fchmodat` policy described below; it proves no complete did journey under
+wallet's preserved policy. Both providers use the same launch table:
 
 | Entry | The call whose refusal named it |
 | --- | --- |
@@ -141,8 +142,9 @@ passes its own provider name, that provider's own binary, its own committed
 declared-rights value and its own test name. There is one journey body, one
 launcher, one list helper and one probe, and no copy per provider (P10).
 
-Both ran on host `spark1.local`: `aarch64`, Ubuntu 24.04.4, kernel
-`6.17.0-1029-nvidia`, 20 cores, unprivileged. Each builds the list from its own
+The recorded runs used host `spark1.local`: `aarch64`, Ubuntu 24.04.4, kernel
+`6.17.0-1029-nvidia`, 20 cores, unprivileged. The did run used an added syscall
+permission, as described below. Each test builds the list from its own
 provider's committed declared-rights file through `seccomp_probe_list` and starts
 that provider through `standin_spawn_confined_provider` with a `Seccomp` policy,
 which reaches `ConfinedProvider::start_under_seccomp` and its one `spawn`.
@@ -163,7 +165,11 @@ fixture must equal `b"did seccomp journey fixture\n"`, the encrypted nickname
 `did/nickname.enc` must keep the bytes `set_nickname` wrote, and the named sibling
 `seccomp-outside-write` outside `STORAGE_ROOT` must be absent. The did suite's
 file-denial cases stay in the B3 and C0 journeys, because a seccomp filter cannot
-make them fail.
+make them fail. Both callers create the fixed-byte fixture before their
+operation suites and call `assert_seccomp_journey_files` after shutdown.
+`seccomp_journey_file_comparison_catches_corruption_for_each_provider` exercises
+that one comparison for both providers with a changed inside file, a changed
+fixed-byte fixture and a present outside sibling.
 
 The list each journey asserts about itself: its `provider` field is the name it
 asked for, and its `program` equals the program built the same way for wallet.
@@ -171,7 +177,7 @@ That equality follows from the two committed declared-rights files declaring the
 same two rights and the same two `platform-baseline` ids with identical rule text,
 so a difference would be a per-provider widening and the assertion fails on it.
 
-The did run also measured `LAUNCH_ESSENTIALS` on its own binary, entry by entry,
+The earlier did run measured `LAUNCH_ESSENTIALS` on its own binary, entry by entry,
 by dropping each entry alone from the whole list and reading what then failed. All
 seven entries are did's too, so the set is one table and needed no per-provider
 row. The failing call was: `close` → `libgcc_s.so.1: cannot close file
@@ -181,20 +187,23 @@ inside `rand`'s thread RNG, which cannot seed; `mmap` → `SIGSEGV`; `mprotect` 
 `rt_sigaction` → `fatal runtime error: assertion failed: signal(libc::SIGPIPE,
 handler) != libc::SIG_ERR`.
 
-One syscall did needed and the table did not yet hold was found the same way. The
-did journey first failed with `the confined provider must return the stored
-nickname` and `{"code":"not_set"}`. An `strace` of that run named the refused
-call: `fchmodat(AT_FDCWD, "<root>/did/nickname.enc", 0600) = -1 EACCES`, issued by
-did's `set_nickname`, whose last step sets the new file's mode. `fchmodat` is a
-`file-write*` call and the row already held its sibling `fchmod`, so the row now
-carries both spellings. Wallet makes no permission call of its own, which is why
-its journey alone never showed the gap.
+The did journey is blocked by wallet's preserved syscall policy. The recorded
+run failed with `the confined provider must return the stored nickname` and
+`{"code":"not_set"}`. Its trace showed
+`fchmodat(AT_FDCWD, "<root>/did/nickname.enc", 0600) = -1 EACCES` when
+`set_nickname` set the file mode. The earlier successful did run added
+`fchmodat` to the shared storage row, which also widened wallet's program.
+That addition has been removed. The shared policy owner must resolve this
+requirement before a fresh did journey can supply acceptance evidence. The did
+test keeps its permitted-operation assertions and full-program equality; its
+previous run with the wider policy supplies neither proof for the restored
+policy nor acceptance of the did seccomp row.
 
 The current journey also compares the key's final bytes with the bytes captured
 immediately after `init`. The key check requires the trailing newline.
 
 The launched child's own `/proc/<pid>/status` reports `Seccomp: 2`
-(`SECCOMP_MODE_FILTER`) in both runs. That mode alone also accepts an inherited
+(`SECCOMP_MODE_FILTER`) in the recorded runs. That mode alone also accepts an inherited
 filter, so the launcher's record additionally carries the marker call's answer
 before and after its own `pre_exec` install, and the two must differ.
 
@@ -205,9 +214,10 @@ This makes the WP176 skip-install plant reach the before/after assertion even
 when the provider already carries an inherited filter. One helper,
 `seccomp_journey_runs_beneath_an_inherited_filter(name, test_name)`, does that for
 both callers, so the did caller takes the same fixture by its own test name
-instead of a second copy of the technique.
+instead of a second copy of the technique. The parent returns after checking
+the child result, so each caller launches its provider once.
 
-Then one forked probe child records the four calls before the filter, installs
+Only the wallet journey runs the forked probe child, which records the four calls before the filter, installs
 the same filter through `install_seccomp`, and records them again:
 
 | Call | Before the filter | After the filter |
@@ -326,8 +336,9 @@ both lists then answer `wallet-provider` and the did case fails.
   `an inherited filter alone must not satisfy the launcher's own install`; and the
   outside-write plant makes it find `seccomp-outside-write` beside `STORAGE_PARENT`
   and fail on `the named sibling outside STORAGE_ROOT must stay absent after the
-  run`. Both red runs are quoted in the build reply for task 149, with the command
-  that produced them, and neither can print a CAUGHT line on the Mac.
+  run`. The earlier did plant results used the wider policy and need a fresh
+  run after the shared policy requirement is resolved. Neither Linux plant can
+  print a CAUGHT line on the Mac.
 
 The earlier WP166 and WP167 plants were CAUGHT on the Mac, in
 `seccomp_keyctl_probe_supplies_every_argument_without_creation` and
@@ -366,10 +377,9 @@ filter.
 The seccomp allow list's own Linux-test cells are the two journeys:
 `linux_wallet_journey_runs_under_the_seccomp_allow_list` and
 `linux_did_journey_runs_under_the_seccomp_allow_list`, both in
-`capsules/wallet-provider/tests/confine.rs`. Both ran on the host above, in the
-same run, and each is the evidence for its own provider's row: the filter that
-provider's declared rights build, the launch that installs it, and the calls that
-provider answers under it.
+`capsules/wallet-provider/tests/confine.rs`. Wallet carries the recorded kernel
+proof above. Did remains pending the shared policy decision and a fresh run
+with the accepted program; its earlier wider-policy run is not row acceptance.
 
 ## The contract on Linux
 

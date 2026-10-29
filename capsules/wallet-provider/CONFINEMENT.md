@@ -673,8 +673,9 @@ and supplies contract evidence, not Linux execution evidence.
   four refused calls answering the filter's marker;
   `linux_did_journey_runs_under_the_seccomp_allow_list` is the second caller of
   the same journey body, with did's own binary, declared rights and permitted
-  operations, so the one path carries both providers and neither has a private
-  copy of the builder, the installer or the probe;
+  operations. It compares the full program with wallet's and leaves the
+  four-call probe to wallet. Did acceptance awaits the shared policy decision
+  recorded in `CONFINEMENT-LINUX.md`;
   `linux_seccomp_launch_refuses_each_failed_install` requires each install
   failure and an architecture refusal to start nothing;
   `linux_seccomp_launcher_runs_the_requested_program` requires the child's own

@@ -163,17 +163,19 @@ needs host-specific test evidence and the Runtime acceptance step, so no status
 document records `did-provider` or `wallet-provider` as confined on Linux (P10,
 P11). The status change lands when the Runtime side does.
 
-The one Linux behaviour that exists today is the seccomp allow list, and the
-seccomp row now holds did evidence beside wallet's. The named test
+The shared seccomp journey has a did caller,
 `linux_did_journey_runs_under_the_seccomp_allow_list`, in
-`../wallet-provider/tests/confine.rs`, builds did's list from did's own committed
-declared-rights file through the one builder, starts did's binary through the one
-stand-in with the one installer, and requires `init`, `get_did` with a `did:key:`
-value, `resolve`, `set_nickname`, `get_nickname` and `get_persona_did` to answer
-under the filter, with the launched child reporting `SECCOMP_MODE_FILTER` in its
-own `/proc/<pid>/status`. It ran on `spark1.local` (`aarch64`, Ubuntu 24.04.4,
-kernel `6.17.0-1029-nvidia`). The list is the same one path as wallet's: there is
-no did-side builder, installer, parser, generator or probe.
+`../wallet-provider/tests/confine.rs`. It builds did's list from did's own
+committed declared-rights file through the one builder and requires the same
+program as wallet. It starts did through the shared stand-in and installer and
+requires `init`, `get_did` with a `did:key:` value, `resolve`, `set_nickname`,
+`get_nickname` and `get_persona_did` to answer under that filter.
+The did seccomp row awaits the shared policy owner's decision: the recorded
+`spark1.local` run (`aarch64`, Ubuntu 24.04.4, kernel `6.17.0-1029-nvidia`)
+needed `fchmodat` to save the nickname. The earlier successful run added that
+permission to wallet's policy too. The shared table now preserves wallet's
+policy, and the did test retains all its assertions. A fresh Linux run after the
+policy decision is required for did acceptance.
 
 No contract file row is enforced on Linux: a seccomp filter reads syscall numbers
 and not paths, so the file rows stay open, and `linux` stays out of
