@@ -455,21 +455,25 @@ impl StandIn {
 
     /// Lab test seam, not a route.
     ///
-    /// `Ok(())` means the grant authorises that caller. This method reads no
-    /// clock, no disk and no WIT file.
-    pub fn authorise(&self, caller: Caller<'_>, request_id: &str) -> Result<(), (u16, String)> {
-        let Some(grant) = self
+    /// `Ok(())` means the grant authorises that caller, and a `once` grant
+    /// stores `Exhausted`. This method reads no clock, no disk and no WIT file.
+    pub fn authorise(&mut self, caller: Caller<'_>, request_id: &str) -> Result<(), (u16, String)> {
+        let Some(index) = self
             .grants
             .iter()
-            .find(|grant| grant.request_id == request_id)
+            .position(|grant| grant.request_id == request_id)
         else {
             return Err(unknown_grant(request_id));
         };
+        let grant = &self.grants[index];
         if !is_live(grant.life) {
             return Err(grant_not_live(grant.life));
         }
         if !session_authorises(grant, caller) {
             return Err(wrong_capsule(grant, caller));
+        }
+        if grant.duration == "once" {
+            self.grants[index].life = Life::Exhausted;
         }
         Ok(())
     }
@@ -4609,6 +4613,16 @@ mod tests {
             Some("component-2"),
             "the stand-in refuses instance 1's grant for instance 2",
         );
+        assert_eq!(
+            grant_record(&standin, "req-1"),
+            (Life::Live, true),
+            "the stand-in did the work: the sibling refusal spends nothing"
+        );
+        assert_eq!(
+            request_ids(&shell_pair(&standin).0),
+            BTreeSet::from(["req-1".to_owned()]),
+            "the stand-in did the work: the refused sibling leaves the grant in the live view"
+        );
         let owner = standin.authorise(
             Caller::Client {
                 session_id: "component-1",
@@ -4635,9 +4649,136 @@ mod tests {
         );
         assert_eq!(
             grant_record(&standin, "req-1"),
-            (Life::Live, true),
-            "the stand-in leaves the seeded grant unchanged"
+            (Life::Exhausted, true),
+            "the stand-in did the work: the owner's one use stores Exhausted"
         );
+        assert_eq!(
+            request_ids(&shell_pair(&standin).0),
+            BTreeSet::new(),
+            "the stand-in did the work: the live view omits the spent grant"
+        );
+    }
+
+    #[test]
+    fn standin_once_grant_is_spent_by_one_use() {
+        let mut standin = StandIn::new();
+        launch_two_running(&mut standin);
+        standin.seed_grant(
+            "req-once",
+            "component-1",
+            "res",
+            "read",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-session",
+            "component-2",
+            "res",
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        assert_eq!(
+            request_ids(&shell_pair(&standin).0),
+            BTreeSet::from(["req-once".to_owned(), "req-session".to_owned()]),
+            "the stand-in did the work: the live view lists both seeded grants"
+        );
+        let sibling = standin.authorise(
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "req-once",
+        );
+        assert_wrong_capsule(
+            &sibling,
+            "component-1",
+            Some("component-2"),
+            "the stand-in did the work: it refuses the sibling of the once grant",
+        );
+        let shell = standin.authorise(Caller::Shell, "req-once");
+        assert_wrong_capsule(
+            &shell,
+            "component-1",
+            None,
+            "the stand-in did the work: it refuses the shell presentation of the once grant",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Live, false),
+            "the stand-in did the work: both refusals spend nothing"
+        );
+        assert_eq!(
+            request_ids(&shell_pair(&standin).0),
+            BTreeSet::from(["req-once".to_owned(), "req-session".to_owned()]),
+            "the stand-in did the work: both refusals leave the live view unchanged"
+        );
+        let owner = standin.authorise(
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "req-once",
+        );
+        assert!(
+            owner.is_ok(),
+            "the stand-in did the work: it authorises the owner's one use: {owner:?}"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: the owner's one use stores Exhausted"
+        );
+        assert_eq!(
+            request_ids(&shell_pair(&standin).0),
+            BTreeSet::from(["req-session".to_owned()]),
+            "the stand-in did the work: the live view omits the spent once grant"
+        );
+        let again = standin.authorise(
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "req-once",
+        );
+        assert_not_live(
+            &again,
+            "Exhausted",
+            "the stand-in did the work: the spent grant is not live for a second use",
+        );
+        for attempt in 1..=2 {
+            let session = standin.authorise(
+                Caller::Client {
+                    session_id: "component-2",
+                },
+                "req-session",
+            );
+            assert!(
+                session.is_ok(),
+                "the stand-in did the work: session grant use {attempt} succeeds: {session:?}"
+            );
+        }
+        assert_eq!(
+            grant_record(&standin, "req-session"),
+            (Life::Live, false),
+            "the stand-in did the work: the session grant stays Live after two uses"
+        );
+        assert_eq!(
+            request_ids(&shell_pair(&standin).0),
+            BTreeSet::from(["req-session".to_owned()]),
+            "the stand-in did the work: the live view still lists the session grant"
+        );
+        for id in ["component-1", "component-2"] {
+            assert_capsule(
+                &standin,
+                id,
+                "running",
+                "",
+                "the stand-in did the work: it leaves both instances running",
+            );
+        }
     }
 
     #[test]

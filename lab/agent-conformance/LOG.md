@@ -9197,3 +9197,178 @@ New:
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | No capsule code or import changes; the stand-in keeps the one shell request record the real route answers. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_unanswered_request_expires` at `standin-runtime/mod.rs:3749`; the stub, late and settled plants each fail that named test on its assertion, and the restored test passes. |
 | 8. Identity, admission and allowance stay separate? | Yes | Expiry writes one request record at `standin-runtime/mod.rs:678-683` and leaves the instance phase and grants as they were; `finish_start` at `:503` and `delete_capsule` at `:578` stay the admission and stop decisions, and a granted record and its `Live` grant stay. A PASS gives the Runtime no A10 or A11 credit for expiry. |
+
+## 065 — A6: one use spends a once grant
+
+065: `authorise` becomes `&mut self` and, on its one success path, stores `Exhausted` in that grant's `life` when its duration is `once`. The three refusals keep their order, status and reason text and write nothing. `standin_sibling_cannot_use_the_grant` now asserts the refused sibling leaves the grant `Live` and the owner's single use stores `Exhausted`, so the live view drops the grant. The new `standin_once_grant_is_spent_by_one_use` proves the spend and the session grant that stays. `standin-runtime/README.md` states the spend in its `authorise` paragraph, and `RUNBOOK.md` gains one paragraph after the last stand-in paragraph. `elastos/`, `capsules/`, `scripts/`, `examples/`, `GAPS.md`, `falsifiers.json`, `Cargo.toml`, `Cargo.lock`, `src/harness.rs`, `src/census.rs`, `tests/effects.rs` and `tests/common/grants.rs` are unchanged. No new method, use counter, token or reason string.
+
+### Quotes from the contract (read only)
+
+`docs/AGENT_ARCHITECTURE.md:318-320`, "Delegation and mandates":
+
+```text
+- **Allow once** authorizes one exact operation.
+- **Allow for this session** authorizes a bounded operation set until the
+  session ends or the grant is revoked.
+```
+
+### Quotes from the Runtime (read only, not imported)
+
+`elastos/crates/elastos-server/src/api/handlers/capability.rs:334-337` shows the two durations this task mirrors:
+
+```text
+    let constraints = match duration {
+        GrantDuration::Once => TokenConstraints::new(0, false, None, Some(1)),
+        GrantDuration::Session => TokenConstraints::default(),
+    };
+```
+
+`Once` therefore carries `max_uses` `Some(1)`, and `Session` uses the default, which leaves `max_uses` unset.
+
+`elastos/crates/elastos-runtime/src/capability/manager.rs:422-427` checks the caller before the use count:
+
+```text
+        // 4. Caller verification
+        if token.capsule != caller_capsule_id {
+            self.audit_validation_failure(token, caller_capsule_id, "wrong_capsule");
+            return Err(ValidationError::WrongCapsule {
+                expected: token.capsule.clone(),
+                got: caller_capsule_id.to_string(),
+            });
+```
+
+The use count check is later, at `manager.rs:486-490` (`try_use_token`). A refused caller returns `wrong capsule` before that call, so a refused caller spends no use.
+
+### Code
+
+- `authorise` at `standin-runtime/mod.rs:460` takes `&mut self`; its doc comment starts `Lab test seam, not a route.` and states that a `once` grant stores `Exhausted`. The unknown id, the not-live life and the wrong caller return in that order with the same status and reason text.
+- The one write is at `standin-runtime/mod.rs:475-477`: on success, `grant.duration == "once"` sets `self.grants[index].life = Life::Exhausted`. Every other field and every other grant stay. A `session` grant stays `Live`. The refusals write nothing. There is no use counter and no second reason; a spent grant's next presentation is the existing `grant is not live: Exhausted`.
+- `seed_grant`, `seed_at`, `is_live`, `revoke_live`, `keep`, `visible`, `post_capability_grant`, `post_capability_deny`, `watch_ended` and `expire_due` are unchanged. No new `StandIn` method.
+
+### Tests
+
+`standin_once_grant_is_spent_by_one_use` at `standin-runtime/mod.rs:4663`, in the module's `#[cfg(test)]`, passes with no operator and no probe build. Every assertion message starts `the stand-in did the work:`.
+
+- `launch_two_running` gives `component-1` and `component-2` `running`. `req-once` is seeded on `component-1` and `req-session` on `component-2`, resource `res`, action `read`, `granted_at` 1, life `Live`, `session_ended` false, durations `once` and `session`. The shell `request_id` set is exactly both.
+- The `component-2` client's `authorise` of `req-once` is 403 `wrong capsule`, and the shell's is 403 `wrong capsule`. `grant_record` for `req-once` stays `(Life::Live, false)` and the shell set stays both.
+- The `component-1` client's `authorise` of `req-once` is `Ok(())`; `grant_record` becomes `(Life::Exhausted, false)` and the shell set is exactly `req-session`.
+- A second `authorise` by the `component-1` client is 400 `grant is not live: Exhausted`.
+- Two `authorise` calls by the `component-2` client of `req-session` are each `Ok(())`; `grant_record` stays `(Life::Live, false)` and the shell set stays exactly `req-session`.
+- Both instances stay `running` with cause `""`.
+
+`standin_sibling_cannot_use_the_grant` at `:4564` keeps its launch, seed, shell list before any `authorise`, sibling 403, owner `Ok(())` and both instance checks. It adds the sibling-refusal record `(Life::Live, true)` and the still-`req-1` shell set, and its final assertion is now `(Life::Exhausted, true)` with an empty shell set; the text `the stand-in leaves the seeded grant unchanged` is gone. `standin_stop_clears_that_sessions_grant`, `standin_authorise_unknown_grant`, `standin_authorise_dead_grants` and `standin_shell_cannot_authorise` keep their bodies; their one-use successes are not followed by a life read.
+
+### Hand-run falsifiers
+
+No `falsifiers.json` id and no new id. Each plant ran alone and was restored before the next. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_once_grant_is_spent_by_one_use -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. Each planted crate compiled. After the last restore, `standin-runtime/mod.rs` matched the pre-plant copy byte for byte and `git diff -- lab/agent-conformance/standin-runtime/mod.rs` shows only the intended change, with no plant. The restored file's SHA-256 is `05ad138ccd4bc492cd8dc7b4fc490697000189e4871864f7b97dfe361fef8959`.
+
+F-standin-a6-once-stub: the start of `authorise` returns `Ok(())` before any grant is read. Planted run failed on the assertion at `standin-runtime/mod.rs:4552:9`: `the stand-in did the work: it refuses the sibling of the once grant: Ok(())`.
+
+Old:
+
+```text
+    pub fn authorise(&mut self, caller: Caller<'_>, request_id: &str) -> Result<(), (u16, String)> {
+        let Some(index) = self
+```
+
+New:
+
+```text
+    pub fn authorise(&mut self, caller: Caller<'_>, request_id: &str) -> Result<(), (u16, String)> {
+        return Ok(());
+        let Some(index) = self
+```
+
+F-standin-a6-once-keep: the success path does not change `life`. Planted run failed on the assertion at `standin-runtime/mod.rs:4727:9`: `the stand-in did the work: the owner's one use stores Exhausted`, left `(Live, false)`, right `(Exhausted, false)`.
+
+Old:
+
+```text
+        if !session_authorises(grant, caller) {
+            return Err(wrong_capsule(grant, caller));
+        }
+        if grant.duration == "once" {
+            self.grants[index].life = Life::Exhausted;
+        }
+        Ok(())
+```
+
+New:
+
+```text
+        if !session_authorises(grant, caller) {
+            return Err(wrong_capsule(grant, caller));
+        }
+        Ok(())
+```
+
+F-standin-a6-once-session: the success path also sets a `session` grant to `Exhausted`. Planted run failed on the assertion at `standin-runtime/mod.rs:4758:13`: `the stand-in did the work: session grant use 2 succeeds: Err((400, "grant is not live: Exhausted"))`.
+
+Old:
+
+```text
+        if grant.duration == "once" {
+            self.grants[index].life = Life::Exhausted;
+        }
+```
+
+New:
+
+```text
+        if grant.duration == "once" || grant.duration == "session" {
+            self.grants[index].life = Life::Exhausted;
+        }
+```
+
+F-standin-a6-once-sibling: the `Exhausted` store runs before the session check. Planted run failed on the assertion at `standin-runtime/mod.rs:4552:9`: `the stand-in did the work: it refuses the shell presentation of the once grant: Err((400, "grant is not live: Exhausted"))`.
+
+Old:
+
+```text
+        if !session_authorises(grant, caller) {
+            return Err(wrong_capsule(grant, caller));
+        }
+        if grant.duration == "once" {
+            self.grants[index].life = Life::Exhausted;
+        }
+        Ok(())
+```
+
+New:
+
+```text
+        let exhausted = grant.duration == "once";
+        if exhausted {
+            self.grants[index].life = Life::Exhausted;
+        }
+        if !session_authorises(&self.grants[index], caller) {
+            return Err(wrong_capsule(&self.grants[index], caller));
+        }
+        Ok(())
+```
+
+### Docs
+
+`standin-runtime/README.md:33` keeps the `authorise` paragraph with the sibling refusal and the stop. It adds that a successful `authorise` by the owning client of a `once` grant stores `Exhausted`, that the live view omits it through the one life filter, that a `session` grant stays `Live`, and that a refusal spends nothing. The RA-1 section and the RI-1 to RI-4 material stay, and the paragraph stays before `## Callers`. `RUNBOOK.md:735` adds one paragraph after the last stand-in paragraph: `standin_once_grant_is_spent_by_one_use` is this stand-in, and a PASS there gives the Runtime no A6 credit for a once grant. Every other RUNBOOK paragraph keeps its bytes.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged, and the protected diff is empty: `git diff` for `src/harness.rs`, `src/census.rs`, `tests/effects.rs`, `tests/common/grants.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. The only changed files are `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: real 245.91 seconds, inside the 600-second bound. The observed targets were lib 56 passed 0 failed (a separate `--lib` run), effects passed (Cargo reached the later targets), report 23 passed, runtime 10 passed with 2 ignored, standin_contract 2 passed, probe 3 passed and doc-tests 0; no `error: test failed` line appeared. Cargo stops at the first failing target, so reaching the last doc-tests target means every earlier target passed. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.13 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_once_grant_is_spent_by_one_use -- --exact` exit 0, real 0.06 seconds, 1 passed and 0 failed.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | The change adds no identity; `authorise` at `standin-runtime/mod.rs:460` and the test at `:4663` use existing lab request ids and the seeded `res` resource. |
+| 2. Capsule, Home or UI gains ungranted access? | No | The edit changes one lab grant's life at `standin-runtime/mod.rs:475-477`; no capsule, route or import changes, and the shell still holds no grant. |
+| 3. A second path or a second copy of one rule? | No | `authorise` at `standin-runtime/mod.rs:460` stays the one presentation check; the spend is inside its success path at `:475`, with no new method, use counter or reason string. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`; `elastos/`, `capsules/` and `scripts/` are untouched, and the Runtime durations are quoted only. |
+| 5. Refusals deny by default with a clear reason? | Yes | The unknown-id, not-live and wrong-caller refusals at `standin-runtime/mod.rs:466-473` keep status 400/403 and their existing reasons; a spent grant's next use is 400 `grant is not live: Exhausted`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | No capsule code or import changes; the stand-in keeps the one presentation check the Runtime uses, and the capsule keeps its own logic. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_once_grant_is_spent_by_one_use` at `standin-runtime/mod.rs:4663`; the stub, keep, session and sibling plants each fail that named test on its assertion, and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | The caller decision at `standin-runtime/mod.rs:472` and the liveness decision at `:469` come before the duration-limited spend at `:475`; the Runtime checks the caller at `manager.rs:422-427` before `try_use_token` at `:486`, so a refused caller spends nothing in either place. A PASS gives the Runtime no A6 credit for a once grant. |
+
