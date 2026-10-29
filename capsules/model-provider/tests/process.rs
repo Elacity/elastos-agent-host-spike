@@ -3932,3 +3932,208 @@ fn opt_in_real_deepseek_turn_through_the_runtime_socket_completes_with_text_and_
 
     provider.shutdown();
 }
+
+/// The run limit for `a_hosted_run_held_past_its_time_limit_fails_as_a_timeout`.
+/// The other hosted tests keep `HOSTED_FIXTURE_RUNTIME_MS_LIMIT`.
+const HOSTED_TIMEOUT_RUNTIME_MS_LIMIT: u64 = 2_000;
+
+/// How long past that limit `wait_for_run_terminal_within` may wait. A client
+/// that no longer stops at the limit stays open through this wait, so the
+/// wait's `model run did not settle` is what a dropped timeout must hit.
+const HOSTED_TIMEOUT_SETTLE_SLACK: Duration = Duration::from_secs(10);
+
+/// A hosted run whose answer never comes ends on its own time limit, as one
+/// `failed` terminal, and the offer's one run slot is then free.
+///
+/// The rule has three parts. `remaining_run_timeout`
+/// (`src/adapters.rs:132-141`) gives the hosted client its timeout
+/// (`src/adapters.rs:1894-1899`). The worker returns `true` on a
+/// `BackendTimeout` fault (`src/adapters.rs:1486-1490`). The coordinator's
+/// `Exited { timed_out: true }` arm (`src/execution.rs:399-403`) calls
+/// `settle_local_text_run_timeout` (`src/state.rs:832-844`), which uses
+/// `transition_timeout` (`src/state.rs:1419-1432`) and records `failed` with
+/// class and code `backend_timeout`. While that worker is alive, a read does
+/// not settle the run (`src/state.rs:1006-1009`), so only the worker's own
+/// timeout ends it.
+///
+/// The design lines this pins are "prompt and event privacy, bounded
+/// capacity, queues, tokens, time, and usage;" (`docs/MODEL_PROVIDER.md:536`)
+/// and "each request has one terminal state;" (`docs/MODEL_PROVIDER.md:556`).
+///
+/// The stand-in is `HostedEffectStandIn::bind`, and `hold_answer` keeps its
+/// refusal back. The offer limit is `HOSTED_TIMEOUT_RUNTIME_MS_LIMIT`. The
+/// create body is `hosted_text_create_request`. Off macOS the provider
+/// refuses every hosted run before any socket, so the test prints one `SKIP`
+/// line and returns.
+#[test]
+fn a_hosted_run_held_past_its_time_limit_fails_as_a_timeout() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted run held past its time limit: off macOS the \
+             provider refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-run-timeout");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind("hosted-run-timeout");
+    stand_in.hold_answer();
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_TIMEOUT_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let create_a = hosted_text_create_request(
+        &test_support::fixture_model_request_id("request:hosted-run-timeout-a"),
+        "grant:test",
+        "a hosted run held past its time limit",
+    );
+    let mut create_c = create_a.clone();
+    create_c["runtime_binding"]["request_id"] = json!(test_support::fixture_model_request_id(
+        "request:hosted-run-timeout-c"
+    ));
+    let binding_a: RuntimeCreateBinding =
+        serde_json::from_value(create_a["runtime_binding"].clone()).unwrap();
+    let binding_c: RuntimeCreateBinding =
+        serde_json::from_value(create_c["runtime_binding"].clone()).unwrap();
+    let run_a = model_run_id(&binding_a);
+    let run_c = model_run_id(&binding_c);
+    assert_ne!(run_a, run_c, "each request id must name its own run");
+
+    let opened_at = Instant::now();
+    let created_a = provider.request(create_a.clone());
+    assert_eq!(
+        created_a["status"], "ok",
+        "unexpected create response: {created_a}"
+    );
+    assert_eq!(
+        created_a["data"]["run_id"], run_a,
+        "runs_create must return the contract run id"
+    );
+    assert!(
+        matches!(
+            created_a["data"]["status"].as_str(),
+            Some("prepared" | "running")
+        ),
+        "the held hosted run must report an open status: {created_a}"
+    );
+    stand_in.wait_for_connections(1);
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "the held hosted run must open exactly one connection to the Runtime socket"
+    );
+
+    let settle_budget =
+        Duration::from_millis(HOSTED_TIMEOUT_RUNTIME_MS_LIMIT) + HOSTED_TIMEOUT_SETTLE_SLACK;
+    let settled_a = wait_for_run_terminal_within(
+        &mut provider,
+        &run_a,
+        &access_binding(&create_a),
+        settle_budget,
+    );
+    let elapsed = opened_at.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(HOSTED_TIMEOUT_RUNTIME_MS_LIMIT - 100),
+        "the run limit must be what ended the run: elapsed {elapsed:?}, limit {HOSTED_TIMEOUT_RUNTIME_MS_LIMIT} ms"
+    );
+    assert_eq!(
+        settled_a["data"]["status"], "failed",
+        "a run held past its time limit must fail: {settled_a}"
+    );
+    assert_eq!(
+        settled_a["data"]["terminal"]["error"]["class"], "backend_timeout",
+        "a time limit must record class backend_timeout: {settled_a}"
+    );
+    assert_eq!(
+        settled_a["data"]["terminal"]["error"]["code"], "backend_timeout",
+        "a time limit must record code backend_timeout: {settled_a}"
+    );
+    assert!(
+        settled_a["data"]["terminal"]["output"].is_null(),
+        "a timed-out run must carry no output: {settled_a}"
+    );
+    // `transition_timeout` passes no report (`src/state.rs:1421-1431`). A
+    // hosted terminal with no report stores `BackendReport::unknown()`
+    // (`src/state.rs:1354`). `unknown()` sets `usage` to `BackendFact::Unknown`
+    // with no reason and no count (`src/contract.rs:212-218`).
+    assert_eq!(
+        settled_a["data"]["terminal"]["backend_report"],
+        json!({
+            "schema": BACKEND_REPORT_SCHEMA,
+            "resolved_model": {"status": "unknown"},
+            "usage": {"status": "unknown"},
+            "cost": {"status": "unknown"},
+        }),
+        "a timed-out hosted run must record resolved_model, usage and cost as unknown, with no count: {settled_a}"
+    );
+
+    let events = read_hosted_run_events(&mut provider, &run_a, &access_binding(&create_a));
+    assert!(
+        events.iter().all(|event| event["kind"] != "text_delta"),
+        "a timed-out run must carry no text deltas: {events:?}"
+    );
+
+    let again = provider.request(json!({
+        "op": "runs_get",
+        "run_id": run_a,
+        "runtime_binding": access_binding(&create_a)
+    }));
+    assert_eq!(again["status"], "ok", "unexpected run response: {again}");
+    assert_eq!(
+        again["data"], settled_a["data"],
+        "a second read must return the same terminal: {again}"
+    );
+
+    stand_in.release_answer();
+    let created_c = provider.request(create_c.clone());
+    assert_eq!(
+        created_c["status"], "ok",
+        "unexpected create response: {created_c}"
+    );
+    assert_eq!(
+        created_c["data"]["run_id"], run_c,
+        "runs_create must return the contract run id"
+    );
+    assert_ne!(
+        created_c["data"]["terminal"]["error"]["code"], "model_busy",
+        "the timed-out run must free the one slot: {created_c}"
+    );
+    let settled_c = wait_for_run_terminal(&mut provider, &run_c, &access_binding(&create_c));
+    assert_eq!(
+        settled_c["data"]["terminal"]["error"]["code"], "hosted_effect_refused",
+        "the next run must be admitted and reach the Runtime socket: {settled_c}"
+    );
+    stand_in.wait_for_connections(2);
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 2,
+        "the timed-out run and the next run must open one connection each"
+    );
+    assert_eq!(
+        requests.len(),
+        2,
+        "the timed-out run must send one request and no retry"
+    );
+    for recorded in &requests {
+        assert_eq!(recorded.request_line, "POST /v1/hosted-effect HTTP/1.1");
+        assert_eq!(
+            recorded.value("authorization"),
+            None,
+            "a hosted run must carry no bearer key"
+        );
+    }
+
+    provider.shutdown();
+}
