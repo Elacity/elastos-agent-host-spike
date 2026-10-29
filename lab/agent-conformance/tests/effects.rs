@@ -6,7 +6,7 @@ use agent_conformance::census;
 use agent_conformance::harness::ThrowawayHome;
 use agent_conformance::identity::{Observation, StagedProbe, MANIFEST};
 use agent_conformance::runtime::runtime_under_test;
-use agent_conformance::standin_runtime::{Caller as StandInCaller, Life, StandIn, Start};
+use agent_conformance::standin_runtime::{Caller as StandInCaller, StandIn, Start};
 use common::signed_bundle::{SignedBundle, SHARED_NAME};
 use probe::{build_probe, Effect};
 use serde_json::json;
@@ -1209,17 +1209,33 @@ fn standin_stopped_run_leaves_no_live_grant() {
         vec!["component-1".to_owned(), "component-2".to_owned()],
         "the stand-in numbers the two launches"
     );
-    for (request_id, session_id) in [("req-1", "component-1"), ("req-2", "component-2")] {
-        stopped_run.seed_grant(
-            request_id,
-            session_id,
-            "localhost://Public/resident-instances/shared.txt",
-            "read",
-            "session",
-            0,
-            Life::Live,
-            false,
-        );
+    let mut granted = BTreeSet::new();
+    for session_id in ["component-1", "component-2"] {
+        let posted = stopped_run
+            .post_capability_request(
+                StandInCaller::Client { session_id },
+                &json!({
+                    "resource": "localhost://Public/resident-instances/shared.txt",
+                    "action": "read",
+                    "reason": "read shared",
+                }),
+            )
+            .expect("the agent's own route stores its pending request");
+        let request_id = posted["request_id"]
+            .as_str()
+            .expect("the request route names the request it stored")
+            .to_owned();
+        stopped_run
+            .post_capability_grant(
+                StandInCaller::Shell,
+                &json!({
+                    "request_id": request_id,
+                    "duration": "session",
+                    "rationale": "shell approves the shared read",
+                }),
+            )
+            .expect("the shell grants the agent's request");
+        granted.insert(request_id);
     }
     for (request_id, session_id) in [("req-p1", "component-1"), ("req-p2", "component-2")] {
         stopped_run
@@ -1246,9 +1262,14 @@ fn standin_stopped_run_leaves_no_live_grant() {
         })
         .collect();
     assert_eq!(
+        requests.len(),
+        2,
+        "the stand-in lists the two granted requests: {requests:?}"
+    );
+    assert_eq!(
         requests,
-        BTreeSet::from(["req-1", "req-2"]),
-        "the stand-in lists exactly the two seeded grants"
+        granted.iter().map(String::as_str).collect(),
+        "the stand-in lists exactly the two route grants"
     );
     let census = standin_a12_census(&stopped_run, &home, port);
     assert!(
@@ -1309,23 +1330,31 @@ fn standin_stopped_run_leaves_no_live_grant() {
             .expect("the stand-in returns a request list");
         assert_eq!(
             requests.len(),
-            1,
-            "the stand-in keeps exactly one request for {session_id}"
+            2,
+            "the stand-in keeps the route grant's record and the pending one for {session_id}"
+        );
+        let granted = requests
+            .iter()
+            .find(|request| request["status"] == "granted")
+            .unwrap_or_else(|| panic!("the stand-in keeps the granted record for {session_id}"));
+        assert_eq!(
+            granted["decision_reason"], "shell approves the shared read",
+            "the stand-in keeps the shell rationale on the granted record of {session_id}"
+        );
+        let pending = requests
+            .iter()
+            .find(|request| request["request_id"] == request_id)
+            .unwrap_or_else(|| panic!("the stand-in keeps {request_id} for {session_id}"));
+        assert_eq!(
+            pending["status"], "denied",
+            "the stand-in denies the stopped session's pending request"
         );
         assert_eq!(
-            requests[0]["request_id"], request_id,
-            "the stand-in keeps the seeded request id"
-        );
-        assert_eq!(
-            requests[0]["status"], "denied",
-            "the stand-in denies the stopped session's request"
-        );
-        assert_eq!(
-            requests[0]["settled_by"], "runtime",
+            pending["settled_by"], "runtime",
             "the stand-in settles the request as the runtime"
         );
         assert_eq!(
-            requests[0]["decision_reason"], decision_reason,
+            pending["decision_reason"], decision_reason,
             "the stand-in names the stop cause"
         );
     }
