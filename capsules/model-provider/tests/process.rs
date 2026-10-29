@@ -8,6 +8,13 @@ mod test_support;
 /// crate takes the same file in with its own `#[path]` line
 /// (`lab/agent-conformance/src/lib.rs:9-10`). Its `#[cfg(test)] mod tests`
 /// compiles into this binary too, so the shared stand-in's own tests run here.
+/// The stand-in's storage seam calls `crate::harness`
+/// (`lab/agent-conformance/src/lib.rs` exposes the same file). This test
+/// binary includes the stand-in, so it includes that module too.
+#[allow(dead_code)]
+#[path = "../../../lab/agent-conformance/src/harness.rs"]
+mod harness;
+
 #[allow(dead_code)]
 #[path = "../../../lab/agent-conformance/standin-runtime/mod.rs"]
 mod standin_runtime;
@@ -3404,9 +3411,9 @@ fn a_hosted_tool_call_or_reasoning_never_reaches_the_caller() {
 /// `access_refused`. One `Live` grant for run B's request id is then listed
 /// with every entry field, and run B completes with `ready` and reported
 /// usage. The loopback backend counts exactly one request, so only B reached
-/// the model (`MP36`). The shared stand-in has no seam that spends a grant
-/// (`lab/agent-conformance/standin-runtime/README.md`), so this lane models no
-/// spending and the entry stays listed.
+/// the model (`MP36`). The shared stand-in spends a `once` grant in
+/// `authorise`. This test seeds `session`, so the listed entry is this lane's
+/// check that it adds no spending of its own.
 ///
 /// This is stand-in lab evidence for M1's A4 only: the stand-ins are not the
 /// Runtime, the loopback backend is not a hosted connection, and it books no
@@ -3472,7 +3479,9 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
     let request_b = granted_model_turn_request_id(HOSTED_FIXTURE_SESSION_ID, prompt_b);
     let resource = "model:fixture/text";
     let action = "text.generate";
-    let duration = "once";
+    // `authorise` exhausts a `once` grant. `session` stays listed, which is
+    // this lane's check that it adds no spending of its own.
+    let duration = "session";
     let granted_at: u64 = 1_790_000_000;
     grants.lock().unwrap().seed_grant(
         &request_b,
@@ -3544,8 +3553,8 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
         }
     }
 
-    // The shared stand-in has no seam that spends a grant and this lane adds
-    // none, so the entry stays listed after run B.
+    // The stand-in spends a `once` grant in `authorise`. This fixture is
+    // `session`, and this lane adds no spending, so the entry stays listed.
     assert_eq!(
         shell_live_grant_view(&grants),
         json!({
@@ -5258,4 +5267,226 @@ fn hosted_request_identity_survives_rotation_and_refuses_conflicts() {
         &expected_run_id,
         HOSTED_IDENTITY_PROMPT,
     );
+}
+
+/// A later events page of an open hosted run sends nothing.
+/// Stream lifecycle (`docs/MODEL_PROVIDER.md`, "Stream lifecycle") gives events
+/// rising sequence numbers, and reconnection asks for events after the last
+/// durable sequence without dispatching the model request again.
+/// `page_run_events` returns that empty page and keeps the durable cursor.
+/// The 64-event split stays with `runs_events_pages_without_gaps_or_duplicates`.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn hosted_later_events_page_of_an_open_run_sends_nothing() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted later events page: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-later-events-page");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind_streaming("hosted-later-events-page");
+    stand_in.hold_answer();
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let prompt = "later-events-page";
+    let request_id = test_support::fixture_model_request_id("request:hosted-later-events-page");
+    let create_request = hosted_text_create_request(&request_id, "grant:test", prompt);
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+    let create = provider.request(create_request.clone());
+    assert_eq!(
+        create["status"], "ok",
+        "unexpected create response: {create}"
+    );
+    assert_eq!(
+        create["data"]["run_id"], expected_run_id,
+        "runs_create must return the contract run id"
+    );
+    stand_in.wait_for_connections(1);
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "the open run must open exactly one connection to the Runtime socket"
+    );
+
+    let access = access_binding(&create_request);
+    let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
+    let open_page = loop {
+        let page = provider.request(json!({
+            "op": "runs_events",
+            "run_id": &expected_run_id,
+            "runtime_binding": &access,
+            "after_sequence": 0
+        }));
+        assert_eq!(page["status"], "ok", "unexpected events response: {page}");
+        let saw_dispatched = page["data"]["events"]
+            .as_array()
+            .expect("runs_events returns an event array")
+            .iter()
+            .any(|event| event["kind"] == "dispatched");
+        if saw_dispatched {
+            break page;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the open run never showed a dispatched event: {page}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        open_page["data"]["has_more"],
+        json!(false),
+        "the open run's events page must not split: {open_page}"
+    );
+    let open_events = open_page["data"]["events"]
+        .as_array()
+        .expect("runs_events returns an event array");
+    assert!(
+        open_events
+            .iter()
+            .any(|event| event["kind"] == "dispatched"),
+        "the open page must contain the dispatched event: {open_page}"
+    );
+    for (position, event) in open_events.iter().enumerate() {
+        assert_eq!(
+            event["sequence"].as_u64(),
+            Some(position as u64 + 1),
+            "open-run event sequences start at 1 and rise by one: {open_page}"
+        );
+    }
+    let durable_cursor = open_page["data"]["next_cursor"]
+        .as_u64()
+        .expect("the open page's next_cursor is the durable sequence");
+
+    let later = provider.request(json!({
+        "op": "runs_events",
+        "run_id": &expected_run_id,
+        "runtime_binding": &access,
+        "after_sequence": durable_cursor + 1
+    }));
+    assert_eq!(
+        later["status"], "ok",
+        "unexpected later events response: {later}"
+    );
+    assert_eq!(
+        later["data"]["events"],
+        json!([]),
+        "a later page of an open run sends nothing: {later}"
+    );
+    assert_eq!(
+        later["data"]["has_more"],
+        json!(false),
+        "a later page of an open run has no further page: {later}"
+    );
+    assert_eq!(
+        later["data"]["next_cursor"],
+        json!(durable_cursor),
+        "an open run's later page keeps the durable cursor: {later}"
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "a later page of an open run must not open another connection"
+    );
+
+    stand_in.release_answer();
+    let settled = wait_for_run_terminal(&mut provider, &expected_run_id, &access);
+    assert_eq!(
+        settled["data"]["status"], "completed",
+        "the hosted run must complete: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["output"],
+        json!({"schema": RUN_OUTPUT_TEXT_SCHEMA, "text": "ready"}),
+        "the completed run's output text is ready: {settled}"
+    );
+
+    let continuation = provider.request(json!({
+        "op": "runs_events",
+        "run_id": &expected_run_id,
+        "runtime_binding": &access,
+        "after_sequence": durable_cursor
+    }));
+    assert_eq!(
+        continuation["status"], "ok",
+        "unexpected continuation response: {continuation}"
+    );
+    let continued = continuation["data"]["events"]
+        .as_array()
+        .expect("runs_events returns an event array");
+    assert!(
+        !continued.is_empty(),
+        "the continuation page must carry the events after the durable cursor: {continuation}"
+    );
+    for (position, event) in continued.iter().enumerate() {
+        assert_eq!(
+            event["sequence"].as_u64(),
+            Some(durable_cursor + 1 + position as u64),
+            "continuation sequences rise by one from the next integer: {continuation}"
+        );
+    }
+    assert_eq!(
+        continued
+            .last()
+            .expect("the continuation page has a last event")["terminal"],
+        json!(true),
+        "the continuation page ends on the terminal event: {continuation}"
+    );
+    assert_eq!(
+        continued
+            .iter()
+            .filter(|event| event["terminal"] == true)
+            .count(),
+        1,
+        "the continuation page's last event is the only terminal: {continuation}"
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "reconnection must not dispatch the model request again"
+    );
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "the journey must open exactly one connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "the journey must send exactly one request"
+    );
+    let recorded = &requests[0];
+    assert_eq!(recorded.request_line, "POST /v1/hosted-effect HTTP/1.1");
+    assert_eq!(
+        recorded.value("authorization"),
+        None,
+        "a hosted run must carry no bearer key"
+    );
+    let body = String::from_utf8_lossy(&recorded.body);
+    assert!(
+        body.contains(prompt),
+        "the hosted effect body must carry the prompt: {body}"
+    );
+
+    provider.shutdown();
 }
