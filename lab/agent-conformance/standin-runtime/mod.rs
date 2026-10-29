@@ -4395,28 +4395,42 @@ mod tests {
             vec![pending_request("request-2", "component-2")],
             "the stand-in keeps the sibling request pending after the other start returns"
         );
-        // #1090 gives the sibling resident a posted `request-2` and a
-        // finished start. `request-2` is already pending from the request
-        // route calls above. This test owns no request path, so it seeds only
-        // the unused grant and checks what any reader can see at this
-        // instant: the sibling request stays pending and its grant leaves.
-        standin.seed_grant(
-            "request-2",
-            "component-2",
-            "res",
-            "read",
-            "once",
-            1,
-            Life::Live,
-            false,
+        // The sibling resident's request-2 is pending from the request route
+        // above and the shell grants it through the grant route, which stores
+        // no token, so no route can produce a live grant here. This test
+        // checks what any reader can see after the sibling's start finishes,
+        // and that its grant leaves at its expiry instant.
+        let sibling_granted = standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({ "request_id": "request-2", "duration": "once" }),
+            )
+            .expect("the stand-in grants the sibling request");
+        assert_eq!(
+            sibling_granted,
+            json!({ "success": true }),
+            "the stand-in answers success true for the sibling grant and stores no token"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-2"),
+            vec![granted_request(
+                "request-2",
+                "component-2",
+                "Shell auto-grant"
+            )],
+            "the stand-in stores the sibling request granted by the grant route"
         );
         standin
             .finish_start("component-2")
             .expect("the sibling start finishes");
         assert_eq!(
             request_entries(&standin, "component-2"),
-            vec![pending_request("request-2", "component-2")],
-            "the stand-in keeps the started sibling's request-2 pending"
+            vec![granted_request(
+                "request-2",
+                "component-2",
+                "Shell auto-grant"
+            )],
+            "the stand-in keeps the started sibling's granted request-2"
         );
         assert_capsule(
             &standin,
@@ -4428,27 +4442,27 @@ mod tests {
         assert_eq!(
             request_ids(&shell_pair(&standin).0),
             BTreeSet::from(["request-1".to_owned(), "request-2".to_owned()]),
-            "the stand-in lists the seeded request-2 beside this test's grant"
+            "the stand-in lists the granted request-2 beside this test's grant"
         );
         assert_eq!(
             grant_record(&standin, "request-2"),
             (Life::Live, false),
-            "the stand-in keeps the seeded request-2 live: only its use spends it"
+            "the stand-in keeps the granted request-2 live: only its use spends it"
         );
-        // One second before the seeded grant's expiry the live view still
+        // One second before the granted request's expiry the live view still
         // lists it, and at the expiry instant it leaves through the one filter.
-        let at_expiry = 1 + GRANT_LIFETIME_SECS;
+        let at_expiry = 4 + GRANT_LIFETIME_SECS;
         standin.set_instant(at_expiry - 1);
         assert_eq!(
             request_ids(&shell_pair(&standin).0),
             BTreeSet::from(["request-1".to_owned(), "request-2".to_owned()]),
-            "the stand-in keeps the seeded grant live one second before its expiry"
+            "the stand-in keeps the granted request live one second before its expiry"
         );
         standin.set_instant(at_expiry);
         assert_eq!(
             request_ids(&shell_pair(&standin).0),
             BTreeSet::from(["request-1".to_owned()]),
-            "the stand-in drops the seeded grant at its expiry instant"
+            "the stand-in drops the granted request at its expiry instant"
         );
     }
 
