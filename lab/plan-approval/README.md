@@ -17,7 +17,10 @@ And the non-negotiable boundaries:
 
 `preview` is unchanged: it returns the plan bytes and
 `agent_conformance::identity::sha256` of those bytes, and it calls no `StandIn`
-method. A proposal carries no authority.
+method. A proposal carries no authority. A hand-run plant that makes `preview`
+call `authorise` on the seeded `req-preview` grant is caught: `authorise` spends
+the seeded once grant, stores `Exhausted`, the live list drops it, and
+`preview_makes_no_effect` fails.
 
 `submit_shown_plan` recomputes the hash, refuses a hash that does not name the
 bytes, refuses a step the bytes do not contain, and then only calls

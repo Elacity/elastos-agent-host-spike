@@ -4,6 +4,7 @@
 
 - 001: `preview` returns the plan bytes and `agent_conformance::identity::sha256` of those bytes and calls no `StandIn` method; the exact-name test reads the stand-in only through `get_capability_list` and `get_capsules`; two hand-run plants caught and restored; 1 test, 2 plants.
 - 002: `submit_shown_plan` calls only `seed_request` with the preview hash as `reason`, `grant_shown_plan` calls only `post_capability_grant` for duration `once`, and `perform_shown_plan` ignores `approved` and calls `authorise` only when the recomputed hash matches that `reason`; `preview` unchanged; `approval_binds_to_the_previewed_plan_hash` added; eight hand-run plants caught and restored; 2 tests, 8 plants.
+- 003: a preview that spends the seeded once grant `req-preview` is caught; the plant calls the existing `authorise` from `preview`, stores `Exhausted`, the live list drops the grant, and `preview_makes_no_effect` fails at `src/lib.rs:186:5`; restored, 1 test passes; no function, no dependency, no `falsifiers.json`.
 
 ## 001
 
@@ -146,3 +147,38 @@ After all restores, `git diff -- lab/plan-approval/src/lib.rs` shows no plant.
 restored proof command took 0.38 s real; `preview_makes_no_effect` passed in the
 same run. This lane has no `falsifiers.json`; the runner's `plan-approval`
 command is a crate-table row, not a recovery target (BACKLOG item 3).
+
+## 003
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md) Request flow step 5:
+
+> A proposal carries no authority.
+
+The plant calls the existing `authorise` from `preview`; it adds no function, no
+call counter and no second meter. `authorise` is `&mut self`, and for duration
+`once` it stores `Life::Exhausted`; the live list already omits that life.
+
+Plant command:
+
+```bash
+RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib preview_makes_no_effect -- --exact
+```
+
+### F-preview-spends-grant
+
+- old bytes, 17: `let _ = stand_in;`
+- new bytes, 124: `let _ = stand_in.authorise(agent_conformance::standin_runtime::Caller::Client { session_id: "component-1" }, "req-preview");`
+- planted crate compiled; `preview_makes_no_effect` failed at `src/lib.rs:186:5`
+  on the unchanged-grants assertion after the seeded grant:
+  `assertion left == right failed: the preview returned the plan bytes, the hash is sha256 of those bytes, and the live grants and the capsule list are unchanged after the seeded grant`;
+  left `{"capabilities":[],"scope":"all_sessions_live"}`, right held the seeded
+  `req-preview` grant as duration `once`. The first preview call after the seed
+  spends that grant, storing `Exhausted`; the live list drops it, and the second
+  preview call finds no live grant.
+- restored, the test passes.
+
+After the restore, `git diff -- lab/plan-approval/src/lib.rs` shows no plant.
+`cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check` passed. The
+restored proof command took 0.94 s real and `preview_makes_no_effect` passed.
+No `falsifiers.json` id was added; this lane's plants stay hand-run. A passing
+run gives the Runtime no A15 credit.
