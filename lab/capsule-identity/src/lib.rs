@@ -496,6 +496,19 @@ pub enum Refusal {
     /// larger file is named from its bytes, by [`encode_entries`] or
     /// [`lab_cid`]. `length` is the listed size.
     FileOverChunkLimit { path: String, length: usize },
+    /// A chunked file ([`encode_chunked_files`]) holds no leaf. An empty
+    /// file is one empty raw leaf, so it holds one pair of 0 bytes, and a
+    /// file with none names nothing.
+    ChunkedFileWithoutLeaves { path: String },
+    /// A chunked file ([`encode_chunked_files`]) holds a chunk the split
+    /// cannot give. Every chunk but the last is `CHUNK_SIZE` bytes, the last
+    /// is 1 to `CHUNK_SIZE` bytes, and only a one-chunk file may be 0 bytes.
+    /// `index` is the chunk's position and `length` its size.
+    BadChunkSize {
+        path: String,
+        index: usize,
+        length: u64,
+    },
     /// A HAMT shard would need a ninth digest byte. The murmur3 digest is
     /// eight bytes, so no deeper level can name these links. `.` is the
     /// bundle root. The builder refuses it instead of looping; the inline
@@ -602,6 +615,18 @@ impl fmt::Display for Refusal {
             Refusal::FileOverChunkLimit { path, length } => write!(
                 f,
                 "{path} is {length} bytes, over the {CHUNK_SIZE}-byte limit of one raw leaf: a listed file's one SHA-256 names a single raw leaf, so a larger file is named from its bytes (encode_entries or lab_cid)"
+            ),
+            Refusal::ChunkedFileWithoutLeaves { path } => write!(
+                f,
+                "{path} is a chunked file with no leaves: an empty file is one empty raw leaf, so it holds one chunk of 0 bytes"
+            ),
+            Refusal::BadChunkSize {
+                path,
+                index,
+                length,
+            } => write!(
+                f,
+                "{path} chunk {index} is {length} bytes: each chunk but the last is {CHUNK_SIZE} bytes, the last is 1 to {CHUNK_SIZE}, and only a one-chunk file may be 0"
             ),
             Refusal::HamtTooDeep { path } => write!(
                 f,
@@ -910,6 +935,18 @@ pub fn encode_entries(entries: &[BundleEntry]) -> Result<LabCid, Refusal> {
     encode_tree(files)
 }
 
+/// One file of a closure whose caller has already split its bytes into the
+/// raw leaves of a balanced file tree: its bundle path and each leaf's
+/// SHA-256 and length, in order, every chunk but the last [`CHUNK_SIZE`]
+/// bytes. An empty file is one 0-byte chunk, because it is one empty raw
+/// leaf. The caller's walk owns that each digest and length are those of the
+/// file's bytes; the encoder reads no file and hashes nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChunkedFile {
+    pub path: String,
+    pub chunks: Vec<([u8; 32], u64)>,
+}
+
 /// The lab CID of a closure listing, given in any order. It reads no file
 /// and checks no manifest. The lab CID names the bytes only if each file's
 /// `sha256` and `size` are those of its bytes; the caller's walk owns that,
@@ -940,7 +977,24 @@ pub fn encode_listed_files(files: &[ListedFile]) -> Result<LabCid, Refusal> {
     encode_tree(leaves)
 }
 
-/// The one tree builder both public calls feed: it puts each file's node at
+/// The lab CID of a closure whose files its caller has already split into
+/// leaves, given in any order: each [`ChunkedFile`]'s leaves become the one
+/// file node for its path, then `encode_tree`, the one tree builder, which
+/// [`encode_entries`] and [`encode_listed_files`] share. It reads no file
+/// and hashes nothing: the lab CID names the bytes only if each pair is its
+/// leaf's SHA-256 and length, and the caller's walk owns that. A file with
+/// no leaves, or a chunk the chunker cannot give, is refused with its own
+/// reason.
+pub fn encode_chunked_files(files: &[ChunkedFile]) -> Result<LabCid, Refusal> {
+    let mut leaves = Vec::new();
+    for file in files {
+        let (cid, tsize) = chunked_file_node(file)?;
+        leaves.push((file.path.as_str(), Child::File { cid, tsize }));
+    }
+    encode_tree(leaves)
+}
+
+/// The one tree builder every public call feeds: it puts each file's node at
 /// its bundle path with `Directory::insert`, then encodes the root with
 /// `encode_directory`. The root block's SHA-256 is the lab CID.
 fn encode_tree(files: Vec<(&str, Child)>) -> Result<LabCid, Refusal> {
@@ -965,6 +1019,43 @@ fn file_node(entry: &BundleEntry) -> Child {
     Child::File { cid, tsize }
 }
 
+/// The node a directory links for `file`: the balanced file root over its
+/// leaves, or the one raw leaf when it holds one chunk of at most
+/// [`CHUNK_SIZE`] bytes (an empty file is one 0-byte chunk). A file with no
+/// leaves is refused, because an empty file is one empty raw leaf and no
+/// leaf names nothing; a chunk that is not a chunk of the split is refused
+/// too: every chunk but the last is [`CHUNK_SIZE`] bytes, the last is 1 to
+/// [`CHUNK_SIZE`] bytes, and only a one-chunk file may be 0 bytes.
+fn chunked_file_node(file: &ChunkedFile) -> Result<(Vec<u8>, u64), Refusal> {
+    if file.chunks.is_empty() {
+        return Err(Refusal::ChunkedFileWithoutLeaves {
+            path: file.path.clone(),
+        });
+    }
+    let last = file.chunks.len() - 1;
+    for (index, (_, length)) in file.chunks.iter().enumerate() {
+        let fits = if last == 0 {
+            *length <= CHUNK_SIZE as u64
+        } else if index == last {
+            (1..=CHUNK_SIZE as u64).contains(length)
+        } else {
+            *length == CHUNK_SIZE as u64
+        };
+        if !fits {
+            return Err(Refusal::BadChunkSize {
+                path: file.path.clone(),
+                index,
+                length: *length,
+            });
+        }
+    }
+    Ok(file_from_digests(
+        file.chunks
+            .iter()
+            .map(|(digest, length)| (*digest, *length)),
+    ))
+}
+
 /// A raw leaf's CID bytes and Tsize: CIDv1, raw codec and `sha256`, the
 /// SHA-256 of its block, and its length `size`. Every leaf is made here: a
 /// listed file's, a one-leaf file's and each leaf under a file root.
@@ -985,21 +1076,32 @@ struct FileTreeNode {
 
 /// The CID bytes and Tsize of the balanced file root of `content`, the bytes
 /// of a file that is over one leaf. The bytes are split into
-/// [`CHUNK_SIZE`]-byte raw leaves, the last one shorter. Each level groups its
-/// nodes left to right into groups of up to [`MAX_FILE_LINKS`], each full
-/// before the next starts, and wraps each group in one dag-pb file node, so
-/// only a level's last group can be short and a group of one child is still a
-/// node with one link. The depth is the smallest `d` with `MAX_FILE_LINKS^d`
-/// at least the leaf count; a file of 175 leaves is a root of two depth-1
-/// nodes, 174 leaves then one leaf. The root's Tsize is its block's length
-/// plus its children's. A file of one leaf is never here: `file_node` names
-/// it as that leaf.
+/// [`CHUNK_SIZE`]-byte raw leaves, the last one shorter, by
+/// [`file_from_digests`], the one file-tree builder. A file of one leaf is
+/// never here: `file_node` names it as that leaf.
 fn file_root(content: &[u8]) -> (Vec<u8>, u64) {
-    let mut level: Vec<FileTreeNode> = content
-        .chunks(CHUNK_SIZE)
-        .map(|chunk| {
-            let filesize = chunk.len() as u64;
-            let (cid, tsize) = raw_leaf(&naming_hash(chunk), filesize);
+    file_from_digests(
+        content
+            .chunks(CHUNK_SIZE)
+            .map(|chunk| (naming_hash(chunk), chunk.len() as u64)),
+    )
+}
+
+/// The CID bytes and Tsize of the balanced file root over `leaves`, the
+/// SHA-256 and length of each raw leaf, in order. Each pair becomes one raw
+/// leaf, then each level groups its nodes left to right into groups of up to
+/// [`MAX_FILE_LINKS`], each full before the next starts, and wraps each group
+/// in one dag-pb file node, so only a level's last group can be short and a
+/// group of one child is still a node with one link. The depth is the
+/// smallest `d` with `MAX_FILE_LINKS^d` at least the leaf count; a file of
+/// 175 leaves is a root of two depth-1 nodes, 174 leaves then one leaf. The
+/// root's Tsize is its block's length plus its children's. A file of one
+/// leaf is that leaf. A file with no leaves is never here: its callers
+/// refuse it.
+fn file_from_digests(leaves: impl Iterator<Item = ([u8; 32], u64)>) -> (Vec<u8>, u64) {
+    let mut level: Vec<FileTreeNode> = leaves
+        .map(|(digest, filesize)| {
+            let (cid, tsize) = raw_leaf(&digest, filesize);
             FileTreeNode {
                 cid,
                 tsize,

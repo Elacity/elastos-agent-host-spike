@@ -3,8 +3,11 @@
 //! with its own test.
 mod common;
 
-use capsule_identity::{encode_entries, lab_cid, BundleEntry, Refusal};
+use capsule_identity::{
+    encode_chunked_files, encode_entries, lab_cid, BundleEntry, ChunkedFile, Refusal,
+};
 use common::*;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 fn entry(path: &str, content: &[u8]) -> BundleEntry {
@@ -192,6 +195,26 @@ fn file_over_one_leaf_has_the_pinned_cid() {
     }
 }
 
+/// The leaves of task 072's file, in order: leaf `i`'s digest is the SHA-256
+/// of `i` as 8 little-endian bytes; the 30276 full leaves are 262144 bytes
+/// and the last is 1 byte.
+fn three_level_leaves() -> Vec<([u8; 32], u64)> {
+    (0..30_277u64)
+        .map(|index| {
+            let size = if index < 30_276 { 262_144 } else { 1 };
+            (Sha256::digest(index.to_le_bytes()).into(), size)
+        })
+        .collect()
+}
+
+/// One [`ChunkedFile`] at `sample.example` over `chunks`.
+fn chunked(chunks: Vec<([u8; 32], u64)>) -> ChunkedFile {
+    ChunkedFile {
+        path: "sample.example".to_owned(),
+        chunks,
+    }
+}
+
 #[test]
 fn file_past_174_leaves_keeps_a_second_tree_level() {
     // One leaf past 174: 45613057 bytes (174 leaves of 262144 bytes and one
@@ -218,7 +241,147 @@ fn file_past_174_leaves_keeps_a_second_tree_level() {
     assert_ne!(one_level.to_string(), pin, "174 leaves has another CID");
 }
 
-/// The bundle's links estimate: each direct child's name bytes plus 36.
+#[test]
+fn file_past_174_squared_leaves_keeps_a_third_tree_level() {
+    // 30277 leaves: 30276 of 262144 bytes then one of 1 byte, 7936671745
+    // bytes. 174^2 is 30276, so a third level is needed: 175 depth-1 nodes
+    // (174 over 174 leaves, one over the single leaf), then 2 (one over the
+    // 174 nodes, one over the single node), then the root. The pin was first
+    // printed by README's Python rule through THREE_LEVEL_FILE_DRIVER; Kubo is
+    // not run, because the file is 7936671745 bytes and is never written.
+    let leaves = three_level_leaves();
+    assert_eq!(leaves.len(), 30_277, "the file's leaf count");
+    assert_eq!(
+        leaves.iter().map(|(_, size)| *size).sum::<u64>(),
+        7_936_671_745,
+        "the file's size"
+    );
+    assert_eq!(
+        leaves.last().map(|(_, size)| *size),
+        Some(1),
+        "the last leaf"
+    );
+    // The driver holds no part of the rule: no grouping limit, varint, CID
+    // prefix or base32 alphabet of its own.
+    for rule in [
+        "174",
+        "varint",
+        "0x55",
+        "0x70",
+        "B32",
+        "abcdefghijklmnopqrstuvwxyz234567",
+        "base64",
+        "def ",
+        "lambda",
+    ] {
+        assert!(
+            !THREE_LEVEL_FILE_DRIVER.contains(rule),
+            "the driver holds {rule:?}: {THREE_LEVEL_FILE_DRIVER}"
+        );
+    }
+    assert_eq!(THREE_LEVEL_FILE_DRIVER.matches("directory(").count(), 1);
+    assert_eq!(THREE_LEVEL_FILE_DRIVER.matches("printed(").count(), 1);
+
+    let pin = THREE_LEVEL_FILE_LAB_CID;
+    let python = readme_python_three_level_file().unwrap_or_else(|reason| panic!("{reason}"));
+    assert_eq!(python, pin, "README's Python rule against the pin");
+    let named = encode_chunked_files(&[chunked(leaves.clone())])
+        .unwrap_or_else(|refusal| panic!("30277 leaves: {refusal}"));
+    assert_eq!(
+        named.to_string(),
+        pin,
+        "encode_chunked_files against the pin"
+    );
+    assert!(pin.starts_with("bafybei"), "{pin}");
+    assert_eq!(pin.len(), 59, "{pin}");
+
+    // 30276 full leaves still finish in two passes, with another CID. That
+    // CID is not pinned.
+    let mut full = leaves;
+    full.pop();
+    assert_eq!(full.len(), 30_276, "the two-pass file's leaf count");
+    let two_levels = encode_chunked_files(&[chunked(full)])
+        .unwrap_or_else(|refusal| panic!("30276 leaves: {refusal}"));
+    assert_ne!(two_levels.to_string(), pin, "30276 leaves has another CID");
+}
+
+#[test]
+fn chunked_file_without_leaves_is_refused() {
+    // An empty file is one empty raw leaf, so no leaf names nothing.
+    let refusal = encode_chunked_files(&[chunked(Vec::new())]).expect_err("no leaves");
+    assert_eq!(
+        refusal,
+        Refusal::ChunkedFileWithoutLeaves {
+            path: "sample.example".to_owned()
+        }
+    );
+    assert_eq!(
+        refusal.to_string(),
+        "sample.example is a chunked file with no leaves: an empty file is one empty raw leaf, so it holds one chunk of 0 bytes"
+    );
+}
+
+#[test]
+fn chunked_file_with_a_bad_chunk_size_is_refused() {
+    // Every chunk but the last is 262144 bytes, the last is 1 to 262144
+    // bytes, and only a one-chunk file may be 0 bytes. Each bad chunk names
+    // its own position and size.
+    let digest: [u8; 32] = Sha256::digest(b"chunk").into();
+    // Valid splits, so the refusals below are the size rule alone.
+    for chunks in [
+        vec![(digest, 0)],
+        vec![(digest, 1)],
+        vec![(digest, 262_144)],
+        vec![(digest, 262_144), (digest, 1)],
+        vec![(digest, 262_144), (digest, 262_144), (digest, 3)],
+    ] {
+        encode_chunked_files(&[chunked(chunks)]).expect("a chunk the split can give");
+    }
+    let mut three = vec![(digest, 262_144u64), (digest, 262_144)];
+    three.push((digest, 0));
+    for (chunks, index, length) in [
+        (vec![(digest, 262_145)], 0, 262_145),
+        (vec![(digest, 1), (digest, 262_144)], 0, 1),
+        (three, 2, 0),
+        (vec![(digest, 262_144), (digest, 262_145)], 1, 262_145),
+    ] {
+        let refusal = encode_chunked_files(&[chunked(chunks)]).expect_err("a bad chunk");
+        assert_eq!(
+            refusal,
+            Refusal::BadChunkSize {
+                path: "sample.example".to_owned(),
+                index,
+                length,
+            }
+        );
+    }
+    assert_eq!(
+        Refusal::BadChunkSize {
+            path: "sample.example".to_owned(),
+            index: 1,
+            length: 0,
+        }
+        .to_string(),
+        "sample.example chunk 1 is 0 bytes: each chunk but the last is 262144 bytes, the last is 1 to 262144, and only a one-chunk file may be 0"
+    );
+}
+
+#[test]
+fn one_chunk_chunked_file_names_the_bytes_call() {
+    // The digest-input path is the same file rule: one empty leaf and one
+    // full chunk name what `encode_entries` names for the same bytes.
+    let empty: &[u8] = b"";
+    let full = vec![0; 262_144];
+    for content in [empty, &full[..]] {
+        let digest: [u8; 32] = Sha256::digest(content).into();
+        let by_digests = encode_chunked_files(&[chunked(vec![(digest, content.len() as u64)])])
+            .unwrap_or_else(|refusal| panic!("one leaf: {refusal}"));
+        let by_bytes = encode_entries(&[entry("sample.example", content)])
+            .unwrap_or_else(|refusal| panic!("one leaf: {refusal}"));
+        assert_eq!(by_digests, by_bytes, "{} bytes", content.len());
+    }
+}
+
 fn estimate(names: impl IntoIterator<Item = usize>) -> usize {
     names.into_iter().map(|length| length + 36).sum()
 }

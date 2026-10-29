@@ -83,7 +83,14 @@ To recompute a lab CID by hand:
    one leaf stays that raw leaf, never a file node.
    `file_past_174_leaves_keeps_a_second_tree_level` pins the 175-leaf bundle
    (`SECOND_LEVEL_FILE_LAB_CID`) and catches F-CI76a (a one-child group
-   linked directly) and F-CI76b (a child's Tsize as its blocksize).
+   linked directly) and F-CI76b (a child's Tsize as its blocksize). A file of
+   30277 leaves (30276 of 262144 bytes and one of 1 byte, 7936671745 bytes)
+   is the smallest at depth 3: 175 depth-1 nodes (174 over 174 leaves, and the
+   node of one link over the single leaf), then 2 depth-2 nodes (one over
+   those 174 nodes, and one over that node of one link), then the root's two
+   children. `file_past_174_squared_leaves_keeps_a_third_tree_level` pins that
+   file (`THREE_LEVEL_FILE_LAB_CID`) and catches F-CI72a (the level loop stops
+   after two passes).
 4. Each path part but the last is a **directory**: `browser/app.js` is a
    directory `browser` with a link named `app.js`. The root is the directory
    of the bundle's entries. No empty directory is ever made.
@@ -159,19 +166,16 @@ def varint(n):
 def field(number, data):  # protobuf, wire type 2
     return bytes([number << 3 | 2]) + varint(len(data)) + data
 
-def cid(codec, block):
-    return bytes([0x01, codec, 0x12, 0x20]) + hashlib.sha256(block).digest()
+def cid(codec, block):  # a CIDv1 sha2-256 of a block
+    return cid_for(codec, hashlib.sha256(block).digest())
+
+def cid_for(codec, digest):  # the same CID from the block's digest
+    return bytes([0x01, codec, 0x12, 0x20]) + digest
 
 def total(block, tsizes):  # the Tsize of a node's block
     return len(block) + sum(tsizes)
 
-def file_node(data):  # a file's bytes; returns (CID bytes, Tsize)
-    if len(data) <= 262144:
-        return cid(0x55, data), len(data)
-    level = []
-    for at in range(0, len(data), 262144):
-        chunk = data[at:at + 262144]
-        level.append((cid(0x55, chunk), len(chunk), len(chunk)))
+def file_tree(level):  # (CID, Tsize, filesize) nodes of one level; the root
     while len(level) > 1:
         groups = [level[at:at + 174] for at in range(0, len(level), 174)]
         level = []
@@ -186,6 +190,18 @@ def file_node(data):  # a file's bytes; returns (CID bytes, Tsize)
             block = links + field(1, unixfs)
             level.append((cid(0x70, block), total(block, [child[1] for child in group]), filesize))
     return level[0][0], level[0][1]
+
+def file_from_digests(leaves):  # (digest, size) pairs; returns (CID bytes, Tsize)
+    return file_tree([(cid_for(0x55, digest), size, size) for digest, size in leaves])
+
+def file_node(data):  # a file's bytes; returns (CID bytes, Tsize)
+    if len(data) <= 262144:
+        return cid(0x55, data), len(data)
+    leaves = []
+    for at in range(0, len(data), 262144):
+        chunk = data[at:at + 262144]
+        leaves.append((hashlib.sha256(chunk).digest(), len(chunk)))
+    return file_from_digests(leaves)
 
 def murmur(data):  # murmur3 x64-128, seed 0; its first 64 bits, big-endian
     mask = (1 << 64) - 1
@@ -253,6 +269,8 @@ def directory(tree):  # {name: bytes or a dict}; returns (CID bytes, Tsize)
         child = tree[name]
         if isinstance(child, dict):
             child_cid, tsize = directory(child)
+        elif isinstance(child, list):
+            child_cid, tsize = file_from_digests(child)
         else:
             child_cid, tsize = file_node(child)
         links.append((name, child_cid, tsize))
@@ -264,6 +282,10 @@ def directory(tree):  # {name: bytes or a dict}; returns (CID bytes, Tsize)
     block = written + field(1, b"\x08\x01")
     return cid(0x70, block), total(block, [tsize for _, _, tsize in links])
 
+def printed(cid_bytes):  # the root's CID bytes as the 59-character text
+    bits = "".join(f"{byte:08b}" for byte in cid_bytes) + "00"
+    return "b" + "".join(B32[int(bits[i:i + 5], 2)] for i in range(0, 290, 5))
+
 def lab_cid(files):  # {bundle path: bytes}
     root = {}
     for path, data in files.items():
@@ -272,8 +294,7 @@ def lab_cid(files):  # {bundle path: bytes}
         for folder in folders:
             node = node.setdefault(folder, {})
         node[name] = data
-    bits = "".join(f"{byte:08b}" for byte in directory(root)[0]) + "00"
-    return "b" + "".join(B32[int(bits[i:i + 5], 2)] for i in range(0, 290, 5))
+    return printed(directory(root)[0])
 ```
 
 In Rust, the walk (`checked_bundle`, which `lab_cid` runs too) reads a bundle,
@@ -315,7 +336,8 @@ rules and not from the Rust code, in
 | Directory codec `0x70`, dag-pb | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18r (`0x71`) |
 | Chunk size 262144: a file of exactly that size is one block | `single_block_at_the_chunk_limit_has_the_pinned_cid` | F-CI18d (262143) |
 | A file over one leaf is a balanced root of raw leaves: empty link names, type 2, filesize, blocksizes, and a Tsize of its block and its leaves | `file_over_one_leaf_has_the_pinned_cid` | F-CI48a (no name field), F-CI48b (no blocksizes), F-CI48c (no filesize), F-CI48d (Tsize without the root block) |
-| The file tree's depth is the smallest `d` with `174^d` at least the leaf count: each level groups up to 174 children, left to right, each group full before the next starts, one file node per group, and a group of one child is a one-link node | `file_past_174_leaves_keeps_a_second_tree_level` | F-CI18e (the level loop runs only once), F-CI48e (the limit is 175), F-CI76a (a one-child group linked directly), F-CI76b (a child's Tsize as its blocksize) |
+| The file tree's depth is the smallest `d` with `174^d` at least the leaf count: each level groups up to 174 children, left to right, each group full before the next starts, one file node per group, and a group of one child is a one-link node | `file_past_174_leaves_keeps_a_second_tree_level`, `file_past_174_squared_leaves_keeps_a_third_tree_level` | F-CI18e (the level loop runs only once), F-CI48e (the limit is 175), F-CI76a (a one-child group linked directly), F-CI76b (a child's Tsize as its blocksize), F-CI72a (the level loop stops after two passes) |
+| A file of 30277 leaves needs a third tree level: 175 depth-1 nodes, then 2, then the root's two children; 30276 full leaves still finish in two passes | `file_past_174_squared_leaves_keeps_a_third_tree_level` | F-CI72a (the level loop stops after two passes) |
 | The listing call names a file of at most one leaf; a listed file over one chunk is refused and named from its bytes instead | `listed_file_over_the_chunk_limit_is_refused`, `listed_file_over_one_leaf_names_the_bytes_call` | F-CI47c (`encode_listed_files` has no size refusal) |
 | Links sorted by name bytes | `lab_cid_matches_the_pinned_value_for_each_fixture`, `lab_cid_does_not_depend_on_listing_order` | F-CI18f (reverse), F-CI1a (no sort) |
 | Directory type 1 | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18g (5) |
@@ -362,6 +384,13 @@ root of two depth-1 file nodes) is
 `bafybeifdbtqkw5q2ayypyajkbxd4wrctavgxpagjbugk5nddz53igm6xta`, first printed
 by README's Python rule before any Rust code named it. The 174-leaf file of
 45613056 zero bytes still encodes, with another CID, and is not pinned.
+Task 072 adds one more, in memory and never written: one file `sample.example`
+whose 30277 leaves are leaf `i`'s SHA-256 of `i` as 8 little-endian bytes,
+30276 of 262144 bytes and one of 1 byte (7936671745 bytes), is
+`bafybeig3p6lebveuwcqolitt4bzbmr2mbidjzw3tqzmq6vrc5otgrp5bea`, first printed
+by README's Python rule before any Rust code named it. The 30276-leaf file of
+262144-byte chunks still finishes in two passes, with another CID, and is not
+pinned.
 Task 077 adds three more, built in a temp dir and never committed; the one
 helper measures the name it lengthens, so no length is hardcoded:
 `content-sample` plus empty files whose links estimate is exactly 262144 (one
@@ -425,7 +454,12 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    (task 076), the three HAMT-threshold bundles (task 077) and the two
    shared-prefix bundles (task 071), also built in memory. `wc001-core` has
    no pin, because its `capsule.wasm` is built on each machine, so it is not
-   checked here.
+   checked here. Task 072's third-level file is not one of the 20 either: it
+   is 7936671745 bytes and is never written, so
+   `file_past_174_squared_leaves_keeps_a_third_tree_level` runs the second
+   driver, `THREE_LEVEL_FILE_DRIVER`, which builds its 30277 leaves and calls
+   the block's `directory` and `printed`; that test holds the driver to no
+   grouping, varint, CID prefix or base32 of its own.
 
 | Rule | Named test | Falsifier |
 | --- | --- | --- |
@@ -1994,7 +2028,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 297 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 298 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -2049,7 +2083,8 @@ F-CI77a to F-CI77l (see [the encoding](#the-encoding); F-CI77k and F-CI77l:
 see [the cross-implementation check](#the-cross-implementation-check)), and
 task 071's F-CI71a and F-CI71b (see [the encoding](#the-encoding)) and
 F-CI71c to F-CI71e (see
-[the cross-implementation check](#the-cross-implementation-check)).
+[the cross-implementation check](#the-cross-implementation-check)), and task
+072's F-CI72a (see [the encoding](#the-encoding)).
 Task 077 moves F-CI18h to the links estimate, F-CI18m to the shared Tsize
 rule, F-CI19c to the missing-block empty result caught by the 20-bundle count,
 F-CI23b to the new module-doc sentence,
