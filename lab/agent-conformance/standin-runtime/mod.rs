@@ -7,8 +7,10 @@
 //! `post_capsules`, `get_capsules` and `delete_capsule` answer the capsule
 //! routes for an admitted resident guest. Admission names a bundle by its lab
 //! CID and checks the publisher's name signature; launch names it by that lab
-//! CID only (M1 check B1). Launch answers `starting` with the Bus session
-//! before `finish_start`. A stop stores `stopped` and revokes
+//! CID only (M1 check B1). Admission refuses a `content` manifest with status
+//! 403: a content capsule opens by CID as content and never runs as code, so
+//! no row, instance or grant exists for it. Launch answers `starting` with
+//! the Bus session before `finish_start`. A stop stores `stopped` and revokes
 //! that session's `Live` grants; a failed start stores `failed` and revokes
 //! them too. One map names the five statuses. One age compare keeps a
 //! `failed` or `stopped` entry. One check refuses a client on a shell-only
@@ -635,6 +637,9 @@ impl StandIn {
     /// explicit `accepted` publisher list. A walk refusal is status 400 with
     /// its own text; a signature or name refusal is status 403 with its own
     /// text. A refused admission stores nothing. `Ok(())` grants nothing.
+    /// A `content` manifest is content, never code: it opens by CID as
+    /// content and never runs as code, so it is refused here with status 403
+    /// and the one content reason, and nothing is stored.
     pub fn admit_resident(
         &mut self,
         bundle: &Path,
@@ -643,6 +648,7 @@ impl StandIn {
         start: Start,
     ) -> Result<(), (u16, String)> {
         let checked = check_bundle(bundle, sig, accepted)?;
+        refuse_content(&checked)?;
         let cid = checked.cid();
         if self.admitted.iter().any(|row| row.cid == cid) {
             return Err((403, format!("bundle already admitted: {cid}")));
@@ -1075,6 +1081,28 @@ fn check_bundle(
     let checked = checked_bundle(bundle).map_err(|refusal| (400, said(&refusal)))?;
     verify_checked_signature(&checked, sig, accepted).map_err(|refusal| (403, said(&refusal)))?;
     Ok(checked)
+}
+
+/// The role a manifest names for content. Content opens by CID as content
+/// and never runs as code (M2 exit (b)).
+const CONTENT_ROLE: &str = "content";
+
+/// The one content refusal. Admission calls it on the bundle it just checked,
+/// so the role and the bytes it names are one value: no second read of
+/// `capsule.json` and no path to re-resolve after the check. A bundle whose
+/// manifest role is [`CONTENT_ROLE`] is status 403 with a reason naming it.
+/// Any other role passes.
+fn refuse_content(checked: &CheckedBundle) -> Result<(), (u16, String)> {
+    if checked.manifest_role() == CONTENT_ROLE {
+        return Err((
+            403,
+            format!(
+                "bundle {cid} has role {CONTENT_ROLE}: content opens by CID and never runs as code",
+                cid = checked.cid()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// The launch body is an object whose only key is a string `cid`, parsed as
