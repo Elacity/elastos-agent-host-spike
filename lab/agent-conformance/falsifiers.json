@@ -1432,6 +1432,118 @@
       "tests": [
         "real_agent_host_journal_under_usersai_principal"
       ]
+    },
+    {
+      "id": "F-standin-a12-stub",
+      "title": "return success from the A12 census before the grant list is read",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/tests/effects.rs",
+          "old": "fn standin_a12_census(standin: &StandIn, home: &ThrowawayHome, port: u16) -> Result<(), String> {",
+          "new": "fn standin_a12_census(standin: &StandIn, home: &ThrowawayHome, port: u16) -> Result<(), String> {\n    return Ok(());"
+        }
+      ],
+      "tests": [
+        "standin_stopped_run_leaves_no_live_grant"
+      ]
+    },
+    {
+      "id": "F-standin-a12-skip-status",
+      "title": "skip the three live-status comparisons in the A12 census",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/tests/effects.rs",
+          "old": "        if status == \"starting\" || status == \"running\" || status == \"stopping\" {",
+          "new": "        if false && (status == \"starting\" || status == \"running\" || status == \"stopping\") {"
+        }
+      ],
+      "tests": [
+        "standin_stopped_run_leaves_no_live_grant"
+      ]
+    },
+    {
+      "id": "F-standin-a12-skip-cleanup",
+      "title": "replace the A12 physical census with a passing string",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/tests/effects.rs",
+          "old": "    match census::cleanup(home, port) {",
+          "new": "    match Ok::<String, String>(\"root checks PASS\".to_owned()) {"
+        }
+      ],
+      "tests": [
+        "standin_stopped_run_leaves_no_live_grant"
+      ]
+    },
+    {
+      "id": "F-standin-a12-skip-pending",
+      "title": "skip the pending comparison in the A12 census",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/tests/effects.rs",
+          "old": "            if request[\"status\"] == \"pending\" {",
+          "new": "            if false && request[\"status\"] == \"pending\" {"
+        }
+      ],
+      "tests": [
+        "standin_stopped_run_leaves_no_live_grant"
+      ]
+    },
+    {
+      "id": "F-standin-a12-denied-is-pending",
+      "title": "treat a denied request as pending in the A12 census",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/tests/effects.rs",
+          "old": "            if request[\"status\"] == \"pending\" {",
+          "new": "            if request[\"status\"] == \"pending\" || request[\"status\"] == \"denied\" {"
+        }
+      ],
+      "tests": [
+        "standin_stopped_run_leaves_no_live_grant"
+      ]
+    },
+    {
+      "id": "F-net-undeclared",
+      "title": "stage the declared manifest for the undeclared network refusal",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/tests/effects.rs",
+          "old": "agent_conformance::identity::stage_probe(&home, &bytes, manifest, label)",
+          "new": "agent_conformance::identity::stage_probe(&home, &bytes, MANIFEST, label)"
+        }
+      ],
+      "tests": [
+        "undeclared_network_manifest_is_refused"
+      ]
+    },
+    {
+      "id": "F-net-reason",
+      "title": "give the declared network request the read denial reason",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
+          "old": "                let reason = if field(request, \"resource\")? == \"elastos://net/stream\" {\n                    \"fixture denies unlisted elastos://net/stream\".to_owned()\n                } else {\n                    self.fixture.deny_reason.clone()\n                };",
+          "new": "                let reason = self.fixture.deny_reason.clone();"
+        }
+      ],
+      "tests": [
+        "ungranted_network_is_refused"
+      ]
     }
   ]
 }

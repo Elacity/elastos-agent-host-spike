@@ -860,13 +860,22 @@ fn wait_for_terminal(
 /// `operations_table_cells_stay_lab_claims` runs on that same section after
 /// the real-file missing-test check and returns ok. A data row starts with
 /// `| ` and its first non-empty cell is not `Operation` and not `---`. The
-/// Right cell passes when `entry_id` read that id from the fixture's `rights`
-/// array, or the cell is `no named test shows this`. The Linux cell is the
-/// seventh non-empty cell: `designed, not enforced`. An in-memory row whose
-/// Right cell is `network` panics, and the panic contains `network` and
-/// `right`. A `storage` cell whose id list is only `bound-executable` panics
-/// with `storage` and `right`. The enforced panic contains the backticked
-/// cell `` `enforced` ``.
+/// Right cell is the fourth non-empty cell and the Linux cell is the seventh:
+/// `designed, not enforced`.
+///
+/// `match_operation` is false for the in-memory rows: the Right cell passes
+/// when `entry_id` read that id from the fixture's `rights` array, or the cell
+/// is `none: needs no declared right`. The phrase `no named test shows this`
+/// does not pass. `match_operation` is true for the real section: the Right
+/// cell of `status`, `shutdown`, `offers_list` and `unsupported` is exactly
+/// `none: needs no declared right`, and the Right cell of `init`,
+/// `runs_create`, `runs_get`, `runs_events` and `runs_cancel` is exactly
+/// `storage`. An in-memory row whose Right cell is `network` panics, and the
+/// panic contains `network` and `right`. A `storage` cell whose id list is
+/// only `bound-executable` panics with `storage` and `right`. The enforced
+/// panic contains the backticked cell `` `enforced` ``. An in-memory row with
+/// the old phrase panics with that phrase and `right`. In the true mode, a
+/// wrong Right cell panics with the operation and the rejected cell.
 ///
 /// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
 /// test no longer finds that function. F-cc49a drops the `generated_`
@@ -952,11 +961,21 @@ fn operations_section_cites_existing_tests() {
     fn operations_table_cells_stay_lab_claims(
         section: &str,
         right_ids: &[&str],
+        match_operation: bool,
     ) -> Result<(), String> {
         const RIGHT_PLACE: usize = 4;
         const LINUX_PLACE: usize = 7;
         const UNSHOWN_RIGHT: &str = "no named test shows this";
+        const NO_DECLARED_RIGHT: &str = "none: needs no declared right";
         const LINUX_CLAIM: &str = "designed, not enforced";
+        const NO_RIGHT_OPERATIONS: [&str; 4] = ["status", "shutdown", "offers_list", "unsupported"];
+        const STORAGE_OPERATIONS: [&str; 5] = [
+            "init",
+            "runs_create",
+            "runs_get",
+            "runs_events",
+            "runs_cancel",
+        ];
         for line in section.lines() {
             if !line.starts_with("| ") {
                 continue;
@@ -973,7 +992,26 @@ fn operations_section_cites_existing_tests() {
                 continue;
             }
             let right = cells.get(RIGHT_PLACE - 1).copied().unwrap_or("");
-            if !right_ids.contains(&right) && right != UNSHOWN_RIGHT {
+            if match_operation {
+                if NO_RIGHT_OPERATIONS.contains(&first) {
+                    if right != NO_DECLARED_RIGHT {
+                        return Err(format!(
+                            "operation `{first}` needs right cell `{NO_DECLARED_RIGHT}`, not `{right}`"
+                        ));
+                    }
+                } else if STORAGE_OPERATIONS.contains(&first) {
+                    if right != "storage" {
+                        return Err(format!(
+                            "operation `{first}` needs right cell `storage`, not `{right}`"
+                        ));
+                    }
+                }
+            } else if right == UNSHOWN_RIGHT {
+                return Err(format!(
+                    "right cell `{UNSHOWN_RIGHT}` does not pass; a shown call says `{NO_DECLARED_RIGHT}`"
+                ));
+            }
+            if !right_ids.contains(&right) && right != NO_DECLARED_RIGHT {
                 return Err(format!("right cell `{right}` is not an approved right id"));
             }
             let linux = cells.get(LINUX_PLACE - 1).copied().unwrap_or("");
@@ -985,9 +1023,11 @@ fn operations_section_cites_existing_tests() {
         }
         Ok(())
     }
-    fn caught_lab_claim_panic(section: &str, right_ids: &[&str]) -> String {
+    fn caught_lab_claim_panic(section: &str, right_ids: &[&str], match_operation: bool) -> String {
         match catch_unwind(AssertUnwindSafe(|| {
-            if let Err(reason) = operations_table_cells_stay_lab_claims(section, right_ids) {
+            if let Err(reason) =
+                operations_table_cells_stay_lab_claims(section, right_ids, match_operation)
+            {
                 panic!("{reason}");
             }
         })) {
@@ -1037,13 +1077,13 @@ fn operations_section_cites_existing_tests() {
 
     let approved_ids = ["storage", "bound-executable"];
     let network_row = "| init | in | out | network | effect | rule | designed, not enforced |";
-    let network_panic = caught_lab_claim_panic(network_row, &approved_ids);
+    let network_panic = caught_lab_claim_panic(network_row, &approved_ids, false);
     assert!(
         network_panic.contains("network") && network_panic.contains("right"),
         "{network_panic}"
     );
     let storage_row = "| init | in | out | storage | effect | rule | designed, not enforced |";
-    let storage_panic = caught_lab_claim_panic(storage_row, &["bound-executable"]);
+    let storage_panic = caught_lab_claim_panic(storage_row, &["bound-executable"], false);
     assert!(
         storage_panic.contains("storage") && storage_panic.contains("right"),
         "{storage_panic}"
@@ -1051,19 +1091,91 @@ fn operations_section_cites_existing_tests() {
     let bound_row =
         "| init | in | out | bound-executable | effect | rule | designed, not enforced |";
     assert_eq!(
-        operations_table_cells_stay_lab_claims(bound_row, &approved_ids),
+        operations_table_cells_stay_lab_claims(bound_row, &approved_ids, false),
         Ok(())
+    );
+    let none_row =
+        "| status | in | out | none: needs no declared right | effect | rule | designed, not enforced |";
+    assert_eq!(
+        operations_table_cells_stay_lab_claims(none_row, &approved_ids, false),
+        Ok(())
+    );
+    let unshown_row =
+        "| status | in | out | no named test shows this | effect | rule | designed, not enforced |";
+    let unshown_panic = caught_lab_claim_panic(unshown_row, &approved_ids, false);
+    assert!(
+        unshown_panic.contains("no named test shows this") && unshown_panic.contains("right"),
+        "{unshown_panic}"
     );
     let startup_row =
         "| init | in | out | startup-root-directory | effect | rule | designed, not enforced |";
-    let startup_panic = caught_lab_claim_panic(startup_row, &approved_ids);
+    let startup_panic = caught_lab_claim_panic(startup_row, &approved_ids, false);
     assert!(
         startup_panic.contains("startup-root-directory") && startup_panic.contains("right"),
         "{startup_panic}"
     );
     let enforced_row = "| init | in | out | storage | effect | rule | enforced |";
-    let enforced_panic = caught_lab_claim_panic(enforced_row, &approved_ids);
+    let enforced_panic = caught_lab_claim_panic(enforced_row, &approved_ids, false);
     assert!(enforced_panic.contains("`enforced`"), "{enforced_panic}");
+
+    // In the real-section mode each operation has one right cell, so a row
+    // with the other cell, or with another approved id, must fail. Dropping
+    // any operation from either list would let that row pass.
+    let no_right_operations = ["status", "shutdown", "offers_list", "unsupported"];
+    let storage_operations = [
+        "init",
+        "runs_create",
+        "runs_get",
+        "runs_events",
+        "runs_cancel",
+    ];
+    for operation in no_right_operations {
+        for wrong in ["storage", "bound-executable", "no named test shows this"] {
+            let row = format!(
+                "| {operation} | in | out | {wrong} | effect | rule | designed, not enforced |"
+            );
+            let panic = caught_lab_claim_panic(&row, &approved_ids, true);
+            assert!(
+                panic.contains(operation) && panic.contains(wrong),
+                "{operation} with `{wrong}`: {panic}"
+            );
+        }
+        let row = format!(
+            "| {operation} | in | out | none: needs no declared right | effect | rule | designed, not enforced |"
+        );
+        assert_eq!(
+            operations_table_cells_stay_lab_claims(&row, &approved_ids, true),
+            Ok(())
+        );
+    }
+    for operation in storage_operations {
+        for wrong in [
+            "bound-executable",
+            "none: needs no declared right",
+            "no named test shows this",
+        ] {
+            let row = format!(
+                "| {operation} | in | out | {wrong} | effect | rule | designed, not enforced |"
+            );
+            let panic = caught_lab_claim_panic(&row, &approved_ids, true);
+            assert!(
+                panic.contains(operation) && panic.contains("storage") && panic.contains(wrong),
+                "{operation} with `{wrong}`: {panic}"
+            );
+        }
+        let row = format!(
+            "| {operation} | in | out | storage | effect | rule | designed, not enforced |"
+        );
+        assert_eq!(
+            operations_table_cells_stay_lab_claims(&row, &["bound-executable"], true),
+            Err("right cell `storage` is not an approved right id".to_string()),
+            "{operation} requires storage in the approved rights"
+        );
+        assert_eq!(
+            operations_table_cells_stay_lab_claims(&row, &approved_ids, true),
+            Ok(())
+        );
+    }
 
     let doc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("CONFINEMENT.md");
     let doc = fs::read_to_string(&doc_path).unwrap_or_else(|err| {
@@ -1104,7 +1216,7 @@ fn operations_section_cites_existing_tests() {
         .and_then(Value::as_array)
         .unwrap_or_else(|| panic!("declared rights must be an array"));
     let right_ids: Vec<&str> = rights.iter().map(entry_id).collect();
-    operations_table_cells_stay_lab_claims(section, &right_ids)
+    operations_table_cells_stay_lab_claims(section, &right_ids, true)
         .expect("the real operations section keeps its Right and Linux lab claims");
 }
 
