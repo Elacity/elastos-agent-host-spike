@@ -2,10 +2,9 @@ id: F-A7-twice
 file: src/ledger.rs
 test: ledger::model_settle_twice_is_refused
 --- old
-            None => return Err(SettleRefuse::NotOutstanding),
+                Some(open) => (open.identity.clone(), open.session.clone(), open.instance),
+                None => return Err(SettleRefuse::NotOutstanding),
 --- new
-            None => {
-                ledger.charged += measured;
-                return Ok(measured);
-            }
+                Some(open) => (open.identity.clone(), open.session.clone(), open.instance),
+                None => return Ok(0),
 --- end
