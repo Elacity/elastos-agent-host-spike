@@ -2646,6 +2646,38 @@
       "tests": [
         "an_ra1_grant_for_another_session_does_not_reach_the_model"
       ]
+    },
+    {
+      "id": "MP55",
+      "title": "the text extractor returns the model's private reasoning when it is a string, so the reasoning reaches the caller as answer text",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "fn extract_stream_text_delta(value: &Value) -> String {\n    if let Some(text) = value\n        .pointer(\"/choices/0/delta/content\")",
+          "new": "fn extract_stream_text_delta(value: &Value) -> String {\n    if let Some(text) = value\n        .pointer(\"/choices/0/delta/reasoning_content\")\n        .and_then(Value::as_str)\n    {\n        return text.to_string();\n    }\n    if let Some(text) = value\n        .pointer(\"/choices/0/delta/content\")"
+        }
+      ],
+      "tests": [
+        "a_hosted_tool_call_or_reasoning_never_reaches_the_caller"
+      ]
+    },
+    {
+      "id": "MP56",
+      "title": "the text extractor returns a proposed tool call's arguments when they are a string, so the tool call reaches the caller as answer text",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "fn extract_stream_text_delta(value: &Value) -> String {\n    if let Some(text) = value\n        .pointer(\"/choices/0/delta/content\")",
+          "new": "fn extract_stream_text_delta(value: &Value) -> String {\n    if let Some(text) = value\n        .pointer(\"/choices/0/delta/tool_calls/0/function/arguments\")\n        .and_then(Value::as_str)\n    {\n        return text.to_string();\n    }\n    if let Some(text) = value\n        .pointer(\"/choices/0/delta/content\")"
+        }
+      ],
+      "tests": [
+        "a_hosted_tool_call_or_reasoning_never_reaches_the_caller"
+      ]
     }
   ]
 }

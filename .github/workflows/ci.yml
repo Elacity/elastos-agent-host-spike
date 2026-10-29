@@ -9,8 +9,12 @@ on:
         default: ""
   push:
     # develop pushes keep the shared build caches warm for every PR into develop.
-    branches: [main, develop]
+    # spike/agent-host pushes run source-home-macos after merge (Sash, 29 Oct 2026).
+    branches: [main, develop, spike/agent-host]
     tags: ["v*"]
+  schedule:
+    # Nightly macOS run on the default branch (spike/agent-host), 02:17 Bangkok.
+    - cron: "17 19 * * *"
   pull_request:
   merge_group:
     types: [checks_requested]
@@ -20,8 +24,9 @@ permissions:
   actions: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Pushes to spike/agent-host share one group, so a burst of merges runs only the newest commit.
+  group: ci-${{ github.workflow }}-${{ (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/spike/agent-host')) && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/spike/agent-host') }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -1046,8 +1051,10 @@ jobs:
   source-home-macos:
     name: source-home-macos
     runs-on: macos-14
-    # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
-    if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
+    # macOS runs after merge only: on pushes (spike/agent-host, main, develop, tags) and the nightly schedule.
+    # It no longer gates lane PRs, batch PRs or workflow_dispatch baselines; a red post-merge run is
+    # routed back to the lane whose PR caused it by the orchestrator.
+    if: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
     # The two hop builds may take 30 minutes and the update journey step 75.
     timeout-minutes: 150
     needs: source-gate

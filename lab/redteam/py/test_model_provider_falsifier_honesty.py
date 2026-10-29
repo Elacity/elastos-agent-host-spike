@@ -1,10 +1,11 @@
-"""Row 10 rests on the model-provider anchors in falsifiers.json.
+"""row 10 rests on MP02, MP05, and MP11 only.
 
-Grade row 10 (local model ops) counts the provider falsifiers as caught.
-That count holds while each ``old`` anchor still occurs once, on the
-updated text, the way ``falsify.py`` applies it. This probe judges every
-provider entry on this base. An id captured before a removal is reported
-absent. MP02, MP05, and MP11 stay required. The selftest and PV
+Grade row 10 (local model ops) scores those three ids. The printed report
+states that sentence on a clean commit, a missing commit, and a problem
+list. This probe still judges every provider entry on this base. An id
+captured before a removal is reported absent. Each ``old`` anchor still
+has to occur once, on the updated text, the way ``falsify.py`` applies
+it. MP02, MP05, and MP11 stay required. The selftest and PV
 entries in the same file stay out of the checks; ``load_json`` still has
 to accept the whole file. The ``about`` text is the runner's path rule
 for every list, and this probe leaves it alone.
@@ -197,7 +198,10 @@ def mark_recorded_check(method):
 
 
 def report_text(commit, data, problems, described):
-    """The record for one snapshot. The hold sentence is the clean result."""
+    """The record for one snapshot. The hold sentence is the clean result.
+
+    The score sentence follows the branch, so every path includes it.
+    """
     lines = []
     if commit and not problems:
         lines.append(f"the provider anchors hold on {commit}")
@@ -207,6 +211,7 @@ def report_text(commit, data, problems, described):
     else:
         lines.append("provider entries differ from the row 10 anchors:")
         lines.extend(finding_line(problem) for problem in problems)
+    lines.append("row 10 rests on MP02, MP05, and MP11 only")
     pull = pull_request(described)
     if pull:
         lines.append(pull)
@@ -372,7 +377,11 @@ class ModelProviderFalsifierHonesty(unittest.TestCase):
         self.assertEqual(anchors_of([entry], read), [])
 
     def test_report_names_the_bytes_it_read(self):
-        """The report names the snapshot commit and the bytes this run read."""
+        """The report names the snapshot commit, the bytes this run read, and the three score ids.
+
+        A missing commit still names those three ids. The hold sentence stays
+        on the clean path.
+        """
         snapshot, data, _entries = provider_base()
         self.assertEqual(snapshot.root, REPO)
         require_digest(data, falsifier_data.digest(data).removeprefix("sha256 "))
@@ -390,8 +399,22 @@ class ModelProviderFalsifierHonesty(unittest.TestCase):
         self.assertTrue(commit)
         self.assertEqual(len(commit), 40)
         self.assertIn(f"the provider anchors hold on {commit}", text)
+        self.assertIn("row 10 rests on MP02, MP05, and MP11 only", text)
+        self.assertEqual(text.count("row 10 rests on MP02, MP05, and MP11 only"), 1)
         self.assertIn(f"read at HEAD {commit}", text)
         self.assertIn(falsifier_data.digest(data), text)
+        missing = report_text(None, data, [], "read at HEAD (unresolved)")
+        self.assertIn("row 10 rests on MP02, MP05, and MP11 only", missing)
+        self.assertEqual(missing.count("row 10 rests on MP02, MP05, and MP11 only"), 1)
+        self.assertIn(
+            "HEAD cannot be resolved, so the provider anchors are bound to no commit",
+            missing,
+        )
+        self.assertNotIn("the provider anchors hold on ", missing)
+        self.assertIn(falsifier_data.digest(data), missing)
+        doc = sys.modules[__name__].__doc__
+        self.assertIn("row 10 rests on MP02, MP05, and MP11 only", doc)
+        self.assertNotIn("rests on the model-provider anchors", doc)
         change = snapshot.last_change(MODEL_FILE)
         self.assertIsNotNone(change)
         self.assertIn(change.split()[0], text)
@@ -475,6 +498,8 @@ class ModelProviderFalsifierHonesty(unittest.TestCase):
         described = snapshot.describe({MODEL_FILE: data}, snapshot.commit)
         dirty = report_text(snapshot.commit, data, [two], described)
         self.assertNotIn("the provider anchors hold on ", dirty)
+        self.assertIn("row 10 rests on MP02, MP05, and MP11 only", dirty)
+        self.assertEqual(dirty.count("row 10 rests on MP02, MP05, and MP11 only"), 1)
         self.assertIn("MP02", dirty)
         self.assertIn(snapshot.commit, dirty)
         self.assertIn(falsifier_data.digest(data), dirty)
