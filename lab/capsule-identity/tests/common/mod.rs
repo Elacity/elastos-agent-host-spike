@@ -116,6 +116,12 @@ pub const SHARED_SIX_BYTE_PREFIX_LAB_CID: &str =
 /// task 071 printed it first with README's Python rule.
 pub const SHARED_SEVEN_BYTE_PREFIX_LAB_CID: &str =
     "bafybeie2vvrtsognxi7rnvjpzbzerrk73zfzakxdr6eoxmzgkzvtphnmeu";
+/// The six-byte row's bundle with its two replaced names holding one byte
+/// each, `0x71`: the child shard's link stores the child block's length plus
+/// those two files' 1-byte Tsizes. Built in a temp dir and never committed;
+/// task 084 printed it first with README's Python rule.
+pub const CHILD_SHARD_TWO_FILE_LAB_CID: &str =
+    "bafybeigm3pt32gpzl3b2zfruwu6lrym3wn47wvomsucvkyucjejgdgiawu";
 
 /// The empty file names whose links estimate alone is `estimate`, and the
 /// bytes one name was lengthened by. Each name is 100 bytes
@@ -263,6 +269,26 @@ pub fn shared_prefix_bundle(row: &SharedPrefixRow) -> Vec<BundleEntry> {
     );
     let estimate: usize = entries.iter().map(|entry| entry.path.len() + 36).sum();
     assert_eq!(estimate, 262_145, "the row's links estimate");
+    entries
+}
+
+/// The six-byte row's bundle with its two replaced names holding one byte
+/// each, `0x71`. The row's child shard keeps both names behind their own
+/// prefixes, so the link to it stores a Tsize beyond its block: the child
+/// block's length plus those two 1-byte files' Tsizes.
+pub fn child_shard_two_file_bundle() -> Vec<BundleEntry> {
+    let row = &shared_prefix_rows()[0];
+    let mut entries = shared_prefix_bundle(row);
+    let mut replaced = 0;
+    for entry in &mut entries {
+        if entry.path == row.first || entry.path == row.second {
+            entry.content = vec![0x71];
+            replaced += 1;
+        }
+    }
+    assert_eq!(replaced, 2, "the row's two names are replaced");
+    let estimate: usize = entries.iter().map(|entry| entry.path.len() + 36).sum();
+    assert_eq!(estimate, 262_145, "the bundle's links estimate");
     entries
 }
 

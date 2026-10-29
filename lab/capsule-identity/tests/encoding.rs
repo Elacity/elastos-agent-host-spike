@@ -4,7 +4,8 @@
 mod common;
 
 use capsule_identity::{
-    encode_chunked_files, encode_entries, lab_cid, BundleEntry, ChunkedFile, Refusal,
+    encode_chunked_files, encode_entries, encode_listed_files, lab_cid, BundleEntry, ChunkedFile,
+    ListedFile, Refusal,
 };
 use common::*;
 use sha2::{Digest, Sha256};
@@ -379,6 +380,104 @@ fn one_chunk_chunked_file_names_the_bytes_call() {
         let by_bytes = encode_entries(&[entry("sample.example", content)])
             .unwrap_or_else(|refusal| panic!("one leaf: {refusal}"));
         assert_eq!(by_digests, by_bytes, "{} bytes", content.len());
+    }
+}
+
+#[test]
+fn child_shard_link_keeps_the_files_tsizes() {
+    // The six-byte row's two names share six digest bytes, so the root
+    // shard's DE link points at a child shard. Give exactly those two files
+    // one byte each: the link's Tsize is the child block's length plus their
+    // two 1-byte Tsizes, so the child shard is more than its block. Every
+    // other file stays as the helper built it, so the links estimate stays
+    // 262145 and `sample.example` is not one of the two.
+    let row = &shared_prefix_rows()[0];
+    let entries = child_shard_two_file_bundle();
+    assert_eq!(
+        estimate(entries.iter().map(|entry| entry.path.len())),
+        262_145,
+        "the bundle's links estimate"
+    );
+    let replaced: Vec<&BundleEntry> = entries
+        .iter()
+        .filter(|entry| entry.path == row.first || entry.path == row.second)
+        .collect();
+    assert_eq!(replaced.len(), 2, "the row's two names");
+    assert_eq!(
+        [replaced[0].path.as_str(), replaced[1].path.as_str()],
+        [row.first.as_str(), row.second.as_str()],
+        "the two paths are the six-byte row's first and second"
+    );
+    for entry in &replaced {
+        assert_eq!(entry.content, vec![0x71], "{} holds one byte", entry.path);
+        assert_ne!(
+            entry.path, "sample.example",
+            "sample.example stays as built"
+        );
+    }
+    let sample = entries
+        .iter()
+        .find(|entry| entry.path == "sample.example")
+        .expect("content-sample's sample.example stays");
+    assert_eq!(
+        sample.content,
+        read_fixture(&CONTENT_SAMPLE, "sample.example"),
+        "sample.example keeps its bytes"
+    );
+
+    let pin = CHILD_SHARD_TWO_FILE_LAB_CID;
+    let bundle = bundled(&entries);
+    let encoded = encode_entries(&entries)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    assert_eq!(
+        (name(&bundle), encoded.as_str()),
+        (pin.to_owned(), pin),
+        "(lab_cid, encode_entries) against the pin"
+    );
+
+    // The listing path: each file's size is its byte length and its SHA-256
+    // is the digest of its bytes, so an empty file is a 0-byte leaf and each
+    // `0x71` file is a 1-byte leaf.
+    let listing: Vec<ListedFile> = entries
+        .iter()
+        .map(|entry| ListedFile {
+            path: entry.path.clone(),
+            size: entry.content.len() as u64,
+            sha256: Sha256::digest(&entry.content).into(),
+        })
+        .collect();
+    let listed = encode_listed_files(&listing)
+        .unwrap_or_else(|refusal| panic!("the listing: {refusal}"))
+        .to_string();
+    assert_eq!(listed, pin, "encode_listed_files against the pin");
+
+    // The chunked path: each file is one chunk of its own bytes, an empty
+    // file as one chunk of 0 bytes and each `0x71` file as one chunk of 1
+    // byte.
+    let chunked: Vec<ChunkedFile> = entries
+        .iter()
+        .map(|entry| ChunkedFile {
+            path: entry.path.clone(),
+            chunks: vec![(
+                Sha256::digest(&entry.content).into(),
+                entry.content.len() as u64,
+            )],
+        })
+        .collect();
+    let by_chunks = encode_chunked_files(&chunked)
+        .unwrap_or_else(|refusal| panic!("the chunks: {refusal}"))
+        .to_string();
+    assert_eq!(by_chunks, pin, "encode_chunked_files against the pin");
+
+    assert!(pin.starts_with("bafybei"), "{pin}");
+    assert_eq!(pin.len(), 59, "{pin}");
+    for other in [
+        SHARED_SIX_BYTE_PREFIX_LAB_CID,
+        SHARED_SEVEN_BYTE_PREFIX_LAB_CID,
+        HAMT_OVER_THRESHOLD_LAB_CID,
+    ] {
+        assert_ne!(pin, other, "the two files name another bundle");
     }
 }
 

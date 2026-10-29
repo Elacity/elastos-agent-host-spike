@@ -23,9 +23,10 @@ use std::process::Command;
 /// How many pinned bundles the check covers: seven fixtures, the recipe,
 /// the three bundles built for the profile tests, the photo stand-in
 /// consumer copy (task 047), the three bundles with a file over one leaf
-/// (tasks 048 and 076), the three HAMT-threshold bundles (task 077) and the
-/// two shared-prefix bundles (task 071).
-const PINNED_BUNDLES: usize = 20;
+/// (tasks 048 and 076), the three HAMT-threshold bundles (task 077), the
+/// two shared-prefix bundles (task 071) and the two-file child-shard
+/// bundle (task 084).
+const PINNED_BUNDLES: usize = 21;
 
 /// How many committed fixtures have a pin: all but wc001-core.
 const PINNED_FIXTURES: usize = 7;
@@ -180,6 +181,11 @@ fn pinned_bundles() -> Vec<Pinned> {
             entries: shared_prefix_bundle(&row),
         });
     }
+    bundles.push(Pinned {
+        what: "two-file child-shard bundle".to_owned(),
+        pin: CHILD_SHARD_TWO_FILE_LAB_CID,
+        entries: child_shard_two_file_bundle(),
+    });
     bundles
 }
 
@@ -551,7 +557,7 @@ fn kubo_roots(kubo: &Path) -> Result<Vec<String>, String> {
 /// ```
 ///
 /// Every pinned bundle's Kubo root, its pin and `encode_entries` must be one
-/// value, and the test asserts it checked all 20.
+/// value, and the test asserts it checked all 21.
 #[test]
 #[ignore = "needs LAB_KUBO naming a Kubo v0.40.1 binary"]
 fn kubo_hash_only_import_prints_every_lab_cid_pin() {
