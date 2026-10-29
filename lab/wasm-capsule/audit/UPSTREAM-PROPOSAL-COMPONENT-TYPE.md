@@ -20,9 +20,14 @@ That one section is accepted in one of two ways:
 
 A type-level name is `ComponentImport.name.name`. The walk covers
 `ComponentTypeDeclaration::Type` and `ComponentType::Instance`, so a name one
-level down is still collected. A name that is a prefix of a listed string, a
-section with no type-level import, and a `component-type` name inside type-only
-data all return `CodeInCustomSection` with the same string.
+level down is still collected. The walk also covers a core type in either
+position: each `ModuleTypeDeclaration::Import` under a `CoreType::Module` is
+collected as `core:<module>.<name>`, and `CoreType::Rec` and a module type with
+no import add no name. So a core module import inside the one type section is
+refused with `code in custom section`, and the fixed `core:` prefix keeps a
+joined name from spelling a Bus string. A name that is a prefix of a listed
+string, a section with no type-level import, and a `component-type` name inside
+type-only data all return `CodeInCustomSection` with the same string.
 
 ## Allowed Bus interfaces
 

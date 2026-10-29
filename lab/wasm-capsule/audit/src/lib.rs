@@ -2,8 +2,9 @@
 
 use std::fmt;
 use wasmparser::{
-    ComponentExternalKind, ComponentType, ComponentTypeDeclaration, Encoding, Import,
-    ImportSectionReader, InstanceTypeDeclaration, MemoryType, Parser, Payload, TypeRef, Validator,
+    ComponentExternalKind, ComponentType, ComponentTypeDeclaration, CoreType, Encoding, Import,
+    ImportSectionReader, InstanceTypeDeclaration, MemoryType, ModuleTypeDeclaration, Parser,
+    Payload, TypeRef, Validator,
 };
 
 pub const AUDIT_API: u32 = 1;
@@ -277,9 +278,31 @@ fn type_only_payload(payload: Payload<'_>, type_imports: &mut Vec<String>) -> Re
     }
 }
 
-// A type-level import is `ComponentImport.name.name` in a component type, or
-// one or more nested type declarations down. Every name is collected, not only
-// the first level.
+// A core module type inside the one type-only section carries no capsule
+// kernel import. Each of its core imports is still forbidden, so it is joined
+// under a fixed `core:` prefix: a joined name can never equal a Bus string,
+// even when the module and item names together spell one.
+const CORE_IMPORT_PREFIX: &str = "core:";
+
+fn collect_core_type_imports(core_type: &CoreType<'_>, names: &mut Vec<String>) {
+    let CoreType::Module(declarations) = core_type else {
+        // `CoreType::Rec` declares no module import.
+        return;
+    };
+    for declaration in declarations {
+        if let ModuleTypeDeclaration::Import(import) = declaration {
+            names.push(format!(
+                "{CORE_IMPORT_PREFIX}{}.{}",
+                import.module, import.name
+            ));
+        }
+    }
+}
+
+// A type-level import is `ComponentImport.name.name` in a component type, one
+// or more nested type declarations down, or a core module import under a core
+// type in either the component or the instance walk. Every name is collected,
+// not only the first level.
 fn collect_type_imports(ty: &ComponentType<'_>, names: &mut Vec<String>) {
     match ty {
         ComponentType::Component(declarations) => {
@@ -289,14 +312,21 @@ fn collect_type_imports(ty: &ComponentType<'_>, names: &mut Vec<String>) {
                         names.push(import.name.name.to_owned());
                     }
                     ComponentTypeDeclaration::Type(nested) => collect_type_imports(nested, names),
+                    ComponentTypeDeclaration::CoreType(core_type) => {
+                        collect_core_type_imports(core_type, names);
+                    }
                     _ => {}
                 }
             }
         }
         ComponentType::Instance(declarations) => {
             for declaration in declarations.iter() {
-                if let InstanceTypeDeclaration::Type(nested) = declaration {
-                    collect_type_imports(nested, names);
+                match declaration {
+                    InstanceTypeDeclaration::Type(nested) => collect_type_imports(nested, names),
+                    InstanceTypeDeclaration::CoreType(core_type) => {
+                        collect_core_type_imports(core_type, names);
+                    }
+                    _ => {}
                 }
             }
         }

@@ -84,8 +84,15 @@ Callers match the variant's fields; they never parse the Display string.
   Otherwise its type-level imports are collected: a type-level name is
   `ComponentImport.name.name`, the walk covers
   `ComponentTypeDeclaration::Type` and `ComponentType::Instance`, and at
-  least one such name must exist. Every collected name must equal one of
-  these five Bus interfaces:
+  least one such name must exist. The same walk covers
+  `ComponentTypeDeclaration::CoreType` and `InstanceTypeDeclaration::CoreType`:
+  every `ModuleTypeDeclaration::Import` under a `CoreType::Module` is
+  collected as `core:<module>.<name>`, and both `CoreType::Rec` and a module
+  type with no import add no name. The fixed `core:` prefix keeps a joined
+  core name from equaling a Bus string, so a core module import inside the
+  one type section is refused with `code in custom section`, even when its
+  module name or its module and item names together spell one. Every
+  collected name must equal one of these five Bus interfaces:
   `elastos:bus/types@1.0.0`, `elastos:bus/runtime@1.0.0`,
   `elastos:bus/identity@1.0.0`, `elastos:bus/capabilities@1.0.0` and
   `elastos:bus/providers@1.0.0`. A name that is a prefix of a listed string,

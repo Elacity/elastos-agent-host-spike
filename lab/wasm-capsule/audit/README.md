@@ -57,9 +57,12 @@ in the name at all four tested depths, plus plain names and data.
 Five tests cover the `component-type` exception: the pinned 1,382-byte fixture
 is accepted and records its SHA-256; a second `component-type*` section is
 refused; a type-level `wasi` name, `env`, a newer or pre-release Bus name, an
-empty import set, and a `wasi` name under only the `Type` or only the
-`Instance` walk are refused with `code in custom section`; all five unpinned
-Bus names are accepted. `componentized_product_capsule_passes_audit_component`
+empty import set, a `wasi` name under only the `Type` or only the
+`Instance` walk, a core module import under either component or instance
+level, a Bus-named core module, and joined core names that spell a Bus string
+are all refused with `code in custom section`; all five unpinned Bus names,
+plus a Bus import beside a `CoreType::Rec` or an import-free module type, are
+accepted. `componentized_product_capsule_passes_audit_component`
 uses the shared custom-section helper on a five-import component, asserts its
 one `component-type` section holds the fixture bytes, and lists the five names.
 The API test pins the derives and `#[non_exhaustive]` lines in both the source
@@ -145,6 +148,12 @@ apply and verify each entry by hand in this workspace.
 | F-CWA24e | Remove the `ComponentTypeDeclaration::Type` walk | `type_level_wasi_or_env_import_is_refused` |
 | F-CWA24f | Remove the `ComponentType::Instance` walk | `type_level_wasi_or_env_import_is_refused` |
 | F-CWA24g | Reject every unpinned section | `unpinned_bus_type_imports_are_accepted` |
+| F-CWA24h | Remove the `ComponentTypeDeclaration::CoreType` walk | `type_level_wasi_or_env_import_is_refused` |
+| F-CWA24i | Remove the `InstanceTypeDeclaration::CoreType` walk | `type_level_wasi_or_env_import_is_refused` |
+| F-CWA24j | Collect a core import as its module alone | `type_level_wasi_or_env_import_is_refused` |
+| F-CWA24k | Remove the core import prefix, so joined names can match Bus names | `type_level_wasi_or_env_import_is_refused` |
+| F-CWA24l | Collect a forbidden name from `CoreType::Rec` | `unpinned_bus_type_imports_are_accepted` |
+| F-CWA24m | Collect a forbidden name from an import-free module type | `unpinned_bus_type_imports_are_accepted` |
 
 Start with passing checks. Save the original bytes of the edited file and its
 SHA-256, then apply one entry's exact edits. With the check environment above,
