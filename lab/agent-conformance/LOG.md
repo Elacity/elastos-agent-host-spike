@@ -15018,3 +15018,47 @@ New:
 - `Cargo.toml` and `Cargo.lock` are unchanged. `pull_stdout` stays at 65536. `ThrowawayHome::launch` and `try_output` still call `capture` for both streams.
 
 - 094: `capture` refuses a finished stdout or stderr whose logical length is above 16777216 before it copies any byte, so a sparse file cannot abort the owner after the child has exited.
+
+## 095
+
+095: `hash_file` reads the provider file length and returns `{name} start is refused: the {label} {path} exceeds its byte limit` when that length is above `PROVIDER_FILE_BYTE_LIMIT` (67108864), before `fs::read` and before any buffer is sized from that length. A length at or under the cap is `identity::sha256` of the file bytes. A metadata or read error stays `could not be read`. `pull_stdout` still refuses with `provider response exceeds its byte limit` at 65536. `capture` stays the 094 bound. A PASS gives the Runtime no C0 credit and no B3 credit.
+
+Runtime verifies the principal and session, enforces capabilities, owns lifecycle and audit, and routes the operation. Effect providers do not decide that an unverified caller is authorized.
+
+### Plant
+
+F-shared-launch-hash-cap. No `falsifiers.json` id. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_provider_file_hash_refuses_a_sparse_file -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. The planted crate compiled. The test failed on the byte-limit assertion. Real 1.76 seconds. Restored, that test passed. Real 1.77 seconds.
+
+Failed at `src/../standin-runtime/mod.rs:16387:9`: `the stand-in did the work: a sparse confinement profile past the byte cap is refused`, got `Ok("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")`. That line is the planted file. The restored assertion is `standin-runtime/mod.rs:16390`.
+
+Old:
+
+```text
+        return Err(format!(
+            "{name} start is refused: the {label} {} exceeds its byte limit",
+            path.display()
+        ));
+```
+
+New:
+
+```text
+        return Ok(identity::sha256(&[]));
+```
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. `CARGO_TARGET_DIR` and `CARGO_BUILD_TARGET_DIR` were `lab/agent-conformance/target`. `CARGO_BUILD_BUILD_DIR` was `lab/agent-conformance/target/host-build`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.16 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 276.99 seconds, inside the 600-second bound. lib 90 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 10 passed; provider_launch 22 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0. No leftover, so no rerun.
+- Proof after the plant was restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.16 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_provider_file_hash_refuses_a_sparse_file -- --exact`: exit 0, 1 passed, real 1.77 seconds.
+- `Cargo.toml` and `Cargo.lock` are unchanged. `PROVIDER_FILE_BYTE_LIMIT` stays 67108864. `pull_stdout` stays at 65536. `capture` stays the 094 bound. `hash_file` stays the only hash. `start_provider` still calls it for the binary and for the profile, before `create_dir_all` and before `start_with_input`.
+
+- 095: `hash_file` refuses a provider binary or confinement profile whose logical length is above 67108864 before it reads the bytes, so a sparse file cannot abort the owner inside `start_provider` before any child exists.
+
+### Supervisor gate and one rerun
+
+The supervisor `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` failed with exit 101. The only failure was `process_isolation::runaway_trap_is_bounded_while_siblings_finish`. The census line was `process leftover; processes:1 paths:["stderr-220"]`. That path matches `stderr-<digits>`. It does not include `host-process.lock` or `config.toml`. The effects binary finished in 207.19 seconds. Census and the operator were left as they are. No source change.
+
+Rerun, same environment as the gate above: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.18 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` exit 0, real 280.92 seconds, inside the 600-second bound. lib 90 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 10 passed; provider_launch 22 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0. Proof: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_provider_file_hash_refuses_a_sparse_file -- --exact` exit 0, 1 passed, real 0.41 seconds.

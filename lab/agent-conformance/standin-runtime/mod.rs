@@ -2535,7 +2535,25 @@ fn path_text<'a>(path: &'a Path, name: &str, label: &str) -> Result<&'a str, Str
     })
 }
 
+// A provider binary or confinement profile longer than this is refused
+// before `fs::read` sizes a buffer from the logical length.
+const PROVIDER_FILE_BYTE_LIMIT: u64 = 67108864;
+
 fn hash_file(path: &Path, name: &str, label: &str) -> Result<String, String> {
+    let len = fs::metadata(path)
+        .map_err(|err| {
+            format!(
+                "{name} start is refused: the {label} {} could not be read: {err}",
+                path.display()
+            )
+        })?
+        .len();
+    if len > PROVIDER_FILE_BYTE_LIMIT {
+        return Err(format!(
+            "{name} start is refused: the {label} {} exceeds its byte limit",
+            path.display()
+        ));
+    }
     let bytes = fs::read(path).map_err(|err| {
         format!(
             "{name} start is refused: the {label} {} could not be read: {err}",
@@ -16337,6 +16355,69 @@ mod tests {
             "running",
             "",
             "component-1 stays running",
+        );
+    }
+
+    /// A provider file whose logical length is past the hash cap is refused
+    /// before that length is read. A short file is hashed as it is.
+    ///
+    /// Falsifier: F-shared-launch-hash-cap returns Ok of `identity::sha256` of
+    /// an empty slice when the logical length is above the cap, and it does
+    /// not call `fs::read`.
+    #[test]
+    fn standin_provider_file_hash_refuses_a_sparse_file() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let home = ThrowawayHome::new().expect("setup: a throwaway Home");
+        let short = home.root().join("profile-ok");
+        fs::write(&short, b"ok\n").expect("setup: the short profile is written");
+        assert_eq!(
+            hash_file(&short, "wallet-provider", "confinement profile"),
+            Ok(identity::sha256(b"ok\n")),
+            "the stand-in did the work: a short confinement profile is hashed"
+        );
+
+        let sparse = home.root().join("profile-sparse");
+        let mut file = fs::File::create(&sparse).expect("setup: the sparse profile is created");
+        file.seek(SeekFrom::Start(1 << 30))
+            .expect("setup: the sparse profile seeks past the byte cap");
+        file.write_all(b"x")
+            .expect("setup: the sparse profile writes one byte");
+        drop(file);
+
+        let profile_refusal = hash_file(&sparse, "wallet-provider", "confinement profile");
+        let profile_text = profile_refusal.as_ref().err().map(String::as_str);
+        assert!(
+            profile_text.is_some_and(|text| {
+                text.contains("wallet-provider start is refused: the confinement profile")
+                    && text.contains("exceeds its byte limit")
+                    && !text.contains("could not be read")
+            }),
+            "the stand-in did the work: a sparse confinement profile past the byte cap is refused: {profile_refusal:?}"
+        );
+        let binary_refusal = hash_file(&sparse, "wallet-provider", "provider binary");
+        let binary_text = binary_refusal.as_ref().err().map(String::as_str);
+        assert!(
+            binary_text.is_some_and(|text| {
+                text.contains("the provider binary") && text.contains("exceeds its byte limit")
+            }),
+            "the stand-in did the work: a sparse provider binary past the byte cap is refused: {binary_refusal:?}"
+        );
+
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("setup: a closed port");
+        let port = listener.local_addr().expect("setup: a closed port").port();
+        drop(listener);
+        let census = crate::census::cleanup(&home, port);
+        let line = census.unwrap_or_else(|line| line);
+        assert!(
+            line.contains("root checks PASS"),
+            "the stand-in did the work: census after the refused hash: {line}"
+        );
+        assert_eq!(
+            home.finish(),
+            Ok(()),
+            "the stand-in did the work: the passed home is removed"
         );
     }
 }
