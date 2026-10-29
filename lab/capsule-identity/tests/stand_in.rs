@@ -559,6 +559,42 @@ fn standin_hands_an_instance_only_its_signed_asks_bytes() {
     assert_eq!(grant_view(&stand_in), Vec::<Value>::new(), "no grant");
 }
 
+/// The stand-in's after-walk hook: change one byte of the stored `asks.json`.
+fn change_stored_asks_after_the_walk(folder: &Path) {
+    change_stored_asks(folder);
+}
+
+#[test]
+fn standin_takes_the_asks_from_the_walk_not_the_folder() {
+    let published = publish_agent_host();
+    let (mut stand_in, _) = signed_stand_in(&published);
+    let signed = read_fixture(&AGENT_HOST, "asks.json");
+    stand_in.set_after_walk(change_stored_asks_after_the_walk);
+
+    // The walk read the signed bytes, so the name compare and the record
+    // check pass, and the launch goes on.
+    let answer = launched(&mut stand_in);
+    assert_eq!(answer["status"], "launched");
+    let session = answer["session_id"].as_str().expect("a session id");
+
+    // The hook ran: the stored asks.json changed between the walk and the
+    // launch.
+    let on_disk = fs::read(published.folder.join("asks.json")).expect("read asks.json");
+    assert_ne!(
+        on_disk, signed,
+        "the hook must have changed the stored asks.json"
+    );
+
+    // The instance is handed the bytes the walk read, not the folder's.
+    assert_eq!(
+        stand_in.asks_of(session),
+        Some(signed),
+        "a change on disk between the walk and the launch must not reach the instance"
+    );
+    assert_eq!(listed_instances(&stand_in).len(), 1);
+    assert_eq!(grant_view(&stand_in), Vec::<Value>::new(), "no grant");
+}
+
 #[test]
 fn standin_gives_each_session_its_own_asks() {
     let agent_host = publish_agent_host();
