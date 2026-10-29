@@ -999,12 +999,10 @@ fn operations_section_cites_existing_tests() {
                             "operation `{first}` needs right cell `{NO_DECLARED_RIGHT}`, not `{right}`"
                         ));
                     }
-                } else if STORAGE_OPERATIONS.contains(&first) {
-                    if right != "storage" {
-                        return Err(format!(
-                            "operation `{first}` needs right cell `storage`, not `{right}`"
-                        ));
-                    }
+                } else if STORAGE_OPERATIONS.contains(&first) && right != "storage" {
+                    return Err(format!(
+                        "operation `{first}` needs right cell `storage`, not `{right}`"
+                    ));
                 }
             } else if right == UNSHOWN_RIGHT {
                 return Err(format!(
