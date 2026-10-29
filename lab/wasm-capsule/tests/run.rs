@@ -10,13 +10,10 @@
 //! keeps the first line it printed; `wasm_capsule_tools::receipt` renders the
 //! run's receipt and writes it only through the shared new-file writer.
 //!
-//! wc-009a: `run` passes the caller's granted imports, read from a lab grants
-//! file by `read_grants`, to its one `verify_bundle` call, and reports the
-//! linked imports and the unused grants. A module with an import that is not
-//! granted never reaches an engine.
-//!
-//! Task 031: a module that imports, granted, an import with no typed lab
-//! operation (`LAB_OPERATIONS`) never reaches an engine either.
+//! Task 065 (Rong's WC-1 and WC-2): `run` takes no granted imports and reads
+//! no lab grants file. Its one `verify_bundle` call audits with an empty
+//! list, so a module with any core import is refused by the import's own name
+//! and never reaches an engine.
 //!
 //! The stand-in engines are small shell scripts written into each test's own
 //! temp dir. Every stand-in the two-engine runner starts answers `--version`
@@ -32,7 +29,7 @@ use capsule::{FIXED_INPUT, FIXED_OUTPUT};
 use capsule_identity::{sign_bundle, LabCid, NameSignature};
 use common::build::{lane_dir, run_build, TempDir};
 use common::componentize::componentize;
-use common::grants::{env_f, grants_file, importing, importing_env, IMPORTING_MODULE};
+use common::grants::{importing, IMPORTING_MODULE};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use std::fs;
@@ -53,9 +50,7 @@ use wasm_capsule_tools::run::{
     Refusal, RunControl, RunInput, TwoEngineRefusal, TwoEngineRun, DIGEST_ARGUMENT, DIGEST_EXPORT,
     WASMER_VERSION, WASMTIME_VERSION,
 };
-use wasm_capsule_tools::verify::{
-    bus_imports, read_grants, verify_bundle, VerifiedBundle, VerifyRefusal,
-};
+use wasm_capsule_tools::verify::{bus_imports, verify_bundle, VerifiedBundle, VerifyRefusal};
 use wasm_capsule_tools::{bundle_identity, CAPSULE_MANIFEST};
 
 /// The smallest core Wasm module: the magic and version 1, no sections.
@@ -166,7 +161,7 @@ fn signed_bundle(
 fn verified_bundle(root: &Path, name: &str, module: &[u8]) -> (PathBuf, VerifiedBundle) {
     let key = fresh_key();
     let (bundle, sig) = signed_bundle(root, name, module, &key);
-    let value = verify_bundle(&bundle, Some(&sig), &[did(&key)], &[])
+    let value = verify_bundle(&bundle, Some(&sig), &[did(&key)])
         .unwrap_or_else(|refusal| panic!("the verifier refused: {refusal}"));
     (bundle, value)
 }
@@ -1047,8 +1042,8 @@ fn runner_uses_only_explicit_inputs() {
         );
     }
     // wc-005b: the two-engine runner verifies once, through wc-004's one
-    // verify path. wc-009a: it passes the caller's granted imports unchanged,
-    // never an empty list of its own, and reads no grants itself.
+    // verify path. Task 065: with its own inputs only, no granted imports
+    // (it has none), and it reads no grants itself.
     assert_eq!(
         code.matches(["verify", "_bundle("].concat().as_str())
             .count(),
@@ -1059,19 +1054,14 @@ fn runner_uses_only_explicit_inputs() {
         code.matches(
             [
                 "verify",
-                "_bundle(input.bundle, input.signature, input.accepted, input.granted)"
+                "_bundle(input.bundle, input.signature, input.accepted)"
             ]
             .concat()
             .as_str()
         )
         .count(),
         1,
-        "the runner does not verify its own inputs with the caller's grants"
-    );
-    assert_eq!(
-        code.matches("input.granted").count(),
-        1,
-        "the runner uses the granted imports somewhere other than its verify call"
+        "the runner does not verify exactly its own bundle, signature and accepted list"
     );
     // Task 033: the module's bytes come from entrypoint() twice, the module
     // write and the memory check, and nowhere else.
@@ -1164,7 +1154,6 @@ fn input<'a>(
         bundle: &signed.bundle,
         signature: Some(&signed.sig),
         accepted: &signed.accepted,
-        granted: &[],
         wasmtime,
         wasmer,
         work_root,
@@ -1313,7 +1302,6 @@ fn same_name_same_output_on_wasmtime_and_wasmer() {
         bundle: &bundle,
         signature: Some(&sig),
         accepted: &accepted,
-        granted: &[],
         wasmtime: &programs[0],
         wasmer: &programs[1],
         work_root: &work,
@@ -1363,13 +1351,12 @@ fn runner_refuses_an_unverified_bundle() {
         ("wrong signer", Some(&sig), &other),
     ];
     for (kind, signature, accepted) in cases {
-        let expected = verify_bundle(&bundle, signature, accepted, &[])
+        let expected = verify_bundle(&bundle, signature, accepted)
             .expect_err("the verifier passed a bundle this test means to be refused");
         let refusal = two_refused(run(&RunInput {
             bundle: &bundle,
             signature,
             accepted,
-            granted: &[],
             wasmtime: &wasmtime,
             wasmer: &wasmer,
             work_root: &work,
@@ -2233,7 +2220,6 @@ fn real_receipt_names_both_installed_engines() {
         bundle: &bundle,
         signature: Some(&sig),
         accepted: &accepted,
-        granted: &[],
         wasmtime: &programs[0],
         wasmer: &programs[1],
         work_root: &work,
@@ -2312,32 +2298,28 @@ fn real_receipt_names_both_installed_engines() {
     eprintln!("PASS: the receipt names both installed engines' versions as they printed them");
 }
 
-/// The folders of one wc-009a run made by [`run_with_grants`]: both
-/// [`counting`] stand-ins and the work root.
-struct GrantsRun {
+/// The folders of one run made by [`run_counting`]: both [`counting`]
+/// stand-ins and the work root.
+struct CountingRun {
     wasmtime: PathBuf,
     wasmer: PathBuf,
     work: PathBuf,
 }
 
-/// One wc-009a run: `module`, bundled with this capsule's manifest in `root`,
-/// signed with a fresh key, run through `run` with the grants that
-/// `read_grants` reads from a new lab grants file beside the bundle, never
-/// inside it, on [`counting`] stand-ins. Each `case` gets its own folders.
-fn run_with_grants(
+/// One run of `module`, bundled with this capsule's manifest in `root`,
+/// signed with a fresh key, through `run` on [`counting`] stand-ins. Each
+/// `case` gets its own folders. Task 065: `run` takes no grants, so none are
+/// given (wc-009a's `run_with_grants` read them from a lab grants file).
+fn run_counting(
     root: &Path,
     case: &str,
     module: &[u8],
-    grants: &[(&str, &str, &str)],
-) -> (Result<TwoEngineRun, TwoEngineRefusal>, GrantsRun) {
+) -> (Result<TwoEngineRun, TwoEngineRefusal>, CountingRun) {
     let key = fresh_key();
     let (bundle, sig) = signed_bundle(root, &format!("bundle-{case}"), module, &key);
     let accepted = [did(&key)];
-    let grants_path = grants_file(root, &format!("grants-{case}.json"), grants);
-    let granted = read_grants(&grants_path)
-        .unwrap_or_else(|refusal| panic!("{case}: the grants file was refused: {refusal}"));
     let engines = work_root(root, &format!("engines-{case}"));
-    let folders = GrantsRun {
+    let folders = CountingRun {
         wasmtime: counting(&engines, "wasmtime"),
         wasmer: counting(&engines, "wasmer"),
         work: work_root(root, &format!("work-{case}")),
@@ -2346,7 +2328,6 @@ fn run_with_grants(
         bundle: &bundle,
         signature: Some(&sig),
         accepted: &accepted,
-        granted: &granted,
         wasmtime: &folders.wasmtime,
         wasmer: &folders.wasmer,
         work_root: &folders.work,
@@ -2358,7 +2339,7 @@ fn run_with_grants(
 /// Each engine of `ran` was asked `--version` `count` times and started for a
 /// module run `count` times: one of each per engine when the run passed, none
 /// of either when it was refused.
-fn assert_engine_starts(ran: &GrantsRun, count: usize, case: &str) {
+fn assert_engine_starts(ran: &CountingRun, count: usize, case: &str) {
     for (engine_kind, program) in [
         (Engine::Wasmtime, &ran.wasmtime),
         (Engine::Wasmer, &ran.wasmer),
@@ -2384,30 +2365,24 @@ fn built_capsule(root: &Path) -> Vec<u8> {
     fs::read(out.join("capsule.wasm")).expect("read the built capsule.wasm")
 }
 
-/// wc-009a, Rong's test: the capsule `tools/build` makes, signed, with an
-/// empty grants file: each engine is asked its version once and runs the
-/// module once, nothing is linked and no grant is unused.
+/// wc-009a, Rong's test: the capsule `tools/build` makes, signed, with nothing
+/// granted (task 065: `run` takes no grants): each engine is asked its version
+/// once and runs the module once, and no run folder is left.
 #[test]
 fn zero_grants_zero_imports_runs() {
     let tmp = TempDir::new("run9-zero");
     let root = canonical(&tmp);
     let built = built_capsule(&root);
 
-    let (result, ran) = run_with_grants(&root, "zero", &built, &[]);
-    let passed = two_ran(result);
-    assert!(passed.linked().is_empty(), "linked: {:?}", passed.linked());
-    assert!(
-        passed.unused_grants().is_empty(),
-        "unused: {:?}",
-        passed.unused_grants()
-    );
+    let (result, ran) = run_counting(&root, "zero", &built);
+    two_ran(result);
     assert_engine_starts(&ran, 1, "zero");
     assert!(names(&ran.work).is_empty(), "a run folder was left");
 }
 
 /// wc-009a, the real-engine variant of `zero_grants_zero_imports_runs`: the
-/// real `wasmtime` and `wasmer` on PATH print `FIXED_OUTPUT`, with nothing
-/// linked. An engine not found prints SKIPPED and gives no result.
+/// real `wasmtime` and `wasmer` on PATH print `FIXED_OUTPUT`. An engine not
+/// found prints SKIPPED and gives no result.
 #[test]
 fn zero_grants_zero_imports_runs_on_both_real_engines() {
     let mut missing = Vec::new();
@@ -2431,15 +2406,12 @@ fn zero_grants_zero_imports_runs_on_both_real_engines() {
     let key = fresh_key();
     let (bundle, sig) = signed_bundle(&root, "bundle", &built, &key);
     let accepted = [did(&key)];
-    let grants = grants_file(&root, "grants.json", &[]);
-    let granted = read_grants(&grants).expect("read the empty grants file");
     let work = work_root(&root, "work");
 
     let passed = two_ran(run(&RunInput {
         bundle: &bundle,
         signature: Some(&sig),
         accepted: &accepted,
-        granted: &granted,
         wasmtime: &programs[0],
         wasmer: &programs[1],
         work_root: &work,
@@ -2453,20 +2425,21 @@ fn zero_grants_zero_imports_runs_on_both_real_engines() {
             "{engine_kind}"
         );
     }
-    assert!(passed.linked().is_empty(), "linked: {:?}", passed.linked());
-    assert!(passed.unused_grants().is_empty());
     eprintln!("PASS: zero grants, zero imports: both engines printed {FIXED_OUTPUT}");
 }
 
-/// wc-009a, Rong's test: the signed module that imports `env.f`, with an
-/// empty grants file, is refused by the verifier by the import's name; no run
-/// folder is made and no engine is started, not even for `--version`.
+/// Task 065 (Rong's WC-1): no core-module import is granted. The signed
+/// module that imports `env.f`, through `run` on [`counting`] stand-ins, is
+/// refused by the verifier with the audit's own `undeclared import env.f`; no
+/// run folder is made and no engine is started, not even for `--version`.
+/// Task 020's `declared_not_granted_import_refuses_instantiation_by_name`
+/// asserted the same with an empty grants file; this is it, renamed.
 #[test]
-fn declared_not_granted_import_refuses_instantiation_by_name() {
-    let tmp = TempDir::new("run9-not-granted");
+fn core_module_import_is_refused_before_any_engine_start() {
+    let tmp = TempDir::new("run65-core-import");
     let root = canonical(&tmp);
 
-    let (result, ran) = run_with_grants(&root, "not-granted", IMPORTING_MODULE, &[]);
+    let (result, ran) = run_counting(&root, "core-import", IMPORTING_MODULE);
     let refusal = two_refused(result);
     assert_eq!(refusal.to_string(), "undeclared import env.f");
     match refusal {
@@ -2480,109 +2453,7 @@ fn declared_not_granted_import_refuses_instantiation_by_name() {
         other => panic!("not a verifier refusal: {other}"),
     }
     assert!(names(&ran.work).is_empty(), "a run folder was made");
-    assert_engine_starts(&ran, 0, "not-granted");
-}
-
-/// wc-009a, Rong's test: a validly signed zero-import bundle with an empty
-/// grants file links nothing.
-#[test]
-fn valid_signature_with_empty_grants_file_links_nothing() {
-    let tmp = TempDir::new("run9-empty");
-    let root = canonical(&tmp);
-
-    let (result, ran) = run_with_grants(&root, "empty", MODULE, &[]);
-    let passed = two_ran(result);
-    assert!(passed.linked().is_empty(), "linked: {:?}", passed.linked());
-    assert!(passed.unused_grants().is_empty());
-    assert_engine_starts(&ran, 1, "empty");
-}
-
-/// wc-009a, Rong's rename of `granted_but_undeclared_is_refused`: a grant for
-/// an import the module does not have links nothing and is reported.
-#[test]
-fn grant_for_an_import_the_module_does_not_have_links_nothing_and_is_reported() {
-    let tmp = TempDir::new("run9-unused");
-    let root = canonical(&tmp);
-
-    let (result, ran) = run_with_grants(&root, "unused", MODULE, &[("env", "f", "call")]);
-    let passed = two_ran(result);
-    assert_eq!(passed.linked(), [], "a grant was linked with no import");
-    assert_eq!(passed.unused_grants(), [env_f()], "the unused grant");
-    assert_engine_starts(&ran, 1, "unused");
-}
-
-/// wc-009a: the signed module that imports `env.f`, with `env.f` granted,
-/// passes verification and `env.f` is linked; each engine is asked its
-/// version once and runs the module once. The stand-ins host nothing: the
-/// runner gives no engine a host function yet (wc-009b).
-#[test]
-fn granted_import_is_linked() {
-    let tmp = TempDir::new("run9-linked");
-    let root = canonical(&tmp);
-
-    let (result, ran) = run_with_grants(&root, "linked", IMPORTING_MODULE, &[("env", "f", "call")]);
-    let passed = two_ran(result);
-    assert_eq!(passed.linked(), [env_f()], "the linked imports");
-    assert!(passed.unused_grants().is_empty());
-    assert_engine_starts(&ran, 1, "linked");
-    // Each run folder as its engine saw it; task 039: both are removed.
-    for (engine_kind, program) in [
-        (Engine::Wasmtime, &ran.wasmtime),
-        (Engine::Wasmer, &ran.wasmer),
-    ] {
-        assert_eq!(
-            recorded(program, "module"),
-            IMPORTING_MODULE,
-            "{engine_kind}: not the verified importing module"
-        );
-    }
-    assert!(names(&ran.work).is_empty(), "a run folder was left");
-}
-
-/// Task 031: the signed module that imports `env.g`, which has no typed lab
-/// operation, is refused by the verifier with `env.g` granted, by the import's
-/// name; with no grant, the audit still refuses it as undeclared. Either way no
-/// run folder is made and no engine is started, not even for `--version`.
-#[test]
-fn module_import_with_no_typed_operation_is_refused() {
-    let tmp = TempDir::new("run31-untyped");
-    let root = canonical(&tmp);
-    let module = importing_env(b'g');
-
-    let (result, ran) = run_with_grants(&root, "untyped", &module, &[("env", "g", "call")]);
-    let refusal = two_refused(result);
-    assert_eq!(
-        refusal.to_string(),
-        "no typed lab operation for import env.g"
-    );
-    match refusal {
-        TwoEngineRefusal::Verify(reason) => assert_eq!(
-            reason,
-            VerifyRefusal::UntypedImport {
-                module: "env".into(),
-                name: "g".into(),
-            }
-        ),
-        other => panic!("not a verifier refusal: {other}"),
-    }
-    assert!(names(&ran.work).is_empty(), "a run folder was made");
-    assert_engine_starts(&ran, 0, "untyped");
-
-    let (result, ran) = run_with_grants(&root, "untyped-not-granted", &module, &[]);
-    let refusal = two_refused(result);
-    assert_eq!(refusal.to_string(), "undeclared import env.g");
-    match refusal {
-        TwoEngineRefusal::Verify(reason) => assert_eq!(
-            reason,
-            VerifyRefusal::Audit(AuditRefusal::Undeclared {
-                module: "env".into(),
-                name: "g".into(),
-            })
-        ),
-        other => panic!("not a verifier refusal: {other}"),
-    }
-    assert!(names(&ran.work).is_empty(), "a run folder was made");
-    assert_engine_starts(&ran, 0, "untyped-not-granted");
+    assert_engine_starts(&ran, 0, "core-import");
 }
 
 /// wc-010b, task 033: a hand-written core module, as bytes: one memory of 1
@@ -2705,7 +2576,7 @@ fn verified_bundle_declaring(
     memory_mb: u32,
 ) -> VerifiedBundle {
     let signed = signed_bundle_declaring(root, name, module, memory_mb);
-    let value = verify_bundle(&signed.bundle, Some(&signed.sig), &signed.accepted, &[])
+    let value = verify_bundle(&signed.bundle, Some(&signed.sig), &signed.accepted)
         .unwrap_or_else(|refusal| panic!("the verifier refused: {refusal}"));
     assert_eq!(value.memory_mb(), memory_mb, "the declared memory_mb");
     value
@@ -2731,7 +2602,6 @@ impl Declared {
             bundle: &self.bundle,
             signature: Some(&self.sig),
             accepted: &self.accepted,
-            granted: &[],
             wasmtime,
             wasmer,
             work_root,
@@ -2914,7 +2784,7 @@ fn refused_for_memory(
     text: &str,
 ) -> Vec<Reason> {
     let signed = declaring(root, &format!("bundle-{case}"), module, memory_mb);
-    let value = verify_bundle(&signed.bundle, Some(&signed.sig), &signed.accepted, &[])
+    let value = verify_bundle(&signed.bundle, Some(&signed.sig), &signed.accepted)
         .unwrap_or_else(|refusal| panic!("{case}: the verifier refused: {refusal}"));
     let engines = work_root(root, &format!("engines-{case}"));
     let wasmtime = marked(&engines, "wasmtime", "printf 'same\\n'\n");
@@ -3076,7 +2946,7 @@ fn run_starts_a_module_whose_maximum_fits_the_declared_size() {
     let fits = memory_module(&MAXIMUM_32, GROW_TO_THE_CAP);
     for (case, module, memory_mb) in [("fits", &fits[..], Some(2)), ("no-memory", MODULE, None)] {
         let signed = declaring(&root, &format!("bundle-{case}"), module, memory_mb);
-        let value = verify_bundle(&signed.bundle, Some(&signed.sig), &signed.accepted, &[])
+        let value = verify_bundle(&signed.bundle, Some(&signed.sig), &signed.accepted)
             .unwrap_or_else(|refusal| panic!("{case}: the verifier refused: {refusal}"));
         let engines = work_root(&root, &format!("engines-{case}"));
         let wasmtime = counting(&engines, "wasmtime");
@@ -3273,7 +3143,6 @@ fn built_capsule_runs_under_the_declared_cap_on_wasmtime() {
         bundle: &bundle,
         signature: Some(&sig),
         accepted: &accepted,
-        granted: &[],
         wasmtime: &wasmtime,
         wasmer: &programs[1],
         work_root: &work,
@@ -3511,7 +3380,7 @@ fn receipt_memory_maximums(
         &memory_module(limits, GROW_TO_THE_CAP),
         memory_mb,
     );
-    let declared = verify_bundle(&signed.bundle, Some(&signed.sig), &signed.accepted, &[])
+    let declared = verify_bundle(&signed.bundle, Some(&signed.sig), &signed.accepted)
         .unwrap_or_else(|refusal| panic!("the verifier refused: {refusal}"))
         .memory_mb();
     let engines = work_root(root, "engines");
@@ -4186,7 +4055,6 @@ fn normal_run_leaves_nothing_under_the_scratch_root() {
         bundle: &bundle,
         signature: Some(&sig),
         accepted: &accepted,
-        granted: &[],
         wasmtime: &wasmtime,
         wasmer: &wasmer,
         work_root: &work,
@@ -4560,7 +4428,6 @@ fn run_stops_wasmtime_at_its_budget_and_never_starts_wasmer() {
                 bundle: &bundle,
                 signature: Some(&sig),
                 accepted: &accepted,
-                granted: &[],
                 wasmtime: &wasmtime,
                 wasmer: &wasmer,
                 work_root: &work,
@@ -5389,7 +5256,7 @@ fn run_cancelled_during_wasmtime_never_starts_wasmer() {
 
 /// Task 045 (M1 A12 lab half): through `run`, each refusal is its own
 /// expected reason and the census finds nothing under its work root
-/// afterwards: a verifier refusal (an import that is not granted), an unpinned
+/// afterwards: a verifier refusal (a core import; task 065 grants none), an unpinned
 /// `wasmtime --version` (stand-in), a `wasmtime` that fails ([`FAILING_BODY`]
 /// stand-in) and task 043's budget stop (a stand-in sleeper, 200 ms, under
 /// the watchdog).
@@ -5399,7 +5266,7 @@ fn refused_and_failed_runs_leave_nothing_under_the_scratch_root() {
     let tmp = TempDir::new("run45-refused");
     let root = canonical(&tmp);
 
-    let (result, ran) = run_with_grants(&root, "not-granted", IMPORTING_MODULE, &[]);
+    let (result, ran) = run_counting(&root, "core-import", IMPORTING_MODULE);
     match two_refused(result) {
         TwoEngineRefusal::Verify(VerifyRefusal::Audit(AuditRefusal::Undeclared {
             module,
@@ -5627,8 +5494,8 @@ fn host_secret_fixture_never_reaches_either_real_engine() {
 /// Task 041, the inner test, run only by
 /// `host_secret_fixture_never_reaches_either_real_engine` in a child whose
 /// `HOME` is the fixture home; it fails at once under any other `HOME`. It
-/// signs the built capsule with a fresh key, reads an empty grants file and
-/// calls `run` with both recording shims. For each engine: the module run's
+/// signs the built capsule with a fresh key and calls `run` with both
+/// recording shims (task 065: `run` reads no grants file). For each engine: the module run's
 /// argv has no preopen, env or network flag ([`argv_faults`]) and no argument
 /// holding the `HOME` folder; each start's environment record is not empty and
 /// holds `_=/usr/bin/env` ([`HostSecretCase::recorded_env`], task 049), and
@@ -5662,15 +5529,12 @@ fn host_secret_fixture_run_inside_the_child() {
     let capsule = fs::read(case.capsule()).expect("read the built capsule");
     let (bundle, sig) = signed_bundle(&case.root, "bundle", &capsule, &key);
     let accepted = [did(&key)];
-    let grants = grants_file(&case.root, "grants.json", &[]);
-    let granted = read_grants(&grants).expect("read the empty grants file");
     let work = work_root(&case.root, "work");
     assert_eq!(work, case.work());
     let passed = two_ran(run(&RunInput {
         bundle: &bundle,
         signature: Some(&sig),
         accepted: &accepted,
-        granted: &granted,
         wasmtime: &case.shim(Engine::Wasmtime),
         wasmer: &case.shim(Engine::Wasmer),
         work_root: &work,
@@ -5744,10 +5608,11 @@ const HOST_SECRET_PROBES: [&str; 5] = [
 const WASI_PREVIEW1: &str = "wasi_snapshot_preview1";
 
 /// Task 041, M1 A8 lab half: a signed module importing each of
-/// [`HOST_SECRET_PROBES`] from `wasi_snapshot_preview1` is refused by `run`:
-/// with no grant as undeclared, with a `call` grant as an import with no typed
-/// lab operation, each by its exact text and variant. No run folder is made and
-/// no engine is asked anything, not even `--version`.
+/// [`HOST_SECRET_PROBES`] from `wasi_snapshot_preview1` is refused by `run` as
+/// undeclared, by its exact text and variant: task 065 grants no core import,
+/// so there is no granted case (task 041 also refused a `call` grant of each,
+/// as an import with no typed lab operation). No run folder is made and no
+/// engine is asked anything, not even `--version`.
 #[test]
 fn host_secret_probe_imports_are_refused_before_any_engine_starts() {
     let tmp = TempDir::new("run41-probes");
@@ -5760,10 +5625,8 @@ fn host_secret_probe_imports_are_refused_before_any_engine_starts() {
 
     for name in HOST_SECRET_PROBES {
         let module = importing(WASI_PREVIEW1, name);
-        let import = (WASI_PREVIEW1.to_owned(), name.to_owned());
-
-        let case = format!("{name}-not-granted");
-        let (result, ran) = run_with_grants(&root, &case, &module, &[]);
+        let case = format!("{name}-core-import");
+        let (result, ran) = run_counting(&root, &case, &module);
         let refusal = two_refused(result);
         assert_eq!(
             refusal.to_string(),
@@ -5774,8 +5637,8 @@ fn host_secret_probe_imports_are_refused_before_any_engine_starts() {
             TwoEngineRefusal::Verify(reason) => assert_eq!(
                 reason,
                 VerifyRefusal::Audit(AuditRefusal::Undeclared {
-                    module: import.0.clone(),
-                    name: import.1.clone(),
+                    module: WASI_PREVIEW1.to_owned(),
+                    name: name.to_owned(),
                 }),
                 "{case}"
             ),
@@ -5783,30 +5646,7 @@ fn host_secret_probe_imports_are_refused_before_any_engine_starts() {
         }
         assert!(names(&ran.work).is_empty(), "{case}: a run folder was made");
         assert_engine_starts(&ran, 0, &case);
-
-        let case = format!("{name}-granted");
-        let (result, ran) =
-            run_with_grants(&root, &case, &module, &[(WASI_PREVIEW1, name, "call")]);
-        let refusal = two_refused(result);
-        assert_eq!(
-            refusal.to_string(),
-            format!("no typed lab operation for import {WASI_PREVIEW1}.{name}"),
-            "{case}"
-        );
-        match refusal {
-            TwoEngineRefusal::Verify(reason) => assert_eq!(
-                reason,
-                VerifyRefusal::UntypedImport {
-                    module: import.0,
-                    name: import.1,
-                },
-                "{case}"
-            ),
-            other => panic!("{case}: not a verifier refusal: {other}"),
-        }
-        assert!(names(&ran.work).is_empty(), "{case}: a run folder was made");
-        assert_engine_starts(&ran, 0, &case);
-        eprintln!("PASS: {WASI_PREVIEW1}.{name} refused, granted or not, before any engine");
+        eprintln!("PASS: {WASI_PREVIEW1}.{name} refused before any engine");
     }
 }
 
