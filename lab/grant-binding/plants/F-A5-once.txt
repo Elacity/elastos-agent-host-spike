@@ -1,12 +1,9 @@
 id: F-A5-once
 file: src/ops.rs
 test: ops::model_allow_once_ends_after_one_effect
+test: ops::model_child_effect_ends_the_allow_once_grant
 --- old
-                if grant.once && operation != Operation::ChildJournal {
-                    self.grants.remove(&request.handle);
-                }
+                        self.revoke_grant(ending);
 --- new
-                if grant.once && operation != Operation::ChildJournal {
-                    let _ = request.handle;
-                }
+                        let _ending = ending;
 --- end
