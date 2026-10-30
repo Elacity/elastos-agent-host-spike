@@ -67,6 +67,8 @@ pub(crate) struct Ledger {
     verifier_deadline: u64,
     deadline_set: bool,
     open: HashMap<u64, OpenHold>,
+    allowances: HashMap<Handle, u64>,
+    spent: HashMap<Handle, u64>,
 }
 
 impl Ledger {
@@ -82,6 +84,8 @@ impl Ledger {
             verifier_deadline: 0,
             deadline_set: false,
             open: HashMap::new(),
+            allowances: HashMap::new(),
+            spent: HashMap::new(),
         }
     }
 }
@@ -98,6 +102,7 @@ pub enum ReserveRefuse {
     OverCeiling { ceiling: u64, held: u64, asked: u64 },
     SumOverflow { held: u64, asked: u64 },
     NoCeiling,
+    Spent { remaining: u64, asked: u64 },
     Binding(Refuse),
 }
 
@@ -111,6 +116,7 @@ impl std::fmt::Display for ReserveRefuse {
                 formatter.write_str("reservation sum does not fit in u64")
             }
             ReserveRefuse::NoCeiling => formatter.write_str("identity has no ceiling"),
+            ReserveRefuse::Spent { .. } => formatter.write_str("grant allowance is spent"),
             ReserveRefuse::Binding(refusal) => refusal.fmt(formatter),
         }
     }
@@ -238,6 +244,13 @@ impl Verifier {
         ledger.ceiling = ceiling;
     }
 
+    /// Records `amount` as that handle's allowance on the one ledger. A later
+    /// amount for the same handle replaces the earlier one.
+    pub(super) fn note_grant_allowance(&self, handle: Handle, amount: u64) {
+        let mut ledger = self.ledger.lock().expect("ledger lock");
+        ledger.allowances.insert(handle, amount);
+    }
+
     /// Sets the allowance ceiling. Outstanding holds stay as they are.
     /// Every identity ceiling above `ceiling` is lowered to it, and an
     /// identity with no ceiling keeps none until an ask names it.
@@ -311,6 +324,19 @@ impl Verifier {
             }
         } else {
             None
+        };
+        #[rustfmt::skip]
+        let () = {
+        if let Some(granted) = ledger.allowances.get(&request.handle).copied() {
+            let spent = ledger.spent.get(&request.handle).copied().unwrap_or(0);
+            let remaining = granted.saturating_sub(spent);
+            if amount > remaining {
+                return Err(ReserveRefuse::Spent {
+                    remaining,
+                    asked: amount,
+                });
+            }
+        }
         };
         ledger.held = total;
         if let Some(shared_total) = put_back {
@@ -411,6 +437,8 @@ impl Verifier {
         ledger.charged = charged;
         ledger.held -= stored;
         ledger.open.remove(&reservation.id);
+        let spent = ledger.spent.entry(bound).or_insert(0);
+        *spent = spent.saturating_add(charge);
         Ok(charge)
     }
 
@@ -1493,10 +1521,21 @@ fn model_settle_below_the_hold_returns_the_rest() {
     assert_eq!(books(&verifier).charged, 4);
     assert_eq!(books(&verifier).held, 0);
     assert!(!books(&verifier).open.contains_key(&reservation.id));
-    verifier
+    let spent = verifier
         .reserve(&call, &request, 10)
-        .expect("reserve after settle");
-    assert_eq!(books(&verifier).held, 10);
+        .expect_err("the settled charge stays spent");
+    assert_eq!(
+        spent,
+        ReserveRefuse::Spent {
+            remaining: 6,
+            asked: 10,
+        }
+    );
+    assert_eq!(spent.to_string(), "grant allowance is spent");
+    verifier
+        .reserve(&call, &request, 6)
+        .expect("the unspent remainder");
+    assert_eq!(books(&verifier).held, 6);
 }
 
 #[test]
@@ -1650,9 +1689,36 @@ fn model_settle_past_the_u64_charge_is_refused() {
     let after_first = books(&verifier);
     assert_eq!(after_first.charged, u64::MAX - 3);
     assert_eq!(after_first.held, 0);
-    let second = verifier.reserve(&call, &request, 10).expect("reserve");
+    let spent = verifier
+        .reserve(&call, &request, 10)
+        .expect_err("the settled charge stays on the first grant");
+    assert_eq!(
+        spent,
+        ReserveRefuse::Spent {
+            remaining: 3,
+            asked: 10,
+        }
+    );
+    assert_eq!(spent.to_string(), "grant allowance is spent");
+    let other = verifier.register_instance("agent-1", "session-a");
+    let other_handle = verifier
+        .bind_grant(other, "UsersAI/agent-1/other", rights())
+        .expect("other");
+    let other_call = verifier.open_call(other);
+    let other_request = guest(other_handle);
+    verifier
+        .admit_ask(
+            &other_call,
+            &other_request,
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("other allowance");
+    let second = verifier
+        .reserve(&other_call, &other_request, 10)
+        .expect("reserve");
     let refusal = verifier
-        .settle(&call, &request, second, SettleOutcome::Known(4))
+        .settle(&other_call, &other_request, second, SettleOutcome::Known(4))
         .expect_err("past the u64 charge");
     assert_eq!(refusal, SettleRefuse::ChargeOverflow);
     assert_eq!(refusal.to_string(), "settled charge does not fit in u64");
@@ -1661,7 +1727,7 @@ fn model_settle_past_the_u64_charge_is_refused() {
     assert_eq!(after_refusal.charged, u64::MAX - 3);
     assert_eq!(after_refusal.open.get(&second.id), Some(&10));
     assert_eq!(
-        verifier.settle(&call, &request, second, SettleOutcome::Known(3)),
+        verifier.settle(&other_call, &other_request, second, SettleOutcome::Known(3)),
         Ok(3)
     );
     let after_second = books(&verifier);
@@ -2140,11 +2206,22 @@ fn model_lower_ceiling_does_not_refuse_the_settle() {
         }
     );
     assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
-    verifier
+    let spent = verifier
         .reserve(&call, &request, 4)
-        .expect("room under the lowered ceiling");
+        .expect_err("the settled charge stays spent under the lowered ceiling");
+    assert_eq!(
+        spent,
+        ReserveRefuse::Spent {
+            remaining: 2,
+            asked: 4,
+        }
+    );
+    assert_eq!(spent.to_string(), "grant allowance is spent");
+    verifier
+        .reserve(&call, &request, 2)
+        .expect("the unspent remainder fits the lowered ceiling");
     let freed = books(&verifier);
-    assert_eq!(freed.held, 4);
+    assert_eq!(freed.held, 2);
     assert_eq!(freed.charged, 8);
 }
 
@@ -5474,4 +5551,55 @@ fn model_reported_usage_does_not_pick_the_reserve_ceiling() {
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
     assert_eq!(after.held, 0);
+}
+
+#[test]
+fn model_settled_charge_stays_spent_on_that_grant() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("agent-1", "session-a");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/agent-1/library", rights())
+        .expect("library");
+    let album = verifier
+        .bind_grant(photo, "UsersAI/agent-1/album", rights())
+        .expect("album");
+    let call = verifier.open_call(photo);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(library),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("library allowance");
+    verifier
+        .admit_ask(
+            &call,
+            &guest(album),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("album allowance");
+    let reservation = verifier.reserve(&call, &guest(library), 6).expect("hold");
+    assert_eq!(
+        verifier.settle(&call, &guest(library), reservation, SettleOutcome::Known(6)),
+        Ok(6)
+    );
+    assert_eq!(books(&verifier).held, 0);
+    assert_eq!(books(&verifier).charged, 6);
+    let spent = verifier
+        .reserve(&call, &guest(library), 5)
+        .expect_err("the settled charge stays on the library grant");
+    assert_eq!(
+        spent,
+        ReserveRefuse::Spent {
+            remaining: 4,
+            asked: 5,
+        }
+    );
+    assert_eq!(spent.to_string(), "grant allowance is spent");
+    verifier
+        .reserve(&call, &guest(album), 4)
+        .expect("the album grant keeps its own allowance");
+    assert_eq!(books(&verifier).held, 4);
 }

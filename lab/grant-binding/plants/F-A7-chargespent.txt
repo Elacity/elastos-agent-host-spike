@@ -1,0 +1,8 @@
+id: F-A7-chargespent
+file: src/ledger.rs
+test: ledger::model_settled_charge_stays_spent_on_that_grant
+--- old
+        *spent = spent.saturating_add(charge);
+--- new
+        *spent = *spent;
+--- end
