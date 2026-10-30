@@ -2,7 +2,7 @@ id: F-A5-schemex
 file: src/lib.rs
 test: model_extended_usersai_segment_is_refused
 --- old
-parts[0] != "UsersAI"
+    if parts.len() < 3 || parts[0] != "UsersAI" || parts[1] != agent {
 --- new
-!parts[0].starts_with("UsersAI")
+    if parts.len() < 3 || !parts[0].starts_with("UsersAI") || parts[1] != agent {
 --- end

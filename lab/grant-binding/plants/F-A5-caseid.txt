@@ -2,11 +2,7 @@ id: F-A5-caseid
 file: src/lib.rs
 test: model_case_different_identity_is_refused
 --- old
-        if live.identity != grant.identity {
-            return Err(Refuse::Identity);
-        }
+        if live.identity != record.identity {
 --- new
-        if !live.identity.eq_ignore_ascii_case(&grant.identity) {
-            return Err(Refuse::Identity);
-        }
+        if !live.identity.eq_ignore_ascii_case(&record.identity) {
 --- end

@@ -53,6 +53,7 @@ impl Verifier {
             .grants
             .get(&request.handle)
             .expect("resolved grant")
+            .record
             .identity
             .clone();
         self.store_admitted_ceiling(Some(&identity), ask.amount);

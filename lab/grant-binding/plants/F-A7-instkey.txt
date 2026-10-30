@@ -13,7 +13,7 @@ test: ask::model_forged_instance_does_not_retarget_the_ceiling
             Some(
             staged
                 .as_deref()
-                .filter(|forged| self.grants.values().any(|grant| grant.identity == *forged))
+                .filter(|forged| self.grants.values().any(|grant| grant.record.identity == *forged))
                 .unwrap_or(&identity),
             ),
             ask.amount,

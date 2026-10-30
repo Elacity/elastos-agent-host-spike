@@ -145,8 +145,9 @@ struct Grant {
     plan: Option<PlanBinding>,
     /// The grant ledger's own handle for this grant (M1 check A7). Only
     /// `Verifier::bind_grant` mints one, on the stand-in's shared ledger, and
-    /// the grant route stores it here. Callers never present a handle and
-    /// never choose it; the admission path passes this stored value back.
+    /// the grant route and `seed_bound_grant` store it here. Callers never
+    /// present a handle and never choose it; the admission path passes this
+    /// stored value back.
     binding: Option<Handle>,
     /// The hosted run this grant was minted for (M1 check A6). The grant route
     /// mints it from the request's session; the request read returns it; the
@@ -1183,9 +1184,11 @@ impl StandIn {
     /// agent that presents another agent's pair is refused. A hosted effect is
     /// one use, so it takes the same path as `post_capability_validate`: the
     /// grant authorises, the ask runs against the one budget cap, and only an
-    /// admitted ask spends a `once` grant. A hosted effect carries no body, so
-    /// its ask is the default `EFFECT_BUDGET_CAP`, the same rule as a validate
-    /// body with no `amount`. Ok is `{"valid": true}`; every refusal spends
+    /// admitted ask spends a `once` grant. A hosted effect's ask is
+    /// `hosted_amount` on the body, read by the same `validate_body` rule as
+    /// a validate body: a missing `amount` is `EFFECT_BUDGET_CAP`, and a
+    /// malformed one is status 400 with `ASK_REASON` before the grant is read,
+    /// so it spends nothing. Ok is `{"valid": true}`; every refusal spends
     /// nothing.
     pub fn post_hosted_effect(
         &mut self,
@@ -1194,11 +1197,13 @@ impl StandIn {
         effect: &str,
         run_id: &str,
         request_id: &str,
+        body: &Value,
     ) -> Result<Value, (u16, String)> {
         if offer_id.is_empty() || effect.is_empty() {
             return Err((400, "hosted effect needs an offer and an effect".to_owned()));
         }
-        self.use_grant(caller, request_id, Some(run_id), None, EFFECT_BUDGET_CAP)?;
+        let amount = hosted_amount(body)?;
+        self.use_grant(caller, request_id, Some(run_id), None, amount)?;
         Ok(json!({ "valid": true }))
     }
 
@@ -1510,12 +1515,18 @@ impl StandIn {
         Ok(())
     }
 
-    /// Writes `Revoked` on `Live` grants of one session. Other lives stay.
+    /// Writes `Revoked` on `Live` grants of one session and ends the ledger
+    /// binding of each one (M1 check A7, condition c). Other lives stay.
     fn revoke_live(&mut self, session_id: &str) {
+        let mut ended = Vec::new();
         for grant in &mut self.grants {
             if grant.session_id == session_id && is_live(grant.life) {
                 grant.life = Life::Revoked;
+                ended.extend(grant.binding);
             }
+        }
+        for handle in ended {
+            self.ledger.end_grant(handle);
         }
     }
 
@@ -1693,9 +1704,9 @@ impl StandIn {
     /// same binding that minted it. An over-budget ask or a binding refusal
     /// is status 403 with `AdmitRefuse`'s own text, and the ledger keeps the
     /// grant bound and stores no ceiling. An ask at the cap is admitted.
-    /// The grant route is the one bind site, so a grant with no stored handle
-    /// (a seeded grant, or one whose route binding refused) is refused here
-    /// with status 403 and the ledger's `unknown handle` text. The
+    /// The grant route's binding and `seed_bound_grant` are the two bind sites,
+    /// so a grant with no stored handle (one whose binding refused) is refused
+    /// here with status 403 and the ledger's `unknown handle` text. The
     /// ledger binds nothing on this path.
     fn admit_effect(
         &mut self,
@@ -2078,9 +2089,6 @@ fn require_client(caller: Caller<'_>) -> Result<(), (u16, String)> {
 /// hash is compared with a bound grant's own hash.
 /// The body's three fields and its ask: the request id, the optional pair
 /// `(run_id, plan_sha256)` a use may present, and the ask.
-/// One amount rule: a present `amount` is a non-negative integer and any
-/// other shape is status 400 with `ASK_REASON`; an absent one is
-/// `EFFECT_BUDGET_CAP`. No other place reads the amount.
 type ValidateFields<'a> = (&'a str, Option<&'a str>, Option<&'a str>, u64);
 
 fn validate_body(body: &Value) -> Result<ValidateFields<'_>, (u16, String)> {
@@ -2092,17 +2100,10 @@ fn validate_body(body: &Value) -> Result<ValidateFields<'_>, (u16, String)> {
     let mut request_id = None;
     let mut run_id = None;
     let mut plan_sha256 = None;
-    let mut amount = EFFECT_BUDGET_CAP;
+    let amount = ask_amount(object.get("amount"))?;
     for (key, value) in object {
         match key.as_str() {
-            "amount" => match value {
-                Value::Number(number) => {
-                    amount = number
-                        .as_u64()
-                        .ok_or_else(|| (400, ASK_REASON.to_owned()))?;
-                }
-                _ => return Err((400, ASK_REASON.to_owned())),
-            },
+            "amount" => {}
             "request_id" => match value {
                 Value::String(text) => request_id = Some(text.as_str()),
                 _ => return Err((400, "validate request_id must be a string".to_owned())),
@@ -2120,6 +2121,35 @@ fn validate_body(body: &Value) -> Result<ValidateFields<'_>, (u16, String)> {
     }
     let request_id = request_id.ok_or_else(|| (400, NEEDS_ID.to_owned()))?;
     Ok((request_id, run_id, plan_sha256, amount))
+}
+
+/// The hosted effect body's only key is the optional `amount`, the ask. Its
+/// presence and shape rule is `ask_amount`, the same one `validate_body`
+/// applies to a validate body, so neither route writes the rule twice.
+fn hosted_amount(body: &Value) -> Result<u64, (u16, String)> {
+    let object = body
+        .as_object()
+        .ok_or_else(|| (400, "hosted effect body needs to be an object".to_owned()))?;
+    for key in object.keys() {
+        if key != "amount" {
+            return Err((400, format!("hosted effect body rejects {key}")));
+        }
+    }
+    ask_amount(object.get("amount"))
+}
+
+/// The one amount rule: a present `amount` is a non-negative integer and any
+/// other shape is status 400 with `ASK_REASON`; an absent one is
+/// `EFFECT_BUDGET_CAP`. `validate_body` and `hosted_amount` both call it, so
+/// no other place reads the amount.
+fn ask_amount(amount: Option<&Value>) -> Result<u64, (u16, String)> {
+    match amount {
+        None => Ok(EFFECT_BUDGET_CAP),
+        Some(value) => match value {
+            Value::Number(number) => number.as_u64().ok_or_else(|| (400, ASK_REASON.to_owned())),
+            _ => Err((400, ASK_REASON.to_owned())),
+        },
+    }
 }
 
 /// The one mint helper for the run pair (M1 check A6). Only the grant route
@@ -3270,7 +3300,8 @@ mod tests {
 
     /// Binds a seeded grant the way the grant route does, so the admission
     /// path has the ledger handle it stores. Setup for the rows below uses the
-    /// grant route's own `bind_on_ledger` and no other bind site.
+    /// `bind_on_ledger` step that `post_capability_grant` and
+    /// `seed_bound_grant` share.
     fn bind_seeded(standin: &mut StandIn, request_id: &str, session_id: &str) {
         let instance = standin.instance_on_ledger(session_id);
         let bound = standin

@@ -109,12 +109,24 @@ fn own_grant(standin: &mut StandIn, session: &str) -> MintedRun {
     MintedRun { run_id, request_id }
 }
 
-/// One hosted effect presented by `session`, through the effect route.
+/// One hosted effect presented by `session`, through the effect route. The
+/// body carries no `amount`, so the ask is the default cap.
 fn present(
     standin: &mut StandIn,
     session: &str,
     run_id: &str,
     request_id: &str,
+) -> Result<Value, (u16, String)> {
+    present_ask(standin, session, run_id, request_id, &json!({}))
+}
+
+/// One hosted effect whose body names `body`, the ask.
+fn present_ask(
+    standin: &mut StandIn,
+    session: &str,
+    run_id: &str,
+    request_id: &str,
+    body: &Value,
 ) -> Result<Value, (u16, String)> {
     standin.post_hosted_effect(
         Caller::Client {
@@ -124,6 +136,7 @@ fn present(
         EFFECT,
         run_id,
         request_id,
+        body,
     )
 }
 
@@ -365,61 +378,172 @@ fn a_bound_seeded_grant_is_admitted_at_a_hosted_use_and_an_unbound_one_is_refuse
 ///
 /// The journey enters only through `admit_resident` for setup, `post_capsules`,
 /// `finish_start`, `post_capability_request`, `post_capability_grant`,
-/// `get_run_binding` and `post_hosted_effect`. It does not name an amount, so
-/// the hosted effect's ask is the default cap. The guard is the admission
-/// itself, so the proof plants a ledger drain: a first ask at the cap, then an
-/// ask one above the cap, then an ask back at the cap. Only a hosted effect
-/// that admits each ask refuses that second ask and leaves the ceiling at the
-/// cap for the third.
+/// `get_run_binding` and `post_hosted_effect`. Both grants are route-minted
+/// and bound, so the grant's life, pair and ledger binding all pass and the
+/// admission is the one check that can refuse. The ask one above the cap is
+/// refused on `over`, which stays live and unspent; the ask at the cap is
+/// admitted on `at_cap`, which then spends.
 #[test]
 fn a_hosted_effect_above_the_budget_cap_is_refused_on_the_granted_pair() {
     let mut standin = StandIn::new();
     let bundle = SignedBundle::distinct("agent-budget");
     admit(&mut standin, &bundle);
     let session = launch(&mut standin, &bundle);
-    let mine = own_grant(&mut standin, &session);
-    let drained = own_grant(&mut standin, &session);
-    let over = (
-        403u16,
-        "budget ask exceeds the admission cap: asked 4097, cap 4096".to_owned(),
-    );
+    let over = own_grant(&mut standin, &session);
+    let at_cap = own_grant(&mut standin, &session);
 
-    // The first use is admitted: a hosted effect on agent B's own pair.
+    // One above the cap: refused by the admission, with its one text.
     assert_eq!(
-        present(&mut standin, &session, &mine.run_id, &mine.request_id),
-        Ok(json!({ "valid": true })),
-        "the hosted effect admits the granted pair's own use"
+        present_ask(
+            &mut standin,
+            &session,
+            &over.run_id,
+            &over.request_id,
+            &json!({ "amount": 4097 }),
+        ),
+        Err((
+            403u16,
+            "budget ask exceeds the admission cap: asked 4097, cap 4096".to_owned()
+        )),
+        "the hosted effect refuses an ask one above the cap on its granted pair"
     );
     assert!(
-        !listed_live(&standin, &mine.request_id),
+        listed_live(&standin, &over.request_id),
+        "the refused hosted effect leaves that grant live and unspent"
+    );
+
+    // At the cap on a second granted pair: admitted, and that use spends the
+    // once grant.
+    assert_eq!(
+        present_ask(
+            &mut standin,
+            &session,
+            &at_cap.run_id,
+            &at_cap.request_id,
+            &json!({ "amount": 4096 }),
+        ),
+        Ok(json!({ "valid": true })),
+        "the hosted effect admits an ask at the cap"
+    );
+    assert!(
+        !listed_live(&standin, &at_cap.request_id),
         "the admitted hosted effect spends the once grant"
     );
 
-    // The planted drain: one use above the cap on a second granted pair.
-    let above = standin
-        .post_capability_validate(
-            Caller::Client {
-                session_id: &session,
-            },
-            &json!({ "request_id": drained.request_id, "amount": 4097 }),
-        )
-        .expect_err("an ask one above the cap is refused");
-    assert_eq!(above, over, "the drain is refused with the one cap text");
+    // A malformed ask is status 400 with the validate route's own text, before
+    // the grant is read, so `over` stays live and unspent.
+    assert_eq!(
+        present_ask(
+            &mut standin,
+            &session,
+            &over.run_id,
+            &over.request_id,
+            &json!({ "amount": "4097" }),
+        ),
+        Err((
+            400u16,
+            "budget ask needs a non-negative integer amount".to_owned()
+        )),
+        "a hosted effect reads the amount with the validate route's one rule"
+    );
     assert!(
-        listed_live(&standin, &drained.request_id),
-        "the refused drain leaves the second grant live and unspent"
+        listed_live(&standin, &over.request_id),
+        "the malformed ask leaves the grant live and unspent"
+    );
+}
+
+/// M1 check A7: a grant with no ledger binding is refused at use.
+///
+/// A seeded grant is the one grant no ledger bind reaches. It exists, it is
+/// live and it is authored by its own session, so the binding is the only
+/// check that can refuse. The ask is within the cap and the run id is the
+/// grant's own, so the pair check passes too.
+#[test]
+fn an_unbound_grant_is_refused_at_use_and_spends_nothing() {
+    let mut standin = StandIn::new();
+    let bundle = SignedBundle::distinct("agent-unbound");
+    admit(&mut standin, &bundle);
+    let session = launch(&mut standin, &bundle);
+    standin.seed_grant(
+        "request-unbound",
+        &session,
+        ASK_RESOURCE,
+        "read",
+        "once",
+        0,
+        Life::Live,
+        false,
+    );
+    let refused = (403u16, "unknown handle".to_owned());
+    let reason = (
+        403u16,
+        "effect run  is not bound to request request-unbound".to_owned(),
     );
 
-    // The guarded use: the same 4096 ask through the hosted effect route. A
-    // hosted effect that skips its admission would answer Ok here, so this is
-    // the assertion the admission guard alone decides.
+    // Its stored run id is empty, which the pair check refuses first.
     assert_eq!(
-        present(&mut standin, &session, &drained.run_id, &drained.request_id),
-        Ok(json!({ "valid": true })),
-        "the hosted effect admits one ask at the cap after the drain"
+        present(&mut standin, &session, "", "request-unbound"),
+        Err(reason),
+        "the seeded grant stores no run pair"
+    );
+
+    // The one bind site is the grant route, so the seeded grant has no handle
+    // and the admission refuses it before any spend.
+    assert_eq!(
+        standin.post_capability_validate(
+            Caller::Client {
+                session_id: &session
+            },
+            &json!({ "request_id": "request-unbound", "amount": 1 }),
+        ),
+        Err(refused),
+        "an ask within the cap on an unbound grant is refused with the ledger's text"
     );
     assert!(
-        !listed_live(&standin, &drained.request_id),
-        "the admitted hosted effect spends the second once grant"
+        listed_live(&standin, "request-unbound"),
+        "the unbound refusal leaves the grant live and unspent"
+    );
+}
+
+/// M1 check A7 condition (c): a stop ends the ledger binding of each grant it
+/// revokes, and the use path still refuses the stopped grant.
+///
+/// The journey enters through `admit_resident`, `post_capsules`,
+/// `finish_start`, `post_capability_request`, `post_capability_grant`,
+/// `get_run_binding` and `delete_capsule`. `authorise` refuses the revoked
+/// grant before the admission runs, so this route asserts the use refusal and
+/// the unspent grant; `model_end_grant_refuses_the_ended_handle` pins the
+/// ledger half directly.
+#[test]
+fn a_stop_ends_the_ledger_binding_of_its_revoked_grant() {
+    let mut standin = StandIn::new();
+    let bundle = SignedBundle::distinct("agent-stop");
+    admit(&mut standin, &bundle);
+    let session = launch(&mut standin, &bundle);
+    let victim = own_grant(&mut standin, &session);
+
+    assert_eq!(
+        standin.delete_capsule(Caller::Shell, &session, &json!({ "reason": "done" })),
+        Ok(Value::Null),
+        "the shell stops the resident"
+    );
+    assert!(
+        !listed_live(&standin, &victim.request_id),
+        "the stop revokes the grant"
+    );
+
+    assert_eq!(
+        standin.post_capability_validate(
+            Caller::Client {
+                session_id: &session
+            },
+            &json!({ "request_id": victim.request_id, "amount": 1 }),
+        ),
+        Err((400u16, "grant is not live: Revoked".to_owned())),
+        "the stopped grant no longer authorises a use"
+    );
+    assert!(
+        !listed_live(&standin, &victim.request_id),
+        "the refused use spends nothing after the stop"
     );
 }
