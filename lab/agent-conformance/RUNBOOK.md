@@ -746,6 +746,8 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 
 `seed_seams_are_not_routes` is this stand-in, and a PASS there gives the Runtime no A10 credit.
 
+`standin_shell_revoke_drops_one_live_grant` and `standin_stop_revokes_only_that_sessions_grant` are this stand-in, and a PASS there gives the Runtime no A6 credit for a shell revoke.
+
 ## Content capsule named by its CID (M2 exit (e), PH6)
 
 - `requires_cid_is_refused_today` stages the viewer probe through the staging route and records the refusal the manifest reader gives now (`unknown field cid`). It goes red when the Runtime reads `requires[].cid`.
