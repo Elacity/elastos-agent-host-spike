@@ -512,7 +512,15 @@ one `json!`, or the fields `WalletProviderResponseV2` declares on a
 that leaves a key out, adds one, or writes another error name. The check also
 reads a declared-right row's macOS cell for an allow form of that right, and a
 `none: needs no declared right` row quotes none, so
-`operations_table_row_check_refuses_each_bad_table` refuses a bad quote. A
+`operations_table_row_check_refuses_each_bad_table` refuses a bad quote. The same
+check holds each row's Effect cell against the right the row declares and the
+dispatch class the contract's `class()` gives its kind: a
+`none: needs no declared right` row names no canonical parameter and quotes no
+allow form, a `storage` row names `STORAGE_ROOT`, a `Read` kind claims no
+`wallet-state.json` write, and an `Effectful` kind names the store it writes.
+The rule reads the cells against that declared class; it does not show that a
+handler writes only what its cell names.
+`operations_table_row_check_refuses_each_bad_table` refuses a bad Effect cell. A
 refusal under `(deny default)` is a denial, not a grant, and no row writes it
 as a right. A refusal from a `kind` comes back as an outer
 `status` `ok` whose `data.result` holds `status` `error`, `code` and `message`;
@@ -1535,6 +1543,15 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `operations_table_row_check_refuses_each_bad_table` checks this rule.
 - WP226: A missing `operations` list reads as an empty list, so the
   missing-list case passes.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP227: The `none:` row's Effect check returns early, so a row with no
+  declared right that names `STORAGE_ROOT` passes.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP228: The Effect class compare treats every kind as `Effectful`, so the
+  `Read` kind that claims the store write passes.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP229: The contract reader treats the catch-all `class()` arm as `Read`, so
+  the `Effectful` kind that claims only in-memory work passes.
   `operations_table_row_check_refuses_each_bad_table` checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.

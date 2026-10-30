@@ -27,13 +27,15 @@ use elastos_protected_content_contracts::{
 use elastos_wallet_contract::{
     Erc1271ProofEvidenceV1, ManagedRecoveryKeyEntryV1, ManagedRecoverySetV1, PublicNetwork,
     ValidatedChainOutcomeBindingV1, ValidatedChainOutcomeV1, VerifiedWalletInvocationContext,
-    WalletProviderOperationV2, WalletProviderRequestV2, WalletProviderResponseV2, WalletResultV2,
-    PROTECTED_CONTENT_RIGHTS_SIGNATURE_INTENT, VALIDATED_CHAIN_OUTCOME_SCHEMA,
+    WalletOperationClass, WalletProviderOperationV2, WalletProviderRequestV2,
+    WalletProviderResponseV2, WalletResultV2, PROTECTED_CONTENT_RIGHTS_SIGNATURE_INTENT,
+    VALIDATED_CHAIN_OUTCOME_SCHEMA,
 };
 use k256::ecdsa::SigningKey;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sha3::Keccak256;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -13217,6 +13219,19 @@ fn operations_table_citation_problems(
 /// right.
 const NO_DECLARED_RIGHT: &str = "none: needs no declared right";
 
+/// The `storage` id of `CONTRACT_RIGHTS`: the declared right a row holds when
+/// its call writes under the storage root. It is read from that one list, so
+/// the rule names the same id the vocabulary does and no second copy.
+const STORAGE_RIGHT: &str = CONTRACT_RIGHTS[0];
+
+/// The canonical parameter whose subtree a `storage` row's Effect cell names.
+/// It is one `CANONICAL_PARAMS` entry, so the rule names the same token the
+/// profile does.
+const STORAGE_ROOT_PARAM: &str = CANONICAL_PARAMS[1];
+
+/// The store file every Effectful wallet kind writes.
+const STORE_FILE_NAME: &str = "wallet-state.json";
+
 /// The one Linux cell value every operations row uses in this lab.
 const LINUX_STATUS: &str = "designed, not enforced";
 
@@ -13270,6 +13285,7 @@ struct OperationsRow {
     inputs: String,
     outputs: String,
     right: String,
+    effect: String,
     macos: String,
     linux: String,
 }
@@ -13381,6 +13397,7 @@ fn operations_table_rows(
             inputs: cells[1].to_string(),
             outputs: cells[2].to_string(),
             right: cells[3].to_string(),
+            effect: cells[4].to_string(),
             macos: cells[5].to_string(),
             linux: cells[6].to_string(),
         });
@@ -15463,6 +15480,255 @@ fn linux_status_problems(document_name: &str, row: &OperationsRow) -> Vec<String
 /// own and no second JSON reader (P10).
 const DECLARED_RIGHTS_FILE: &str = "tests/fixtures/confine/declared-rights.json";
 
+/// The one signature the contract's dispatch class reader looks for, and the
+/// value it must return.
+const CLASS_SIGNATURE: &str = "fn class(";
+const CLASS_RESULT: &str = "-> WalletOperationClass";
+/// The two values the `class()` arms return, as the contract spells them.
+const READ_CLASS: &str = "Read";
+const EFFECTFUL_CLASS: &str = "Effectful";
+/// The one variant prefix a `class()` arm names its kinds with.
+const CLASS_ARM_VARIANT: &str = "Self::";
+
+/// Every variant name the body of one enum declares, in declaration order, or
+/// one reason the body cannot be read.
+///
+/// An item is one comma-separated entry of the body, and its variant name is
+/// the identifier after any attributes it carries.
+fn enum_variant_names(body: &str) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for item in declaration_items(body).map_err(str::to_string)? {
+        let mut declared = item.trim_start();
+        while let Some(attribute) = declared.strip_prefix('#') {
+            let Some(attributes) = attribute.trim_start().strip_prefix('[') else {
+                break;
+            };
+            let Some(end) = attribute_end(attributes) else {
+                break;
+            };
+            declared = attributes[end + 1..].trim_start();
+        }
+        let name: String = declared
+            .chars()
+            .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+            .collect();
+        if !name.is_empty() {
+            names.push(name);
+        }
+    }
+    Ok(names)
+}
+
+/// The body of the contract's one `fn class(` that returns
+/// `WalletOperationClass`, or `None` when that signature is absent.
+///
+/// The signature line must carry both its return type and its opening brace,
+/// and the body then ends at the brace that closes it, so a later function's
+/// match is never read. Comments are removed first, so a commented-out
+/// signature and a `fn class(` inside a string are text.
+fn class_match_body(text: &str) -> Option<String> {
+    let text = without_comments(text);
+    let start = text.find(CLASS_SIGNATURE)?;
+    let line_end = text[start..].find('\n').map_or(text.len(), |at| start + at);
+    if !text[start..line_end].contains(CLASS_RESULT) {
+        return None;
+    }
+    let open = text[start..line_end].find('{')? + start;
+    let body = &text[open + 1..];
+    declaration_end(body).map(|end| body[..end].to_string())
+}
+
+/// The variant names one `class()` arm lists, from its text up to its `=>`.
+///
+/// The `Read` arm's text ends at its value, so it holds every alternative it
+/// matches. The remaining arm's text starts after that value and ends at its
+/// own value, so a catch-all `_` arm names no variant and an arm that lists
+/// kinds names them.
+fn class_arm_variants(text: &str) -> Vec<String> {
+    let head = text.rsplit_once("=>").map_or(text, |(before, _)| before);
+    let mut variants = Vec::new();
+    let mut rest = head;
+    while let Some(offset) = rest.find(CLASS_ARM_VARIANT) {
+        let tail = &rest[offset + CLASS_ARM_VARIANT.len()..];
+        let variant: String = tail
+            .chars()
+            .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+            .collect();
+        if !variant.is_empty() {
+            variants.push(variant);
+        }
+        rest = tail;
+    }
+    variants.dedup();
+    variants
+}
+
+/// Every declared wallet contract kind and the class the contract's `class()`
+/// gives it, in declaration order, or one reason the arms cannot be read.
+///
+/// The reader takes the text `contract_enum_text` already returns and reads it
+/// through `item_body`, `without_comments` and `declaration_end`: the enum body
+/// names every declared kind, and the one `fn class(` that returns
+/// `WalletOperationClass` decides each kind's class. The arm whose value is
+/// `WalletOperationClass::Read` lists the read kinds; every other declared kind
+/// is `Effectful`, whether the remaining arm names it or falls to the catch-all
+/// `_`. A missing enum body, `class()` signature, `Read` arm or remaining arm
+/// is one named refusal; so is a `Read` arm that names no `Self::<Kind>`
+/// variant and a kind named in both arms.
+///
+/// Honesty limits: the reader reads declarations, not a run. The class of a
+/// kind comes from the `class()` arms as source text, so a branch the match
+/// adds by a guard or a nested condition is not read, and a kind the match
+/// does not name falls to the catch-all arm. A cell is compared by the words it
+/// names, not by what a handler does. did's table holds no `wallet_contract`
+/// row, so that half of the rule is wallet's alone. The rule makes no kernel
+/// call, starts no process and reads files only, so it runs on every OS.
+fn wallet_operation_classes(text: &str) -> Result<HashMap<String, WalletOperationClass>, String> {
+    let Some(body) = item_body(text, "WalletProviderOperationV2", "enum") else {
+        return Err("the contract declares no enum WalletProviderOperationV2".to_string());
+    };
+    let declared = enum_variant_names(&body)?;
+    let Some(class_body) = class_match_body(text) else {
+        return Err(format!(
+            "the contract declares no {CLASS_SIGNATURE}) that returns WalletOperationClass"
+        ));
+    };
+    let class_body = without_comments(&class_body);
+    let Some((read_arm, rest)) =
+        class_body.split_once(&format!("WalletOperationClass::{READ_CLASS}"))
+    else {
+        return Err(format!(
+            "the fn class match holds no arm whose value is WalletOperationClass::{READ_CLASS}"
+        ));
+    };
+    let Some((effectful_arm, _)) =
+        rest.split_once(&format!("WalletOperationClass::{EFFECTFUL_CLASS}"))
+    else {
+        return Err(format!(
+            "the fn class match holds no arm whose value is \
+             WalletOperationClass::{EFFECTFUL_CLASS}"
+        ));
+    };
+    let read = class_arm_variants(read_arm);
+    if read.is_empty() {
+        return Err(format!(
+            "the {READ_CLASS} arm of fn class names no {CLASS_ARM_VARIANT}<Kind> variant"
+        ));
+    }
+    let read: Vec<String> = read.iter().map(|kind| variant_snake_case(kind)).collect();
+    let effectful: Vec<String> = class_arm_variants(effectful_arm)
+        .iter()
+        .map(|kind| variant_snake_case(kind))
+        .collect();
+    if let Some(both) = effectful.iter().find(|kind| read.contains(kind)) {
+        return Err(format!("the kind {both} is named in both arms of fn class"));
+    }
+    let mut classes = HashMap::new();
+    for kind in declared {
+        let kind = variant_snake_case(&kind);
+        let class = if read.contains(&kind) {
+            WalletOperationClass::Read
+        } else {
+            WalletOperationClass::Effectful
+        };
+        classes.insert(kind, class);
+    }
+    Ok(classes)
+}
+
+/// Every problem with one table's Effect cells, each naming the document, the
+/// row and the cell.
+///
+/// A row whose Right is `NO_DECLARED_RIGHT` names no granted access, so its
+/// Effect cell names none of `CANONICAL_PARAMS` and quotes no allow form. A
+/// `storage` row's Effect cell names `STORAGE_ROOT`. A `wallet_contract <kind>`
+/// row follows the class the contract's `class()` gives that kind: a `Read`
+/// kind's cell names no `STORE_FILE_NAME`, and an `Effectful` kind's cell names
+/// `STORE_FILE_NAME` or `STORAGE_ROOT`. A `wallet_contract` row whose kind the
+/// contract does not declare is a refusal that names the kind.
+///
+/// Honesty limits: the rule reads declarations and cells as words, so it shows
+/// which words a cell uses, not that a handler writes only those. It reads the
+/// class `class()` declares, so a kind the match does not name reads as
+/// `Effectful` through the catch-all arm. did's table has no
+/// `wallet_contract` row, so the class half never runs there. The rule starts
+/// no process and makes no kernel call.
+fn effect_cell_problems(
+    document_name: &str,
+    rows: &[OperationsRow],
+    classes: &HashMap<String, WalletOperationClass>,
+) -> Vec<String> {
+    let contract_prefix = format!("{WALLET_CONTRACT_ARM} ");
+    let mut problems = Vec::new();
+    for row in rows {
+        if row.right == NO_DECLARED_RIGHT {
+            if let Some(param) = CANONICAL_PARAMS
+                .iter()
+                .find(|param| row.effect.contains(*param))
+            {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} is \
+                     {NO_DECLARED_RIGHT} and its Effect cell names {param}",
+                    row.operation
+                ));
+                continue;
+            }
+            if let Some(form) = backtick_spans(&row.effect)
+                .into_iter()
+                .find(|span| span.starts_with(ALLOW_QUOTE_PREFIX))
+            {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} is \
+                     {NO_DECLARED_RIGHT} and quotes the allow form `{form}` in its Effect cell",
+                    row.operation
+                ));
+                continue;
+            }
+        }
+        if declared_right_id(&row.right) == Some(STORAGE_RIGHT)
+            && !row.effect.contains(STORAGE_ROOT_PARAM)
+        {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names the Right {} \
+                 and its Effect cell names no {STORAGE_ROOT_PARAM}",
+                row.operation, row.right
+            ));
+            continue;
+        }
+        let Some(kind) = row.operation.strip_prefix(&contract_prefix) else {
+            continue;
+        };
+        let Some(class) = classes.get(kind) else {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names the kind \
+                 {kind}, which the contract does not declare",
+                row.operation
+            ));
+            continue;
+        };
+        let names_store = row.effect.contains(STORE_FILE_NAME);
+        let names_root = row.effect.contains(STORAGE_ROOT_PARAM);
+        match class {
+            WalletOperationClass::Read if names_store => problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names the kind \
+                 {kind}, which fn class gives {READ_CLASS}, and its Effect cell names \
+                 {STORE_FILE_NAME}",
+                row.operation
+            )),
+            WalletOperationClass::Effectful if !names_store && !names_root => {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names the kind \
+                     {kind}, which fn class gives {EFFECTFUL_CLASS}, and its Effect cell names \
+                     neither {STORE_FILE_NAME} nor {STORAGE_ROOT_PARAM}",
+                    row.operation
+                ))
+            }
+            _ => {}
+        }
+    }
+    problems
+}
+
 /// The prefix a macOS cell's allow quote starts with. The cell writes a rule in
 /// its spaced spelling, so `(allow(file-read*))` is prose and is not a quote.
 const ALLOW_QUOTE_PREFIX: &str = "(allow ";
@@ -15581,6 +15847,38 @@ fn macos_allow_quote_problems(
         .collect()
 }
 
+/// Every problem with every row's Effect cell, in row order.
+///
+/// The contract enum is opened only when a row names a contract kind, so did's
+/// table, which has none, reads no contract file. The class reader is the one
+/// `wallet_operation_classes` over the text `contract_enum_text` returns, and
+/// an unreadable file or unreadable arms is one refusal that names the reason.
+fn effect_cell_problems_rows(
+    document_name: &str,
+    rows: &[OperationsRow],
+    sources: &WireSources<'_>,
+) -> Vec<String> {
+    let contract_prefix = format!("{WALLET_CONTRACT_ARM} ");
+    if !rows
+        .iter()
+        .any(|row| row.operation.starts_with(&contract_prefix))
+    {
+        return effect_cell_problems(document_name, rows, &HashMap::new());
+    }
+    match contract_enum_text(sources) {
+        Ok((_, text)) => match wallet_operation_classes(&text) {
+            Ok(classes) => effect_cell_problems(document_name, rows, &classes),
+            Err(reason) => vec![format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} Effect cells cannot be \
+                 checked because {reason}"
+            )],
+        },
+        Err(reason) => vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} {reason}"
+        )],
+    }
+}
+
 /// Every problem with one operations table's rows, each naming the document,
 /// the row (or the arm) and the value.
 ///
@@ -15605,6 +15903,10 @@ fn macos_allow_quote_problems(
 /// `WalletProviderResponseV2`'s declared fields on a `wallet_contract` row.
 /// A declared-right row's macOS cell quotes at least one allow form of that
 /// right through `macos_allow_quote_problems`, and a `none:` row quotes none.
+/// A `NO_DECLARED_RIGHT` row's Effect cell names no canonical parameter and
+/// quotes no allow form, a `storage` row's Effect cell names `STORAGE_ROOT`,
+/// and a `wallet_contract <kind>` row's Effect cell follows the class the
+/// contract's `class()` gives that kind through `effect_cell_problems`.
 ///
 /// Honesty limits: rule 1 reads the dispatch arms as text, so it shows the row
 /// set matches the arms, not that every arm is reachable; rule 2 reads a
@@ -15613,7 +15915,9 @@ fn macos_allow_quote_problems(
 /// text, so it does not read a serialized value, a key a helper adds at run
 /// time, or a key inside a nested value; and the allow quote reads the rules a
 /// right owns, not the Effect cell's prose, so a right with two forms passes on
-/// either one.
+/// either one. The Effect rule reads the cells against the dispatch class the
+/// contract declares, and it does not show that a handler writes only what its
+/// cell names.
 fn operations_table_row_problems(
     document_name: &str,
     document: &str,
@@ -15692,6 +15996,7 @@ fn operations_table_row_problems(
                 };
                 problems.extend(inputs_cell_problems(document_name, &rows, &wire));
                 problems.extend(outputs_cell_problems_rows(document_name, &rows, &wire));
+                problems.extend(effect_cell_problems_rows(document_name, &rows, &wire));
             }
             Err(err) => problems.push(format!(
                 "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} Inputs cells cannot be \
@@ -17616,6 +17921,27 @@ fn dispatch_wallet_operation(&mut self, request: &WalletProviderRequestV2) -> Re
         WalletProviderOperationV2::ListAccounts { include_revoked } => self.accounts(*include_revoked),
     }
 }
+
+enum WalletProviderOperationV2 {
+    ListAccounts {
+        include_revoked: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalletOperationClass {
+    Read,
+    Effectful,
+}
+
+impl WalletProviderOperationV2 {
+    pub const fn class(&self) -> WalletOperationClass {
+        match self {
+            Self::ListAccounts { .. } => WalletOperationClass::Read,
+            _ => WalletOperationClass::Effectful,
+        }
+    }
+}
 ";
 
 /// The Outputs cell of one fixture operation's row.
@@ -17675,37 +18001,80 @@ fn fixture_row(
     inputs: &str,
     outputs: &str,
     right: &str,
+    effect: &str,
     macos: &str,
     linux: &str,
 ) -> String {
-    format!(
-        "| {operation} | {inputs} | {outputs} | {right} | answers in memory | {macos} | {linux} |\n"
+    format!("| {operation} | {inputs} | {outputs} | {right} | {effect} | {macos} | {linux} |\n")
+}
+
+/// The kinds the fixture contract's own `class()` gives `Read`. Every other
+/// kind that contract declares falls to its catch-all arm, so it is
+/// `Effectful`. This is fixture data that mirrors the fixture's `class()`.
+const FIXTURE_READ_KINDS: [&str; 1] = ["list_accounts"];
+
+/// Whether one fixture row writes under the storage root: `init`, and every
+/// `wallet_contract` kind `FIXTURE_READ_KINDS` does not name.
+fn fixture_writes_storage(operation: &str) -> bool {
+    if operation == "init" {
+        return true;
+    }
+    let prefix = format!("{WALLET_CONTRACT_ARM} ");
+    operation
+        .strip_prefix(&prefix)
+        .is_some_and(|kind| !FIXTURE_READ_KINDS.contains(&kind))
+}
+
+/// The Effect cell of one fixture row that writes under the storage root.
+fn fixture_storage_effect() -> String {
+    format!("writes `{STORE_FILE_NAME}` under `{STORAGE_ROOT_PARAM}`")
+}
+
+/// The macOS cell of one fixture row that holds the `storage` right: it quotes
+/// that right's own allow form and cites both sides.
+fn fixture_storage_macos() -> &'static str {
+    "The `storage` rule is `(allow file-read* file-write* (subpath (param \
+     \"STORAGE_ROOT\")))`. permitted: `tests/confine.rs::present_case` shows the write. \
+     nearest outside refused: `tests/confine.rs::present_case` shows the refusal."
+}
+
+/// One fixture operations row that holds the `storage` right.
+fn fixture_storage_row(operation: &str, inputs: &str, outputs: &str) -> String {
+    fixture_row(
+        operation,
+        inputs,
+        outputs,
+        "`storage`",
+        &fixture_storage_effect(),
+        fixture_storage_macos(),
+        LINUX_STATUS,
     )
 }
 
-/// One fixture operations row whose Inputs, Outputs, Right, macOS and Linux
-/// cells follow every rule.
+/// One fixture operations row that needs no declared right and answers from
+/// memory, which is every ordinary fixture row but `init` and every
+/// `FIXTURE_READ_KINDS` kind.
+fn fixture_none_row(operation: &str, inputs: &str, outputs: &str) -> String {
+    fixture_row(
+        operation,
+        inputs,
+        outputs,
+        NO_DECLARED_RIGHT,
+        "answers from the in-memory store",
+        "`tests/confine.rs::present_case` shows the answer.",
+        LINUX_STATUS,
+    )
+}
+
+/// One fixture operations row whose Inputs, Outputs, Right, Effect, macOS and
+/// Linux cells follow every rule.
 fn passing_fixture_row(operation: &str) -> String {
-    if operation == "init" {
-        fixture_row(
-            operation,
-            &fixture_inputs(operation),
-            &fixture_outputs(operation),
-            "`storage`",
-            "The `storage` rule is `(allow file-read* file-write* (subpath (param \
-             \"STORAGE_ROOT\")))`. permitted: `tests/confine.rs::present_case` shows the write. \
-             nearest outside refused: `tests/confine.rs::present_case` shows the refusal.",
-            LINUX_STATUS,
-        )
+    let inputs = fixture_inputs(operation);
+    let outputs = fixture_outputs(operation);
+    if fixture_writes_storage(operation) {
+        fixture_storage_row(operation, &inputs, &outputs)
     } else {
-        fixture_row(
-            operation,
-            &fixture_inputs(operation),
-            &fixture_outputs(operation),
-            NO_DECLARED_RIGHT,
-            "`tests/confine.rs::present_case` shows the answer.",
-            LINUX_STATUS,
-        )
+        fixture_none_row(operation, &inputs, &outputs)
     }
 }
 
@@ -17798,8 +18167,16 @@ const FIXTURE_OPERATIONS: [&str; 5] = [
 /// is not JSON, or holds no `authority.capabilities` entry, a capability with no
 /// `operations` list, a `operations` item that is not a string, an interface
 /// method with no `operation` string or no `id` string, and a method whose
-/// `operation` differs from its `id`. WP225 accepts a declared operation the/// provider does not answer, so the phantom case passes; WP226 reads a missing
-/// `operations` list as an empty list, so the missing-list case passes.
+/// `operation` differs from its `id`. WP225 accepts a declared operation the
+/// provider does not answer, so the phantom case passes; WP226 reads a missing
+/// `operations` list as an empty list, so the missing-list case passes. Rule 8
+/// refuses a `none:` row whose Effect cell names a canonical parameter or
+/// quotes an allow form, a `storage` row whose Effect cell names no
+/// `STORAGE_ROOT`, a `Read` kind that claims the store write, an `Effectful`
+/// kind that claims only in-memory work, and a `wallet_contract` row whose kind
+/// the contract does not declare. WP227 makes the `none:` check return early,
+/// WP228 treats every kind as `Effectful` and WP229 treats the catch-all arm as
+/// `Read`, so this test fails on those cases.
 #[test]
 fn operations_table_row_check_refuses_each_bad_table() {
     let provider = tempfile::tempdir().expect("temporary provider folder");
@@ -18137,19 +18514,24 @@ fn operations_table_row_check_refuses_each_bad_table() {
     );
 
     // Rule 1: both contract kinds retain their dispatch order and multiplicity.
-    let two_kind_source = ROW_FIXTURE_PROVIDER.replace(
-        "        WalletProviderOperationV2::ListAccounts",
-        "        WalletProviderOperationV2::GetDID {} => self.get_did(),\n\
-                WalletProviderOperationV2::ListAccounts",
-    ) + "
-enum WalletProviderOperationV2 {
-    GetDID {},
-    ListAccounts {
-        include_revoked: bool,
-    },
-}
-";
+    // A second kind also gives the fixture `class()` both of its arms: the
+    // `Read` arm names `ListAccounts` and the catch-all arm carries `GetDID`.
+    let two_kind_source = ROW_FIXTURE_PROVIDER
+        .replace(
+            "        WalletProviderOperationV2::ListAccounts",
+            "        WalletProviderOperationV2::GetDID {} => self.get_did(),\n\
+                    WalletProviderOperationV2::ListAccounts",
+        )
+        .replace(
+            "enum WalletProviderOperationV2 {\n    ListAccounts {\n        include_revoked: bool,\n    },\n}",
+            "enum WalletProviderOperationV2 {\n    GetDID {},\n    ListAccounts {\n        \
+             include_revoked: bool,\n    },\n}",
+        );
     assert_ne!(two_kind_source, ROW_FIXTURE_PROVIDER);
+    assert!(
+        two_kind_source.contains("GetDID {},"),
+        "the two-kind source must declare the second kind"
+    );
     fs::write(&provider_source, &two_kind_source).expect("two-kind fixture provider source");
     let two_kind_operations = [
         "init",
@@ -18247,10 +18629,78 @@ enum WalletProviderOperationV2 {
                  wallet_contract get_did has no arm in {}",
                 provider_source.display()
             ),
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row wallet_contract \
+                 get_did names the kind get_did, which the contract does not declare"
+            ),
         ],
         "an acronym row must name the operation as serde does"
     );
     fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
+    // Rule 8: the `Effectful` kind that claims only in-memory work follows the
+    // fixture `class()` catch-all arm. The two-kind source declares `GetDID`
+    // there, so its row must name the store it writes.
+    {
+        fs::write(&provider_source, &two_kind_source).expect("two-kind fixture provider source");
+        let operation = "wallet_contract get_d_i_d";
+        let document = fixture_row_document(&two_kind_operations).replacen(
+            &passing_fixture_row(operation),
+            &fixture_none_row(
+                operation,
+                &fixture_inputs(operation),
+                &fixture_outputs(operation),
+            ),
+            1,
+        );
+        assert_ne!(
+            document,
+            fixture_row_document(&two_kind_operations),
+            "the Effectful kind's Effect cell must change"
+        );
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row wallet_contract \
+                 get_d_i_d names the kind get_d_i_d, which fn class gives {EFFECTFUL_CLASS}, and \
+                 its Effect cell names neither {STORE_FILE_NAME} nor {STORAGE_ROOT_PARAM}"
+            )],
+            "an Effectful kind that claims only in-memory work must be refused"
+        );
+        fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+    }
+
+    // Rule 8: a `wallet_contract` row whose kind the contract does not declare
+    // is refused by name. The fixture enum renames its one kind while the
+    // dispatch still answers `ListAccounts`, so the class reader has no class
+    // for that kind and names it. The Inputs rule keeps its own reason beside
+    // it, because that declaration no longer holds the arm either.
+    {
+        let undeclared = ROW_FIXTURE_PROVIDER.replace(
+            "enum WalletProviderOperationV2 {\n    ListAccounts {\n        include_revoked: bool,\n    },\n}",
+            "enum WalletProviderOperationV2 {\n    ListApprovals {\n        include_resolved: bool,\n    },\n}",
+        );
+        assert_ne!(undeclared, ROW_FIXTURE_PROVIDER);
+        fs::write(&provider_source, &undeclared).expect("undeclared kind fixture source");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &passing, provider.path()),
+            vec![
+                format!(
+                    "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row wallet_contract \
+                     list_accounts holds the Inputs cell {}, and {} declares no ListAccounts arm",
+                    fixture_inputs("wallet_contract list_accounts"),
+                    provider_source.display()
+                ),
+                format!(
+                    "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row wallet_contract \
+                     list_accounts names the kind list_accounts, which the contract does not \
+                     declare"
+                ),
+            ],
+            "a row naming a kind the contract does not declare must be refused by name"
+        );
+        fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+    }
 
     // Rule 2: a Right cell with an undeclared id, and one naming no test.
     for (case, right) in [
@@ -18732,6 +19182,7 @@ enum WalletProviderOperationV2 {
             cell,
             &fixture_outputs(operation),
             NO_DECLARED_RIGHT,
+            "answers from the in-memory store",
             "`tests/confine.rs::present_case` shows the answer.",
             LINUX_STATUS,
         );
@@ -18777,11 +19228,11 @@ enum WalletProviderOperationV2 {
     );
     fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
 
-    // Rule 5: a `wallet_contract` row is read. The fixture dispatch does not
-    // declare the operation enum, so this cell is checked against the contract
-    // file. A cell that is not that shape is one problem naming the source.
-    let contract_path = wallet_operation_contract_path();
-    let contract_label = inputs_source_label(provider_source.as_path(), &contract_path);
+    // Rule 5: a `wallet_contract` row is read. The fixture dispatch declares
+    // the operation enum beside the fixture `class()`, so this cell is checked
+    // against that declaration, through the one `contract_enum_text` reader. A
+    // cell that is not that shape is one problem naming the source.
+    let contract_label = provider_source.display().to_string();
     let listed = fixture_inputs("wallet_contract list_accounts");
     let garbage = passing.replacen(
         &format!("| wallet_contract list_accounts | {listed} |"),
@@ -18807,7 +19258,7 @@ enum WalletProviderOperationV2 {
         WalletProviderOperationV2::Empty {} => self.empty(),\n        \
         WalletProviderOperationV2::NamedNone { field } => self.named(field),\n        \
         WalletProviderOperationV2::Pair { beta, alpha } => self.pair(beta, alpha),\n";
-    let contract_enum = "
+    let contract_enum = "\
 enum WalletProviderOperationV2 {
     Empty {},
     NamedNone {
@@ -18820,11 +19271,24 @@ enum WalletProviderOperationV2 {
     },
 }
 ";
-    let contract_source = ROW_FIXTURE_PROVIDER.replace(
-        "        WalletProviderOperationV2::ListAccounts { include_revoked } => self.accounts(*include_revoked),\n",
-        contract_dispatch,
-    ) + contract_enum;
+    let contract_source = ROW_FIXTURE_PROVIDER
+        .replace(
+            "        WalletProviderOperationV2::ListAccounts { include_revoked } => self.accounts(*include_revoked),\n",
+            contract_dispatch,
+        )
+        .replace(
+            "enum WalletProviderOperationV2 {\n    ListAccounts {\n        include_revoked: bool,\n    },\n}",
+            contract_enum.trim_end(),
+        )
+        .replace(
+            "Self::ListAccounts { .. } => WalletOperationClass::Read",
+            "Self::Empty { .. } => WalletOperationClass::Read",
+        );
     assert_ne!(contract_source, ROW_FIXTURE_PROVIDER);
+    assert!(
+        contract_source.contains("    Empty {},"),
+        "the fixture contract source must declare its own kinds"
+    );
     fs::write(&provider_source, &contract_source).expect("fixture contract source");
     write_capsule_manifest_declaring(
         provider.path(),
@@ -18841,19 +19305,22 @@ enum WalletProviderOperationV2 {
     let contract_cell = |kind: &str, params: &str| {
         format!("`op`, `request` (`kind: {kind}`, `params` ({params})), `_runtime_invocation`")
     };
+    // The fixture `class()` names `Empty` in its `Read` arm and lets the
+    // catch-all arm carry `NamedNone` and `Pair`, so the fixture table
+    // exercises both arms: the `Read` kind answers from memory under no right,
+    // and each `Effectful` kind holds `storage` and names the store it writes.
+    let contract_none_cell = contract_cell("empty", "none");
     let mut contract_document = fixture_row_document(&["init", "status", "echo", "shutdown"]);
-    for (kind, params) in [
-        ("empty", "none"),
-        ("named_none", "`none`"),
-        ("pair", "`beta`, `alpha`"),
-    ] {
-        contract_document.push_str(&fixture_row(
+    contract_document.push_str(&fixture_none_row(
+        "wallet_contract empty",
+        &contract_none_cell,
+        &fixture_outputs("wallet_contract empty"),
+    ));
+    for (kind, params) in [("named_none", "`none`"), ("pair", "`beta`, `alpha`")] {
+        contract_document.push_str(&fixture_storage_row(
             &format!("wallet_contract {kind}"),
             &contract_cell(kind, params),
             &fixture_outputs(&format!("wallet_contract {kind}")),
-            NO_DECLARED_RIGHT,
-            "`tests/confine.rs::present_case` shows the answer.",
-            LINUX_STATUS,
         ));
     }
     assert_eq!(
@@ -19186,6 +19653,84 @@ enum WalletProviderOperationV2 {
         )],
         "a wallet_contract field the struct does not declare must be refused"
     );
+
+    // Rule 8: the Effect cell follows the right and the dispatch class. One
+    // case per refusal: a `none:` row that names a canonical parameter, a
+    // `none:` row that quotes an allow form, a `storage` row that names no
+    // root, a `Read` kind that claims the store write, and an `Effectful` kind
+    // that claims only in-memory work.
+    let effect_cases: Vec<(&str, String, String)> = vec![
+        (
+            "a none: row that names the storage root",
+            passing.replacen(
+                "| answers from the in-memory store |",
+                &format!("| answers from memory under `{STORAGE_ROOT_PARAM}` |"),
+                1,
+            ),
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status is \
+                 {NO_DECLARED_RIGHT} and its Effect cell names {STORAGE_ROOT_PARAM}"
+            ),
+        ),
+        (
+            "a none: row that quotes an allow form",
+            passing.replacen(
+                "| answers from the in-memory store |",
+                &format!("| answers in memory, `{}` |", STARTUP_RULES[1]),
+                1,
+            ),
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status is \
+                 {NO_DECLARED_RIGHT} and quotes the allow form `{}` in its Effect cell",
+                STARTUP_RULES[1]
+            ),
+        ),
+        (
+            "a storage row that names no storage root",
+            passing.replacen(&fixture_storage_effect(), "writes its key file", 1),
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init names the Right \
+                 `storage` and its Effect cell names no {STORAGE_ROOT_PARAM}"
+            ),
+        ),
+    ];
+    for (case, document, reason) in effect_cases {
+        assert_ne!(document, passing, "{case} must change the fixture");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![reason],
+            "{case} must be refused as one problem"
+        );
+    }
+
+    // Rule 8: the `Read` kind that claims the store write, and the `Effectful`
+    // kind that claims only in-memory work, both follow the fixture `class()`.
+    {
+        let operation = "wallet_contract list_accounts";
+        let document = passing.replacen(
+            &passing_fixture_row(operation),
+            &fixture_row(
+                operation,
+                &fixture_inputs(operation),
+                &fixture_outputs(operation),
+                NO_DECLARED_RIGHT,
+                &format!("writes `{STORE_FILE_NAME}`"),
+                "`tests/confine.rs::present_case` shows the answer.",
+                LINUX_STATUS,
+            ),
+            1,
+        );
+        assert_ne!(document, passing, "the Read kind's Effect cell must change");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {operation} names the \
+                 kind list_accounts, which fn class gives {READ_CLASS}, and its Effect cell names \
+                 {STORE_FILE_NAME}"
+            )],
+            "the Read kind that claims the store write must be refused"
+        );
+    }
 
     // Rule 4: a Linux cell that is not `designed, not enforced`, one per row.
     let enforced = passing.replace(LINUX_STATUS, "enforced by Landlock");

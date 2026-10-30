@@ -130,7 +130,15 @@ order. `operations_table_row_check_refuses_each_bad_table`, in
 key out, adds one, or writes another error name. The check also reads a
 declared-right row's macOS cell for an allow form of that right, and a
 `none: needs no declared right` row quotes none, so
-`operations_table_row_check_refuses_each_bad_table` refuses a bad quote. A
+`operations_table_row_check_refuses_each_bad_table` refuses a bad quote. The same
+check holds each row's Effect cell against the right the row declares and the
+dispatch class the contract's `class()` gives its kind: a
+`none: needs no declared right` row names no canonical parameter and quotes no
+allow form, and a `storage` row names `STORAGE_ROOT`. This table has no
+`wallet_contract` row, so the class half of that rule has nothing to read here.
+The rule reads the cells against that declared class; it does not show that a
+handler writes only what its cell names.
+`operations_table_row_check_refuses_each_bad_table` refuses a bad Effect cell. A
 refusal under `(deny default)` is a denial, not a grant, and no row writes it
 as a right. The
 startup grants stay in "What the profile allows". A `storage` row cites both

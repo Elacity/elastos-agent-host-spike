@@ -288,8 +288,14 @@ use std::process::Command;
 /// `socket_sweep_reports_every_family_and_type_refused`. Task 162 adds WP225,
 /// which accepts a declared operation the provider does not answer, and WP226,
 /// which reads a missing `operations` list as an empty list. Both are CAUGHT on
-/// the Mac by `operations_table_row_check_refuses_each_bad_table`.
-const EXPECTED_FALSIFIERS: usize = 206;
+/// the Mac by `operations_table_row_check_refuses_each_bad_table`. Task 163 adds
+/// WP227, which makes the `none:` row's Effect check return early so a row with
+/// no right passes while naming `STORAGE_ROOT`; WP228, which treats every kind
+/// as `Effectful` so the `Read` kind that claims the store write passes; and
+/// WP229, which treats the contract's catch-all arm as `Read` so the
+/// `Effectful` kind that claims only in-memory work passes. All three are
+/// CAUGHT on the Mac by `operations_table_row_check_refuses_each_bad_table`.
+const EXPECTED_FALSIFIERS: usize = 209;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
