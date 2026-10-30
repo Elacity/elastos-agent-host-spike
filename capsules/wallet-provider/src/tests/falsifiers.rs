@@ -236,8 +236,38 @@ use std::process::Command;
 /// in the `Request::Shutdown` arm of `fn handle` before it answers
 /// `Response::empty_ok()`, so the final wallet directory compare in
 /// `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged`
-/// fails because it finds a name the setup did not leave.
-const EXPECTED_FALSIFIERS: usize = 143;
+/// fails because it finds a name the setup did not leave. Task 148 adds WP162 to
+/// WP165, all CAUGHT on the Mac: the off-Linux journey label, the record
+/// reader's length case and unknown-step case, and the launcher's list-provider
+/// check. Its two Linux-only plants are named in `CONFINEMENT-LINUX.md` and are
+/// not registered here, because a Linux-only test cannot produce a CAUGHT line
+/// on the Mac. Task 149 adds WP178, CAUGHT on the Mac: the one file-to-list
+/// helper ignoring its provider and reading wallet's declared-rights file, which
+/// `seccomp_allow_list_names_the_provider_it_was_built_for` catches. Its two
+/// Linux-only plants are the same two 148 registered for the wallet journey, on
+/// the did caller, and are named in `CONFINEMENT-LINUX.md` too. Task 150 adds
+/// WP179, which publishes the wallet directory's parent entry at the
+/// `src/main.rs` call after `create_wallet_dir_durable` answers, and WP180,
+/// which canonicalizes the wallet directory there so a symlinked parent passes
+/// the inspection; both are CAUGHT on the Mac by the two storage-root tests
+/// task 150 adds. Task 151 adds WP181, which makes the one field reader honour
+/// no `serde` attribute, and WP182, which makes the Inputs compare tolerate a
+/// cell that stops before a declared field; both are CAUGHT on the Mac by
+/// `operations_table_row_check_refuses_each_bad_table`.
+/// WP183 through WP197 exercise character and raw-identifier boundaries,
+/// quoting, order, malformed cells, and source or arm refusals in that test.
+/// WP198 removes the field-list reader's balance refusal, so a shift expression
+/// hides the field after it and the same test fails on its shift case. Task 152
+/// adds WP202, which grants the parent Landlock row a file read; WP203, which
+/// drops the default-denial ABI check; WP204, which keeps only the read rights
+/// in the handled mask; and WP210, which runs the final Landlock call before
+/// `PR_SET_NO_NEW_PRIVS`. All four are CAUGHT on the Mac. Task 153 adds WP211,
+/// which reads a Landlock launch step as an installed record; WP212, which
+/// adds a loader rule without `READ_FILE`; and WP213, which labels the file
+/// row as a Linux host off Linux. All three are CAUGHT on the Mac. Its two
+/// Linux-only plants are named in `CONFINEMENT-LINUX.md` and are not registered
+/// here.
+const EXPECTED_FALSIFIERS: usize = 193;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
