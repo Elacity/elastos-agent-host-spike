@@ -67,18 +67,37 @@ refused with `grant is not live: Expired`, while the request record stays
 `granted`. A step already spent stays refused with `grant is not live:
 Exhausted`, because the life check runs before the expiry check.
 
-`preview`, `plan_sha256`, `approve`, `execute`, `deny_shown_plan`,
-`age_shown_plan` and `stop_shown_session` are unchanged by this slice. This
-crate calls `agent_conformance::standin_runtime` and does not copy it. There is
-one stand-in and one hasher. The stand-in keeps one admitted row per lab CID, so
+The Delegation section gives the session scope:
+
+> Allow for this session authorizes a bounded operation set until the session
+> ends or the grant is revoked.
+
+`approve` is the one grant call, and it sends the duration word it is given as
+the route's `duration` key without judging it. A session shown step is a live
+grant that lasts until that session stops: it stays on the live list after two
+uses of its plan and after the stand-in's once lifetime, because the stand-in
+stores no expiry for it. A different plan is refused with `grant is not bound
+to this plan` and the grant stays live. Another duration word reaches the
+stand-in's own refusal, `Invalid duration: <word>. Expected 'once' or
+'session'`, and the request stays pending. Stopping that session revokes the
+grant, so `execute` returns `grant is not live: Revoked` and the request record
+stays `granted`. This crate stores no lifetime and does not copy the expiry
+rule; the stand-in owns it.
+
+`preview`, `plan_sha256`, `execute`, `deny_shown_plan`, `age_shown_plan` and
+`stop_shown_session` are unchanged by this slice; `approve` gains the duration
+argument and remains the only grant call. This crate calls
+`agent_conformance::standin_runtime` and does not copy it. There is one
+stand-in and one hasher. The stand-in keeps one admitted row per lab CID, so
 the one launch journey admits a distinct fixture CID for each session after
 the first; it adds no second launch path. The June planner path is an open
 question with Sash via Flint; this crate names no planner and guesses no path.
 
 A passing run gives the Runtime no A15 credit. The expiry of an allow-once grant
-is half of M1 check A15; approval binding (step 8, where an allow-once decision
-authorises one exact operation, and principle 16, "A visible approval card is
-not the grant authority") is a later slice; RA-4 and RA-5 stay open.
+and the lifetime of a session grant are the two halves of M1 check A15;
+approval binding (step 8, where an allow-once decision authorises one exact
+operation, and principle 16, "A visible approval card is not the grant
+authority") is a later slice; RA-4 and RA-5 stay open.
 
 ## Layout
 
@@ -86,13 +105,14 @@ not the grant authority") is a later slice; RA-4 and RA-5 stay open.
   `age_shown_plan`, `deny_shown_plan`, `stop_shown_session`, `execute`,
   `preview_makes_no_effect`, `plan_sha256_hashes_the_exact_bytes`,
   `deny_one_shown_step`, `unanswered_shown_step_expires`,
-  `stop_settles_that_sessions_shown_steps`, `shown_allow_once_expires` and the
-  bound-plan journey.
+  `stop_settles_that_sessions_shown_steps`, `shown_allow_once_expires`,
+  `shown_session_lasts_until_stop` and the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_session_lasts_until_stop -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_allow_once_expires -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib stop_settles_that_sessions_shown_steps -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib unanswered_shown_step_expires -- --exact

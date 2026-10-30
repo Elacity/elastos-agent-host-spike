@@ -41,6 +41,11 @@ pub fn plan_sha256(plan: &[u8]) -> String {
 
 /// The owner approves one pending request through `POST /api/capability/grant`.
 ///
+/// `duration` is the word the owner chose, `once` or `session`; this helper
+/// sends it as the route's `duration` key and does not judge it, so another
+/// word reaches the stand-in's own refusal. A `session` grant lasts until that
+/// session stops.
+///
 /// `plan_sha256` is the plan hash the owner saw with the request, the value the
 /// shell's request view shows in `plan`. The grant route mints the binding from
 /// that hash only when it equals the hash the agent requested; a missing or
@@ -48,13 +53,14 @@ pub fn plan_sha256(plan: &[u8]) -> String {
 pub fn approve(
     stand_in: &mut StandIn,
     request_id: &str,
+    duration: &str,
     plan_sha256: &str,
 ) -> Result<Value, (u16, String)> {
     stand_in.post_capability_grant(
         Caller::Shell,
         &json!({
             "request_id": request_id,
-            "duration": "once",
+            "duration": duration,
             "rationale": "owner approved",
             "plan_sha256": plan_sha256,
         }),
@@ -417,12 +423,12 @@ fn a_grant_bound_to_one_plan_is_refused_for_another_plan() {
     let owner_sees_a = plan_sha256(PLAN_A);
     let owner_sees_b = plan_sha256(PLAN_B);
     assert_eq!(
-        approve(&mut stand_in, &request_a, &owner_sees_a),
+        approve(&mut stand_in, &request_a, "once", &owner_sees_a),
         Ok(json!({ "success": true })),
         "the owner approves plan A"
     );
     assert_eq!(
-        approve(&mut stand_in, &request_b, &owner_sees_b),
+        approve(&mut stand_in, &request_b, "once", &owner_sees_b),
         Ok(json!({ "success": true })),
         "the owner approves plan B"
     );
@@ -772,7 +778,7 @@ fn unanswered_shown_step_expires() {
     );
 
     assert_eq!(
-        approve(&mut stand_in, &allowed, &plan_b),
+        approve(&mut stand_in, &allowed, "once", &plan_b),
         Ok(json!({ "success": true })),
         "the owner allows the second shown step once"
     );
@@ -872,7 +878,7 @@ fn unanswered_shown_step_expires() {
 
     // An expired shown step is not a live grant and cannot be granted later.
     assert_eq!(
-        approve(&mut stand_in, &unanswered, &plan_a),
+        approve(&mut stand_in, &unanswered, "once", &plan_a),
         Err((400, "request is not pending: request-1".to_owned())),
         "an expired shown step cannot be granted later"
     );
@@ -1004,7 +1010,7 @@ fn stop_settles_that_sessions_shown_steps() {
 
     // The owner allows the second step once, with the hash it saw.
     assert_eq!(
-        approve(&mut stand_in, &allowed_step, &plan_b),
+        approve(&mut stand_in, &allowed_step, "once", &plan_b),
         Ok(json!({ "success": true })),
         "the owner allows the second shown step once"
     );
@@ -1110,7 +1116,7 @@ fn stop_settles_that_sessions_shown_steps() {
 
     // The other session's pending step is the next live grant.
     assert_eq!(
-        approve(&mut stand_in, &other_step, &plan_a),
+        approve(&mut stand_in, &other_step, "once", &plan_a),
         Ok(json!({ "success": true })),
         "the other session's pending step can still be allowed once"
     );
@@ -1214,12 +1220,12 @@ fn shown_allow_once_expires() {
 
     // The owner allows each shown step once, through the one grant call.
     assert_eq!(
-        approve(&mut stand_in, &spent_step, &plan_a),
+        approve(&mut stand_in, &spent_step, "once", &plan_a),
         Ok(json!({ "success": true })),
         "the owner allows the first shown step once"
     );
     assert_eq!(
-        approve(&mut stand_in, &unspent_step, &plan_b),
+        approve(&mut stand_in, &unspent_step, "once", &plan_b),
         Ok(json!({ "success": true })),
         "the owner allows the second shown step once"
     );
@@ -1369,5 +1375,298 @@ fn shown_allow_once_expires() {
         live(&stand_in),
         Vec::<Value>::new(),
         "the spent step stays exhausted and adds no live grant"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn shown_session_lasts_until_stop() {
+    use agent_conformance::standin_runtime::Caller;
+    use fixtures::{PLAN_A, PLAN_B};
+    use journeys::{request, running_agent};
+    use serde_json::{json, Value};
+
+    let live = |stand_in: &StandIn| -> Vec<Value> {
+        stand_in
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
+            .expect("shell live list")["capabilities"]
+            .as_array()
+            .cloned()
+            .expect("the shell live list holds a capabilities array")
+    };
+
+    let shown = |stand_in: &StandIn, session: &str| -> Vec<Value> {
+        stand_in
+            .get_capability_requests(Caller::Shell, Some(session))
+            .expect("the shell reads the session's requests")["requests"]
+            .as_array()
+            .cloned()
+            .expect("the shell request view holds a requests array")
+    };
+
+    let record = |stand_in: &StandIn, session: &str, request_id: &str| -> Value {
+        shown(stand_in, session)
+            .into_iter()
+            .find(|entry| entry["request_id"] == request_id)
+            .expect("the session's request view holds that id")
+    };
+
+    let mut stand_in = StandIn::new();
+    let session = running_agent(&mut stand_in);
+    assert_eq!(
+        session, "component-1",
+        "the fresh stand-in names the one session component-1"
+    );
+
+    let session_step = request(&mut stand_in, &session, PLAN_A);
+    let once_step = request(&mut stand_in, &session, PLAN_B);
+    let refused_word = request(&mut stand_in, &session, PLAN_A);
+    assert_eq!(
+        session_step, "request-1",
+        "the agent's first shown step is the stand-in's first request"
+    );
+    assert_eq!(
+        once_step, "request-2",
+        "the agent's second shown step is the stand-in's second request"
+    );
+    assert_eq!(
+        refused_word, "request-3",
+        "the agent's third shown step is the stand-in's third request"
+    );
+
+    let plan_a = plan_sha256(PLAN_A);
+    let plan_b = plan_sha256(PLAN_B);
+
+    // Another duration word reaches the stand-in's own refusal and mints
+    // nothing, so that shown step stays pending with its plan hash.
+    assert_eq!(
+        approve(&mut stand_in, &refused_word, "standing", &plan_a),
+        Err((
+            400,
+            "Invalid duration: standing. Expected 'once' or 'session'".to_owned()
+        )),
+        "a shown step allowed for standing is refused with the stand-in's invalid-duration reason"
+    );
+    assert_eq!(
+        record(&stand_in, &session, &refused_word),
+        json!({
+            "request_id": "request-3",
+            "session_id": "component-1",
+            "resource": "localhost://Public/plan-approval/a.txt",
+            "action": "read",
+            "reason": "",
+            "status": "pending",
+            "decision_reason": "",
+            "settled_by": null,
+            "plan": plan_a,
+        }),
+        "the refused duration word leaves that shown step pending with the plan hash it posted"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "the refused duration word mints no live grant"
+    );
+
+    // The owner allows the first shown step for this session and the second
+    // once, through the one grant call, naming the hashes they saw.
+    assert_eq!(
+        approve(&mut stand_in, &session_step, "session", &plan_a),
+        Ok(json!({ "success": true })),
+        "the owner allows the first shown step for this session"
+    );
+    assert_eq!(
+        approve(&mut stand_in, &once_step, "once", &plan_b),
+        Ok(json!({ "success": true })),
+        "the owner allows the second shown step once"
+    );
+
+    let granted_session = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "granted",
+        "decision_reason": "owner approved",
+        "settled_by": "shell",
+        "plan": plan_a,
+    });
+    let granted_once = json!({
+        "request_id": "request-2",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "granted",
+        "decision_reason": "owner approved",
+        "settled_by": "shell",
+        "plan": plan_b,
+    });
+    assert_eq!(
+        record(&stand_in, &session, &session_step),
+        granted_session,
+        "the session step is granted under the shell with the hash of plan A"
+    );
+    assert_eq!(
+        record(&stand_in, &session, &once_step),
+        granted_once,
+        "the allow-once step is granted under the shell with the hash of plan B"
+    );
+
+    let session_live = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "duration": "session",
+        "granted_at": 0,
+    });
+    let once_live = json!({
+        "request_id": "request-2",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "duration": "once",
+        "granted_at": 0,
+    });
+    let both_live = vec![session_live.clone(), once_live.clone()];
+    assert_eq!(
+        live(&stand_in),
+        both_live,
+        "the session step and the allow-once step are the two live grants, request-1 then request-2"
+    );
+
+    // Find the stand-in's own once lifetime. The test names no instant: it
+    // ages the stand-in through `age_shown_plan` and remembers only the last
+    // instant it saw the allow-once witness live.
+    let mut last_live = 0;
+    let mut probe = 1;
+    for _ in 0..24 {
+        age_shown_plan(&mut stand_in, probe);
+        if !live(&stand_in)
+            .iter()
+            .any(|entry| entry["request_id"] == "request-2")
+        {
+            break;
+        }
+        last_live = probe;
+        probe = probe.saturating_mul(2);
+    }
+    assert!(
+        !live(&stand_in)
+            .iter()
+            .any(|entry| entry["request_id"] == "request-2"),
+        "the once witness left the live list"
+    );
+
+    let mut due = last_live + 1;
+    while due <= probe {
+        age_shown_plan(&mut stand_in, due);
+        if !live(&stand_in)
+            .iter()
+            .any(|entry| entry["request_id"] == "request-2")
+        {
+            break;
+        }
+        due += 1;
+    }
+    assert!(
+        due <= probe,
+        "the walk from the last live instant reaches the absent instant"
+    );
+
+    // One second before the stand-in's once lifetime the allow-once witness
+    // is live again, and the session grant was never due.
+    age_shown_plan(&mut stand_in, due - 1);
+    assert_eq!(
+        live(&stand_in),
+        both_live,
+        "one second before the stand-in's once lifetime both grants are live with their own durations"
+    );
+
+    age_shown_plan(&mut stand_in, due);
+    assert_eq!(
+        live(&stand_in),
+        vec![session_live.clone()],
+        "the allow-once step leaves the live list and the session step stays live with duration session"
+    );
+    assert_eq!(
+        record(&stand_in, &session, &session_step),
+        granted_session,
+        "the session step stays granted with the hash of plan A after the once lifetime"
+    );
+    assert_eq!(
+        record(&stand_in, &session, &once_step),
+        granted_once,
+        "the allow-once step stays granted with the hash of plan B after its own lifetime"
+    );
+
+    // A session grant authorises its bound plan again and again, and a
+    // different plan is refused without spending it.
+    assert_eq!(
+        execute(&mut stand_in, &session, &session_step, PLAN_A),
+        Ok(json!({ "valid": true })),
+        "the session grant authorises its bound plan"
+    );
+    assert_eq!(
+        live(&stand_in),
+        vec![session_live.clone()],
+        "the used session grant stays on the live list"
+    );
+    assert_eq!(
+        execute(&mut stand_in, &session, &session_step, PLAN_A),
+        Ok(json!({ "valid": true })),
+        "the session grant authorises its bound plan a second time"
+    );
+    assert_eq!(
+        live(&stand_in),
+        vec![session_live.clone()],
+        "two uses of its plan leave the session grant live"
+    );
+    assert_eq!(
+        execute(&mut stand_in, &session, &session_step, PLAN_B),
+        Err((403, "grant is not bound to this plan".to_owned())),
+        "a different plan is refused with grant is not bound to this plan"
+    );
+    assert_eq!(
+        live(&stand_in),
+        vec![session_live.clone()],
+        "the refused different plan leaves the session grant live"
+    );
+
+    // The stop revokes that session's live grant; the record stays granted.
+    assert_eq!(
+        stop_shown_session(&mut stand_in, "component-1"),
+        Ok(Value::Null),
+        "the stop of that session reports its settlement"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "a session grant lasts until that session stops"
+    );
+    let stopped = record(&stand_in, &session, &session_step);
+    assert_eq!(
+        stopped["status"], "granted",
+        "the stopped session's grant record stays granted"
+    );
+    assert_eq!(
+        stopped["settled_by"], "shell",
+        "the stopped session's grant record keeps the shell as settler"
+    );
+    assert_eq!(
+        stopped["decision_reason"], "owner approved",
+        "the stopped session's grant record keeps the owner's decision reason"
+    );
+    assert_eq!(
+        execute(&mut stand_in, &session, &session_step, PLAN_A),
+        Err((400, "grant is not live: Revoked".to_owned())),
+        "the stopped session's grant is revoked, so its use is refused as Revoked"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "the refused use of the revoked grant mints nothing"
     );
 }
