@@ -35,7 +35,9 @@ is the only writer for that file.
 An immediate ``timeout_hold`` after ``SettleOutcome::Unknown`` is refused.
 No ledger call sits between that settle and the timeout. An ``Ok`` from the
 live call is ``findings/grant-binding-003.md``. That writer reads the live
-ledger file. It is not ``record_escaped_link``.
+ledger file. It is not ``record_escaped_link``. The rendered call, match
+arm, Ok panic and observed line follow the one live ``timeout_hold``
+parameter list, read once at import.
 """
 
 from __future__ import annotations
@@ -72,10 +74,15 @@ LINK_NAME = "redteam_manifest_is_not_a_grant_link"
 TIMEOUT_NAME = "test_immediate_timeout_after_unknown_is_refused"
 TIMEOUT_FINDING = REPO / "lab" / "redteam" / "findings" / "grant-binding-003.md"
 TIMEOUT_LEDGER = "lab/grant-binding/src/ledger.rs"
-TIMEOUT_OK_PANIC = "immediate timeout returned Ok"
 TIMEOUT_FREED_PANIC = "immediate timeout freed the hold"
-TIMEOUT_OK_OBSERVED = "timeout_hold returned Ok"
 TIMEOUT_FREED_OBSERVED = "timeout_hold freed the hold"
+TIMEOUT_MISSING = "timeout_hold is missing from the live ledger"
+TIMEOUT_SIGNATURE = (
+    "timeout_hold signature is not the three-argument or four-argument form"
+)
+TIMEOUT_CALL_MARKER = "@@TIMEOUT_CALL@@"
+TIMEOUT_MATCH_MARKER = "@@TIMEOUT_MATCH@@"
+TIMEOUT_PANIC_MARKER = "@@TIMEOUT_PANIC@@"
 PROBE_NAMES = (SESSION_NAME, SIBLING_NAME, CLEAN_NAME, PATH_NAME, IDENTITY_NAME)
 STALE_NAMES = (SESSION_NAME, SIBLING_NAME)
 REPO_MARKER = "@@REDTEAM_REPO@@"
@@ -146,7 +153,7 @@ DOUBLE_NEW = (
 COMPILE_OLD = "        Call { instance }\n"
 COMPILE_NEW = "        let _: u32 = \"compile error\";\n        Call { instance }\n"
 
-REPLAY_RS = r"""//! Stale-call probe. Public API only. The crate's ledger stays private.
+REPLAY_TEMPLATE = r"""//! Stale-call probe. Public API only. The crate's ledger stays private.
 
 use grant_binding::ledger::{ReserveRefuse, SettleOutcome, SettleRefuse};
 use grant_binding::{GuestRequest, Handle, Refuse, Rights, Verifier};
@@ -380,8 +387,8 @@ fn test_immediate_timeout_after_unknown_is_refused() {
         .expect_err("unknown outcome");
     assert_eq!(unknown, SettleRefuse::UnknownOutcome);
     assert_eq!(unknown.to_string(), "unknown outcome keeps the hold");
-    match verifier.timeout_hold(&call, &request, reservation) {
-        Ok(()) => panic!("immediate timeout returned Ok"),
+    match @@TIMEOUT_CALL@@ {
+        @@TIMEOUT_MATCH@@ => panic!("@@TIMEOUT_PANIC@@"),
         Err(refusal) => assert!(!refusal.to_string().is_empty()),
     }
     match verifier.reserve(&call, &request, 1) {
@@ -551,6 +558,100 @@ def timeout_pin_line():
     return f"grant-binding-003 {TIMEOUT_LEDGER} {commit} sha256 {digest}"
 
 
+class TimeoutShape:
+    """The one live ``timeout_hold`` call shape.
+
+    One parameter list decides the call, the match arm, the Ok panic and the
+    observed line together, so no second place repeats that rule.
+    """
+
+    def __init__(self, uses_now):
+        self.uses_now = uses_now
+        if uses_now:
+            self.call = "verifier.timeout_hold(&call, &request, reservation, 0)"
+            self.match = "Ok(_)"
+            self.panic = (
+                "immediate timeout returned Ok because no deadline was set"
+            )
+            self.observed = (
+                "timeout_hold returned Ok because no deadline was set"
+            )
+        else:
+            self.call = "verifier.timeout_hold(&call, &request, reservation)"
+            self.match = "Ok(())"
+            self.panic = "immediate timeout returned Ok"
+            self.observed = "timeout_hold returned Ok"
+
+
+def timeout_shape(ledger_text):
+    """The one live ``timeout_hold`` shape, from one ledger text.
+
+    The list runs from the first ``(`` after ``pub fn timeout_hold`` to its
+    matching ``)``. The four-argument form adds ``now: u64``. A declaration
+    that is neither form is a probe error with its own reason.
+    """
+    start = ledger_text.find("pub fn timeout_hold")
+    if start < 0:
+        raise ProbeError(TIMEOUT_MISSING)
+    opening = ledger_text.find("(", start)
+    depth = 0
+    for index in range(opening, len(ledger_text)):
+        char = ledger_text[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                parameters = ledger_text[opening + 1:index]
+                compact = " ".join(parameters.split()).rstrip(",")
+                if compact == (
+                    "&self, call: &Call, request: &GuestRequest, "
+                    "reservation: Reservation"
+                ):
+                    return TimeoutShape(False)
+                if compact == (
+                    "&self, call: &Call, request: &GuestRequest, "
+                    "reservation: Reservation, now: u64"
+                ):
+                    return TimeoutShape(True)
+                raise ProbeError(f"{TIMEOUT_SIGNATURE}: {parameters}")
+    raise ProbeError(f"{TIMEOUT_SIGNATURE}: unclosed parameter list")
+
+
+def apply_timeout_shape(source, shape):
+    """Substitute each timeout marker once, or raise its own reason.
+
+    A missing marker, a marker copied twice, and a marker left after
+    substitution are distinct probe errors.
+    """
+    values = (
+        (TIMEOUT_CALL_MARKER, shape.call),
+        (TIMEOUT_MATCH_MARKER, shape.match),
+        (TIMEOUT_PANIC_MARKER, shape.panic),
+    )
+    for marker, _value in values:
+        count = source.count(marker)
+        if count == 0:
+            raise ProbeError(f"replay.rs is missing {marker}")
+        if count != 1:
+            raise ProbeError(f"replay.rs holds {count} copies of {marker}, not one")
+    text = source
+    for marker, value in values:
+        text = text.replace(marker, value, 1)
+    for marker, _value in values:
+        if marker in text:
+            raise ProbeError(f"replay.rs still holds {marker}")
+    return text
+
+
+# One ledger read at import decides the shape, the two Ok strings and the
+# rendered replay. No later path re-reads that file for a signature.
+TIMEOUT_SHAPE = timeout_shape(LEDGER.read_text())
+TIMEOUT_OK_PANIC = TIMEOUT_SHAPE.panic
+TIMEOUT_OK_OBSERVED = TIMEOUT_SHAPE.observed
+REPLAY_RS = apply_timeout_shape(REPLAY_TEMPLATE, TIMEOUT_SHAPE)
+
+
 def timeout_finding_text(observed):
     """grant-binding-003 from the live ledger file and one observed line."""
     if observed not in (TIMEOUT_OK_OBSERVED, TIMEOUT_FREED_OBSERVED):
@@ -571,13 +672,7 @@ def write_timeout_finding(observed, finding):
 
 
 def handle_timeout(real_error, outcome, finding):
-    """Classify one immediate-timeout result.
-
-    A set ``real_error`` is raised and writes nothing. A pass deletes a
-    stale finding. An Ok panic writes ``timeout_hold returned Ok``. A freed
-    hold writes ``timeout_hold freed the hold``. Both panics, any other
-    failure, and an error raise and leave the destination unchanged.
-    """
+    """Classify one immediate-timeout result. The Ok line names the live shape."""
     if real_error is not None:
         raise real_error
     if outcome is None:
@@ -600,6 +695,16 @@ def handle_timeout(real_error, outcome, finding):
     if freed:
         return "finding", write_timeout_finding(TIMEOUT_FREED_OBSERVED, path)
     raise ProbeError("timeout outcome was an unrelated failure")
+
+
+handle_timeout.__doc__ = (
+    "Classify one immediate-timeout result.\n"
+    "\n"
+    "A set ``real_error`` is raised and writes nothing. A pass deletes a\n"
+    f"stale finding. An Ok panic writes ``{TIMEOUT_OK_OBSERVED}``. A freed\n"
+    f"hold writes ``{TIMEOUT_FREED_OBSERVED}``. Both panics, any other\n"
+    "failure, and an error raise and leave the destination unchanged."
+)
 
 
 def toolchain_reason():
@@ -1201,8 +1306,8 @@ class GrantReplayProbe(unittest.TestCase):
     def test_timeout_probe_calls_settle_before_timeout(self):
         """Unknown settle, then one timeout_hold, then reserve again.
 
-        ``release`` does not occur. This test launches nothing and does not
-        read the ledger for a deadline.
+        ``release`` does not occur. This test launches nothing. The call
+        follows the one live signature read at import.
         """
         source = inspect.getsource(
             GrantReplayProbe.test_timeout_probe_calls_settle_before_timeout
@@ -1226,6 +1331,21 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertLess(reserve, unknown)
         self.assertLess(unknown, timeout)
         self.assertEqual(body.count("timeout_hold"), 1)
+        self.assertEqual(body.count(TIMEOUT_SHAPE.call), 1)
+        self.assertIn(TIMEOUT_SHAPE.match, body)
+        if TIMEOUT_SHAPE.uses_now:
+            self.assertEqual(
+                body.count("timeout_hold(&call, &request, reservation, 0)"), 1
+            )
+            self.assertIn("because no deadline was set", body)
+            self.assertNotIn("Ok(())", body)
+            self.assertNotIn("set_verifier_deadline", body)
+        else:
+            self.assertEqual(
+                body.count("timeout_hold(&call, &request, reservation, 0)"), 0
+            )
+            self.assertEqual(body.count("Ok(())"), 1)
+            self.assertNotIn("because no deadline was set", body)
         self.assertEqual(body.count("SettleOutcome::Unknown"), 1)
         self.assertEqual(body.count(".reserve("), 2)
         self.assertLess(timeout, again)
@@ -1239,6 +1359,39 @@ class GrantReplayProbe(unittest.TestCase):
             "use grant_binding::{GuestRequest, Handle, Refuse, Rights, Verifier};",
             REPLAY_RS,
         )
+        three = (
+            "pub fn timeout_hold(&self, call: &Call, request: &GuestRequest, "
+            "reservation: Reservation) -> Result<(), TimeoutRefuse> {"
+        )
+        four = (
+            "pub fn timeout_hold(&self, call: &Call, request: &GuestRequest, "
+            "reservation: Reservation, now: u64) -> Result<TimeoutRecord, TimeoutRefuse> {"
+        )
+        self.assertFalse(timeout_shape(three).uses_now)
+        self.assertTrue(timeout_shape(four).uses_now)
+        before = TIMEOUT_FINDING.read_bytes() if TIMEOUT_FINDING.is_file() else None
+        cases = (
+            ("pub fn not_timeout_hold(&self) {}", TIMEOUT_MISSING),
+            (
+                "pub fn timeout_hold(&self, call: &Call",
+                TIMEOUT_SIGNATURE + ": unclosed parameter list",
+            ),
+            (
+                "pub fn timeout_hold(&self, call: &Call, request: &GuestRequest, "
+                "reservation: Reservation, deadline: u64)"
+                " -> Result<(), TimeoutRefuse> {",
+                TIMEOUT_SIGNATURE
+                + ": &self, call: &Call, request: &GuestRequest, "
+                "reservation: Reservation, deadline: u64",
+            ),
+        )
+        for text, reason in cases:
+            with self.subTest(reason=reason):
+                with self.assertRaises(ProbeError) as caught:
+                    timeout_shape(text)
+                self.assertEqual(str(caught.exception), reason)
+        after = TIMEOUT_FINDING.read_bytes() if TIMEOUT_FINDING.is_file() else None
+        self.assertEqual(after, before)
 
     def test_timeout_probe_errors_write_nothing(self):
         """Each timeout error is its own ProbeError and writes nothing.
@@ -1773,9 +1926,11 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertEqual(marked, recorded_probes())
 
     def test_replay_marker_count_is_refused(self):
-        """The replay source holds the repo marker once. Zero or two is a probe error.
+        """Each replay marker is required once. Zero, two, or one left is a probe error.
 
-        Dropping the count check accepts a source that does not bind this repo.
+        Dropping a count check accepts a source that does not bind this repo
+        or does not render the live timeout call. Each refusal names its own
+        marker reason.
         """
         self.assertEqual(REPLAY_RS.count(REPO_MARKER), 1)
         samples = (
@@ -1792,6 +1947,38 @@ class GrantReplayProbe(unittest.TestCase):
         rendered = render_replay(REPLAY_RS, "/tmp/redteam-repo")
         self.assertNotIn(REPO_MARKER, rendered)
         self.assertIn('let repo = "/tmp/redteam-repo";', rendered)
+        for marker in (
+            TIMEOUT_CALL_MARKER,
+            TIMEOUT_MATCH_MARKER,
+            TIMEOUT_PANIC_MARKER,
+        ):
+            with self.subTest(marker=marker):
+                missing = REPLAY_TEMPLATE.replace(marker, "", 1)
+                with self.assertRaises(ProbeError) as caught:
+                    apply_timeout_shape(missing, TIMEOUT_SHAPE)
+                self.assertEqual(
+                    str(caught.exception), f"replay.rs is missing {marker}"
+                )
+                duplicate = REPLAY_TEMPLATE.replace(
+                    marker, marker + "\n" + marker, 1
+                )
+                with self.assertRaises(ProbeError) as caught:
+                    apply_timeout_shape(duplicate, TIMEOUT_SHAPE)
+                self.assertEqual(
+                    str(caught.exception),
+                    f"replay.rs holds 2 copies of {marker}, not one",
+                )
+        left = TimeoutShape(TIMEOUT_SHAPE.uses_now)
+        left.match = left.match + " " + TIMEOUT_MATCH_MARKER
+        with self.assertRaises(ProbeError) as caught:
+            apply_timeout_shape(REPLAY_TEMPLATE, left)
+        self.assertEqual(
+            str(caught.exception),
+            f"replay.rs still holds {TIMEOUT_MATCH_MARKER}",
+        )
+        self.assertEqual(
+            apply_timeout_shape(REPLAY_TEMPLATE, TIMEOUT_SHAPE), REPLAY_RS
+        )
 
     def test_replay_repo_quote_or_backslash_is_refused(self):
         """A quote or a backslash in the repo path is a probe error.
