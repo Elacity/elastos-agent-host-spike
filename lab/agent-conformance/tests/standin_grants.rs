@@ -274,3 +274,66 @@ fn an_agent_cannot_present_another_agents_grant_pair() {
         "agent B made no request and gained no grant"
     );
 }
+
+/// M1 check A7: a hosted effect is one use, so the same budget cap refuses it.
+///
+/// The journey enters only through `admit_resident` for setup, `post_capsules`,
+/// `finish_start`, `post_capability_request`, `post_capability_grant`,
+/// `get_run_binding` and `post_hosted_effect`. It does not name an amount, so
+/// the hosted effect's ask is the default cap. The guard is the admission
+/// itself, so the proof plants a ledger drain: a first ask at the cap, then an
+/// ask one above the cap, then an ask back at the cap. Only a hosted effect
+/// that admits each ask refuses that second ask and leaves the ceiling at the
+/// cap for the third.
+#[test]
+fn a_hosted_effect_above_the_budget_cap_is_refused_on_the_granted_pair() {
+    let mut standin = StandIn::new();
+    let bundle = SignedBundle::distinct("agent-budget");
+    admit(&mut standin, &bundle);
+    let session = launch(&mut standin, &bundle);
+    let mine = own_grant(&mut standin, &session);
+    let drained = own_grant(&mut standin, &session);
+    let over = (
+        403u16,
+        "budget ask exceeds the admission cap: asked 4097, cap 4096".to_owned(),
+    );
+
+    // The first use is admitted: a hosted effect on agent B's own pair.
+    assert_eq!(
+        present(&mut standin, &session, &mine.run_id, &mine.request_id),
+        Ok(json!({ "valid": true })),
+        "the hosted effect admits the granted pair's own use"
+    );
+    assert!(
+        !listed_live(&standin, &mine.request_id),
+        "the admitted hosted effect spends the once grant"
+    );
+
+    // The planted drain: one use above the cap on a second granted pair.
+    let above = standin
+        .post_capability_validate(
+            Caller::Client {
+                session_id: &session,
+            },
+            &json!({ "request_id": drained.request_id, "amount": 4097 }),
+        )
+        .expect_err("an ask one above the cap is refused");
+    assert_eq!(above, over, "the drain is refused with the one cap text");
+    assert!(
+        listed_live(&standin, &drained.request_id),
+        "the refused drain leaves the second grant live and unspent"
+    );
+
+    // The guarded use: the same 4096 ask through the hosted effect route. A
+    // hosted effect that skips its admission would answer Ok here, so this is
+    // the assertion the admission guard alone decides.
+    assert_eq!(
+        present(&mut standin, &session, &drained.run_id, &drained.request_id),
+        Ok(json!({ "valid": true })),
+        "the hosted effect admits one ask at the cap after the drain"
+    );
+    assert!(
+        !listed_live(&standin, &drained.request_id),
+        "the admitted hosted effect spends the second once grant"
+    );
+}

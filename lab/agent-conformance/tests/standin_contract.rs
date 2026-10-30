@@ -1710,10 +1710,12 @@ fn standin_admission_admits_a_granted_ask_within_budget_and_refuses_one_above() 
         "the malformed amounts leave the grant live and unspent"
     );
 
-    // The store and the re-resolve of the grant run before the admission, so
-    // the order is proved on a second, `once` grant: the admitted use makes
-    // it `Exhausted`, an ask above the cap is then `grant is not live`, and
-    // the exhausted grant stays out of the one live view.
+    // The budget decision runs before any spend, and the order is proved on
+    // a second, `once` grant: an ask one above the cap is refused with the
+    // cap text while the grant is still live and unspent, and an ask at the
+    // cap is then admitted and spends it. The refusal is the guarded one:
+    // the grant is live, unspent, owned by this caller and carries the handle
+    // the grant route minted.
     let pending = standin
         .post_capability_request(
             owner,
@@ -1735,18 +1737,36 @@ fn standin_admission_admits_a_granted_ask_within_budget_and_refuses_one_above() 
         )
         .expect("the shell grants the second request for one use");
     assert_eq!(
-        standin.post_capability_validate(owner, &json!({ "request_id": once_id })),
-        Ok(json!({ "valid": true })),
-        "the once grant admits its one ask under the default cap"
+        live(&standin),
+        BTreeSet::from([request_id.clone(), once_id.clone()]),
+        "the shell live view lists the once grant live before its first use"
     );
     assert_eq!(
         standin.post_capability_validate(owner, &json!({ "request_id": once_id, "amount": 4097 })),
-        Err((400, "grant is not live: Exhausted".to_owned())),
-        "the once grant was spent before the admission read it"
+        Err((
+            403,
+            "budget ask exceeds the admission cap: asked 4097, cap 4096".to_owned()
+        )),
+        "the once grant's first ask one above the cap is refused with the cap text"
     );
     assert_eq!(
         live(&standin),
-        victim,
-        "the spent once grant is out of the live view"
+        BTreeSet::from([request_id.clone(), once_id.clone()]),
+        "the refused ask leaves the once grant live and unspent"
+    );
+    assert_eq!(
+        standin.post_capability_validate(owner, &json!({ "request_id": once_id, "amount": 4096 })),
+        Ok(json!({ "valid": true })),
+        "the once grant admits its ask at the cap"
+    );
+    assert_eq!(
+        live(&standin),
+        BTreeSet::from([request_id.clone()]),
+        "the admitted ask spends the once grant, which leaves the live view"
+    );
+    assert_eq!(
+        standin.post_capability_validate(owner, &json!({ "request_id": once_id })),
+        Err((400, "grant is not live: Exhausted".to_owned())),
+        "the spent once grant is not live for a second use"
     );
 }
