@@ -29,14 +29,15 @@
 //!    its CID is the bytes `01 55 12 20` and the SHA-256 of the block (CID
 //!    version 1, raw codec `0x55`, multihash sha2-256 of 32 bytes), and its
 //!    Tsize is its length. A larger file is split into 262144-byte raw
-//!    leaves, the last one shorter, under one balanced dag-pb file root
-//!    (trickle off): for each leaf in order a link with the leaf's CID, an
-//!    empty name and the leaf's length as Tsize; then the UnixFS data `08 02`
-//!    (type file), the file's length (field 3) and each leaf's length (field
-//!    4, one tag per value). Its CID is `01 70 12 20` and the SHA-256 of that
-//!    block, and its Tsize is the block's length plus its leaves' lengths. A
-//!    file of more than 174 leaves (`max-file-links`), over 45613056 bytes,
-//!    would need a second tree level and is refused.
+//!    leaves, and every leaf is a full 262144 bytes except a last short leaf
+//!    when the length is not an exact multiple, under one balanced dag-pb
+//!    file root (trickle off): for each leaf in order a link with the leaf's
+//!    CID, an empty name and the leaf's length as Tsize; then the UnixFS data
+//!    `08 02` (type file), the file's length (field 3) and each leaf's
+//!    length (field 4, one tag per value). Its CID is `01 70 12 20` and the
+//!    SHA-256 of that block, and its Tsize is the block's length plus its
+//!    leaves' lengths. A file of more than 174 leaves (`max-file-links`),
+//!    over 45613056 bytes, would need a second tree level and is refused.
 //! 2. A bundle path such as `browser/app.js` is a directory `browser` that
 //!    links `app.js`. Each directory's block is dag-pb: one link per child,
 //!    sorted by name bytes, each as protobuf field 2 holding the child's CID
@@ -947,10 +948,11 @@ fn raw_leaf(sha256: &[u8; 32], size: u64) -> (Vec<u8>, u64) {
 
 /// The CID bytes and Tsize of the balanced file root of `content`, the bytes
 /// of the file at `path`, which is over one leaf. The bytes are split into
-/// [`CHUNK_SIZE`]-byte raw leaves, the last one shorter, all linked from one
-/// dag-pb block, so the tree has one level. A file of more than
-/// [`MAX_FILE_LINKS`] leaves would need a second level and is refused with
-/// its path and length. The root's Tsize is its block's length plus its
+/// [`CHUNK_SIZE`]-byte raw leaves, all linked from one dag-pb block, so the
+/// tree has one level: every leaf is a full [`CHUNK_SIZE`] bytes except a
+/// last short leaf when the length is not an exact multiple. A file of more
+/// than [`MAX_FILE_LINKS`] leaves would need a second level and is refused
+/// with its path and length. The root's Tsize is its block's length plus its
 /// leaves' lengths.
 fn file_root(path: &str, content: &[u8]) -> Result<(Vec<u8>, u64), Refusal> {
     if content.len().div_ceil(CHUNK_SIZE) > MAX_FILE_LINKS {

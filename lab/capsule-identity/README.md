@@ -58,8 +58,13 @@ To recompute a lab CID by hand:
    `01 55 12 20` and the SHA-256 of the block: CID version 1, the raw codec
    `0x55`, the multihash code `0x12` (sha2-256) and length `0x20` (32). Its
    Tsize is its length.
-3. A file of more than 262144 bytes is split into 262144-byte chunks, the
-   last one shorter, and each chunk is a raw leaf as in step 2. One dag-pb
+3. A file of more than 262144 bytes is split into 262144-byte chunks, and
+   each chunk is a raw leaf as in step 2. Every chunk but the last is 262144
+   bytes; the last chunk is shorter only when the length is not an exact
+   multiple of 262144, so a file of 524288 bytes (two full chunks) keeps two
+   full 262144-byte raw leaves. `two_full_chunks_keep_both_leaves` pins that
+   file and catches F-CI85a (a splitter drops the last byte when the length
+   is an exact multiple). One dag-pb
    **file root** links them all (the balanced layout, one level). Its block
    is, for each leaf in order, field 2 (`0x12`, length) holding a link: field
    1 (`0x0a`, length) the leaf's CID bytes, field 2 with an empty name
@@ -206,6 +211,7 @@ rules and not from the Rust code, in
 | Directory codec `0x70`, dag-pb | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18r (`0x71`) |
 | Chunk size 262144: a file of exactly that size is one block | `single_block_at_the_chunk_limit_has_the_pinned_cid` | F-CI18d (262143) |
 | A file over one leaf is a balanced root of raw leaves: empty link names, type 2, filesize, blocksizes, and a Tsize of its block and its leaves | `file_over_one_leaf_has_the_pinned_cid` | F-CI48a (no name field), F-CI48b (no blocksizes), F-CI48c (no filesize), F-CI48d (Tsize without the root block) |
+| A file of exactly two chunks keeps both full leaves, so a short-last-chunk pin cannot hide a splitter that drops the last byte | `two_full_chunks_keep_both_leaves` | F-CI85a (a splitter drops the last byte when the length is an exact multiple) |
 | At most 174 leaves; one more is refused | `file_of_174_leaves_is_named_and_one_byte_more_is_refused` | F-CI18e (no leaf-limit refusal), F-CI48e (the limit is 175) |
 | The listing call names a file of at most one leaf; a listed file over one chunk is refused and named from its bytes instead | `listed_file_over_the_chunk_limit_is_refused`, `listed_file_over_one_leaf_names_the_bytes_call` | F-CI47c (`encode_listed_files` has no size refusal) |
 | Links sorted by name bytes | `lab_cid_matches_the_pinned_value_for_each_fixture`, `lab_cid_does_not_depend_on_listing_order` | F-CI18f (reverse), F-CI1a (no sort) |
@@ -267,22 +273,22 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    (`python3 -I could not run: <error>`), a non-zero exit (even after it
    printed a valid CID), no output, or more than one line is refused with its
    own reason, and the test asserts each of these reasons.
-5. For each of the 14 pins, the Python answer, the pin constant and the
+5. For each of the 15 pins, the Python answer, the pin constant and the
    printed `encode_entries` result for the same files must be equal, and the
-   test asserts that it checked exactly 14 bundles. The 14 are the seven
+   test asserts that it checked exactly 15 bundles. The 15 are the seven
    pinned fixtures (`content-sample`, `web-app`, `agent-host`, `provider`,
    `model`, `provider-variant-a`, `provider-variant-b`), the recipe, the
    chunk-limit, empty-file and long-name bundles above, which are built as
    entries in memory, the photo stand-in consumer copy (task 047, see
-   [naming a closure listing](#naming-a-closure-listing)), and the two-leaf
-   and three-leaf file bundles (task 048), also built in memory. `wc001-core` has no pin, because its `capsule.wasm` is
+   [naming a closure listing](#naming-a-closure-listing)), the two-leaf,
+   three-leaf and two-full-chunk file bundles (tasks 048 and 085), also built in memory. `wc001-core` has no pin, because its `capsule.wasm` is
    built on each machine, so it is not checked here.
 
 | Rule | Named test | Falsifier |
 | --- | --- | --- |
 | README's rule agrees with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19a (the block's `0x55` becomes `0x70` before it runs) |
 | Rust agrees with README's rule, not only with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19b (the encoder's `RAW_CODEC` becomes `0x56`) |
-| A missing block is no pass: exactly 14 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
+| A missing block is no pass: exactly 15 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
 | An interpreter that cannot start fails the test | `readme_python_recomputes_every_lab_cid_pin` | F-CI19d (a program that does not exist) |
 | A non-zero exit is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19e (exit status not checked) |
 | No output is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19f (empty answer taken) |
@@ -629,13 +635,15 @@ The tests are in `tests/parse.rs`.
 
 ## For a lab that uses the lab CID
 
-Three lab crates outside this lane have a path dependency on this crate. Each
+Four lab crates outside this lane have a path dependency on this crate. Each
 manifest is listed below with what that crate uses: `pins` (its tests pin a
-printed lab CID), `parse` (it reads a printed lab CID with `LabCid`'s parse, or
-makes values with `encode_entries`), or `both`.
+printed lab CID), `parse` (it reads a printed lab CID with `LabCid`'s parse,
+makes values with `encode_entries`, or names a bundle with `checked_bundle`),
+or `both`.
 
 ```text
 lab/agent-conformance/Cargo.toml  parse
+lab/plan-approval/Cargo.toml  parse
 lab/wasm-capsule/Cargo.toml  both
 lab/wasm-capsule/tools/Cargo.toml  pins
 ```
@@ -644,6 +652,9 @@ lab/wasm-capsule/tools/Cargo.toml  pins
   `parse::<LabCid>()` (`src/report.rs`), makes its synthetic values with
   `encode_entries`, and names bundles with `checked_bundle`. It pins no lab
   CID.
+- `lab/plan-approval` (plan-approval) admits and launches one live session
+  through the stand-in's routes: its tests name a bundle with `checked_bundle`
+  and sign a bundle's name with `sign_bundle`. It pins no lab CID.
 - `lab/wasm-capsule` (wasm-capsule-lab), the `capsule` package, a
   dev-dependency: its tests pin two lab CIDs (`tests/common/mod.rs`,
   `tests/bundle.rs`) and parse a printed one (`tests/run.rs`).
@@ -1805,7 +1816,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 276 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 277 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a

@@ -3,8 +3,11 @@
 //! with its own test.
 mod common;
 
-use capsule_identity::{encode_entries, lab_cid, BundleEntry, Refusal};
+use capsule_identity::{
+    encode_entries, encode_listed_files, lab_cid, BundleEntry, ListedFile, Refusal,
+};
 use common::*;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 fn entry(path: &str, content: &[u8]) -> BundleEntry {
@@ -190,6 +193,56 @@ fn file_over_one_leaf_has_the_pinned_cid() {
         );
         assert!(pin.starts_with("bafybei"), "{pin}");
     }
+}
+
+#[test]
+fn two_full_chunks_keep_both_leaves() {
+    // 524288 bytes is exactly two 262144-byte chunks, so the one splitter in
+    // `file_root` keeps two full raw leaves and the last leaf is full, not
+    // short. The pin was first printed by README's Python rule; the file is
+    // made here and never committed. A splitter that chunks all but the last
+    // byte when the length is an exact multiple gets another CID, which this
+    // pin refuses.
+    let manifest = read_fixture(&CONTENT_SAMPLE, "capsule.json");
+    let zeros = vec![0; 524_288];
+    let bundle = content_sample_with(&[("sample.example", &zeros)]);
+    let entries = vec![
+        entry("capsule.json", &manifest),
+        entry("sample.example", &zeros),
+    ];
+    let pin = TWO_FULL_CHUNK_LAB_CID;
+    let encoded = encode_entries(&entries)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    assert_eq!(
+        (name(&bundle), encoded),
+        (pin.to_owned(), pin.to_owned()),
+        "(lab_cid, encode_entries) against the pin"
+    );
+    assert!(pin.starts_with("bafybei"), "{pin}");
+    assert_eq!(pin.len(), 59, "{pin}");
+    for other in [
+        CHUNK_LIMIT_LAB_CID,
+        TWO_LEAF_FILE_LAB_CID,
+        THREE_LEAF_NESTED_LAB_CID,
+    ] {
+        assert_ne!(pin, other, "the two-full-chunk pin is another bundle's");
+    }
+
+    // A listed file names one raw leaf by one SHA-256, so 524288 bytes is over
+    // its limit and is refused with its path rather than named by that digest.
+    let listed = ListedFile {
+        path: "sample.example".to_owned(),
+        size: 524_288,
+        sha256: Sha256::digest(&zeros).into(),
+    };
+    assert_eq!(
+        encode_listed_files(&[listed]),
+        Err(Refusal::FileOverChunkLimit {
+            path: "sample.example".to_owned(),
+            length: 524_288,
+        })
+    );
 }
 
 #[test]

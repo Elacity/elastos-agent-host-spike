@@ -68,6 +68,12 @@ pub const LONG_UTF8_NAME_LAB_CID: &str =
 /// bytes. Built in a temp dir and never committed.
 pub const TWO_LEAF_FILE_LAB_CID: &str =
     "bafybeidbd7gfhommypeks66twpnbbb3lwovdqe6iwtmdxptgcq5jqbaaby";
+/// content-sample with `sample.example` as 524288 zero bytes: a balanced file
+/// root over two full 262144-byte raw leaves, so the last leaf is full, not
+/// short. Built in a temp dir and never committed; task 085 printed it first
+/// with README's Python rule.
+pub const TWO_FULL_CHUNK_LAB_CID: &str =
+    "bafybeibvhr2j5aurjmaq363oy2aevhiwknyass4cs3m5cdgs24zflktdxa";
 /// content-sample with one more file, `core/big.bin`, holding
 /// [`big_bin_bytes`]: a file root over three raw leaves (262144, 262144 and
 /// 75712 bytes) one directory down, so its Tsize reaches the root through
