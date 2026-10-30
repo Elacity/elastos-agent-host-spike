@@ -1,0 +1,239 @@
+/tmp/wt-307-r5/review/lab/review-307-r5/standins/payload.c: In function ‘main’:
+/tmp/wt-307-r5/review/lab/review-307-r5/standins/payload.c:13:19: warning: ignoring return value of ‘write’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+   13 |             (void)write(fd, "payload-ran\n", 12);
+      |                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/tmp/wt-307-r5/review/lab/review-307-r5/standins/payload.c:18:11: warning: ignoring return value of ‘read’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+   18 |     (void)read(0, buf, sizeof buf);
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~
+{
+  "head": "747cda4f0f2dfb5953baad1c62c44be1a0d84e71",
+  "launcher": "/tmp/wt-307-r5/candidate/lab/fail-closed-linux/target/debug/fcl-launch",
+  "hunts": [
+    {
+      "id": "reexec-foreign",
+      "started": true,
+      "init": 11375,
+      "first": "first",
+      "exec_line": "exec errno=13 path=/tmp/wt-307-r5/review/lab/review-307-r5/standins/bin/payload",
+      "payload_line": null,
+      "exe_after": "/tmp/wt-307-r5/review/lab/review-307-r5/standins/bin/hunter",
+      "lines": [
+        "hunter mode=reexec pid=2",
+        "first",
+        "started did-provider pid=11375",
+        "exec errno=13 path=/tmp/wt-307-r5/review/lab/review-307-r5/standins/bin/payload"
+      ],
+      "verdict": "second exec denied"
+    },
+    {
+      "id": "reexec-storage",
+      "started": true,
+      "init": 11443,
+      "first": "first",
+      "exec_line": "exec errno=13 path=/tmp/fcl-r5-hunts-ufslqprr/reexec-store/payload",
+      "payload_line": null,
+      "lines": [
+        "hunter mode=reexec pid=2",
+        "first",
+        "started did-provider pid=11443",
+        "exec errno=13 path=/tmp/fcl-r5-hunts-ufslqprr/reexec-store/payload"
+      ],
+      "verdict": "storage exec denied"
+    },
+    {
+      "id": "swap-same-path",
+      "started": true,
+      "init": 11745,
+      "ino_before": 425119,
+      "ino_after": 425259,
+      "dev_before": 65056,
+      "dev_after": 65056,
+      "first": "first",
+      "exec_line": "exec errno=13 path=/tmp/fcl-r5-hunts-ufslqprr/swap-exe",
+      "payload_line": null,
+      "exe_after": "/tmp/fcl-r5-hunts-ufslqprr/swap-exe (deleted)",
+      "lines": [
+        "hunter mode=reexec pid=2",
+        "first",
+        "started did-provider pid=11745",
+        "exec errno=13 path=/tmp/fcl-r5-hunts-ufslqprr/swap-exe"
+      ],
+      "verdict": "swapped inode exec denied"
+    },
+    {
+      "id": "bind-mount",
+      "mounted": false,
+      "mount_errno": 1,
+      "verdict": "host cannot bind-mount (no CAP_SYS_ADMIN)"
+    },
+    {
+      "id": "identity-fd",
+      "started": true,
+      "init": 12024,
+      "fds": [
+        "fd 0 flags=0 kind=pipe",
+        "fd 1 flags=0 kind=pipe",
+        "fd 2 flags=0 kind=pipe"
+      ],
+      "extra": [],
+      "pipes": [],
+      "verdict": "only fds 0-2"
+    },
+    {
+      "id": "stdin-pty",
+      "started": true,
+      "init": 12074,
+      "ioctl_lines": [
+        "hunter mode=stdin-ioctl pid=2",
+        "ioctl_fd_0 errno=25",
+        "tiocsti_fd_0 errno=25",
+        "ioctl_fd_1 errno=25",
+        "tiocsti_fd_1 errno=25",
+        "ioctl_fd_2 errno=25",
+        "tiocsti_fd_2 errno=25"
+      ],
+      "ioctl0": "ioctl_fd_0 errno=25",
+      "tiocsti0": "tiocsti_fd_0 errno=25",
+      "verdict": "stdin pty ioctl denied"
+    },
+    {
+      "id": "memfd-exec",
+      "started": true,
+      "init": 12091,
+      "memfd_line": "memfd_execveat errno=1",
+      "payload_line": null,
+      "lines": [
+        "hunter mode=memfd-exec pid=2",
+        "started did-provider pid=12091",
+        "memfd_execveat errno=1"
+      ],
+      "verdict": "memfd exec denied"
+    },
+    {
+      "id": "memfd-exec-flag",
+      "started": true,
+      "init": 12096,
+      "memfd_line": "memfd_exec_create errno=1",
+      "payload_line": null,
+      "lines": [
+        "started did-provider pid=12096",
+        "hunter mode=memfd-exec-flag pid=2",
+        "memfd_exec_create errno=1"
+      ],
+      "verdict": "MFD_EXEC denied"
+    },
+    {
+      "id": "reexec-self",
+      "started": true,
+      "init": 12101,
+      "first": "first",
+      "after": "after_reexec pid=2",
+      "persist_mfd": "persist_mfd_create errno=1",
+      "persist_noexec": "persist_noexec_execveat errno=1",
+      "payload_line": null,
+      "exe_after": "/tmp/fcl-r5-hunts-ufslqprr/self-hunter",
+      "lines": [
+        "hunter mode=reexec-self pid=2",
+        "first",
+        "started did-provider pid=12101",
+        "hunter mode=after-reexec pid=2",
+        "after_reexec pid=2",
+        "after_reexec_ioctl0 errno=25",
+        "persist_mfd_create errno=1",
+        "persist_noexec_execveat errno=1"
+      ],
+      "verdict": "granted-path re-exec ran; second filter persisted"
+    },
+    {
+      "id": "memfd-procfd",
+      "started": true,
+      "init": 12106,
+      "procfd_line": null,
+      "payload_line": "payload pid=2",
+      "lines": [
+        "started did-provider pid=12106",
+        "hunter mode=memfd-procfd pid=2",
+        "payload pid=2"
+      ],
+      "verdict": "procfd payload ran"
+    },
+    {
+      "id": "shm-exec",
+      "started": true,
+      "init": 12111,
+      "shm_line": "shm_open errno=13",
+      "payload_line": null,
+      "lines": [
+        "started did-provider pid=12111",
+        "hunter mode=shm-exec pid=2",
+        "shm_open errno=13"
+      ],
+      "verdict": "shm exec denied"
+    },
+    {
+      "id": "denied-syscalls",
+      "started": true,
+      "init": 12116,
+      "lines": [
+        "ptrace errno=1 ret=-1",
+        "process_vm_writev errno=1 ret=-1",
+        "io_uring_setup errno=1 ret=-1"
+      ],
+      "verdict": "ptrace/process_vm_writev/io_uring EPERM"
+    },
+    {
+      "id": "stdin-socket-rights",
+      "started": true,
+      "init": 12121,
+      "recv": "recvmsg n=1",
+      "rights": "scm_rights fd=3",
+      "read": "scm_read n=12",
+      "lines": [
+        "hunter mode=recv-rights pid=2",
+        "recvmsg n=1",
+        "scm_rights fd=3",
+        "scm_read n=12"
+      ],
+      "verdict": "SCM_RIGHTS delivered a host fd"
+    },
+    {
+      "id": "stdin-pipe",
+      "started": true,
+      "init": 12126,
+      "fd0": "fd 0 flags=0 kind=pipe",
+      "fds": [
+        "fd 0 flags=0 kind=pipe",
+        "fd 1 flags=0 kind=pipe",
+        "fd 2 flags=0 kind=pipe"
+      ],
+      "verdict": "stdin stays a pipe to the host"
+    },
+    {
+      "id": "ioctl-devnull",
+      "started": true,
+      "init": 12131,
+      "ioctl0": "ioctl_fd_0 errno=25",
+      "tiocsti0": "tiocsti_fd_0 errno=25",
+      "lines": [
+        "hunter mode=stdin-ioctl pid=2",
+        "ioctl_fd_0 errno=25",
+        "tiocsti_fd_0 errno=25",
+        "ioctl_fd_1 errno=25",
+        "tiocsti_fd_1 errno=25",
+        "ioctl_fd_2 errno=25",
+        "tiocsti_fd_2 errno=25"
+      ],
+      "verdict": "ioctl on /dev/null denied"
+    },
+    {
+      "id": "hunt_selftest_strace",
+      "error": "[Errno 2] No such file or directory: 'strace'"
+    },
+    {
+      "id": "close-range-fallback",
+      "host_has_close_range": true,
+      "missing_proc": "open_missing_proc errno=2",
+      "verdict": "fallback not exercised on this host; missing /proc open fails closed in source"
+    }
+  ]
+}

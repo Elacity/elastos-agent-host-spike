@@ -1,0 +1,5 @@
+/standins/bin/
+/tmp/
+/work/
+*.o
+target/

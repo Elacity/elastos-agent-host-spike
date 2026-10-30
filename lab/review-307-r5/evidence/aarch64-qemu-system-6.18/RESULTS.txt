@@ -1,0 +1,21 @@
+label=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+native=0
+jetson=0
+emulated_cpu=1
+qemu_accel=tcg
+kernel=Linux (none) 6.18.58-0-virt aarch64
+landlock_abi=7
+vmlinuz_sha256=d1876369b061ef3bc33314f490240efcd32b031393cb34c6f81134fa862fe472
+
+lib          9 passed; 0 failed; 0 ignored   PASS
+simulated   21 passed; 0 failed; 0 ignored   PASS
+real_kernel 26 passed; 2 failed; 0 ignored   SHORT vs claimed 28
+
+failed real_kernel rows (both assume host ABI < 7):
+  real_per_right_floor_refuses_on_this_kernel
+  real_extra_floor_still_names_the_missing_right
+
+r4 leftovers on this guest:
+  real_memfd_second_image_is_refused     ok
+  real_stdin_pty_is_not_a_terminal       ok
+  real_confined_provider_has_every_layer ok
