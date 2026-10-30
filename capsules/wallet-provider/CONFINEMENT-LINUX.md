@@ -7,12 +7,92 @@ present is the one file-profile contract: `check_profile_contract`, run over
 no network allow, only the `PROVIDER_EXECUTABLE`, `STORAGE_ROOT` and
 `STORAGE_PARENT` tokens, and the three shared rules verbatim.
 This contract has no Linux enforcement or tests yet. Nothing in this file is
-current behaviour.
+current behaviour except the seccomp allow list in "The seccomp allow list"
+below, which is source that builds and refuses and whose kernel behaviour is not
+proven on Linux by this task.
 `confine.sb` stays each provider's one oracle. The contract is shared, so its
 Linux mapping is written once here, beside the one contract check (P10). The
 Linux policy that the Runtime would generate from the same approved declared
 rights must carry each oracle rule as this file maps it, and no second profile
 file exists (P10).
+
+## The seccomp allow list
+
+One part of this design exists today as source, for `wallet-provider` only: a
+seccomp allow list generated from the provider's declared rights. It builds and
+it refuses, and no Linux start has been proven with it. The kernel proof of the
+filter and of the four calls below belongs to the task that runs on a real Linux
+host, and this section does not claim it.
+
+One function builds the list:
+`seccomp_allow_list_from_declared_rights(name, declared)` in
+`capsules/wallet-provider/tests/confine.rs` calls `generate_profile`, the one lab
+generator, reads the profile text back through `profile_forms`, the one profile
+parser, and maps each allow form through one table. It reads no file, holds no
+rule text of its own and never reads the declared-rights JSON: `declared_entries`
+reaches it only through `generate_profile`, so the JSON has one reader and the
+profile one parser (P10).
+
+The filter is an allow list. Its final decision is the deny marker
+`SECCOMP_RET_ERRNO` with `EACCES` (13), and every `SECCOMP_RET_ALLOW` return sits
+behind an equality test against a syscall number the list names, so a changed
+jump target fails even when the number is right. A call the list does not name is
+refused by the default arm. That is what closes the 0710 fault class, in which
+every call a list does not name is permitted.
+
+`SECCOMP_RULE_SYSCALLS` is the one mapping table, keyed on the allow-form text.
+It holds exactly one row for each of the five allow forms a wallet profile
+carries:
+
+| Allow form | Syscalls the row admits |
+| --- | --- |
+| `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))` | `execve`, `execveat` |
+| `(allow file-read* (literal (param "STORAGE_PARENT")))` | `faccessat`, `fstat`, `getdents64`, `lseek`, `newfstatat`, `openat`, `openat2`, `pread64`, `read`, `readlinkat`, `readv`, `statx` |
+| `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` | the file-read row, plus `fchmod`, `fdatasync`, `fsync`, `ftruncate`, `linkat`, `mkdirat`, `pwrite64`, `renameat2`, `unlinkat`, `write`, `writev` |
+| `(allow file-read* (literal "/"))` | the file-read row |
+| `(allow sysctl-read)` | `uname`, `sysinfo` |
+
+The head forms (`(version 1)`, `(deny default)`) and the deny forms grant
+nothing, so they take no row and add no syscall. An allow form with no row is a
+refusal that names the provider and the form and builds no filter, symmetrical
+to `check_profile_contract`'s refusals. The one recogniser that decides what an
+allow form is, `is_allow_form`, reads `(allow)`, `(allow(file-read*))` and
+`(allow file-read*)` as allow forms; the three allow predicates and
+`allow_forms` call it, so the rule has one spelling.
+
+The table is the only source of the list's syscalls. The builder adds none of its
+own, so a declaration with no allow form yields an empty list and a program whose
+only decisions are the two ABI guards and the deny marker. The launch set a Linux
+start needs beside the forms-derived part is measured on the Linux host by the
+task that proves the kernel behaviour, and it is not in this list yet. A Linux
+start is therefore refused at the launcher's seat below until that set exists, so
+no provider runs with a list that lacks a call its launch needs.
+
+Four calls are in no row, so the default decision is
+the only answer they receive: `ptrace`, `mount`, `bpf` and `keyctl`. The named
+test `seccomp_program_denies_by_default_and_lists_no_undeclared_call` asserts
+each of the four is in no list entry and no table row and is tested by no
+equality in the program, so adding one to a row turns it red. The filter's
+marker errno is `EACCES` rather than `EPERM` on purpose: a host can already
+answer `EPERM` for a call an unprivileged process may not make, so a plain
+`EPERM` assertion would pass with no filter installed.
+
+`install_seccomp_with(allow, steps)` is the one step sequencer and makes no
+kernel call. It checks the audit architecture first, then runs
+`NoNewPrivileges` and `Filter` in that order, and stops at the first failure with
+that step's own reason and errno.
+`seccomp_launch_refuses_each_reporting_failure` covers the record writer, which
+completes a short write and retries on `EINTR`, and gives a failed write and a
+zero-byte write distinct reasons and errnos.
+
+Namespaces, Landlock, capability dropping and every file row of the contract stay
+unbuilt on Linux, and a seccomp filter reads syscall numbers and not paths, so no
+sentence here says a contract file row is enforced on Linux. `linux` stays out of
+`DECLARED_CONFINED_OS`. A `linux` host under a `Seatbelt` policy keeps the words
+this lab already used, and a `linux` host under a `Seccomp` policy is accepted by
+the host rule; because this build installs no filter, the launcher's own seat
+then refuses that start by name instead of starting the provider unconfined.
+`standin_host_refusal_decides_each_policy` holds both.
 
 ## The frame
 
