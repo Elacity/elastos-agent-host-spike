@@ -1,0 +1,12 @@
+id: F-A5-rateissuing
+file: src/lib.rs
+test: ops::model_child_effect_spends_the_issuing_rate
+--- old
+        if grant.parent.is_some() {
+            return Err(Refuse::IssuingRate);
+        }
+--- new
+        if grant.parent.is_some() {
+            let _ = grant.parent;
+        }
+--- end

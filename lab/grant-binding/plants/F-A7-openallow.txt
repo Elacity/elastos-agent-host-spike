@@ -1,0 +1,13 @@
+id: F-A7-openallow
+file: src/ledger.rs
+test: ledger::model_open_hold_counts_toward_the_grant_allowance
+--- old
+            let open_on_grant = ledger
+                .open
+                .values()
+                .filter(|hold| hold.handle == request.handle)
+                .fold(0u64, |sum, hold| sum.saturating_add(hold.amount));
+            let remaining = granted.saturating_sub(spent).saturating_sub(open_on_grant);
+--- new
+            let remaining = granted.saturating_sub(spent);
+--- end

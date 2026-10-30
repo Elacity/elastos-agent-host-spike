@@ -56,6 +56,7 @@ impl Verifier {
             .identity
             .clone();
         self.store_admitted_ceiling(Some(&identity), ask.amount);
+        self.note_grant_allowance(request.handle, ask.amount);
         Ok(ask.amount)
     }
 }

@@ -2,18 +2,15 @@ id: F-A7-stusage
 file: src/ledger.rs
 test: ledger::model_reported_usage_does_not_move_the_settle
 --- old
-        self.resolve(*call, request.handle)
-            .map_err(SettleRefuse::Binding)?;
+            let presented = call.instance;
 --- new
-        let mut instance = call.instance;
-        if request.reported_usage > 0 {
-            for id in self.registry.keys() {
-                if *id != call.instance {
-                    instance = *id;
-                    break;
+            let mut presented = call.instance;
+            if request.reported_usage > 0 {
+                for id in self.registry.keys() {
+                    if *id != call.instance {
+                        presented = *id;
+                        break;
+                    }
                 }
             }
-        }
-        self.resolve(Call { instance }, request.handle)
-            .map_err(SettleRefuse::Binding)?;
 --- end
