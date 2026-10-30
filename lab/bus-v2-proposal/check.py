@@ -1144,13 +1144,19 @@ def _target_quotation(text, target, root, sha):
     return globals()[quoter](text, root, sha)
 
 
+def marker_stands_without_a_block(text, marker):
+    """True when MARKER stands exactly once and no indented block follows it."""
+    return text.count(marker) == 1 and not _remainders(text, marker)
+
+
 def _quote_refusal(root, text, sha, target, refused_spans=frozenset()):
     """Return the refusal for one target, or None when it matches or is absent.
 
     The pin already refused this citation, or the marker it reads, with a
     structural reason: one citation has one reason, so no quote refusal runs.
-    The walk has no remainder for MARKER: no refusal, and the next target runs.
-    The marker is not one line: refused before the line read. ``cited_line``
+    The marker stands and no indented block follows it: refused before the line
+    read. The walk has no remainder for MARKER: no refusal, and the next target
+    runs. The marker is not one line: refused before the line read. ``cited_line``
     names the line after the pinned file is read: the numbered line of a line
     span, or the declaring line of a function span. The pinned line is absent,
     or no window holds the cited line: the quotation is not in the pin.
@@ -1161,6 +1167,8 @@ def _quote_refusal(root, text, sha, target, refused_spans=frozenset()):
         return None
     if text.count(marker) > 1:
         return "refuse: quoted line is not one line: " + marker.strip("`")
+    if marker_stands_without_a_block(text, marker):
+        return "refuse: quoted line has no block: " + span
     if not _remainders(text, marker):
         return None
     rel = CITATION.fullmatch(span).group("path")

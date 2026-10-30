@@ -3837,11 +3837,18 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(got, [expected])
 
     def test_draft_without_the_owned_span_adds_no_quote_refusal(self):
+        # The pkg/kept.rs body cites no target, so it stays empty. The second
+        # body's first target in QUOTE_TARGETS order whose marker stands is
+        # OWNED_SPAN, whose marker has no indented block.
         bodies = (
             "Open `pkg/kept.rs:1`.\n\n    /// Not the owned quote.\n",
             "`" + OWNED_SPAN + "` states the journal root.\n\n  /// Two-space indent.\n",
         )
-        for body in bodies:
+        expected = (
+            [],
+            ["refuse: quoted line has no block: " + OWNED_SPAN],
+        )
+        for body, want in zip(bodies, expected):
             root = self._draft(
                 body,
                 {
@@ -3849,7 +3856,7 @@ class CitationCheckTests(unittest.TestCase):
                     "pkg/kept.rs": b"fn kept(\n",
                 },
             )
-            self.assertEqual(check.problems(root), [], body)
+            self.assertEqual(check.problems(root), want, body)
 
     def test_quote_refusal_waits_for_a_known_pin(self):
         body = self._quote_body(OWNED_QUOTE + "x")
@@ -4126,6 +4133,8 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(check.problems(root), [])
 
     def test_deny_span_without_an_indented_line_adds_no_refusal(self):
+        # The first target in QUOTE_TARGETS order whose marker stands in this
+        # body is DENY_SPAN, so its missing block is the one reason.
         body = (
             "`"
             + DENY_SPAN
@@ -4134,7 +4143,7 @@ class CitationCheckTests(unittest.TestCase):
             "The block follows.\n"
         )
         got, reads = self._pinned_reads(body, {DENY_REL: self._deny_source()})
-        self.assertEqual(got, [])
+        self.assertEqual(got, ["refuse: quoted line has no block: " + DENY_SPAN])
         self.assertEqual(reads, [])
 
     def test_deny_quoted_line_absent_from_the_pinned_commit_is_refused(self):
@@ -4637,10 +4646,12 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(check.problems(root), [])
 
     def test_grant_span_without_an_indented_line_adds_no_refusal(self):
+        # The first target in QUOTE_TARGETS order whose marker stands in this
+        # body is GRANT_SPAN, so its missing block is the one reason.
         got, reads = self._pinned_reads(
             self._grant_block(count=0), {GRANT_REL: self._journal_source()}
         )
-        self.assertEqual(got, [])
+        self.assertEqual(got, ["refuse: quoted line has no block: " + GRANT_SPAN])
         self.assertEqual(reads, [])
 
     def test_grant_quoted_line_absent_from_the_pinned_commit_is_refused(self):
@@ -4862,11 +4873,13 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(check.problems(root), [])
 
     def test_write_span_without_an_indented_line_adds_no_write_refusal(self):
+        # The first target in QUOTE_TARGETS order whose marker stands in this
+        # body is WRITE_SPAN, so its missing block is the one reason.
         got, reads = self._pinned_reads(
             self._ask_block(count=0, spans=(WRITE_SPAN,)),
             {ASK_REL: self._ask_source()},
         )
-        self.assertEqual(got, [])
+        self.assertEqual(got, ["refuse: quoted line has no block: " + WRITE_SPAN])
         self.assertEqual(reads, [])
 
     def test_write_quoted_line_absent_from_the_pinned_commit_is_refused(self):
@@ -5502,10 +5515,12 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(check.problems(root), [])
 
     def test_kind_read_span_without_an_indented_line_adds_no_refusal(self):
+        # The first target in QUOTE_TARGETS order whose marker stands in this
+        # body is KIND_READ_SPAN, so its missing block is the one reason.
         got, reads = self._pinned_reads(
             self._kind_block(count=0), {KIND_REL: self._kind_source()}
         )
-        self.assertEqual(got, [])
+        self.assertEqual(got, ["refuse: quoted line has no block: " + KIND_READ_SPAN])
         self.assertEqual(reads, [])
 
     def test_kind_read_quoted_line_absent_from_the_pinned_commit_is_refused(self):
@@ -6059,13 +6074,27 @@ class CitationCheckTests(unittest.TestCase):
             )
 
     def test_kind_line_span_without_an_indented_line_adds_no_refusal(self):
+        # Each arm's body cites only that arm's span with no block, so the one
+        # reason is that arm's own span: run=8189, hosted=8191, child=8192,
+        # init=8193, append=8194.
         for name, number, span, quote, index in KIND_LINE_ARMS:
             body = self._kind_line_body(spans=[span], indented=False)
             got, reads = self._pinned_reads(body, {KIND_REL: self._kind_source()})
-            self.assertEqual(got, [], name)
-            present = self._present_decisions(body)
             self.assertEqual(
-                reads, [other for other in present if other != number], name
+                got, ["refuse: quoted line has no block: " + span], name
+            )
+            present = self._present_decisions(body)
+            # The walk stops at the arm, so it reads only the decisions that
+            # stand before that arm in KIND_DECISION_ORDER.
+            self.assertEqual(
+                reads,
+                [
+                    other
+                    for other in present
+                    if KIND_DECISION_ORDER.index(other)
+                    < KIND_DECISION_ORDER.index(number)
+                ],
+                name,
             )
 
     def test_kind_edit_mismatch_stops_the_run_decision(self):
@@ -6500,9 +6529,11 @@ class CitationCheckTests(unittest.TestCase):
             )
 
     def test_file_ask_span_without_an_indented_line_adds_no_refusal(self):
+        # The first target in QUOTE_TARGETS order whose marker stands in this
+        # body is OBSERVE_SPAN, so its missing block is the one reason.
         body = self._file_ask_body(indented=False)
         got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
-        self.assertEqual(got, [])
+        self.assertEqual(got, ["refuse: quoted line has no block: " + OBSERVE_SPAN])
         self.assertEqual(reads, [])
 
     def test_file_ask_quoted_line_past_the_pin_is_refused(self):
@@ -6936,11 +6967,13 @@ class CitationCheckTests(unittest.TestCase):
             self.assertEqual(reads, [IS_WRITE_NUMBER], index)
 
     def test_edit_walks_without_an_indented_line_add_no_refusal(self):
+        # The first target in QUOTE_TARGETS order whose marker stands in this
+        # body is OBSERVE_SPAN, so its missing block is the one reason.
         got, reads = self._pinned_reads(
             self._edit_walk_body(indented=False),
             {OWNED_REL: self._file_ask_source()},
         )
-        self.assertEqual(got, [])
+        self.assertEqual(got, ["refuse: quoted line has no block: " + OBSERVE_SPAN])
         self.assertEqual(reads, [])
 
     def test_edit_walk_quoted_line_past_the_pin_is_refused(self):
@@ -7413,11 +7446,13 @@ class CitationCheckTests(unittest.TestCase):
             )
 
     def test_provider_spans_without_an_indented_line_add_no_refusal(self):
+        # The first target in QUOTE_TARGETS order whose marker stands in this
+        # body is SCHEME_SPAN, so its missing block is the one reason.
         got, reads = self._pinned_reads(
             self._provider_body(indented=False),
             {PROVIDER_REL: self._provider_source()},
         )
-        self.assertEqual(got, [])
+        self.assertEqual(got, ["refuse: quoted line has no block: " + SCHEME_SPAN])
         self.assertEqual(reads, [])
 
     def test_provider_quoted_line_absent_from_the_pinned_commit_is_refused(self):
@@ -7850,11 +7885,13 @@ class CitationCheckTests(unittest.TestCase):
         )
 
     def test_run_body_spans_without_an_indented_line_add_no_refusal(self):
+        # The first target in QUOTE_TARGETS order whose marker stands in this
+        # body is NO_PROCESS_SPAN, so its missing block is the one reason.
         got, reads = self._pinned_reads(
             self._file_ask_body(groups=["run", "write_body"], indented=False),
             {OWNED_REL: self._file_ask_source()},
         )
-        self.assertEqual(got, [])
+        self.assertEqual(got, ["refuse: quoted line has no block: " + NO_PROCESS_SPAN])
         self.assertEqual(reads, [])
 
     def test_run_body_quoted_line_past_the_pin_is_refused(self):
@@ -8450,10 +8487,12 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(check.write_invoke_quote(body), WRITE_INVOKE_QUOTE)
 
     def test_append_spans_without_an_indented_line_add_no_refusal(self):
+        # The first target in QUOTE_TARGETS order whose marker stands in this
+        # body is APPEND_CONDITION_SPAN, so its missing block is the one reason.
         got, reads = self._pinned_reads(
             self._append_body(indented=False), {OWNED_REL: self._append_source()}
         )
-        self.assertEqual(got, [])
+        self.assertEqual(got, ["refuse: quoted line has no block: " + APPEND_CONDITION_SPAN])
         self.assertEqual(reads, [])
 
     def test_append_quoted_line_past_the_pin_is_refused(self):
@@ -9298,10 +9337,12 @@ class CitationCheckTests(unittest.TestCase):
             )
 
     def test_hosted_span_without_an_indented_line_adds_no_refusal(self):
+        # The first target in QUOTE_TARGETS order whose marker stands in this
+        # body is NO_WRITE_SPAN, so its missing block is the one reason.
         got, reads = self._pinned_reads(
             self._hosted_body(indented=False), self._hosted_files()
         )
-        self.assertEqual(got, [])
+        self.assertEqual(got, ["refuse: quoted line has no block: " + NO_WRITE_SPAN])
         self.assertEqual(reads, [])
 
     def test_hosted_quoted_line_past_the_pin_is_refused(self):
@@ -10883,6 +10924,124 @@ class CitationCheckTests(unittest.TestCase):
             self.test_changed_other_indent_remainder_does_not_match,
             "elastos/crates/elastos-runtime/src/capability/manager.rs:409",
             "CAUGHT other-indent-spans",
+        )
+
+    def _block_lines_after(self, text, marker):
+        """Return the line indexes of the indented block that follows MARKER."""
+        lines = text.splitlines(keepends=True)
+        for index, line in enumerate(lines):
+            if marker not in line:
+                continue
+            block = []
+            for following in range(index + 1, len(lines)):
+                body = lines[following].rstrip("\n")
+                if not body:
+                    continue
+                if not body.startswith(check.DRAFT_INDENT):
+                    break
+                block.append(following)
+            return block
+        return []
+
+    def _main_for(self, body):
+        """main() over an in-memory draft, with the pinned reads unchanged."""
+        original = check.load_draft
+        buf = io.StringIO()
+
+        def load(_root):
+            return body
+
+        check.load_draft = load
+        try:
+            with contextlib.redirect_stdout(buf):
+                code = check.main()
+        finally:
+            check.load_draft = original
+        return code, buf.getvalue()
+
+    def test_deleting_one_block_refuses_the_cited_span(self):
+        # The end-to-end deletion case: one target keeps its marker and loses
+        # only the indented block under it. The refusal names that span, and
+        # main() prints it and exits 1.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        span, marker, _ = check.QUOTE_TARGETS[0]
+        lines = text.splitlines(keepends=True)
+        keep = set(self._block_lines_after(text, marker))
+        draft = "".join(line for index, line in enumerate(lines) if index not in keep)
+        self.assertIn(marker, draft)
+        expected = "refuse: quoted line has no block: " + span
+        self.assertEqual(self._problems_for(draft), [expected])
+        code, out = self._main_for(draft)
+        self.assertEqual(code, 1)
+        self.assertEqual(out, expected + "\n")
+
+    def test_deleting_a_span_and_its_marker_adds_no_refusal(self):
+        # A draft that stops citing a span is not a missing block, so the walk
+        # moves on and this deletion stays silent.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        span, marker, _ = check.QUOTE_TARGETS[0]
+        draft = "".join(
+            line for line in text.splitlines(keepends=True) if marker not in line
+        )
+        self.assertNotIn(marker, draft)
+        self.assertEqual(self._problems_for(draft), [])
+
+    def test_block_under_a_repeated_marker_is_refused_as_repeated(self):
+        # A second marker standing in the draft is refused before the block is
+        # read, so the repeated-marker reason wins over the block rule.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        span, marker, _ = check.QUOTE_TARGETS[0]
+        draft = text + "\nAgain " + marker + ".\n\n    kept\n"
+        self.assertEqual(
+            self._problems_for(draft),
+            ["refuse: quoted line is not one line: " + span],
+        )
+
+    def test_every_target_without_a_block_is_refused(self):
+        # For each target, the memory draft deletes only the block under that
+        # target's marker. The count is read at run time because later tasks
+        # append tails. One draft line can cite several targets, so the refusal
+        # names the first target whose own marker then has no block.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        targets = list(check.QUOTE_TARGETS)
+        self.assertGreater(len(targets), 0)
+        for span, marker, _ in targets:
+            lines = text.splitlines(keepends=True)
+            keep = set(self._block_lines_after(text, marker))
+            draft = "".join(
+                line for index, line in enumerate(lines) if index not in keep
+            )
+            self.assertEqual(draft.count(marker), 1, span)
+            first = next(
+                other
+                for other, other_marker, _ in targets
+                if not check._remainders(draft, other_marker)
+            )
+            self.assertEqual(
+                check._quote_refusals(root, draft, check.pin_sha(text)),
+                ["refuse: quoted line has no block: " + first],
+                span,
+            )
+
+    def test_falsifier_block_missing(self):
+        self._caught(
+            "marker_stands_without_a_block",
+            lambda text, marker: False,
+            self.test_deleting_one_block_refuses_the_cited_span,
+            "refuse: quoted line has no block: ",
+            "CAUGHT block-missing",
         )
 
 # The quote-target walk before function spans, in list order.
