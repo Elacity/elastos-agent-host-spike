@@ -75,6 +75,7 @@ const SWAPPED_REASON: &str = "storage file is not the file the stand-in created"
 const EXISTS_REASON: &str = "storage file already exists";
 const SHELL_STORAGE_REASON: &str = "storage belongs to one agent instance";
 const MISSING_STORAGE_REASON: &str = "storage directory does not exist";
+const NOT_DIR_REASON: &str = "storage directory is not a directory";
 const EXISTING_STORAGE_REASON: &str = "storage directory already exists";
 const DATA_STEP: &str = "storage directory";
 const ENTRY_STEP: &str = "storage file";
@@ -307,11 +308,12 @@ impl StandIn {
     /// The storage check and the storage use are one operation.
     ///
     /// The Home is the one `set_home` named, never a caller argument.
-    /// Every path component from that Home down to the storage
-    /// directory is opened from the handle of its parent with `O_NOFOLLOW`,
-    /// `O_DIRECTORY`, `O_NONBLOCK` and `O_CLOEXEC`, so a symbolic link, a
-    /// parent swapped after an earlier call, or a non-directory at any step
-    /// fails that step and nothing is followed. The entry name must be one
+    /// Every path component from the file-system root through the Home
+    /// and down to the storage directory is opened once from the handle of
+    /// the step above with `O_NOFOLLOW`, `O_DIRECTORY`, `O_NONBLOCK` and
+    /// `O_CLOEXEC`, so a symbolic link at an ancestor of the Home, at the
+    /// Home, a parent swapped after an earlier call, or a non-directory at
+    /// any step fails that step and nothing is followed. The entry name must be one
     /// normal component. The stand-in creates every storage file itself with
     /// `openat` `O_CREAT|O_EXCL|O_NOFOLLOW`, and records `(st_dev, st_ino)`
     /// in the per-Home record this value keeps. Every later call opens the
@@ -522,14 +524,15 @@ impl StandIn {
             .ok_or_else(|| (400, "storage needs a selected Home".to_owned()))
     }
 
-    /// Opens the storage directory from a handle on the selected Home with
-    /// one `O_NOFOLLOW|O_DIRECTORY` step per component, so a symbolic link at
-    /// any step, an intermediate folder included, is refused and not
-    /// followed. No step is a multi-component path, and no step starts at the
-    /// current directory: the Home is opened by its own last component on a
-    /// handle on the directory that holds it, and every step below it is
-    /// opened from the handle of the step above. Nothing is canonicalized, so
-    /// no outside path is resolved.
+    /// Opens the storage directory from a fresh handle on the file-system
+    /// root with one `O_NOFOLLOW|O_DIRECTORY` step per component, so a
+    /// symbolic link at any step, an ancestor of the Home included, is
+    /// refused and not followed. The Home must be absolute and hold no `.`
+    /// or `..` component. No step is a multi-component path, and no step
+    /// starts at the current directory: every step of the Home is opened by
+    /// its own last component on the handle of the step above, and the
+    /// storage steps below the Home continue from the Home handle. Nothing
+    /// is canonicalized, so no outside path is resolved.
     ///
     /// The walked handle is returned with `None` when the storage directory
     /// itself was opened, or with the name of the first step that is absent
@@ -540,40 +543,43 @@ impl StandIn {
         &self,
         home: &Path,
     ) -> Result<(OwnedFd, Option<std::ffi::OsString>), (u16, String)> {
+        use std::os::fd::AsFd;
+
         let storage = Self::storage_for_home(home)?;
         let to_storage = storage
             .strip_prefix(home)
             .map_err(|_| (400, DATA_REASON.to_owned()))?;
-        use std::os::fd::AsFd;
-        // A link on any step of the walk is the one storage link reason.
-        let storage_reason = |_: &rustix::io::Errno| (400, LINK_REASON.to_owned());
+        let home_parts = home
+            .components()
+            .map(|part| match part {
+                Component::RootDir => Ok(None),
+                Component::Normal(part) => Ok(Some(part)),
+                Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
+                    Err((400, DATA_REASON.to_owned()))
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if !home.is_absolute() || home_parts.iter().all(Option::is_none) {
+            return Err((400, DATA_REASON.to_owned()));
+        }
+        // A step that was opened and then closed under the walk is refused
+        // with the one storage reason for its class.
         let present = |_: &rustix::io::Errno| false;
 
-        let Some(holder) = home.parent() else {
-            return Err((400, DATA_REASON.to_owned()));
-        };
-        let Some(name) = home.file_name() else {
-            return Err((400, DATA_REASON.to_owned()));
-        };
-        let Some(above) = holder.parent() else {
-            return Err((400, DATA_REASON.to_owned()));
-        };
-        let Some(holder_name) = holder.file_name() else {
-            return Err((400, DATA_REASON.to_owned()));
-        };
-        // The directory that holds the Home is the one step opened from the
-        // current directory; the Home and every step below it start at the
-        // handle of their parent.
-        let mut current = step(
-            rustix::fs::CWD.as_fd(),
-            &present,
-            &storage_failure,
-            above.as_os_str(),
-        )?
-        .ok_or_else(|| (400, DATA_REASON.to_owned()))?;
-        for part in [holder_name, name] {
-            current = step(current.as_fd(), &present, &storage_reason, part)?
-                .ok_or_else(|| (400, LINK_REASON.to_owned()))?;
+        let mut current = rustix::fs::open(
+            "/",
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|error| storage_failure(&error))?;
+        for part in home_parts.into_iter().flatten() {
+            let Some(next) = step(current.as_fd(), &present, &storage_failure, part)? else {
+                return Err((400, MISSING_STORAGE_REASON.to_owned()));
+            };
+            current = next;
         }
         // The storage path's own components are opened from the Home handle
         // above. The walk stops on the first absent one and returns the
@@ -583,7 +589,7 @@ impl StandIn {
                 return Err((400, DATA_REASON.to_owned()));
             };
             let absent_step = |error: &rustix::io::Errno| *error == rustix::io::Errno::NOENT;
-            match step(current.as_fd(), &absent_step, &directory_failure, part)? {
+            match step(current.as_fd(), &absent_step, &storage_failure, part)? {
                 Some(next) => current = next,
                 None => return Ok((current, Some(part.to_os_string()))),
             }
@@ -1624,7 +1630,10 @@ fn existing_step(directory: &OwnedFd, name: &std::ffi::OsStr) -> (u16, String) {
         rustix::fs::Mode::empty(),
     ) {
         Ok(_) => (409, EXISTING_STORAGE_REASON.to_owned()),
-        Err(error) => directory_failure(&error),
+        // The entry `mkdirat` saw is not a directory and not a link: it is
+        // the not-a-directory case. Every other error keeps its own reason.
+        Err(error) if error == rustix::io::Errno::NOTDIR => (400, NOT_DIR_REASON.to_owned()),
+        Err(error) => storage_failure(&error),
     }
 }
 
@@ -1656,7 +1665,7 @@ fn make_step(parent: &OwnedFd, name: &std::ffi::OsStr) -> Result<OwnedFd, (u16, 
             | rustix::fs::OFlags::CLOEXEC,
         rustix::fs::Mode::empty(),
     )
-    .map_err(|error| directory_failure(&error))
+    .map_err(|error| storage_failure(&error))
 }
 
 /// A storage file open or `fstat` refusal. It names the file step, never the
@@ -1668,28 +1677,17 @@ fn file_failure(error: &rustix::io::Errno) -> (u16, String) {
     }
 }
 
-/// One storage open refusal, named by the step that refused it. A symbolic
-/// link anywhere on the walk is refused and not followed, so it reaches this
-/// function as the step it stood on. An absent step is not an escape: the
-/// caller reports it with its own missing reason before this function runs.
-/// ENOTDIR is a component that is not a directory, so it is an outside path.
+/// The one storage-directory reason for every open step: the Home, every
+/// ancestor of the Home and every step of `harness::data_dir(home)` down to
+/// the storage directory. Every open on that walk asks for
+/// `O_NOFOLLOW|O_DIRECTORY`, so ELOOP and ENOTDIR are the symbolic link the
+/// call refused to follow. ENOTDIR on an entry that is a plain file is the
+/// separate not-a-directory case, which `existing_step` reports itself.
 fn storage_failure(error: &rustix::io::Errno) -> (u16, String) {
-    // ELOOP: the walk passed its link limit. ENOTDIR: a step is not a
-    // directory, which is what `O_NOFOLLOW|O_DIRECTORY` reports for the
-    // symbolic link or the file it refused to follow. Every other error
-    // names its own step; an absent directory (ENOENT) is the caller's case.
     match *error {
         rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR => (400, LINK_REASON.to_owned()),
-        _ => (400, format!("{DATA_STEP}: {error}")),
-    }
-}
-
-/// The storage-directory open refusal. A symbolic link and a non-directory
-/// step are both the link rule; a missing directory is its own case.
-fn directory_failure(error: &rustix::io::Errno) -> (u16, String) {
-    match *error {
         rustix::io::Errno::NOENT => (400, MISSING_STORAGE_REASON.to_owned()),
-        _ => storage_failure(error),
+        _ => (400, format!("{DATA_STEP}: {error}")),
     }
 }
 
@@ -8022,6 +8020,95 @@ mod tests {
             "the stand-in did the work: agent 1's own file is unchanged"
         );
         home.finish().expect("the throwaway Home finishes");
+    }
+
+    /// Task 112, M1 check A9: the walk reaches the Home itself one component
+    /// at a time from a handle on `/`, so a symbolic link at an ANCESTOR of
+    /// the Home is refused and not followed. Swapping `base` for a link to
+    /// another tree of the same shape turns the first assertion below red
+    /// when the Home is opened again by its full path, because that one
+    /// `openat` follows the link in `base` and reaches the other tree.
+    #[test]
+    fn standin_storage_refuses_an_ancestor_symlink_of_the_home() {
+        use std::os::unix::fs::symlink;
+
+        let scratch = TempDir::new().expect("a scratch directory for the ancestor link row");
+        let base = scratch.path().join("base");
+        let home = base.join("mid").join("holder").join("thehome");
+        std::fs::create_dir_all(&home).expect("the test makes the real Home tree");
+        let storage = StandIn::storage_for_home(&home)
+            .expect("the stand-in returns the selected Home's storage path");
+        let outside = scratch.path().join("outside");
+        let outside_home = outside.join("mid").join("holder").join("thehome");
+        std::fs::create_dir_all(&outside_home).expect("the test makes the other tree");
+
+        let mut standin = StandIn::new();
+        standin.set_home(&home);
+        // The tree works before the swap, so the refusal below is the link.
+        assert_eq!(
+            standin.create_storage("notes.txt"),
+            Ok(()),
+            "the stand-in did the work: the real ancestor tree accepts the file"
+        );
+        let real = storage.join("notes.txt");
+        assert_eq!(
+            std::fs::read(&real).expect("the real file stays readable"),
+            b"",
+            "the file lands under the real Home"
+        );
+
+        // The other tree holds the same shape and a real storage directory,
+        // so only the link on `base` can refuse the second tree.
+        let outside_storage = StandIn::storage_for_home(&outside_home)
+            .expect("the stand-in returns the other Home's storage path");
+        std::fs::create_dir_all(&outside_storage).expect("the test makes the other storage");
+        std::fs::write(outside_storage.join("notes.txt"), b"outside bytes")
+            .expect("the test writes the outside file");
+        std::fs::rename(&base, scratch.path().join("real-base"))
+            .expect("the test moves the real base aside");
+        symlink(&outside, &base).expect("the test makes the base an ancestor link");
+
+        assert_eq!(
+            standin.create_storage("second.txt"),
+            Err((400, LINK_REASON.to_owned())),
+            "the stand-in did the work: it refuses an ancestor link of the Home"
+        );
+        assert_eq!(
+            standin.confirm_storage("notes.txt"),
+            Err((400, LINK_REASON.to_owned())),
+            "the stand-in did the work: the check refuses that ancestor link too"
+        );
+        let mut names = std::fs::read_dir(&outside_storage)
+            .expect("the other storage stays readable")
+            .map(|entry| entry.expect("the other entry reads").file_name())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![std::ffi::OsString::from("notes.txt")],
+            "the stand-in did the work: it creates nothing in the other tree"
+        );
+        assert_eq!(
+            std::fs::read(outside_storage.join("notes.txt"))
+                .expect("the outside file stays readable"),
+            b"outside bytes",
+            "the stand-in did the work: the outside file is unchanged"
+        );
+
+        // Restore the real base: the route then works, so the refusal above
+        // came from the link and nothing else.
+        std::fs::remove_file(&base).expect("the test removes the link");
+        std::fs::rename(scratch.path().join("real-base"), &base)
+            .expect("the test puts the real base back");
+        assert_eq!(
+            standin.create_storage("second.txt"),
+            Ok(()),
+            "the stand-in did the work: the real base accepts a second file"
+        );
+        assert!(
+            storage.join("second.txt").is_file(),
+            "the file lands under the Home"
+        );
     }
 
     #[test]
