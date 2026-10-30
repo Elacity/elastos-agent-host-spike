@@ -341,15 +341,20 @@ fn cid_record_refuses_as_the_checked_record_does() {
     verify_cid_record(cid, &record, &[did.clone()])
         .unwrap_or_else(|refusal| panic!("the good record was refused: {refusal}"));
 
-    // The listing with one byte of one file's `sha256` changed names
-    // another closure.
-    let mut changed = listing_of(&photo_stand_in_entries());
+    // A record over the PH6 listing's pin does not pass for that same
+    // listing with one byte of one file's `sha256` changed: only the flip
+    // makes the two CIDs differ, so only the CID compare refuses it.
+    let listing = listing_of(&photo_stand_in_entries());
+    let pin: LabCid = PHOTO_STAND_IN_LAB_CID.parse().expect("the pin parses");
+    assert_eq!(listed_cid(&listing), pin);
+    let over_pin = sign_cid_record(&key, pin);
+    let mut changed = listing;
     changed[2].sha256[0] ^= 1;
     let changed_cid = listed_cid(&changed);
-    assert_ne!(changed_cid, cid);
-    let refusal = verify_cid_record(changed_cid, &record, &[did.clone()])
+    assert_ne!(changed_cid, pin);
+    let refusal = verify_cid_record(changed_cid, &over_pin, &[did.clone()])
         .expect_err("a record over the listing must not pass for the changed listing");
-    assert_names_another_cid(refusal, cid, changed_cid);
+    assert_names_another_cid(refusal, pin, changed_cid);
     // The other way round, where a checked bundle holds the CID: a record
     // over the changed listing, judged by both calls.
     let over_changed = sign_cid_record(&key, changed_cid);
