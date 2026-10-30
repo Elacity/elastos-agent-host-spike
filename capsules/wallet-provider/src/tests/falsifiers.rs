@@ -257,8 +257,12 @@ use std::process::Command;
 /// WP183 through WP197 exercise character and raw-identifier boundaries,
 /// quoting, order, malformed cells, and source or arm refusals in that test.
 /// WP198 removes the field-list reader's balance refusal, so a shift expression
-/// hides the field after it and the same test fails on its shift case.
-const EXPECTED_FALSIFIERS: usize = 186;
+/// hides the field after it and the same test fails on its shift case. Task 152
+/// adds WP202, which grants the parent Landlock row a file read; WP203, which
+/// drops the default-denial ABI check; WP204, which keeps only the read rights
+/// in the handled mask; and WP210, which runs the final Landlock call before
+/// `PR_SET_NO_NEW_PRIVS`. All four are CAUGHT on the Mac.
+const EXPECTED_FALSIFIERS: usize = 190;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

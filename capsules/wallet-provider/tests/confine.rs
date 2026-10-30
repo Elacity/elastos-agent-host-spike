@@ -5916,8 +5916,9 @@ fn invalid_json_answer_names_the_request_and_the_parse_error() {
 /// operator: `(allow file-read*)` and `(allow(literal "/x"))` put a space or a
 /// nested form after `allow`, `(allow)` is the bare operator, and
 /// `(allow network*)` is the spaced spelling. The three predicates below, the
-/// allow-form selector `allow_forms` and the seccomp mapping table's lookup all
-/// call this one function, so the rule has one spelling in this file (P10).
+/// allow-form selector `allow_forms`, the seccomp mapping table's lookup and
+/// the Landlock ruleset builder all call this one function, so the rule has
+/// one spelling in this file (P10).
 ///
 /// `allow` must be a whole token of the form: `(allowed ...)`, `(allowing x)`
 /// and `(notallow)` are not allow forms.
@@ -6072,6 +6073,23 @@ const PINNED_RULES: &[(&str, &str)] = &[
 /// present the contract, in this order.
 const FILE_PROFILES: [&str; 3] = ["did-provider", "wallet-provider", "model-provider"];
 
+/// The parameter names one form's `(param "NAME")` tokens carry, in order.
+/// An unclosed token is a refusal. The contract check and the Landlock path
+/// reader both use this scan, so the token has one reader (P10).
+fn parameter_tokens(form: &str) -> Result<Vec<&str>, ()> {
+    let mut tokens = Vec::new();
+    let mut rest = form;
+    while let Some(at) = rest.find(PARAM_PREFIX) {
+        let tail = &rest[at + PARAM_PREFIX.len()..];
+        let Some(end) = tail.find('"') else {
+            return Err(());
+        };
+        tokens.push(&tail[..end]);
+        rest = &tail[end..];
+    }
+    Ok(tokens)
+}
+
 /// The one file-profile contract every file profile declares: `(version 1)`
 /// first, `(deny default)` second, an explicit `(deny network*)`, no
 /// `(allow default)`, no network allow, exactly one `process-exec` allow (the
@@ -6107,20 +6125,17 @@ fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
         if is_exec_allow(form) {
             exec_allows.push(form.as_str());
         }
-        let mut rest = form.as_str();
-        while let Some(at) = rest.find(PARAM_PREFIX) {
-            let tail = &rest[at + PARAM_PREFIX.len()..];
-            let Some(end) = tail.find('"') else {
-                return Err(format!("{name} parameter token must close: {form}"));
-            };
-            let token = &tail[..end];
+        let tokens = match parameter_tokens(form) {
+            Ok(tokens) => tokens,
+            Err(()) => return Err(format!("{name} parameter token must close: {form}")),
+        };
+        for token in tokens {
             if !CANONICAL_PARAMS.contains(&token) {
                 return Err(format!(
                     "{name} declares the non-canonical parameter token {token}; \
                      every file profile binds STORAGE_ROOT, STORAGE_PARENT and PROVIDER_EXECUTABLE"
                 ));
             }
-            rest = &tail[end..];
         }
     }
     if exec_allows.len() > 1 {
@@ -6707,6 +6722,808 @@ fn install_seccomp_with(
         steps(step).map_err(|errno| SeccompInstallFailure::Step(step, errno))?;
     }
     Ok(())
+}
+
+/// The Landlock filesystem rights, by the bit the ABI numbers. The values are
+/// the kernel's `<linux/landlock.h>` flags, written here as plain numbers so the
+/// ruleset builder and every test read one table on every OS. `REFER`,
+/// `TRUNCATE` and `IOCTL_DEV` arrived in ABI 2, 3 and 5, so a row that needs one
+/// of them departs a lower-ABI kernel wider, and the builder refuses that ABI
+/// instead of installing a weaker rule.
+const LANDLOCK_ACCESS_FS_EXECUTE: u64 = 1 << 0;
+const LANDLOCK_ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
+const LANDLOCK_ACCESS_FS_READ_FILE: u64 = 1 << 2;
+const LANDLOCK_ACCESS_FS_READ_DIR: u64 = 1 << 3;
+const LANDLOCK_ACCESS_FS_REMOVE_DIR: u64 = 1 << 4;
+const LANDLOCK_ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
+const LANDLOCK_ACCESS_FS_MAKE_CHAR: u64 = 1 << 6;
+const LANDLOCK_ACCESS_FS_MAKE_DIR: u64 = 1 << 7;
+const LANDLOCK_ACCESS_FS_MAKE_REG: u64 = 1 << 8;
+const LANDLOCK_ACCESS_FS_MAKE_SOCK: u64 = 1 << 9;
+const LANDLOCK_ACCESS_FS_MAKE_FIFO: u64 = 1 << 10;
+const LANDLOCK_ACCESS_FS_MAKE_BLOCK: u64 = 1 << 11;
+const LANDLOCK_ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
+const LANDLOCK_ACCESS_FS_REFER: u64 = 1 << 13;
+const LANDLOCK_ACCESS_FS_TRUNCATE: u64 = 1 << 14;
+const LANDLOCK_ACCESS_FS_IOCTL_DEV: u64 = 1 << 15;
+
+/// The one mapping table from a top-level allow form's text to the Landlock
+/// filesystem rights its path rule carries: the file row of the Linux seat of
+/// the file-profile contract.
+///
+/// An entry whose rights are `0` is a form that is deliberately given no path
+/// right, and it is written down rather than omitted so a reader cannot mistake
+/// "no rule" for "not yet considered". Every allow form a wallet profile
+/// carries has exactly one entry here, so no form is left without a decision and
+/// no form can be added to a profile without one:
+///
+/// - the `STORAGE_ROOT` subpath form carries read-file, read-dir, write-file,
+///   remove-file, remove-dir, make-dir and make-reg, because `init` creates the
+///   wallet directory and its key file inside the root, and a path rule on that
+///   directory covers the tree `subpath` names;
+/// - the `bound-executable` exec form carries only `EXECUTE` on that file,
+///   which is what the declared `process-exec` permission authorizes;
+/// - the `STORAGE_PARENT` read form carries no right: a Landlock path rule on a
+///   directory covers the whole tree beneath it, so a read rule on the parent
+///   would grant every sibling of `STORAGE_ROOT`;
+/// - the root read form `(allow file-read* (literal "/"))` carries no right: a
+///   read rule on `/` would grant the whole filesystem and add a fourth path;
+/// - `(allow sysctl-read)` carries no path right. Landlock has no sysctl right,
+///   and the form names kernel facts rather than a path.
+///
+/// The head forms (`(version 1)`, `(deny default)`) and the deny forms grant
+/// nothing, so they take no entry at all.
+///
+/// Falsifier: WP202 adds `READ_FILE` to the `STORAGE_PARENT` row, so
+/// `landlock_ruleset_follows_the_declared_rights` fails on that decision.
+const LANDLOCK_RULE_RIGHTS: &[(&str, u64)] = &[
+    (
+        SHARED_RULES[2],
+        LANDLOCK_ACCESS_FS_READ_FILE
+            | LANDLOCK_ACCESS_FS_READ_DIR
+            | LANDLOCK_ACCESS_FS_WRITE_FILE
+            | LANDLOCK_ACCESS_FS_REMOVE_FILE
+            | LANDLOCK_ACCESS_FS_REMOVE_DIR
+            | LANDLOCK_ACCESS_FS_MAKE_DIR
+            | LANDLOCK_ACCESS_FS_MAKE_REG,
+    ),
+    (SHARED_RULES[0], LANDLOCK_ACCESS_FS_EXECUTE),
+    (SHARED_RULES[1], 0),
+    (STARTUP_RULES[0], 0),
+    (STARTUP_RULES[1], 0),
+];
+
+/// The ABI each Landlock right needs. `READ_FILE`, `READ_DIR`, `WRITE_FILE`
+/// and `EXECUTE` are ABI 1; `REMOVE_FILE`, `REMOVE_DIR`, `MAKE_DIR` and
+/// `MAKE_REG` are also ABI 1. A row whose rights all exist at ABI 1 needs ABI
+/// 1, and the builder reads this table to name the row a lower ABI cannot
+/// express.
+///
+/// The table holds one entry per Landlock right so a row added later with a
+/// newer right cannot silently claim ABI 1: a right with no entry is a
+/// programmatic error the builder reports as its own reason.
+const LANDLOCK_RIGHT_ABI: &[(u64, u32)] = &[
+    (LANDLOCK_ACCESS_FS_EXECUTE, 1),
+    (LANDLOCK_ACCESS_FS_WRITE_FILE, 1),
+    (LANDLOCK_ACCESS_FS_READ_FILE, 1),
+    (LANDLOCK_ACCESS_FS_READ_DIR, 1),
+    (LANDLOCK_ACCESS_FS_REMOVE_DIR, 1),
+    (LANDLOCK_ACCESS_FS_REMOVE_FILE, 1),
+    (LANDLOCK_ACCESS_FS_MAKE_CHAR, 1),
+    (LANDLOCK_ACCESS_FS_MAKE_DIR, 1),
+    (LANDLOCK_ACCESS_FS_MAKE_REG, 1),
+    (LANDLOCK_ACCESS_FS_MAKE_SOCK, 1),
+    (LANDLOCK_ACCESS_FS_MAKE_FIFO, 1),
+    (LANDLOCK_ACCESS_FS_MAKE_BLOCK, 1),
+    (LANDLOCK_ACCESS_FS_MAKE_SYM, 1),
+    (LANDLOCK_ACCESS_FS_REFER, 2),
+    (LANDLOCK_ACCESS_FS_TRUNCATE, 3),
+    (LANDLOCK_ACCESS_FS_IOCTL_DEV, 5),
+];
+
+/// The lowest Landlock ABI that can express every right of `rights`, or `None`
+/// where a right has no table entry. It reads the one ABI table. A missing
+/// entry is `None`, never ABI 1.
+fn landlock_rights_abi(rights: u64) -> Option<u32> {
+    let mut needed = 0u32;
+    let mut known = 0u64;
+    for (right, abi) in LANDLOCK_RIGHT_ABI {
+        known |= *right;
+        if rights & right == 0 {
+            continue;
+        }
+        needed = needed.max(*abi);
+    }
+    if rights & !known != 0 {
+        return None;
+    }
+    Some(needed)
+}
+
+/// The refusal of one row the reported `abi` cannot express, naming the row, or
+/// `None` where the ABI can express it. This is the one copy of the ABI rule:
+/// the ruleset builder and the test that presents a low ABI both read it (P10).
+fn landlock_row_abi_refusal(row: &str, rights: u64, abi: u32) -> Option<String> {
+    let Some(needed) = landlock_rights_abi(rights) else {
+        return Some(format!(
+            "linux confinement refused: the Landlock ABI cannot express {row}, \
+             because a right in it has no ABI table entry"
+        ));
+    };
+    if abi < needed {
+        return Some(format!(
+            "linux confinement refused: the Landlock ABI cannot express {row}, \
+             which needs ABI {needed} and this kernel reports ABI {abi}"
+        ));
+    }
+    None
+}
+
+/// The rights the file row must be able to *deny*, with the row name its refusal
+/// uses. The oracle's `(deny default)` file row refuses every file write outside
+/// `STORAGE_ROOT`, and a truncation and a device ioctl are writes there, so a
+/// kernel whose ABI reports no right for them leaves them permitted outside the
+/// root. `CONFINEMENT-LINUX.md` states the same rule for the `STORAGE_ROOT` row:
+/// a wider departure is not confinement, so the start is refused.
+///
+/// The ABI each right needs is read from the one ABI table by
+/// `landlock_row_abi_refusal`, so this constant holds no ABI version of its own.
+/// `TRUNCATE` arrives at ABI 3 and `IOCTL_DEV` at ABI 5, so only ABI 5 or later
+/// can refuse a write outside the root and a lower ABI builds no ruleset.
+///
+/// Falsifier: WP203 drops the builder's check of this pair, so ABI 1 builds a
+/// ruleset and `landlock_ruleset_refuses_an_abi_that_cannot_express_a_row` fails.
+const LANDLOCK_REQUIRED_DENIALS: (&str, u64) = (
+    "the default-denial file rights",
+    LANDLOCK_ACCESS_FS_TRUNCATE | LANDLOCK_ACCESS_FS_IOCTL_DEV,
+);
+
+/// The rights the builder handles in every ruleset: every right the ABI can
+/// report at the version the ruleset was built for, so a right no rule covers is
+/// refused by the default denial instead of being permitted. `handled_access_fs`
+/// must name every right the kernel knows at that ABI, because an unnamed right
+/// is not restricted at all.
+///
+/// `REFER`, `TRUNCATE` and `IOCTL_DEV` are added only at the ABI that defines
+/// them: naming a right a lower-ABI kernel does not know makes
+/// `landlock_create_ruleset` fail with `EINVAL`, so the mask is built from the
+/// same ABI table the rows are checked against.
+///
+/// Falsifier: WP204 keeps only the read rights, so
+/// `landlock_ruleset_handles_every_right_the_abi_reports` fails on the mask.
+fn landlock_handled_rights(abi: u32) -> u64 {
+    let mut handled = 0u64;
+    for (right, introduced) in LANDLOCK_RIGHT_ABI {
+        if *introduced <= abi {
+            handled |= *right;
+        }
+    }
+    handled
+}
+
+/// One path rule of a Landlock ruleset: the parameter it names, the path bound
+/// to that parameter, and the rights the rule grants there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LandlockPathRule {
+    parameter: &'static str,
+    path: PathBuf,
+    rights: u64,
+}
+
+/// The generated Landlock policy of one provider: the provider name, the ABI it
+/// was built for, the access mask it handles, and its path rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LandlockRuleset {
+    provider: String,
+    abi: u32,
+    handled: u64,
+    rules: Vec<LandlockPathRule>,
+    /// A step an install must refuse, so a launch refusal is proved without a
+    /// kernel that would refuse it. It is test input and `None` in every real
+    /// launch.
+    injected_step_failure: Option<(LandlockStep, i32)>,
+}
+
+/// The one builder of a provider's Landlock file row: the ruleset of `name`,
+/// rendered from the profile `generate_profile` produces from `declared` and read
+/// back through `profile_forms`. Like the seccomp builder it reads no file, holds
+/// no rule text of its own and never reads the declared-rights document
+/// directly, so the JSON has one reader and the profile one parser (P10).
+///
+/// `bindings` carries the three parameter paths the launch binds, so the ruleset
+/// names the same paths the start uses and no second derivation exists. A rule is
+/// built only for a parameter a row grants a right on: a row whose rights are
+/// `0` is a decision written down, and it adds no rule.
+///
+/// `abi` is the version the kernel reported, passed in rather than read here, so
+/// every OS can drive this function and a test can present an ABI below a row's.
+/// It refuses, in this order: whatever `generate_profile` refuses, with that
+/// reason unchanged; an allow form the rights table does not hold, with a reason
+/// that names the provider and the form and builds no ruleset; an ABI below a
+/// row's, with `linux confinement refused: the Landlock ABI cannot express
+/// <row>`, naming the row; a form whose parameter the launch does not bind; and
+/// an ABI below the rights the default denial must be able to refuse, with the
+/// same words and `LANDLOCK_REQUIRED_DENIALS`' row name. Every refusal builds no
+/// ruleset.
+///
+/// The loader entries are added only where the provider needs them, which is
+/// every launch of a dynamically linked provider; the builder takes them as an
+/// input so a test can build a ruleset without them and read the difference.
+/// This task passes an empty list: the loader paths rest on a measurement of the
+/// real binary, and that measurement is the next slice.
+fn landlock_path_rules(
+    name: &str,
+    declared: &Value,
+    bindings: &[(&'static str, PathBuf)],
+    abi: u32,
+    loader: &[(&str, &str)],
+) -> Result<LandlockRuleset, String> {
+    let rendered = generate_profile(name, declared)?;
+    let mut rules: Vec<LandlockPathRule> = Vec::new();
+    for form in profile_forms(&rendered) {
+        if !is_allow_form(&form) {
+            // The version, the default denial and the network denial grant
+            // nothing, so they take no row and add no path.
+            continue;
+        }
+        let Some((_, rights)) = LANDLOCK_RULE_RIGHTS
+            .iter()
+            .find(|(allowed, _)| *allowed == form.as_str())
+        else {
+            return Err(format!(
+                "{name} landlock ruleset refuses the allow form {form}: \
+                 the rights table has no row for it, so no ruleset is built"
+            ));
+        };
+        if *rights == 0 {
+            // A row that grants no right is a decision, not an omission.
+            continue;
+        }
+        if let Some(refusal) = landlock_row_abi_refusal(&format!("the {form} row"), *rights, abi) {
+            return Err(refusal);
+        }
+        let Some((parameter, path)) = parameter_path_for_form(&form, bindings) else {
+            // A form whose parameter the launch does not bind is a refusal
+            // rather than a skipped rule: a rule on a path nobody bound would
+            // grant nothing and hide a drift between the profile and the launch.
+            return Err(format!(
+                "{name} landlock ruleset refuses the allow form {form}: \
+                 the launch binds no parameter it names, so no ruleset is built"
+            ));
+        };
+        rules.push(LandlockPathRule {
+            parameter,
+            path,
+            rights: *rights,
+        });
+    }
+    for (path, _) in loader {
+        rules.push(LandlockPathRule {
+            parameter: "LANDLOCK_LOADER_PATHS",
+            path: PathBuf::from(path),
+            rights: LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE,
+        });
+    }
+    // The row's decisions are checked above; the denial the default arm must
+    // make is checked here, so an ABI that grants every row but cannot refuse a
+    // write outside `STORAGE_ROOT` builds no ruleset.
+    let (denial_row, denial_rights) = LANDLOCK_REQUIRED_DENIALS;
+    if let Some(refusal) = landlock_row_abi_refusal(denial_row, denial_rights, abi) {
+        return Err(refusal);
+    }
+    Ok(LandlockRuleset {
+        provider: name.to_string(),
+        abi,
+        handled: landlock_handled_rights(abi),
+        rules,
+        injected_step_failure: None,
+    })
+}
+
+/// The parameter and bound path an allow form names, or `None` where the form
+/// names no parameter the launch binds. It reads the form's `(param "NAME")`
+/// token through `parameter_tokens`, the same reader the contract check uses,
+/// so the token has one spelling, and it answers the path from the one
+/// bindings list.
+fn parameter_path_for_form<'a>(
+    form: &str,
+    bindings: &'a [(&'static str, PathBuf)],
+) -> Option<(&'static str, PathBuf)> {
+    let Ok(tokens) = parameter_tokens(form) else {
+        return None;
+    };
+    for (parameter, path) in bindings {
+        if tokens.contains(parameter) {
+            return Some((*parameter, path.clone()));
+        }
+    }
+    None
+}
+
+/// The step a Landlock install was taking when it failed. Each has its own
+/// refusal, so a failure names the step and keeps its errno (P11).
+///
+/// `AddRule` names its rule by position in the ruleset rather than by parameter,
+/// because the loader entries share one parameter name and a name would not tell
+/// four rules apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LandlockStep {
+    /// `landlock_create_ruleset`.
+    CreateRuleset,
+    /// `landlock_add_rule` for the rule at this position.
+    AddRule(usize),
+    /// `prctl(PR_SET_NO_NEW_PRIVS)`, which `landlock_restrict_self` requires.
+    NoNewPrivileges,
+    /// `landlock_restrict_self`.
+    RestrictSelf,
+}
+
+/// One Landlock install failure: the step that failed and its errno.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LandlockInstallFailure {
+    step: LandlockStep,
+    errno: i32,
+}
+
+impl LandlockInstallFailure {
+    const fn new(step: LandlockStep, errno: i32) -> Self {
+        Self { step, errno }
+    }
+
+    /// The step's own words. `Display` reads this one copy, so the step wording
+    /// cannot drift (P10).
+    fn step_words(self) -> String {
+        match self.step {
+            LandlockStep::CreateRuleset => "the ruleset could not be created".to_string(),
+            LandlockStep::AddRule(index) => format!("the path rule {index} could not be added"),
+            LandlockStep::NoNewPrivileges => "PR_SET_NO_NEW_PRIVS failed".to_string(),
+            LandlockStep::RestrictSelf => "landlock_restrict_self failed".to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for LandlockInstallFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "landlock install refused: {} with errno {}",
+            self.step_words(),
+            self.errno
+        )
+    }
+}
+
+/// The one Landlock step sequencer, and it makes no kernel call: it runs the
+/// steps in the order an install must take them, stopping at the first failure
+/// with that step's own errno. A failure of the first step means no later step
+/// runs, so a partly built ruleset is never installed.
+///
+/// The order is the one the kernel requires: every rule is added first, then
+/// `PR_SET_NO_NEW_PRIVS`, then `landlock_restrict_self`. Without
+/// `PR_SET_NO_NEW_PRIVS` first, `restrict_self` fails `EPERM` (1) and nothing is
+/// confined, so an install that skipped or reordered that step would leave the
+/// provider unconfined while answering `ok`.
+///
+/// Falsifier: WP210 runs the final call before `PR_SET_NO_NEW_PRIVS`, so
+/// `landlock_install_refuses_each_failed_step` fails on its recorded order.
+fn install_landlock_with(
+    ruleset: &LandlockRuleset,
+    mut steps: impl FnMut(LandlockStep) -> Result<(), i32>,
+) -> Result<(), LandlockInstallFailure> {
+    let mut run =
+        |step: LandlockStep| steps(step).map_err(|errno| LandlockInstallFailure::new(step, errno));
+    run(LandlockStep::CreateRuleset)?;
+    for index in 0..ruleset.rules.len() {
+        run(LandlockStep::AddRule(index))?;
+    }
+    run(LandlockStep::NoNewPrivileges)?;
+    run(LandlockStep::RestrictSelf)
+}
+
+/// The ABI refusal of `ruleset`, or an empty string where its rows fit its ABI.
+/// It reads the ruleset's own rows through the one ABI rule, so a row the ABI
+/// cannot express has one refusal spelling (P10).
+fn landlock_abi_refusal(ruleset: &LandlockRuleset) -> String {
+    for rule in &ruleset.rules {
+        if let Some(refusal) = landlock_row_abi_refusal(
+            &format!("the {} row", rule.parameter),
+            rule.rights,
+            ruleset.abi,
+        ) {
+            return refusal;
+        }
+    }
+    String::new()
+}
+
+/// Wallet's committed declared rights yield the `STORAGE_ROOT` rule and the
+/// `EXECUTE` rule, the three zero-right rows stay decisions that add no path,
+/// and a declaration the shared contract does not name keeps `declared_entries`'
+/// reason. The test builds rulesets and reads them. It starts no process and
+/// calls no kernel, so it runs on every OS.
+///
+/// Falsifier: WP202 adds `READ_FILE` to the `STORAGE_PARENT` row, so this test
+/// fails on the parent decision.
+#[test]
+fn landlock_ruleset_follows_the_declared_rights() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let fixture = tempfile::tempdir().expect("temporary wallet base");
+    let base = resolved(fixture.path());
+    let bindings = canonical_bindings(WALLET_PROVIDER, &base, Path::new(PROVIDER_BINARY));
+    let ruleset = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, 7, &[])
+        .unwrap_or_else(|err| panic!("{err}"));
+    assert!(ruleset.injected_step_failure.is_none());
+    assert_eq!(LANDLOCK_RULE_RIGHTS.len(), 5);
+
+    let rule = |parameter: &str| {
+        ruleset
+            .rules
+            .iter()
+            .find(|rule| rule.parameter == parameter)
+            .unwrap_or_else(|| panic!("the ruleset must hold the {parameter} rule: {ruleset:?}"))
+    };
+    let bound = |parameter: &str| {
+        bindings
+            .iter()
+            .find(|(name, _)| *name == parameter)
+            .unwrap_or_else(|| panic!("the launch must bind {parameter}"))
+            .1
+            .clone()
+    };
+
+    assert_eq!(
+        rule("STORAGE_ROOT").rights,
+        LANDLOCK_ACCESS_FS_READ_FILE
+            | LANDLOCK_ACCESS_FS_READ_DIR
+            | LANDLOCK_ACCESS_FS_WRITE_FILE
+            | LANDLOCK_ACCESS_FS_REMOVE_FILE
+            | LANDLOCK_ACCESS_FS_REMOVE_DIR
+            | LANDLOCK_ACCESS_FS_MAKE_DIR
+            | LANDLOCK_ACCESS_FS_MAKE_REG,
+        "the storage subpath row must carry the seven rights init needs"
+    );
+    assert_eq!(rule("STORAGE_ROOT").path, bound("STORAGE_ROOT"));
+    assert_eq!(
+        rule("PROVIDER_EXECUTABLE").rights,
+        LANDLOCK_ACCESS_FS_EXECUTE,
+        "the bound-executable row must carry execution-only rights"
+    );
+    assert_eq!(
+        rule("PROVIDER_EXECUTABLE").path,
+        bound("PROVIDER_EXECUTABLE")
+    );
+
+    let parent = LANDLOCK_RULE_RIGHTS
+        .iter()
+        .find(|(form, _)| *form == SHARED_RULES[1])
+        .expect("the parent form must have an explicit decision")
+        .1;
+    assert_eq!(parent, 0, "the STORAGE_PARENT row must grant no right");
+    assert_eq!(
+        parent & LANDLOCK_ACCESS_FS_READ_FILE,
+        0,
+        "the STORAGE_PARENT row must grant no read"
+    );
+    assert_eq!(
+        parent & LANDLOCK_ACCESS_FS_WRITE_FILE,
+        0,
+        "the STORAGE_PARENT row must grant no write"
+    );
+    for form in [STARTUP_RULES[0], STARTUP_RULES[1]] {
+        let rights = LANDLOCK_RULE_RIGHTS
+            .iter()
+            .find(|(candidate, _)| *candidate == form)
+            .unwrap_or_else(|| panic!("{form} must have an explicit decision"))
+            .1;
+        assert_eq!(rights, 0, "{form} must grant no path right");
+    }
+    assert!(
+        !ruleset
+            .rules
+            .iter()
+            .any(|rule| rule.parameter == "STORAGE_PARENT"),
+        "the zero-right parent form must add no path"
+    );
+
+    let mut without_storage = declared.clone();
+    without_storage["rights"]
+        .as_array_mut()
+        .expect("the declared rights must hold a rights list")
+        .retain(|entry| entry["id"] != "storage");
+    let reduced = landlock_path_rules(WALLET_PROVIDER, &without_storage, &bindings, 7, &[])
+        .unwrap_or_else(|err| panic!("{err}"));
+    assert!(
+        !reduced
+            .rules
+            .iter()
+            .any(|rule| rule.parameter == "STORAGE_ROOT"),
+        "removing the storage right must remove the STORAGE_ROOT rule: {reduced:?}"
+    );
+    assert!(
+        reduced
+            .rules
+            .iter()
+            .any(|rule| rule.parameter == "PROVIDER_EXECUTABLE"),
+        "the bound-executable right stays, so its rule stays: {reduced:?}"
+    );
+
+    let mut unnamed = declared.clone();
+    unnamed["rights"]
+        .as_array_mut()
+        .expect("the declared rights must hold a rights list")
+        .push(json!({
+            "id": "unnamed-right",
+            "rules": [r#"(allow file-read* (literal "/private/var/cc-landlock-unnamed"))"#],
+        }));
+    let refusal = landlock_path_rules(WALLET_PROVIDER, &unnamed, &bindings, 7, &[])
+        .expect_err("an id the shared contract does not name must be refused");
+    assert_eq!(
+        refusal,
+        format!(
+            "{WALLET_PROVIDER} declares unnamed-right, which the shared contract does not name"
+        ),
+        "the refusal must be declared_entries' own reason, unchanged"
+    );
+
+    let mut unmapped = declared.clone();
+    unmapped["rights"]
+        .as_array_mut()
+        .expect("the declared rights must hold a rights list")
+        .iter_mut()
+        .find(|entry| entry["id"] == "storage")
+        .expect("the declared rights must hold the storage right")["rules"]
+        .as_array_mut()
+        .expect("the storage right must hold a rules list")
+        .push(json!(
+            r#"(allow mach-lookup (global-name "com.apple.system.logger"))"#
+        ));
+    let refusal = landlock_path_rules(WALLET_PROVIDER, &unmapped, &bindings, 7, &[])
+        .expect_err("an allow form with no rights row must be refused");
+    assert_eq!(
+        refusal,
+        format!(
+            "{WALLET_PROVIDER} landlock ruleset refuses the allow form \
+             (allow mach-lookup (global-name \"com.apple.system.logger\")): \
+             the rights table has no row for it, so no ruleset is built"
+        ),
+        "an allow form the rights table does not hold must be refused in these exact words"
+    );
+
+    let exec_binding: Vec<(&'static str, PathBuf)> = bindings
+        .iter()
+        .filter(|(name, _)| *name == "PROVIDER_EXECUTABLE")
+        .cloned()
+        .collect();
+    let refusal = landlock_path_rules(WALLET_PROVIDER, &declared, &exec_binding, 7, &[])
+        .expect_err("a form whose parameter the launch does not bind must be refused");
+    assert_eq!(
+        refusal,
+        format!(
+            "{WALLET_PROVIDER} landlock ruleset refuses the allow form {}: \
+             the launch binds no parameter it names, so no ruleset is built",
+            SHARED_RULES[2]
+        ),
+        "an unbound parameter must be refused rather than skipped"
+    );
+}
+
+/// ABI 1, 2 and 4 build no ruleset, because the default denial must be able to
+/// refuse a truncation and a device ioctl. ABI 5 and above build one. `REFER`,
+/// `TRUNCATE` and `IOCTL_DEV` are each refused below the ABI that introduced
+/// them and accepted at their own, by `landlock_row_abi_refusal`.
+///
+/// Falsifier: WP203 drops the required-denial check, so ABI 1 builds a ruleset
+/// and this test fails.
+#[test]
+fn landlock_ruleset_refuses_an_abi_that_cannot_express_a_row() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let fixture = tempfile::tempdir().expect("temporary wallet base");
+    let base = resolved(fixture.path());
+    let bindings = canonical_bindings(WALLET_PROVIDER, &base, Path::new(PROVIDER_BINARY));
+
+    for (rights, required, too_low) in [
+        (LANDLOCK_ACCESS_FS_REFER, 2, 1),
+        (LANDLOCK_ACCESS_FS_TRUNCATE, 3, 2),
+        (LANDLOCK_ACCESS_FS_IOCTL_DEV, 5, 4),
+    ] {
+        assert_eq!(landlock_rights_abi(rights), Some(required));
+        let mut fixture = LandlockRuleset {
+            provider: WALLET_PROVIDER.to_string(),
+            abi: too_low,
+            handled: landlock_handled_rights(too_low),
+            rules: vec![LandlockPathRule {
+                parameter: "STORAGE_ROOT",
+                path: PathBuf::from("/fixture/base/ElastOS/SystemServices/Wallet"),
+                rights,
+            }],
+            injected_step_failure: None,
+        };
+        assert_eq!(
+            landlock_abi_refusal(&fixture),
+            format!(
+                "linux confinement refused: the Landlock ABI cannot express the STORAGE_ROOT row, \
+                 which needs ABI {required} and this kernel reports ABI {too_low}"
+            ),
+            "a row the ABI cannot express must be refused in these exact words"
+        );
+        assert_eq!(
+            landlock_row_abi_refusal("the STORAGE_ROOT row", rights, too_low),
+            Some(landlock_abi_refusal(&fixture)),
+            "the three rights must be refused by the one ABI function"
+        );
+        fixture.abi = required;
+        assert!(
+            landlock_abi_refusal(&fixture).is_empty(),
+            "the row must be accepted at ABI {required}"
+        );
+        assert!(
+            landlock_row_abi_refusal("the STORAGE_ROOT row", rights, required).is_none(),
+            "the same function must accept the right at its own ABI"
+        );
+    }
+
+    assert_eq!(
+        landlock_rights_abi(1u64 << 16),
+        None,
+        "a right with no ABI table entry must not be read as ABI 1"
+    );
+    assert_eq!(
+        landlock_row_abi_refusal("the unknown row", 1u64 << 16, 7),
+        Some(
+            "linux confinement refused: the Landlock ABI cannot express the unknown row, \
+             because a right in it has no ABI table entry"
+                .to_string()
+        ),
+        "a right with no ABI table entry is its own refusal"
+    );
+
+    for (too_low, needed) in [(1, 5), (2, 5), (4, 5)] {
+        let refusal = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, too_low, &[])
+            .expect_err("an ABI below the default denial's rights must be refused");
+        assert_eq!(
+            refusal,
+            format!(
+                "linux confinement refused: the Landlock ABI cannot express {}, \
+                 which needs ABI {needed} and this kernel reports ABI {too_low}",
+                LANDLOCK_REQUIRED_DENIALS.0
+            ),
+            "an ABI that cannot refuse the write boundary must be refused in these words"
+        );
+    }
+    let needed = landlock_rights_abi(LANDLOCK_REQUIRED_DENIALS.1)
+        .expect("the default denial's rights must have ABI entries");
+    assert_eq!(needed, 5);
+    for abi in needed..8 {
+        let ruleset = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, abi, &[])
+            .unwrap_or_else(|err| panic!("ABI {abi} must build a ruleset: {err}"));
+        assert_eq!(ruleset.abi, abi);
+        assert!(
+            ruleset
+                .rules
+                .iter()
+                .any(|rule| rule.parameter == "STORAGE_ROOT"),
+            "ABI {abi} must keep the STORAGE_ROOT rule: {ruleset:?}"
+        );
+    }
+}
+
+/// The handled mask equals the ABI table's rights for the version the ruleset
+/// claims, so no right that version knows is left unrestricted.
+///
+/// Falsifier: WP204 keeps only the read rights in the mask, so this test fails.
+#[test]
+fn landlock_ruleset_handles_every_right_the_abi_reports() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let fixture = tempfile::tempdir().expect("temporary wallet base");
+    let base = resolved(fixture.path());
+    let bindings = canonical_bindings(WALLET_PROVIDER, &base, Path::new(PROVIDER_BINARY));
+    for abi in [5, 6, 7] {
+        let ruleset = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, abi, &[])
+            .unwrap_or_else(|err| panic!("ABI {abi} must build a ruleset: {err}"));
+        let mut reported = 0u64;
+        for (right, introduced) in LANDLOCK_RIGHT_ABI {
+            if abi >= *introduced {
+                reported |= *right;
+            }
+        }
+        assert_eq!(
+            ruleset.handled, reported,
+            "ABI {abi} must handle every right its table reports"
+        );
+        for right in [
+            LANDLOCK_ACCESS_FS_EXECUTE,
+            LANDLOCK_ACCESS_FS_WRITE_FILE,
+            LANDLOCK_ACCESS_FS_TRUNCATE,
+            LANDLOCK_ACCESS_FS_IOCTL_DEV,
+        ] {
+            assert_ne!(
+                ruleset.handled & right,
+                0,
+                "ABI {abi} must restrict {right:#x}"
+            );
+        }
+    }
+}
+
+/// The five install steps run in order, each failure keeps its step and errno
+/// and its own reason, and a failed first step runs no later step.
+///
+/// Falsifier: WP210 runs the final call before `PR_SET_NO_NEW_PRIVS`, so this
+/// test fails on its recorded order.
+#[test]
+fn landlock_install_refuses_each_failed_step() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let fixture = tempfile::tempdir().expect("temporary install fixture");
+    let base = resolved(fixture.path());
+    let bindings = canonical_bindings(WALLET_PROVIDER, &base, Path::new(PROVIDER_BINARY));
+    let ruleset = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, 7, &[]).unwrap();
+    assert_eq!(ruleset.rules.len(), 2);
+    let order = [
+        LandlockStep::CreateRuleset,
+        LandlockStep::AddRule(0),
+        LandlockStep::AddRule(1),
+        LandlockStep::NoNewPrivileges,
+        LandlockStep::RestrictSelf,
+    ];
+    let cases = [
+        (
+            LandlockStep::CreateRuleset,
+            libc::EINVAL,
+            "landlock install refused: the ruleset could not be created with errno 22",
+        ),
+        (
+            LandlockStep::AddRule(0),
+            libc::EACCES,
+            "landlock install refused: the path rule 0 could not be added with errno 13",
+        ),
+        (
+            LandlockStep::AddRule(1),
+            libc::ENOENT,
+            "landlock install refused: the path rule 1 could not be added with errno 2",
+        ),
+        (
+            LandlockStep::NoNewPrivileges,
+            libc::EPERM,
+            "landlock install refused: PR_SET_NO_NEW_PRIVS failed with errno 1",
+        ),
+        (
+            LandlockStep::RestrictSelf,
+            libc::EBADF,
+            "landlock install refused: landlock_restrict_self failed with errno 9",
+        ),
+    ];
+    let mut seen = Vec::new();
+    install_landlock_with(&ruleset, |step| {
+        seen.push(step);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(seen, order);
+    for (position, (failed, errno, expected)) in cases.into_iter().enumerate() {
+        let mut seen = Vec::new();
+        let failure = install_landlock_with(&ruleset, |step| {
+            seen.push(step);
+            if step == failed {
+                Err(errno)
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("each failed install step must refuse");
+        assert_eq!(
+            seen,
+            &order[..=position],
+            "a refused install must stop at its failed step"
+        );
+        assert_eq!(failure, LandlockInstallFailure::new(failed, errno));
+        assert_eq!(failure.step, failed);
+        assert_eq!(failure.errno, errno);
+        assert_eq!(failure.to_string(), expected);
+    }
 }
 
 /// The one install record writer, and it makes no kernel call: it writes the

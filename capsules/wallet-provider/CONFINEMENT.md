@@ -1464,6 +1464,16 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - WP198: A field list whose delimiters do not balance is read as a shorter
   list instead of being refused.
   `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP202: The `STORAGE_PARENT` Landlock row carries a file read.
+  `landlock_ruleset_follows_the_declared_rights` checks this rule.
+- WP203: The Landlock builder skips the default-denial ABI check, so ABI 1
+  builds a ruleset.
+  `landlock_ruleset_refuses_an_abi_that_cannot_express_a_row` checks this rule.
+- WP204: The Landlock handled mask keeps only the read rights.
+  `landlock_ruleset_handles_every_right_the_abi_reports` checks this rule.
+- WP210: The Landlock sequencer runs the final call before
+  `PR_SET_NO_NEW_PRIVS`.
+  `landlock_install_refuses_each_failed_step` checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

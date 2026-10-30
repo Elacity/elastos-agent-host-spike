@@ -348,6 +348,50 @@ the named test with `the keyctl call must pass the table's five arguments and
 no register it did not set`; the source was then restored byte-for-byte. The
 registered runner check remains with the supervisor.
 
+## The Landlock ruleset builder
+
+The file row's ruleset is a decided derivation from the same declared rights,
+and this section claims no row of "The contract on Linux". `landlock_path_rules`
+in `capsules/wallet-provider/tests/confine.rs` renders the profile through
+`generate_profile` and reads it back through `profile_forms`. It makes no
+kernel call. The kernel run, the loader measurement and the probe are the next
+slice. Each row of "The contract on Linux" keeps the status it has.
+
+`LANDLOCK_RULE_RIGHTS` is the one table from a top-level allow form to the
+rights that form carries. It holds one row for each of the five allow forms a
+wallet profile holds:
+
+| Allow form | Rights the row carries |
+| --- | --- |
+| `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` | read-file, read-dir, write-file, remove-file, remove-dir, make-dir and make-reg, because `init` creates the wallet directory and its key file inside the root |
+| `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))` | `EXECUTE` |
+| `(allow file-read* (literal (param "STORAGE_PARENT")))` | none: a directory grant covers the whole tree beneath the parent |
+| `(allow file-read* (literal "/"))` | none: a read rule on `/` would grant the whole filesystem |
+| `(allow sysctl-read)` | none: Landlock has no sysctl right |
+
+A row that carries none is a written decision and adds no path. A form the
+table does not hold is a refusal that names the provider and the form, and no
+ruleset is built. A form whose parameter the launch does not bind is a refusal, and no
+ruleset is built.
+
+`LANDLOCK_RIGHT_ABI` is the one table from a right to the ABI that introduced
+it. `landlock_rights_abi` answers the lowest ABI a set of rights needs. A right
+with no table entry is its own refusal. The default denial must be able to
+refuse a truncation and a device ioctl, so `TRUNCATE` and `IOCTL_DEV` are
+`LANDLOCK_REQUIRED_DENIALS`. A row's rights and those two denials both go
+through `landlock_row_abi_refusal`. An ABI below either is refused with
+`linux confinement refused: the Landlock ABI cannot express <row>`, naming the
+row.
+
+The handled mask is every right that ABI table reports at the version the
+ruleset claims, so a right the version knows stays restricted when no path rule
+grants it.
+
+`install_landlock_with` runs one order and stops at the first failure: create
+the ruleset, add each path rule in ruleset order, set `PR_SET_NO_NEW_PRIVS`,
+then the final call. The closure stands in for the kernel call, so the order
+is decided here.
+
 ## The frame
 
 The Runtime generates each provider's policy from the provider's approved
