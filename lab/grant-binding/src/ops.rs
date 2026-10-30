@@ -61,7 +61,22 @@ impl Verifier {
             Operation::ChildJournal if !grant.rights.child_journal => {
                 Err(OperateRefuse::ChildJournalNotGranted)
             }
-            _ => Ok(()),
+            _ => {
+                #[allow(unused_mut)]
+                let mut counted = request.handle;
+                if operation != Operation::ChildJournal {
+                    if let Some(limit) = grant.effect_limit {
+                        if grant.effects >= limit {
+                            return Err(OperateRefuse::Binding(Refuse::EffectLimit));
+                        }
+                        self.note_effect(counted).map_err(OperateRefuse::Binding)?;
+                    }
+                }
+                if grant.once && operation != Operation::ChildJournal {
+                    self.grants.remove(&request.handle);
+                }
+                Ok(())
+            }
         }
     }
 
@@ -1018,4 +1033,157 @@ fn model_owned_root_needs_a_resource_segment() {
         .use_grant(verifier.open_call(instance), &guest(handle))
         .expect("grant");
     assert_eq!(decision.owned_root, "UsersAI/agent-1/notes");
+}
+
+#[test]
+fn model_allow_once_ends_after_one_effect() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_once(photo, "UsersAI/photo/library", crate::rights())
+        .expect("allow once");
+    let call = verifier.open_call(photo);
+    verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal does not end the grant");
+    verifier
+        .operate(&call, &guest(library), Operation::Append)
+        .expect("one append");
+    let refusal = verifier
+        .operate(&call, &guest(library), Operation::Append)
+        .expect_err("the allow-once grant has ended");
+    assert_eq!(refusal, OperateRefuse::Binding(Refuse::UnknownHandle));
+    assert_eq!(refusal.to_string(), "unknown handle");
+}
+
+#[test]
+fn model_session_grant_allows_a_second_effect() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let home = verifier.register_instance("home", "session-a");
+    let public = verifier
+        .bind_once(photo, "Public/photo/desk", crate::rights())
+        .expect_err("public storage does not bind");
+    assert_eq!(public, Refuse::PublicRead);
+    let home_mint = verifier
+        .bind_once(home, "UsersAI/home/desk", crate::rights())
+        .expect_err("home does not mint");
+    assert_eq!(home_mint, Refuse::HomeMint);
+    let library = verifier
+        .bind_grant(
+            photo,
+            "UsersAI/photo/library",
+            Rights {
+                append: true,
+                overwrite: true,
+                child_journal: false,
+            },
+        )
+        .expect("session grant");
+    let call = verifier.open_call(photo);
+    verifier
+        .operate(&call, &guest(library), Operation::Append)
+        .expect("first append");
+    verifier
+        .operate(&call, &guest(library), Operation::Overwrite)
+        .expect("a session grant allows a second effect");
+    let refused = verifier
+        .operate(&call, &guest(library), Operation::ChildJournal)
+        .expect_err("a refused effect does not remove the grant");
+    assert_eq!(refused, OperateRefuse::ChildJournalNotGranted);
+    verifier
+        .operate(&call, &guest(library), Operation::Append)
+        .expect("the grant is still there");
+}
+
+#[test]
+fn model_effect_limit_stops_the_next_effect() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_grant(
+            photo,
+            "UsersAI/photo/library",
+            Rights {
+                append: true,
+                overwrite: false,
+                child_journal: true,
+            },
+        )
+        .expect("library ask");
+    verifier.set_effect_limit(library, 1).expect("limit");
+    let call = verifier.open_call(photo);
+    verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal does not spend the limit");
+    let refused = verifier
+        .operate(&call, &guest(library), Operation::Overwrite)
+        .expect_err("a refused right does not spend the limit");
+    assert_eq!(refused, OperateRefuse::OverwriteNotGranted);
+    verifier
+        .operate(&call, &guest(library), Operation::Append)
+        .expect("one effect");
+    let again = verifier
+        .operate(&call, &guest(library), Operation::Append)
+        .expect_err("the effect limit is reached");
+    assert_eq!(again, OperateRefuse::Binding(Refuse::EffectLimit));
+    assert_eq!(again.to_string(), "effect limit is reached");
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the grant stays in the store");
+    let once = verifier
+        .bind_once(photo, "UsersAI/photo/frames", crate::rights())
+        .expect("allow once");
+    verifier
+        .operate(&call, &guest(once), Operation::Append)
+        .expect("the allow-once grant ends");
+    let missing = verifier
+        .set_effect_limit(once, 1)
+        .expect_err("the handle is already gone");
+    assert_eq!(missing, Refuse::UnknownHandle);
+    assert_eq!(missing.to_string(), "unknown handle");
+}
+
+#[test]
+fn model_unset_effect_limit_does_not_stop() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_grant(
+            photo,
+            "UsersAI/photo/library",
+            Rights {
+                append: true,
+                overwrite: true,
+                child_journal: false,
+            },
+        )
+        .expect("library ask");
+    let call = verifier.open_call(photo);
+    verifier
+        .operate(&call, &guest(library), Operation::Append)
+        .expect("unset limit allows the first effect");
+    verifier
+        .operate(&call, &guest(library), Operation::Overwrite)
+        .expect("unset limit allows the next effect");
+    let frames = verifier
+        .bind_grant(
+            photo,
+            "UsersAI/photo/frames",
+            Rights {
+                append: true,
+                overwrite: false,
+                child_journal: false,
+            },
+        )
+        .expect("frames ask");
+    verifier.set_effect_limit(frames, 0).expect("zero limit");
+    let refusal = verifier
+        .operate(&call, &guest(frames), Operation::Append)
+        .expect_err("a set limit of 0 stops the first effect");
+    assert_eq!(refusal, OperateRefuse::Binding(Refuse::EffectLimit));
+    assert_eq!(refusal.to_string(), "effect limit is reached");
+    verifier
+        .use_grant(call, &guest(frames))
+        .expect("a refused effect leaves the grant");
 }
