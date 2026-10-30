@@ -1160,6 +1160,7 @@ fn standin_a12_census(standin: &StandIn, home: &ThrowawayHome, port: u16) -> Res
             }
         }
     }
+    standin.unlisted_pending()?;
     match census::cleanup(home, port) {
         Ok(line) if line.contains("root checks PASS") => Ok(()),
         Ok(line) => Err(line),
