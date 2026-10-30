@@ -288,6 +288,92 @@ fn an_agent_cannot_present_another_agents_grant_pair() {
     );
 }
 
+/// M1 check A6: a grant the lab seam binds is admitted; a plain seeded grant is
+/// not.
+///
+/// Both agents are admitted and launched through `admit_resident`,
+/// `post_capsules` and `finish_start`. Agent A's grant is stored through
+/// `seed_bound_grant`, which runs the grant route's own `bind_on_ledger` step,
+/// so A's hosted effect through `post_hosted_effect` is admitted and spends
+/// the `once` grant. Agent B's grant is a plain `seed_grant`, which stores no
+/// ledger handle and no run pair, so B's effect is refused status 403 with the
+/// route's pair reason before any admission, and B's grant stays live and
+/// unspent. Removing only the bind in `seed_bound_grant` turns this test red at
+/// the bound agent's admission line.
+#[test]
+fn a_bound_seeded_grant_is_admitted_at_a_hosted_use_and_an_unbound_one_is_refused() {
+    let mut standin = StandIn::new();
+    let bundles = [
+        SignedBundle::distinct("agent-bound"),
+        SignedBundle::distinct("agent-unbound"),
+    ];
+    for bundle in &bundles {
+        admit(&mut standin, bundle);
+    }
+    let bound = launch(&mut standin, &bundles[0]);
+    let unbound = launch(&mut standin, &bundles[1]);
+    standin
+        .seed_bound_grant(
+            "request-seeded-bound",
+            &bound,
+            ASK_RESOURCE,
+            "read",
+            "once",
+            1_800_000_000,
+            Life::Live,
+            false,
+        )
+        .expect("the bound seam binds on the ledger");
+    standin.seed_grant(
+        "request-seeded-unbound",
+        &unbound,
+        ASK_RESOURCE,
+        "read",
+        "once",
+        1_800_000_000,
+        Life::Live,
+        false,
+    );
+    let pair = standin
+        .get_run_binding(
+            Caller::Client { session_id: &bound },
+            "request-seeded-bound",
+        )
+        .expect("the bound grant's own session reads the minted pair");
+    let run_id = pair["run_id"]
+        .as_str()
+        .expect("the read returns the run id the bind minted")
+        .to_owned();
+    assert_eq!(pair["request_id"], json!("request-seeded-bound"));
+
+    assert_eq!(
+        present(&mut standin, &bound, &run_id, "request-seeded-bound"),
+        Ok(json!({ "valid": true })),
+        "the hosted effect admits the pair of the grant the seam bound"
+    );
+    assert!(
+        !listed_live(&standin, "request-seeded-bound"),
+        "the admitted hosted effect spends the bound once grant"
+    );
+
+    // The plain seed stores no ledger handle. `admit_effect` refuses that
+    // before any ledger call with the `unknown handle` text; a hosted effect
+    // presents a run id, so the route's pair check answers first with its own
+    // reason.
+    assert_eq!(
+        present(&mut standin, &unbound, "", "request-seeded-unbound"),
+        Err((
+            403,
+            "effect run  is not bound to request request-seeded-unbound".to_owned()
+        )),
+        "the hosted effect refuses the grant the plain seed left unbound"
+    );
+    assert!(
+        listed_live(&standin, "request-seeded-unbound"),
+        "the refused use leaves the unbound grant live and unspent"
+    );
+}
+
 /// M1 check A7: a hosted effect is one use, so the same budget cap refuses it.
 ///
 /// The journey enters only through `admit_resident` for setup, `post_capsules`,
