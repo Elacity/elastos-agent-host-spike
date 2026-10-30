@@ -2983,6 +2983,38 @@
       "tests": [
         "hosted_access_states_fail_the_run_on_the_socket"
       ]
+    },
+    {
+      "id": "MP74",
+      "title": "the returned allowlist also names x-elastos-grant-id, so the parse of read_request still runs",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/tests/process.rs",
+          "old": "    let read_request_header_names = names;\n    read_request_header_names\n",
+          "new": "    let mut read_request_header_names = names;\n    read_request_header_names.insert(String::from(\"x-elastos-grant-id\"));\n    read_request_header_names\n"
+        }
+      ],
+      "tests": [
+        "hosted_run_posts_the_runtime_effect_headers_with_the_contract_run_id_and_no_key"
+      ]
+    },
+    {
+      "id": "MP75",
+      "title": "the Runtime socket arm sends x-elastos-grant-id, so the sent name is outside the real match",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "        builder\n            .header(\"x-elastos-offer-id\", offer_id)\n            .header(\"x-elastos-run-id\", run_id)\n            .header(\"x-elastos-request-id\", request_id)\n            .header(\"x-elastos-effect\", effect)\n",
+          "new": "        builder\n            .header(\"x-elastos-offer-id\", offer_id)\n            .header(\"x-elastos-run-id\", run_id)\n            .header(\"x-elastos-request-id\", request_id)\n            .header(\"x-elastos-effect\", effect)\n            .header(\"x-elastos-grant-id\", \"grant:test\")\n"
+        }
+      ],
+      "tests": [
+        "hosted_run_posts_the_runtime_effect_headers_with_the_contract_run_id_and_no_key"
+      ]
     }
   ]
 }
