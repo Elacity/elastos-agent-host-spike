@@ -782,6 +782,48 @@ fn nine_byte_name_over_the_hamt_threshold_is_a_shard() {
 }
 
 #[test]
+fn one_byte_name_over_the_hamt_threshold_is_a_shard() {
+    // The 262145 file set with its longest name shortened to 174 bytes and
+    // one empty file `a` added: `a` is the one name whose tail is not empty
+    // yet holds one byte, so its only byte is tail index 0. The entries stay
+    // a shard and name their own pin. README's Python rule printed the pin
+    // first.
+    let entries = one_byte_shard();
+    let pin = ONE_BYTE_NAME_LAB_CID;
+    let bundle = bundled(&entries);
+    let encoded = encode_entries(&entries)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    let listed: Vec<ListedFile> = entries
+        .iter()
+        .map(|entry| ListedFile {
+            path: entry.path.clone(),
+            size: entry.content.len() as u64,
+            sha256: Sha256::digest(&entry.content).into(),
+        })
+        .collect();
+    let by_listing = encode_listed_files(&listed)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    assert_eq!(
+        (name(&bundle), encoded.as_str(), by_listing.as_str()),
+        (pin.to_owned(), pin, pin),
+        "(lab_cid, encode_entries, encode_listed_files) against the one-byte pin"
+    );
+    assert!(pin.starts_with("bafybei"), "{pin}");
+    assert_eq!(pin.len(), 59, "{pin}");
+    for other in [
+        HAMT_OVER_THRESHOLD_LAB_CID,
+        HAMT_THRESHOLD_LAB_CID,
+        HAMT_CHILD_LAB_CID,
+        FILE_ROOT_SHARD_LAB_CID,
+        NINE_BYTE_NAME_LAB_CID,
+    ] {
+        assert_ne!(pin, other, "the one-byte pin is another bundle's");
+    }
+}
+
+#[test]
 fn child_directory_over_the_hamt_threshold_is_a_shard() {
     // The 262145 file set under `photos/`: the child is judged on its own
     // estimate and is a shard, while the root counts only its three direct

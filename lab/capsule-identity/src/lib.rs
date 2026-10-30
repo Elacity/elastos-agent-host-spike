@@ -1333,7 +1333,9 @@ fn tsize(block: &[u8], children: impl Iterator<Item = u64>) -> u64 {
 /// `hamt_digest("hello")` is `cb d8 a7 b3 41 bd 9b 02`. Level `n` of a shard
 /// takes digest byte `n`. A name whose tail is longer than 8 bytes mixes its
 /// tail index 8, the second word's first byte: `hamt_digest("photo.jpg")`,
-/// a 9-byte name, is `c8 93 6b cd f7 98 4c 4c`.
+/// a 9-byte name, is `c8 93 6b cd f7 98 4c 4c`. A 1-byte name mixes its only
+/// tail byte, because its tail is not empty: `hamt_digest("a")` is
+/// `85 55 55 65 f6 59 78 89`.
 fn hamt_digest(name: &str) -> [u8; HAMT_DIGEST_BYTES] {
     const C1: u64 = 0x87c3_7b91_1142_53d5;
     const C2: u64 = 0x4cf5_ad43_2745_937f;
@@ -2372,6 +2374,19 @@ fn hamt_digest_is_the_marked_murmur3_copy() {
         hamt_digest("hello"),
         [0xcb, 0xd8, 0xa7, 0xb3, 0x41, 0xbd, 0x9b, 0x02],
         "the first 64 bits of murmur3 x64-128 of \"hello\", big-endian"
+    );
+}
+
+/// A 1-byte name's tail is not empty, so it mixes its only byte at index 0:
+/// `a` gives this digest, while skipping the first-word mix gives another
+/// first byte and another shard bucket.
+#[cfg(test)]
+#[test]
+fn a_mixes_its_only_tail_byte() {
+    assert_eq!(
+        hamt_digest("a"),
+        [0x85, 0x55, 0x55, 0x65, 0xf6, 0x59, 0x78, 0x89],
+        "the first 64 bits of murmur3 x64-128 of \"a\", big-endian"
     );
 }
 

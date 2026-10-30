@@ -153,6 +153,12 @@ pub const EXACT_BASIC_BLOCK_LAB_CID: &str =
 /// temp dir and never committed.
 pub const HAMT_OVER_THRESHOLD_LAB_CID: &str =
     "bafybeiapjks5bqeaeeuhrestfwx3tskokvzjvy5kltdidb24gnyyzkn2rm";
+/// The 262145 file set with its longest name shortened to 174 bytes and one
+/// empty file `a`: `a` is 1 byte, so its tail is not empty and index 0 is its
+/// only byte. Built in a temp dir and never committed; task 099 printed it
+/// first with README's Python rule.
+pub const ONE_BYTE_NAME_LAB_CID: &str =
+    "bafybeifcqzll4tyg4ki5m3tigmm6mpx34qgarnwtczxjn54ne4dad3rxam";
 /// The 262145 file set with its longest name shortened to 166 bytes and one
 /// empty file `photo.jpg`: `photo.jpg` is 9 bytes, so its tail index 8 is its
 /// last byte and the second word's first byte. Built in a temp dir and never
@@ -290,6 +296,61 @@ pub fn shard_with_a_file_root() -> (Vec<BundleEntry>, String) {
     let estimate: usize = entries.iter().map(|entry| entry.path.len() + 36).sum();
     assert_eq!(estimate, 262_145, "the file set's links estimate");
     (entries, first)
+}
+
+/// The over-threshold bundle of [`flat_bundle_at`] at 262145 with its longest
+/// name shortened by 37 bytes, to 174 bytes, and one empty file `a` added: 37
+/// is the 1-byte name plus its 36-byte link overhead, so the links estimate
+/// stays 262145 and the directory is still a shard. `a` is the only path whose
+/// length modulo 16 is 1, so only its murmur tail mixes one byte at index 0.
+pub fn one_byte_shard() -> Vec<BundleEntry> {
+    let (mut entries, names, _extra) = flat_bundle_at("", 262_145);
+    let longest = names
+        .into_iter()
+        .max_by_key(String::len)
+        .expect("the file set has names");
+    assert_eq!(longest.len(), 211, "the lengthened name is 211 bytes");
+    let mut shortened = longest.clone();
+    shortened.truncate(174);
+    let at = entries
+        .iter()
+        .position(|entry| entry.path == longest)
+        .expect("the longest name is an empty file of the bundle");
+    entries[at].path = shortened;
+    entries.push(BundleEntry {
+        path: "a".to_owned(),
+        content: Vec::new(),
+    });
+    let longest = entries
+        .iter()
+        .map(|entry| entry.path.len())
+        .max()
+        .expect("the bundle has entries");
+    assert_eq!(longest, 174, "the shortened longest name");
+    let longest_entry = entries
+        .iter()
+        .find(|entry| entry.path.len() == longest)
+        .expect("the longest name is in the bundle");
+    assert!(
+        longest_entry.path.ends_with('x'),
+        "the shortened name ends with x"
+    );
+    let one: Vec<&str> = entries
+        .iter()
+        .filter(|entry| entry.path.len() % 16 == 1)
+        .map(|entry| entry.path.as_str())
+        .collect();
+    assert_eq!(one, ["a"], "the only 1-byte tail is a");
+    let a = entries
+        .iter()
+        .find(|entry| entry.path == "a")
+        .expect("a is in the bundle");
+    assert_eq!(a.path.len(), 1, "a is 1 byte");
+    assert_eq!(a.path.as_bytes(), b"a", "a's only byte is a");
+    assert!(a.content.is_empty(), "a is empty");
+    let estimate: usize = entries.iter().map(|entry| entry.path.len() + 36).sum();
+    assert_eq!(estimate, 262_145, "the file set's links estimate");
+    entries
 }
 
 /// The over-threshold bundle of [`flat_bundle_at`] at 262145 with its longest
