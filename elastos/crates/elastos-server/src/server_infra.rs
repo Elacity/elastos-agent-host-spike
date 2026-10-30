@@ -155,8 +155,6 @@ fn media_provider_bridge_config(
 /// refuses startup on any other OS instead of running the model unconfined.
 const MODEL_PROVIDER_CONFINEMENT_UNAVAILABLE: &str = "provider confinement unavailable on this OS";
 
-// Used by the non-confining-OS model branch; here it keeps that branch testable.
-#[cfg_attr(any(target_os = "macos", target_os = "linux"), allow(dead_code))]
 fn model_provider_confinement(os: &str) -> Result<(), provider::bridge::BridgeError> {
     match os {
         "macos" | "linux" => Ok(()),
@@ -1043,45 +1041,54 @@ async fn setup_server_infrastructure_impl(
         Ok(Some(path)) => {
             match model_provider_startup_config(&data_dir, &provider_registry).await {
                 Ok((mut model_config, worker)) => {
-                    #[cfg(target_os = "macos")]
-                    let bridge_result = async {
-                        let root = Path::new(&model_config.base_path);
-                        let bundle = api::model_provider_engine_bundle(root).map_err(|_| {
-                            provider::bridge::BridgeError::InitFailed(
-                                "model engine confinement unavailable".into(),
-                            )
-                        })?;
-                        provider::ProviderBridge::spawn_confined_model_with_engine_bundle(
-                            &path,
-                            model_config.clone(),
-                            bundle.as_deref(),
-                        )
-                        .await
-                        .map(
-                            |(bridge, sockets, vacant, config, listener)| {
-                                (bridge, Some((sockets, vacant)), config, Some(listener))
-                            },
-                        )
-                    }
-                    .await;
-                    #[cfg(target_os = "linux")]
-                    let bridge_result = provider::ProviderBridge::spawn_confined_model_linux(
-                        &path,
-                        model_config.clone(),
-                    )
-                    .await
-                    .map(|(bridge, sockets, vacant, config)| {
-                        (bridge, Some((sockets, vacant)), config, None::<()>)
-                    });
+                    // Refuse before any spawn when this OS has no confinement backend.
+                    let confinement = model_provider_confinement(std::env::consts::OS);
                     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
                     let bridge_result: Result<
                         (provider::ProviderBridge, Option<()>, _, Option<()>),
                         provider::bridge::BridgeError,
-                    > = model_provider_confinement(std::env::consts::OS).and_then(|()| {
-                        Err(provider::bridge::BridgeError::InitFailed(
-                            MODEL_PROVIDER_CONFINEMENT_UNAVAILABLE.to_owned(),
-                        ))
-                    });
+                    > = match confinement {
+                        Ok(()) => Err(provider::bridge::BridgeError::InitFailed(
+                            "provider confinement has no backend on this OS".to_owned(),
+                        )),
+                        Err(refusal) => Err(refusal),
+                    };
+                    #[cfg(target_os = "macos")]
+                    let bridge_result = match confinement {
+                        Ok(()) => {
+                            let root = Path::new(&model_config.base_path);
+                            let bundle = api::model_provider_engine_bundle(root).map_err(|_| {
+                                provider::bridge::BridgeError::InitFailed(
+                                    "model engine confinement unavailable".into(),
+                                )
+                            });
+                            match bundle {
+                                Ok(bundle) => provider::ProviderBridge::spawn_confined_model_with_engine_bundle(
+                                    &path,
+                                    model_config.clone(),
+                                    bundle.as_deref(),
+                                )
+                                .await
+                                .map(|(bridge, sockets, vacant, config, listener)| {
+                                    (bridge, Some((sockets, vacant)), config, Some(listener))
+                                }),
+                                Err(refusal) => Err(refusal),
+                            }
+                        }
+                        Err(refusal) => Err(refusal),
+                    };
+                    #[cfg(target_os = "linux")]
+                    let bridge_result = match confinement {
+                        Ok(()) => provider::ProviderBridge::spawn_confined_model_linux(
+                            &path,
+                            model_config.clone(),
+                        )
+                        .await
+                        .map(|(bridge, sockets, vacant, config)| {
+                            (bridge, Some((sockets, vacant)), config, None::<()>)
+                        }),
+                        Err(refusal) => Err(refusal),
+                    };
                     match bridge_result {
                         Ok((bridge, local_sockets, confined_config, hosted_listener)) => {
                             model_config = confined_config;
