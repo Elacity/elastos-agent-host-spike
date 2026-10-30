@@ -261,8 +261,13 @@ use std::process::Command;
 /// adds WP202, which grants the parent Landlock row a file read; WP203, which
 /// drops the default-denial ABI check; WP204, which keeps only the read rights
 /// in the handled mask; and WP210, which runs the final Landlock call before
-/// `PR_SET_NO_NEW_PRIVS`. All four are CAUGHT on the Mac.
-const EXPECTED_FALSIFIERS: usize = 190;
+/// `PR_SET_NO_NEW_PRIVS`. All four are CAUGHT on the Mac. Task 153 adds WP211,
+/// which reads a Landlock launch step as an installed record; WP212, which
+/// adds a loader rule without `READ_FILE`; and WP213, which labels the file
+/// row as a Linux host off Linux. All three are CAUGHT on the Mac. Its two
+/// Linux-only plants are named in `CONFINEMENT-LINUX.md` and are not registered
+/// here.
+const EXPECTED_FALSIFIERS: usize = 193;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

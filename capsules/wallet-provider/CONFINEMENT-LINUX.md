@@ -6,11 +6,16 @@ present is the one file-profile contract: `check_profile_contract`, run over
 `(deny default)` second, an explicit `(deny network*)`, no `(allow default)`,
 no network allow, only the `PROVIDER_EXECUTABLE`, `STORAGE_ROOT` and
 `STORAGE_PARENT` tokens, and the three shared rules verbatim.
-This contract has no Linux enforcement yet. Its only current Linux behaviour is
-the seccomp allow list in "The seccomp allow list" below: a generated allow
-list and a recorded wallet Linux run in which the refused calls answer the
-filter's own marker. The did caller uses the same path and awaits the policy
-decision described under "The kernel proof".
+This contract's current Linux behaviour is the seccomp allow list in "The
+seccomp allow list" below, and the file-row installer in "The file row". The
+seccomp part is a generated allow list and a recorded wallet Linux run in which
+the refused calls answer the filter's own marker. The did caller uses the same
+path and awaits the policy decision described under "The kernel proof". The
+file-row installer is the one Linux launch: it installs the Landlock ruleset
+and then the seccomp filter, and the one record carries a Landlock step. The
+file row of "The contract on Linux" is GAP. This session recorded no run that
+names the host, the kernel and the ABI the kernel reported, so that row is not
+written as passing.
 `confine.sb` stays each provider's one oracle. The contract is shared, so its
 Linux mapping is written once here, beside the one contract check (P10). The
 Linux policy that the Runtime would generate from the same approved declared
@@ -23,9 +28,10 @@ One part of this design exists today as source for both providers: a seccomp
 allow list generated from each provider's own declared rights. Wallet supplies
 the recorded Linux proof of the four denied calls; did compares its full
 program with wallet's and awaits acceptance of its operation journey.
-Namespaces, Landlock, capability dropping and every file row of the
-contract stay unbuilt, so a seccomp filter is the only Linux confinement this lab
-applies.
+Namespaces and the capability drop stay unbuilt. The file-row installer is in
+the harness, and the contract file row is GAP until a recorded run names the
+host, the kernel and the reported ABI. A seccomp filter is the Linux
+confinement this lab has recorded.
 
 One function builds the list:
 `seccomp_allow_list_from_declared_rights(name, declared)` in
@@ -264,9 +270,9 @@ stops reportable without `WUNTRACED` and a stopped child is still alive. The rea
 is asserted on every result before any arm can return, and the whole test is
 bounded well inside eight deadlines.
 
-Namespaces, Landlock, capability dropping and every file row of the contract stay
-unbuilt on Linux, and a seccomp filter reads syscall numbers and not paths, so no
-sentence here says a contract file row is enforced on Linux. `linux` stays out of
+Namespaces and the capability drop stay unbuilt. A seccomp filter reads syscall
+numbers and not paths. The file row in "The file row" is GAP, and no sentence
+here says a contract file row is enforced on Linux. `linux` stays out of
 `DECLARED_CONFINED_OS`. A `linux` host under a `Seatbelt` policy keeps the words
 this lab already used, and a `linux` host under a `Seccomp` policy is accepted by
 the host rule and starts the provider under the filter; on any other OS the same
@@ -317,9 +323,8 @@ both lists then answer `wallet-provider` and the did case fails.
   The current test installs the inherited fixture first. Its required plant
   failure is `an inherited filter alone must not satisfy the launcher's own install`,
   with equal before/after answers. This additional Linux run is NOT RUN in the
-  repair session, which runs on macOS. To exercise it, replace only
-  `let install = install_seccomp(&allow);` in `start_under_seccomp` with
-  `let install: Result<(), SeccompInstallFailure> = Ok(());`, then run
+  repair session, which runs on macOS. To exercise it, replace
+  `install_seccomp(&allow)` in `start_under_linux_policy` with `Ok(())`, then run
   `cargo test --locked --manifest-path capsules/wallet-provider/Cargo.toml --test confine linux_wallet_journey_runs_under_the_seccomp_allow_list -- --exact --nocapture`.
   The inherited fixture's install and the probe's install stay intact.
 - WP177 writes the named outside sibling in `status`'s ok arm, so the journey
@@ -350,12 +355,13 @@ registered runner check remains with the supervisor.
 
 ## The Landlock ruleset builder
 
-The file row's ruleset is a decided derivation from the same declared rights,
-and this section claims no row of "The contract on Linux". `landlock_path_rules`
-in `capsules/wallet-provider/tests/confine.rs` renders the profile through
-`generate_profile` and reads it back through `profile_forms`. It makes no
-kernel call. The kernel run, the loader measurement and the probe are the next
-slice. Each row of "The contract on Linux" keeps the status it has.
+The file row's ruleset is a decided derivation from the same declared rights.
+`landlock_path_rules` in `capsules/wallet-provider/tests/confine.rs` renders the
+profile through `generate_profile` and reads it back through `profile_forms`.
+It makes no kernel call. The kernel install, the probe and the journey are
+"The file row" below. This section claims no row of "The contract on Linux".
+Each row that "The file row" does not record keeps its current status and was
+not run.
 
 `LANDLOCK_RULE_RIGHTS` is the one table from a top-level allow form to the
 rights that form carries. It holds one row for each of the five allow forms a
@@ -390,7 +396,73 @@ grants it.
 `install_landlock_with` runs one order and stops at the first failure: create
 the ruleset, add each path rule in ruleset order, set `PR_SET_NO_NEW_PRIVS`,
 then the final call. The closure stands in for the kernel call, so the order
-is decided here.
+is decided here. `install_landlock` is the one kernel caller of that order.
+
+## The file row
+
+The file row is GAP. This session did not reach the spark1 host, so it recorded
+no run that names the host, the kernel and the ABI the kernel reported. The
+two rows this installer is for — `(deny default)`, files, and
+`(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` — are not
+written as passing. Every other row of "The contract on Linux" was not run.
+`linux` stays out of `DECLARED_CONFINED_OS`. Nothing here says the Runtime
+installed a ruleset.
+
+What the harness holds, and what a later host run would record:
+
+One Linux launch. `start_under_seccomp` and `start_under_landlock` both call
+`start_under_linux_policy`. That function makes one report socket, one
+`pre_exec` and one `spawn`. Inside `pre_exec` the order is the file row first,
+then `install_seccomp`. `install_landlock` runs `install_landlock_with`: create
+the ruleset with the handled mask, add each path rule, set
+`PR_SET_NO_NEW_PRIVS`, then `landlock_restrict_self`. `landlock_abi` reads the
+version with `LANDLOCK_CREATE_RULESET_VERSION` and returns the create step's
+refusal when the kernel answers `ENOSYS` or `EOPNOTSUPP`. The one record's
+first field `SECCOMP_LAUNCH_LANDLOCK` carries the failed step, and
+`decode_seccomp_launch_record` turns it into that step's words.
+`write_seccomp_launch_record` is unchanged.
+
+The nine probe calls, in report order, are `read-inside-storage-root`,
+`write-inside-storage-root`, `read-bound-executable`,
+`read-beneath-storage-parent`, `write-beside-storage-parent`,
+`truncate-beside-storage-parent`, `list-storage-parent`, `list-sibling` and
+`list-sibling-private`. This session has no control answer and no confined
+errno for any of them. A passing run would show every control call succeeding,
+the two inside calls succeeding under the ruleset, and the other seven
+answering `EACCES` (13).
+
+`LANDLOCK_LOADER_PATHS` is the aarch64 loader and the three libraries a
+dynamically linked wallet maps. Each rule carries `EXECUTE | READ_FILE`. The
+failure that named each entry on the earlier host measurement, when that entry
+alone was dropped, is:
+
+| Entry | The failure that named it |
+| --- | --- |
+| `/lib/ld-linux-aarch64.so.1` | `execve` answers `EACCES` (13) before the provider's first instruction without `EXECUTE`; without `READ_FILE` the loader cannot map itself |
+| `/lib/aarch64-linux-gnu/libc.so.6` | the loader exits with `error while loading shared libraries: libc.so.6: cannot open shared object file` |
+| `/lib/aarch64-linux-gnu/libgcc_s.so.1` | the loader exits with `error while loading shared libraries: libgcc_s.so.1: cannot open shared object file` |
+| `/lib/aarch64-linux-gnu/libm.so.6` | the loader exits with `error while loading shared libraries: libm.so.6: cannot open shared object file` |
+
+This session did not drop each entry again against the wallet binary on
+spark1. Those four lines are the earlier measurement the constant carries.
+They are not this session's recorded run, and they do not name a host, a
+kernel and a reported ABI together, so they do not lift the GAP.
+
+Two Linux-only plants are not in `falsifiers.json`. A `#[cfg(target_os = "linux")]`
+test cannot print a CAUGHT line on the Mac. Each still needs one red run on
+the host. This session did not run either.
+
+- Skip only the launcher's Landlock install: in `start_under_linux_policy`,
+  replace `install_landlock(ruleset).map_err(SeccompInstallFailure::Landlock)`
+  with `Ok(())`. `linux_wallet_file_row_is_refused_outside_storage_root` must
+  fail on the outside `Init`, which would no longer be `storage_error` with
+  `Permission denied`. Rerun:
+  `~/.cargo/bin/cargo test --locked --manifest-path capsules/wallet-provider/Cargo.toml -- linux_wallet_file_row_is_refused_outside_storage_root --exact --nocapture`.
+  This session has no red output to quote.
+- Grant `READ_FILE` on the `STORAGE_PARENT` row: change `(SHARED_RULES[1], 0)`
+  to `(SHARED_RULES[1], LANDLOCK_ACCESS_FS_READ_FILE)`. The same journey must
+  fail because `read-beneath-storage-parent` no longer answers `EACCES` (13).
+  The same command reruns it. This session has no red output to quote.
 
 ## The frame
 
@@ -413,10 +485,10 @@ is a mount, not a grant. The policy is a second rendering of the same rights,
 and the one contract check stays the one check of the oracle.
 
 The Linux policy would be applied before the provider image is entered. Apart
-from the seccomp allow list above, this file is a design: each row names the
-Linux test that would prove it, those Linux counterparts do not exist yet, and
-no sentence here claims that any provider is confined on Linux beyond that one
-filter.
+from the seccomp allow list above, this file is a design, and the file row is
+GAP as "The file row" records. Each other row names the Linux test that would
+prove it. Those rows were not run. No sentence here claims that any provider
+is confined on Linux beyond the recorded seccomp filter.
 
 The seccomp allow list's own Linux-test cells are the two journeys:
 `linux_wallet_journey_runs_under_the_seccomp_allow_list` and
@@ -426,6 +498,11 @@ proof above. Did remains pending the shared policy decision and a fresh run
 with the accepted program; its earlier wider-policy run is not row acceptance.
 
 ## The contract on Linux
+
+`(deny default)`, files, and
+`(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` are GAP, as
+"The file row" records. Every other row below was not run. The cells keep the
+design each row already stated.
 
 | Oracle rule | Linux primitive that would carry it | How exact the match is | Linux test that would prove it |
 | --- | --- | --- | --- |

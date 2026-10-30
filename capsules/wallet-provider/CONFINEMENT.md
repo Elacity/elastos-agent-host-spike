@@ -1474,6 +1474,12 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - WP210: The Landlock sequencer runs the final call before
   `PR_SET_NO_NEW_PRIVS`.
   `landlock_install_refuses_each_failed_step` checks this rule.
+- WP211: The launch record reads a Landlock step as an installed record.
+  `landlock_install_record_decodes_each_failed_step` checks this rule.
+- WP212: A measured loader rule is added without `READ_FILE`.
+  `landlock_ruleset_names_each_measured_loader_entry` checks this rule.
+- WP213: The file-row label claims a Linux host off Linux.
+  `linux_landlock_journey_is_not_applicable_off_linux` checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,
@@ -1481,7 +1487,9 @@ so none can produce a CAUGHT line in this list. That file names each of them,
 with the red output of its run on the Linux host: the `NoNewPrivileges` and
 `Filter` install-failure plants, the requested-program plant, the stopped-child
 and timeout-reap plants, the omitted-wait plant, the allocation-guard plant, the
-skip-install plant and the outside-write plant.
+skip-install plant and the outside-write plant. Task 153's two Linux-only
+plants, a launcher that skips its Landlock install and a parent row that grants
+a read, are recorded in that same file. This session did not rerun them.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
