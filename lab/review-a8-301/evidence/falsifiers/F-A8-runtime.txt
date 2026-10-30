@@ -1,0 +1,8 @@
+F-A8-runtime agent_host_host_key_read_is_refused: exit 101, caught
+  a8 runtime: elastos sha256 1437b90888d636269784eb6550cc6783278e6862855120e6b626238fbbd211f4
+  a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 injected agent-host: sha256 f7a41ffdbe7cf6bd041108599079a64ec4f6bc2aa635a97d7455c7b423f9b8e5 imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+  a8 host key read: exit:None refusal_line:None marker_absent:true unchanged:true
+restored elastos/crates/elastos-server/src/resource_bridge.rs sha256 b8edb86cf709a23c1634e420691cf9916e07014f648009e19878285a3da076be
+F-A8-runtime: CAUGHT (expected caught)
