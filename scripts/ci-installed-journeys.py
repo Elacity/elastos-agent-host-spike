@@ -187,6 +187,7 @@ FINITE_OBSERVER_MESSAGES = frozenset({
     'finite journey outside process identity is unavailable',
     'finite journey process census differs',
     'finite journey process changed during pidfd binding',
+    'finite journey process wait is unavailable',
     'finite journey process exit is unavailable',
     'finite journey process identity changed',
     'finite journey process identity is unavailable',
