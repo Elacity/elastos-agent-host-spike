@@ -2,7 +2,7 @@ id: F-A7-tnotout
 file: src/ledger.rs
 test: ledger::model_timeout_twice_is_refused
 --- old
-            None => return Err(TimeoutRefuse::NotOutstanding),
+            Err(HoldBind::Missing) => return Err(TimeoutRefuse::NotOutstanding),
 --- new
-            None => return Ok(TimeoutRecord),
+            Err(HoldBind::Missing) => return Ok(TimeoutRecord),
 --- end

@@ -1,0 +1,9 @@
+id: F-M4-absent
+file: src/lib.rs
+test: model_missing_handle_removes_nothing
+--- old
+        if !self.grants.contains_key(&handle) {
+            return;
+        }
+--- new
+--- end

@@ -1,0 +1,9 @@
+id: F-A7-endbindmiss
+file: src/ledger.rs
+test: ledger::model_release_unknown_instance_is_refused
+test: ledger::model_timeout_unknown_instance_is_refused
+--- old
+            .ok_or(HoldBind::Refused(Refuse::UnknownInstance))?;
+--- new
+            .ok_or(HoldBind::Refused(Refuse::Identity))?;
+--- end
