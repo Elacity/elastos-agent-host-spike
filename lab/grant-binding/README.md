@@ -13,6 +13,8 @@ reference model, not the Runtime; counts toward no M1 check; the Runtime half is
 
 `Verifier::bind_grant` is the stand-in entry for a capability ask. The asker is the registered instance principal. A Home principal is refused and does not mint. An app principal stores the binding. A caller claim is not the principal and no caller names the asker. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
 
+`Verifier::bind_once` and `Verifier::bind_until` store an allow-once grant and an expiry through the one `bind_grant`. One successful append or overwrite removes an allow-once grant. `resolve` refuses a grant when `verifier_now` is at or after its expiry. An unset expiry is not due. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
 `Verifier::admit_ask` caps one agent's budget ask and stores the granted amount through the one `admit`. This is a lab stand-in for that admission. It is not the Runtime. It does not count toward A7 or M1-R.
 
 A forged identity, session, instance, usage, ceiling or set of rights changes
