@@ -31,7 +31,7 @@ reference model, not the Runtime; counts toward no M1 check; the Runtime half is
 
 `Verifier::admit_ask` caps one agent's budget ask and stores the granted amount through the one `admit`. This is a lab stand-in for that admission. It is not the Runtime. It does not count toward A7 or M1-R.
 
-`Verifier::admit_ask` stores that grant's allowance on the one ledger. `Verifier::settle` adds the charged figure to that same grant. `Verifier::reserve` refuses a hold past the unspent remainder. A release does not charge the allowance. Another grant keeps its own remainder. This mirrors `Life::Exhausted`. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+`Verifier::admit_ask` stores that grant's allowance on the one ledger. `Verifier::settle` adds the charged figure to that same grant. `Verifier::reserve` refuses a hold past the unspent remainder. An open hold on that grant counts in the remainder. A release does not charge the allowance and returns that room. Another grant keeps its own remainder. This mirrors `Life::Exhausted`. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
 
 A forged identity, session, instance, usage, ceiling or set of rights changes
 nothing. A host call whose identity, session or instance differs from the

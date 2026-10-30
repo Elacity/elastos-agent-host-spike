@@ -1,6 +1,7 @@
 id: F-A7-spent
 file: src/ledger.rs
 test: ledger::model_settled_charge_stays_spent_on_that_grant
+test: ledger::model_open_hold_counts_toward_the_grant_allowance
 --- old
             if amount > remaining {
                 return Err(ReserveRefuse::Spent {

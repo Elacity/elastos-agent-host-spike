@@ -329,7 +329,12 @@ impl Verifier {
         let () = {
         if let Some(granted) = ledger.allowances.get(&request.handle).copied() {
             let spent = ledger.spent.get(&request.handle).copied().unwrap_or(0);
-            let remaining = granted.saturating_sub(spent);
+            let open_on_grant = ledger
+                .open
+                .values()
+                .filter(|hold| hold.handle == request.handle)
+                .fold(0u64, |sum, hold| sum.saturating_add(hold.amount));
+            let remaining = granted.saturating_sub(spent).saturating_sub(open_on_grant);
             if amount > remaining {
                 return Err(ReserveRefuse::Spent {
                     remaining,
@@ -5602,4 +5607,58 @@ fn model_settled_charge_stays_spent_on_that_grant() {
         .reserve(&call, &guest(album), 4)
         .expect("the album grant keeps its own allowance");
     assert_eq!(books(&verifier).held, 4);
+}
+
+#[test]
+fn model_open_hold_counts_toward_the_grant_allowance() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("agent-1", "session-a");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/agent-1/library", rights())
+        .expect("library");
+    let album = verifier
+        .bind_grant(photo, "UsersAI/agent-1/album", rights())
+        .expect("album");
+    let call = verifier.open_call(photo);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(library),
+            crate::ask::BudgetAsk { amount: 4 },
+            10,
+        )
+        .expect("library allowance");
+    verifier
+        .admit_ask(
+            &call,
+            &guest(album),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("album allowance");
+    verifier
+        .reserve(&call, &guest(album), 3)
+        .expect("the album hold does not spend the library allowance");
+    let first = verifier
+        .reserve(&call, &guest(library), 2)
+        .expect("first hold");
+    verifier
+        .reserve(&call, &guest(library), 2)
+        .expect("a hold equal to the remainder is allowed");
+    let blocked = verifier
+        .reserve(&call, &guest(library), 1)
+        .expect_err("the open holds fill the library allowance");
+    assert_eq!(
+        blocked,
+        ReserveRefuse::Spent {
+            remaining: 0,
+            asked: 1,
+        }
+    );
+    assert_eq!(blocked.to_string(), "grant allowance is spent");
+    assert_eq!(verifier.release(&call, &guest(library), first), Ok(()));
+    verifier
+        .reserve(&call, &guest(library), 1)
+        .expect("a release returns that room");
+    assert_eq!(books(&verifier).charged, 0);
 }
