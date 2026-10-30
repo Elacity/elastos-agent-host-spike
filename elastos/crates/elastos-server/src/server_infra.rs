@@ -151,6 +151,21 @@ fn media_provider_bridge_config(
     elastos_server::protected_content_runtime::load_runtime_media_provider_bridge_config(data_dir)
 }
 
+/// The model provider starts only under an OS confinement backend. The launcher
+/// refuses startup on any other OS instead of running the model unconfined.
+const MODEL_PROVIDER_CONFINEMENT_UNAVAILABLE: &str = "provider confinement unavailable on this OS";
+
+// Used by the non-confining-OS model branch; here it keeps that branch testable.
+#[cfg_attr(any(target_os = "macos", target_os = "linux"), allow(dead_code))]
+fn model_provider_confinement(os: &str) -> Result<(), provider::bridge::BridgeError> {
+    match os {
+        "macos" | "linux" => Ok(()),
+        _ => Err(provider::bridge::BridgeError::InitFailed(
+            MODEL_PROVIDER_CONFINEMENT_UNAVAILABLE.to_owned(),
+        )),
+    }
+}
+
 async fn request_browser_engine_provider_status(
     bridge: &provider::ProviderBridge,
     status_timeout: Duration,
@@ -1059,10 +1074,14 @@ async fn setup_server_infrastructure_impl(
                         (bridge, Some((sockets, vacant)), config, None::<()>)
                     });
                     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-                    let bridge_result =
-                        provider::ProviderBridge::spawn(&path, model_config.clone())
-                            .await
-                            .map(|bridge| (bridge, None, model_config.clone(), None::<()>));
+                    let bridge_result: Result<
+                        (provider::ProviderBridge, Option<()>, _, Option<()>),
+                        provider::bridge::BridgeError,
+                    > = model_provider_confinement(std::env::consts::OS).and_then(|()| {
+                        Err(provider::bridge::BridgeError::InitFailed(
+                            MODEL_PROVIDER_CONFINEMENT_UNAVAILABLE.to_owned(),
+                        ))
+                    });
                     match bridge_result {
                         Ok((bridge, local_sockets, confined_config, hosted_listener)) => {
                             model_config = confined_config;
@@ -1131,6 +1150,9 @@ async fn setup_server_infrastructure_impl(
                                     tracing::warn!("Skipping model-provider because startup failed")
                                 }
                             }
+                        }
+                        Err(provider::bridge::BridgeError::InitFailed(reason)) => {
+                            tracing::warn!("Skipping model-provider: {}", reason)
                         }
                         Err(_) => tracing::warn!("Skipping model-provider because startup failed"),
                     }
@@ -4288,5 +4310,26 @@ mod tests {
             ),
             "revoked token must stay revoked after restart: {result:?}"
         );
+    }
+
+    #[test]
+    fn model_provider_confinement_refuses_unsupported_os() {
+        for os in ["macos", "linux"] {
+            assert!(
+                super::model_provider_confinement(os).is_ok(),
+                "{os} must start the model provider confined"
+            );
+        }
+        for os in ["freebsd", "windows", ""] {
+            match super::model_provider_confinement(os) {
+                Err(elastos_runtime::provider::bridge::BridgeError::InitFailed(reason)) => {
+                    assert_eq!(
+                        reason, "provider confinement unavailable on this OS",
+                        "{os} reason"
+                    )
+                }
+                other => panic!("{os} must refuse model startup, got {other:?}"),
+            }
+        }
     }
 }
