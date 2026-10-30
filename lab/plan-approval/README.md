@@ -399,6 +399,46 @@ live list stays `read_shown_grants`. `preview`, `plan_sha256`, `approve`,
 unchanged by this slice. The crate does not copy the stand-in, and it names no
 planner. A passing run gives the Runtime no A15 credit.
 
+A shown submit stores a pending request only for an exact ask the signed bundle
+declared. The Request flow states the check at step 7:
+
+> Runtime verifies the exact resource, action, operation, principal, session,
+> capsule, grant, expiry, and revocation state
+
+`journeys::request` is the only submit, and it passes the resource and the
+action it is given. It sends both unchanged as the route's `resource` and
+`action` keys and adds no rule of its own: this crate stores no copy of
+`declared_ask`, of `request_body` or of the action allow-list.
+
+The route checks the resource scheme before the instance is read. A resource
+that starts with neither `elastos://` nor `localhost://` is status 400 with
+`Unsupported resource scheme. Allowed: elastos://, localhost://`. The route
+then checks the action word after lowercasing it: an action outside `read`,
+`write`, `execute`, `delete`, `message` and `admin` is status 400 with
+`Invalid action: ` plus that action and the expected list. A session with no
+instance is status 400 with `unknown instance: ` plus that id.
+
+A live session's pair must equal one declared ask. A pair that matches no ask
+is status 403 with `ask not declared in the signed manifest: ` plus the
+resource, one space and the lowercased action, and it stores nothing. The
+match is equality, so the parent path, a longer path, the same path under
+`elastos://` and the allowed action `execute` are each refused. `READ` is
+stored as `read` and `Write` as `write`, and
+`localhost://Public/resident-instances/shared.txt` with `read` is stored as
+that resource. The once grant of the write request carries action `write`
+until its one use spends it.
+
+`shown_submit_names_a_declared_ask` drives two sessions through
+`running_agent`. It proves the scheme and action refusals on a fresh stand-in,
+the five refused pairs, the shell and unknown-instance refusals, the three
+stored records, and the once grant of the write request. Every earlier submit
+still passes `localhost://Public/plan-approval/a.txt` and `read`. `preview`,
+`plan_sha256`, `approve`, `execute`, `deny_shown_plan`, `age_shown_plan`,
+`stop_shown_session`, `read_shown_request`, `read_shown_grants`,
+`read_shown_requests` and `running_agent` are unchanged by this slice. The
+crate does not copy the stand-in, and it names no planner. A passing run gives
+the Runtime no A15 credit.
+
 ## Layout
 
 - `src/lib.rs`: `Preview`, `preview`, `plan_sha256`, `approve`,
@@ -416,12 +456,14 @@ planner. A passing run gives the Runtime no A15 credit.
   `agent_cannot_stop_a_shown_session`, `agent_cannot_launch_a_shown_session`,
   `shown_request_status_is_not_the_grant`,
   `shown_live_list_is_not_another_sessions_grant`,
+  `shown_submit_names_a_declared_ask`,
   `shown_request_list_does_not_submit_again` and the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_submit_names_a_declared_ask -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_request_list_does_not_submit_again -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_live_list_is_not_another_sessions_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_request_status_is_not_the_grant -- --exact

@@ -17,6 +17,7 @@
 - 020: `deny_shown_plan` gains `caller: Caller<'_>` after `stand_in` and passes that value to `post_capability_deny`, staying the one deny call; `agent_cannot_deny_its_own_shown_plan` proves the session that posted the shown plan and the other running session are refused with `This endpoint requires shell privileges` for their own step, the sibling step and an absent id before the deny body is read, both requests stay pending with the live list empty, the shell's deny then settles `request-1` and leaves `request-2` pending for its allow-once `approve` and `execute`; two hand-run plants caught and restored; 1 test, 2 plants.
 - 022: `running_agent` gains `caller: Caller<'_>` after `stand_in`, passes it to `get_capsules` and `post_capsules`, and returns `Result<String, (u16, String)>`, staying the one launch journey; `agent_cannot_launch_a_shown_session` proves a client launch for a never-launched id, an absent id and an empty id is the 403 shell refusal before `admit_resident` and stores nothing, the shell's launches then start `component-1` and `component-2` and a client launch after them mints no `component-3`, and both shell sessions submit, are granted once and spend that one use; two hand-run plants caught and restored; 1 test, 2 plants.
 - 025: `read_shown_request` is the one status call and passes the caller it is given to `get_capability_request`, so an absent id is not found for every caller, another session, an empty id and the shell are refused as another session's request, and the owning session reads only `{"status":"pending"}`, `{"status":"granted"}`, the denied reason or the expired reason with no plan; two hand-run plants caught and restored; 1 test, 2 plants.
+- 028: `journeys::request` gains `resource` and `action` after `plan` and passes both to the one submit route; `shown_submit_names_a_declared_ask` proves a shown submit stores a pending request only for an exact declared ask, while two early refusals, five undeclared pairs, a shell submit and an unknown instance store nothing, `READ` and `Write` are stored lowercased, the shared file is stored as its own resource, and the once grant of the write request carries action `write` until its one use; two hand-run plants caught and restored; 1 test, 2 plants.
 
 ## 001
 
@@ -1037,3 +1038,127 @@ the single `stand_in.get_capability_requests(caller, session)` line. The restore
 `falsifiers.json`; no id is added.
 
 027: added `read_shown_requests` and `shown_request_list_does_not_submit_again`; the shown request list returns the stored records and does not submit again.
+
+## 028
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md) Request flow step 7:
+
+> Runtime verifies the exact resource, action, operation, principal, session,
+> capsule, grant, expiry, and revocation state
+
+This task proves the resource and the action for a shown submit. `journeys::request` gains
+`resource: &str` and `action: &str` after `plan`, sends both unchanged as the route's
+`resource` and `action` keys, and returns that route's result with its `request_id` on Ok. It
+matches no `Caller`, contains none of the route's refusal reasons and calls no other `StandIn`
+method. Every existing call passes `"localhost://Public/plan-approval/a.txt"` and `"read"`; no
+other argument and no assertion changed.
+
+`shown_submit_names_a_declared_ask` drives two sessions through `running_agent`. On a fresh
+stand-in the `https://` resource is the scheme refusal before the instance is read, and the
+`mint` action is the action refusal; each stores nothing and leaves both shell lists empty.
+The five pairs the signed bundle did not declare are each status 403 with `ask not declared in
+the signed manifest: <resource> <action>` and each leaves the first session's list empty, the
+shell live list empty and both capsules listed. A shell submit is the caller refusal and the
+absent session is the instance refusal, neither the ask reason. `READ` of the plan A file
+stores `read` as `request-1`, `Write` of plan B stores `write` as `request-2`, and the shared
+file with `read` stores that resource as `request-3`; a repeat of the undeclared pair stores
+nothing. The once grant of `request-2` lists action `write` and no `request-1` or `request-3`;
+its one use is `{"valid":true}`, the live list empties, and the next use is
+`Err((400, "grant is not live: Exhausted"))` with the three records kept and `request-2`
+granted. The test calls no `post_capability_request`, `get_capability_requests`,
+`get_capability_request`, `get_capability_list`, `seed_request`, `post_capability_*` method,
+`admit_resident`, `post_capsules`, `finish_start`, `set_instant`, `delete_capsule` or
+`worker_exited`. This crate stores no copy of `declared_ask`, does not copy the stand-in and
+names no planner. A passing run gives the Runtime no A15 credit.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_submit_names_a_declared_ask -- --exact
+```
+
+### F-undeclared-is-stored
+
+Old bytes, 225:
+
+```rust
+        let stored = stand_in.post_capability_request(
+            caller,
+            &json!({
+                "resource": resource,
+                "action": action,
+                "plan": hash,
+            }),
+        )?;
+```
+
+New bytes, 440:
+
+```rust
+        let stored = match stand_in.post_capability_request(
+            caller,
+            &json!({
+                "resource": resource,
+                "action": action,
+                "plan": hash,
+            }),
+        ) {
+            Err((403, reason)) if reason.starts_with("ask not declared in the signed manifest:") => {
+                return Ok("request-1".to_owned());
+            }
+            stored => stored?,
+        };
+```
+
+The planted crate compiled. `shown_submit_names_a_declared_ask` failed at `src/lib.rs:6965:9`
+(planted tree) on the first refused pair: `assertion left == right failed: a shown submit
+names a declared ask: the pair localhost://Public/plan-approval/b.txt read is the
+declared-ask refusal`; left held `Ok("request-1")`, right expected `Err((403, "ask not
+declared in the signed manifest: localhost://Public/plan-approval/b.txt read"))`. The
+refusal was stored as a request. Restored, the test passes.
+
+### F-other-resource-is-a-txt
+
+Old bytes, 138:
+
+```rust
+            &json!({
+                "resource": resource,
+                "action": action,
+                "plan": hash,
+            }),
+```
+
+New bytes, 468:
+
+```rust
+            &json!({
+                "resource": if resource == "localhost://Public/plan-approval/a.txt" {
+                    resource
+                } else {
+                    "localhost://Public/plan-approval/a.txt"
+                },
+                "action": if resource == "localhost://Public/plan-approval/a.txt" {
+                    action
+                } else {
+                    "read"
+                },
+                "plan": hash,
+            }),
+```
+
+The planted crate compiled. `shown_submit_names_a_declared_ask` failed at `src/lib.rs:6843:5`
+(planted tree) on the scheme refusal: `assertion left == right failed: a shown submit names
+a declared ask: a resource outside elastos:// and localhost:// is the scheme refusal`; left
+held `Err((400, "unknown instance: component-1"))`, right expected `Err((400, "Unsupported
+resource scheme. Allowed: elastos://, localhost://"))`. The `https://` resource reached the
+instance lookup as the plan A file with action `read`. Restored, the test passes.
+
+Neither plant calls `seed_request`. After both restores,
+`git diff -- lab/plan-approval/src/lib.rs` holds no `stored => stored?`, no
+`reason.starts_with("ask not declared` and no
+`resource == "localhost://Public/plan-approval/a.txt"` line. The restored proof command set
+(the fmt check and the twenty-one test commands in the task) took 2.648 s real. This lane has
+no `falsifiers.json`; no id is added.
+
+028: `journeys::request` takes the resource and the action it is given; `shown_submit_names_a_declared_ask` proves an exact declared ask is the only stored submit and the grant keeps that action; two hand-run plants caught and restored.
