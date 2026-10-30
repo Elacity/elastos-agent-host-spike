@@ -42,6 +42,7 @@ name = "agent-conformance"
 version = "0.1.0"
 dependencies = [
  "capsule-identity",
+ "grant-binding",
  "rustix",
  "serde",
  "serde_json",
@@ -518,6 +519,10 @@ dependencies = [
  "opaque-debug",
  "polyval",
 ]
+
+[[package]]
+name = "grant-binding"
+version = "0.0.0"
 
 [[package]]
 name = "group"
