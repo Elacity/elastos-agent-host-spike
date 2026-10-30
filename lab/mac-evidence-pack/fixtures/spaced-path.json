@@ -1,0 +1,18 @@
+{
+  "os_name": "Darwin",
+  "machine": "arm64",
+  "translated": "0",
+  "uid": 501,
+  "sudo_present": false,
+  "macos_version": "15.6.1",
+  "home": "/Users/sash name",
+  "work": "/Users/sash name/mac-evidence-pack/run",
+  "cargo_home": "/Users/sash name/.cargo",
+  "rustc_path": "/Users/sash name/.cargo/bin/rustc",
+  "cargo_path": "/Users/sash name/.cargo/bin/cargo",
+  "xcode_path": "/Library/Developer/CommandLineTools",
+  "sandbox_exec": true,
+  "free_kib": 41943040,
+  "python3": "/usr/bin/python3",
+  "git": "/usr/bin/git"
+}
