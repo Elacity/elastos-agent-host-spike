@@ -192,7 +192,9 @@ struct Instance {
 struct Record {
     home: PathBuf,
     name: String,
-    device: u64,
+    /// `fstat`'s device type on this platform: `rustix::fs::Dev` is the libc
+    /// `dev_t`, which is `u64` on Linux and `i32` on macOS.
+    device: rustix::fs::Dev,
     inode: u64,
 }
 
@@ -512,7 +514,7 @@ impl StandIn {
         Ok(home)
     }
 
-    fn storage_record(&self, home: &Path, entry: &str) -> Option<(u64, u64)> {
+    fn storage_record(&self, home: &Path, entry: &str) -> Option<(rustix::fs::Dev, u64)> {
         self.storage
             .iter()
             .find(|record| record.home == home && record.name == entry)
