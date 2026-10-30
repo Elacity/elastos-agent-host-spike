@@ -94,6 +94,18 @@ pub fn execute(
     )
 }
 
+/// Moves the stand-in's clock to `secs` and lets the stand-in expire due
+/// pending requests. It calls `set_instant` and no other `StandIn` method.
+///
+/// A pending shown step whose age is at least 300 seconds becomes `expired`
+/// with `Request timed out` and `runtime` as settler, so it is not a live
+/// grant and cannot be granted later. A granted record stays granted and its
+/// `once` grant stays live, because that grant's own expiry is later. The
+/// helper takes no request id and no plan.
+pub fn age_shown_plan(stand_in: &mut StandIn, secs: u64) {
+    stand_in.set_instant(secs);
+}
+
 #[cfg(test)]
 mod fixtures {
     pub const PLAN_A: &[u8] =
@@ -655,5 +667,202 @@ fn deny_one_shown_step() {
         live(&stand_in),
         Vec::<Value>::new(),
         "the once sibling grant is spent"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn unanswered_shown_step_expires() {
+    use agent_conformance::standin_runtime::Caller;
+    use fixtures::{PLAN_A, PLAN_B};
+    use journeys::{request, running_agent};
+    use serde_json::Value;
+
+    fn live(stand_in: &StandIn) -> Vec<Value> {
+        stand_in
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
+            .expect("shell live list")["capabilities"]
+            .as_array()
+            .cloned()
+            .expect("the shell live list holds a capabilities array")
+    }
+
+    fn shown(stand_in: &StandIn, session: &str) -> Vec<Value> {
+        stand_in
+            .get_capability_requests(Caller::Shell, Some(session))
+            .expect("the shell reads the session's requests")["requests"]
+            .as_array()
+            .cloned()
+            .expect("the shell request view holds a requests array")
+    }
+
+    let mut stand_in = StandIn::new();
+    let session = running_agent(&mut stand_in);
+    assert_eq!(
+        session, "component-1",
+        "the fresh stand-in names the one session component-1"
+    );
+
+    let unanswered = request(&mut stand_in, &session, PLAN_A);
+    assert_eq!(
+        unanswered, "request-1",
+        "the agent's first shown step is the stand-in's first request"
+    );
+    let allowed = request(&mut stand_in, &session, PLAN_B);
+    assert_eq!(
+        allowed, "request-2",
+        "the agent's second shown step is the stand-in's second request"
+    );
+
+    let plan_a = plan_sha256(PLAN_A);
+    let plan_b = plan_sha256(PLAN_B);
+    assert_eq!(
+        shown(&stand_in, &session)[0]["plan"],
+        plan_a,
+        "the first shown step carries the hash of plan A"
+    );
+    assert_eq!(
+        shown(&stand_in, &session)[1]["plan"],
+        plan_b,
+        "the second shown step carries the hash of plan B"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "a shown step is not a live grant before the owner decides"
+    );
+
+    assert_eq!(
+        approve(&mut stand_in, &allowed, &plan_b),
+        Ok(json!({ "success": true })),
+        "the owner allows the second shown step once"
+    );
+    let allowed_live = vec![json!({
+        "request_id": "request-2",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "duration": "once",
+        "granted_at": 0,
+    })];
+    assert_eq!(
+        live(&stand_in),
+        allowed_live,
+        "the allowed step is the one live grant"
+    );
+
+    // At 299 seconds the unanswered step is still pending and is still not a
+    // live grant; the allowed step's record and its live grant stay.
+    age_shown_plan(&mut stand_in, 299);
+    let aged = shown(&stand_in, &session);
+    assert_eq!(
+        aged[0],
+        json!({
+            "request_id": "request-1",
+            "session_id": "component-1",
+            "resource": "localhost://Public/plan-approval/a.txt",
+            "action": "read",
+            "reason": "",
+            "status": "pending",
+            "decision_reason": "",
+            "settled_by": null,
+            "plan": plan_a,
+        }),
+        "an unanswered shown step is still pending at 299 seconds"
+    );
+    assert_eq!(
+        aged[1],
+        json!({
+            "request_id": "request-2",
+            "session_id": "component-1",
+            "resource": "localhost://Public/plan-approval/a.txt",
+            "action": "read",
+            "reason": "",
+            "status": "granted",
+            "decision_reason": "owner approved",
+            "settled_by": "shell",
+            "plan": plan_b,
+        }),
+        "the allowed step stays a grant and keeps its plan hash at 299 seconds"
+    );
+    assert_eq!(
+        live(&stand_in),
+        allowed_live,
+        "the allowed step stays a grant and the unanswered step is not live at 299 seconds"
+    );
+
+    // At 300 seconds the unanswered step expires through the stand-in's own
+    // clock; the allowed step's record and its live grant stay.
+    age_shown_plan(&mut stand_in, 300);
+    let expired = shown(&stand_in, &session);
+    assert_eq!(
+        expired[0],
+        json!({
+            "request_id": "request-1",
+            "session_id": "component-1",
+            "resource": "localhost://Public/plan-approval/a.txt",
+            "action": "read",
+            "reason": "",
+            "status": "expired",
+            "decision_reason": "Request timed out",
+            "settled_by": "runtime",
+            "plan": plan_a,
+        }),
+        "an unanswered shown step expires at 300 seconds and keeps its plan hash"
+    );
+    assert_eq!(
+        expired[1],
+        json!({
+            "request_id": "request-2",
+            "session_id": "component-1",
+            "resource": "localhost://Public/plan-approval/a.txt",
+            "action": "read",
+            "reason": "",
+            "status": "granted",
+            "decision_reason": "owner approved",
+            "settled_by": "shell",
+            "plan": plan_b,
+        }),
+        "the allowed step stays a grant and keeps its plan hash at 300 seconds"
+    );
+    assert_eq!(
+        live(&stand_in),
+        allowed_live,
+        "the allowed step stays a grant when the unanswered step expires"
+    );
+
+    // An expired shown step is not a live grant and cannot be granted later.
+    assert_eq!(
+        approve(&mut stand_in, &unanswered, &plan_a),
+        Err((400, "request is not pending: request-1".to_owned())),
+        "an expired shown step cannot be granted later"
+    );
+    assert_eq!(
+        live(&stand_in),
+        allowed_live,
+        "the refused late grant of the expired step mints nothing and the allowed step stays a grant"
+    );
+
+    assert_eq!(
+        execute(&mut stand_in, &session, &unanswered, PLAN_A),
+        Err((400, "unknown grant".to_owned())),
+        "an expired shown step is not a live grant, so running it is refused with unknown grant"
+    );
+    assert_eq!(
+        live(&stand_in),
+        allowed_live,
+        "the refused use of the expired step mints nothing and the allowed step stays a grant"
+    );
+
+    // The allowed step still authorises exactly its own one use.
+    assert_eq!(
+        execute(&mut stand_in, &session, &allowed, PLAN_B),
+        Ok(json!({ "valid": true })),
+        "the allowed step stays a grant and authorises its own one use"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "the once allowed step is spent by its one use"
     );
 }
