@@ -25,6 +25,8 @@ reference model, not the Runtime; counts toward no M1 check; the Runtime half is
 
 `Verifier::bind_for_session` stores an allow-for-this-session grant through the one `bind_grant`. `Verifier::host_set_session` removes those grants through the one `revoke_grant` when the session string changes. A child journal minted from that grant is removed with it. Setting the same session string removes nothing. A standing grant stays, and restoring the old session makes that standing grant usable again. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
 
+`resolve` reads the issuing grant's expiry for a derived journal. The child keeps no expiry of its own. A use of that journal is refused when `verifier_now` is at or after the issuing expiry. An unset issuing expiry is not due. This is the same one expiry check `model_expired_grant_is_refused` already uses. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
 `Verifier::admit_ask` caps one agent's budget ask and stores the granted amount through the one `admit`. This is a lab stand-in for that admission. It is not the Runtime. It does not count toward A7 or M1-R.
 
 A forged identity, session, instance, usage, ceiling or set of rights changes
