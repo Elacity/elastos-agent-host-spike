@@ -74,7 +74,6 @@ const NOT_CREATED_REASON: &str = "storage file was not created by the stand-in";
 const SWAPPED_REASON: &str = "storage file is not the file the stand-in created";
 const EXISTS_REASON: &str = "storage file already exists";
 const SHELL_STORAGE_REASON: &str = "storage belongs to one agent instance";
-const STORAGE_NAME: &str = "storage";
 const MISSING_STORAGE_REASON: &str = "storage directory does not exist";
 const EXISTING_STORAGE_REASON: &str = "storage directory already exists";
 const DATA_STEP: &str = "storage directory";
@@ -332,6 +331,9 @@ impl StandIn {
             _ => return Err((400, ENTRY_REASON.to_owned())),
         };
         if !named {
+            // An absent storage directory is accepted with no name: only a
+            // named entry needs the directory. A link on any step is still
+            // refused by the walk.
             let _ = self.storage_directory(&home)?;
             return Ok(());
         }
@@ -347,8 +349,8 @@ impl StandIn {
     /// `read_storage` and `write_storage` for that name checks the recorded
     /// pair. A name that already has a record is status 400 with the reason
     /// `storage file already exists`, and this call changes nothing then.
-    /// The storage directory is made, when it is absent, with `mkdirat` on
-    /// the data-directory handle the walk ended on, so creation never
+    /// The storage directory is made, when it is absent, one component at a
+    /// time with `mkdirat` on the handle the walk reached, so creation never
     /// resolves the data path a second time. This call reads no clock.
     pub fn create_storage(&mut self, entry: &str) -> Result<(), (u16, String)> {
         use std::os::fd::AsFd;
@@ -360,39 +362,33 @@ impl StandIn {
         if self.storage_record(&home, entry).is_some() {
             return Err((400, EXISTS_REASON.to_owned()));
         }
-        // The walk hands back the handle of the last directory it reached:
-        // the storage directory itself, or the data directory when storage
-        // is absent. Creation uses that same handle.
-        let (handle, absent) = self.storage_directory(&home)?;
-        let directory = if absent {
-            rustix::fs::mkdirat(
-                &handle,
-                STORAGE_NAME,
-                rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR | rustix::fs::Mode::XUSR,
-            )
-            .map_err(|error| {
-                if error == rustix::io::Errno::EXIST {
-                    existing_step(&handle, STORAGE_NAME)
-                } else {
-                    storage_failure(&error)
-                }
-            })?;
-            rustix::fs::openat(
-                &handle,
-                STORAGE_NAME,
-                rustix::fs::OFlags::RDONLY
-                    | rustix::fs::OFlags::DIRECTORY
-                    | rustix::fs::OFlags::NOFOLLOW
-                    | rustix::fs::OFlags::NONBLOCK
-                    | rustix::fs::OFlags::CLOEXEC,
-                rustix::fs::Mode::empty(),
-            )
-            .map_err(|error| directory_failure(&error))?
-        } else {
-            handle
+        // The walk reports the handle it reached and the first step it did
+        // not open. That step and every step after it are made here, in
+        // order, on that handle, so creation resolves no path again.
+        let (walked, absent) = self.storage_directory(&home)?;
+        let storage = Self::storage_for_home(&home)?;
+        let path = storage
+            .strip_prefix(&home)
+            .map_err(|_| (400, DATA_REASON.to_owned()))?
+            .components()
+            .filter_map(|part| match part {
+                Component::Normal(part) => Some(part),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let from = match &absent {
+            Some(absent) => path
+                .iter()
+                .position(|part| *part == absent)
+                .ok_or_else(|| (400, DATA_REASON.to_owned()))?,
+            None => path.len(),
         };
+        let mut handle = walked;
+        for part in &path[from..] {
+            handle = make_step(&handle, part)?;
+        }
         let make = rustix::fs::openat(
-            directory.as_fd(),
+            handle.as_fd(),
             entry,
             rustix::fs::OFlags::WRONLY
                 | rustix::fs::OFlags::CREATE
@@ -413,7 +409,7 @@ impl StandIn {
             // The controlled interleaving: the test's name joins this file
             // after the open call and before the `fstat`.
             rustix::fs::linkat(
-                directory.as_fd(),
+                handle.as_fd(),
                 entry,
                 rustix::fs::CWD,
                 &name,
@@ -526,61 +522,76 @@ impl StandIn {
             .ok_or_else(|| (400, "storage needs a selected Home".to_owned()))
     }
 
-    /// Opens the storage directory from a handle on the selected Home's
-    /// fixed data directory with one `O_NOFOLLOW|O_DIRECTORY` step per
-    /// component, so a symbolic link at any step is refused and not
-    /// followed. Nothing is canonicalized, so no outside path is resolved.
+    /// Opens the storage directory from a handle on the selected Home with
+    /// one `O_NOFOLLOW|O_DIRECTORY` step per component, so a symbolic link at
+    /// any step, an intermediate folder included, is refused and not
+    /// followed. No step is a multi-component path, and no step starts at the
+    /// current directory: the Home is opened by its own last component on a
+    /// handle on the directory that holds it, and every step below it is
+    /// opened from the handle of the step above. Nothing is canonicalized, so
+    /// no outside path is resolved.
     ///
-    /// The walked handle is returned with `false`. When a step is absent the
-    /// walk stops there and returns the handle of the step it reached with
-    /// `true`: the data directory when the storage directory is absent.
-    /// Creation then makes `storage` on that handle, so one open is the one
-    /// path from the selected Home to the directory that is used.
-    fn storage_directory(&self, home: &Path) -> Result<(OwnedFd, bool), (u16, String)> {
-        use rustix::fs::OFlags;
-
+    /// The walked handle is returned with `None` when the storage directory
+    /// itself was opened, or with the name of the first step that is absent
+    /// and the handle of its parent. Creation then makes that step and the
+    /// rest with `mkdirat` on the handle the walk reached. One walk is the
+    /// one path from the selected Home to the directory that is used.
+    fn storage_directory(
+        &self,
+        home: &Path,
+    ) -> Result<(OwnedFd, Option<std::ffi::OsString>), (u16, String)> {
         let storage = Self::storage_for_home(home)?;
-        let data = crate::harness::data_dir(home).map_err(|reason| (400, reason.to_owned()))?;
-        let relative = storage
-            .strip_prefix(&data)
+        let to_storage = storage
+            .strip_prefix(home)
             .map_err(|_| (400, DATA_REASON.to_owned()))?;
-        let mut current = rustix::fs::openat(
-            rustix::fs::CWD,
-            data.as_path(),
-            OFlags::RDONLY
-                | OFlags::DIRECTORY
-                | OFlags::NOFOLLOW
-                | OFlags::NONBLOCK
-                | OFlags::CLOEXEC,
-            rustix::fs::Mode::empty(),
-        )
-        .map_err(|error| storage_failure(&error))?;
-        for part in relative.components() {
+        use std::os::fd::AsFd;
+        // A link on any step of the walk is the one storage link reason.
+        let storage_reason = |_: &rustix::io::Errno| (400, LINK_REASON.to_owned());
+        let present = |_: &rustix::io::Errno| false;
+
+        let Some(holder) = home.parent() else {
+            return Err((400, DATA_REASON.to_owned()));
+        };
+        let Some(name) = home.file_name() else {
+            return Err((400, DATA_REASON.to_owned()));
+        };
+        let Some(above) = holder.parent() else {
+            return Err((400, DATA_REASON.to_owned()));
+        };
+        let Some(holder_name) = holder.file_name() else {
+            return Err((400, DATA_REASON.to_owned()));
+        };
+        // The directory that holds the Home is the one step opened from the
+        // current directory; the Home and every step below it start at the
+        // handle of their parent.
+        let mut current = step(
+            rustix::fs::CWD.as_fd(),
+            &present,
+            &storage_failure,
+            above.as_os_str(),
+        )?
+        .ok_or_else(|| (400, DATA_REASON.to_owned()))?;
+        for part in [holder_name, name] {
+            current = step(current.as_fd(), &present, &storage_reason, part)?
+                .ok_or_else(|| (400, LINK_REASON.to_owned()))?;
+        }
+        // The storage path's own components are opened from the Home handle
+        // above. The walk stops on the first absent one and returns the
+        // handle it reached, with that step's name.
+        for part in to_storage.components() {
             let Component::Normal(part) = part else {
                 return Err((400, DATA_REASON.to_owned()));
             };
-            match rustix::fs::openat(
-                &current,
-                part,
-                OFlags::RDONLY
-                    | OFlags::DIRECTORY
-                    | OFlags::NOFOLLOW
-                    | OFlags::NONBLOCK
-                    | OFlags::CLOEXEC,
-                rustix::fs::Mode::empty(),
-            ) {
-                Ok(next) => current = next,
-                // An absent step is not a link: the stand-in creates the
-                // storage directory later only through `create_storage`,
-                // which uses the handle this walk reached.
-                Err(rustix::io::Errno::NOENT) => return Ok((current, true)),
-                Err(error) => return Err(directory_failure(&error)),
+            let absent_step = |error: &rustix::io::Errno| *error == rustix::io::Errno::NOENT;
+            match step(current.as_fd(), &absent_step, &directory_failure, part)? {
+                Some(next) => current = next,
+                None => return Ok((current, Some(part.to_os_string()))),
             }
         }
-        Ok((current, false))
+        Ok((current, None))
     }
 
-    /// Opens one recorded entry on the Home's directory handle and checks
+    /// Opens one storage entry on the Home's directory handle and checks
     /// that handle. The returned handle is the checked file.
     /// `writable` opens the recorded file for a write that then truncates
     /// that same handle. The check is the same on both paths.
@@ -592,13 +603,16 @@ impl StandIn {
     ) -> Result<OwnedFd, (u16, String)> {
         use std::os::fd::AsFd;
 
+        // A recorded name needs the storage directory. An absent one is the
+        // directory's own reason, so a missing directory never reads as a
+        // missing file.
+        let (directory, absent) = self.storage_directory(home)?;
+        if absent.is_some() {
+            return Err((400, MISSING_STORAGE_REASON.to_owned()));
+        }
         let Some((device, inode)) = self.storage_record(home, entry) else {
             return Err((400, NOT_CREATED_REASON.to_owned()));
         };
-        let (directory, absent) = self.storage_directory(home)?;
-        if absent {
-            return Err((400, NOT_CREATED_REASON.to_owned()));
-        }
         let access = if writable {
             rustix::fs::OFlags::WRONLY
         } else {
@@ -1566,10 +1580,37 @@ fn check_file(stat: &rustix::fs::Stat) -> Result<(), (u16, String)> {
     Ok(())
 }
 
+/// One directory step of the storage walk: `name` is opened on the handle of
+/// its parent with `O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC`, so a name is
+/// never a multi-component path and a symbolic link is refused, not followed.
+/// The caller's `missing` predicate says which error is an absent step; every
+/// other error goes through the caller's one reason for its refusal.
+fn step(
+    parent: std::os::fd::BorrowedFd<'_>,
+    missing: &dyn Fn(&rustix::io::Errno) -> bool,
+    refused: &dyn Fn(&rustix::io::Errno) -> (u16, String),
+    name: &std::ffi::OsStr,
+) -> Result<Option<OwnedFd>, (u16, String)> {
+    match rustix::fs::openat(
+        parent,
+        name,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    ) {
+        Ok(next) => Ok(Some(next)),
+        Err(error) if missing(&error) => Ok(None),
+        Err(error) => Err(refused(&error)),
+    }
+}
+
 /// The refusal for an entry that `mkdirat` reported as present. The entry is
 /// opened once here without following a link: a symbolic link is the link
 /// rule, and a real directory is its own reason. Nothing is created.
-fn existing_step(directory: &OwnedFd, name: &str) -> (u16, String) {
+fn existing_step(directory: &OwnedFd, name: &std::ffi::OsStr) -> (u16, String) {
     use std::os::fd::AsFd;
 
     match rustix::fs::openat(
@@ -1585,6 +1626,37 @@ fn existing_step(directory: &OwnedFd, name: &str) -> (u16, String) {
         Ok(_) => (409, EXISTING_STORAGE_REASON.to_owned()),
         Err(error) => directory_failure(&error),
     }
+}
+
+/// Makes one directory step on a parent handle and opens it without
+/// following a link. A present step is the link rule, because the walk
+/// reported it absent and the tree changed under the creation.
+fn make_step(parent: &OwnedFd, name: &std::ffi::OsStr) -> Result<OwnedFd, (u16, String)> {
+    use std::os::fd::AsFd;
+
+    rustix::fs::mkdirat(
+        parent,
+        name,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR | rustix::fs::Mode::XUSR,
+    )
+    .map_err(|error| {
+        if error == rustix::io::Errno::EXIST {
+            existing_step(parent, name)
+        } else {
+            storage_failure(&error)
+        }
+    })?;
+    rustix::fs::openat(
+        parent.as_fd(),
+        name,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|error| directory_failure(&error))
 }
 
 /// A storage file open or `fstat` refusal. It names the file step, never the
@@ -7775,6 +7847,127 @@ mod tests {
                 .count(),
             0,
             "the stand-in did the work: it creates nothing through the link"
+        );
+        home.finish().expect("the throwaway Home finishes");
+    }
+
+    /// Task 112, M1 check A9: every step from the Home down is opened one
+    /// component at a time with `O_NOFOLLOW`, so a symbolic link at an
+    /// INTERMEDIATE step is refused and not followed. One multi-component
+    /// `openat` on the data path, or a walk that drops `O_NOFOLLOW` on an
+    /// intermediate step, follows `Home/x` into the outside directory and
+    /// turns this test red at the first assertion below.
+    #[test]
+    fn standin_storage_refuses_an_intermediate_symlink_step() {
+        use crate::harness::ThrowawayHome;
+        use std::os::unix::fs::symlink;
+
+        let home = ThrowawayHome::new().expect("a throwaway Home for the intermediate link row");
+        let mut standin = StandIn::new();
+        standin.set_home(home.home());
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let id = launch_finished(&shared, &mut standin);
+        assert!(!id.is_empty(), "the launched instance names its session");
+        let storage = StandIn::storage_for_home(home.home())
+            .expect("the stand-in returns the selected Home's storage path");
+
+        // The first step below the Home is a link to an outside directory
+        // that really exists and really holds a file.
+        let outside = home.root().join("outside");
+        std::fs::create_dir(&outside).expect("the test makes the outside directory");
+        std::fs::write(outside.join("notes.txt"), b"outside bytes")
+            .expect("the test writes the outside file");
+        let step = home
+            .data()
+            .strip_prefix(home.home())
+            .unwrap()
+            .components()
+            .next()
+            .unwrap();
+        let linked = home.home().join(step.as_os_str());
+        std::fs::remove_dir_all(&linked).expect("the test removes the real first step");
+        symlink(&outside, &linked).expect("the test makes the first step a link");
+        let before =
+            std::fs::read(outside.join("notes.txt")).expect("the outside file stays readable");
+
+        assert_eq!(
+            standin.create_storage("notes.txt"),
+            Err((400, LINK_REASON.to_owned())),
+            "the stand-in did the work: it refuses an intermediate link step"
+        );
+        assert_eq!(
+            standin.confirm_storage("notes.txt"),
+            Err((400, LINK_REASON.to_owned())),
+            "the stand-in did the work: the check refuses that link step too"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("notes.txt")).expect("the outside file stays readable"),
+            before,
+            "the stand-in did the work: the outside file is unchanged"
+        );
+        let mut names = std::fs::read_dir(&outside)
+            .expect("the outside directory stays readable")
+            .map(|entry| entry.expect("the outside entry reads").file_name())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![std::ffi::OsString::from("notes.txt")],
+            "the stand-in did the work: it creates nothing outside"
+        );
+
+        // Restore the real step: the route then works, so the refusal above
+        // came from the link step and nothing else.
+        std::fs::remove_file(&linked).expect("the test removes the link");
+        std::fs::create_dir(&linked).expect("the test makes the real first step again");
+        assert_eq!(
+            standin.create_storage("notes.txt"),
+            Ok(()),
+            "the stand-in did the work: the real step accepts the file"
+        );
+        assert!(
+            storage.join("notes.txt").is_file(),
+            "the file lands under the Home"
+        );
+        home.finish().expect("the throwaway Home finishes");
+    }
+
+    /// Task 112, M1 check A9: an absent storage directory is its own case
+    /// with its own reason. A read needs the directory and says so; a read
+    /// never falls back to the "not created" file reason for a missing
+    /// directory.
+    #[test]
+    fn standin_storage_read_refuses_an_absent_storage_directory() {
+        use crate::harness::ThrowawayHome;
+
+        let home = ThrowawayHome::new().expect("a throwaway Home for the absent directory row");
+        let mut standin = StandIn::new();
+        standin.set_home(home.home());
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let id = launch_finished(&shared, &mut standin);
+        let agent = Caller::Client { session_id: &id };
+        let storage = StandIn::storage_for_home(home.home())
+            .expect("the stand-in returns the selected Home's storage path");
+        assert!(
+            !storage.exists(),
+            "the test starts with no storage directory"
+        );
+
+        assert_eq!(
+            standin.read_storage(agent, "notes.txt"),
+            Err((400, MISSING_STORAGE_REASON.to_owned())),
+            "the stand-in did the work: an absent storage directory has its own reason"
+        );
+        assert_eq!(
+            standin.write_storage(agent, "notes.txt", b"bytes"),
+            Err((400, MISSING_STORAGE_REASON.to_owned())),
+            "the stand-in did the work: a write says the directory is absent too"
+        );
+        assert!(
+            !storage.exists(),
+            "the stand-in did the work: the refusal creates no directory"
         );
         home.finish().expect("the throwaway Home finishes");
     }
