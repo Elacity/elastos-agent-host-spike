@@ -13,8 +13,11 @@ about ElastOS.
 ## Menu
 
 - Status line: "Home is running" or "Home is not running", refreshed every 3 seconds.
-- Open Home: opens `http://localhost:8090/home/` in the default browser. Passkeys belong
-  to `localhost`, so the app never uses `127.0.0.1` or an embedded web view.
+- Open Home: opens `http://localhost:8090/home/` as its own window (app mode: no tabs,
+  no address bar) in Brave, Chrome, Edge or Chromium, whichever is installed first in
+  that order; otherwise in a tab of the default browser. It is still the real browser,
+  so passkeys work. Passkeys belong to `localhost`, so the app never uses `127.0.0.1`
+  or an embedded web view, which cannot use them there.
 - Stop Home: disabled. It needs the background service planned for 0.8.1 (P2).
 - Check for Updates: opens Home; updates stay in System > About.
 - Quit ElastOS Lab: closes the menu-bar app only. Home keeps running.

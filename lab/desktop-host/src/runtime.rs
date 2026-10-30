@@ -3,7 +3,7 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -40,8 +40,27 @@ fn probe(addr: SocketAddr) -> std::io::Result<bool> {
     Ok(status_line.starts_with(b"HTTP/1.1 2") || status_line.starts_with(b"HTTP/1.1 3"))
 }
 
+/// Chromium browsers that can show Home as its own window (app mode). They keep the
+/// browser's passkeys, which an embedded web view cannot use at `localhost`.
+const APP_MODE_BROWSERS: &[&str] = &[
+    "/Applications/Brave Browser.app",
+    "/Applications/Google Chrome.app",
+    "/Applications/Microsoft Edge.app",
+    "/Applications/Chromium.app",
+];
+
+/// Opens Home in its own window when an app-mode browser is installed, otherwise in a
+/// tab of the default browser. Launch Services starts the browser, so macOS privacy
+/// prompts name the browser, not this app; a running browser takes over the request.
 pub fn open_home() -> std::io::Result<()> {
-    let status = Command::new("open").arg(HOME_URL).status()?;
+    let app_mode = APP_MODE_BROWSERS.iter().find(|app| Path::new(app).is_dir());
+    let status = match app_mode {
+        Some(app) => Command::new("open")
+            .args(["-n", "-a", app, "--args"])
+            .arg(format!("--app={HOME_URL}"))
+            .status()?,
+        None => Command::new("open").arg(HOME_URL).status()?,
+    };
     if status.success() {
         Ok(())
     } else {
