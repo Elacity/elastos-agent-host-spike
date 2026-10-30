@@ -93,6 +93,12 @@ pub const SECOND_LEVEL_FILE_LAB_CID: &str =
 /// printed it first with README's Python rule.
 pub const EXACT_174_LEAF_LAB_CID: &str =
     "bafybeid7rnq7jruu3l5odw7a47ynfrlckf5ewdtyjj6uxd73pd2sa375tq";
+/// content-sample with `sample.example` as 45613056 zero bytes: exactly 174
+/// full raw leaves of 262144 bytes, so one depth-1 file node groups them all
+/// and its links name every leaf. Built in a temp dir and never committed;
+/// task 092 printed it first with README's Python rule.
+pub const FULL_174_LEAF_LAB_CID: &str =
+    "bafybeidtvhhdn46m3umxspczgcq7oigqbuiahy37dhbhhjbblflsi6e5km";
 /// The lab CID of one file `sample.example` whose 30277 leaves are leaf `i`'s
 /// SHA-256 of `i` as 8 little-endian bytes, 30276 of 262144 bytes and the
 /// last of 1 byte (7936671745 bytes): depth 3, 175 nodes then 2 then the

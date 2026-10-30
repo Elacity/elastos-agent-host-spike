@@ -23,12 +23,12 @@ use std::process::Command;
 /// How many pinned bundles the check covers: seven fixtures, the recipe,
 /// the three bundles built for the profile tests, the photo stand-in
 /// consumer copy (task 047), the three bundles with a file over one leaf
-/// (tasks 048 and 076), the two-full-chunk and exactly-174-leaf bundles
-/// (tasks 085 and 086), the three HAMT-threshold bundles (task 077), the
-/// shard with a file root (task 082), the two shared-prefix bundles
-/// (task 071), the 127-byte file bundle (task 091) and the exact
-/// 262144-byte basic block bundle (task 093).
-const PINNED_BUNDLES: usize = 25;
+/// (tasks 048 and 076), the two-full-chunk, exactly-174-leaf and
+/// 174-full-leaf bundles (tasks 085, 086 and 092), the three HAMT-threshold
+/// bundles (task 077), the shard with a file root (task 082), the two
+/// shared-prefix bundles (task 071), the 127-byte file bundle (task 091) and
+/// the exact 262144-byte basic block bundle (task 093).
+const PINNED_BUNDLES: usize = 26;
 
 /// How many committed fixtures have a pin: all but wc001-core.
 const PINNED_FIXTURES: usize = 7;
@@ -186,6 +186,17 @@ fn pinned_bundles() -> Vec<Pinned> {
                 .find(|entry| entry.path == "sample.example")
                 .expect("content-sample holds sample.example");
             sample.content = vec![0; 45_350_913];
+        }),
+    });
+    bundles.push(Pinned {
+        what: "174-full-leaf file bundle".to_owned(),
+        pin: FULL_174_LEAF_LAB_CID,
+        entries: content_sample_with(|entries| {
+            let sample = entries
+                .iter_mut()
+                .find(|entry| entry.path == "sample.example")
+                .expect("content-sample holds sample.example");
+            sample.content = vec![0; 45_613_056];
         }),
     });
     bundles.push(Pinned {

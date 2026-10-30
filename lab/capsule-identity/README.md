@@ -78,7 +78,12 @@ To recompute a lab CID by hand:
    one leaf. A file of exactly 174 leaves is one depth-1 file node:
    `exactly_174_leaves_stay_one_file_node` pins a 45350913-byte file (173
    chunks of 262144 bytes and a last chunk of 1 byte) and catches F-CI86a and
-   F-CI88b (a loop that skips a full group of 174). A file node's block
+   F-CI88b (a loop that skips a full group of 174). A file of exactly 174
+   full leaves, 45613056 bytes (174 chunks of 262144 bytes), is one depth-1
+   file node whose links name every leaf:
+   `a_file_of_174_full_leaves_has_the_pinned_cid` pins that length and
+   catches F-CI92a (a splitter drops one full chunk when the length is 174
+   times 262144). A file node's block
    is, for each child in order, field 2 (`0x12`, length) holding a link:
    field 1 (`0x0a`, length) the child's CID bytes, field 2 with an empty name
    (`12 00`), field 3 (`0x18`) the child's Tsize as a varint. Then field 1
@@ -371,6 +376,7 @@ rules and not from the Rust code, in
 | A file over one leaf is a balanced root of raw leaves: empty link names, type 2, filesize, blocksizes, and a Tsize of its block and its leaves | `file_over_one_leaf_has_the_pinned_cid` | F-CI48a (no name field), F-CI48b (no blocksizes), F-CI48c (no filesize), F-CI48d (Tsize without the root block) |
 | A file of exactly two chunks keeps both full leaves, so a short-last-chunk pin cannot hide a splitter that drops the last byte | `two_full_chunks_keep_both_leaves` | F-CI85a, F-CI88a (a splitter drops the last byte when the length is an exact multiple) |
 | A file of exactly 174 leaves is one depth-1 file node, and 45350913 bytes (173 chunks of 262144 bytes and a last chunk of 1 byte) groups once | `exactly_174_leaves_stay_one_file_node` | F-CI86a, F-CI88b (the level loop skips a full group of 174) |
+| A file of exactly 174 full leaves, 45613056 bytes (174 chunks of 262144 bytes), is one depth-1 file node that names every leaf | `a_file_of_174_full_leaves_has_the_pinned_cid` | F-CI92a (a splitter drops one full chunk when the length is 174 times 262144) |
 | The file tree's depth is the smallest `d` with `174^d` at least the leaf count: each level groups up to 174 children, left to right, each group full before the next starts, one file node per group, and a group of one child is a one-link node | `file_past_174_leaves_keeps_a_second_tree_level`, `file_past_174_squared_leaves_keeps_a_third_tree_level` | F-CI18e (the level loop runs only once), F-CI48e (the limit is 175), F-CI76a (a one-child group linked directly), F-CI76b (a child's Tsize as its blocksize), F-CI72a (the level loop stops after two passes) |
 | A file of 30277 leaves needs a third tree level: 175 depth-1 nodes, then 2, then the root's two children; 30276 full leaves still finish in two passes | `file_past_174_squared_leaves_keeps_a_third_tree_level` | F-CI72a (the level loop stops after two passes) |
 | The listing call names a file of at most one leaf; a listed file over one chunk is refused and named from its bytes instead | `listed_file_over_the_chunk_limit_is_refused`, `listed_file_over_one_leaf_names_the_bytes_call` | F-CI47c (`encode_listed_files` has no size refusal) |
@@ -422,7 +428,7 @@ in memory and never committed: `content-sample` with `sample.example` as
 root of two depth-1 file nodes) is
 `bafybeifdbtqkw5q2ayypyajkbxd4wrctavgxpagjbugk5nddz53igm6xta`, first printed
 by README's Python rule before any Rust code named it. The 174-leaf file of
-45613056 zero bytes still encodes, with another CID, and is not pinned.
+45613056 zero bytes still encodes, with another CID, and task 092 pins it.
 Task 072 adds one more, in memory and never written: one file `sample.example`
 whose 30277 leaves are leaf `i`'s SHA-256 of `i` as 8 little-endian bytes,
 30276 of 262144 bytes and one of 1 byte (7936671745 bytes), is
@@ -481,9 +487,9 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    (`python3 -I could not run: <error>`), a non-zero exit (even after it
    printed a valid CID), no output, or more than one line is refused with its
    own reason, and the test asserts each of these reasons.
-5. For each of the 25 pins, the Python answer, the pin constant and the
+5. For each of the 26 pins, the Python answer, the pin constant and the
    printed `encode_entries` result for the same files must be equal, and the
-   test asserts that it checked exactly 25 bundles. The 25 are the seven
+   test asserts that it checked exactly 26 bundles. The 26 are the seven
    pinned fixtures (`content-sample`, `web-app`, `agent-host`, `provider`,
    `model`, `provider-variant-a`, `provider-variant-b`), the recipe, the
    chunk-limit, empty-file and long-name bundles above, which are built as
@@ -492,12 +498,13 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    [naming a closure listing](#naming-a-closure-listing)), the two-leaf
    and three-leaf file bundles (task 048), the second-level file bundle
    (task 076), the two-full-chunk file bundle (task 085), the
-   exactly-174-leaf file bundle (task 086), the three HAMT-threshold bundles
+   exactly-174-leaf file bundle (task 086), the 174-full-leaf file bundle
+   (task 092), the three HAMT-threshold bundles
    (task 077), the shard with a file root (task 082), the two
    shared-prefix bundles (task 071), and the exact 262144-byte basic block
    bundle (task 093), also built in memory. `wc001-core` has
    no pin, because its `capsule.wasm` is built on each machine, so it is not
-   checked here. Task 072's third-level file is not one of the 25 either: it
+   checked here. Task 072's third-level file is not one of the 26 either: it
    is 7936671745 bytes and is never written, so
    `file_past_174_squared_leaves_keeps_a_third_tree_level` runs the second
    driver, `THREE_LEVEL_FILE_DRIVER`, which builds its 30277 leaves and calls
@@ -508,7 +515,7 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
 | --- | --- | --- |
 | README's rule agrees with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19a (the block's `0x55` becomes `0x70` before it runs) |
 | Rust agrees with README's rule, not only with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19b (the encoder's `RAW_CODEC` becomes `0x56`) |
-| A missing block is no pass: exactly 25 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
+| A missing block is no pass: exactly 26 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
 | README states the count this test checks, and three sentences say one count | `readme_python_recomputes_every_lab_cid_pin` | F-CI71c (the pins sentence drifts), F-CI71d (the checked sentence drifts), F-CI71e (the rows sentence drifts) |
 | An interpreter that cannot start fails the test | `readme_python_recomputes_every_lab_cid_pin` | F-CI19d (a program that does not exist) |
 | A non-zero exit is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19e (exit status not checked) |
@@ -2110,7 +2117,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 298 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 299 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a

@@ -1122,9 +1122,10 @@ struct FileTreeNode {
 /// The CID bytes and Tsize of the balanced file root of `content`, the bytes
 /// of a file that is over one leaf. The bytes are split into
 /// [`CHUNK_SIZE`]-byte raw leaves, the last one a full 262144 bytes when the
-/// length is an exact multiple of 262144 and shorter otherwise, by
-/// [`file_from_digests`], the one file-tree builder. A file of one leaf is
-/// never here: `file_node` names it as that leaf.
+/// length is an exact multiple of 262144, as for a file of 45613056 bytes
+/// (174 full leaves), and shorter otherwise, by [`file_from_digests`], the
+/// one file-tree builder. A file of one leaf is never here: `file_node` names
+/// it as that leaf.
 fn file_root(content: &[u8]) -> (Vec<u8>, u64) {
     file_from_digests(
         content

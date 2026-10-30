@@ -320,6 +320,74 @@ fn exactly_174_leaves_stay_one_file_node() {
     );
 }
 
+#[test]
+fn a_file_of_174_full_leaves_has_the_pinned_cid() {
+    // 45613056 bytes is exactly 174 full raw leaves of 262144 bytes, so one
+    // depth-1 file node groups them all and its links name every leaf. The
+    // length is an exact multiple of 262144, so a splitter that drops one
+    // full chunk only at 174 times 262144 names another bundle here. The pin
+    // was first printed by README's Python rule; the file is made here and
+    // never committed.
+    let manifest = read_fixture(&CONTENT_SAMPLE, "capsule.json");
+    let zeros = vec![0; 45_613_056];
+    assert_eq!(zeros.len(), 174 * 262_144, "174 full leaves");
+    assert_eq!(zeros.len() % 262_144, 0, "the last leaf is full");
+    let bundle = content_sample_with(&[("sample.example", &zeros)]);
+    let entries = vec![
+        entry("capsule.json", &manifest),
+        entry("sample.example", &zeros),
+    ];
+    let pin = FULL_174_LEAF_LAB_CID;
+    let encoded = encode_entries(&entries)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    let full = Sha256::digest(vec![0; 262_144]);
+    let chunks = vec![(full.into(), 262_144); 174];
+    let by_chunks = encode_chunked_files(&[
+        ChunkedFile {
+            path: "capsule.json".to_owned(),
+            chunks: vec![(Sha256::digest(&manifest).into(), manifest.len() as u64)],
+        },
+        ChunkedFile {
+            path: "sample.example".to_owned(),
+            chunks,
+        },
+    ])
+    .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+    .to_string();
+    assert_eq!(
+        (name(&bundle), encoded, by_chunks),
+        (pin.to_owned(), pin.to_owned(), pin.to_owned()),
+        "(lab_cid, encode_entries, encode_chunked_files) against the pin"
+    );
+    assert!(pin.starts_with("bafybei"), "{pin}");
+    assert_eq!(pin.len(), 59, "{pin}");
+    for other in [
+        TWO_FULL_CHUNK_LAB_CID,
+        EXACT_174_LEAF_LAB_CID,
+        SECOND_LEVEL_FILE_LAB_CID,
+        TWO_LEAF_FILE_LAB_CID,
+        CHUNK_LIMIT_LAB_CID,
+    ] {
+        assert_ne!(pin, other, "the 174-full-leaf pin is another bundle's");
+    }
+
+    // A listed file names one raw leaf by one SHA-256, so this file is over
+    // its limit and is refused with its path rather than named by that digest.
+    let listed = ListedFile {
+        path: "sample.example".to_owned(),
+        size: 45_613_056,
+        sha256: Sha256::digest(&zeros).into(),
+    };
+    assert_eq!(
+        encode_listed_files(&[listed]),
+        Err(Refusal::FileOverChunkLimit {
+            path: "sample.example".to_owned(),
+            length: 45_613_056,
+        })
+    );
+}
+
 /// The leaves of task 072's file, in order: leaf `i`'s digest is the SHA-256
 /// of `i` as 8 little-endian bytes; the 30276 full leaves are 262144 bytes
 /// and the last is 1 byte.
