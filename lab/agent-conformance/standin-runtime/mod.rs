@@ -269,13 +269,14 @@ impl StandIn {
     /// Names the one Home root this stand-in runs under. The launcher names
     /// it from the selected Home; the storage routes then take it from this
     /// value, never from a caller string or a request body. This call opens
-    /// the Home exactly once, from a handle on `/` with one
-    /// `O_DIRECTORY|O_NOFOLLOW` step per component, and stores that handle.
-    /// Every later storage call walks below the stored handle and never
-    /// opens the Home by path again, so an ancestor renamed into the Home's
-    /// place after this call is not followed. A failed open is stored as its
-    /// error and every later storage call answers with it. This call creates
-    /// nothing and reads no clock.
+    /// the Home exactly once, at holder creation: its ancestors are resolved
+    /// once by path, and the Home's own final component is taken on that
+    /// parent handle with `O_NOFOLLOW`, so the Home itself must not be a
+    /// link. Every later storage call walks below the stored handle and
+    /// never opens the Home by path again, so an ancestor renamed into the
+    /// Home's place after this call is not followed. A failed open is stored
+    /// as its error and every later storage call answers with it. This call
+    /// creates nothing and reads no clock.
     pub fn set_home(&mut self, home: &Path) {
         let opened = open_home(home);
         self.home = Some(home.to_path_buf());
@@ -324,12 +325,14 @@ impl StandIn {
     /// The storage check and the storage use are one operation.
     ///
     /// The Home is the one `set_home` named, never a caller argument.
-    /// Every path component from the file-system root through the Home
-    /// and down to the storage directory is opened once from the handle of
-    /// the step above with `O_NOFOLLOW`, `O_DIRECTORY`, `O_NONBLOCK` and
-    /// `O_CLOEXEC`, so a symbolic link at an ancestor of the Home, at the
-    /// Home, a parent swapped after an earlier call, or a non-directory at
-    /// any step fails that step and nothing is followed. The entry name must be one
+    /// The Home handle is the one `set_home` opened at holder creation,
+    /// where the Home's ancestors were resolved once and the Home itself
+    /// was opened with `O_NOFOLLOW`. Every step from that handle down to
+    /// the storage directory is opened once from the handle of the step
+    /// above with `O_NOFOLLOW`, `O_DIRECTORY`, `O_NONBLOCK` and
+    /// `O_CLOEXEC`, so a symbolic link below the Home, a parent swapped
+    /// after an earlier call, or a non-directory at any step fails that
+    /// step and nothing is followed. The entry name must be one
     /// normal component. The stand-in creates every storage file itself with
     /// `openat` `O_CREAT|O_EXCL|O_NOFOLLOW`, and records `(st_dev, st_ino)`
     /// in the per-Home record this value keeps. Every later call opens the
@@ -1583,16 +1586,25 @@ enum Walk {
     },
 }
 
-/// Opens the Home once, from a handle on the file-system root with one
-/// `O_DIRECTORY|O_NOFOLLOW` step per component. The Home must be absolute
-/// and hold no `.` or `..` component. No step is a multi-component path and
-/// no step starts at the current directory, so a symbolic link at an
-/// ancestor of the Home or at the Home itself fails that step and nothing is
-/// followed. This is the only place a Home path is opened.
+/// Opens the Home once, at holder creation. The Home must be absolute and
+/// hold no `.` or `..` component. Its ancestors are resolved once here: the
+/// Home's parent is opened by path for reading and directory access, so a
+/// symbolic link among the ancestors is followed this one time (system
+/// ancestors such as `/var` on macOS are links). The Home's own name is then
+/// the final component, taken on that parent handle with the existing
+/// `O_DIRECTORY|O_NOFOLLOW` step, so a link at the Home itself is refused
+/// and nothing is followed. This is the only place a Home path is opened;
+/// every later storage call walks below the returned handle. An absent
+/// component is the missing storage directory.
 fn open_home(home: &Path) -> Result<OwnedFd, (u16, String)> {
     use std::os::fd::AsFd;
 
-    let parts = home
+    // A relative Home would start at the current directory, which is never
+    // the selected Home, so it is refused before any open.
+    if !home.is_absolute() {
+        return Err((400, DATA_REASON.to_owned()));
+    }
+    let mut parts = home
         .components()
         .map(|part| match part {
             Component::RootDir => Ok(None),
@@ -1602,29 +1614,31 @@ fn open_home(home: &Path) -> Result<OwnedFd, (u16, String)> {
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if !home.is_absolute() || parts.iter().all(Option::is_none) {
+    let Some(name) = parts.pop().flatten() else {
         return Err((400, DATA_REASON.to_owned()));
-    }
-    // Every step of the Home must be present: an absent one is the missing
-    // storage directory, as before.
-    let present = |_: &rustix::io::Errno| false;
-
-    let mut current = rustix::fs::open(
-        "/",
-        rustix::fs::OFlags::RDONLY
-            | rustix::fs::OFlags::DIRECTORY
-            | rustix::fs::OFlags::NOFOLLOW
-            | rustix::fs::OFlags::CLOEXEC,
+    };
+    let Some(parent) = home.parent() else {
+        return Err((400, DATA_REASON.to_owned()));
+    };
+    let opened = rustix::fs::open(
+        parent,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
         rustix::fs::Mode::empty(),
     )
-    .map_err(|error| storage_failure(&error))?;
-    for part in parts.into_iter().flatten() {
-        let Some(next) = step(current.as_fd(), &present, &storage_failure, part)? else {
-            return Err((400, MISSING_STORAGE_REASON.to_owned()));
-        };
-        current = next;
+    .map_err(|error| {
+        if error == rustix::io::Errno::NOENT {
+            (400, MISSING_STORAGE_REASON.to_owned())
+        } else {
+            storage_failure(&error)
+        }
+    })?;
+    // The Home must be present: an absent final component is the missing
+    // storage directory, as before.
+    let present = |_: &rustix::io::Errno| false;
+    match step(opened.as_fd(), &present, &storage_failure, name)? {
+        Some(held) => Ok(held),
+        None => Err((400, MISSING_STORAGE_REASON.to_owned())),
     }
-    Ok(current)
 }
 
 /// One directory step of the storage walk: `name` is opened on the handle of
@@ -1718,12 +1732,12 @@ fn file_failure(error: &rustix::io::Errno) -> (u16, String) {
     }
 }
 
-/// The one storage-directory reason for every open step: the Home, every
-/// ancestor of the Home and every step of `harness::data_dir(home)` down to
-/// the storage directory. Every open on that walk asks for
-/// `O_NOFOLLOW|O_DIRECTORY`, so ELOOP and ENOTDIR are the symbolic link the
-/// call refused to follow. ENOTDIR on an entry that is a plain file is the
-/// separate not-a-directory case, which `existing_step` reports itself.
+/// The one storage-directory reason for every open step: the Home and every
+/// step of `harness::data_dir(home)` down to the storage directory. Every
+/// open on that walk asks for `O_NOFOLLOW|O_DIRECTORY`, so ELOOP and ENOTDIR
+/// are the symbolic link the call refused to follow. ENOTDIR on an entry
+/// that is a plain file is the separate not-a-directory case, which
+/// `existing_step` reports itself.
 fn storage_failure(error: &rustix::io::Errno) -> (u16, String) {
     match *error {
         rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR => (400, LINK_REASON.to_owned()),
@@ -8180,6 +8194,125 @@ mod tests {
         assert_eq!(
             kept, b"outside bytes",
             "the stand-in did the work: the other file is unchanged"
+        );
+    }
+
+    /// Task 112, M1 check A9, K5 ruling: the Home's ancestors are resolved
+    /// once, at holder creation, so a Home under a linked ancestor (macOS
+    /// `/var -> /private/var`) is accepted. The Home itself must not be a
+    /// link, and no later call opens the Home by path. `scratch/link` points
+    /// at `scratch/real`; the Home is `scratch/link/home` and its storage
+    /// directory is created through it. A walk from `/` with `O_NOFOLLOW`
+    /// per component refuses `link` and turns this red at its first
+    /// `create_storage` assertion.
+    #[test]
+    fn standin_storage_follows_a_linked_ancestor_once_at_set_home() {
+        use std::os::unix::fs::symlink;
+
+        let scratch = TempDir::new().expect("a scratch directory for the linked ancestor row");
+        let real = scratch.path().join("real");
+        let link = scratch.path().join("link");
+        std::fs::create_dir(&real).expect("the test makes the real ancestor");
+        symlink(&real, &link).expect("the test makes the ancestor a symbolic link");
+        let home = link.join("home");
+        std::fs::create_dir(&home).expect("the test makes the Home through the link");
+        let linked_storage = StandIn::storage_for_home(&home)
+            .expect("the stand-in returns the selected Home's storage path");
+        assert!(
+            !linked_storage.exists(),
+            "the test starts with no storage directory"
+        );
+
+        let mut standin = StandIn::new();
+        standin.set_home(&home);
+        assert_eq!(
+            standin.create_storage("a.txt"),
+            Ok(()),
+            "the stand-in did the work: a linked ancestor is resolved once and accepted"
+        );
+        assert!(
+            real.join("home")
+                .join(
+                    linked_storage
+                        .strip_prefix(&home)
+                        .expect("the storage path is under the Home")
+                )
+                .join("a.txt")
+                .is_file(),
+            "the stand-in did the work: the file lands in the real tree through the link"
+        );
+        assert_eq!(
+            std::fs::read_dir(&linked_storage)
+                .expect("the storage directory lists")
+                .map(|entry| entry.expect("the entry reads").file_name())
+                .collect::<Vec<_>>(),
+            vec![std::ffi::OsString::from("a.txt")],
+            "the stand-in did the work: the storage directory holds the one created file"
+        );
+    }
+
+    /// Task 112, M1 check A9, K6 fix: a Home must be absolute. A relative
+    /// Home such as `a/b` would open `a` from the current directory, so it
+    /// is refused with the data reason before any open. Dropping the
+    /// `is_absolute` check turns this red.
+    #[test]
+    fn standin_storage_refuses_a_relative_home() {
+        let scratch = TempDir::new().expect("a scratch directory for the relative Home row");
+        let cwd = std::env::current_dir().expect("the test reads the current directory");
+        assert_ne!(
+            scratch
+                .path()
+                .canonicalize()
+                .expect("the scratch path resolves"),
+            cwd.canonicalize().expect("the current directory resolves"),
+            "the test runs outside its scratch directory"
+        );
+        let relative = Path::new("a/b");
+
+        let mut standin = StandIn::new();
+        standin.set_home(relative);
+        assert_eq!(
+            standin.create_storage("a.txt"),
+            Err((400, DATA_REASON.to_owned())),
+            "the stand-in did the work: a relative Home is refused"
+        );
+        assert_eq!(
+            standin.confirm_storage("a.txt"),
+            Err((400, DATA_REASON.to_owned())),
+            "the stand-in did the work: the check refuses a relative Home too"
+        );
+        assert!(
+            !cwd.join("a").exists(),
+            "the stand-in did the work: nothing is created from the current directory"
+        );
+    }
+
+    /// Task 112, M1 check A9, K5 ruling: the Home ITSELF is still refused
+    /// when it is a symbolic link, even to a real directory. Ancestors are
+    /// resolved once; the Home's own final component is opened with
+    /// `O_NOFOLLOW`. Dropping `O_NOFOLLOW` on that step turns this red.
+    #[test]
+    fn standin_storage_refuses_a_home_that_is_itself_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let scratch = TempDir::new().expect("a scratch directory for the Home link row");
+        let real = scratch.path().join("real-home");
+        let link = scratch.path().join("home-link");
+        std::fs::create_dir(&real).expect("the test makes the real Home");
+        symlink(&real, &link).expect("the test makes the Home a symbolic link");
+        let storage = StandIn::storage_for_home(&link)
+            .expect("the stand-in returns the selected Home's storage path");
+
+        let mut standin = StandIn::new();
+        standin.set_home(&link);
+        assert_eq!(
+            standin.create_storage("a.txt"),
+            Err((400, LINK_REASON.to_owned())),
+            "the stand-in did the work: a Home that is itself a link is refused"
+        );
+        assert!(
+            !storage.exists() && !real.join("storage").exists(),
+            "the stand-in did the work: nothing is created under the linked Home"
         );
     }
 
