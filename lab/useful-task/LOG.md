@@ -439,3 +439,79 @@ old strings each occur once in `src/lib.rs`; `tests/checker.rs`, both
 `cargo test --locked` run. A4 stays open and the live model turn stays held.
 
 - 006: Moved `F-UT1` and `F-UT3` unchanged into `held-judge-plants.json`, left `F-UT2` as the only entry in `falsifiers.json`, and stated the `PROVIDER_TARGETS` condition in both `about` strings.
+
+## 007 — `load_spec` refuses a spec that repeats a JSON key
+
+The one loader no longer calls `serde_json::from_str` for its value.
+`load_spec` reads the spec text through the existing `parse_answer`, the same
+unique-key parser that `judge` uses for the answer, and takes the accepted
+value from `AnswerParse::Value`. This closes the collapse: `from_str` keeps the
+last value of a repeated key, so a spec that named a wrong `m1` and then the
+real `m1` loaded as the named task and judged a real answer `Accept`.
+
+A repeated key returns `Err("spec repeats a key")` from the one line
+`        AnswerParse::Duplicate => return Err("spec repeats a key".to_owned()),`.
+`AnswerParse::Invalid` keeps the earlier messages by retrying
+`serde_json::from_str::<Value>` on the same bytes: the parse error text as
+`spec is not JSON: {error}`, and plain `spec is not JSON` when that retry is
+`Ok`. `CHECK_ORDER` keeps its nine reasons, `judge` keeps its first statement
+and its task and answer-duplicate arms, and `parse_answer` stays the only
+unique-key parser with one `Visitor`. Key order and whitespace stay `Spec`
+equality.
+
+`checker_accepts_recorded_answer_and_refuses_stubs` now loads both fixture
+files once into `a_spec_bytes` and `b_spec_bytes`, then refuses each Context
+text with `spec repeats a key`: agent-a with the first `"m1":` replaced by
+`"m1":"other","m1":`, agent-a with that insertion written as
+`"\u006d1":"other","m1":`, and agent-b with the first `"task_id":` replaced by
+`"task_id":"other","task_id":`. The existing other-`m1` spec still loads and is
+still `task`, and `"["` still gives
+`spec is not JSON: EOF while parsing a list at line 1 column 1`.
+
+### Hand plant
+
+The one duplicate arm was replaced with:
+
+```
+        AnswerParse::Duplicate => serde_json::from_str(bytes).map_err(|error| format!("spec is not JSON: {error}"))?,
+```
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --locked --manifest-path lab/useful-task/Cargo.toml -- checker_accepts_recorded_answer_and_refuses_stubs --exact`
+exited 101:
+
+```
+thread 'checker_accepts_recorded_answer_and_refuses_stubs' panicked at tests/checker.rs:40:33:
+malformed spec: Spec { task_id: "agent-a", m1: "A4: Each agent completes one useful task through real Runtime resources (model via a Runtime grant, DeepSeek on the Sparks); the permitted effect succeeds (granted_effect_succeeds).", input_sha256: "6cce0615e268e9a905d394b4e6f1c228fef86569ef8778c006626b1a45d57f30", recorded_sha256: "043eec2fa4d70dafc04b87b9b594b703dc6a3f9db7d1f2baca9a2c50d44e3468", fixed_strings: ["ok", "done", "TODO", "pass"], reasons: [Task, Input, Recorded, Empty, Echo, FixedString, Shape, Duplicate, Mismatch], schema: Fields(["place", "goods", "close"]) }
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+The original bytes were then restored and the same command passed:
+
+```
+test checker_accepts_recorded_answer_and_refuses_stubs ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+The committed `load_spec` has the `spec repeats a key` arm, that line occurs
+once, and `src/lib.rs.falsify-original` is absent. The restored source SHA-256
+is `a017e4a78ba0ac343f065bfdcba5a5e77842475fd4e4c978cea38258b93961a9`.
+
+### Checks
+
+`cargo fmt --manifest-path lab/useful-task/Cargo.toml -- --check` exited 0. The
+full `cargo test --locked --manifest-path lab/useful-task/Cargo.toml` passed
+the integration test and six doctests. The shared runner reported:
+
+```
+baseline: 1 named tests pass without an edit, 0 do not
+F-UT2  CAUGHT                             1s  skip the named-task check
+summary: 1 CAUGHT of 1
+```
+
+`falsifiers.json`, `held-judge-plants.json`, both `accept.json` files, both
+`input.txt` files, both `recorded.json` files, `Cargo.toml` and `Cargo.lock`
+keep their bytes. `src/lib.rs` has no `std::fs` and no `std::net`. The F-UT2
+target still is not in `PROVIDER_TARGETS`, so recovery after a killed run stays
+the open gap recorded in 006. A4 stays open and the live model turn stays held.
+
+- 007: Made the one `load_spec` read through `parse_answer` and refuse a repeated spec key with `spec repeats a key`, extended the named test with the three Context texts, and hand-planted then restored the collapsed-parse arm.

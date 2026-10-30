@@ -204,9 +204,20 @@ pub enum Verdict {
 }
 
 /// Parse one acceptance spec from its bytes.
+///
+/// The spec text uses the same unique-key parser as the answer, so a spec that
+/// repeats an object key is refused instead of collapsing to its last value.
 pub fn load_spec(bytes: &str) -> Result<Spec, String> {
-    let value: Value =
-        serde_json::from_str(bytes).map_err(|error| format!("spec is not JSON: {error}"))?;
+    let value = match parse_answer(bytes) {
+        AnswerParse::Value(value) => value,
+        AnswerParse::Duplicate => return Err("spec repeats a key".to_owned()),
+        AnswerParse::Invalid => {
+            return match serde_json::from_str::<Value>(bytes) {
+                Ok(_) => Err("spec is not JSON".to_owned()),
+                Err(error) => Err(format!("spec is not JSON: {error}")),
+            }
+        }
+    };
     let object = value
         .as_object()
         .ok_or_else(|| "spec is not an object".to_owned())?;

@@ -74,12 +74,21 @@ fn checker_accepts_recorded_answer_and_refuses_stubs() {
         "c72098886eb378e448bcb33a922b153a7a39f058ffaa1c5a48f80b210d2221a7"
     );
 
-    let a_spec = load_spec(&read("tasks/agent-a/accept.json")).expect("agent-a spec parses");
-    let b_spec = load_spec(&read("tasks/agent-b/accept.json")).expect("agent-b spec parses");
+    let a_spec_bytes = read("tasks/agent-a/accept.json");
+    let b_spec_bytes = read("tasks/agent-b/accept.json");
+    let a_spec = load_spec(&a_spec_bytes).expect("agent-a spec parses");
+    let b_spec = load_spec(&b_spec_bytes).expect("agent-b spec parses");
     refused_spec(
         "[",
         "spec is not JSON: EOF while parsing a list at line 1 column 1",
     );
+    for repeated in [
+        a_spec_bytes.replacen("\"m1\":", "\"m1\":\"other\",\"m1\":", 1),
+        a_spec_bytes.replacen("\"m1\":", "\"\\u006d1\":\"other\",\"m1\":", 1),
+        b_spec_bytes.replacen("\"task_id\":", "\"task_id\":\"other\",\"task_id\":", 1),
+    ] {
+        refused_spec(&repeated, "spec repeats a key");
+    }
     refused_spec("null", "spec is not an object");
     for (bytes, schema_key) in [
         (read("tasks/agent-a/accept.json"), "fields"),
