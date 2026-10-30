@@ -7,8 +7,9 @@ test: model_unknown_instance_is_refused
             .get(&call.instance)
             .ok_or(Refuse::UnknownInstance)?;
 --- new
-        let live = self
-            .registry
-            .get(&grant.instance)
-            .ok_or(Refuse::UnknownInstance)?;
+        let live = self.registry.get(&call.instance);
+        let live = match live {
+            Some(live) => live,
+            None => return Ok(()),
+        };
 --- end

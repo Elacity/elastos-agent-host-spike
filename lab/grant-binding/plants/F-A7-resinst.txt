@@ -6,6 +6,7 @@ test: ledger::model_forged_instance_does_not_pick_the_reserve_ceiling
             .grants
             .get(&request.handle)
             .expect("resolved grant")
+            .record
             .identity
             .clone();
 --- new
@@ -13,6 +14,7 @@ test: ledger::model_forged_instance_does_not_pick_the_reserve_ceiling
             .grants
             .get(&request.handle)
             .expect("resolved grant")
+            .record
             .identity
             .clone();
         let looked_up = request.forged_instance.and_then(|instance| {
@@ -21,6 +23,6 @@ test: ledger::model_forged_instance_does_not_pick_the_reserve_ceiling
                 .map(|record| record.identity.clone())
         });
         let identity = looked_up
-            .filter(|forged| self.grants.values().any(|grant| grant.identity == *forged))
+            .filter(|forged| self.grants.values().any(|grant| grant.record.identity == *forged))
             .unwrap_or(stored);
 --- end
