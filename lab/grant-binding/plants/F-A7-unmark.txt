@@ -6,11 +6,13 @@ test: ledger::model_unknown_from_another_handle_does_not_mark_the_hold
                         if handles_match(open.handle, request.handle) {
                             open.uncertain = true;
                             open.deadline = ledger.verifier_deadline;
+                            open.deadline_set = ledger.deadline_set;
                         }
                     }
 --- new
                     if let Some(open) = ledger.open.get_mut(&reservation.id) {
                         open.uncertain = true;
                         open.deadline = ledger.verifier_deadline;
+                        open.deadline_set = ledger.deadline_set;
                     }
 --- end
