@@ -4234,6 +4234,41 @@ fn model_lower_admit_binds_an_asked_agent() {
 }
 
 #[test]
+fn model_admit_at_the_round_is_honoured_by_the_reserve() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = guest(handle);
+    let granted = verifier
+        .admit_ask(&call, &request, crate::ask::BudgetAsk { amount: 4 }, 4)
+        .expect("ask");
+    assert_eq!(granted, 4);
+    verifier.admit(10);
+    let refusal = verifier
+        .reserve(&call, &request, 5)
+        .expect_err("the round admit lowers the asked ceiling");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 4,
+            held: 0,
+            asked: 5,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    assert_eq!(books(&verifier).held, 0);
+    verifier
+        .reserve(&call, &request, 4)
+        .expect("reserve at the lowered ceiling");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+}
+
+#[test]
 fn model_unasked_agent_does_not_inherit_the_last_admit() {
     let mut verifier = Verifier::new();
     let first = verifier.register_instance("agent-1", "session-a");
