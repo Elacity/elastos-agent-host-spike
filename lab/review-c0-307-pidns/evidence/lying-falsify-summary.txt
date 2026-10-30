@@ -1,0 +1,4 @@
+F-LYING-CURRENT  CAUGHT  current code launched on reported ABI 5
+F-LYING-PATCHED  CAUGHT  patched code refused the lying ABI 5 kernel
+F-LYING-DROP     CAUGHT  removing the probe makes the liar launch again
+lying-abi falsifiers: 3/3 caught

@@ -1,0 +1,10 @@
+
+running 1 test
+test sim_lying_abi_5_with_abi_1_rights_refuses ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+   Compiling libc v0.2.189
+   Compiling fail-closed-linux v0.0.0 (/tmp/rv-lying-u_9pj_c0/crate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.06s
+     Running tests/simulated.rs (/tmp/rv-lying-u_9pj_c0/build/debug/deps/simulated-282503272b303f90)

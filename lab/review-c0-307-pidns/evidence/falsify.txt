@@ -1,0 +1,22 @@
+SURVIVED C00-noop-control  33 tests passed
+CAUGHT   F01-fallback-restarts-unconfined  simulated::sim_user_namespaces_off_refuses FAILED, simulated::sim_landlock_missing_refuses FAILED, simulated::sim_every_guard_step_failure_stops_before_exec FAILED, real_kernel::real_user_namespaces_off_refuses FAILED, real_kernel::real_landlock_abi_below_required_refuses FAILED
+CAUGHT   F02-cli-fallback-runs-unconfined  real_kernel::real_user_namespaces_off_refuses FAILED, real_kernel::real_seccomp_install_failure_refuses FAILED, real_kernel::real_landlock_abi_below_required_refuses FAILED
+CAUGHT   F03-child-execs-after-refusal  simulated::sim_every_guard_step_failure_stops_before_exec FAILED, simulated::sim_capability_drop_failure_refuses FAILED, real_kernel::real_capability_drop_failure_refuses FAILED, real_kernel::real_landlock_ruleset_unappliable_refuses FAILED
+CAUGHT   F04-userns-error-ignored  simulated::sim_user_namespaces_off_refuses FAILED, real_kernel::real_user_namespaces_off_refuses FAILED
+CAUGHT   F05-uid-map-error-ignored  simulated::sim_id_maps_unwritable_refuses FAILED, real_kernel::real_id_map_unwritable_refuses FAILED
+CAUGHT   F06-capset-error-ignored  simulated::sim_capability_drop_failure_refuses FAILED, real_kernel::real_capability_drop_failure_refuses FAILED
+CAUGHT   F07-bounding-set-not-dropped  simulated::sim_confined_provider_starts_after_every_layer FAILED, real_kernel::real_confined_provider_has_every_layer FAILED
+CAUGHT   F08-no-new-privs-error-ignored  simulated::sim_no_new_privs_failure_refuses FAILED, real_kernel::real_no_new_privs_failure_refuses FAILED
+CAUGHT   F09-seccomp-error-ignored  simulated::sim_seccomp_install_failure_refuses FAILED, real_kernel::real_seccomp_install_failure_refuses FAILED
+CAUGHT   F10-landlock-missing-tolerated  simulated::sim_landlock_missing_refuses FAILED, real_kernel::real_landlock_missing_refuses FAILED
+CAUGHT   F11-abi-floor-off-by-one  simulated::sim_landlock_abi_too_old_refuses FAILED, real_kernel::real_landlock_abi_below_required_refuses FAILED
+CAUGHT   F12-restrict-self-error-ignored  simulated::sim_landlock_ruleset_unappliable_refuses FAILED, real_kernel::real_landlock_ruleset_unappliable_refuses FAILED
+CAUGHT   F13-socket-allowed  real_kernel::real_confined_provider_has_every_layer FAILED
+CAUGHT   F14-storage-rule-covers-parent  real_kernel::real_confined_provider_has_every_layer FAILED
+CAUGHT   F15-refusal-omits-provider  simulated::sim_user_namespaces_off_refuses FAILED, real_kernel::real_id_map_unwritable_refuses FAILED
+CAUGHT   F16-refusal-exit-code-not-71  real_kernel::real_landlock_abi_below_required_refuses FAILED
+CAUGHT   F17-gid-map-reported-as-uid-map  simulated::sim_id_maps_unwritable_refuses FAILED, simulated::sim_every_guard_step_failure_stops_before_exec FAILED
+CAUGHT   F18-missing-right-silently-passed  simulated::sim_landlock_abi_too_old_refuses FAILED, simulated::sim_landlock_abi_floor_cannot_be_lowered FAILED, simulated::sim_per_right_floor_for_each_abi FAILED, simulated::sim_missing_right_is_never_silently_dropped FAILED
+CAUGHT   F19-pid-unshare-skipped  real_kernel::real_confined_provider_has_every_layer FAILED, real_kernel::real_confined_child_cannot_signal_host FAILED
+falsifiers: 19/19 caught; controls: 1/1 survived
+logs: /tmp/fcl-637345ac/lab/fail-closed-linux/target/falsify/<id>.log

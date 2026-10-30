@@ -1,0 +1,7 @@
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded libc v0.2.189
+   Compiling libc v0.2.189
+   Compiling fail-closed-linux v0.0.0 (/tmp/fcl-637345ac/lab/fail-closed-linux)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.47s
+CLIPPY_EXIT:0

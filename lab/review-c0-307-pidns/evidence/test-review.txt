@@ -1,0 +1,8 @@
+test_307_still_trusts_the_abi_number (tests.test_review.ReviewDetectors.test_307_still_trusts_the_abi_number) ... ok
+test_check_py_exits_zero (tests.test_review.ReviewDetectors.test_check_py_exits_zero) ... ok
+test_proposal_patch_is_not_applied_to_307 (tests.test_review.ReviewDetectors.test_proposal_patch_is_not_applied_to_307) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.030s
+
+OK
