@@ -972,6 +972,62 @@ fn a_value_of_128_takes_two_varint_bytes() {
 }
 
 #[test]
+fn a_value_of_16384_takes_three_varint_bytes() {
+    // content-sample plus one file `b16384` of 16384 zero bytes. Its link
+    // Tsize is 16384, the first value three varint bytes hold
+    // (`0x80 0x80 0x01`): a stop once the shifted remainder is below 256
+    // writes it as two bytes and names another bundle, which this pin
+    // refuses. `sample.example` stays 16 bytes, and no other varint is 16384.
+    // The pin was first printed by README's Python rule; the file is made
+    // here and never committed.
+    let manifest = read_fixture(&CONTENT_SAMPLE, "capsule.json");
+    let sample = read_fixture(&CONTENT_SAMPLE, "sample.example");
+    assert_eq!(sample.len(), 16, "sample.example stays 16 bytes");
+    let zeros = vec![0; 16384];
+    assert_eq!(zeros.len(), 16384, "the file's length is 16384");
+    let bundle = content_sample_with(&[("b16384", &zeros)]);
+    let entries = vec![
+        entry("capsule.json", &manifest),
+        entry("sample.example", &sample),
+        entry("b16384", &zeros),
+    ];
+    let pin = VARINT_16384_LAB_CID;
+    let encoded = encode_entries(&entries)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    // The same files as a closure listing: one raw leaf each, handed to the
+    // one tree builder, so a Tsize of 16384 reaches the root there too.
+    let listed: Vec<ListedFile> = entries
+        .iter()
+        .map(|entry| ListedFile {
+            path: entry.path.clone(),
+            size: entry.content.len() as u64,
+            sha256: Sha256::digest(&entry.content).into(),
+        })
+        .collect();
+    let by_listing = encode_listed_files(&listed)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    assert_eq!(
+        (name(&bundle), encoded, by_listing),
+        (pin.to_owned(), pin.to_owned(), pin.to_owned()),
+        "(lab_cid, encode_entries, encode_listed_files) against the pin"
+    );
+    assert!(pin.starts_with("bafybei"), "{pin}");
+    assert_eq!(pin.len(), 59, "{pin}");
+    for other in [
+        VARINT_128_LAB_CID,
+        VARINT_127_LAB_CID,
+        CONTENT_SAMPLE_LAB_CID,
+        EMPTY_FILE_LAB_CID,
+        LONG_UTF8_NAME_LAB_CID,
+        CHUNK_LIMIT_LAB_CID,
+    ] {
+        assert_ne!(pin, other, "the 16384 pin is another bundle's");
+    }
+}
+
+#[test]
 fn encoder_refuses_file_directory_conflict() {
     // `a` and `a/b` make `a` a file and a directory. A UnixFS directory holds
     // one link per name, so the encoder refuses, in either order, rather
