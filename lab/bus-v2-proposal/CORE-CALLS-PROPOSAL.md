@@ -476,7 +476,7 @@ For the capsule instance, `grant` stores its capsule id argument on the token. `
     }
 
         // 4. Caller verification
-        if token.capsule != caller_capsule_id {
+            if token.capsule != caller_capsule_id {
             self.audit_validation_failure(token, caller_capsule_id, "wrong_capsule");
             return Err(ValidationError::WrongCapsule {
                 expected: token.capsule.clone(),
@@ -581,7 +581,7 @@ The body of `scope_current_user_alias`, quoted in section 1, returns the princip
         JournalGrants { write, read }
     }
 
-The required binding is a grant bound to the verified agent identity, the session, the capsule instance, and the owned storage root, and a host-side handle bound to the capsule instance and the session. The guest presents a handle. The host binds that handle to the verified agent identity, the session, the capsule instance, and the owned storage root. Identity, session, and instance come from the host record of the handle. `elastos/crates/elastos-compute/src/providers/component.rs:384` sets `CapabilityGrant.id` to the token string. The body of `request` on the capabilities host requires one action, asks the bridge, and returns a `CapabilityGrant` whose id is the token string from that response. `elastos/wit/elastos-bus-v1.wit:10` defines `grant-id` as a string, and the capability-grant record uses that type for its id. The cited functions return the token string as the grant id. The cited functions do not show a separate handle table. A5 stays open.
+The required binding is a grant bound to the verified agent identity, the session, the capsule instance, and the owned storage root, and a host-side handle bound to the capsule instance and the session. The guest presents a handle. The host binds that handle to the verified agent identity, the session, the capsule instance, and the owned storage root. Identity, session, and instance come from the host record of the handle. The body of `request` on the capabilities host requires one action, asks the bridge, and returns a `CapabilityGrant` whose id is the token string from that response. The cited functions return the token string as the grant id. The cited functions do not show a separate handle table. A5 stays open.
 
     fn request(
         &mut self,
@@ -623,6 +623,14 @@ The required binding is a grant bound to the verified agent identity, the sessio
       actions: list<action>,
       expires-at-ms: option<u64>,
     }
+
+`elastos/crates/elastos-compute/src/providers/component.rs:384` sets `CapabilityGrant.id` to the token string.
+
+                id: token,
+
+`elastos/wit/elastos-bus-v1.wit:10` defines `grant-id` as a string.
+
+      type grant-id = string;
 
 This citation is design input for A5. For the identity, `lab/grant-binding/src/lib.rs::model_different_identity_is_refused` changes the registry identity after the bind and expects the use to fail. The body calls bind_grant, then host_set_identity, then use_grant. The expect_err line is `expect_err("different identity")` and the assert_eq of the refusal string is `identity does not match the grant`. For the session, `lab/grant-binding/src/lib.rs::model_new_session_is_refused` changes the registry session after the bind and expects the use to fail. The body calls bind_grant, then host_set_session, then use_grant. The expect_err line is `expect_err("new session")` and the assert_eq of the refusal string is `session does not match the grant`. For the capsule instance, `lab/grant-binding/src/lib.rs::model_sibling_instance_is_refused` binds the first instance and opens the call on the other instance. The body calls bind_grant and use_grant. The expect_err line is `expect_err("sibling instance")` and the assert_eq of the refusal string is `instance does not match the grant`. For the owned storage root, `lab/grant-binding/src/lib.rs::model_owned_root_must_sit_under_the_agent` binds `UsersAI/other/notes` and expects the bind to fail. The body calls bind_grant. The expect_err line is `expect_err("outside principal")` and the assert_eq of the refusal string is `owned root is outside the agent principal`. These four functions are the lab reference model, and the lab model is not the Runtime. A5 stays open.
 

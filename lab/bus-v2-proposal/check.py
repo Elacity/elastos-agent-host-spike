@@ -946,6 +946,15 @@ LEDGER_LINE_SPANS = (
     "lab/grant-binding/src/ledger.rs:417",
 )
 
+# Caller-check and grant-id line spans whose block equals the pinned line, in
+# draft order. Each one is spliced into QUOTE_TARGETS with a None quoter, the
+# same way as LEDGER_LINE_SPANS.
+OTHER_INDENT_SPANS = (
+    "elastos/crates/elastos-runtime/src/capability/manager.rs:409",
+    "elastos/crates/elastos-compute/src/providers/component.rs:384",
+    "elastos/wit/elastos-bus-v1.wit:10",
+)
+
 # The one fixed prefix of the target list: one entry per line decision, in
 # source order before the function spans and the indent line spans. A range's
 # two endpoints share one marker. The quoter name is looked up at call time so
@@ -1084,6 +1093,7 @@ def _build_quote_targets():
         + _quote_target_tail(EGRESS_LINE_SPANS)
         + _quote_target_tail(RESTATED_LINE_SPANS)
         + _quote_target_tail(LEDGER_LINE_SPANS)
+        + _quote_target_tail(OTHER_INDENT_SPANS)
     )
 
 
@@ -1112,7 +1122,7 @@ class _QuoteTargets:
 # The only target list: one entry per line decision, then one None-quoter entry
 # per FUNCTION_QUOTE_SPANS entry, then one per INDENT_LINE_SPANS entry, then one
 # per EGRESS_LINE_SPANS entry, then one per RESTATED_LINE_SPANS entry, then one
-# per LEDGER_LINE_SPANS entry.
+# per LEDGER_LINE_SPANS entry, then one per OTHER_INDENT_SPANS entry.
 QUOTE_TARGETS = _QuoteTargets()
 
 
