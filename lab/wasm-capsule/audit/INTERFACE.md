@@ -63,8 +63,10 @@ Callers match the variant's fields; they never parse the Display string.
   this check; padding alone is not refused. This is a byte heuristic;
   compressed or encoded content is not decoded.
   One exception: a custom section whose name starts with `component-type`
-  (the name wit-bindgen writes for its encoded world) skips this byte rule
-  at one level only. Its data must parse and validate as a Component of type
+  (the name wit-bindgen writes for its encoded world) skips this byte rule.
+  The artifact carries exactly one such section; a second one returns
+  `CodeInCustomSection` with the string `code in custom section`.
+  That section's data must parse and validate as a Component of type
   definitions and type exports: every payload is a version, an end, a
   Component type section, a Component export section whose every export kind
   is `Type`, or a custom section whose name does not start with
@@ -75,6 +77,30 @@ Callers match the variant's fields; they never parse the Display string.
   error or a non-Component encoding returns `CodeInCustomSection` with the
   string `code in custom section`. Every other custom section, at every
   depth, keeps the byte rule above.
+  The one section's data is accepted in one of two ways. It equals the
+  committed fixture `tests/fixtures/wit-bindgen-0.57.1-component-type.bin`
+  (1,382 bytes, SHA-256
+  `439929eb565421a1de4791c7e5b278ae105687eb0f12d4a965d6a6adabce24a8`).
+  Otherwise its type-level imports are collected: a type-level name is
+  `ComponentImport.name.name`, the walk covers
+  `ComponentTypeDeclaration::Type` and `ComponentType::Instance`, and at
+  least one such name must exist. The same walk covers
+  `ComponentTypeDeclaration::CoreType` and `InstanceTypeDeclaration::CoreType`:
+  every `ModuleTypeDeclaration::Import` under a `CoreType::Module` is
+  collected as `core:<module>.<name>`, and both `CoreType::Rec` and a module
+  type with no import add no name. The fixed `core:` prefix keeps a joined
+  core name from equaling a Bus string, so a core module import inside the
+  one type section is refused with `code in custom section`, even when its
+  module name or its module and item names together spell one. Every
+  collected name must equal one of these five Bus interfaces:
+  `elastos:bus/types@1.0.0`, `elastos:bus/runtime@1.0.0`,
+  `elastos:bus/identity@1.0.0`, `elastos:bus/capabilities@1.0.0` and
+  `elastos:bus/providers@1.0.0`. A name that is a prefix of a listed string,
+  a section with no type-level import and any other name return
+  `CodeInCustomSection` with the same string.
+  `audit` on the core module is the pre-check, before the artifact is
+  componentized. `audit_component` on the componentized artifact is the lab
+  claim; it lists that artifact's five Bus instance imports in section order.
   The export-kind check is defence in depth: a non-`Type` export needs a
   definition section (module, instance, component, function or value), and
   the payload list above already refuses every such section.
