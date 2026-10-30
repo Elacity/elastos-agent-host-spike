@@ -1,0 +1,12 @@
+id: F-A9-nofollow
+file: src/walk.rs
+test: tests::live_walk_flags_are_pinned
+--- old
+pub(crate) fn nofollow_flag() -> OFlags {
+    OFlags::NOFOLLOW
+}
+--- new
+pub(crate) fn nofollow_flag() -> OFlags {
+    OFlags::empty()
+}
+--- end

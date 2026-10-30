@@ -1,0 +1,12 @@
+id: F-A9-inode-reuse
+file: src/lib.rs
+test: tests::inode_reuse_after_unlink_is_refused
+--- old
+fn require_generation_bind() -> bool {
+    true
+}
+--- new
+fn require_generation_bind() -> bool {
+    false
+}
+--- end

@@ -1,0 +1,12 @@
+id: F-A9-root-swap
+file: src/lib.rs
+test: tests::agent_a_is_denied_b_when_root_is_swapped_for_a_symlink
+--- old
+fn refuse_swapped_root() -> bool {
+    true
+}
+--- new
+fn refuse_swapped_root() -> bool {
+    false
+}
+--- end
