@@ -69,6 +69,8 @@ pub(crate) struct GrantRecord {
     rights: Rights,
     once: bool,
     expiry: Option<u64>,
+    effect_limit: Option<u64>,
+    effects: u64,
 }
 
 /// The binding copied out after a successful check.
@@ -103,6 +105,7 @@ pub enum Refuse {
     PublicRead,
     HomeMint,
     Expired,
+    EffectLimit,
 }
 
 impl std::fmt::Display for Refuse {
@@ -120,6 +123,7 @@ impl std::fmt::Display for Refuse {
             Refuse::PublicRead => "public storage read does not bind",
             Refuse::HomeMint => "home does not mint an app capability",
             Refuse::Expired => "grant has expired",
+            Refuse::EffectLimit => "effect limit is reached",
         })
     }
 }
@@ -209,6 +213,8 @@ impl Verifier {
                 rights,
                 once,
                 expiry,
+                effect_limit: None,
+                effects: 0,
             },
         );
         Ok(handle)
@@ -273,6 +279,18 @@ impl Verifier {
     /// after the expiry stored on that grant.
     pub fn set_verifier_now(&mut self, now: u64) {
         self.verifier_now = now;
+    }
+
+    pub fn set_effect_limit(&mut self, handle: Handle, limit: u64) -> Result<(), Refuse> {
+        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+        grant.effect_limit = Some(limit);
+        Ok(())
+    }
+
+    fn note_effect(&mut self, handle: Handle) -> Result<(), Refuse> {
+        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+        grant.effects += 1;
+        Ok(())
     }
 
     /// The one handle check: resolves a handle and compares the stored grant
