@@ -1,0 +1,20 @@
+exit: 1
+seconds: 0.095
+started: 2026-10-26T23:24:45Z
+
+test_pass_writes_a14_pass_in_this_runs_summary (test_version_binding.RunBinding.test_pass_writes_a14_pass_in_this_runs_summary)
+Pins A14: PASS. to summary.txt. Removing write_summary on the PASS path fails this. ... FAIL
+
+======================================================================
+FAIL: test_pass_writes_a14_pass_in_this_runs_summary (test_version_binding.RunBinding.test_pass_writes_a14_pass_in_this_runs_summary)
+Pins A14: PASS. to summary.txt. Removing write_summary on the PASS path fails this.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/a14-dryrun-src-20261026-232436/lab/demo-a14/tests/test_version_binding.py", line 431, in test_pass_writes_a14_pass_in_this_runs_summary
+    self.assertTrue(summary.is_file(), f"summary.txt missing at {summary}")
+AssertionError: False is not true : summary.txt missing at /tmp/demo-a14-test-2rpfkp27/home/runs/20261026T232445Z-4sxhc438/summary.txt
+
+----------------------------------------------------------------------
+Ran 1 test in 0.007s
+
+FAILED (failures=1)
