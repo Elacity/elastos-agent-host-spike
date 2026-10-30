@@ -273,6 +273,36 @@ fn model_forged_session_does_not_grant_append() {
 }
 
 #[test]
+fn model_forged_instance_does_not_grant_append() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(
+            instance,
+            "UsersAI/agent-1/journal",
+            Rights {
+                append: false,
+                overwrite: true,
+                child_journal: false,
+            },
+        )
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_instance: Some(sibling),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_instance, Some(sibling));
+    let refusal = verifier
+        .operate(&call, &request, Operation::Append)
+        .expect_err("guest instance does not grant append");
+    assert_eq!(refusal, OperateRefuse::AppendNotGranted);
+    assert_eq!(refusal.to_string(), "overwrite does not permit append");
+}
+
+#[test]
 fn model_operate_on_a_sibling_instance_is_refused() {
     let mut verifier = Verifier::new();
     let first = verifier.register_instance("agent-1", "session-a");
