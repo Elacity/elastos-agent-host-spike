@@ -1,0 +1,145 @@
+{
+  "head": "dc5fe676e8ad13e5882871a27b9f2dd166780bf5",
+  "launcher": "/tmp/review-c0-307-r4-src/lab/fail-closed-linux/target/debug/fcl-launch",
+  "hunts": [
+    {
+      "id": "reexec-foreign",
+      "started": true,
+      "init": 11603,
+      "provider": 11604,
+      "first": "first",
+      "exec_line": "exec errno=13 path=/workspace/lab/review-307-r4/standins/bin/payload",
+      "payload_line": null,
+      "exe_after": "/workspace/lab/review-307-r4/standins/bin/hunter",
+      "lines": [
+        "hunter mode=reexec pid=2",
+        "started did-provider pid=11603",
+        "first",
+        "exec errno=13 path=/workspace/lab/review-307-r4/standins/bin/payload"
+      ],
+      "verdict": "second exec denied"
+    },
+    {
+      "id": "reexec-storage",
+      "started": true,
+      "init": 11608,
+      "first": "first",
+      "exec_line": "exec errno=13 path=/tmp/fcl-r4-hunts-0f89gw7h/reexec-store/payload",
+      "payload_line": null,
+      "lines": [
+        "hunter mode=reexec pid=2",
+        "first",
+        "started did-provider pid=11608",
+        "exec errno=13 path=/tmp/fcl-r4-hunts-0f89gw7h/reexec-store/payload"
+      ],
+      "verdict": "storage exec denied"
+    },
+    {
+      "id": "swap-same-path",
+      "started": true,
+      "init": 11613,
+      "ino_before": 423762,
+      "ino_after": 423763,
+      "dev_before": 65056,
+      "dev_after": 65056,
+      "first": "first",
+      "exec_line": "exec errno=13 path=/tmp/fcl-r4-hunts-0f89gw7h/swap-exe",
+      "payload_line": null,
+      "exe_after": "/tmp/fcl-r4-hunts-0f89gw7h/swap-exe (deleted)",
+      "lines": [
+        "started did-provider pid=11613",
+        "hunter mode=reexec pid=2",
+        "first",
+        "exec errno=13 path=/tmp/fcl-r4-hunts-0f89gw7h/swap-exe"
+      ],
+      "verdict": "swapped inode exec denied"
+    },
+    {
+      "id": "bind-mount",
+      "mounted": false,
+      "mount_errno": 1,
+      "verdict": "host cannot bind-mount (no CAP_SYS_ADMIN)"
+    },
+    {
+      "id": "identity-fd",
+      "started": true,
+      "init": 11618,
+      "fds": [
+        "fd 0 flags=0 kind=pipe",
+        "fd 1 flags=0 kind=pipe",
+        "fd 2 flags=0 kind=pipe",
+        "fd 11 flags=0 kind=pipe"
+      ],
+      "extra": [
+        "fd 11 flags=0 kind=pipe"
+      ],
+      "pipes": [
+        "fd 11 flags=0 kind=pipe"
+      ],
+      "verdict": "identity pipe left open"
+    },
+    {
+      "id": "stdin-pty",
+      "started": true,
+      "init": 11623,
+      "ioctl_lines": [
+        "ioctl_fd_0 ok",
+        "ioctl_fd_1 errno=25",
+        "ioctl_fd_2 errno=25",
+        "ioctl_fd_11 errno=25"
+      ],
+      "ioctl0": "ioctl_fd_0 ok",
+      "verdict": "stdin pty ioctl works"
+    },
+    {
+      "id": "memfd-exec",
+      "started": true,
+      "init": 11628,
+      "memfd_line": null,
+      "payload_line": "payload pid=2",
+      "lines": [
+        "started did-provider pid=11628",
+        "hunter mode=memfd-exec pid=2",
+        "payload pid=2"
+      ],
+      "verdict": "memfd payload ran"
+    },
+    {
+      "id": "selftest-strace",
+      "started": true,
+      "init": 11636,
+      "open_pts_or_enforce": [
+        "11634 openat(AT_FDCWD, \"/tmp/fcl-enf-11634-1793056093639789224/probe\", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0666) = 3",
+        "11635 openat(AT_FDCWD, \"/dev/pts/3\", O_RDONLY|O_CLOEXEC|O_PATH) = 6",
+        "11638 openat(AT_FDCWD, \"/tmp/fcl-enf-11634-1793056093639789224/probe\", O_WRONLY|O_CLOEXEC) = -1 EACCES (Permission denied)",
+        "11638 openat(AT_FDCWD, \"/dev/pts/3\", O_RDONLY|O_NOCTTY|O_CLOEXEC <unfinished ...>",
+        "11634 openat(AT_FDCWD, \"/tmp/fcl-enf-11634-1793056093639789224\", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 3"
+      ],
+      "truncate": [
+        "11638 truncate(\"/tmp/fcl-enf-11634-1793056093639789224/probe\", 0) = -1 EACCES (Permission denied)"
+      ],
+      "ioctl": [
+        "11638 ioctl(3, TIOCGWINSZ, 0x7ffe4d7e6c18) = -1 EACCES (Permission denied)"
+      ],
+      "close_range": [
+        "11635 close_range(3, 4, 0)              = 0",
+        "11635 close_range(6, 6, 0)              = 0",
+        "11635 close_range(9, 10, 0)             = 0",
+        "11635 close_range(12, 4294967295, 0)    = 0"
+      ],
+      "proc_getdents": [],
+      "verdict": "self-test syscalls recorded",
+      "stderr_tail": "",
+      "lines": [
+        "started did-provider pid=11636",
+        "hunter mode=wait pid=2"
+      ]
+    },
+    {
+      "id": "close-range-fallback",
+      "host_has_close_range": true,
+      "missing_proc": "open_missing_proc errno=2",
+      "verdict": "fallback not exercised on this host; missing /proc open fails closed in source"
+    }
+  ]
+}

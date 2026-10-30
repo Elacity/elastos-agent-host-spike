@@ -1,0 +1,141 @@
+source=/tmp/review-c0-307-r4-src/lab/fail-closed-linux
+head=dc5fe676e8ad13e5882871a27b9f2dd166780bf5
+==== F33-inherited-fds-left-open real_kernel::real_inherited_pty_ioctl_is_not_available ====
+exit=101 caught=True
+
+running 1 test
+test real_inherited_pty_ioctl_is_not_available ... FAILED
+
+failures:
+
+---- real_inherited_pty_ioctl_is_not_available stdout ----
+thread 'real_inherited_pty_ioctl_is_not_available' panicked at tests/real_kernel.rs:990:9:
+did-provider: inherited pty must be closed, got ["started did-provider pid=10936", "probe-ran provider=did-provider", "marker ok", "socket_inet errno=1", "socket_unix errno=1", "read_outside errno=13", "write_outside errno=13", "read_etc_passwd errno=13", "storage_write ok", "storage_read ok", "truncate_storage ok", "truncate_outside errno=13", "o_trunc_outside errno=13", "ioctl_dev errno=13", "inherit_ioctl ok", "nspid=2", "ready"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    real_inherited_pty_ioctl_is_not_available
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.00s
+
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded libc v0.2.189
+   Compiling libc v0.2.189
+   Compiling fail-closed-linux v0.0.0 (/tmp/review-c0-307-r4-replant/F33-inherited-fds-left-open/crate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.32s
+     Running tests/real_kernel.rs (target/debug/deps/real_kernel-fcb5fe080d96224c)
+error: test failed, to rerun pass `--test real_kernel`
+
+==== F34-enforcement-self-test-skipped simulated::sim_lying_kernel_enforcement_refuses ====
+exit=101 caught=True
+
+running 1 test
+test sim_lying_kernel_enforcement_refuses ... FAILED
+
+failures:
+
+---- sim_lying_kernel_enforcement_refuses stdout ----
+thread 'sim_lying_kernel_enforcement_refuses' panicked at tests/simulated.rs:27:24:
+did-provider started as pid 4242 although the kernel was set to fail; steps [Unshare, UidMap, Setgroups, GidMap, UnsharePid, LastCapability, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, BoundingSet, AmbientSet, CapabilitySets, SetNoNewPrivs, InstallFilter, AbiProbe, RightProbe, RightProbe, CreateRuleset, StorageRootRule, ExecutableRule, ExecutableRule, RestrictSelf, CloseFds, Execve]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    sim_lying_kernel_enforcement_refuses
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+
+   Compiling libc v0.2.189
+   Compiling fail-closed-linux v0.0.0 (/tmp/review-c0-307-r4-replant/F34-enforcement-self-test-skipped/crate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.24s
+     Running tests/simulated.rs (target/debug/deps/simulated-7a8a33f5833be881)
+error: test failed, to rerun pass `--test simulated`
+
+==== F34-enforcement-self-test-skipped real_kernel::real_lying_enforcement_self_test_refuses ====
+exit=101 caught=True
+
+running 1 test
+test real_lying_enforcement_self_test_refuses ... FAILED
+
+failures:
+
+---- real_lying_enforcement_self_test_refuses stdout ----
+thread 'real_lying_enforcement_self_test_refuses' panicked at tests/common/mod.rs:256:5:
+assertion `left == right` failed: status ExitStatus(unix_wait_status(0))
+stdout:
+started did-provider pid=11087
+probe-ran provider=did-provider
+marker ok
+socket_inet errno=1
+socket_unix errno=1
+read_outside errno=13
+write_outside errno=13
+read_etc_passwd errno=13
+storage_write ok
+storage_read ok
+truncate_storage ok
+truncate_outside errno=13
+o_trunc_outside errno=13
+ioctl_dev errno=13
+nspid=2
+ready
+
+stderr:
+
+  left: Some(0)
+ right: Some(71)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    real_lying_enforcement_self_test_refuses
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.00s
+
+
+   Compiling fail-closed-linux v0.0.0 (/tmp/review-c0-307-r4-replant/F34-enforcement-self-test-skipped/crate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.39s
+     Running tests/real_kernel.rs (target/debug/deps/real_kernel-fcb5fe080d96224c)
+error: test failed, to rerun pass `--test real_kernel`
+
+==== F35-close-pipe-reported-as-start real_kernel::real_close_pipe_without_exec_is_not_a_start ====
+exit=101 caught=True
+
+running 1 test
+test real_close_pipe_without_exec_is_not_a_start ... FAILED
+
+failures:
+
+---- real_close_pipe_without_exec_is_not_a_start stdout ----
+thread 'real_close_pipe_without_exec_is_not_a_start' panicked at tests/common/mod.rs:256:5:
+assertion `left == right` failed: status ExitStatus(unix_wait_status(0))
+stdout:
+started did-provider pid=11203
+
+stderr:
+
+  left: Some(0)
+ right: Some(71)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    real_close_pipe_without_exec_is_not_a_start
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.00s
+
+
+   Compiling libc v0.2.189
+   Compiling fail-closed-linux v0.0.0 (/tmp/review-c0-307-r4-replant/F35-close-pipe-reported-as-start/crate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.40s
+     Running tests/real_kernel.rs (target/debug/deps/real_kernel-fcb5fe080d96224c)
+error: test failed, to rerun pass `--test real_kernel`
+
+ALL_CAUGHT=True
+
+REPLANT_EXIT=0
+REPLANT_DONE
