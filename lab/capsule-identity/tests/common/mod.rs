@@ -145,6 +145,13 @@ pub const EXACT_BASIC_BLOCK_LAB_CID: &str =
 /// temp dir and never committed.
 pub const HAMT_OVER_THRESHOLD_LAB_CID: &str =
     "bafybeiapjks5bqeaeeuhrestfwx3tskokvzjvy5kltdidb24gnyyzkn2rm";
+/// The over-threshold file set with its one 211-byte name shortened to 160
+/// bytes and one empty file `photo-tail.jpeg` added: 15 bytes, the only path
+/// whose length modulo 16 is 15, so its last byte is murmur3 tail index 14.
+/// The estimate stays 262145. Built in memory and never committed; task 096
+/// printed its pin first with README's Python rule.
+pub const FIFTEEN_BYTE_NAME_LAB_CID: &str =
+    "bafybeifwfc7vasazw6rcne6cgmtz7pbbiyxpd5fzjjmu6edrdvwmwnnwbq";
 /// The 262145 file set under `photos/`, with content-sample's two files left
 /// at the root, whose own estimate is 140: the child directory is a shard and
 /// the root a basic directory. Built in a temp dir and never committed.
@@ -276,6 +283,50 @@ pub fn shard_with_a_file_root() -> (Vec<BundleEntry>, String) {
     let estimate: usize = entries.iter().map(|entry| entry.path.len() + 36).sum();
     assert_eq!(estimate, 262_145, "the file set's links estimate");
     (entries, first)
+}
+
+/// The over-threshold file set with its one 211-byte name shortened by 51
+/// bytes to 160, so it still ends with `x`, and one empty file
+/// `photo-tail.jpeg` added: 15 bytes, the only path whose length modulo 16 is
+/// 15, so its last byte is murmur3 tail index 14. The 51 bytes removed are the
+/// 15 name bytes and 36 of link overhead added, so the links estimate stays
+/// 262145. Built in memory and never committed; task 096 printed its pin
+/// first with README's Python rule.
+pub fn fifteen_byte_shard() -> Vec<BundleEntry> {
+    let (mut entries, names, _extra) = flat_bundle_at("", 262_145);
+    let longest = names
+        .into_iter()
+        .max_by_key(String::len)
+        .expect("the file set has names");
+    assert_eq!(longest.len(), 211, "the longest name on this tip");
+    let shortened = longest[..longest.len() - 51].to_owned();
+    assert_eq!(shortened.len(), 160, "the shortened name");
+    assert!(shortened.ends_with('x'), "the shortened name ends with x");
+    let at = entries
+        .iter()
+        .position(|entry| entry.path == longest)
+        .expect("the longest name is an empty file of the bundle");
+    assert!(entries[at].content.is_empty(), "the longest name is empty");
+    entries[at].path = shortened;
+    entries.push(BundleEntry {
+        path: "photo-tail.jpeg".to_owned(),
+        content: Vec::new(),
+    });
+    let tails: Vec<&BundleEntry> = entries
+        .iter()
+        .filter(|entry| entry.path.len() % 16 == 15)
+        .collect();
+    assert_eq!(tails.len(), 1, "one path whose length modulo 16 is 15");
+    assert_eq!(tails[0].path, "photo-tail.jpeg", "the 15-byte path");
+    assert_eq!(tails[0].path.len(), 15, "the 15-byte path's length");
+    assert_eq!(
+        tails[0].path.as_bytes()[14],
+        b'g',
+        "the 15-byte path's last byte"
+    );
+    let estimate: usize = entries.iter().map(|entry| entry.path.len() + 36).sum();
+    assert_eq!(estimate, 262_145, "the file set's links estimate");
+    entries
 }
 
 /// One row of [`shared_prefix_rows`]: two 200-byte names whose murmur3

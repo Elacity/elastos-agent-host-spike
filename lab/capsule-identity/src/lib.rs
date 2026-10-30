@@ -1330,8 +1330,9 @@ fn tsize(block: &[u8], children: impl Iterator<Item = u64>) -> u64 {
 /// The murmur3 x64-128 digest of a HAMT link name: seed 0, its first 64 bits
 /// big-endian. This is the marked lab copy of the one HAMT hash; a separate
 /// x64-64 mix gives another value, so it is the wrong function.
-/// `hamt_digest("hello")` is `cb d8 a7 b3 41 bd 9b 02`. Level `n` of a shard
-/// takes digest byte `n`.
+/// `hamt_digest("hello")` is `cb d8 a7 b3 41 bd 9b 02`. A name of 15 bytes,
+/// such as `photo-tail.jpeg`, mixes its last byte at tail index 14 into `k2`.
+/// Level `n` of a shard takes digest byte `n`.
 fn hamt_digest(name: &str) -> [u8; HAMT_DIGEST_BYTES] {
     const C1: u64 = 0x87c3_7b91_1142_53d5;
     const C2: u64 = 0x4cf5_ad43_2745_937f;
@@ -2367,6 +2368,19 @@ fn hamt_digest_is_the_marked_murmur3_copy() {
         hamt_digest("hello"),
         [0xcb, 0xd8, 0xa7, 0xb3, 0x41, 0xbd, 0x9b, 0x02],
         "the first 64 bits of murmur3 x64-128 of \"hello\", big-endian"
+    );
+}
+
+/// A name of 15 bytes reaches tail index 14, so its last byte mixes into
+/// `k2`; skipping that byte changes the digest and every shard that holds the
+/// name. README's `murmur` printed this digest first.
+#[cfg(test)]
+#[test]
+fn photo_tail_mixes_tail_index_14() {
+    assert_eq!(
+        hamt_digest("photo-tail.jpeg"),
+        [0x19, 0x64, 0x8b, 0xa3, 0x83, 0x36, 0xe8, 0xe4],
+        "the first 64 bits of murmur3 x64-128 of \"photo-tail.jpeg\", big-endian"
     );
 }
 

@@ -27,9 +27,9 @@ use std::process::Command;
 /// 174-full-leaf bundles (tasks 085, 086 and 092), the three HAMT-threshold
 /// bundles (task 077), the shard with a file root (task 082), the two
 /// shared-prefix bundles (task 071), the 127-byte file bundle (task 091),
-/// the exact 262144-byte basic block bundle (task 093) and the 128-byte
-/// file bundle (task 094).
-const PINNED_BUNDLES: usize = 27;
+/// the exact 262144-byte basic block bundle (task 093), the 128-byte
+/// file bundle (task 094) and the 15-byte-name shard (task 096).
+const PINNED_BUNDLES: usize = 28;
 
 /// How many committed fixtures have a pin: all but wc001-core.
 const PINNED_FIXTURES: usize = 7;
@@ -236,6 +236,11 @@ fn pinned_bundles() -> Vec<Pinned> {
         what: "exact 262144-byte basic block".to_owned(),
         pin: EXACT_BASIC_BLOCK_LAB_CID,
         entries: three_byte_bundle(5_575),
+    });
+    bundles.push(Pinned {
+        what: "fifteen-byte-name shard".to_owned(),
+        pin: FIFTEEN_BYTE_NAME_LAB_CID,
+        entries: fifteen_byte_shard(),
     });
     bundles
 }

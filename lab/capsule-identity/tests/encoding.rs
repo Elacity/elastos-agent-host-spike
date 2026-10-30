@@ -838,6 +838,86 @@ fn shard_with_a_file_root_has_the_pinned_cid() {
 }
 
 #[test]
+fn fifteen_byte_name_over_the_hamt_threshold_is_a_shard() {
+    // The 077 file set at 262145 shortens its one 211-byte name by 51 bytes
+    // to 160 and adds the empty 15-byte file `photo-tail.jpeg`: 15 bytes and
+    // 36 bytes of link overhead replace the 51 removed, so the estimate stays
+    // 262145 and the root is a shard. `photo-tail.jpeg` is the only path
+    // whose length modulo 16 is 15, so its last byte `g` is murmur3 tail
+    // index 14. README's Python rule printed the pin first.
+    let entries = fifteen_byte_shard();
+    assert_eq!(
+        entries.iter().map(|entry| entry.path.len()).max(),
+        Some(160),
+        "the longest name is 160 bytes"
+    );
+    let shortened = entries
+        .iter()
+        .find(|entry| entry.path.len() == 160)
+        .expect("the shortened name is in the bundle");
+    assert!(
+        shortened.path.ends_with('x'),
+        "the shortened name still ends with x"
+    );
+    let tail = entries
+        .iter()
+        .find(|entry| entry.path == "photo-tail.jpeg")
+        .expect("the 15-byte name is in the bundle");
+    assert_eq!(tail.path.len(), 15, "the 15-byte name's length");
+    assert_eq!(
+        tail.path.as_bytes()[14],
+        b'g',
+        "the 15-byte name's last byte"
+    );
+    let with_tail: Vec<&str> = entries
+        .iter()
+        .filter(|entry| entry.path.len() % 16 == 15)
+        .map(|entry| entry.path.as_str())
+        .collect();
+    assert_eq!(
+        with_tail,
+        ["photo-tail.jpeg"],
+        "the only path whose length modulo 16 is 15"
+    );
+    assert_eq!(
+        estimate(entries.iter().map(|entry| entry.path.len())),
+        262_145,
+        "the bundle's links estimate"
+    );
+    let pin = FIFTEEN_BYTE_NAME_LAB_CID;
+    let bundle = bundled(&entries);
+    let encoded = encode_entries(&entries)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    let listed: Vec<ListedFile> = entries
+        .iter()
+        .map(|entry| ListedFile {
+            path: entry.path.clone(),
+            size: entry.content.len() as u64,
+            sha256: Sha256::digest(&entry.content).into(),
+        })
+        .collect();
+    let by_listing = encode_listed_files(&listed)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    assert_eq!(
+        (name(&bundle), encoded.as_str(), by_listing.as_str()),
+        (pin.to_owned(), pin, pin),
+        "(lab_cid, encode_entries, encode_listed_files) against the 15-byte-name pin"
+    );
+    for other in [
+        HAMT_OVER_THRESHOLD_LAB_CID,
+        HAMT_THRESHOLD_LAB_CID,
+        HAMT_CHILD_LAB_CID,
+        FILE_ROOT_SHARD_LAB_CID,
+    ] {
+        assert_ne!(pin, other, "the 15-byte-name pin is another bundle's");
+    }
+    assert!(pin.starts_with("bafybei"), "{pin}");
+    assert_eq!(pin.len(), 59, "{pin}");
+}
+
+#[test]
 fn empty_file_has_the_pinned_cid() {
     // A zero-byte file is a raw leaf whose block is empty, with Tsize 0,
     // never a dag-pb file node.
