@@ -771,7 +771,7 @@ The error arm is this fault.
         "Runtime network authority is not available",
     ))
 
-The Runtime grants the call and carries it. `elastos/crates/elastos-server/src/api/model_provider_egress.rs::handle` calls `create_grant_after_decision` and `current_grant`. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:493` is the `create_grant_after_decision` call. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:503` is the `current_grant` check. An error denies the stream. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:509` calls `forward`, and that call is the carry.
+The Runtime grants the call and carries it. `elastos/crates/elastos-server/src/api/model_provider_egress.rs::handle` calls `create_grant_after_decision` and `current_grant`. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:493` is the `create_grant_after_decision` call.
 
     async fn handle(
         mut stream: UnixStream,
@@ -779,6 +779,14 @@ The Runtime grants the call and carries it. `elastos/crates/elastos-server/src/a
         provider_pid: u32,
         data_dir: &Path,
     ) -> io::Result<()> {
+
+`elastos/crates/elastos-server/src/api/model_provider_egress.rs:504` is the `current_grant` check. An error denies the stream.
+
+            || current_grant(data_dir, &request, &destination).is_err()
+
+`elastos/crates/elastos-server/src/api/model_provider_egress.rs:509` calls `forward`, and that call is the carry.
+
+            forward(&mut stream, data_dir, &request, &destination, || {
 
 The grant check denies the stream, and `forward` carries the call.
 

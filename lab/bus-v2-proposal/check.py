@@ -921,6 +921,14 @@ INDENT_LINE_SPANS = (
     "lab/grant-binding/src/lib.rs:244",
 )
 
+# Egress line spans whose block equals the pinned line, in draft order. Each
+# one is spliced into QUOTE_TARGETS with a None quoter, the same way as
+# INDENT_LINE_SPANS.
+EGRESS_LINE_SPANS = (
+    "elastos/crates/elastos-server/src/api/model_provider_egress.rs:504",
+    "elastos/crates/elastos-server/src/api/model_provider_egress.rs:509",
+)
+
 # The one fixed prefix of the target list: one entry per line decision, in
 # source order before the function spans and the indent line spans. A range's
 # two endpoints share one marker. The quoter name is looked up at call time so
@@ -1056,6 +1064,7 @@ def _build_quote_targets():
         _QUOTE_TARGETS_PREFIX
         + _quote_target_tail(FUNCTION_QUOTE_SPANS)
         + _quote_target_tail(INDENT_LINE_SPANS)
+        + _quote_target_tail(EGRESS_LINE_SPANS)
     )
 
 
@@ -1082,7 +1091,8 @@ class _QuoteTargets:
 
 
 # The only target list: one entry per line decision, then one None-quoter entry
-# per FUNCTION_QUOTE_SPANS entry, then one per INDENT_LINE_SPANS entry.
+# per FUNCTION_QUOTE_SPANS entry, then one per INDENT_LINE_SPANS entry, then one
+# per EGRESS_LINE_SPANS entry.
 QUOTE_TARGETS = _QuoteTargets()
 
 

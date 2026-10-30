@@ -10152,7 +10152,10 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(len(ALIGNED_NEW_ENDPOINTS), 56)
         self.assertEqual(
             len(check.QUOTE_TARGETS),
-            115 + len(check.FUNCTION_QUOTE_SPANS) + len(check.INDENT_LINE_SPANS),
+            115
+            + len(check.FUNCTION_QUOTE_SPANS)
+            + len(check.INDENT_LINE_SPANS)
+            + len(check.EGRESS_LINE_SPANS),
         )
         self.assertEqual(set(ALIGNED_ALREADY_DECIDED) - ALIGNED_ENDPOINT_SET, set())
 
@@ -10195,7 +10198,8 @@ class CitationCheckTests(unittest.TestCase):
             len(BASELINE_TARGETS)
             + len(ALIGNED_NEW_ENDPOINTS)
             + len(check.FUNCTION_QUOTE_SPANS)
-            + len(check.INDENT_LINE_SPANS),
+            + len(check.INDENT_LINE_SPANS)
+            + len(check.EGRESS_LINE_SPANS),
         )
         # The spans this task adds, read back from the target list as spans, are
         # exactly the 65 names above minus the 12 that already had entries. A
@@ -10214,6 +10218,7 @@ class CitationCheckTests(unittest.TestCase):
             if endpoint not in BASELINE_TARGETS
             and endpoint not in check.FUNCTION_QUOTE_SPANS
             and endpoint not in check.INDENT_LINE_SPANS
+            and endpoint not in check.EGRESS_LINE_SPANS
         ]
         self.assertEqual(len(added), len(ALIGNED_NEW_ENDPOINTS))
         added_spans = {
@@ -10403,26 +10408,35 @@ class CitationCheckTests(unittest.TestCase):
 
     def test_quote_targets_are_the_base_list_plus_function_spans(self):
         # Walk order is the base list, then one None quoter per function span,
-        # then one None quoter per indent line span. A missing, extra, or
-        # duplicated entry fails this ordered comparison.
+        # then one None quoter per indent line span, then one None quoter per
+        # egress line span. A missing, extra, or duplicated entry fails this
+        # ordered comparison.
         expected = BASE_QUOTE_TARGETS + tuple(
             (span, "`" + span + "`", None) for span in FUNCTION_QUOTE_SPAN_ORDER
         ) + tuple(
             (span, "`" + span + "`", None) for span in INDENT_LINE_SPAN_ORDER
+        ) + tuple(
+            (span, "`" + span + "`", None) for span in EGRESS_LINE_SPAN_ORDER
         )
         self.assertEqual(check.QUOTE_TARGETS, expected)
         self.assertEqual(check.FUNCTION_QUOTE_SPANS, FUNCTION_QUOTE_SPAN_ORDER)
         self.assertEqual(check.INDENT_LINE_SPANS, INDENT_LINE_SPAN_ORDER)
+        self.assertEqual(check.EGRESS_LINE_SPANS, EGRESS_LINE_SPAN_ORDER)
         self.assertEqual(len(FUNCTION_QUOTE_SPAN_ORDER), 51)
         self.assertEqual(len(INDENT_LINE_SPAN_ORDER), 18)
-        self.assertEqual(len(expected), 184)
+        self.assertEqual(len(EGRESS_LINE_SPAN_ORDER), 2)
+        self.assertEqual(len(expected), 186)
         self.assertEqual(
             len(check.QUOTE_TARGETS),
             len({target[0] for target in check.QUOTE_TARGETS}),
         )
         self.assertEqual(
-            tuple(target[0] for target in check.QUOTE_TARGETS[-18:]),
+            tuple(target[0] for target in check.QUOTE_TARGETS[-20:-2]),
             INDENT_LINE_SPAN_ORDER,
+        )
+        self.assertEqual(
+            tuple(target[0] for target in check.QUOTE_TARGETS[-2:]),
+            EGRESS_LINE_SPAN_ORDER,
         )
         for span in UNMATCHED_FUNCTION_SPANS:
             self.assertNotIn(span, check.FUNCTION_QUOTE_SPANS, span)
@@ -10435,6 +10449,8 @@ class CitationCheckTests(unittest.TestCase):
             check.INDENT_LINE_SPANS = ()
             expected = BASE_QUOTE_TARGETS + tuple(
                 (span, "`" + span + "`", None) for span in FUNCTION_QUOTE_SPAN_ORDER
+            ) + tuple(
+                (span, "`" + span + "`", None) for span in EGRESS_LINE_SPAN_ORDER
             )
             self.assertEqual(check.QUOTE_TARGETS, expected)
             self.assertNotIn(
@@ -10582,6 +10598,29 @@ class CitationCheckTests(unittest.TestCase):
                 span,
             )
 
+    def test_changed_egress_remainder_does_not_match(self):
+        # One changed character of the remainder that stands for the cited
+        # line refuses that egress span and no other reason.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        sha = check.pin_sha(text)
+        for span in EGRESS_LINE_SPAN_ORDER:
+            remainders = check._remainders(text, "`" + span + "`")
+            rel = check.CITATION.fullmatch(span).group("path")
+            pinned = check._pinned_lines(root, sha, rel)
+            number = check.cited_line(span, pinned)
+            index = check._quote_window(remainders, pinned, number)
+            changed = list(remainders)
+            line = changed[index]
+            changed[index] = line[:-1] + ("x" if line[-1] != "x" else "y")
+            block = "".join("    " + row + "\n" for row in changed)
+            body = "Pinned commit: " + sha + "\n`" + span + "`\n\n" + block
+            self.assertEqual(
+                self._problems_for(body),
+                ["refuse: quoted line does not match " + span],
+                span,
+            )
+
     def test_repeated_indent_marker_is_not_one_line(self):
         root = check.worktree_root()
         text = check.load_draft(root)
@@ -10644,6 +10683,17 @@ class CitationCheckTests(unittest.TestCase):
             self.test_component_352_short_indent_is_refused,
             "component.rs:352",
             "CAUGHT indent-line-spans",
+        )
+
+    def test_falsifier_egress_line_spans(self):
+        # An empty EGRESS_LINE_SPANS drops the span, so the changed line is not
+        # refused and this test fails.
+        self._caught(
+            "EGRESS_LINE_SPANS",
+            (),
+            self.test_changed_egress_remainder_does_not_match,
+            EGRESS_LINE_SPAN_ORDER[0],
+            "CAUGHT egress-line-spans",
         )
 
 # The quote-target walk before function spans, in list order.
@@ -10851,4 +10901,10 @@ INDENT_LINE_SPAN_ORDER = (
     'elastos/crates/elastos-runtime/src/provider/registry.rs:841',
     'lab/grant-binding/src/lib.rs:162',
     'lab/grant-binding/src/lib.rs:244',
+)
+
+# The 2 egress line spans spliced after the indent line spans, in draft order.
+EGRESS_LINE_SPAN_ORDER = (
+    'elastos/crates/elastos-server/src/api/model_provider_egress.rs:504',
+    'elastos/crates/elastos-server/src/api/model_provider_egress.rs:509',
 )
