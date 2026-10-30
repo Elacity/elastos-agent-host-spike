@@ -1,0 +1,236 @@
+[
+  {
+    "id": "F-A14a",
+    "title": "the gate skips the installed native binaries",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14b",
+    "title": "the gate skips the Runtime the journeys launch",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14c",
+    "title": "the gate trusts a VERSIONS.json changed after install",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14d",
+    "title": "the gate accepts a checkout at another commit",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14e",
+    "title": "the gate accepts a checkout with local changes",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14f",
+    "title": "a receipt from a failed conformance run is accepted",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14g",
+    "title": "the gate skips the agent-host component the journeys load",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14h",
+    "title": "the run goes on after the gate refuses",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14i",
+    "title": "a journey's Runtime identity is not compared",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14j",
+    "title": "the gate does not run again after the journeys",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14k",
+    "title": "an ok with a SKIP line counts as a pass",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14l",
+    "title": "macOS-only steps run off macOS",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14m",
+    "title": "a journey that prints no identity is not required to",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14n",
+    "title": "install does not compare the receipt with the Runtime build",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14o",
+    "title": "the journey list names a test that does not exist",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14p",
+    "title": "a step executable or provider binary is not hashed against INSTALL.json",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14q",
+    "title": "a recorded executable outside the repository is accepted",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14r",
+    "title": "the gate does not check the recorded step executables",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14s",
+    "title": "A1, A2 and C go through Cargo, which may rebuild them, instead of running the hashed files",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14t",
+    "title": "a suite runs although its recorded bytes changed after the gate",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14u",
+    "title": "A8 runs although the elastos it launches is not the installed copy",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14v",
+    "title": "Cargo may run another A8 test executable than the recorded one",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14w",
+    "title": "a signature that does not verify is accepted",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14x",
+    "title": "an unsigned receipt is accepted while signing is on",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14y",
+    "title": "a valid signature by any key is accepted, not only this machine's key",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14z",
+    "title": "INSTALL.json, which holds the guest and step hashes, is not signed",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14aa",
+    "title": "install picks one of several test executables Cargo built for a suite",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14ab",
+    "title": "the run claims a valid signature without saying it proves integrity here, not the publisher",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14ac",
+    "title": "the signing key folder is readable by other users",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14ad",
+    "title": "install skips the machine check and starts cargo fetch",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14ae",
+    "title": "install.sh --sign writes the key before it knows the install can finish",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14af",
+    "title": "a refusal before any journey writes no summary.txt",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14ag",
+    "title": "suite_env keeps a parent CARGO_TERM_COLOR=always",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14ah",
+    "title": "a Rosetta shell is accepted",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14ai",
+    "title": "a space in HOME is accepted",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14aj",
+    "title": "an absolute CARGO_TARGET_DIR outside the repository is accepted",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14ak",
+    "title": "a missing wasm32-unknown-unknown target is accepted",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14al",
+    "title": "morning step 2 checks out spike/agent-host, which has no demo",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  },
+  {
+    "id": "F-A14am",
+    "title": "step 5 opens an empty path when no run folder exists",
+    "verdict": "CAUGHT",
+    "applied": "applied"
+  }
+]

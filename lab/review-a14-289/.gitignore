@@ -1,0 +1,5 @@
+checkout/
+morning/
+scratch/
+*.pyc
+__pycache__/

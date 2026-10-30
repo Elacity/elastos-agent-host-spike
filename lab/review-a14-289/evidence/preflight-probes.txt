@@ -1,0 +1,16 @@
+=== shasum ===
+present
+=== crates.io 2s ===
+crates_ok
+crates_seconds 0.02885723114013672
+=== CARGO_TARGET_DIR=../elsewhere ===
+preflight: FAIL
+=== CARGO_TARGET_DIR=/tmp/a14-outside-target ===
+missing: CARGO_TARGET_DIR=/tmp/a14-outside-target is outside the repository; install records test executables only from inside the checkout and refuses these
+preflight: FAIL
+=== CARGO_TERM_COLOR=always ===
+missing: CARGO_TERM_COLOR=always; run.sh reads Cargo's plain 'Running' line for A8, so the variable needs to be unset or set to never
+preflight: FAIL
+=== DEMO_A14_HOME inside repo ===
+missing: DEMO_A14_HOME=/workspace/lab/review-a14-289/scratch/fetch-experiment/full/lab is inside the repository; install.sh refuses that
+preflight: FAIL
