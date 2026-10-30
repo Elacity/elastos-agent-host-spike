@@ -19,9 +19,9 @@ use ed25519_dalek::{Signature, Verifier};
 
 /// How many pinned bundles the check covers: seven fixtures, the recipe,
 /// the three bundles built for the profile tests, the photo stand-in
-/// consumer copy (task 047) and the two bundles with a file over one leaf
-/// (task 048).
-const PINNED_BUNDLES: usize = 14;
+/// consumer copy (task 047) and the three bundles with a file over one leaf
+/// (tasks 048 and 076).
+const PINNED_BUNDLES: usize = 15;
 
 /// How many committed fixtures have a pin: all but wc001-core.
 const PINNED_FIXTURES: usize = 7;
@@ -142,6 +142,17 @@ fn pinned_bundles() -> Vec<Pinned> {
         what: "three-leaf nested file bundle".to_owned(),
         pin: THREE_LEAF_NESTED_LAB_CID,
         entries: content_sample_with(|entries| entries.push(entry(BIG_BIN, &big_bin_bytes()))),
+    });
+    bundles.push(Pinned {
+        what: "second-level file bundle".to_owned(),
+        pin: SECOND_LEVEL_FILE_LAB_CID,
+        entries: content_sample_with(|entries| {
+            let sample = entries
+                .iter_mut()
+                .find(|entry| entry.path == "sample.example")
+                .expect("content-sample holds sample.example");
+            sample.content = vec![0; 45_613_057];
+        }),
     });
     bundles
 }

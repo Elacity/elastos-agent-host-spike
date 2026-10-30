@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048 and 049). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048, 049, 059 and 076). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -2778,18 +2778,18 @@
     },
     {
       "id": "F-CI18e",
-      "title": "the leaf-limit refusal is removed: a file of more than 174 leaves gets one file root (retargeted by task 048: the one-leaf refusal it once removed is no longer in the walk's path)",
+      "title": "the file tree's level loop runs once: a file past 174 leaves gets a one-level tree (retargeted by task 076 from the 174-leaf refusal task 048 removed)",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    if content.len().div_ceil(CHUNK_SIZE) > MAX_FILE_LINKS {\n        return Err(Refusal::FileOverLeafLimit {\n            path: path.to_owned(),\n            length: content.len(),\n        });\n    }\n",
-          "new": ""
+          "old": "    while level.len() > 1 {\n",
+          "new": "    if level.len() > 1 {\n"
         }
       ],
       "tests": [
-        "file_of_174_leaves_is_named_and_one_byte_more_is_refused"
+        "file_past_174_leaves_keeps_a_second_tree_level"
       ]
     },
     {
@@ -4056,14 +4056,14 @@
     },
     {
       "id": "F-CI32a",
-      "title": "the planted stub: the stand-in's POST /api/capsules answers launched at once and runs no check",
+      "title": "the planted stub: the CID fixture entry point answers a launch at once and runs no check",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        let (name, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;\n",
-          "new": "        let (name, asks) = (String::from(\"stub\"), None);\n"
+          "old": "        let (path, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;\n",
+          "new": "        let (path, asks) = (self.store.values().next().expect(\"a stored bundle\").to_string_lossy().into_owned(), None);\n"
         }
       ],
       "tests": [
@@ -4142,14 +4142,14 @@
     },
     {
       "id": "F-CI32f",
-      "title": "the stand-in adds the instance before its checks, so a refused launch is still listed",
+      "title": "the CID entry point launches the first stored fixture before its checks, so a refused launch is still listed",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        let (name, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;\n        Ok(self.launch(name, asks))\n",
-          "new": "        self.launch(String::new(), None);\n        let (name, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;\n        self.instances.pop();\n        Ok(self.launch(name, asks))\n"
+          "old": "        let (path, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;\n",
+          "new": "        let stray = self\n            .store\n            .values()\n            .next()\n            .map(|folder| folder.to_string_lossy().into_owned())\n            .unwrap_or_default();\n        let _ = launch(&json!({ \"path\": stray }));\n        let (path, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;\n"
         }
       ],
       "tests": [
@@ -4159,34 +4159,18 @@
     },
     {
       "id": "F-CI32g",
-      "title": "the stand-in answers launched but adds no instance, so GET /api/capsules lists nothing",
+      "title": "the CID entry point answers a launch body but never calls the shared launch, so GET /api/capsules lists nothing",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        self.instances.push(instance);\n",
-          "new": ""
+          "old": "        let answer = launch(&json!({ \"path\": path }))?;\n",
+          "new": "        let answer = json!({\n            \"id\": \"component-1\",\n            \"name\": \"stub\",\n            \"status\": \"starting\",\n            \"session_id\": \"component-1\",\n        });\n"
         }
       ],
       "tests": [
         "standin_launches_a_signed_bundle_by_its_cid"
-      ]
-    },
-    {
-      "id": "F-CI33a",
-      "title": "a launch gives the instance one grant for each capabilities entry of its manifest, so a valid signature alone yields a grant",
-      "command": "capsule-identity",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        Ok(self.launch(name, asks))\n",
-          "new": "        let answer = self.launch(name, asks);\n        let session_id = answer[\"session_id\"].as_str().expect(\"a session id\").to_owned();\n        let folder = self.store[body[\"cid\"].as_str().expect(\"a cid\")].clone();\n        let manifest: elastos_common::CapsuleManifest =\n            serde_json::from_slice(&fs::read(folder.join(capsule_identity::MANIFEST_FILE)).expect(\"the manifest\"))\n                .expect(\"a manifest\");\n        for capability in manifest.capabilities {\n            self.seed_grant(&session_id, &capability, \"*\", \"session\");\n        }\n        Ok(answer)\n"
-        }
-      ],
-      "tests": [
-        "standin_valid_signature_alone_yields_no_grant"
       ]
     },
     {
@@ -4197,8 +4181,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "self.grants.iter().map(Grant::entry).collect();\n",
-          "new": "self.grants.iter().take(0).map(Grant::entry).collect();\n"
+          "old": "        grants()\n",
+          "new": "        let _ = grants;\n        json!({ \"scope\": \"all_sessions_live\", \"capabilities\": [] })\n"
         }
       ],
       "tests": [
@@ -4213,8 +4197,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        json!({ \"scope\": \"all_sessions_live\", \"capabilities\": capabilities })\n",
-          "new": "        json!({ \"capabilities\": capabilities })\n"
+          "old": "        grants()\n",
+          "new": "        let view = grants();\n        json!({ \"capabilities\": view[\"capabilities\"].clone() })\n"
         }
       ],
       "tests": [
@@ -4230,8 +4214,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "            .and_then(|instance| instance.asks.clone())\n",
-          "new": "            .and_then(|_| fs::read(self.store.values().next()?.join(ASKS_FILE)).ok())\n"
+          "old": "        self.asks.get(session_id).cloned().flatten()\n",
+          "new": "        fs::read(self.store.values().next()?.join(ASKS_FILE)).ok()\n"
         }
       ],
       "tests": [
@@ -4240,14 +4224,14 @@
     },
     {
       "id": "F-CI35b",
-      "title": "asks_of ignores the session and answers the first instance's asks",
+      "title": "asks_of ignores the session and answers the first snapshot's asks",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "            .find(|instance| instance.session_id == session_id)\n",
-          "new": "            .next()\n"
+          "old": "        self.asks.get(session_id).cloned().flatten()\n",
+          "new": "        self.asks.values().next().cloned().flatten()\n"
         }
       ],
       "tests": [
@@ -4311,8 +4295,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "self.grants.iter().map(Grant::entry).collect();\n",
-          "new": "self.grants.iter().take(1).map(Grant::entry).collect();\n"
+          "old": "        grants()\n",
+          "new": "        let view = grants();\n        let capabilities: Vec<Value> = view[\"capabilities\"]\n            .as_array()\n            .map(|entries| entries.iter().take(1).cloned().collect())\n            .unwrap_or_default();\n        json!({ \"scope\": view[\"scope\"].clone(), \"capabilities\": capabilities })\n"
         }
       ],
       "tests": [
@@ -4327,8 +4311,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "self.grants.iter().map(Grant::entry).collect();\n",
-          "new": "self\n            .grants\n            .iter()\n            .filter(|grant| Some(&grant.session_id) == self.grants.first().map(|first| &first.session_id))\n            .map(Grant::entry)\n            .collect();\n"
+          "old": "        grants()\n",
+          "new": "        let view = grants();\n        let first = view[\"capabilities\"][0][\"session_id\"].clone();\n        let capabilities: Vec<Value> = view[\"capabilities\"]\n            .as_array()\n            .map(|entries| {\n                entries\n                    .iter()\n                    .filter(|entry| entry[\"session_id\"] == first)\n                    .cloned()\n                    .collect()\n            })\n            .unwrap_or_default();\n        json!({ \"scope\": view[\"scope\"].clone(), \"capabilities\": capabilities })\n"
         }
       ],
       "tests": [
@@ -4337,14 +4321,14 @@
     },
     {
       "id": "F-CI37c",
-      "title": "seed_grant gives every grant the same request_id",
+      "title": "grant_request_id gives every grant the same request_id",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "            request_id: format!(\"grant-{number}\"),\n",
-          "new": "            request_id: String::from(\"grant-1\"),\n"
+          "old": "    format!(\"grant-{number}\")\n",
+          "new": "    String::from(\"grant-1\")\n"
         }
       ],
       "tests": [
@@ -4359,8 +4343,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        Ok((checked.manifest_name().to_owned(), signed_asks(&checked)))\n",
-          "new": "        Ok((checked.manifest_name().to_owned(), fs::read(folder.join(ASKS_FILE)).ok()))\n"
+          "old": "        Ok((folder.to_string_lossy().into_owned(), signed_asks(&checked)))\n",
+          "new": "        Ok((folder.to_string_lossy().into_owned(), fs::read(folder.join(ASKS_FILE)).ok()))\n"
         }
       ],
       "tests": [
@@ -4467,13 +4451,13 @@
     },
     {
       "id": "F-CI48b",
-      "title": "the blocksizes are left out of a file root's UnixFS data",
+      "title": "the blocksizes are left out of a file node's UnixFS data",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    for leaf in leaves {\n        data.push(4 << 3);\n        put_varint(&mut data, leaf.tsize);\n    }\n",
+          "old": "    for child in children {\n        data.push(4 << 3);\n        put_varint(&mut data, child.filesize);\n    }\n",
           "new": ""
         }
       ],
@@ -4526,7 +4510,7 @@
         }
       ],
       "tests": [
-        "file_of_174_leaves_is_named_and_one_byte_more_is_refused"
+        "file_past_174_leaves_keeps_a_second_tree_level"
       ]
     },
     {
@@ -4576,6 +4560,86 @@
       ],
       "tests": [
         "a_closure_listing_gets_a_package_record_by_its_cid"
+      ]
+    },
+    {
+      "id": "F-CI59a",
+      "title": "the stop seam answers null without calling the shared stop, so the same instances and grants never change",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        stop()\n",
+          "new": "        let _ = stop;\n        Ok(Value::Null)\n"
+        }
+      ],
+      "tests": [
+        "standin_shared_stop_updates_the_same_instances_and_grants"
+      ]
+    },
+    {
+      "id": "F-CI59b",
+      "title": "README drops the sentence that the lab encoder is a test oracle only",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/README.md",
+          "old": "The lab encoder is a test oracle only.",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "the_lab_encoder_is_a_test_oracle"
+      ]
+    },
+    {
+      "id": "F-CI59c",
+      "title": "README drops the sentence that the provider's encoder names deployed content",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/README.md",
+          "old": "The provider's encoder names deployed content.",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "the_lab_encoder_is_a_test_oracle"
+      ]
+    },
+    {
+      "id": "F-CI76a",
+      "title": "a one-child group links that child directly, without its one-link file node",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "                let block = file_root_block(group, filesize);\n",
+          "new": "                if group.len() == 1 {\n                    return group[0].clone();\n                }\n                let block = file_root_block(group, filesize);\n"
+        }
+      ],
+      "tests": [
+        "file_past_174_leaves_keeps_a_second_tree_level"
+      ]
+    },
+    {
+      "id": "F-CI76b",
+      "title": "a child's Tsize is written as its parent's blocksize",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        put_varint(&mut data, child.filesize);\n",
+          "new": "        put_varint(&mut data, child.tsize);\n"
+        }
+      ],
+      "tests": [
+        "file_past_174_leaves_keeps_a_second_tree_level"
       ]
     }
   ]
