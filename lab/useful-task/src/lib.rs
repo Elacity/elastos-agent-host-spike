@@ -8,7 +8,10 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 /// The canonical refusal checks, in the order every spec must name them.
-const CHECK_ORDER: [Reason; 5] = [
+const CHECK_ORDER: [Reason; 8] = [
+    Reason::Task,
+    Reason::Input,
+    Reason::Recorded,
     Reason::Empty,
     Reason::Echo,
     Reason::FixedString,
@@ -61,6 +64,7 @@ const CHECK_ORDER: [Reason; 5] = [
 ///     task_id: String::new(),
 ///     m1: String::new(),
 ///     input_sha256: String::new(),
+///     recorded_sha256: String::new(),
 ///     fixed_strings: Vec::new(),
 ///     reasons: Vec::new(),
 ///     schema: useful_task::Schema::Fields(Vec::new()),
@@ -71,6 +75,7 @@ pub struct Spec {
     task_id: String,
     m1: String,
     input_sha256: String,
+    recorded_sha256: String,
     fixed_strings: Vec<String>,
     reasons: Vec<Reason>,
     schema: Schema,
@@ -89,6 +94,10 @@ impl Spec {
         &self.input_sha256
     }
 
+    pub fn recorded_sha256(&self) -> &str {
+        &self.recorded_sha256
+    }
+
     pub fn fixed_strings(&self) -> &[String] {
         &self.fixed_strings
     }
@@ -105,6 +114,10 @@ impl Spec {
 /// One reason an answer is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reason {
+    /// The spec is not one of the two named task specs.
+    Task,
+    Input,
+    Recorded,
     Empty,
     Echo,
     FixedString,
@@ -116,6 +129,9 @@ impl Reason {
     /// The spec label and the verdict reason for this check.
     pub fn label(self) -> &'static str {
         match self {
+            Reason::Task => "task",
+            Reason::Input => "input",
+            Reason::Recorded => "recorded",
             Reason::Empty => "empty",
             Reason::Echo => "echo",
             Reason::FixedString => "fixed-string",
@@ -203,7 +219,13 @@ pub fn load_spec(bytes: &str) -> Result<Spec, String> {
     for key in object.keys() {
         let known = matches!(
             key.as_str(),
-            "task_id" | "m1" | "reasons" | "fixed_strings" | "input_sha256" | "kind"
+            "task_id"
+                | "m1"
+                | "reasons"
+                | "fixed_strings"
+                | "input_sha256"
+                | "recorded_sha256"
+                | "kind"
         ) || key == kind_key;
         if !known {
             return Err(format!("spec has unexpected key {key}"));
@@ -224,29 +246,34 @@ pub fn load_spec(bytes: &str) -> Result<Spec, String> {
     Ok(Spec {
         task_id: string_field(object, "task_id")?,
         m1: string_field(object, "m1")?,
-        input_sha256: string_field(object, "input_sha256")?,
+        input_sha256: sha256_field(object, "input_sha256")?,
+        recorded_sha256: sha256_field(object, "recorded_sha256")?,
         fixed_strings: strings(object, "fixed_strings")?,
         reasons,
         schema,
     })
 }
 
-/// Judge `answer` against `spec` and the already-parsed `expected` value.
-pub fn judge(spec: &Spec, input: &str, expected: &Value, answer: &str) -> Verdict {
+/// Judge `answer` against `spec`, the input bytes and the expected bytes.
+pub fn judge(spec: &Spec, input: &str, expected: &str, answer: &str) -> Verdict {
     let trimmed = answer.trim();
     let parsed = serde_json::from_str::<Value>(trimmed).ok();
+    let expected_value = serde_json::from_str::<Value>(expected).ok();
 
     for reason in &spec.reasons {
         let refused = match reason {
+            Reason::Task => !is_named_task(spec),
+            Reason::Input => sha256_hex(input) != spec.input_sha256(),
+            Reason::Recorded => sha256_hex(expected) != spec.recorded_sha256(),
             Reason::Empty => trimmed.is_empty(),
             Reason::Echo => trimmed == input.trim(),
             Reason::FixedString => spec.fixed_strings.iter().any(|fixed| fixed == trimmed),
             Reason::Shape => !parsed
                 .as_ref()
                 .is_some_and(|value| spec.schema.matches(value)),
-            Reason::Mismatch => parsed
-                .as_ref()
-                .is_none_or(|value| spec.schema.matches(value) && value != expected),
+            Reason::Mismatch => parsed.as_ref().is_none_or(|value| {
+                spec.schema.matches(value) && Some(value) != expected_value.as_ref()
+            }),
         };
         if refused {
             return Verdict::Refuse {
@@ -258,6 +285,22 @@ pub fn judge(spec: &Spec, input: &str, expected: &Value, answer: &str) -> Verdic
     Verdict::Accept {
         answer_sha256: sha256_hex(trimmed),
     }
+}
+
+/// True only when `spec` is the `Spec` loaded from one of the two named tasks.
+fn is_named_task(spec: &Spec) -> bool {
+    let mut named = false;
+    for bytes in [
+        include_str!("../tasks/agent-a/accept.json"),
+        include_str!("../tasks/agent-b/accept.json"),
+    ] {
+        match load_spec(bytes) {
+            Ok(task) if &task == spec => named = true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+    named
 }
 
 /// Lower-case SHA-256 hex of exactly these bytes.
@@ -283,6 +326,18 @@ fn string_field(object: &Map<String, Value>, key: &str) -> Result<String, String
         .as_str()
         .map(str::to_owned)
         .ok_or_else(|| format!("spec {key} is not a string"))
+}
+
+fn sha256_field(object: &Map<String, Value>, key: &str) -> Result<String, String> {
+    let value = string_field(object, key)?;
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(format!("spec {key} is not a sha256 hex"));
+    }
+    Ok(value)
 }
 
 fn strings(object: &Map<String, Value>, key: &str) -> Result<Vec<String>, String> {
