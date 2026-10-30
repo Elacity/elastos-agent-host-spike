@@ -515,3 +515,79 @@ target still is not in `PROVIDER_TARGETS`, so recovery after a killed run stays
 the open gap recorded in 006. A4 stays open and the live model turn stays held.
 
 - 007: Made the one `load_spec` read through `parse_answer` and refuse a repeated spec key with `spec repeats a key`, extended the named test with the three Context texts, and hand-planted then restored the collapsed-parse arm.
+
+## 008 — refuse non-JSON whitespace around an answer
+
+`judge` no longer calls `str::trim` on the answer. Its first statement is now
+`    let trimmed = trim_json_whitespace(answer);`, and the echo arm is
+`            Reason::Echo => trimmed == trim_json_whitespace(input),`. The one
+private helper in `src/lib.rs` is:
+
+```rust
+fn trim_json_whitespace(text: &str) -> &str {
+    text.trim_matches(&[' ', '\t', '\n', '\r'][..])
+}
+```
+
+It removes only space, tab, line feed and carriage return from both ends and
+leaves every other character in place. `src/lib.rs` now has no `.trim()` call,
+and `parse_answer` is still the only answer parser with one trim ahead of it.
+`CHECK_ORDER` keeps its nine reasons, the task arm, the duplicate arm and the
+`expected_value` line stay as they were, and `src/lib.rs` still has no
+`std::fs` and no `std::net`. `held-judge-plants.json` changes only F-UT1's
+`old` to `    let trimmed = trim_json_whitespace(answer);\n` and its `new` to
+the early return followed by that same line; `falsifiers.json` stays F-UT2
+only, and neither F-UT1 nor F-UT3 ran.
+
+`checker_accepts_recorded_answer_and_refuses_stubs` still accepts each recorded
+answer and each equivalent-JSON answer, and now also accepts a recorded answer
+with a leading tab and one with a trailing carriage return. `""`, `"   "` and
+`"\r\n \t"` are `empty`. For each agent the recorded bytes with U+00A0 before
+them, U+000B before them, U+000C after them or U+FEFF before them are `shape`,
+and `"\u{00a0}ok"` is `shape`. Every earlier refusal stays, including the spec
+swap and the malformed-spec cases.
+
+### Hand plant
+
+The helper body was replaced with `text.trim()`:
+
+```rust
+fn trim_json_whitespace(text: &str) -> &str {
+    text.trim()
+}
+```
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --locked --manifest-path lab/useful-task/Cargo.toml -- checker_accepts_recorded_answer_and_refuses_stubs --exact`
+exited 101 on the U+00A0 assertion:
+
+```
+thread 'checker_accepts_recorded_answer_and_refuses_stubs' panicked at tests/checker.rs:337:13:
+assertion `left == right` failed: non-JSON whitespace around an answer is shape
+  left: Accept { answer_sha256: "be6bff0dff3b3ebdcd97da9db1cdbe24aaa194e90fef6ac158ff8b0b36eb5ba5" }
+ right: Refuse { reason: "shape" }
+```
+
+The original body was then restored and the same command passed. `src/lib.rs`
+kept SHA-256
+`ad69585f3afbc3298499e5a89ea74c27918d00f2bbb9e7f2c23b9c384f5511a4` across the
+plant and the restore, the committed helper does not call `text.trim()`, and
+`lab/useful-task/src/lib.rs.falsify-original` is absent.
+
+### Checks
+
+`cargo fmt --manifest-path lab/useful-task/Cargo.toml -- --check` exited 0. The
+full `cargo test --locked --manifest-path lab/useful-task/Cargo.toml` passed
+the integration test and six doctests. The shared runner reported:
+
+```
+baseline: 1 named tests pass without an edit, 0 do not
+F-UT2  CAUGHT                             1s  skip the named-task check
+summary: 1 CAUGHT of 1
+```
+
+`held-judge-plants.json`, `tests/checker.rs` and `src/lib.rs` are the only
+changed files; both `accept.json` files, both `input.txt` files, both
+`recorded.json` files, `Cargo.toml`, `Cargo.lock` and `falsifiers.json` keep
+their bytes. A4 stays open and the live model turn stays held.
+
+- 008: Made the one trim remove only the four JSON whitespace characters through `trim_json_whitespace`, reused it in the echo arm, extended the named test with the tab, carriage-return and four non-JSON-wrapped cases, and hand-planted then restored the `text.trim()` body.

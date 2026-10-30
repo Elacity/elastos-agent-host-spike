@@ -314,13 +314,37 @@ fn checker_accepts_recorded_answer_and_refuses_stubs() {
         } else {
             (&b_input, &b_recorded)
         };
-        for blank in ["", "   "] {
+        for blank in ["", "   ", "\r\n \t"] {
             assert_eq!(
                 judge(spec, input, expected, blank),
                 refused("empty"),
                 "blank answer is empty"
             );
         }
+        for wrapped in [format!("\t{expected}"), format!("{expected}\r")] {
+            assert_eq!(
+                judge(spec, input, expected, &wrapped),
+                accepted(&wrapped),
+                "JSON whitespace around an answer is accepted"
+            );
+        }
+        for wrapped in [
+            format!("\u{00a0}{expected}"),
+            format!("\u{000b}{expected}"),
+            format!("{expected}\u{000c}"),
+            format!("\u{feff}{expected}"),
+        ] {
+            assert_eq!(
+                judge(spec, input, expected, &wrapped),
+                refused("shape"),
+                "non-JSON whitespace around an answer is shape"
+            );
+        }
+        assert_eq!(
+            judge(spec, input, expected, "\u{00a0}ok"),
+            refused("shape"),
+            "a fixed string behind U+00A0 is shape"
+        );
         assert_eq!(
             judge(spec, input, expected, input),
             refused("echo"),

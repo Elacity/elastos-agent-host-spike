@@ -275,7 +275,7 @@ pub fn load_spec(bytes: &str) -> Result<Spec, String> {
 
 /// Judge `answer` against `spec`, the input bytes and the expected bytes.
 pub fn judge(spec: &Spec, input: &str, expected: &str, answer: &str) -> Verdict {
-    let trimmed = answer.trim();
+    let trimmed = trim_json_whitespace(answer);
     let parsed = parse_answer(trimmed);
     let expected_value = serde_json::from_str::<Value>(expected).ok();
 
@@ -285,7 +285,7 @@ pub fn judge(spec: &Spec, input: &str, expected: &str, answer: &str) -> Verdict 
             Reason::Input => sha256_hex(input) != spec.input_sha256(),
             Reason::Recorded => sha256_hex(expected) != spec.recorded_sha256(),
             Reason::Empty => trimmed.is_empty(),
-            Reason::Echo => trimmed == input.trim(),
+            Reason::Echo => trimmed == trim_json_whitespace(input),
             Reason::FixedString => spec.fixed_strings.iter().any(|fixed| fixed == trimmed),
             Reason::Shape => match &parsed {
                 AnswerParse::Value(value) => !spec.schema.matches(value),
@@ -309,6 +309,15 @@ pub fn judge(spec: &Spec, input: &str, expected: &str, answer: &str) -> Verdict 
     Verdict::Accept {
         answer_sha256: sha256_hex(trimmed),
     }
+}
+
+/// Remove only the four JSON whitespace characters from both ends of `text`.
+///
+/// JSON whitespace is space, tab, line feed and carriage return. `str::trim`
+/// also removes other characters such as U+00A0, so an answer wrapped in one
+/// of those would parse as the recorded value and be accepted.
+fn trim_json_whitespace(text: &str) -> &str {
+    text.trim_matches(&[' ', '\t', '\n', '\r'][..])
 }
 
 /// What one parse of the answer text found.
