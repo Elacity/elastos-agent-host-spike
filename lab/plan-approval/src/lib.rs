@@ -125,16 +125,26 @@ pub fn deny_shown_plan(
 /// The agent asks for the hash of the bytes it holds now, so a plan that
 /// changed after approval is refused by the stand-in with status 403 and
 /// `grant is not bound to this plan`, and a `once` grant stays `Live`.
+///
+/// `run_id` is the pair the grant route minted, when one is given, a method
+/// argument. This helper passes it unchanged as the route's `run_id` key only
+/// when it is `Some`, so an absent run id reaches the route without that key
+/// and a presented one must be the exact pair the grant route minted. A
+/// different or empty id is the route's own status 403 refusal naming both
+/// ids, and that refusal spends nothing. This helper does not judge the caller
+/// or the run id text, does not read the pair back and posts no hosted effect.
 pub fn execute(
     stand_in: &mut StandIn,
     caller: Caller<'_>,
     request_id: &str,
     plan: &[u8],
+    run_id: Option<&str>,
 ) -> Result<Value, (u16, String)> {
-    stand_in.post_capability_validate(
-        caller,
-        &json!({ "request_id": request_id, "plan_sha256": plan_sha256(plan) }),
-    )
+    let mut body = json!({ "request_id": request_id, "plan_sha256": plan_sha256(plan) });
+    if let Some(run_id) = run_id {
+        body["run_id"] = json!(run_id);
+    }
+    stand_in.post_capability_validate(caller, &body)
 }
 
 /// Moves the stand-in's clock to `secs` and lets the stand-in expire due
@@ -685,7 +695,8 @@ fn a_grant_bound_to_one_plan_is_refused_for_another_plan() {
                 session_id: &session
             },
             &request_b,
-            PLAN_A
+            PLAN_A,
+            None
         ),
         Err((403, "grant is not bound to this plan".to_owned())),
         "grant G2 is bound to plan B, not plan A"
@@ -709,7 +720,8 @@ fn a_grant_bound_to_one_plan_is_refused_for_another_plan() {
                 session_id: &session
             },
             &request_a,
-            PLAN_A
+            PLAN_A,
+            None
         ),
         Ok(json!({ "valid": true })),
         "grant G1 authorises plan A's one use"
@@ -734,7 +746,8 @@ fn a_grant_bound_to_one_plan_is_refused_for_another_plan() {
                 session_id: &session
             },
             &request_b,
-            PLAN_B
+            PLAN_B,
+            None
         ),
         Ok(json!({ "valid": true })),
         "spending G1 left G2's own plan use intact"
@@ -955,7 +968,8 @@ fn deny_one_shown_step() {
                 session_id: &session
             },
             &denied,
-            PLAN_A
+            PLAN_A,
+            None
         ),
         Err((400, "unknown grant".to_owned())),
         "running a denied step is refused with unknown grant, without an id"
@@ -1013,7 +1027,8 @@ fn deny_one_shown_step() {
                 session_id: &session
             },
             &denied,
-            PLAN_A
+            PLAN_A,
+            None
         ),
         Err((400, "unknown grant".to_owned())),
         "the denied step still has no grant after its sibling is granted"
@@ -1031,7 +1046,8 @@ fn deny_one_shown_step() {
                 session_id: &session
             },
             &sibling,
-            PLAN_B
+            PLAN_B,
+            None
         ),
         Ok(json!({ "valid": true })),
         "the sibling grant authorises its own one use"
@@ -1353,7 +1369,8 @@ fn agent_cannot_deny_its_own_shown_plan() {
             &mut stand_in,
             Caller::Client { session_id: &first },
             &denied,
-            PLAN_A
+            PLAN_A,
+            None
         ),
         Err((400, "unknown grant".to_owned())),
         "running the denied step is refused with unknown grant, without an id"
@@ -1369,7 +1386,8 @@ fn agent_cannot_deny_its_own_shown_plan() {
             &mut stand_in,
             Caller::Client { session_id: &first },
             &sibling,
-            PLAN_B
+            PLAN_B,
+            None
         ),
         Ok(json!({ "valid": true })),
         "the sibling grant authorises its own one use"
@@ -1596,7 +1614,8 @@ fn unanswered_shown_step_expires() {
                 session_id: &session
             },
             &unanswered,
-            PLAN_A
+            PLAN_A,
+            None
         ),
         Err((400, "unknown grant".to_owned())),
         "an expired shown step is not a live grant, so running it is refused with unknown grant"
@@ -1615,7 +1634,8 @@ fn unanswered_shown_step_expires() {
                 session_id: &session
             },
             &allowed,
-            PLAN_B
+            PLAN_B,
+            None
         ),
         Ok(json!({ "valid": true })),
         "the allowed step stays a grant and authorises its own one use"
@@ -1839,7 +1859,8 @@ fn stop_settles_that_sessions_shown_steps() {
             &mut stand_in,
             Caller::Client { session_id: &first },
             &allowed_step,
-            PLAN_B
+            PLAN_B,
+            None
         ),
         Err((400, "grant is not live: Revoked".to_owned())),
         "the revoked allow-once grant refuses its own plan's use"
@@ -1926,7 +1947,8 @@ fn stop_settles_that_sessions_shown_steps() {
                 session_id: &second
             },
             &other_step,
-            PLAN_A
+            PLAN_A,
+            None
         ),
         Ok(json!({ "valid": true })),
         "the other session's allow-once grant authorises its own use"
@@ -2112,7 +2134,8 @@ fn shown_allow_once_expires() {
                 session_id: &session
             },
             &spent_step,
-            PLAN_A
+            PLAN_A,
+            None
         ),
         Ok(json!({ "valid": true })),
         "the first allow-once grant authorises its own one use"
@@ -2182,7 +2205,7 @@ fn shown_allow_once_expires() {
     );
 
     assert_eq!(
-        execute(&mut stand_in, Caller::Client { session_id: &session }, &unspent_step, PLAN_B),
+        execute(&mut stand_in, Caller::Client { session_id: &session }, &unspent_step, PLAN_B, None),
         Err((400, "grant is not live: Expired".to_owned())),
         "an unused allow-once expires at the stand-in's grant lifetime, so its use is refused as Expired"
     );
@@ -2199,7 +2222,8 @@ fn shown_allow_once_expires() {
                 session_id: &session
             },
             &spent_step,
-            PLAN_A
+            PLAN_A,
+            None
         ),
         Err((400, "grant is not live: Exhausted".to_owned())),
         "the spent step stays exhausted at the stand-in's grant lifetime"
@@ -2496,7 +2520,8 @@ fn shown_session_lasts_until_stop() {
                 session_id: &session
             },
             &session_step,
-            PLAN_A
+            PLAN_A,
+            None
         ),
         Ok(json!({ "valid": true })),
         "the session grant authorises its bound plan"
@@ -2513,7 +2538,8 @@ fn shown_session_lasts_until_stop() {
                 session_id: &session
             },
             &session_step,
-            PLAN_A
+            PLAN_A,
+            None
         ),
         Ok(json!({ "valid": true })),
         "the session grant authorises its bound plan a second time"
@@ -2530,7 +2556,8 @@ fn shown_session_lasts_until_stop() {
                 session_id: &session
             },
             &session_step,
-            PLAN_B
+            PLAN_B,
+            None
         ),
         Err((403, "grant is not bound to this plan".to_owned())),
         "a different plan is refused with grant is not bound to this plan"
@@ -2577,7 +2604,8 @@ fn shown_session_lasts_until_stop() {
                 session_id: &session
             },
             &session_step,
-            PLAN_A
+            PLAN_A,
+            None
         ),
         Err((400, "grant is not live: Revoked".to_owned())),
         "the stopped session's grant is revoked, so its use is refused as Revoked"
@@ -2784,7 +2812,7 @@ fn shown_grant_authorises_only_its_session() {
     // Each session uses the other session's shown grant. The use is refused
     // before any spend, so both grants stay live.
     assert_eq!(
-        execute(&mut stand_in, Caller::Client { session_id: "component-2" }, &first_step, PLAN_A),
+        execute(&mut stand_in, Caller::Client { session_id: "component-2" }, &first_step, PLAN_A, None),
         Err((
             403,
             "wrong capsule: expected component-1, got component-2".to_owned()
@@ -2792,7 +2820,7 @@ fn shown_grant_authorises_only_its_session() {
         "a shown grant authorises only its session: the second session's use of request-1 is refused"
     );
     assert_eq!(
-        execute(&mut stand_in, Caller::Client { session_id: &first_session }, &second_step, PLAN_B),
+        execute(&mut stand_in, Caller::Client { session_id: &first_session }, &second_step, PLAN_B, None),
         Err((
             403,
             "wrong capsule: expected component-2, got component-1".to_owned()
@@ -2828,7 +2856,7 @@ fn shown_grant_authorises_only_its_session() {
 
     // Each session's own use of its own grant still runs and spends it.
     assert_eq!(
-        execute(&mut stand_in, Caller::Client { session_id: &first_session }, &first_step, PLAN_A),
+        execute(&mut stand_in, Caller::Client { session_id: &first_session }, &first_step, PLAN_A, None),
         Ok(json!({ "valid": true })),
         "a shown grant authorises only its session: the first session's own use of request-1 still runs"
     );
@@ -2838,7 +2866,7 @@ fn shown_grant_authorises_only_its_session() {
         "a shown grant authorises only its session: the spent first grant leaves the live list and the second grant stays"
     );
     assert_eq!(
-        execute(&mut stand_in, Caller::Client { session_id: &second_session }, &second_step, PLAN_B),
+        execute(&mut stand_in, Caller::Client { session_id: &second_session }, &second_step, PLAN_B, None),
         Ok(json!({ "valid": true })),
         "a shown grant authorises only its session: the second session's own use of request-2 still runs"
     );
@@ -2965,7 +2993,7 @@ fn owner_approves_only_the_shown_hash() {
 
     // A refused approval leaves nothing to run.
     assert_eq!(
-        execute(&mut stand_in, Caller::Client { session_id: &session }, &step, PLAN_A),
+        execute(&mut stand_in, Caller::Client { session_id: &session }, &step, PLAN_A, None),
         Err((400, "unknown grant".to_owned())),
         "the owner grant mints only the hash the shown request stored: running the request before the owner grants it is refused as unknown grant"
     );
@@ -3019,7 +3047,8 @@ fn owner_approves_only_the_shown_hash() {
                 session_id: &session
             },
             &step,
-            PLAN_A
+            PLAN_A,
+            None
         ),
         Ok(json!({ "valid": true })),
         "the owner grant mints only the hash the shown request stored: the granted plan runs once"
@@ -3030,7 +3059,7 @@ fn owner_approves_only_the_shown_hash() {
         "the owner grant mints only the hash the shown request stored: the spent once grant leaves the live list"
     );
     assert_eq!(
-        execute(&mut stand_in, Caller::Client { session_id: &session }, &step, PLAN_A),
+        execute(&mut stand_in, Caller::Client { session_id: &session }, &step, PLAN_A, None),
         Err((400, "grant is not live: Exhausted".to_owned())),
         "the owner grant mints only the hash the shown request stored: a second use of the same plan is refused as Exhausted"
     );
@@ -3221,7 +3250,8 @@ fn agent_cannot_approve_its_own_shown_plan() {
                 session_id: &poster
             },
             &step,
-            PLAN_A
+            PLAN_A,
+            None
         ),
         Err((400, "unknown grant".to_owned())),
         "the agent that showed the plan cannot mint its grant: the posted plan has no grant to run"
@@ -3276,7 +3306,8 @@ fn agent_cannot_approve_its_own_shown_plan() {
                 session_id: &poster
             },
             &step,
-            PLAN_A
+            PLAN_A,
+            None
         ),
         Ok(json!({ "valid": true })),
         "the agent that showed the plan cannot mint its grant: the granted plan runs once"
@@ -3287,7 +3318,7 @@ fn agent_cannot_approve_its_own_shown_plan() {
         "the agent that showed the plan cannot mint its grant: the spent once grant leaves the live list"
     );
     assert_eq!(
-        execute(&mut stand_in, Caller::Client { session_id: &poster }, &step, PLAN_A),
+        execute(&mut stand_in, Caller::Client { session_id: &poster }, &step, PLAN_A, None),
         Err((400, "grant is not live: Exhausted".to_owned())),
         "the agent that showed the plan cannot mint its grant: a second use of the same plan is refused as Exhausted"
     );
@@ -3410,7 +3441,7 @@ fn shell_cannot_spend_a_shown_grant() {
     ));
     let plans: [&[u8]; 3] = [PLAN_A, PLAN_B, b""];
     for plan in plans {
-        let result = execute(&mut stand_in, Caller::Shell, &step, plan);
+        let result = execute(&mut stand_in, Caller::Shell, &step, plan, None);
         assert_eq!(
             result, refused,
             "the shell cannot spend a shown grant: the shell's use of request-1 with plan bytes {plan:?} is refused as a shell on an instance-session route"
@@ -3448,7 +3479,8 @@ fn shell_cannot_spend_a_shown_grant() {
                 session_id: &other_session,
             },
             &step,
-            PLAN_A
+            PLAN_A,
+            None
         ),
         Err((
             403,
@@ -3475,8 +3507,7 @@ fn shell_cannot_spend_a_shown_grant() {
                 session_id: &owner_session,
             },
             &step,
-            PLAN_A
-        ),
+            PLAN_A, None),
         Ok(json!({ "valid": true })),
         "the shell cannot spend a shown grant: the owning session's own use of request-1 still runs"
     );
@@ -3488,7 +3519,7 @@ fn shell_cannot_spend_a_shown_grant() {
 
     // A shell call after that spend is still the session refusal, so the
     // caller check runs before the life check.
-    let after_spend = execute(&mut stand_in, Caller::Shell, &step, PLAN_A);
+    let after_spend = execute(&mut stand_in, Caller::Shell, &step, PLAN_A, None);
     assert_eq!(
         after_spend, refused,
         "the shell cannot spend a shown grant: a shell call after the spend is still refused as a shell"
@@ -3511,8 +3542,7 @@ fn shell_cannot_spend_a_shown_grant() {
                 session_id: &owner_session,
             },
             &step,
-            PLAN_A
-        ),
+            PLAN_A, None),
         Err((400, "grant is not live: Exhausted".to_owned())),
         "the shell cannot spend a shown grant: a second use by the owning session is refused as Exhausted"
     );
@@ -3824,7 +3854,8 @@ fn shell_cannot_submit_a_shown_plan() {
                 session_id: "component-1"
             },
             "request-1",
-            PLAN_A
+            PLAN_A,
+            None
         ),
         Ok(json!({ "valid": true })),
         "the shell cannot submit a shown plan: the instance session's own use of request-1 runs"
@@ -4232,7 +4263,8 @@ fn only_a_live_session_submits_a_shown_plan() {
                 session_id: &second,
             },
             "request-1",
-            PLAN_A
+            PLAN_A,
+            None
         ),
         Ok(json!({ "valid": true })),
         "only a live session submits a shown plan: the live session's own use of request-1 runs"
@@ -4614,7 +4646,7 @@ fn agent_cannot_stop_a_shown_session() {
 
     // The revoked grant is refused through the existing use path.
     assert_eq!(
-        execute(&mut stand_in, posting_session, &shown_step, PLAN_A),
+        execute(&mut stand_in, posting_session, &shown_step, PLAN_A, None),
         Err((400, "grant is not live: Revoked".to_owned())),
         "the shell stop's revoked grant refuses its own plan's use"
     );
@@ -4698,7 +4730,7 @@ fn agent_cannot_stop_a_shown_session() {
         "the other session's approval stores one live grant"
     );
     assert_eq!(
-        execute(&mut stand_in, other_session, &other_step, PLAN_A),
+        execute(&mut stand_in, other_session, &other_step, PLAN_A, None),
         Ok(json!({ "valid": true })),
         "the other session's allow-once grant authorises its own use"
     );
@@ -5048,7 +5080,7 @@ fn agent_cannot_launch_a_shown_session() {
     );
 
     assert_eq!(
-        execute(&mut stand_in, client_session, &shown_step, PLAN_A),
+        execute(&mut stand_in, client_session, &shown_step, PLAN_A, None),
         Ok(json!({ "valid": true })),
         "the agent cannot launch a shown session: the shown session's allow-once grant authorises its own use"
     );
@@ -5119,7 +5151,7 @@ fn agent_cannot_launch_a_shown_session() {
         "the agent cannot launch a shown session: the owner allows the other session's plan once with the hash it saw"
     );
     assert_eq!(
-        execute(&mut stand_in, other_session, &other_step, PLAN_A),
+        execute(&mut stand_in, other_session, &other_step, PLAN_A, None),
         Ok(json!({ "valid": true })),
         "the agent cannot launch a shown session: the other shell session's allow-once grant authorises its own use"
     );
@@ -5582,6 +5614,7 @@ fn shown_request_status_is_not_the_grant() {
             },
             &second_step,
             PLAN_B,
+            None
         ),
         Ok(json!({ "valid": true })),
         "a shown request status is not the grant: the live once grant authorises its one use"
@@ -5607,8 +5640,7 @@ fn shown_request_status_is_not_the_grant() {
             &mut stand_in,
             Caller::Client { session_id: &second },
             &second_step,
-            PLAN_B,
-        ),
+            PLAN_B, None),
         Err((400, "grant is not live: Exhausted".to_owned())),
         "a shown request status is not the grant: the status word is not the live grant, so the next use is refused"
     );
@@ -6273,8 +6305,7 @@ fn shown_live_list_is_not_another_sessions_grant() {
             &mut stand_in,
             Caller::Client { session_id: &first },
             &second_step,
-            PLAN_B,
-        ),
+            PLAN_B, None),
         Err((
             403,
             "wrong capsule: expected component-2, got component-1".to_owned()
@@ -6294,6 +6325,7 @@ fn shown_live_list_is_not_another_sessions_grant() {
             Caller::Client { session_id: &first },
             &first_step,
             PLAN_A,
+            None
         ),
         Ok(json!({ "valid": true })),
         "a shown live list is not another session's grant: the once grant authorises its one use"
@@ -6322,6 +6354,7 @@ fn shown_live_list_is_not_another_sessions_grant() {
             Caller::Client { session_id: &first },
             &first_step,
             PLAN_A,
+            None
         ),
         Err((400, "grant is not live: Exhausted".to_owned())),
         "a shown live list is not another session's grant: the spent once grant is no longer live"
@@ -6350,8 +6383,7 @@ fn shown_live_list_is_not_another_sessions_grant() {
                 session_id: &second,
             },
             &second_step,
-            PLAN_B,
-        ),
+            PLAN_B, None),
         Ok(json!({ "valid": true })),
         "a shown live list is not another session's grant: the session grant authorises its session's use"
     );
@@ -6372,8 +6404,7 @@ fn shown_live_list_is_not_another_sessions_grant() {
                 session_id: &second,
             },
             &second_step,
-            PLAN_B,
-        ),
+            PLAN_B, None),
         Ok(json!({ "valid": true })),
         "a shown live list is not another session's grant: the session grant authorises a second use"
     );
@@ -6450,6 +6481,7 @@ fn shown_live_list_is_not_another_sessions_grant() {
             },
             &second_step,
             PLAN_B,
+            None
         ),
         Err((400, "grant is not live: Revoked".to_owned())),
         "a shown live list is not another session's grant: the stopped session's grant is revoked"
@@ -6937,6 +6969,7 @@ fn shown_request_list_does_not_submit_again() {
             },
             &second_step,
             PLAN_B,
+            None
         ),
         Ok(json!({ "valid": true })),
         "a shown request list does not submit again: the once grant authorises its one use"
@@ -6968,8 +7001,7 @@ fn shown_request_list_does_not_submit_again() {
                 session_id: &second,
             },
             &second_step,
-            PLAN_B,
-        ),
+            PLAN_B, None),
         Err((400, "grant is not live: Exhausted".to_owned())),
         "a shown request list does not submit again: the next use of the spent once grant is refused"
     );
@@ -7600,6 +7632,7 @@ fn shown_submit_names_a_declared_ask() {
             Caller::Client { session_id: &first },
             &second_step,
             PLAN_B,
+            None
         ),
         Ok(json!({ "valid": true })),
         "a shown submit names a declared ask: the once write grant authorises its one use"
@@ -7615,6 +7648,7 @@ fn shown_submit_names_a_declared_ask() {
             Caller::Client { session_id: &first },
             &second_step,
             PLAN_B,
+            None
         ),
         Err((400, "grant is not live: Exhausted".to_owned())),
         "a shown submit names a declared ask: the next use of the spent once grant is refused"
@@ -8227,6 +8261,7 @@ fn shown_request_reason_is_not_the_grant() {
             },
             "request-1",
             PLAN_A,
+            None
         ),
         Ok(json!({ "valid": true })),
         "a shown request reason is not the grant: the once grant authorises its one use"
@@ -8244,6 +8279,7 @@ fn shown_request_reason_is_not_the_grant() {
             },
             "request-1",
             PLAN_A,
+            None
         ),
         Err((400, "grant is not live: Exhausted".to_owned())),
         "a shown request reason is not the grant: the next use of the spent once grant is refused"
@@ -8936,6 +8972,7 @@ fn shown_grant_rationale_is_not_the_grant() {
             },
             "request-1",
             PLAN_A,
+            None
         ),
         Ok(json!({ "valid": true })),
         "a shown grant rationale is not the grant: the once grant authorises its one use"
@@ -8978,6 +9015,7 @@ fn shown_grant_rationale_is_not_the_grant() {
             },
             "request-1",
             PLAN_A,
+            None
         ),
         Err((400, "grant is not live: Exhausted".to_owned())),
         "a shown grant rationale is not the grant: the next use of the spent once grant is refused"
@@ -9784,6 +9822,7 @@ fn shown_deny_reason_is_not_the_grant() {
             },
             "request-4",
             PLAN_B,
+            None
         ),
         Ok(json!({ "valid": true })),
         "a shown deny reason is not the grant: the live once grant authorises its one use"
@@ -9817,6 +9856,7 @@ fn shown_deny_reason_is_not_the_grant() {
             },
             "request-4",
             PLAN_B,
+            None
         ),
         Err((400, "grant is not live: Exhausted".to_owned())),
         "a shown deny reason is not the grant: the next use of the spent once grant is refused"
@@ -10399,6 +10439,7 @@ fn shown_stop_reason_is_not_the_grant() {
         },
         "request-1",
         PLAN_A,
+        None,
     );
     assert_eq!(
         revoked_a,
@@ -10553,6 +10594,7 @@ fn shown_stop_reason_is_not_the_grant() {
         },
         "request-3",
         PLAN_A,
+        None,
     );
     assert_eq!(
         revoked_c,
@@ -11009,6 +11051,7 @@ fn shown_worker_exit_is_not_the_grant() {
         },
         "request-1",
         PLAN_A,
+        None,
     );
     assert_eq!(
         revoked_a,
@@ -11213,6 +11256,7 @@ fn shown_worker_exit_is_not_the_grant() {
         },
         "request-3",
         PLAN_A,
+        None,
     );
     assert_eq!(
         revoked_c,
@@ -11599,7 +11643,7 @@ fn shown_run_pair_is_not_the_grant() {
 
     // A use of the once grant exhausts it: the pair stops being live.
     assert_eq!(
-        execute(&mut stand_in, client_one, "request-1", PLAN_A),
+        execute(&mut stand_in, client_one, "request-1", PLAN_A, None),
         Ok(json!({ "valid": true })),
         "a shown run pair is not the grant: the once grant authorises its one use"
     );
@@ -11633,7 +11677,7 @@ fn shown_run_pair_is_not_the_grant() {
 
     // A session grant stays readable after one use.
     assert_eq!(
-        execute(&mut stand_in, client_two, "request-2", PLAN_B),
+        execute(&mut stand_in, client_two, "request-2", PLAN_B, None),
         Ok(json!({ "valid": true })),
         "a shown run pair is not the grant: the session grant authorises its use"
     );
@@ -11704,5 +11748,690 @@ fn shown_run_pair_is_not_the_grant() {
         shell_live(&stand_in),
         empty_shell,
         "a shown run pair is not the grant: the stop leaves the empty live list"
+    );
+}
+
+#[test]
+fn shown_use_names_the_minted_run() {
+    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use fixtures::{PLAN_A, PLAN_B};
+    use journeys::{request, running_agent};
+    use serde_json::{json, Value};
+
+    fn shell_capsules(stand_in: &StandIn) -> Vec<Value> {
+        stand_in
+            .get_capsules(Caller::Shell)
+            .expect("shell capsules")["capsules"]
+            .as_array()
+            .cloned()
+            .expect("the shell capsule list holds a capsules array")
+    }
+
+    fn capsule_state(stand_in: &StandIn, id: &str) -> Value {
+        let listed = shell_capsules(stand_in)
+            .into_iter()
+            .find(|entry| entry["id"] == id)
+            .expect("the shell capsule list holds that id");
+        json!({ "id": listed["id"], "status": listed["status"], "cause": listed["cause"] })
+    }
+
+    fn shell_live(stand_in: &StandIn) -> Value {
+        read_shown_grants(stand_in, Caller::Shell, None).expect("the shell reads the live list")
+    }
+
+    let client_one = Caller::Client {
+        session_id: "component-1",
+    };
+    let client_two = Caller::Client {
+        session_id: "component-2",
+    };
+    let resource_a = "localhost://Public/plan-approval/a.txt";
+    let unknown: Result<Value, (u16, String)> = Err((400, "unknown grant".to_owned()));
+    let shell_refused: Result<Value, (u16, String)> = Err((
+        403,
+        "capability validate needs an instance session".to_owned(),
+    ));
+    let once_spent: Result<Value, (u16, String)> =
+        Err((400, "grant is not live: Exhausted".to_owned()));
+    let revoked: Result<Value, (u16, String)> = Err((400, "grant is not live: Revoked".to_owned()));
+    let pair_one = json!({ "run_id": "run-request-1", "request_id": "request-1" });
+    let pair_two = json!({ "run_id": "run-request-2", "request_id": "request-2" });
+    let entry_one = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": resource_a,
+        "action": "read",
+        "duration": "once",
+        "granted_at": 0,
+    });
+    let entry_two = json!({
+        "request_id": "request-2",
+        "session_id": "component-2",
+        "resource": resource_a,
+        "action": "write",
+        "duration": "session",
+        "granted_at": 0,
+    });
+    let empty_shell: Value = json!({ "scope": "all_sessions_live", "capabilities": [] });
+    let one_live = json!({
+        "scope": "all_sessions_live",
+        "capabilities": [entry_one.clone()],
+    });
+    let two_live = json!({
+        "scope": "all_sessions_live",
+        "capabilities": [entry_two.clone()],
+    });
+    let plan_a = plan_sha256(PLAN_A);
+    let plan_b = plan_sha256(PLAN_B);
+
+    let mut stand_in = StandIn::new();
+
+    // A use with no grant is the unknown-grant answer even when it presents a
+    // run id, and that refusal stores and spends nothing.
+    let no_grant = execute(
+        &mut stand_in,
+        client_one,
+        "request-1",
+        PLAN_A,
+        Some("run-other"),
+    );
+    assert_eq!(
+        no_grant, unknown,
+        "a shown use names the minted run pair: a use with no grant is unknown grant"
+    );
+    assert_ne!(
+        no_grant,
+        Err((
+            403,
+            "effect run run-other is not bound to request request-1".to_owned()
+        )),
+        "a shown use names the minted run pair: an unknown grant is not the unminted-run refusal"
+    );
+    assert_ne!(
+        no_grant,
+        Err((
+            403,
+            "wrong capsule: expected component-1, got component-1".to_owned()
+        )),
+        "a shown use names the minted run pair: the unknown-grant answer is not a caller refusal"
+    );
+    assert_eq!(
+        shell_capsules(&stand_in),
+        Vec::<Value>::new(),
+        "a shown use names the minted run pair: the refused use stores no capsule"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown use names the minted run pair: the refused use mints no grant"
+    );
+
+    // Two sessions run with no cause.
+    let first = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    let second = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    assert_eq!(
+        first, "component-1",
+        "a shown use names the minted run pair: the fresh stand-in names the first session component-1"
+    );
+    assert_eq!(
+        second, "component-2",
+        "a shown use names the minted run pair: the second running session is component-2"
+    );
+    for id in [&first, &second] {
+        assert_eq!(
+            capsule_state(&stand_in, id),
+            json!({ "id": id, "status": "running", "cause": "" }),
+            "a shown use names the minted run pair: each launched session runs with no cause"
+        );
+    }
+
+    // The first session submits one pending step.
+    let first_step = request(
+        &mut stand_in,
+        client_one,
+        PLAN_A,
+        resource_a,
+        "read",
+        "show this step",
+    )
+    .expect("the agent's request route stores one pending request");
+    assert_eq!(
+        first_step, "request-1",
+        "a shown use names the minted run pair: the first stored request is request-1"
+    );
+    assert_eq!(
+        plan_a.len(),
+        64,
+        "a shown use names the minted run pair: the hash of plan A has length 64"
+    );
+
+    // A use before the owner grants names no pair, even with the id the grant
+    // route will mint.
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            client_one,
+            "request-1",
+            PLAN_A,
+            Some("run-request-1"),
+        ),
+        unknown,
+        "a shown use names the minted run pair: the pending step's use is unknown grant"
+    );
+    assert_eq!(
+        read_shown_request(&stand_in, client_one, "request-1"),
+        Ok(json!({ "status": "pending" })),
+        "a shown use names the minted run pair: the refused use leaves the step pending"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown use names the minted run pair: the pending step is not a live grant"
+    );
+
+    // The owner grants the first step once.
+    let approved_one = approve(
+        &mut stand_in,
+        Caller::Shell,
+        "request-1",
+        "once",
+        &plan_a,
+        "show this grant",
+    );
+    assert_eq!(
+        approved_one,
+        Ok(json!({ "success": true })),
+        "a shown use names the minted run pair: the shell approval of the first step succeeds"
+    );
+    assert!(
+        approved_one
+            .as_ref()
+            .expect("the grant route answers")
+            .get("run_id")
+            .is_none(),
+        "a shown use names the minted run pair: the grant answer carries no run_id key"
+    );
+    assert_eq!(
+        read_shown_run(&stand_in, client_one, "request-1"),
+        Ok(pair_one.clone()),
+        "a shown use names the minted run pair: the owning session reads the minted pair"
+    );
+
+    // The shell is refused before the body is read, so a minted or a
+    // different run id each reach the same instance-session refusal.
+    let shell_pair = execute(
+        &mut stand_in,
+        Caller::Shell,
+        "request-1",
+        PLAN_A,
+        Some("run-request-1"),
+    );
+    assert_eq!(
+        shell_pair, shell_refused,
+        "a shown use names the minted run pair: the shell use names no pair"
+    );
+    assert_ne!(
+        shell_pair,
+        Err((
+            403,
+            "effect run run-request-1 is not bound to request request-1".to_owned()
+        )),
+        "a shown use names the minted run pair: the shell refusal is not the unminted-run refusal"
+    );
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Shell,
+            "request-1",
+            PLAN_A,
+            Some("run-other"),
+        ),
+        shell_refused,
+        "a shown use names the minted run pair: the shell's other run id reaches the same refusal"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        one_live,
+        "a shown use names the minted run pair: the refused shell use leaves the once grant live"
+    );
+    assert!(
+        shell_live(&stand_in)["capabilities"][0]
+            .get("run_id")
+            .is_none(),
+        "a shown use names the minted run pair: the live grant entry has no run_id key"
+    );
+    assert_eq!(
+        read_shown_run(&stand_in, client_one, "request-1"),
+        Ok(pair_one.clone()),
+        "a shown use names the minted run pair: the refused shell use leaves the pair readable"
+    );
+
+    // Another session's different run id is the unminted-run refusal; its
+    // matching run id is the wrong-capsule refusal. Each spends nothing.
+    let sibling_other = execute(
+        &mut stand_in,
+        client_two,
+        "request-1",
+        PLAN_A,
+        Some("run-other"),
+    );
+    assert_eq!(
+        sibling_other,
+        Err((
+            403,
+            "effect run run-other is not bound to request request-1".to_owned()
+        )),
+        "a shown use names the minted run pair: the other session's different run id is the unminted-run refusal"
+    );
+    assert_ne!(
+        sibling_other,
+        Err((
+            403,
+            "wrong capsule: expected component-1, got component-2".to_owned()
+        )),
+        "a shown use names the minted run pair: the different run id is refused before the session"
+    );
+    let sibling_pair = execute(
+        &mut stand_in,
+        client_two,
+        "request-1",
+        PLAN_A,
+        Some("run-request-1"),
+    );
+    assert_eq!(
+        sibling_pair,
+        Err((
+            403,
+            "wrong capsule: expected component-1, got component-2".to_owned()
+        )),
+        "a shown use names the minted run pair: the other session's minted pair is the wrong-capsule refusal"
+    );
+    assert_ne!(
+        sibling_pair,
+        Err((
+            403,
+            "effect run run-request-1 is not bound to request request-1".to_owned()
+        )),
+        "a shown use names the minted run pair: the matching pair passes the run compare"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        one_live,
+        "a shown use names the minted run pair: the other session's refusals leave the once grant live"
+    );
+
+    // The owning session's different, empty and sibling ids are the
+    // unminted-run refusal and leave the once grant live.
+    let owner_other = execute(
+        &mut stand_in,
+        client_one,
+        "request-1",
+        PLAN_A,
+        Some("run-other"),
+    );
+    assert_eq!(
+        owner_other,
+        Err((
+            403,
+            "effect run run-other is not bound to request request-1".to_owned()
+        )),
+        "a shown use names the minted run pair: the owning session's different run id is the unminted-run refusal"
+    );
+    assert_ne!(
+        owner_other,
+        Err((403, "grant is not bound to this plan".to_owned())),
+        "a shown use names the minted run pair: the different run id is refused before the plan"
+    );
+    assert_ne!(
+        owner_other, unknown,
+        "a shown use names the minted run pair: the live grant's different run id is not unknown grant"
+    );
+    assert_eq!(
+        execute(&mut stand_in, client_one, "request-1", PLAN_A, Some("")),
+        Err((
+            403,
+            "effect run  is not bound to request request-1".to_owned()
+        )),
+        "a shown use names the minted run pair: the empty run id is the unminted-run refusal"
+    );
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            client_one,
+            "request-1",
+            PLAN_A,
+            Some("granted"),
+        ),
+        Err((
+            403,
+            "effect run granted is not bound to request request-1".to_owned()
+        )),
+        "a shown use names the minted run pair: a status word is not the minted run id"
+    );
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            client_one,
+            "request-1",
+            PLAN_A,
+            Some("run-request-2"),
+        ),
+        Err((
+            403,
+            "effect run run-request-2 is not bound to request request-1".to_owned()
+        )),
+        "a shown use names the minted run pair: the sibling's minted run id is not this request's pair"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        one_live,
+        "a shown use names the minted run pair: the unminted run ids leave the once grant live"
+    );
+
+    let granted_one = read_shown_request(&stand_in, client_one, "request-1")
+        .expect("the owning session reads the granted step");
+    assert_eq!(
+        granted_one,
+        json!({ "status": "granted" }),
+        "a shown use names the minted run pair: the granted status body is the status word alone"
+    );
+    assert!(
+        granted_one.get("run_id").is_none(),
+        "a shown use names the minted run pair: the status body carries no run_id key"
+    );
+    assert_eq!(
+        read_shown_run(&stand_in, client_one, "request-1"),
+        Ok(pair_one.clone()),
+        "a shown use names the minted run pair: the unminted run ids leave the pair readable"
+    );
+
+    // The minted pair with another plan is the plan refusal and leaves the
+    // once grant live.
+    let wrong_plan = execute(
+        &mut stand_in,
+        client_one,
+        "request-1",
+        PLAN_B,
+        Some("run-request-1"),
+    );
+    assert_eq!(
+        wrong_plan,
+        Err((403, "grant is not bound to this plan".to_owned())),
+        "a shown use names the minted run pair: the minted pair with another plan is the plan refusal"
+    );
+    assert_ne!(
+        wrong_plan,
+        Err((
+            403,
+            "effect run run-request-1 is not bound to request request-1".to_owned()
+        )),
+        "a shown use names the minted run pair: the matching pair passes the run compare"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        one_live,
+        "a shown use names the minted run pair: the plan refusal leaves the once grant live"
+    );
+
+    // The exact pair spends the once grant.
+    let spent = execute(
+        &mut stand_in,
+        client_one,
+        "request-1",
+        PLAN_A,
+        Some("run-request-1"),
+    );
+    assert_eq!(
+        spent,
+        Ok(json!({ "valid": true })),
+        "a shown use names the minted run pair: the exact pair runs once"
+    );
+    assert!(
+        spent
+            .as_ref()
+            .expect("the use route answers")
+            .get("run_id")
+            .is_none(),
+        "a shown use names the minted run pair: the use answer carries no run_id key"
+    );
+    assert_eq!(
+        read_shown_run(&stand_in, client_one, "request-1"),
+        once_spent,
+        "a shown use names the minted run pair: the spent once grant has no live pair"
+    );
+    assert_ne!(
+        read_shown_run(&stand_in, client_one, "request-1"),
+        Err((
+            403,
+            "effect run run-request-1 is not bound to request request-1".to_owned()
+        )),
+        "a shown use names the minted run pair: the spent grant read is not the unminted-run refusal"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown use names the minted run pair: the spent once grant leaves the empty live list"
+    );
+
+    // On the spent grant the life check runs before the run compare, so a
+    // different and the minted id each read Exhausted.
+    let spent_other = execute(
+        &mut stand_in,
+        client_one,
+        "request-1",
+        PLAN_A,
+        Some("run-other"),
+    );
+    assert_eq!(
+        spent_other, once_spent,
+        "a shown use names the minted run pair: a later different run id on the spent grant is Exhausted"
+    );
+    assert_ne!(
+        spent_other,
+        Err((
+            403,
+            "effect run run-other is not bound to request request-1".to_owned()
+        )),
+        "a shown use names the minted run pair: the spent grant's refusal is not the unminted-run refusal"
+    );
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            client_one,
+            "request-1",
+            PLAN_A,
+            Some("run-request-1"),
+        ),
+        once_spent,
+        "a shown use names the minted run pair: the minted pair on the spent grant is Exhausted"
+    );
+
+    // The second session submits a write and the owner keeps a session grant.
+    let second_step = request(
+        &mut stand_in,
+        client_two,
+        PLAN_B,
+        resource_a,
+        "write",
+        "show this step",
+    )
+    .expect("the other session's request route stores its plan");
+    assert_eq!(
+        second_step, "request-2",
+        "a shown use names the minted run pair: the second stored request is request-2"
+    );
+    assert_eq!(
+        plan_b.len(),
+        64,
+        "a shown use names the minted run pair: the hash of plan B has length 64"
+    );
+    let approved_two = approve(
+        &mut stand_in,
+        Caller::Shell,
+        "request-2",
+        "session",
+        &plan_b,
+        "keep the session",
+    );
+    assert_eq!(
+        approved_two,
+        Ok(json!({ "success": true })),
+        "a shown use names the minted run pair: the shell approval of the second step succeeds"
+    );
+    assert!(
+        approved_two
+            .as_ref()
+            .expect("the grant route answers")
+            .get("run_id")
+            .is_none(),
+        "a shown use names the minted run pair: the second grant answer carries no run_id key"
+    );
+    assert_eq!(
+        read_shown_run(&stand_in, client_two, "request-2"),
+        Ok(pair_two.clone()),
+        "a shown use names the minted run pair: the second session reads its own pair"
+    );
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            client_two,
+            "request-2",
+            PLAN_B,
+            Some("run-request-1"),
+        ),
+        Err((
+            403,
+            "effect run run-request-1 is not bound to request request-2".to_owned()
+        )),
+        "a shown use names the minted run pair: the first request's pair is not the second request's pair"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        two_live,
+        "a shown use names the minted run pair: the unminted run id leaves the session grant live"
+    );
+    assert!(
+        shell_live(&stand_in)["capabilities"][0]
+            .get("run_id")
+            .is_none(),
+        "a shown use names the minted run pair: the session grant entry has no run_id key"
+    );
+
+    // An omitted run id succeeds on the session grant, as every earlier
+    // caller sends, and the grant stays live.
+    let no_run = execute(&mut stand_in, client_two, "request-2", PLAN_B, None);
+    assert_eq!(
+        no_run,
+        Ok(json!({ "valid": true })),
+        "a shown use names the minted run pair: an omitted run id succeeds on the session grant"
+    );
+    assert!(
+        no_run
+            .as_ref()
+            .expect("the use route answers")
+            .get("run_id")
+            .is_none(),
+        "a shown use names the minted run pair: the omitted-run use answer carries no run_id key"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        two_live,
+        "a shown use names the minted run pair: the session grant stays live after the omitted-run use"
+    );
+    assert_eq!(
+        read_shown_run(&stand_in, client_two, "request-2"),
+        Ok(pair_two.clone()),
+        "a shown use names the minted run pair: the session grant stays readable after the omitted-run use"
+    );
+
+    // The minted pair then succeeds on the same session grant.
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            client_two,
+            "request-2",
+            PLAN_B,
+            Some("run-request-2"),
+        ),
+        Ok(json!({ "valid": true })),
+        "a shown use names the minted run pair: the minted pair succeeds on the session grant"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        two_live,
+        "a shown use names the minted run pair: the session grant stays live after the minted-pair use"
+    );
+    assert_eq!(
+        read_shown_run(&stand_in, client_two, "request-2"),
+        Ok(pair_two.clone()),
+        "a shown use names the minted run pair: the session grant stays readable after the minted-pair use"
+    );
+
+    // A stop revokes the session grant, so a presented run id reads Revoked.
+    assert_eq!(
+        stop_shown_session(
+            &mut stand_in,
+            Caller::Shell,
+            "component-2",
+            "stop the shown session",
+        ),
+        Ok(Value::Null),
+        "a shown use names the minted run pair: the stop reports its settlement"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-2"),
+        json!({
+            "id": "component-2",
+            "status": "stopped",
+            "cause": "stopped: stop the shown session",
+        }),
+        "a shown use names the minted run pair: the stop stores the stated cause"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-1"),
+        json!({ "id": "component-1", "status": "running", "cause": "" }),
+        "a shown use names the minted run pair: the stop leaves the other session running"
+    );
+    let after_stop_other = execute(
+        &mut stand_in,
+        client_two,
+        "request-2",
+        PLAN_B,
+        Some("run-other"),
+    );
+    assert_eq!(
+        after_stop_other, revoked,
+        "a shown use names the minted run pair: a presented run id after a stop is Revoked"
+    );
+    assert_ne!(
+        after_stop_other,
+        Err((
+            403,
+            "effect run run-other is not bound to request request-2".to_owned()
+        )),
+        "a shown use names the minted run pair: the revoked refusal is not the unminted-run refusal"
+    );
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            client_two,
+            "request-2",
+            PLAN_B,
+            Some("run-request-2"),
+        ),
+        revoked,
+        "a shown use names the minted run pair: the revoked grant refuses its minted pair"
+    );
+    assert_eq!(
+        read_shown_run(&stand_in, client_one, "request-1"),
+        once_spent,
+        "a shown use names the minted run pair: the other session's spent grant stays exhausted"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown use names the minted run pair: the stop leaves the empty live list"
     );
 }

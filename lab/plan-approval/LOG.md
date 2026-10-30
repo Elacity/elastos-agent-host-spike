@@ -1836,3 +1836,133 @@ no plant validate call inside `read_shown_run`. The restored proof command set
 This lane has no `falsifiers.json`; no id is added.
 
 034: `read_shown_run(stand_in, caller, request_id)` is the one pair read and passes the caller and the request id to the stand-in's own pair route; `shown_run_pair_is_not_the_grant` proves a pending request is `unknown grant`, the shell and another session are refused while the grant is live, a second read keeps the once grant live, `execute` makes the owner's and the shell's read `grant is not live: Exhausted`, a session grant stays readable after one `execute`, a stop makes that session's read `grant is not live: Revoked`, and the grant answer, status body and live entry omit `run_id`; two hand-run plants caught and restored.
+
+## 035
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md), Request flow step 9:
+
+> Runtime dispatches an approved operation to the owning provider and records the result in the same audit path used for a human action
+
+This task proves a shown use names the run pair the grant route minted.
+`execute(stand_in, caller, request_id, plan, run_id)` is the only use call. It
+passes the caller and the body `request_id` and `plan_sha256` of the plan bytes
+to the stand-in's own `post_capability_validate`, adds a `run_id` key only when
+`run_id` is `Some`, and returns that route's result. It matches no caller and no
+run id text, holds no `run-` or `effect run` text, and calls no seed, store,
+pair, effect or capsule seam. Every earlier call passes `None`, so its body has
+no `run_id` key. No existing helper and no existing assertion changed.
+
+`shown_use_names_the_minted_run` drives two sessions through `running_agent`.
+A use before any launch is `unknown grant`, not the unminted-run refusal and not
+a caller refusal, and stores no capsule or grant. The two sessions run with no
+cause. The first session submits `request-1` (read of `PLAN_A`); a use that
+presents the upcoming `run-request-1` is still `unknown grant`, the step stays
+`pending` and the live list stays empty. The owner grants `request-1` once with
+the hash of `PLAN_A`; the answer is `{"success": true}` with no `run_id` key,
+and the owner reads `{"run_id":"run-request-1","request_id":"request-1"}`. The
+shell's use with the minted pair and with `run-other` is `capability validate
+needs an instance session`, and the once grant and its pair stay live. The other
+session's `run-other` is `effect run run-other is not bound to request
+request-1`, and its minted pair is `wrong capsule: expected component-1, got
+component-2`; neither spends. The owner's `run-other`, `""`, `granted` and
+`run-request-2` are the unminted-run refusal naming each id, and the grant stays
+live. The minted pair with `PLAN_B` is `grant is not bound to this plan` and
+leaves the grant live. The minted pair with `PLAN_A` is `{"valid": true}` with
+no `run_id` key, and the pair read then is `grant is not live: Exhausted`; a
+later `run-other` and the minted pair are each `Exhausted`, not the unminted
+reason. The second session submits `request-2` (write of `PLAN_B`) and the owner
+grants it for a session. Its pair read is `run-request-2`; the first request's
+pair is `effect run run-request-1 is not bound to request request-2`. An omitted
+run id succeeds, then the minted pair succeeds, and each use leaves the session
+grant live and readable. A shell stop of `component-2` stores `stopped: stop the
+shown session`, leaves `component-1` running with no cause, and makes a
+presented `run-other` and the minted pair each `grant is not live: Revoked`,
+while `request-1` stays `Exhausted`. The shell live list is empty.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_use_names_the_minted_run -- --exact
+```
+
+### F-use-drops-run
+
+Old body bytes, 223:
+
+```rust
+    let mut body = json!({ "request_id": request_id, "plan_sha256": plan_sha256(plan) });
+    if let Some(run_id) = run_id {
+        body["run_id"] = json!(run_id);
+    }
+    stand_in.post_capability_validate(caller, &body)
+```
+
+New body bytes, 158:
+
+```rust
+    let body = json!({ "request_id": request_id, "plan_sha256": plan_sha256(plan) });
+    let _ = run_id;
+    stand_in.post_capability_validate(caller, &body)
+```
+
+The planted crate compiled. `shown_use_names_the_minted_run` failed at
+`src/lib.rs:12019:5` (planted tree) on the other session's different run id:
+`assertion left == right failed: a shown use names the minted run pair: the
+other session's different run id is the unminted-run refusal`; left held
+`Err((403, "wrong capsule: expected component-1, got component-2"))`, right
+expected `Err((403, "effect run run-other is not bound to request
+request-1"))`. The dropped run id skipped the compare. Restored, the test
+passes.
+
+### F-unminted-run-mints
+
+Old body bytes, 223:
+
+```rust
+    let mut body = json!({ "request_id": request_id, "plan_sha256": plan_sha256(plan) });
+    if let Some(run_id) = run_id {
+        body["run_id"] = json!(run_id);
+    }
+    stand_in.post_capability_validate(caller, &body)
+```
+
+New body bytes, 677:
+
+```rust
+    let mut body = json!({ "request_id": request_id, "plan_sha256": plan_sha256(plan) });
+    if let Some(run_id) = run_id {
+        body["run_id"] = json!(run_id);
+    }
+    let result = stand_in.post_capability_validate(caller, &body);
+    if let Err((403, reason)) = &result {
+        if reason.starts_with("effect run ") {
+            stand_in.seed_grant(
+                "request-plant",
+                "component-2",
+                "localhost://Public/plan-approval/a.txt",
+                "read",
+                "once",
+                0,
+                agent_conformance::standin_runtime::Life::Live,
+                false,
+            );
+        }
+    }
+    result
+```
+
+The planted crate compiled. `shown_use_names_the_minted_run` failed at
+`src/lib.rs:12075:5` (planted tree) on the shell live list after the other
+session's refusals: `assertion left == right failed: a shown use names the
+minted run pair: the other session's refusals leave the once grant live`; left
+held the `request-1` entry plus a `request-plant` entry, right expected the
+`request-1` entry alone. The unminted-run refusal minted a grant. Restored, the
+test passes.
+
+Neither plant calls `seed_request`; the first plant calls no other seam and the
+second plant calls `seed_grant`. After both restores, `git diff -- lab/plan-approval/src/lib.rs`
+holds no `request-plant` and no plant validate call inside `execute`. The
+restored proof command set (the fmt check and the twenty-eight test commands in
+the task) took 3.91 s real. This lane has no `falsifiers.json`; no id is added.
+
+035: `execute(stand_in, caller, request_id, plan, run_id)` is the only use call and passes a run id only when one is given; `shown_use_names_the_minted_run` proves an absent grant is `unknown grant` even with a run id, the shell is `capability validate needs an instance session`, a different or empty run id is `effect run ... is not bound to request ...`, the minted pair from another session is `wrong capsule`, the minted pair with another plan is `grant is not bound to this plan`, the minted pair runs a once grant once and then reads `Exhausted`, an omitted run id and the minted pair each keep a session grant live, and a presented run id after a stop is `Revoked`; two hand-run plants caught and restored.

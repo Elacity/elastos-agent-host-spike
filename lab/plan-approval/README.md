@@ -617,9 +617,48 @@ every live list through `read_shown_grants`, reads the capsule list through
 its pair helper holds no `run-` text. `preview`, `plan_sha256`, `approve`,
 `execute`, `deny_shown_plan`, `age_shown_plan`, `stop_shown_session`,
 `read_shown_request`, `read_shown_grants`, `read_shown_requests`,
-`shown_worker_exited`, `running_agent` and `request` are unchanged by this
-slice. The crate does not copy the stand-in, and it names no planner. A passing
-run gives the Runtime no A15 credit.
+`shown_worker_exited`, `read_shown_run`, `running_agent` and `request` are
+unchanged by that slice. The crate does not copy the stand-in, and it names no
+planner. A passing run gives the Runtime no A15 credit.
+
+A shown use names the minted run pair. The request flow states:
+
+> Runtime dispatches an approved operation to the owning provider and records
+> the result in the same audit path used for a human action
+
+`execute` is the only use call. It passes the caller it is given and the body
+`request_id` and `plan_sha256` of the plan bytes to the stand-in's own validate
+route, and it adds a `run_id` key only when one is given; every earlier call
+passes `None`, so its body has no `run_id` key. The helper judges neither the
+caller nor the run id text and returns that route's result.
+
+A use with no grant is `unknown grant` even when it presents a run id, and that
+refusal spends nothing. The run compare runs before the session check and
+before the plan check. A shell that presents the minted pair is `capability
+validate needs an instance session`, and the once grant stays live. Another
+session that presents a different run id is `effect run ` plus that id plus
+` is not bound to request ` plus the request id; another session that presents
+the minted pair is `wrong capsule`. The ids `run-other`, `""`, `granted` and
+`run-request-2` leave the once grant live. The minted pair with `PLAN_B` is
+`grant is not bound to this plan` and leaves that grant live. The minted pair
+with `PLAN_A` is `{"valid": true}` and the grant is then `grant is not live:
+Exhausted`; a later different run id on that spent grant is `Exhausted`, not the
+unminted reason. An omitted run id and then the minted pair each succeed on a
+session grant and leave it live. After a stop, a presented run id is `grant is
+not live: Revoked`.
+
+`shown_use_names_the_minted_run` drives two sessions through `running_agent`,
+submits through `request`, grants through `approve`, reads the pair through
+`read_shown_run`, reads the status through `read_shown_request`, reads every
+live list through `read_shown_grants`, reads the capsule list through
+`get_capsules`, stops through `stop_shown_session` and spends through `execute`.
+This crate stores no copy of `run_accepts` or `unminted_run`, and it does not
+call `post_hosted_effect`. `preview`, `plan_sha256`, `approve`,
+`deny_shown_plan`, `age_shown_plan`, `stop_shown_session`, `read_shown_request`,
+`read_shown_grants`, `read_shown_requests`, `shown_worker_exited`,
+`read_shown_run`, `running_agent` and `request` are unchanged by this slice. The
+crate does not copy the stand-in, and it names no planner. A passing run gives
+the Runtime no A15 credit.
 
 ## Layout
 
@@ -646,12 +685,14 @@ run gives the Runtime no A15 credit.
   `shown_deny_reason_is_not_the_grant`,
   `shown_stop_reason_is_not_the_grant`,
   `shown_worker_exit_is_not_the_grant`,
-  `shown_run_pair_is_not_the_grant` and the bound-plan journey.
+  `shown_run_pair_is_not_the_grant`,
+  `shown_use_names_the_minted_run` and the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_use_names_the_minted_run -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_run_pair_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_worker_exit_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_stop_reason_is_not_the_grant -- --exact
