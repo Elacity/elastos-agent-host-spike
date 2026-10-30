@@ -1,0 +1,16 @@
+   Compiling a1-a8-hardening v0.1.0 (/tmp/pr-301-a8-r4/lab/a1-a8-hardening)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s
+     Running unittests src/lib.rs (lab/a1-a8-hardening/target/host-build/debug/deps/a1_a8_hardening-8a8885523e61edb9)
+
+running 8 tests
+test tests::complete_bind_has_no_gaps ... ok
+test tests::follow_sentence_is_not_host_sequence ... ok
+test tests::guest_function_is_required_and_must_be_journal_grants ... ok
+test tests::foreign_capsule_id_is_a_fail ... ok
+test tests::hash_aliases_are_not_module_hash ... ok
+test tests::missing_assigned_is_not_a_match ... ok
+test tests::session_id_comes_from_run_lines_only ... ok
+test tests::session_must_equal_this_launch ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

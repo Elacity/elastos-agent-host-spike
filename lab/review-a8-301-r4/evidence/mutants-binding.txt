@@ -1,0 +1,16 @@
+## Real predicates
+honest-today: NEEDS RUNTIME ['component id', 'session id', 'guest module hash', 'guest function']
+foreign-id-no-assigned: NEEDS RUNTIME ['component id', 'session id', 'guest module hash', 'guest function']
+foreign-id-with-assigned: FAIL receipts outside launch window
+guest-follow-sentence: NEEDS RUNTIME ['component id', 'session id', 'guest module hash', 'guest function']
+after-snapshot: FAIL receipts outside launch window
+complete-bind: PASS []
+M-sequence-stderr: mutant=PASS real=NEEDS RUNTIME hunt=H-guest-follow-sentence KILLED
+M-assigned-none-match: mutant=PASS real=NEEDS RUNTIME hunt=foreign capsule_id KILLED
+M-after-snapshot-window: mutant=PASS real=FAIL hunt=H-race-after-snapshot KILLED
+M-println-not-assert: mutant=PASS real=NEEDS RUNTIME hunt=honest missing fields KILLED
+M-session-presence: mutant=PASS real=FAIL hunt=other-session KILLED
+M-guest-function-optional: mutant=PASS real=NEEDS RUNTIME hunt=missing guest function KILLED
+M-hash-alias: mutant=PASS real=NEEDS RUNTIME hunt=wasm_hash alias KILLED
+
+7 of 7 mutants KILLED

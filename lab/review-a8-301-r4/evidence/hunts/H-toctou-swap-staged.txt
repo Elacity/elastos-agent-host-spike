@@ -1,0 +1,33 @@
+
+running 1 test
+a8 runtime: elastos sha256 de9f9b9ff6faed144f35791dbdf9087cc23b1caad4eb46d1e19888612e1929df
+a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+a8 injected agent-host: sha256 f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737 imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+a8 receipt cursor: size:0 inode:None path:/tmp/a8-home.Iaf6Wy/home/.local/share/elastos/runtime/capability-requests.jsonl
+a8 host key read: exit:Some(0) assigned:None session:None guest_hash:f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737 host_records:[] marker_absent:true unchanged:true
+test agent_host_host_key_read_is_refused ... FAILED
+
+failures:
+
+failures:
+    agent_host_host_key_read_is_refused
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 21.42s
+
+   Compiling a1-a8-hardening v0.1.0 (/tmp/pr-301-a8-r4/lab/a1-a8-hardening)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.46s
+     Running tests/a8_agent_host_host_key.rs (lab/a1-a8-hardening/target/host-build/debug/deps/a8_agent_host_host_key-a923056801d94aa1)
+
+thread 'agent_host_host_key_read_is_refused' (27522) panicked at tests/a8_agent_host_host_key.rs:199:5:
+the guest must not exit 0 after the host-key ask; stderr:
+[2m2026-10-27T00:53:37.551927Z[0m [32m INFO[0m [2melastos::run_cmd[0m[2m:[0m Running capsule from: /tmp/a8-home.Iaf6Wy/capsules/agent-host
+[run] Component capsule attached to runtime at http://127.0.0.1:38715
+[2m2026-10-27T00:53:37.555013Z[0m [33m WARN[0m [2melastos_server::runtime[0m[2m:[0m Capsule signature verification running in dev_mode=true; unsigned local capsules are allowed
+[2m2026-10-27T00:53:37.556793Z[0m [32m INFO[0m [2melastos_server::runtime[0m[2m:[0m Loading capsule 'agent-host' (Wasm)
+[2m2026-10-27T00:53:37.556821Z[0m [33m WARN[0m [2melastos_server::runtime[0m[2m:[0m Unsigned capsule 'agent-host' allowed because dev_mode=true
+[run] Component capsule 'agent-host' exited
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+retained throwaway root: /tmp/a8-home.Iaf6Wy
+error: test failed, to rerun pass `--test a8_agent_host_host_key`
