@@ -234,6 +234,19 @@ fn dot_entries_are_skipped() {
 }
 
 #[test]
+fn an_empty_folder_leaves_the_lab_cid_unchanged() {
+    // A folder that holds no file adds no link, at any depth: web-app plus
+    // an empty `e` and a folder `f` that holds only an empty `g` keeps
+    // web-app's name, through the walk and through the checked bundle.
+    let bundle = assemble(&WEB_APP);
+    fs::create_dir(bundle.path().join("e")).expect("make the empty folder e");
+    fs::create_dir_all(bundle.path().join("f/g")).expect("make f holding only g");
+    assert!(bundle.path().join("f/g").is_dir(), "f/g was not made");
+    assert_eq!(named(bundle.path()).to_string(), WEB_APP_LAB_CID);
+    assert_eq!(checked(bundle.path()).cid().to_string(), WEB_APP_LAB_CID);
+}
+
+#[test]
 fn link_at_the_bundle_root_is_refused() {
     // The root path is opened once, as a folder, with no-follow: a link as
     // its last part is refused, never followed. The same folder named by its

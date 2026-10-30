@@ -8,20 +8,33 @@
 //! `name_digest` on each pinned fixture's printed CID, and the package
 //! record's `record_payload` and `record_digest` on records a fresh test key
 //! signs. Each must give the bytes and the digest the Rust code signs.
+//!
+//! Kubo itself checks the pins in two ignored tests, run by hand (README,
+//! "Kubo cross-check"): an offline, hash-only import with the Runtime's
+//! profile flags must print every pin, and the same flags must print the
+//! model package CID the Runtime admitted on this Mac. A third (task 052)
+//! asks whether the same flags leave hidden names and empty folders out of
+//! the CID; on this Mac it fails for a folder holding only an empty folder.
 mod common;
 
+use std::ffi::OsString;
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+
 use capsule_identity::{
-    domain_separated_digest, encode_entries, name_signature_message, sign_package_record,
-    BundleEntry, PackageRecord, PACKAGE_RECORD_DOMAIN,
+    domain_separated_digest, encode_entries, lab_cid, name_signature_message, sign_package_record,
+    BundleEntry, PackageRecord, Refusal, PACKAGE_RECORD_DOMAIN,
 };
 use common::*;
 use ed25519_dalek::{Signature, Verifier};
+use tempfile::TempDir;
 
 /// How many pinned bundles the check covers: seven fixtures, the recipe,
 /// the three bundles built for the profile tests, the photo stand-in
-/// consumer copy (task 047) and the two bundles with a file over one leaf
-/// (task 048).
-const PINNED_BUNDLES: usize = 14;
+/// consumer copy (task 047), the two bundles with a file over one leaf
+/// (task 048) and the bundle with a file of two tree levels (task 051).
+const PINNED_BUNDLES: usize = 15;
 
 /// How many committed fixtures have a pin: all but wc001-core.
 const PINNED_FIXTURES: usize = 7;
@@ -142,6 +155,17 @@ fn pinned_bundles() -> Vec<Pinned> {
         what: "three-leaf nested file bundle".to_owned(),
         pin: THREE_LEAF_NESTED_LAB_CID,
         entries: content_sample_with(|entries| entries.push(entry(BIG_BIN, &big_bin_bytes()))),
+    });
+    bundles.push(Pinned {
+        what: "two-level file bundle".to_owned(),
+        pin: TWO_LEVEL_FILE_LAB_CID,
+        entries: content_sample_with(|entries| {
+            let sample = entries
+                .iter_mut()
+                .find(|entry| entry.path == "sample.example")
+                .expect("content-sample holds sample.example");
+            sample.content = two_level_bytes();
+        }),
     });
     bundles
 }
@@ -397,4 +421,318 @@ fn readme_python_matches_the_package_record_bytes() {
     }
     assert_eq!(checked, SIGNED_RECORDS, "checked {checked} records");
     assert_eq!(python.len(), signed.len());
+}
+
+/// The variable that holds the path of the Kubo the two Kubo tests run.
+const LAB_KUBO: &str = "LAB_KUBO";
+
+/// The variable that holds the folder of the model package the Runtime
+/// admitted on this Mac.
+const LAB_ADMITTED_MODEL_DIR: &str = "LAB_ADMITTED_MODEL_DIR";
+
+/// The one Kubo version the profile is pinned to: `version --number` must
+/// print exactly this.
+const KUBO_VERSION: &str = "0.40.1";
+
+/// The import flags, written once. They are the release script's
+/// `KUBO_ADD_FLAGS` (`scripts/ci-model-package.mjs:211`, run as
+/// `add <flags> <dir>` at `:221`) with `--only-hash=true` from the Runtime
+/// provider's `ADD_OPTIONS` (`capsules/ipfs-provider/src/directory_hash.rs:19-43`,
+/// "Kubo v0.40.1 core/commands/add.go"). `--offline` is the script's own.
+/// No flag here is missing from both copies.
+const KUBO_ADD_FLAGS: [&str; 22] = [
+    "--offline",
+    "--only-hash=true",
+    "--recursive=true",
+    "--quieter=true",
+    "--wrap-with-directory=false",
+    "--cid-version=1",
+    "--hash=sha2-256",
+    "--raw-leaves=true",
+    "--chunker=size-262144",
+    "--trickle=false",
+    "--max-file-links=174",
+    "--max-directory-links=0",
+    "--max-hamt-fanout=256",
+    "--inline=false",
+    "--nocopy=false",
+    "--fscache=false",
+    "--preserve-mode=false",
+    "--preserve-mtime=false",
+    "--empty-dirs=false",
+    "--progress=false",
+    "--fast-provide-root=false",
+    "--fast-provide-wait=false",
+];
+
+/// The two HAMT values that have no add flag, as the provider's own Kubo
+/// fixture writes them (`directory_hash.rs:1111-1112`) and its
+/// `check_hamt_value` accepts them (`:507-524`).
+const KUBO_HAMT_CONFIG: [(&str, &str); 2] = [
+    ("Import.UnixFSHAMTDirectorySizeThreshold", "256KiB"),
+    ("Import.UnixFSHAMTDirectorySizeEstimation", "links"),
+];
+
+/// The package CID of the SmolLM2 model package the Runtime admitted on this
+/// Mac: Kubo made it at release, the Runtime's provider computed it again
+/// before admission. `model-catalog.json` holds it (entry
+/// `smollm2-135m-instruct-q8-0-local`, also `SMOL_CID` at
+/// `scripts/ci-model-package.test.mjs:189`), and the ElastOS data folder's
+/// `model-preparation/state.json` records it as `package_cid`, state
+/// `admitted`.
+const ADMITTED_MODEL_PACKAGE_CID: &str =
+    "bafybeiew3vuq32fvuz2kmps7lmgl4rxpvwsvklxykx4covogbrkhgy5qky";
+
+/// The files of the admitted folder and the size of each, where the task
+/// fixed it. `_elastos_object.json` is the release script's object index
+/// (`scripts/ci-model-package.mjs:124-127`).
+const ADMITTED_MODEL_FILES: [(&str, Option<u64>); 6] = [
+    ("LICENSE", Some(11_358)),
+    ("LICENSE.base", Some(11_358)),
+    ("PROVENANCE.md", Some(358)),
+    ("_elastos_object.json", None),
+    ("capsule.json", Some(751)),
+    ("weights.gguf", Some(144_811_072)),
+];
+
+/// The weights file: 553 raw leaves, so a root over four file nodes of 174,
+/// 174, 174 and 31 leaves (two tree levels).
+const ADMITTED_WEIGHTS: &str = "weights.gguf";
+
+/// How many raw leaves [`ADMITTED_WEIGHTS`] has.
+const ADMITTED_WEIGHTS_LEAVES: u64 = 553;
+
+/// The value of the variable `name`, or a panic that names it: a Kubo test
+/// never skips.
+fn required_var(name: &str, what: &str) -> OsString {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| panic!("{name} is not set: it must hold {what}"))
+}
+
+/// One Kubo with a fresh, empty repo in a temp folder outside the tree: no
+/// daemon, no network, nothing written outside the temp folders. The repo's
+/// config holds a node key Kubo makes at `init`; nothing here reads or prints
+/// it.
+struct HashOnlyKubo {
+    binary: OsString,
+    repo: TempDir,
+}
+
+impl HashOnlyKubo {
+    /// The Kubo at `LAB_KUBO`, checked to be [`KUBO_VERSION`], with its repo
+    /// made by `init --empty-repo` and [`KUBO_HAMT_CONFIG`] set.
+    fn start() -> HashOnlyKubo {
+        let kubo = HashOnlyKubo {
+            binary: required_var(LAB_KUBO, "the path of a Kubo v0.40.1"),
+            repo: temp_dir(),
+        };
+        let version = kubo.run(&["version", "--number"]);
+        assert_eq!(
+            version.strip_suffix('\n').unwrap_or(&version),
+            KUBO_VERSION,
+            "{LAB_KUBO} version --number printed {version:?}, not {KUBO_VERSION:?}"
+        );
+        // Init's output names the new node; it is not kept.
+        kubo.run(&["init", "--empty-repo"]);
+        for (key, value) in KUBO_HAMT_CONFIG {
+            kubo.run(&["config", key, value]);
+        }
+        kubo
+    }
+
+    /// Kubo's root CID for the folder `folder`: an offline, hash-only import
+    /// with [`KUBO_ADD_FLAGS`], which must print one line.
+    fn root(&self, folder: &Path) -> String {
+        let folder = folder.to_str().expect("a temp or admitted folder is UTF-8");
+        let mut args = vec!["add"];
+        args.extend(KUBO_ADD_FLAGS);
+        args.push(folder);
+        let output = self.run(&args);
+        match output.lines().collect::<Vec<_>>()[..] {
+            [root] => root.to_owned(),
+            _ => panic!("kubo add {folder} printed {output:?}, not one root"),
+        }
+    }
+
+    /// The one place Kubo runs: `args` with `IPFS_PATH` set to the temp repo,
+    /// from the temp folder. A Kubo that cannot start or fails is a panic
+    /// with its exit status and standard error; its output is returned.
+    fn run(&self, args: &[&str]) -> String {
+        let repo = self.repo.path().join("repo");
+        let output = Command::new(&self.binary)
+            .args(args)
+            .env("IPFS_PATH", &repo)
+            .current_dir(self.repo.path())
+            .output()
+            .unwrap_or_else(|error| panic!("{LAB_KUBO} {:?} could not run: {error}", args[0]));
+        assert!(
+            output.status.success(),
+            "{LAB_KUBO} {:?} exited with {}: {}",
+            args[0],
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("Kubo prints UTF-8")
+    }
+}
+
+#[test]
+#[ignore = "run by hand: needs LAB_KUBO, the path of a Kubo v0.40.1"]
+fn kubo_hash_only_import_prints_every_lab_cid_pin() {
+    let kubo = HashOnlyKubo::start();
+    let bundles = pinned_bundles();
+    let mut rows = Vec::new();
+    for bundle in &bundles {
+        let folder = temp_dir();
+        for entry in &bundle.entries {
+            write_file(folder.path(), &entry.path, &entry.content);
+        }
+        let root = kubo.root(folder.path());
+        let rust = encode_entries(&bundle.entries)
+            .unwrap_or_else(|refusal| panic!("{}: {refusal}", bundle.what))
+            .to_string();
+        println!(
+            "{}: kubo {root}, pin {}, encode_entries {rust}",
+            bundle.what, bundle.pin
+        );
+        rows.push((bundle.what.as_str(), root, bundle.pin, rust));
+    }
+    let differ: Vec<_> = rows
+        .iter()
+        .filter(|(_, root, pin, rust)| (root.as_str(), rust.as_str()) != (*pin, *pin))
+        .collect();
+    assert!(
+        differ.is_empty(),
+        "(bundle, Kubo, pin, encode_entries) are not one value: {differ:#?}"
+    );
+    assert_eq!(rows.len(), PINNED_BUNDLES, "checked {} bundles", rows.len());
+}
+
+#[test]
+#[ignore = "run by hand: needs LAB_KUBO, the path of a Kubo v0.40.1"]
+fn kubo_leaves_out_hidden_names_and_empty_folders() {
+    // web-app with (a) a root `.DS_Store`, (b) a hidden folder holding a
+    // file, (c) an empty folder and a folder holding only an empty folder.
+    // Kubo with the Runtime's flags (no `--hidden`, `--empty-dirs=false`)
+    // must print web-app's pin for each. The lab refuses (a) and (b), since
+    // it never leaves bytes out of a name, and names (c) with the pin.
+    let kubo = HashOnlyKubo::start();
+    let cases: [(&str, &dyn Fn(&Path), Option<&str>); 3] = [
+        (
+            "(a) root .DS_Store",
+            &|root| write_file(root, ".DS_Store", b"Bud1"),
+            Some(".DS_Store"),
+        ),
+        (
+            "(b) .well-known/a.txt",
+            &|root| write_file(root, ".well-known/a.txt", b"a\n"),
+            Some(".well-known/a.txt"),
+        ),
+        (
+            "(c) empty folders e and f/g",
+            &|root| {
+                fs::create_dir(root.join("e")).expect("make e");
+                fs::create_dir_all(root.join("f/g")).expect("make f/g");
+            },
+            None,
+        ),
+    ];
+    let mut differ = Vec::new();
+    for (what, add, hidden) in cases {
+        let bundle = assemble(&WEB_APP);
+        add(bundle.path());
+        let root = kubo.root(bundle.path());
+        let walked = lab_cid(bundle.path()).map(|cid| cid.to_string());
+        println!("{what}: kubo {root}, pin {WEB_APP_LAB_CID}, lab_cid {walked:?}");
+        let expected = match hidden {
+            Some(path) => Err(Refusal::HiddenName { path: path.into() }),
+            None => Ok(WEB_APP_LAB_CID.to_owned()),
+        };
+        if root != WEB_APP_LAB_CID || walked != expected {
+            differ.push((what, root, WEB_APP_LAB_CID, walked));
+        }
+    }
+    assert!(
+        differ.is_empty(),
+        "(case, Kubo, pin, lab_cid) do not agree: {differ:#?}"
+    );
+}
+
+#[test]
+#[ignore = "run by hand: needs LAB_KUBO and LAB_ADMITTED_MODEL_DIR"]
+fn kubo_profile_reproduces_the_admitted_model_package_cid() {
+    let admitted = required_var(
+        LAB_ADMITTED_MODEL_DIR,
+        "the folder of the model package the Runtime admitted",
+    );
+    let admitted = Path::new(&admitted);
+    let mut found: Vec<(String, u64)> = fs::read_dir(admitted)
+        .unwrap_or_else(|error| panic!("read {}: {error}", admitted.display()))
+        .map(|item| {
+            let item = item.expect("a folder entry");
+            let meta = item.metadata().expect("its metadata");
+            let name = item.file_name().into_string().expect("a UTF-8 name");
+            assert!(meta.is_file(), "{name} is not a regular file");
+            (name, meta.len())
+        })
+        .collect();
+    found.sort();
+    let names: Vec<&str> = found.iter().map(|(name, _)| name.as_str()).collect();
+    let expected: Vec<&str> = ADMITTED_MODEL_FILES.iter().map(|(name, _)| *name).collect();
+    assert_eq!(names, expected, "the admitted folder's files");
+    for ((name, size), (_, expected)) in found.iter().zip(ADMITTED_MODEL_FILES) {
+        if let Some(expected) = expected {
+            assert_eq!(*size, expected, "{name}'s size");
+        }
+    }
+
+    let kubo = HashOnlyKubo::start();
+    let root = kubo.root(admitted);
+    println!("admitted model package: kubo {root}, pin {ADMITTED_MODEL_PACKAGE_CID}");
+    assert_eq!(
+        root, ADMITTED_MODEL_PACKAGE_CID,
+        "Kubo with these flags did not print the package CID the Runtime admitted"
+    );
+
+    // Task 051: the lab encoder, given the six files' bytes, gives the CID
+    // Kubo and the Runtime made, so it names a file of two tree levels as
+    // they do.
+    let weights = found
+        .iter()
+        .find(|(name, _)| name == ADMITTED_WEIGHTS)
+        .map(|(_, size)| *size)
+        .expect("the admitted folder holds the weights");
+    assert_eq!(
+        weights.div_ceil(262_144),
+        ADMITTED_WEIGHTS_LEAVES,
+        "{ADMITTED_WEIGHTS}'s leaves"
+    );
+    let entries: Vec<BundleEntry> = names
+        .iter()
+        .map(|name| {
+            let path = admitted.join(name);
+            let content =
+                fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+            entry(name, &content)
+        })
+        .collect();
+    let encoded = encode_entries(&entries)
+        .unwrap_or_else(|refusal| panic!("encode_entries refused the admitted files: {refusal}"))
+        .to_string();
+    println!("admitted model package: encode_entries {encoded}");
+    assert_eq!(
+        encoded, ADMITTED_MODEL_PACKAGE_CID,
+        "encode_entries over the admitted files did not give the package CID the Runtime admitted"
+    );
+
+    // lab_cid is the walk, the Runtime's manifest check and the same
+    // encoder; it only reads the folder.
+    let walked = lab_cid(admitted);
+    println!("admitted model package: lab_cid {walked:?}");
+    assert_eq!(
+        walked.map(|cid| cid.to_string()),
+        Ok(ADMITTED_MODEL_PACKAGE_CID.to_owned()),
+        "lab_cid on the admitted folder"
+    );
 }

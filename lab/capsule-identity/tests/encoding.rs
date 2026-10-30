@@ -3,7 +3,9 @@
 //! with its own test.
 mod common;
 
-use capsule_identity::{encode_entries, lab_cid, BundleEntry, Refusal};
+use capsule_identity::{
+    encode_entries, encode_listed_files, lab_cid, BundleEntry, ListedFile, Refusal,
+};
 use common::*;
 use tempfile::TempDir;
 
@@ -193,31 +195,35 @@ fn file_over_one_leaf_has_the_pinned_cid() {
 }
 
 #[test]
-fn file_of_174_leaves_is_named_and_one_byte_more_is_refused() {
-    // 174 leaves of 262144 bytes (45613056 bytes) is the most one file root
-    // links (`max-file-links`). One byte more needs a 175th leaf and so a
-    // second tree level, which the lab refuses. In memory: no folder.
+fn file_over_174_leaves_gets_a_second_tree_level() {
+    // 174 leaves of 262144 bytes (45613056 bytes) is the most one file node
+    // links (`max-file-links`). One byte more is a 175th leaf, so Kubo's
+    // balanced layout puts a root over two nodes: one of 174 leaves and one
+    // of a single leaf, still a node of one link. Its pin was recomputed by
+    // README's Python rule and printed by Kubo v0.40.1 (task 051). In memory:
+    // no folder.
     let limit = 174 * 262_144;
     assert_eq!(limit, 45_613_056);
-    let mut file = vec![0; limit];
-    let named = encode_entries(&[entry("full.bin", &file)])
-        .unwrap_or_else(|refusal| panic!("174 leaves: {refusal}"));
-    assert!(named.to_string().starts_with("bafybei"), "{named}");
+    let manifest = entry(
+        "capsule.json",
+        &read_fixture(&CONTENT_SAMPLE, "capsule.json"),
+    );
+    let file = two_level_bytes();
+    assert_eq!(file.len(), limit + 1);
+    let named = |content: &[u8]| {
+        encode_entries(&[manifest.clone(), entry("sample.example", content)])
+            .unwrap_or_else(|refusal| panic!("{} bytes: {refusal}", content.len()))
+            .to_string()
+    };
+    let two_levels = named(&file);
+    assert_eq!(two_levels, TWO_LEVEL_FILE_LAB_CID);
+    assert!(two_levels.starts_with("bafybei"), "{two_levels}");
 
-    file.push(0);
-    let refusal = encode_entries(&[entry("full.bin", &file)])
-        .expect_err("a file of 175 leaves must be refused");
-    assert_eq!(
-        refusal,
-        Refusal::FileOverLeafLimit {
-            path: "full.bin".into(),
-            length: 45_613_057
-        }
-    );
-    assert_eq!(
-        refusal.to_string(),
-        "full.bin is 45613057 bytes, over the 174-leaf limit of one file root (45613056 bytes): the lab names no deeper file tree"
-    );
+    // 174 leaves still get one file node, so a name that is not the
+    // two-level one.
+    let one_level = named(&file[..limit]);
+    assert!(one_level.starts_with("bafybei"), "{one_level}");
+    assert_ne!(one_level, two_levels, "174 and 175 leaves got one name");
 }
 
 #[test]
@@ -312,6 +318,62 @@ fn encoder_refuses_a_path_with_an_empty_or_dot_part() {
             )
         );
     }
+}
+
+/// The exact text of a [`Refusal::HiddenName`] for `path`.
+fn hidden_name_text(path: &str) -> String {
+    format!(
+        "the path {path:?} has a part that starts with .: Kubo's import with the Runtime's flags (no --hidden) leaves a name starting with . out of the CID, and the lab names every byte or refuses"
+    )
+}
+
+#[test]
+fn a_hidden_name_is_refused_with_its_reason() {
+    // Kubo's `add` without `--hidden` leaves a name starting with `.` out of
+    // the CID, and the lab never leaves bytes out of a name, so it refuses:
+    // a hidden file at the root, a hidden folder, a hidden file one folder
+    // down, a listed hidden file, and a walked bundle with a `.DS_Store`.
+    let refused = |path: &str, refusal: Refusal| {
+        assert_eq!(
+            refusal,
+            Refusal::HiddenName { path: path.into() },
+            "{path:?}"
+        );
+        assert_eq!(refusal.to_string(), hidden_name_text(path), "{path:?}");
+    };
+    for path in [".DS_Store", ".well-known/a.txt", "browser/.hidden"] {
+        let refusal = encode_entries(&[entry("capsule.json", b"{}"), entry(path, b"x")])
+            .expect_err("a hidden name must be refused");
+        refused(path, refusal);
+    }
+    let listed = ListedFile {
+        path: ".x".into(),
+        size: 1,
+        sha256: [0; 32],
+    };
+    refused(
+        ".x",
+        encode_listed_files(&[listed]).expect_err("a listed hidden name must be refused"),
+    );
+    let bundle = assemble(&WEB_APP);
+    write_file(bundle.path(), ".DS_Store", b"Bud1");
+    refused(
+        ".DS_Store",
+        lab_cid(bundle.path()).expect_err("a walked .DS_Store must be refused"),
+    );
+
+    // A dot inside or at the end of a name is a plain name.
+    for path in ["a.b", "x."] {
+        encode_entries(&[entry(path, b"x")])
+            .unwrap_or_else(|refusal| panic!("{path:?} must be named: {refusal}"));
+    }
+
+    // P10: the rule is in the one path check, once.
+    assert_eq!(
+        library_code().matches("part.starts_with('.')").count(),
+        1,
+        "the hidden-name rule is not in one place"
+    );
 }
 
 #[test]
