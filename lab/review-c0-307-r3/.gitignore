@@ -1,0 +1,7 @@
+evidence/*.log
+evidence/tmp/
+__pycache__/
+standins/*.bin
+/tmp/
+target/
+*.o

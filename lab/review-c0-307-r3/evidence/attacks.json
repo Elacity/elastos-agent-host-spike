@@ -1,0 +1,168 @@
+{
+  "head": "26c55e6cbd59d1f4e740fc60dc8dd404b7d900da",
+  "launch": "/tmp/review-c0-307-r3-src/lab/fail-closed-linux/target/debug/fcl-launch",
+  "probe": "/tmp/review-c0-307-r3-src/lab/fail-closed-linux/target/build/debug/build/fail-closed-linux-1d11d7b03d991c2d/out/fcl-probe",
+  "p3_p4_p7": {
+    "p3": {
+      "returned_pid": 8352,
+      "returned_nspid": "8352\t1",
+      "returned_shares_host_pid_ns": false,
+      "launcher_children": [
+        8352
+      ],
+      "init_children": [
+        8353
+      ],
+      "lines": [
+        "probe-ran provider=did-provider",
+        "marker ok",
+        "socket_inet errno=1",
+        "socket_unix errno=1",
+        "read_outside errno=13",
+        "write_outside errno=13",
+        "read_etc_passwd errno=13",
+        "storage_write ok",
+        "storage_read ok",
+        "truncate_storage ok",
+        "truncate_outside errno=13",
+        "o_trunc_outside errno=13",
+        "ioctl_dev errno=13",
+        "nspid=2",
+        "ready",
+        "started did-provider pid=8352"
+      ],
+      "helper_beside_provider": false,
+      "provider_pid": 8353,
+      "provider_nspid": "8353\t2",
+      "provider_pdeathsig": "Name:\tfcl-probe\nUmask:\t0022\nState:\tS (sleeping)\nTgid:\t8353\nNgid:\t0\nPid:\t8353\nPPid:\t8352\nTracerPid:\t0\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nFDSize:\t64\nGroups:\t4 20 24 25 27 29 30 44 46 1000 \nNStgid:\t8353\t2\nNSpid:\t8353\t2\nNSpgid:\t8340\t0\nNSsid:\t8340\t0\nKthread:\t0\nVmPeak:\t    1808 kB\nVmSize:\t    1808 kB\nVmLck:\t       0 kB\nVmPin:\t       0 kB\nVmHWM:\t    1284 kB\nVmRSS:\t    1284 kB\nRssAnon:\t      88 kB\nRssFile:\t    1196 kB\nRssShmem:\t       0 kB\nVmData:\t     184 kB\nVmStk:\t     132 kB\nVmExe:\t    1116 kB\nVmLib:\t       8 kB\nVmPTE:\t      36 kB\nVmSwap:\t       0 kB\nHugetlbPages:\t       0 kB\nCoreDumping:\t0\nTHP_enabled:\t1\nuntag_mask:\t0xffffffffffffffff\nThreads:\t1\nSigQ:\t0/63994\nSigPnd:\t0000000000000000\nShdPnd:\t0000000000000000\nSigBlk:\t0000000000000000\nSigIgn:\t0000000000001000\nSigCgt:\t0000000000000440\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t0000000000000000\nCapAmb:\t0000000000000000\nNoNewPrivs:\t1\nSeccomp:\t2\nSeccomp_filters:\t1\nSpeculation_Store_Bypass:\tthread vulnerable\nSpeculationIndirectBranch:\tconditional enabled\nCpus_allowed:\tf\nCpus_allowed_list:\t0-3\nMems_allowed:\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\nMems_allowed_list:\t0\nvoluntary_ctxt_switches:\t1\nnonvoluntary_ctxt_switches:\t0\n"
+    },
+    "p4": {
+      "launcher_exit": 137,
+      "init_alive": false,
+      "provider_alive": false,
+      "namespace_down": true
+    },
+    "p7_daemonize": {
+      "returned_pid": 8361,
+      "launcher_exited_after_daemonize": false,
+      "leftover_before_kill": [
+        8363
+      ],
+      "leftover_alive_after_kill": [],
+      "launcher_exit": 137,
+      "lines": [
+        "probe-ran provider=did-provider",
+        "marker errno=2",
+        "socket_inet errno=1",
+        "socket_unix errno=1",
+        "read_outside errno=2",
+        "write_outside errno=2",
+        "read_etc_passwd errno=13",
+        "storage_write errno=2",
+        "storage_read errno=2",
+        "truncate_storage errno=2",
+        "truncate_outside errno=2",
+        "o_trunc_outside errno=2",
+        "ioctl_dev errno=13",
+        "nspid=2",
+        "ready",
+        "started did-provider pid=8361"
+      ]
+    }
+  },
+  "p6_confine_ready": {
+    "exit": 71,
+    "stdout": "",
+    "stderr": "fail-closed-linux refused to start did-provider: layer launch, step confine_ready: ConfineReady without execve is not a start; the provider was not started\n",
+    "marker_exists": false,
+    "refused": true
+  },
+  "ioctl_357": {
+    "confined_line": "ioctl_dev errno=13",
+    "unconfined": {
+      "ok": true,
+      "errno": 0
+    },
+    "confined_eacces": true,
+    "unconfined_ok": true
+  },
+  "sigterm_ignore": {
+    "returned_pid": 8372,
+    "launcher_exit": 143,
+    "init_alive": false,
+    "kids_alive": [],
+    "lines": [
+      "started did-provider pid=8372"
+    ],
+    "killed_despite_ignored_sigterm": true
+  },
+  "double_fork_setsid": {
+    "returned_pid": 8376,
+    "leftover": [
+      {
+        "pid": 8379,
+        "nspid": "8379\t4",
+        "shares_host": false,
+        "sid": "8378"
+      }
+    ],
+    "escaped_to_host_pid_ns": false,
+    "survived_init_kill": [],
+    "launcher_exit": 137,
+    "lines": [
+      "standin=double_fork_setsid pid=4 sid=3",
+      "started did-provider pid=8376"
+    ]
+  },
+  "exec_other_binary": {
+    "dynamic_sleep": {
+      "path": "/bin/sleep",
+      "started": false,
+      "returned_pid": null,
+      "exit": 71,
+      "stderr": "fail-closed-linux refused to start did-provider: layer exec, step execve: Permission denied (os error 13); the provider was not started\n",
+      "lines": []
+    },
+    "static_other": {
+      "path": "/tmp/review-c0-307-r3-findings/lab/review-c0-307-r3/standins/sleep_forever.bin",
+      "started": true,
+      "returned_pid": 8386,
+      "lines": [
+        "started did-provider pid=8386"
+      ],
+      "eof_accepted_different_binary": true
+    }
+  },
+  "inherited_tiocgwinsz": {
+    "lines": [
+      "inherit_ioctl ok rows=0 cols=0"
+    ],
+    "stderr": "",
+    "exit": null,
+    "inherited_ok": true,
+    "inherited_errno": null
+  },
+  "hooks": {
+    "empty_pipe": {
+      "exit": 71,
+      "stderr": "fail-closed-linux refused to start did-provider: layer launch, step report: the child ended before it wrote a fault or started; the provider was not started\n",
+      "marker": false
+    },
+    "lie_rights": {
+      "exit": 71,
+      "stderr": "fail-closed-linux refused to start did-provider: layer landlock, step right_probe: this kernel's Landlock ABI 6 cannot deny truncate (needs ABI 3); ioctl_dev (needs ABI 5): landlock_create_ruleset returned EINVAL (reported ABI 6); the provider was not started\n",
+      "marker": false
+    }
+  },
+  "pid_reuse_window": {
+    "launches": 20,
+    "bad": [],
+    "all_init_after_helper_exit": true
+  },
+  "pdeathsig": {
+    "exit": 0,
+    "stdout": "pdeathsig=9 pid=2\nstarted did-provider pid=8478\n",
+    "stderr": "",
+    "pdeathsig_is_sigkill": true
+  }
+}
