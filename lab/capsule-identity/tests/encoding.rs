@@ -1111,6 +1111,69 @@ fn a_value_of_16384_takes_three_varint_bytes() {
 }
 
 #[test]
+fn a_value_of_2097152_takes_four_varint_bytes() {
+    // content-sample plus one file `b2097152` of 2097152 zero bytes. 2097152
+    // is eight times 262144, so the one splitter in `file_root` gives eight
+    // full raw leaves, and the file node's filesize and its link Tsize (the
+    // node's block plus those leaves) are 2097152 and a little more: the
+    // first values four varint bytes hold (`0x80 0x80 0x80 0x01`). A varint
+    // that stops once the shifted remainder is 16384 through 32767 writes
+    // 2097152 in three bytes and names another bundle, which this pin refuses.
+    // `sample.example` stays 16 bytes. The pin was first printed by README's
+    // Python rule; the file is made here and never committed.
+    let manifest = read_fixture(&CONTENT_SAMPLE, "capsule.json");
+    let sample = read_fixture(&CONTENT_SAMPLE, "sample.example");
+    assert_eq!(sample.len(), 16, "sample.example stays 16 bytes");
+    let zeros = vec![0; 2_097_152];
+    assert_eq!(zeros.len(), 2_097_152, "the file's length is 2097152");
+    let bundle = content_sample_with(&[("b2097152", &zeros)]);
+    let entries = vec![
+        entry("capsule.json", &manifest),
+        entry("sample.example", &sample),
+        entry("b2097152", &zeros),
+    ];
+    let pin = VARINT_2097152_LAB_CID;
+    let encoded = encode_entries(&entries)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    assert_eq!(
+        (name(&bundle), encoded),
+        (pin.to_owned(), pin.to_owned()),
+        "(lab_cid, encode_entries) against the pin"
+    );
+    assert!(pin.starts_with("bafybei"), "{pin}");
+    assert_eq!(pin.len(), 59, "{pin}");
+    for other in [
+        VARINT_16384_LAB_CID,
+        VARINT_128_LAB_CID,
+        VARINT_127_LAB_CID,
+        CONTENT_SAMPLE_LAB_CID,
+        EMPTY_FILE_LAB_CID,
+        LONG_UTF8_NAME_LAB_CID,
+        CHUNK_LIMIT_LAB_CID,
+        TWO_FULL_CHUNK_LAB_CID,
+    ] {
+        assert_ne!(pin, other, "the 2097152 pin is another bundle's");
+    }
+
+    // A listed file names one raw leaf by one SHA-256, so 2097152 bytes is
+    // over its limit and is refused with its path rather than named by that
+    // digest.
+    let listed = ListedFile {
+        path: "b2097152".to_owned(),
+        size: 2_097_152,
+        sha256: Sha256::digest(&zeros).into(),
+    };
+    assert_eq!(
+        encode_listed_files(&[listed]),
+        Err(Refusal::FileOverChunkLimit {
+            path: "b2097152".to_owned(),
+            length: 2_097_152,
+        })
+    );
+}
+
+#[test]
 fn encoder_refuses_file_directory_conflict() {
     // `a` and `a/b` make `a` a file and a directory. A UnixFS directory holds
     // one link per name, so the encoder refuses, in either order, rather

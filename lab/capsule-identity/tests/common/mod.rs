@@ -85,6 +85,16 @@ pub const VARINT_128_LAB_CID: &str = "bafybeib463rkym7ob2fdffpbbl6uksjvjnuwcknio
 pub const VARINT_16384_LAB_CID: &str =
     "bafybeifc7bnmgsduo233svvb3qc6bfud5bjrpxgexosae5fr7t5x754hve";
 
+/// content-sample with one more file, `b2097152`, of 2097152 zero bytes:
+/// eight full raw leaves under one file root, so its link Tsize is the root
+/// block plus those leaves. That Tsize is the first value four varint bytes
+/// hold (`0x80 0x80 0x80 0x01`); a varint that stops once the shifted
+/// remainder is 16384 through 32767 writes 2097152 in three bytes and names
+/// another bundle. Built in a temp dir and never committed; task 100 printed
+/// it first with README's Python rule.
+pub const VARINT_2097152_LAB_CID: &str =
+    "bafybeiebzhqjsthwbkmok43oxpibpyd65zgq35vpyhirpepst4ni6n7se4";
+
 /// content-sample with `sample.example` as 262145 zero bytes, one over the
 /// chunk limit: a balanced file root over two raw leaves, 262144 and 1
 /// bytes. Built in a temp dir and never committed.
