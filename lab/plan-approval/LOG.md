@@ -935,3 +935,105 @@ Neither plant calls `seed_grant` or `seed_request`. After both restores, no plan
 holds no `match read`, no shadowed `caller` and no `Caller::Client { .. }` guard. The restored proof
 command set (the fmt check and the nineteen test commands in the task) took 2.09 s real. This lane
 has no `falsifiers.json`; no id is added.
+
+## 027
+
+Design sentence followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md), Session and
+interaction contract:
+
+> Reconnecting presentation reads durable state; it does not rerun inference or submit the proposed
+> effect again.
+
+This task proves that sentence for the shell's per-session request list: the list is the durable
+records, a second read stores nothing and spends nothing, and each record keeps the plan the owner was
+shown. `read_shown_requests` is the one new function and the only product read of that list; it takes
+`&StandIn`, passes the caller and the session through, and returns that result. It contains no match
+on `Caller` and no copy of the shell check, the session check or `request_entry`. The owner grant stays
+`approve`, the one-request status read stays `read_shown_request` and the live list stays
+`read_shown_grants`.
+
+`shown_request_list_does_not_submit_again` reads the list only through `read_shown_requests` and the
+live list only through `read_shown_grants`; it calls no `get_capability_requests` and no
+`get_capability_list` of its own. On a fresh stand-in, a client read is `Err((403, "This endpoint
+requires shell privileges"))` for `component-1` with session `component-1`, `component-2` with
+session `component-1`, the empty id with an empty session, `component-absent` with its own session,
+and `component-1` with no session; none is the session refusal, none is an Ok body, none names
+`request-1`, and each leaves the capsule list and the shell live list empty. A shell read with no
+session and with the empty session is `Err((400, "requests need a session"))` and is not the shell
+refusal, and each leaves both shell lists empty. A shell read for `component-absent`, `component-1`
+and `component-2` on a fresh stand-in is `Ok({"requests":[]})` and leaves both shell lists empty. Two
+`running_agent` shell calls then start `component-1` and `component-2`, both `running` with cause
+`""`, and both shell reads are still the empty list while the client read stays refused. The first
+session submits `PLAN_A` for `request-1` and the second submits `PLAN_B` for `request-2`; each
+session's list holds only its own pending record with `settled_by` null, an empty
+`decision_reason` and its 64-character plan hash, a second read is the same value, and both live lists
+stay empty. The shell's `deny_shown_plan` of `request-1` gives `{"success":true}` and that record stays
+on the first session's list as `denied` under `shell` with `deny the shown plan`, unchanged by a
+second read, while the second session's record stays pending. The shell's `approve` of `request-2`
+once gives `{"success":true}` and that record stays on the second session's list as `granted` under
+`shell` with `owner approved`, unchanged by a second and a third read, with the one live entry in the
+shell live list throughout. The second session's `execute` of `PLAN_B` is `{"valid":true}`; the
+record stays `granted`, the shell live list becomes the empty shell body, a read leaves both
+unchanged, and the next use is `Err((400, "grant is not live: Exhausted"))`. The first session
+submits `PLAN_A` again for `request-3`, `age_shown_plan` of 300 runs, and the first session's list is
+the denied `request-1` then the expired `request-3` under `runtime` with `Request timed out`, in
+request id order and without `request-2`; a second read is the same value, the second session's list
+stays that one granted entry, the shell live list stays empty, and a shell read with no session is
+still `Err((400, "requests need a session"))`. The test calls no `seed_request`, no
+`post_capability_*` method, `admit_resident`, `post_capsules`, `finish_start`, `set_instant`,
+`delete_capsule` or `worker_exited`. This crate stores no copy of `request_entry`, does not copy the
+stand-in and names no planner. A passing run gives the Runtime no A15 credit.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_request_list_does_not_submit_again -- --exact
+```
+
+### F-client-reads-shell
+
+- old bytes, line 244: `    stand_in.get_capability_requests(caller, session)`
+- new bytes, line 244: `    stand_in.get_capability_requests(Caller::Shell, session)`
+- planted crate compiled; `shown_request_list_does_not_submit_again` failed at `src/lib.rs:6131:9`
+  (planted tree) on the first fresh client read: `assertion left == right failed: a shown request list
+  does not submit again: a client read is the shell refusal for Client { session_id: "component-1" }
+  with session Some("component-1")`; left held `Ok(Object {"requests": Array []})`, right expected
+  `Err((403, "This endpoint requires shell privileges"))`. A client read ran as the shell.
+- restored, the test passes.
+
+### F-second-read-adds-request
+
+- old bytes, line 244: `    stand_in.get_capability_requests(caller, session)`
+- new bytes, lines 244 to 258:
+  ```
+      let read = stand_in.get_capability_requests(caller, session);
+      match read {
+          Ok(mut value)
+              if value["requests"]
+                  .as_array()
+                  .is_some_and(|requests| !requests.is_empty()) =>
+          {
+              value["requests"]
+                  .as_array_mut()
+                  .expect("requests array")
+                  .push(json!({ "request_id": "request-plant", "status": "pending" }));
+              Ok(value)
+          }
+          read => read,
+      }
+  ```
+- planted crate compiled; `shown_request_list_does_not_submit_again` failed at `src/lib.rs:6297:5`
+  (planted tree) on the first non-empty read: `assertion left == right failed: a shown request list
+  does not submit again: the shell read for the first session shows the pending step with its hash`;
+  left held the `request-1` record followed by `{"request_id": "request-plant", "status":
+  "pending"}`, right expected the one `request-1` record. A read stored a second record.
+- restored, the test passes.
+
+Neither plant calls `seed_request` or `post_capability_request`. After both restores,
+`git diff -- lab/plan-approval/src/lib.rs` holds no `request-plant`, no `Caller::Shell, session` and
+no `match read` line, and `sed -n '239,245p' lab/plan-approval/src/lib.rs` shows the signature and
+the single `stand_in.get_capability_requests(caller, session)` line. The restored proof command set
+(the fmt check and the twenty test commands in the task) took 2.398 s real. This lane has no
+`falsifiers.json`; no id is added.
+
+027: added `read_shown_requests` and `shown_request_list_does_not_submit_again`; the shown request list returns the stored records and does not submit again.

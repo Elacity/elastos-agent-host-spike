@@ -360,11 +360,50 @@ list stays `get_capability_requests`. `preview`, `plan_sha256`, `approve`,
 slice. The crate does not copy the stand-in, and it names no planner. A
 passing run gives the Runtime no A15 credit.
 
+A read of a session's request list does not submit again. The design states the
+presentation boundary under the session contract:
+
+> Reconnecting presentation reads durable state; it does not rerun inference or
+> submit the proposed effect again.
+
+`read_shown_requests` is the only product read of the per-session request list,
+and it passes the caller and the session it is given to the stand-in's own
+`GET /api/capability/requests?session=` route. A client returns status 403 with
+`This endpoint requires shell privileges` for a named session, for an empty
+session id and for no session, because the shell check runs before the session
+is read. A shell with no session, or with an empty session, returns status 400
+with `requests need a session`; neither result is the shell refusal, and neither
+carries a body. A shell with any other session returns `{"requests":[]}` when
+that session has no records, including a session that was never launched.
+
+The list holds that session's records only, sorted by `request_id`. Each entry
+is the stand-in's own record with `request_id`, `session_id`, `resource`,
+`action`, `reason`, `status`, `decision_reason`, `settled_by` and `plan`, so
+each record keeps the plan hash the owner was shown. A pending record has
+`settled_by` null and an empty `decision_reason`. A denied record stores
+`denied`, `shell` and `deny the shown plan`; an owner grant stores `granted`,
+`shell` and `owner approved`; an expiry at instant 300 stores `expired`,
+`runtime` and `Request timed out`. A denied, granted or expired record stays on
+the list with its settler. A second read leaves the list and the live grants
+unchanged. A spent once grant stays `granted` on the list, and the next use is
+refused with `grant is not live: Exhausted`.
+`shown_request_list_does_not_submit_again` drives two sessions through
+`running_agent`, submits and settles their plans through `request`, `approve`,
+`deny_shown_plan`, `age_shown_plan` and `execute`, and reads every request list
+through `read_shown_requests` and every live list through `read_shown_grants`;
+it calls no `get_capability_requests` of its own. This crate stores no copy of
+`request_entry`. The one-request status read stays `read_shown_request`, and the
+live list stays `read_shown_grants`. `preview`, `plan_sha256`, `approve`,
+`execute`, `deny_shown_plan`, `age_shown_plan`, `stop_shown_session`,
+`read_shown_request`, `read_shown_grants`, `running_agent` and `request` are
+unchanged by this slice. The crate does not copy the stand-in, and it names no
+planner. A passing run gives the Runtime no A15 credit.
+
 ## Layout
 
 - `src/lib.rs`: `Preview`, `preview`, `plan_sha256`, `approve`,
   `age_shown_plan`, `deny_shown_plan`, `stop_shown_session`,
-  `read_shown_request`, `read_shown_grants`, `execute`,
+  `read_shown_request`, `read_shown_grants`, `read_shown_requests`, `execute`,
   `preview_makes_no_effect`, `plan_sha256_hashes_the_exact_bytes`,
   `deny_one_shown_step`, `unanswered_shown_step_expires`,
   `stop_settles_that_sessions_shown_steps`, `shown_allow_once_expires`,
@@ -376,12 +415,14 @@ passing run gives the Runtime no A15 credit.
   `only_a_live_session_submits_a_shown_plan`,
   `agent_cannot_stop_a_shown_session`, `agent_cannot_launch_a_shown_session`,
   `shown_request_status_is_not_the_grant`,
-  `shown_live_list_is_not_another_sessions_grant` and the bound-plan journey.
+  `shown_live_list_is_not_another_sessions_grant`,
+  `shown_request_list_does_not_submit_again` and the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_request_list_does_not_submit_again -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_live_list_is_not_another_sessions_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_request_status_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_cannot_launch_a_shown_session -- --exact

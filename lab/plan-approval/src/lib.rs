@@ -215,6 +215,35 @@ pub fn read_shown_grants(
     stand_in.get_capability_list(caller, scope)
 }
 
+/// One per-session request-list read through
+/// `GET /api/capability/requests?session=`.
+///
+/// `caller` is the authenticated caller and `session` is the query, both method
+/// arguments. This helper passes them to the list route unchanged and does not
+/// judge either, so the route's own shell check and its own session check
+/// decide the answer. The shell check runs first: a client is refused with the
+/// shell-only reason for a named session, for an empty session and for no
+/// session. A shell with no session, or with an empty session, is refused with
+/// the route's session reason. A shell with any other session, including a
+/// session that was never launched, is `{"requests":[]}` when that session has
+/// no records.
+///
+/// The list holds that session's records and no other session's, sorted by
+/// `request_id`. Each entry is the stand-in's own record: the request id, the
+/// session id, the resource, the action, the reason, the status, the decision
+/// reason, the settler and the plan hash the owner was shown. A pending record
+/// has no settler and an empty decision reason; a denied, granted or expired
+/// record stays on the list with its settler. A read stores nothing and spends
+/// nothing: a second read returns the same list and the live grants stay as
+/// they were.
+pub fn read_shown_requests(
+    stand_in: &StandIn,
+    caller: Caller<'_>,
+    session: Option<&str>,
+) -> Result<Value, (u16, String)> {
+    stand_in.get_capability_requests(caller, session)
+}
+
 #[cfg(test)]
 mod fixtures {
     pub const PLAN_A: &[u8] =
@@ -6024,5 +6053,555 @@ fn shown_live_list_is_not_another_sessions_grant() {
         shell_live(&stand_in, None),
         empty_shell,
         "a shown live list is not another session's grant: the shell live list stays empty after the stop"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn shown_request_list_does_not_submit_again() {
+    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use fixtures::{PLAN_A, PLAN_B};
+    use journeys::{request, running_agent};
+    use serde_json::{json, Value};
+
+    fn shell_requests(stand_in: &StandIn, session: Option<&str>) -> Value {
+        read_shown_requests(stand_in, Caller::Shell, session)
+            .expect("the shell reads a session's request list")
+    }
+
+    fn shell_live(stand_in: &StandIn) -> Value {
+        read_shown_grants(stand_in, Caller::Shell, None).expect("the shell reads the live list")
+    }
+
+    fn shell_capsules(stand_in: &StandIn) -> Vec<Value> {
+        stand_in
+            .get_capsules(Caller::Shell)
+            .expect("shell capsules")["capsules"]
+            .as_array()
+            .cloned()
+            .expect("the shell capsule list holds a capsules array")
+    }
+
+    fn capsule(stand_in: &StandIn, id: &str) -> Value {
+        shell_capsules(stand_in)
+            .into_iter()
+            .find(|entry| entry["id"] == id)
+            .expect("the shell capsule list holds that id")
+    }
+
+    let empty_requests: Value = json!({ "requests": [] });
+    let empty_shell: Value = json!({ "scope": "all_sessions_live", "capabilities": [] });
+    let shell_only: Result<Value, (u16, String)> =
+        Err((403, "This endpoint requires shell privileges".to_owned()));
+    let needs_session: Result<Value, (u16, String)> =
+        Err((400, "requests need a session".to_owned()));
+
+    let mut stand_in = StandIn::new();
+
+    // A client is refused before the session is read, whatever session id it
+    // gives and whether it gives one at all.
+    for (caller, session) in [
+        (
+            Caller::Client {
+                session_id: "component-1",
+            },
+            Some("component-1"),
+        ),
+        (
+            Caller::Client {
+                session_id: "component-2",
+            },
+            Some("component-1"),
+        ),
+        (Caller::Client { session_id: "" }, Some("")),
+        (
+            Caller::Client {
+                session_id: "component-absent",
+            },
+            Some("component-absent"),
+        ),
+        (
+            Caller::Client {
+                session_id: "component-1",
+            },
+            None,
+        ),
+    ] {
+        let read = read_shown_requests(&stand_in, caller, session);
+        assert_eq!(
+            read, shell_only,
+            "a shown request list does not submit again: a client read is the shell refusal for {caller:?} with session {session:?}"
+        );
+        assert_ne!(
+            read, needs_session,
+            "a shown request list does not submit again: the client refusal is not the session refusal for {caller:?} with session {session:?}"
+        );
+        assert!(
+            read.is_err(),
+            "a shown request list does not submit again: the client read returns no body for {caller:?} with session {session:?}"
+        );
+        assert!(
+            !matches!(&read, Ok(value) if value.to_string().contains("request-1")),
+            "a shown request list does not submit again: the client refusal returns no body that names request-1 for {caller:?} with session {session:?}"
+        );
+        assert_eq!(
+            shell_capsules(&stand_in),
+            Vec::<Value>::new(),
+            "a shown request list does not submit again: the client read by {caller:?} leaves the capsule list empty"
+        );
+        assert_eq!(
+            shell_live(&stand_in),
+            empty_shell,
+            "a shown request list does not submit again: the client read by {caller:?} leaves the shell live list empty"
+        );
+    }
+
+    // A shell must name a session.
+    for session in [None, Some("")] {
+        let read = read_shown_requests(&stand_in, Caller::Shell, session);
+        assert_eq!(
+            read, needs_session,
+            "a shown request list does not submit again: a shell read with session {session:?} needs a session"
+        );
+        assert_ne!(
+            read, shell_only,
+            "a shown request list does not submit again: the session refusal for {session:?} is not the shell refusal"
+        );
+        assert!(
+            read.is_err(),
+            "a shown request list does not submit again: the session refusal for {session:?} returns no body"
+        );
+        assert_eq!(
+            shell_capsules(&stand_in),
+            Vec::<Value>::new(),
+            "a shown request list does not submit again: the session refusal for {session:?} leaves the capsule list empty"
+        );
+        assert_eq!(
+            shell_live(&stand_in),
+            empty_shell,
+            "a shown request list does not submit again: the session refusal for {session:?} leaves the shell live list empty"
+        );
+    }
+
+    // A named session with no records is the empty list, including one that was
+    // never launched.
+    for session in ["component-absent", "component-1", "component-2"] {
+        let read = read_shown_requests(&stand_in, Caller::Shell, Some(session));
+        assert_eq!(
+            read,
+            Ok(empty_requests.clone()),
+            "a shown request list does not submit again: the shell read for {session} on a fresh stand-in is the empty list"
+        );
+        assert_eq!(
+            shell_capsules(&stand_in),
+            Vec::<Value>::new(),
+            "a shown request list does not submit again: the shell read for {session} leaves the capsule list empty"
+        );
+        assert_eq!(
+            shell_live(&stand_in),
+            empty_shell,
+            "a shown request list does not submit again: the shell read for {session} leaves the shell live list empty"
+        );
+    }
+
+    // Two running sessions come from the one launch journey.
+    let first = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    assert_eq!(
+        first, "component-1",
+        "a shown request list does not submit again: the fresh stand-in names the first running session component-1"
+    );
+    let second = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    assert_eq!(
+        second, "component-2",
+        "a shown request list does not submit again: the second running session is the stand-in's next component"
+    );
+    for id in [&first, &second] {
+        let listed = capsule(&stand_in, id);
+        assert_eq!(
+            json!({
+                "id": listed["id"],
+                "status": listed["status"],
+                "cause": listed["cause"],
+            }),
+            json!({
+                "id": id,
+                "status": "running",
+                "cause": "",
+            }),
+            "a shown request list does not submit again: each launched session is running with no cause"
+        );
+    }
+
+    // The launch stores no request, so both lists stay empty and a client read
+    // stays refused.
+    for session in [first.as_str(), second.as_str()] {
+        assert_eq!(
+            read_shown_requests(&stand_in, Caller::Shell, Some(session)),
+            Ok(empty_requests.clone()),
+            "a shown request list does not submit again: the shell read for {session} is still the empty list after the launch"
+        );
+    }
+    assert_eq!(
+        read_shown_requests(
+            &stand_in,
+            Caller::Client {
+                session_id: &first,
+            },
+            Some(first.as_str()),
+        ),
+        shell_only,
+        "a shown request list does not submit again: a client read stays the shell refusal after the launch"
+    );
+
+    let plan_a = plan_sha256(PLAN_A);
+    assert_eq!(
+        plan_a.len(),
+        64,
+        "a shown request list does not submit again: the shown hash of plan A is 64 characters"
+    );
+    let first_step = request(&mut stand_in, Caller::Client { session_id: &first }, PLAN_A)
+        .expect("the agent's submit stores the first shown plan");
+    assert_eq!(
+        first_step, "request-1",
+        "a shown request list does not submit again: the first session's shown plan is the stand-in's first request"
+    );
+    let pending_a = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "pending",
+        "decision_reason": "",
+        "settled_by": null,
+        "plan": plan_a,
+    });
+    let first_pending = json!({ "requests": [pending_a.clone()] });
+    let read_first = shell_requests(&stand_in, Some(first.as_str()));
+    assert_eq!(
+        read_first, first_pending,
+        "a shown request list does not submit again: the shell read for the first session shows the pending step with its hash"
+    );
+    assert_eq!(
+        read_first["requests"]
+            .as_array()
+            .expect("the shell request list holds a requests array")
+            .len(),
+        1,
+        "a shown request list does not submit again: the first session's list has one record"
+    );
+    assert_eq!(
+        read_first["requests"][0]["plan"],
+        json!(plan_a),
+        "a shown request list does not submit again: the one record keeps the plan hash the owner was shown"
+    );
+    for session in [second.as_str(), "component-absent"] {
+        assert_eq!(
+            shell_requests(&stand_in, Some(session)),
+            empty_requests.clone(),
+            "a shown request list does not submit again: the first session's record is not in the list for {session}"
+        );
+    }
+
+    // A second read of the same list returns the stored record and stores
+    // nothing.
+    assert_eq!(
+        shell_requests(&stand_in, Some(first.as_str())),
+        first_pending,
+        "a shown request list does not submit again: a second shell read is still that one pending entry"
+    );
+    assert_eq!(
+        read_shown_requests(
+            &stand_in,
+            Caller::Client {
+                session_id: &first,
+            },
+            Some(first.as_str()),
+        ),
+        shell_only,
+        "a shown request list does not submit again: the client read stays the shell refusal and is not that one-entry value"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown request list does not submit again: a pending record is not a live grant"
+    );
+
+    let plan_b = plan_sha256(PLAN_B);
+    assert_eq!(
+        plan_b.len(),
+        64,
+        "a shown request list does not submit again: the shown hash of plan B is 64 characters"
+    );
+    let second_step = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: &second,
+        },
+        PLAN_B,
+    )
+    .expect("the other session's submit stores the second shown plan");
+    assert_eq!(
+        second_step, "request-2",
+        "a shown request list does not submit again: the other session's shown plan is the stand-in's second request"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some(first.as_str())),
+        first_pending,
+        "a shown request list does not submit again: the first session's list still holds only its own record"
+    );
+    let pending_b = json!({
+        "request_id": "request-2",
+        "session_id": "component-2",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "pending",
+        "decision_reason": "",
+        "settled_by": null,
+        "plan": plan_b,
+    });
+    let second_pending = json!({ "requests": [pending_b.clone()] });
+    assert_eq!(
+        shell_requests(&stand_in, Some(second.as_str())),
+        second_pending,
+        "a shown request list does not submit again: the second session's list holds its own pending record"
+    );
+    assert!(
+        !shell_requests(&stand_in, Some(second.as_str()))
+            .to_string()
+            .contains("request-1"),
+        "a shown request list does not submit again: the second session's list holds no other session's record"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some(second.as_str())),
+        second_pending,
+        "a shown request list does not submit again: a second read of the second session is that same value"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown request list does not submit again: both pending records stay out of the shell live list"
+    );
+
+    // The owner's deny settles that record; the record stays on the list.
+    assert_eq!(
+        deny_shown_plan(&mut stand_in, Caller::Shell, &first_step),
+        Ok(json!({ "success": true })),
+        "a shown request list does not submit again: the shell denies the first pending step"
+    );
+    let denied_a = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "denied",
+        "decision_reason": "deny the shown plan",
+        "settled_by": "shell",
+        "plan": plan_a,
+    });
+    let first_denied = json!({ "requests": [denied_a] });
+    assert_eq!(
+        shell_requests(&stand_in, Some(first.as_str())),
+        first_denied,
+        "a shown request list does not submit again: the denied record stays on the list with its settler"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some(first.as_str())),
+        first_denied,
+        "a shown request list does not submit again: a second read of the denied record is that same value"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some(second.as_str())),
+        second_pending,
+        "a shown request list does not submit again: the deny leaves the other session's record pending"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown request list does not submit again: the deny mints no live grant"
+    );
+
+    // The owner's grant settles the second record; the record stays granted.
+    assert_eq!(
+        approve(&mut stand_in, Caller::Shell, &second_step, "once", &plan_b),
+        Ok(json!({ "success": true })),
+        "a shown request list does not submit again: the owner allows the second pending step once with the hash it saw"
+    );
+    let granted_b = json!({
+        "request_id": "request-2",
+        "session_id": "component-2",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "granted",
+        "decision_reason": "owner approved",
+        "settled_by": "shell",
+        "plan": plan_b,
+    });
+    let second_granted = json!({ "requests": [granted_b] });
+    assert_eq!(
+        shell_requests(&stand_in, Some(second.as_str())),
+        second_granted,
+        "a shown request list does not submit again: the granted record stays on the list with its settler and hash"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some(second.as_str())),
+        second_granted,
+        "a shown request list does not submit again: a second read of the granted record is that same value"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some(second.as_str()))["requests"]
+            .as_array()
+            .expect("the shell request list holds a requests array")
+            .len(),
+        1,
+        "a shown request list does not submit again: the granted session's list still has one record"
+    );
+    let one_grant = json!({
+        "request_id": "request-2",
+        "session_id": "component-2",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "duration": "once",
+        "granted_at": 0,
+    });
+    let shell_one = json!({ "scope": "all_sessions_live", "capabilities": [one_grant] });
+    assert_eq!(
+        shell_live(&stand_in),
+        shell_one,
+        "a shown request list does not submit again: the owner's grant is the one live entry"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some(second.as_str())),
+        second_granted,
+        "a shown request list does not submit again: a third read is still that one granted entry"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        shell_one,
+        "a shown request list does not submit again: the third read leaves the live list as it was"
+    );
+
+    // The grant's use leaves the record granted and drops the spent grant.
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &second,
+            },
+            &second_step,
+            PLAN_B,
+        ),
+        Ok(json!({ "valid": true })),
+        "a shown request list does not submit again: the once grant authorises its one use"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some(second.as_str())),
+        second_granted,
+        "a shown request list does not submit again: the spent once grant stays granted on the list"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown request list does not submit again: the spent once grant leaves the shell live list"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some(second.as_str())),
+        second_granted,
+        "a shown request list does not submit again: a second read after the use is that same granted record"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown request list does not submit again: the read after the use leaves the live list empty"
+    );
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &second,
+            },
+            &second_step,
+            PLAN_B,
+        ),
+        Err((400, "grant is not live: Exhausted".to_owned())),
+        "a shown request list does not submit again: the next use of the spent once grant is refused"
+    );
+
+    // A record's age settles it on the list; the settled records stay.
+    let third_step = request(&mut stand_in, Caller::Client { session_id: &first }, PLAN_A)
+        .expect("the first session's second submit stores another shown plan");
+    assert_eq!(
+        third_step, "request-3",
+        "a shown request list does not submit again: the first session's second shown plan is the stand-in's third request"
+    );
+    age_shown_plan(&mut stand_in, 300);
+    let expired_a = json!({
+        "request_id": "request-3",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "expired",
+        "decision_reason": "Request timed out",
+        "settled_by": "runtime",
+        "plan": plan_a,
+    });
+    let first_settled = json!({
+        "requests": [
+            {
+                "request_id": "request-1",
+                "session_id": "component-1",
+                "resource": "localhost://Public/plan-approval/a.txt",
+                "action": "read",
+                "reason": "",
+                "status": "denied",
+                "decision_reason": "deny the shown plan",
+                "settled_by": "shell",
+                "plan": plan_a,
+            },
+            expired_a,
+        ],
+    });
+    let read_settled = shell_requests(&stand_in, Some(first.as_str()));
+    assert_eq!(
+        read_settled, first_settled,
+        "a shown request list does not submit again: the denied and expired records stay on the list in request id order"
+    );
+    assert_eq!(
+        read_settled["requests"]
+            .as_array()
+            .expect("the shell request list holds a requests array")
+            .len(),
+        2,
+        "a shown request list does not submit again: the first session's list has two records"
+    );
+    assert!(
+        !read_settled.to_string().contains("request-2"),
+        "a shown request list does not submit again: the first session's list holds no other session's record"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some(first.as_str())),
+        first_settled,
+        "a shown request list does not submit again: a second read after the expiry is that same value"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some(second.as_str())),
+        second_granted,
+        "a shown request list does not submit again: the other session's granted record is still on its list"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown request list does not submit again: the expiry mints no live grant"
+    );
+    assert_eq!(
+        read_shown_requests(&stand_in, Caller::Shell, None),
+        needs_session,
+        "a shown request list does not submit again: the shell still needs a session after the runs"
     );
 }
