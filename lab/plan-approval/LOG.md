@@ -10,6 +10,7 @@
 - 013: `approve` gains `duration: &str` after `request_id` and sends that word as the `duration` key, staying the one grant call; `shown_session_lasts_until_stop` proves a `session` grant survives two uses of its plan and the stand-in's once lifetime, refuses another duration word and a different plan without spending it, and is revoked by `stop_shown_session` so `execute` refuses it as `Revoked`; three hand-run plants caught and restored; 1 test, 3 plants.
 - 014: `shown_grant_authorises_only_its_session` proves a shown grant authorises only the session that asked for it; another session's use is refused as `wrong capsule` and spends nothing, both client live lists show one grant each without `session_id`, and each session's own use still runs until its `once` grant leaves the live list; two hand-run plants caught and restored; 1 test, 2 plants.
 - 015: `owner_approves_only_the_shown_hash` proves the owner's grant mints only the hash the shown request stored; another plan, an empty hash and a 63-character hash are refused with `approved plan does not match the requested plan` and mint nothing while the request stays pending, and the exact hash then grants one use that `execute` spends; two hand-run plants caught and restored; 1 test, 2 plants.
+- 016: `approve` gains `caller: Caller<'_>` after `stand_in` and passes that value to `post_capability_grant`, staying the one grant call; `agent_cannot_approve_its_own_shown_plan` proves the session that posted a plan and the other running session are refused with `This endpoint requires shell privileges` before the body is read, for another hash, an empty hash, a 63-character hash and the duration word `standing` too, and that the shell's call with the exact hash then grants one use which `execute` spends; two hand-run plants caught and restored; 1 test, 2 plants.
 
 ## 001
 
@@ -275,3 +276,33 @@ cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib owner_app
 - restored, the test passes.
 
 After both restores, `git diff -- lab/plan-approval/src/lib.rs` shows no plant, and the diff adds only `owner_approves_only_the_shown_hash`. The restored proof command set (the fmt check and the ten test commands in the task) took 1.306 s real. This lane has no `falsifiers.json`; no id is added.
+
+## 016
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md) Request flow step 8:
+
+> The UI does not mint the grant itself.
+
+This task proves that sentence for the agent that posted the shown plan and for the other running session. The hash check stays 015; the session check stays 014; a standing mandate stays BACKLOG item 11. `approve` takes the caller after the stand-in, passes it unchanged to the one grant route and does not judge it, so the stand-in's own shell check runs before the body is read. The test calls only `journeys::running_agent`, `journeys::request`, `approve` and `execute`, and the six refusals leave the request pending with its stored hash and the live list empty.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_cannot_approve_its_own_shown_plan -- --exact
+```
+
+### F-approve-forces-shell
+
+- old bytes, 16: `        caller,\n`
+- new bytes, 23: `        Caller::Shell,\n`
+- planted crate compiled; `agent_cannot_approve_its_own_shown_plan` failed at `src/lib.rs:2230:9` on the first client-refusal assertion: `assertion left == right failed: the agent that showed the plan cannot mint its grant: the client's approval with duration once and hash "156e544f8e98e81c5e504dfd7ed21d2adb703b8f9dafa8701b064255b69f85ae" is refused as a client on a shell-only route`; left held `Ok(Object {"success": Bool(true)})`, right expected `Err((403, "This endpoint requires shell privileges"))`. The posting session minted its own grant.
+- restored, the test passes.
+
+### F-duration-before-shell
+
+- old bytes, 36: `    stand_in.post_capability_grant(\n`
+- new bytes, 228: `    if duration != "once" && duration != "session" {\n        return Err((\n            400,\n            format!("Invalid duration: {duration}. Expected 'once' or 'session'"),\n        ));\n    }\n    stand_in.post_capability_grant(\n`
+- planted crate compiled; `agent_cannot_approve_its_own_shown_plan` failed at `src/lib.rs:2236:9` (planted tree) on the same client-refusal assertion for the `standing` call: `assertion left == right failed: the agent that showed the plan cannot mint its grant: the client's approval with duration standing and hash "156e544f8e98e81c5e504dfd7ed21d2adb703b8f9dafa8701b064255b69f85ae" is refused as a client on a shell-only route`; left held `Err((400, "Invalid duration: standing. Expected 'once' or 'session'"))`, right expected `Err((403, "This endpoint requires shell privileges"))`. The duration check ran before the shell check, so a client reached a body check.
+- restored, the test passes.
+
+After both restores, `git diff -- lab/plan-approval/src/lib.rs` shows no plant. The restored proof command set (the fmt check and the eleven test commands in the task) took 3.212 s real. This lane has no `falsifiers.json`; no id is added.

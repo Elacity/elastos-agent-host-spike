@@ -119,6 +119,27 @@ the body hash with the hash the request stored. The crate does not copy the
 stand-in, and it names no planner. A passing run gives the Runtime no A15
 credit.
 
+A client call through `approve` is refused before the grant body is read, so
+the agent that showed a plan cannot mint its grant. `approve` is the only grant
+call and passes the caller it is given. The design keeps the grant in the
+Runtime:
+
+> The UI does not mint the grant itself.
+
+The session that posted the shown plan and the other running session are each
+refused with status 403 and `This endpoint requires shell privileges`. A
+different plan hash, an empty hash, the first 63 characters of the stored hash
+and the duration word `standing` get that same refusal, because the shell check
+runs before the hash and the duration check. Each refusal mints nothing: the
+request stays pending with its stored hash and the shell's live list stays
+empty. The shell's call with the exact hash then grants one use, which
+`execute` spends; a second use is refused with `grant is not live: Exhausted`.
+This crate stores no copy of the shell check; the stand-in's grant route makes
+it. `preview`, `plan_sha256`, `execute`, `deny_shown_plan`, `age_shown_plan`
+and `stop_shown_session` are unchanged by this slice. The crate does not copy
+the stand-in, and it names no planner. A passing run gives the Runtime no A15
+credit.
+
 `preview`, `plan_sha256`, `execute`, `deny_shown_plan`, `age_shown_plan` and
 `stop_shown_session` are unchanged by this slice; `approve` gains the duration
 argument and remains the only grant call. This crate calls
@@ -142,12 +163,14 @@ open.
   `deny_one_shown_step`, `unanswered_shown_step_expires`,
   `stop_settles_that_sessions_shown_steps`, `shown_allow_once_expires`,
   `shown_session_lasts_until_stop`, `shown_grant_authorises_only_its_session`,
-  `owner_approves_only_the_shown_hash` and the bound-plan journey.
+  `owner_approves_only_the_shown_hash`, `agent_cannot_approve_its_own_shown_plan`
+  and the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_cannot_approve_its_own_shown_plan -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib owner_approves_only_the_shown_hash -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_grant_authorises_only_its_session -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_session_lasts_until_stop -- --exact
