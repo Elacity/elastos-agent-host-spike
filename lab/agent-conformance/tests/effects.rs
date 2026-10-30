@@ -1408,8 +1408,9 @@ fn standin_stopped_run_leaves_no_live_grant() {
         standin_a12_census(&fresh_run, &home, port).is_ok(),
         "the stand-in's third run leaves no request after both stops"
     );
-    // The census test above shows a leftover request fails the census; no
-    // route stores one after a stop, so this run plants none.
+    // `standin_a12_census_catches_planted_leftovers` shows the pending loop
+    // reads a route-stored record. No route stores one after a stop, so this
+    // run holds none.
     for session_id in ["component-1", "component-2"] {
         let stored: Result<String, (u16, String)> = match fresh_run.post_capability_request(
             StandInCaller::Client { session_id },
@@ -2073,6 +2074,115 @@ fn standin_a12_census_catches_planted_leftovers() {
         standin_a12_census(&standin, &home, port),
         Ok(()),
         "the census is clean again after each planted leftover leaves"
+    );
+
+    // Kind 4: the route stores a pending request on a live instance whose
+    // signed bundle declares the ask, and the session's stop then settles
+    // that same record. The stored request is real, not a plant: the census
+    // loop reads it in the record form the stop leaves behind.
+    let pending_shared = SignedBundle::distinct("agent-host-pending");
+    standin
+        .admit_resident(
+            pending_shared.path(),
+            &pending_shared.signature(),
+            pending_shared.accepted(),
+            Start::Ok,
+        )
+        .expect("the stand-in admits the pending instance's signed bundle");
+    assert_eq!(
+        standin_launch(&mut standin, &pending_shared),
+        "component-2",
+        "the stand-in launches the pending instance beside the stopped entry"
+    );
+    standin
+        .finish_start("component-2")
+        .expect("the stand-in finishes the pending start");
+    let pending = standin_seed_shared_request(&mut standin, "component-2");
+    assert_eq!(
+        standin_requests(&standin, "component-2"),
+        vec![standin_request_record(
+            &pending,
+            "component-2",
+            "pending",
+            "",
+            None
+        )],
+        "the route stores the pending request on the live instance"
+    );
+    let census = standin_a12_census(&standin, &home, port);
+    assert!(
+        matches!(&census, Err(reason) if reason.contains("instance still live: running")),
+        "the live copy refuses the census before the pending loop: {census:?}"
+    );
+    standin
+        .delete_capsule(
+            StandInCaller::Shell,
+            "component-2",
+            &json!({"reason": "stop two"}),
+        )
+        .expect("the stand-in stops the pending instance");
+    let survivor = standin_launch(&mut standin, &shared);
+    standin
+        .finish_start(&survivor)
+        .expect("the stand-in returns the survivor to running");
+    let survivor_request = standin_seed_shared_request(&mut standin, &survivor);
+    standin
+        .post_capability_grant(
+            StandInCaller::Shell,
+            &json!({
+                "request_id": survivor_request,
+                "duration": "session",
+                "rationale": "grant shared read",
+            }),
+        )
+        .expect("the stand-in grants the survivor's request");
+    let census = standin_a12_census(&standin, &home, port);
+    assert!(
+        matches!(&census, Err(reason) if reason.contains("live grant leftover") || reason.contains("instance still live: running")),
+        "the survivor reports its live grant or its running word: {census:?}"
+    );
+    standin
+        .delete_capsule(
+            StandInCaller::Shell,
+            &survivor,
+            &json!({"reason": "stop three"}),
+        )
+        .expect("the stand-in stops the survivor");
+    assert_eq!(
+        standin_requests(&standin, &survivor),
+        vec![standin_request_record(
+            &survivor_request,
+            &survivor,
+            "granted",
+            "grant shared read",
+            Some("shell")
+        )],
+        "the survivor's stop keeps its settled granted record"
+    );
+    for (request_id, session_id, decision_reason) in [
+        (&pending, "component-2", "stopped: stop two"),
+        (&survivor_request, survivor.as_str(), "grant shared read"),
+    ] {
+        let listed = standin_requests(&standin, session_id);
+        assert_eq!(
+            listed.len(),
+            1,
+            "the census input holds the route-stored record for {session_id}"
+        );
+        assert!(
+            listed[0]["request_id"] == json!(request_id) && listed[0]["status"] != json!("pending"),
+            "the census input reads the route-stored request {request_id} in a settled status"
+        );
+        assert_eq!(
+            listed[0]["decision_reason"], decision_reason,
+            "the census input reads the settled cause"
+        );
+    }
+    let census = standin_a12_census(&standin, &home, port);
+    assert_eq!(
+        (census, standin_live_grants(&standin)),
+        (Ok(()), vec![]),
+        "the census reads no leftover and leaves every record in place"
     );
     home.finish()
         .expect("the stand-in control run removes its throwaway home");
