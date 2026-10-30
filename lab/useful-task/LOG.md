@@ -214,3 +214,304 @@ BACKLOG and stays opt-in; this task reads no model endpoint and starts no
 agent.
 
 - 002: Added `lab/useful-task/falsifiers.json` with F-UT1 on the shared runner; the registered `useful-task` command catches the early-accept plant and restores `src/lib.rs`.
+
+## 003 — judge binds to the named fixture hashes
+
+`Spec` gained `recorded_sha256` and its read-only accessor. `CHECK_ORDER` is now
+the seven reasons `input`, `recorded`, `empty`, `echo`, `fixed-string`, `shape`,
+`mismatch`. `load_spec` requires `recorded_sha256` as a known key and refuses a
+missing key, a non-string, or a string that is not 64 lowercase hex characters
+for both `input_sha256` and `recorded_sha256`; the messages are
+`spec is missing <key>`, `spec <key> is not a string`, and
+`spec <key> is not a sha256 hex`. One new function, `sha256_field`, performs the
+format check; `sha256_hex` stays the only hasher.
+
+`judge(spec, input, expected, answer)` now takes the expected bytes as `&str`.
+Its first statement is still `    let trimmed = answer.trim();`. Inside the
+existing reasons loop, `input` refuses when `sha256_hex(input)` is not the
+spec's `input_sha256`, and `recorded` refuses when `sha256_hex(expected)` is not
+its `recorded_sha256`. Both hash the arguments exactly as given. The five later
+checks keep their meanings, with the expected value parsed from those bytes.
+
+Both `accept.json` files carry `recorded_sha256` and the seven-reason list. The
+input and recorded fixtures keep their bytes and hashes
+(`043eec2f...e3468` for agent-a, `c7209888...221a7` for agent-b).
+
+`checker_accepts_recorded_answer_and_refuses_stubs` now also checks the recorded
+hash accessors, a one-character input change with the real recorded bytes as
+both expected and answer (`input`), each agent's schema-valid substitute as both
+expected and answer (`recorded`), and both hash fields set to `abc`, `A`×64, and
+`g`×64, plus missing and `17`. The existing accept, empty, echo, fixed-string,
+shape, mismatch, spec-swap and malformed-spec checks use all seven reasons.
+
+### Planted faults
+
+Each fault was hand-applied to `src/lib.rs`, the named test ran alone, and the
+original bytes were restored before the next fault. The restored source SHA-256
+is `b30f53d23fafd545b3aa5878d180323cc3bf7adaf5d01e996151c61fc547ff4a`.
+Every run used
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --locked --manifest-path lab/useful-task/Cargo.toml -- checker_accepts_recorded_answer_and_refuses_stubs --exact`.
+
+1. `            Reason::Input => false,` failed at `tests/checker.rs:208:5`:
+   `assertion left == right failed: changed input is input`,
+   `left: Accept { answer_sha256: "be6bff0dff3b3ebdcd97da9db1cdbe24aaa194e90fef6ac158ff8b0b36eb5ba5" }`
+   / `right: Refuse { reason: "input" }`.
+2. `            Reason::Recorded => false,` failed at `tests/checker.rs:222:5`:
+   `assertion left == right failed: agent-a substitute against its own hash is recorded`,
+   `left: Accept { answer_sha256: "7f0fca5c7e7768cdcfa47fcc6990699ba0431582e99c5ddade2b99813e85a179" }`
+   / `right: Refuse { reason: "recorded" }`.
+3. Replacing the check with `if false {` (so `abc` loads) failed at
+   `tests/checker.rs:38:33`: `malformed spec: Spec { ... input_sha256: "abc",
+   recorded_sha256: "043eec2f...e3468", ... }`.
+4. Skipping only the input key:
+   `if key == "input_sha256" { return Ok(value); }` failed at
+   `tests/checker.rs:38:33` with `input_sha256: "abc"`.
+5. Skipping only the recorded key:
+   `if key == "recorded_sha256" { return Ok(value); }` failed at
+   `tests/checker.rs:38:33` with `recorded_sha256: "abc"`.
+6. Replacing the charset with `byte.is_ascii_hexdigit()` (so uppercase loads)
+   failed at `tests/checker.rs:38:33` with 64 `A` characters in
+   `input_sha256`.
+7. Replacing `b'a'..=b'f'` with `b'a'..=b'z'` (so a non-hex letter loads)
+   failed at `tests/checker.rs:38:33` with 64 `g` characters in
+   `input_sha256`.
+
+After the final restore, the same command passes:
+
+```
+test checker_accepts_recorded_answer_and_refuses_stubs ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+`cargo fmt --manifest-path lab/useful-task/Cargo.toml -- --check` passes. The
+full `cargo test --locked --manifest-path lab/useful-task/Cargo.toml` passes one
+integration test and six doctests. `F-UT1` in the existing `falsifiers.json`
+stays unchanged and the shared runner reports `CAUGHT`. The live model turn
+stays held.
+
+- 003: Bound `judge` to the spec's `input_sha256` and `recorded_sha256`, added the seven-reason order and strict hash-field loading, and extended the named test with the wrong-input and substitute refusals plus format plants.
+
+## 004 — judge requires one of the two named task specs
+
+`CHECK_ORDER` now names eight checks, with `task` first. `judge` keeps
+`    let trimmed = answer.trim();` as its first statement and the existing
+reasons loop gains one arm, `            Reason::Task => !is_named_task(spec),`.
+`is_named_task` loads the embedded `tasks/agent-a/accept.json` and
+`tasks/agent-b/accept.json` with the one `load_spec`, compares `Spec` equality,
+and refuses when either embedded spec fails to load. A caller-supplied spec
+whose hashes match a different note and answer is now `task` instead of
+`Accept`. Both fixture specs change only their `reasons` arrays; `input.txt`,
+`recorded.json`, `Cargo.toml`, `Cargo.lock` and `F-UT1` keep their bytes.
+
+The one test `checker_accepts_recorded_answer_and_refuses_stubs` now uses the
+eight labels and adds three refusals: a copy of agent-a's spec with `m1` set to
+`other` judged against the real fixture bytes, and the self-consistent agent-a
+and agent-b substitutes described in the task. Each substitute keeps its own
+`task_id`, hashes its own input and recorded strings with `sha256_hex`, and is
+`task`. Without the new arm those three calls are `Accept`; the other refusals
+and the spec swaps keep their reasons.
+
+### Falsifiers
+
+`F-UT2` skips the named-task check with
+`            Reason::Task => false,` and names the same test. The shared runner
+reports:
+
+```
+baseline: 1 named tests pass without an edit, 0 do not
+F-UT1  CAUGHT                             1s  accept every answer before the judge reads it
+F-UT2  CAUGHT                             1s  skip the named-task check
+summary: 2 CAUGHT of 2
+```
+
+After the run, `lab/useful-task/src/lib.rs.falsify-original` is absent and the
+source is restored to SHA-256
+`7cb4678485686ecc154837b8321022038a7acb42db45bb6a9e09791ad76dd96c`. The
+restored tree passes `cargo fmt --manifest-path lab/useful-task/Cargo.toml --
+--check`, the named test, and the full `cargo test --locked` run (seven
+tests). The live model turn stays held.
+
+- 004: Made `judge` refuse a spec that is not one of the two named task specs, added the eight-reason order with `task` first, extended the named test with the m1 and self-consistent substitute cases, and added `F-UT2`.
+
+## 005 — judge refuses an answer that repeats a JSON key
+
+`CHECK_ORDER` now names nine checks, with `duplicate` between `shape` and
+`mismatch`. `judge` keeps `    let trimmed = answer.trim();` as its first
+statement and reads the answer through one private `parse_answer`, which
+replaces `serde_json::from_str` on the answer. `parse_answer` uses
+`serde_json::Deserializer::from_str`, one `serde::de::Visitor` (`UniqueValue`),
+and `Deserializer::end` after the value, so trailing non-whitespace is
+`AnswerParse::Invalid` and a unique-key value is `AnswerParse::Value`.
+
+The visitor builds each object with `Map::insert`. A key that is already
+present sets a `Cell` flag and returns `Error::custom("duplicate key")`, and
+`parse_answer` reads that flag as `AnswerParse::Duplicate`. A key written with
+a `\u` escape decodes to the same key, so it is the same case; an object inside
+an array uses the same visitor. Truncated JSON and any other parse error stay
+`AnswerParse::Invalid`. The expected bytes still use `serde_json::from_str`.
+
+The `shape` check refuses `AnswerParse::Invalid` and a `Value` that fails
+`schema.matches`, and it passes `AnswerParse::Duplicate`, so the new one-line
+arm decides that case:
+`            Reason::Duplicate => matches!(parsed, AnswerParse::Duplicate),`.
+The `mismatch` check compares only a `Value`, so a repeated key has no value to
+compare. Hand-setting the duplicate arm to false makes the first Context answer
+`Accept`: the named test panicked at `tests/checker.rs:379:9` with
+`left: Accept { answer_sha256: "0e7900bc0d0567eb66d8637414f5b4e4bf0ab996fbb93fb629b81cbd4c1c7345" }`
+/ `right: Refuse { reason: "duplicate" }`. The `shape` check passes
+`AnswerParse::Duplicate` and `mismatch` matches only a `Value`, so the other
+three duplicate fixtures take the same `Accept` path; the source was restored
+to the SHA-256 below afterwards.
+
+`Cargo.toml` gains `serde = "=1.0.229"`, which the lock already carried as a
+`serde_json` dependency, and the lock's root entry gains `serde`. Both
+`accept.json` files change only their `reasons` arrays to the nine labels;
+`input.txt`, `recorded.json`, `F-UT1` and `F-UT2` keep their bytes.
+
+`checker_accepts_recorded_answer_and_refuses_stubs` now uses the nine labels
+and adds six refusals: the three Context answers, the reversed-key answer, and
+a repeated key beside an extra field are `duplicate`; a unique-key answer whose
+`goods` string contains the word `place` is `mismatch`; and a valid value with
+trailing non-whitespace is `shape`. The three Context answers are `Accept`
+without the duplicate arm, so the test fails without it.
+
+### Falsifiers
+
+`F-UT3` sets the duplicate arm to false and names the same test. The shared
+runner reports:
+
+```
+baseline: 1 named tests pass without an edit, 0 do not
+F-UT1  CAUGHT                             1s  accept every answer before the judge reads it
+F-UT2  CAUGHT                             1s  skip the named-task check
+F-UT3  CAUGHT                             1s  skip the duplicate-key check
+summary: 3 CAUGHT of 3
+```
+
+The command exited 0, `lab/useful-task/src/lib.rs.falsify-original` is absent,
+and `src/lib.rs` kept SHA-256
+`5ff9694e7362b1611eaac6967e4af6975965e6e08f7245ca3334545230d4e7d2` across the
+run. The restored tree passes
+`cargo fmt --manifest-path lab/useful-task/Cargo.toml -- --check`, the named
+test, and the full `cargo test --locked` run (one integration test and six
+doctests). The live model turn stays held.
+
+- 005: Made `parse_answer` refuse a repeated object key with one deserializer and one visitor, added the nine-reason order with `duplicate` between `shape` and `mismatch`, extended the named test with the duplicate and unique-key cases, and added `F-UT3`.
+
+## 006 — the lane gate holds only F-UT2
+
+The lane gate runs `lab/useful-task/falsifiers.json` when it exists, and that
+list now has one entry: `F-UT2`, copied unchanged from head `aa1103891` — id
+`F-UT2`, title `skip the named-task check`, command `useful-task`, expect
+`caught`, tests `["checker_accepts_recorded_answer_and_refuses_stubs"]`, and
+one edit of `            Reason::Task => !is_named_task(spec),\n` to
+`            Reason::Task => false,\n`. The other two entries moved unchanged
+into `lab/useful-task/held-judge-plants.json`, which the gate does not read:
+`F-UT1` (title `accept every answer before the judge reads it`) then `F-UT3`
+(title `skip the duplicate-key check`), each with the same command, expect and
+named test and its one edit of `src/lib.rs`.
+
+The reason is recovery, not preference. `PROVIDER_TARGETS` in
+`examples/agent-host/falsify.py:343` lists the files `recover_backups` at
+`falsify.py:433` restores after a killed run, and it has no
+`lab/useful-task/src/lib.rs`. A killed `F-UT1` or `F-UT3` run would therefore
+leave an always-accept judge or a skipped duplicate-key check in the source.
+`F-UT2` has the same target and is held for the same reason once this list
+shrinks further; it stays because the gate needs one live plant, and it does
+not change the recovery gap. The two `about` strings carry this condition:
+`F-UT1` and `F-UT3` return to `falsifiers.json` only after `PROVIDER_TARGETS`
+includes `lab/useful-task/src/lib.rs`.
+
+This task does not run `examples/agent-host/falsify.py`. It proves the split
+and the source bytes with two commands, both exited 0:
+
+```
+cargo test --locked --manifest-path lab/useful-task/Cargo.toml -- checker_accepts_recorded_answer_and_refuses_stubs --exact
+python3 -c 'import json; g=json.load(open("lab/useful-task/falsifiers.json")); h=json.load(open("lab/useful-task/held-judge-plants.json")); assert [e["id"] for e in g["falsifiers"]]==["F-UT2"]; assert [e["id"] for e in h["falsifiers"]]==["F-UT1","F-UT3"]; assert g["falsifiers"][0]["edits"][0]["new"]=="            Reason::Task => false,\n"; assert h["falsifiers"][0]["edits"][0]["new"]=="    return Verdict::Accept { answer_sha256: sha256_hex(answer.trim()) };\n    let trimmed = answer.trim();\n"; assert h["falsifiers"][1]["edits"][0]["new"]=="            Reason::Duplicate => false,\n"'
+```
+
+The id lists are `["F-UT2"]` for the gate file and `["F-UT1","F-UT3"]` for the
+held file. `git diff -- lab/useful-task/src/lib.rs` is empty, and the three
+old strings each occur once in `src/lib.rs`; `tests/checker.rs`, both
+`accept.json` files, both `input.txt` files, both `recorded.json` files,
+`Cargo.toml` and `Cargo.lock` keep their bytes. The tree still passes
+`cargo fmt --manifest-path lab/useful-task/Cargo.toml -- --check` and the full
+`cargo test --locked` run. A4 stays open and the live model turn stays held.
+
+- 006: Moved `F-UT1` and `F-UT3` unchanged into `held-judge-plants.json`, left `F-UT2` as the only entry in `falsifiers.json`, and stated the `PROVIDER_TARGETS` condition in both `about` strings.
+
+## 007 — `load_spec` refuses a spec that repeats a JSON key
+
+The one loader no longer calls `serde_json::from_str` for its value.
+`load_spec` reads the spec text through the existing `parse_answer`, the same
+unique-key parser that `judge` uses for the answer, and takes the accepted
+value from `AnswerParse::Value`. This closes the collapse: `from_str` keeps the
+last value of a repeated key, so a spec that named a wrong `m1` and then the
+real `m1` loaded as the named task and judged a real answer `Accept`.
+
+A repeated key returns `Err("spec repeats a key")` from the one line
+`        AnswerParse::Duplicate => return Err("spec repeats a key".to_owned()),`.
+`AnswerParse::Invalid` keeps the earlier messages by retrying
+`serde_json::from_str::<Value>` on the same bytes: the parse error text as
+`spec is not JSON: {error}`, and plain `spec is not JSON` when that retry is
+`Ok`. `CHECK_ORDER` keeps its nine reasons, `judge` keeps its first statement
+and its task and answer-duplicate arms, and `parse_answer` stays the only
+unique-key parser with one `Visitor`. Key order and whitespace stay `Spec`
+equality.
+
+`checker_accepts_recorded_answer_and_refuses_stubs` now loads both fixture
+files once into `a_spec_bytes` and `b_spec_bytes`, then refuses each Context
+text with `spec repeats a key`: agent-a with the first `"m1":` replaced by
+`"m1":"other","m1":`, agent-a with that insertion written as
+`"\u006d1":"other","m1":`, and agent-b with the first `"task_id":` replaced by
+`"task_id":"other","task_id":`. The existing other-`m1` spec still loads and is
+still `task`, and `"["` still gives
+`spec is not JSON: EOF while parsing a list at line 1 column 1`.
+
+### Hand plant
+
+The one duplicate arm was replaced with:
+
+```
+        AnswerParse::Duplicate => serde_json::from_str(bytes).map_err(|error| format!("spec is not JSON: {error}"))?,
+```
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --locked --manifest-path lab/useful-task/Cargo.toml -- checker_accepts_recorded_answer_and_refuses_stubs --exact`
+exited 101:
+
+```
+thread 'checker_accepts_recorded_answer_and_refuses_stubs' panicked at tests/checker.rs:40:33:
+malformed spec: Spec { task_id: "agent-a", m1: "A4: Each agent completes one useful task through real Runtime resources (model via a Runtime grant, DeepSeek on the Sparks); the permitted effect succeeds (granted_effect_succeeds).", input_sha256: "6cce0615e268e9a905d394b4e6f1c228fef86569ef8778c006626b1a45d57f30", recorded_sha256: "043eec2fa4d70dafc04b87b9b594b703dc6a3f9db7d1f2baca9a2c50d44e3468", fixed_strings: ["ok", "done", "TODO", "pass"], reasons: [Task, Input, Recorded, Empty, Echo, FixedString, Shape, Duplicate, Mismatch], schema: Fields(["place", "goods", "close"]) }
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+The original bytes were then restored and the same command passed:
+
+```
+test checker_accepts_recorded_answer_and_refuses_stubs ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+The committed `load_spec` has the `spec repeats a key` arm, that line occurs
+once, and `src/lib.rs.falsify-original` is absent. The restored source SHA-256
+is `a017e4a78ba0ac343f065bfdcba5a5e77842475fd4e4c978cea38258b93961a9`.
+
+### Checks
+
+`cargo fmt --manifest-path lab/useful-task/Cargo.toml -- --check` exited 0. The
+full `cargo test --locked --manifest-path lab/useful-task/Cargo.toml` passed
+the integration test and six doctests. The shared runner reported:
+
+```
+baseline: 1 named tests pass without an edit, 0 do not
+F-UT2  CAUGHT                             1s  skip the named-task check
+summary: 1 CAUGHT of 1
+```
+
+`falsifiers.json`, `held-judge-plants.json`, both `accept.json` files, both
+`input.txt` files, both `recorded.json` files, `Cargo.toml` and `Cargo.lock`
+keep their bytes. `src/lib.rs` has no `std::fs` and no `std::net`. The F-UT2
+target still is not in `PROVIDER_TARGETS`, so recovery after a killed run stays
+the open gap recorded in 006. A4 stays open and the live model turn stays held.
+
+- 007: Made the one `load_spec` read through `parse_answer` and refuse a repeated spec key with `spec repeats a key`, extended the named test with the three Context texts, and hand-planted then restored the collapsed-parse arm.
