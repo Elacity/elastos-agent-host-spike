@@ -6,7 +6,7 @@ use agent_conformance::census;
 use agent_conformance::harness::ThrowawayHome;
 use agent_conformance::identity::{Observation, StagedProbe, MANIFEST};
 use agent_conformance::runtime::runtime_under_test;
-use agent_conformance::standin_runtime::{Caller as StandInCaller, Life, StandIn, Start};
+use agent_conformance::standin_runtime::{Caller as StandInCaller, StandIn, Start};
 use common::signed_bundle::{SignedBundle, SHARED_NAME};
 use probe::{build_probe, Effect};
 use serde_json::json;
@@ -1160,6 +1160,7 @@ fn standin_a12_census(standin: &StandIn, home: &ThrowawayHome, port: u16) -> Res
             }
         }
     }
+    standin.unlisted_pending()?;
     match census::cleanup(home, port) {
         Ok(line) if line.contains("root checks PASS") => Ok(()),
         Ok(line) => Err(line),
@@ -1209,29 +1210,20 @@ fn standin_stopped_run_leaves_no_live_grant() {
         vec!["component-1".to_owned(), "component-2".to_owned()],
         "the stand-in numbers the two launches"
     );
-    for (request_id, session_id) in [("req-1", "component-1"), ("req-2", "component-2")] {
-        stopped_run.seed_grant(
-            request_id,
-            session_id,
-            "localhost://Public/resident-instances/shared.txt",
-            "read",
-            "session",
-            0,
-            Life::Live,
-            false,
-        );
-    }
-    for (request_id, session_id) in [("req-p1", "component-1"), ("req-p2", "component-2")] {
-        stopped_run
-            .seed_request(
-                request_id,
-                session_id,
-                "localhost://Public/resident-instances/shared.txt",
-                "read",
-                "read shared",
-            )
-            .expect("the stand-in stores the run's pending request");
-    }
+    let grant_1 = standin_grant_shared(&mut stopped_run, "component-1");
+    let grant_2 = standin_grant_shared(&mut stopped_run, "component-2");
+    let pending_1 = standin_post_shared_request(&mut stopped_run, "component-1");
+    let pending_2 = standin_post_shared_request(&mut stopped_run, "component-2");
+    assert_eq!(
+        (
+            grant_1.as_str(),
+            grant_2.as_str(),
+            pending_1.as_str(),
+            pending_2.as_str(),
+        ),
+        ("request-1", "request-2", "request-3", "request-4"),
+        "the stand-in numbers the running instance's requests through the request route"
+    );
     let view = stopped_run
         .get_capability_list(StandInCaller::Shell, Some("all_sessions_live"))
         .expect("the stand-in returns the shell live view");
@@ -1247,13 +1239,13 @@ fn standin_stopped_run_leaves_no_live_grant() {
         .collect();
     assert_eq!(
         requests,
-        BTreeSet::from(["req-1", "req-2"]),
-        "the stand-in lists exactly the two seeded grants"
+        BTreeSet::from([grant_1.as_str(), grant_2.as_str()]),
+        "the stand-in lists exactly the two granted requests"
     );
     let census = standin_a12_census(&stopped_run, &home, port);
     assert!(
         matches!(&census, Err(reason) if reason.contains("live grant leftover")),
-        "the stand-in keeps the seeded grants live before the stops: {census:?}"
+        "the stand-in keeps the granted requests live before the stops: {census:?}"
     );
     let mut running_run = StandIn::new();
     assert_eq!(
@@ -1297,38 +1289,46 @@ fn standin_stopped_run_leaves_no_live_grant() {
             "the stand-in reports a stopped entry as not live"
         );
     }
-    for (request_id, session_id, decision_reason) in [
-        ("req-p1", "component-1", "stopped: stop one"),
-        ("req-p2", "component-2", "stopped: stop two"),
-    ] {
-        let pending = stopped_run
-            .get_capability_requests(StandInCaller::Shell, Some(session_id))
-            .expect("the stand-in returns the stopped session's requests");
-        let requests = pending["requests"]
-            .as_array()
-            .expect("the stand-in returns a request list");
-        assert_eq!(
-            requests.len(),
-            1,
-            "the stand-in keeps exactly one request for {session_id}"
-        );
-        assert_eq!(
-            requests[0]["request_id"], request_id,
-            "the stand-in keeps the seeded request id"
-        );
-        assert_eq!(
-            requests[0]["status"], "denied",
-            "the stand-in denies the stopped session's request"
-        );
-        assert_eq!(
-            requests[0]["settled_by"], "runtime",
-            "the stand-in settles the request as the runtime"
-        );
-        assert_eq!(
-            requests[0]["decision_reason"], decision_reason,
-            "the stand-in names the stop cause"
-        );
-    }
+    assert_eq!(
+        standin_requests(&stopped_run, "component-1"),
+        vec![
+            standin_request_record(
+                &grant_1,
+                "component-1",
+                "granted",
+                "Shell auto-grant",
+                Some("shell"),
+            ),
+            standin_request_record(
+                &pending_1,
+                "component-1",
+                "denied",
+                "stopped: stop one",
+                Some("runtime"),
+            ),
+        ],
+        "the stand-in keeps the granted record and denies the pending request for component-1"
+    );
+    assert_eq!(
+        standin_requests(&stopped_run, "component-2"),
+        vec![
+            standin_request_record(
+                &grant_2,
+                "component-2",
+                "granted",
+                "Shell auto-grant",
+                Some("shell"),
+            ),
+            standin_request_record(
+                &pending_2,
+                "component-2",
+                "denied",
+                "stopped: stop two",
+                Some("runtime"),
+            ),
+        ],
+        "the stand-in keeps the granted record and denies the pending request for component-2"
+    );
     assert!(
         standin_a12_census(&stopped_run, &home, port).is_ok(),
         "the stand-in leaves no live grant, live instance, pending request or physical leftover after both stops"
@@ -1367,21 +1367,7 @@ fn standin_stopped_run_leaves_no_live_grant() {
         .expect("the stand-in stops the third run's component-2");
     assert!(
         standin_a12_census(&fresh_run, &home, port).is_ok(),
-        "the stand-in's third run leaves no request before the pending seed"
-    );
-    fresh_run
-        .seed_request(
-            "req-left",
-            "component-1",
-            "localhost://Public/resident-instances/shared.txt",
-            "read",
-            "read shared",
-        )
-        .expect("the stand-in stores the third run's pending request");
-    let census = standin_a12_census(&fresh_run, &home, port);
-    assert!(
-        matches!(&census, Err(reason) if reason.contains("pending request leftover")),
-        "the stand-in refuses a pending request after both stops: {census:?}"
+        "the stand-in's third run leaves no live grant, live instance or pending request"
     );
     home.finish()
         .expect("the stand-in run removes its throwaway home");
@@ -1465,16 +1451,35 @@ fn standin_live_grants(standin: &StandIn) -> Vec<serde_json::Value> {
         .clone()
 }
 
-fn standin_seed_shared_request(standin: &mut StandIn, request_id: &str, session_id: &str) {
-    standin
-        .seed_request(
-            request_id,
-            session_id,
-            STANDIN_RESOURCE,
-            "read",
-            "read shared",
+fn standin_post_shared_request(standin: &mut StandIn, session_id: &str) -> String {
+    let opened = standin
+        .post_capability_request(
+            StandInCaller::Client { session_id },
+            &json!({
+                "resource": STANDIN_RESOURCE,
+                "action": "read",
+                "reason": "read shared",
+            }),
         )
         .expect("the stand-in stores the pending request");
+    opened["request_id"]
+        .as_str()
+        .expect("the stand-in names the request")
+        .to_owned()
+}
+
+fn standin_grant_shared(standin: &mut StandIn, session_id: &str) -> String {
+    let request_id = standin_post_shared_request(standin, session_id);
+    standin
+        .post_capability_grant(
+            StandInCaller::Shell,
+            &json!({
+                "request_id": request_id,
+                "duration": "session",
+            }),
+        )
+        .expect("the stand-in grants the running instance's request");
+    request_id
 }
 
 #[test]
@@ -1517,8 +1522,14 @@ fn standin_cancel_survivor_reaches_running() {
         ),
         "the stand-in keeps both launches starting before the start returns"
     );
-    standin_seed_shared_request(&mut standin, "req-1", "component-1");
-    standin_seed_shared_request(&mut standin, "req-2", "component-2");
+    assert_eq!(
+        (
+            standin_post_shared_request(&mut standin, "component-1"),
+            standin_post_shared_request(&mut standin, "component-2"),
+        ),
+        ("request-1".to_owned(), "request-2".to_owned()),
+        "the stand-in stores both starting requests through the request route"
+    );
 
     standin
         .delete_capsule(
@@ -1540,7 +1551,7 @@ fn standin_cancel_survivor_reaches_running() {
     assert_eq!(
         standin_requests(&standin, "component-1"),
         vec![standin_request_record(
-            "req-1",
+            "request-1",
             "component-1",
             "denied",
             "stopped: stop one",
@@ -1556,7 +1567,7 @@ fn standin_cancel_survivor_reaches_running() {
         (
             standin_capsule_record("component-2", STANDIN_SHARED_NAME, "starting", ""),
             vec![standin_request_record(
-                "req-2",
+                "request-2",
                 "component-2",
                 "pending",
                 "",
@@ -1571,7 +1582,7 @@ fn standin_cancel_survivor_reaches_running() {
         .post_capability_grant(
             StandInCaller::Shell,
             &json!({
-                "request_id": "req-2",
+                "request_id": "request-2",
                 "duration": "session",
                 "rationale": "grant shared read",
             }),
@@ -1590,7 +1601,7 @@ fn standin_cancel_survivor_reaches_running() {
     assert_eq!(
         standin_requests(&standin, "component-2"),
         vec![standin_request_record(
-            "req-2",
+            "request-2",
             "component-2",
             "granted",
             "grant shared read",
@@ -1601,7 +1612,7 @@ fn standin_cancel_survivor_reaches_running() {
     assert_eq!(
         standin_requests(&standin, "component-1"),
         vec![standin_request_record(
-            "req-1",
+            "request-1",
             "component-1",
             "denied",
             "stopped: stop one",
@@ -1620,13 +1631,13 @@ fn standin_cancel_survivor_reaches_running() {
         .collect();
     assert_eq!(
         live_ids,
-        BTreeSet::from(["req-2"]),
+        BTreeSet::from(["request-2"]),
         "the stand-in shows exactly the survivor's request as live"
     );
     assert_eq!(
         live,
         vec![json!({
-            "request_id": "req-2",
+            "request_id": "request-2",
             "session_id": "component-2",
             "resource": STANDIN_RESOURCE,
             "action": "read",
@@ -1640,14 +1651,14 @@ fn standin_cancel_survivor_reaches_running() {
             StandInCaller::Client {
                 session_id: "component-2",
             },
-            &json!({ "request_id": "req-2" }),
+            &json!({ "request_id": "request-2" }),
         )
         .expect("the stand-in authorises the survivor's presentation");
     let ended_presentation = standin.post_capability_validate(
         StandInCaller::Client {
             session_id: "component-1",
         },
-        &json!({ "request_id": "req-2" }),
+        &json!({ "request_id": "request-2" }),
     );
     assert!(
         matches!(&ended_presentation, Err((403, reason)) if reason.contains("wrong capsule")),
@@ -1665,7 +1676,7 @@ fn standin_cancel_survivor_reaches_running() {
     assert_eq!(
         standin_requests(&standin, "component-2"),
         vec![standin_request_record(
-            "req-2",
+            "request-2",
             "component-2",
             "granted",
             "grant shared read",
@@ -1676,7 +1687,7 @@ fn standin_cancel_survivor_reaches_running() {
     assert_eq!(
         standin_live_grants(&standin),
         vec![json!({
-            "request_id": "req-2",
+            "request_id": "request-2",
             "session_id": "component-2",
             "resource": STANDIN_RESOURCE,
             "action": "read",
@@ -1711,7 +1722,7 @@ fn standin_cancel_survivor_reaches_running() {
     assert_eq!(
         standin_requests(&standin, "component-2"),
         vec![standin_request_record(
-            "req-2",
+            "request-2",
             "component-2",
             "granted",
             "grant shared read",
@@ -1727,7 +1738,7 @@ fn standin_cancel_survivor_reaches_running() {
         StandInCaller::Client {
             session_id: "component-2",
         },
-        &json!({ "request_id": "req-2" }),
+        &json!({ "request_id": "request-2" }),
     );
     assert!(
         matches!(&revoked, Err((400, reason)) if reason.starts_with("grant is not live:") && reason.contains("Revoked")),
@@ -2069,8 +2080,14 @@ fn standin_failed_survivor_reaches_running() {
         ),
         "the stand-in keeps both launches starting before the start returns"
     );
-    standin_seed_shared_request(&mut standin, "req-1", "component-1");
-    standin_seed_shared_request(&mut standin, "req-2", "component-2");
+    assert_eq!(
+        (
+            standin_post_shared_request(&mut standin, "component-1"),
+            standin_post_shared_request(&mut standin, "component-2"),
+        ),
+        ("request-1".to_owned(), "request-2".to_owned()),
+        "the stand-in stores both starting requests through the request route"
+    );
 
     standin
         .finish_start("component-1")
@@ -2088,7 +2105,7 @@ fn standin_failed_survivor_reaches_running() {
     assert_eq!(
         standin_requests(&standin, "component-1"),
         vec![standin_request_record(
-            "req-1",
+            "request-1",
             "component-1",
             "denied",
             "start refused",
@@ -2104,7 +2121,7 @@ fn standin_failed_survivor_reaches_running() {
         (
             standin_capsule_record("component-2", SECOND_NAME, "starting", ""),
             vec![standin_request_record(
-                "req-2",
+                "request-2",
                 "component-2",
                 "pending",
                 "",
@@ -2119,7 +2136,7 @@ fn standin_failed_survivor_reaches_running() {
         .post_capability_grant(
             StandInCaller::Shell,
             &json!({
-                "request_id": "req-2",
+                "request_id": "request-2",
                 "duration": "session",
                 "rationale": "grant shared read",
             }),
@@ -2143,7 +2160,7 @@ fn standin_failed_survivor_reaches_running() {
     assert_eq!(
         standin_requests(&standin, "component-1"),
         vec![standin_request_record(
-            "req-1",
+            "request-1",
             "component-1",
             "denied",
             "start refused",
@@ -2167,7 +2184,7 @@ fn standin_failed_survivor_reaches_running() {
         .collect();
     assert_eq!(
         live_ids,
-        BTreeSet::from(["req-2"]),
+        BTreeSet::from(["request-2"]),
         "the stand-in shows exactly the survivor's request as live"
     );
     assert_eq!(
@@ -2203,7 +2220,7 @@ fn standin_failed_survivor_reaches_running() {
     assert_eq!(
         standin_requests(&standin, "component-1"),
         vec![standin_request_record(
-            "req-1",
+            "request-1",
             "component-1",
             "denied",
             "start refused",
