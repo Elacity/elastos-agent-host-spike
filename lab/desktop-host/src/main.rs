@@ -4,10 +4,13 @@ mod runtime;
 use std::thread;
 use std::time::Duration;
 
-use tao::event::{Event, StartCause};
-use tao::event_loop::{ControlFlow, EventLoopBuilder};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tao::dpi::LogicalSize;
+use tao::event::{Event, StartCause, WindowEvent};
+use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopWindowTarget};
+use tao::window::{Window, WindowBuilder};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use wry::{WebView, WebViewBuilder};
 
 const POLL: Duration = Duration::from_secs(3);
 
@@ -26,13 +29,7 @@ fn main() {
         return;
     }
 
-    #[allow(unused_mut)]
-    let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
-    #[cfg(target_os = "macos")]
-    {
-        use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
-        event_loop.set_activation_policy(ActivationPolicy::Accessory);
-    }
+    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
 
     let menu_proxy = event_loop.create_proxy();
     MenuEvent::set_event_handler(Some(move |event| {
@@ -60,15 +57,59 @@ fn main() {
     ])
     .expect("tray menu");
 
+    // The menu bar at the top of the screen; Home's text fields need the Edit menu
+    // for copy and paste on macOS.
+    let app_menu = Menu::new();
+    app_menu
+        .append_items(&[
+            &Submenu::with_items(
+                "ElastOS Lab",
+                true,
+                &[
+                    &PredefinedMenuItem::hide(None),
+                    &PredefinedMenuItem::separator(),
+                    &PredefinedMenuItem::quit(None),
+                ],
+            )
+            .expect("app menu"),
+            &Submenu::with_items(
+                "Edit",
+                true,
+                &[
+                    &PredefinedMenuItem::undo(None),
+                    &PredefinedMenuItem::redo(None),
+                    &PredefinedMenuItem::separator(),
+                    &PredefinedMenuItem::cut(None),
+                    &PredefinedMenuItem::copy(None),
+                    &PredefinedMenuItem::paste(None),
+                    &PredefinedMenuItem::select_all(None),
+                ],
+            )
+            .expect("edit menu"),
+            &Submenu::with_items(
+                "Window",
+                true,
+                &[
+                    &PredefinedMenuItem::minimize(None),
+                    &PredefinedMenuItem::close_window(None),
+                ],
+            )
+            .expect("window menu"),
+        ])
+        .expect("app menu");
+
     let mut menu = Some(menu);
     let mut tray: Option<TrayIcon> = None;
     let mut home_up: Option<bool> = None;
+    let mut home: Option<(Window, WebView)> = None;
     let home_proxy = event_loop.create_proxy();
-    event_loop.run(move |event, _, control_flow| {
+    event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
         match event {
             // macOS needs the event loop running before the tray icon exists.
             Event::NewEvents(StartCause::Init) => {
+                #[cfg(target_os = "macos")]
+                app_menu.init_for_nsapp();
                 let Some(menu) = menu.take() else {
                     return;
                 };
@@ -94,7 +135,7 @@ fn main() {
             Event::UserEvent(UserEvent::Home(up)) => {
                 // Opening the app opens Home, like any app opens its window.
                 if home_up.is_none() && up {
-                    open_home();
+                    show_home(&mut home, target);
                 }
                 home_up = Some(up);
                 status.set_text(if up {
@@ -103,16 +144,22 @@ fn main() {
                     "Home is not running"
                 });
             }
-            // Double-clicking the app while it runs.
-            Event::Reopen { .. } => {
-                if home_up == Some(true) {
-                    open_home();
+            // Double-clicking the app, or clicking its Dock icon, while it runs.
+            Event::Reopen { .. } => open_home(home_up, &mut home, target),
+            // Closing the window hides it; the app keeps running in the menu bar.
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => {
+                if let Some((window, _)) = &home {
+                    window.set_visible(false);
                 }
             }
             Event::UserEvent(UserEvent::Menu(event)) => {
                 if event.id == *open.id() || event.id == *updates.id() {
-                    open_home();
+                    open_home(home_up, &mut home, target);
                 } else if event.id == *quit.id() {
+                    home.take();
                     tray.take();
                     *control_flow = ControlFlow::Exit;
                 }
@@ -122,10 +169,47 @@ fn main() {
     });
 }
 
-fn open_home() {
-    if let Err(error) = runtime::open_home() {
-        alert(&format!("Could not open {}: {error}", runtime::HOME_URL));
+fn open_home(
+    home_up: Option<bool>,
+    home: &mut Option<(Window, WebView)>,
+    target: &EventLoopWindowTarget<UserEvent>,
+) {
+    if home_up == Some(true) {
+        show_home(home, target);
+    } else {
+        alert("Home is not running, so there is nothing to open yet.");
     }
+}
+
+/// Shows the one Home window, creating it the first time.
+fn show_home(home: &mut Option<(Window, WebView)>, target: &EventLoopWindowTarget<UserEvent>) {
+    if home.is_none() {
+        match new_home_window(target) {
+            Ok(created) => *home = Some(created),
+            Err(error) => {
+                alert(&format!("Could not open Home: {error}"));
+                return;
+            }
+        }
+    }
+    if let Some((window, _)) = home {
+        window.set_visible(true);
+        window.set_focus();
+    }
+}
+
+fn new_home_window(
+    target: &EventLoopWindowTarget<UserEvent>,
+) -> Result<(Window, WebView), Box<dyn std::error::Error>> {
+    let window = WindowBuilder::new()
+        .with_title("ElastOS")
+        .with_inner_size(LogicalSize::new(1280.0, 820.0))
+        .with_min_inner_size(LogicalSize::new(720.0, 480.0))
+        .build(target)?;
+    let webview = WebViewBuilder::new()
+        .with_url(runtime::HOME_URL)
+        .build(&window)?;
+    Ok((window, webview))
 }
 
 fn alert(message: &str) {
