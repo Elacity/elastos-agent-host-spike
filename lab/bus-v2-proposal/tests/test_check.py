@@ -10156,7 +10156,8 @@ class CitationCheckTests(unittest.TestCase):
             + len(check.FUNCTION_QUOTE_SPANS)
             + len(check.INDENT_LINE_SPANS)
             + len(check.EGRESS_LINE_SPANS)
-            + len(check.RESTATED_LINE_SPANS),
+            + len(check.RESTATED_LINE_SPANS)
+            + len(check.LEDGER_LINE_SPANS),
         )
         self.assertEqual(set(ALIGNED_ALREADY_DECIDED) - ALIGNED_ENDPOINT_SET, set())
 
@@ -10201,7 +10202,8 @@ class CitationCheckTests(unittest.TestCase):
             + len(check.FUNCTION_QUOTE_SPANS)
             + len(check.INDENT_LINE_SPANS)
             + len(check.EGRESS_LINE_SPANS)
-            + len(check.RESTATED_LINE_SPANS),
+            + len(check.RESTATED_LINE_SPANS)
+            + len(check.LEDGER_LINE_SPANS),
         )
         # The spans this task adds, read back from the target list as spans, are
         # exactly the 65 names above minus the 12 that already had entries. A
@@ -10222,6 +10224,7 @@ class CitationCheckTests(unittest.TestCase):
             and endpoint not in check.INDENT_LINE_SPANS
             and endpoint not in check.EGRESS_LINE_SPANS
             and endpoint not in check.RESTATED_LINE_SPANS
+            and endpoint not in check.LEDGER_LINE_SPANS
         ]
         self.assertEqual(len(added), len(ALIGNED_NEW_ENDPOINTS))
         added_spans = {
@@ -10412,8 +10415,9 @@ class CitationCheckTests(unittest.TestCase):
     def test_quote_targets_are_the_base_list_plus_function_spans(self):
         # Walk order is the base list, then one None quoter per function span,
         # then one None quoter per indent line span, then one None quoter per
-        # egress line span, then one None quoter per retargeted line span. A
-        # missing, extra, or duplicated entry fails this ordered comparison.
+        # egress line span, then one None quoter per retargeted line span, then
+        # one None quoter per ledger line span. A missing, extra, or duplicated
+        # entry fails this ordered comparison.
         expected = BASE_QUOTE_TARGETS + tuple(
             (span, "`" + span + "`", None) for span in FUNCTION_QUOTE_SPAN_ORDER
         ) + tuple(
@@ -10422,32 +10426,40 @@ class CitationCheckTests(unittest.TestCase):
             (span, "`" + span + "`", None) for span in EGRESS_LINE_SPAN_ORDER
         ) + tuple(
             (span, "`" + span + "`", None) for span in RESTATED_LINE_SPAN_ORDER
+        ) + tuple(
+            (span, "`" + span + "`", None) for span in LEDGER_LINE_SPAN_ORDER
         )
         self.assertEqual(check.QUOTE_TARGETS, expected)
         self.assertEqual(check.FUNCTION_QUOTE_SPANS, FUNCTION_QUOTE_SPAN_ORDER)
         self.assertEqual(check.INDENT_LINE_SPANS, INDENT_LINE_SPAN_ORDER)
         self.assertEqual(check.EGRESS_LINE_SPANS, EGRESS_LINE_SPAN_ORDER)
         self.assertEqual(check.RESTATED_LINE_SPANS, RESTATED_LINE_SPAN_ORDER)
+        self.assertEqual(check.LEDGER_LINE_SPANS, LEDGER_LINE_SPAN_ORDER)
         self.assertEqual(len(FUNCTION_QUOTE_SPAN_ORDER), 51)
         self.assertEqual(len(INDENT_LINE_SPAN_ORDER), 18)
         self.assertEqual(len(EGRESS_LINE_SPAN_ORDER), 2)
         self.assertEqual(len(RESTATED_LINE_SPAN_ORDER), 2)
-        self.assertEqual(len(expected), 188)
+        self.assertEqual(len(LEDGER_LINE_SPAN_ORDER), 3)
+        self.assertEqual(len(expected), 191)
         self.assertEqual(
             len(check.QUOTE_TARGETS),
             len({target[0] for target in check.QUOTE_TARGETS}),
         )
         self.assertEqual(
-            tuple(target[0] for target in check.QUOTE_TARGETS[-22:-4]),
+            tuple(target[0] for target in check.QUOTE_TARGETS[-25:-7]),
             INDENT_LINE_SPAN_ORDER,
         )
         self.assertEqual(
-            tuple(target[0] for target in check.QUOTE_TARGETS[-4:-2]),
+            tuple(target[0] for target in check.QUOTE_TARGETS[-7:-5]),
             EGRESS_LINE_SPAN_ORDER,
         )
         self.assertEqual(
-            tuple(target[0] for target in check.QUOTE_TARGETS[-2:]),
+            tuple(target[0] for target in check.QUOTE_TARGETS[-5:-3]),
             RESTATED_LINE_SPAN_ORDER,
+        )
+        self.assertEqual(
+            tuple(target[0] for target in check.QUOTE_TARGETS[-3:]),
+            LEDGER_LINE_SPAN_ORDER,
         )
         for span in UNMATCHED_FUNCTION_SPANS:
             self.assertNotIn(span, check.FUNCTION_QUOTE_SPANS, span)
@@ -10464,6 +10476,8 @@ class CitationCheckTests(unittest.TestCase):
                 (span, "`" + span + "`", None) for span in EGRESS_LINE_SPAN_ORDER
             ) + tuple(
                 (span, "`" + span + "`", None) for span in RESTATED_LINE_SPAN_ORDER
+            ) + tuple(
+                (span, "`" + span + "`", None) for span in LEDGER_LINE_SPAN_ORDER
             )
             self.assertEqual(check.QUOTE_TARGETS, expected)
             self.assertNotIn(
@@ -10748,6 +10762,60 @@ class CitationCheckTests(unittest.TestCase):
             "CAUGHT restated-line-spans",
         )
 
+    def test_changed_ledger_remainder_does_not_match(self):
+        # One changed character of the remainder that stands for the cited
+        # line refuses that ledger span and no other reason.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        sha = check.pin_sha(text)
+        for span in LEDGER_LINE_SPAN_ORDER:
+            remainders = check._remainders(text, "`" + span + "`")
+            rel = check.CITATION.fullmatch(span).group("path")
+            pinned = check._pinned_lines(root, sha, rel)
+            number = check.cited_line(span, pinned)
+            index = check._quote_window(remainders, pinned, number)
+            changed = list(remainders)
+            line = changed[index]
+            changed[index] = line[:-1] + ("x" if line[-1] != "x" else "y")
+            block = "".join("    " + row + "\n" for row in changed)
+            body = "Pinned commit: " + sha + "\n`" + span + "`\n\n" + block
+            self.assertEqual(
+                self._problems_for(body),
+                ["refuse: quoted line does not match " + span],
+                span,
+            )
+
+    def test_repeated_ledger_marker_is_not_one_line(self):
+        # Each of the three ledger spans stands once in the draft, and a marker
+        # that stands twice is refused before the line read.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        sha = check.pin_sha(text)
+        for span in LEDGER_LINE_SPAN_ORDER:
+            self.assertEqual(text.count("`" + span + "`"), 1, span)
+            body = (
+                "Pinned commit: " + sha + "\n"
+                "`" + span + "`\n"
+                "`" + span + "`\n"
+                "    kept\n"
+            )
+            self.assertEqual(
+                self._problems_for(body),
+                ["refuse: quoted line is not one line: " + span],
+                span,
+            )
+
+    def test_falsifier_ledger_line_spans(self):
+        # An empty LEDGER_LINE_SPANS drops the span, so the changed line is not
+        # refused and this test fails.
+        self._caught(
+            "LEDGER_LINE_SPANS",
+            (),
+            self.test_changed_ledger_remainder_does_not_match,
+            "ledger.rs:356",
+            "CAUGHT ledger-line-spans",
+        )
+
 # The quote-target walk before function spans, in list order.
 BASE_QUOTE_TARGETS = (
     ('examples/agent-host/src/lib.rs:2067', '`examples/agent-host/src/lib.rs:2067`', 'observe_quote'),
@@ -10965,4 +11033,12 @@ EGRESS_LINE_SPAN_ORDER = (
 RESTATED_LINE_SPAN_ORDER = (
     'elastos/crates/elastos-server/src/resource_bridge.rs:931',
     'elastos/crates/elastos-server/src/resource_bridge.rs:398',
+)
+
+# The 3 retargeted ledger line spans spliced after the restated line spans, in
+# draft order.
+LEDGER_LINE_SPAN_ORDER = (
+    'lab/grant-binding/src/ledger.rs:356',
+    'lab/grant-binding/src/ledger.rs:341',
+    'lab/grant-binding/src/ledger.rs:417',
 )
