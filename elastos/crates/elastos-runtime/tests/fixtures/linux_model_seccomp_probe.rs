@@ -81,7 +81,15 @@ fn main() {
     let mut stdout = io::stdout();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
-        let _ = writeln!(stdout, "{{\"status\":\"ok\"}}");
+        // The startup route checks the model-provider status contract; every
+        // other line gets the plain ok reply.
+        let reply = if line.contains("\"status\"") {
+            "{\"status\":\"ok\",\"data\":{\"provider\":\"model-provider\",\
+\"protocol_version\":\"elastos.model-provider/v1\"}}"
+        } else {
+            "{\"status\":\"ok\"}"
+        };
+        let _ = writeln!(stdout, "{reply}");
         let _ = stdout.flush();
         // Shutdown gets one ok and the probe leaves, so the test can observe a
         // dead child.
