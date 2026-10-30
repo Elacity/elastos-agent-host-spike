@@ -546,10 +546,13 @@ the bytes it hands out are the bytes its lab CID names.
   check found the manifest's `type` to be `wasm`. Only the variant binding's
   check (e2) reads it, and no accessor hands it out.
 - Since task 036 it also keeps, in a private field, the manifest's `name`
-  from that same check, and `manifest_name()` hands it out. `check_manifest`
-  returns both values from its one `CapsuleManifest` parse, so a caller that
-  needs the name never parses `capsule.json` again (P10). The name is identity
-  data the manifest states, not a decision.
+  from that same check, and `manifest_name()` hands it out. M2-S2 added the
+  manifest's `role` the same way: `manifest_role()` hands out the spelling the
+  manifest states, through the infallible `CapsuleRole::as_str`, with no
+  default. `check_manifest` returns both values from its one `CapsuleManifest`
+  parse, so a caller that needs the name or the role never parses
+  `capsule.json` again (P10). Both are identity data the manifest states, not
+  a decision.
 - The entries come in the walk's order. The encoder sorts each directory's
   links by name; a caller that needs an order sorts the entries by path.
 - It lives in memory only. It has no file or serialized form, and nothing
@@ -572,6 +575,7 @@ The public API another lab may call:
 | `CheckedBundle::cid(&self) -> LabCid` | the lab CID of the entries |
 | `CheckedBundle::entries(&self) -> &[BundleEntry]` | every regular file the walk read, as `path` and `content` |
 | `CheckedBundle::manifest_name(&self) -> &str` | the `name` of the bundle's `capsule.json`, as the one manifest check read it |
+| `CheckedBundle::manifest_role(&self) -> &str` | the `role` of the bundle's `capsule.json`, as the one manifest check read it |
 | `CheckedBundle::check_name(&self, claimed: &str) -> Result<(), Refusal>` | `Ok(())` when `claimed` is this lab CID; otherwise `NotALabCid` or `NameMismatch` |
 
 | `str::parse::<LabCid>(printed)` | the `LabCid` a printed lab CID names; otherwise `NotALabCid` (see [Reading a printed lab CID](#reading-a-printed-lab-cid)) |
@@ -590,7 +594,7 @@ walk only through it.
 | The checked form judges the bytes it holds; the path form reads the folder now | `checked_name_check_judges_the_checked_bytes` | F-CI3g, F-CI9h (no compare), F-CI9i (no `b`, its own reading), F-CI9j (walks again) |
 | The checked form refuses a lab CID its bytes do not give | `checked_name_check_refuses_a_mismatch` | F-CI3g, F-CI9h |
 | The checked form calls the one claim check and the one compare, and reads nothing | `checked_name_check_shares_the_claim_check_and_the_compare` | F-CI9h, F-CI9i, F-CI9j |
-| `manifest_name()` answers each committed fixture's manifest `name`, as the test states it | `checked_bundle_hands_out_the_manifest_name` | F-CI36a (an empty string) |
+| `manifest_name()` and `manifest_role()` answer each committed fixture's manifest `name` and `role`, as the test states them | `checked_bundle_hands_out_the_manifest_name` | F-CI36a (an empty string) |
 
 The tests are in `tests/checked_bundle.rs` unless the table names another
 file. F-CI3g skips the one compare, so it lists the checked form's two tests

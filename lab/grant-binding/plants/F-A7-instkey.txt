@@ -1,0 +1,21 @@
+id: F-A7-instkey
+file: src/ask.rs
+test: ask::model_forged_instance_does_not_retarget_the_ceiling
+--- old
+        self.store_admitted_ceiling(Some(&identity), ask.amount);
+--- new
+        let staged = request.forged_instance.and_then(|instance| {
+            self.registry
+                .get(&instance)
+                .map(|record| record.identity.clone())
+        });
+        self.store_admitted_ceiling(
+            Some(
+            staged
+                .as_deref()
+                .filter(|forged| self.grants.values().any(|grant| grant.identity == *forged))
+                .unwrap_or(&identity),
+            ),
+            ask.amount,
+        );
+--- end

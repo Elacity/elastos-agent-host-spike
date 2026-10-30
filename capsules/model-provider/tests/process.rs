@@ -3,20 +3,11 @@
 #[path = "../src/test_support.rs"]
 mod test_support;
 
-#[allow(dead_code)]
-#[path = "../../../lab/agent-conformance/src/harness.rs"]
-mod harness;
-
 /// The shared live-grant stand-in (`lab/agent-conformance/standin-runtime/`),
-/// read here rather than copied: one RA-1 path (P10). The agent-conformance
-/// crate takes the same file in with its own `#[path]` line
-/// (`lab/agent-conformance/src/lib.rs:9-10`). Its `#[cfg(test)] mod tests`
-/// compiles into this binary too, so the shared stand-in's own tests run here.
-#[allow(dead_code)]
-#[path = "../../../lab/agent-conformance/standin-runtime/mod.rs"]
-mod standin_runtime;
-
-use standin_runtime::{Caller, Life, StandIn};
+/// reached through the crate that owns it (`lab/agent-conformance/src/lib.rs`),
+/// so this binary holds no second copy of the source (one RA-1 path, P10).
+/// Its `#[cfg(test)] mod tests` belongs to that crate's own `--lib` target.
+use agent_conformance::standin_runtime::{Caller, Life, StandIn};
 use test_support::FIXTURE_EVENT_TIMEOUT;
 
 use elastos_model_contract::{
@@ -3866,6 +3857,17 @@ fn granted_model_turn_binding(session_id: &str, prompt: &str) -> RuntimeCreateBi
     serde_json::from_value(request["runtime_binding"].clone()).unwrap()
 }
 
+/// The shell's one `Live` grant for a model turn, stored through the shared
+/// stand-in's `seed_grant` seam
+/// (`lab/agent-conformance/standin-runtime/mod.rs:270`). No journey in this
+/// file depends on a plan binding (M1 check A15b): `seed_grant` stores a grant
+/// with no plan (`plan: None`, `lab/agent-conformance/standin-runtime/mod.rs:291`),
+/// the provider's hosted effect names no `plan_sha256`, and `plan_accepts`
+/// accepts every use of an unbound grant
+/// (`lab/agent-conformance/standin-runtime/mod.rs:1130-1135`). A `StandIn::new()`
+/// here therefore reaches "ready" over an unbound grant, and the plan-bound
+/// path is proven in `lab/agent-conformance/tests/standin_plan.rs` and in
+/// `lab/plan-approval/src/lib.rs`.
 fn seed_live_model_grant(grants: &Arc<Mutex<StandIn>>, request_id: &str, session_id: &str) {
     grants.lock().unwrap().seed_grant(
         request_id,

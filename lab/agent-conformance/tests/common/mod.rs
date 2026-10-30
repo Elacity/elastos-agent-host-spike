@@ -11,6 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub mod operator;
+pub mod signed_bundle;
 
 pub fn operator_platform() -> Result<&'static str, &'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {

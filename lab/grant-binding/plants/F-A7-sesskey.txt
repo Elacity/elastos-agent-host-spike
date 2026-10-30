@@ -1,0 +1,17 @@
+id: F-A7-sesskey
+file: src/ask.rs
+test: ask::model_forged_session_does_not_retarget_the_ceiling
+--- old
+        self.store_admitted_ceiling(Some(&identity), ask.amount);
+--- new
+        self.store_admitted_ceiling(
+            Some(
+            request
+                .forged_session
+                .as_deref()
+                .filter(|forged| self.grants.values().any(|grant| grant.identity == *forged))
+                .unwrap_or(&identity),
+            ),
+            ask.amount,
+        );
+--- end

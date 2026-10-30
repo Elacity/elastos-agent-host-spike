@@ -1,0 +1,12 @@
+id: F-A5-retappend
+file: src/lib.rs
+test: model_forged_append_does_not_widen_the_returned_grant
+--- old
+            rights: record.rights,
+--- new
+            rights: Rights {
+                append: record.rights.append || request.forged_append,
+                overwrite: record.rights.overwrite,
+                child_journal: record.rights.child_journal,
+            },
+--- end
