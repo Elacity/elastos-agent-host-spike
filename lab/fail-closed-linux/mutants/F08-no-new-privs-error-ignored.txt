@@ -1,0 +1,9 @@
+id: F08-no-new-privs-error-ignored
+file: src/lib.rs
+test: simulated::sim_no_new_privs_failure_refuses
+test: real_kernel::real_no_new_privs_failure_refuses
+--- old
+    kernel.set_no_new_privs().map_err(os(Step::SetNoNewPrivs))?;
+--- new
+    let _ = kernel.set_no_new_privs();
+--- end

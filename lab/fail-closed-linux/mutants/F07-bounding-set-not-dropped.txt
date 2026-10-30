@@ -1,0 +1,13 @@
+id: F07-bounding-set-not-dropped
+file: src/lib.rs
+test: simulated::sim_confined_provider_starts_after_every_layer
+test: real_kernel::real_confined_provider_has_every_layer
+--- old
+    for cap in 0..=last {
+        kernel
+            .drop_bounding_capability(cap)
+            .map_err(os(Step::BoundingSet))?;
+    }
+--- new
+    for _cap in 0..=last {}
+--- end

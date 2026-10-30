@@ -1,0 +1,13 @@
+id: F17-gid-map-reported-as-uid-map
+file: src/lib.rs
+test: simulated::sim_id_maps_unwritable_refuses
+test: simulated::sim_every_guard_step_failure_stops_before_exec
+--- old
+    kernel
+        .write_gid_map(&plan.gid_map)
+        .map_err(os(Step::GidMap))?;
+--- new
+    kernel
+        .write_gid_map(&plan.gid_map)
+        .map_err(os(Step::UidMap))?;
+--- end

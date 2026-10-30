@@ -1,0 +1,9 @@
+id: C00-noop-control
+expect: survive
+file: src/lib.rs
+test: *
+--- old
+/// Starts the provider confined, or refuses. A refusal starts nothing.
+--- new
+/// Starts the provider confined, or refuses. A refusal starts nothing (control copy).
+--- end

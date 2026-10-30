@@ -1,0 +1,22 @@
+id: F01-fallback-restarts-unconfined
+file: src/lib.rs
+test: simulated::sim_user_namespaces_off_refuses
+test: simulated::sim_landlock_missing_refuses
+test: simulated::sim_every_guard_step_failure_stops_before_exec
+test: real_kernel::real_user_namespaces_off_refuses
+test: real_kernel::real_landlock_abi_below_required_refuses
+--- old
+        Err(fault) => Err(Refusal::new(&spec.name, fault, plan.abi_floor)),
+--- new
+        Err(fault) => {
+            let refusal = Refusal::new(&spec.name, fault, plan.abi_floor);
+            let child = std::process::Command::new(&spec.executable)
+                .args(&spec.args)
+                .spawn()
+                .map_err(|_| refusal)?;
+            Ok(Started {
+                provider: spec.name.clone(),
+                pid: child.id(),
+            })
+        }
+--- end

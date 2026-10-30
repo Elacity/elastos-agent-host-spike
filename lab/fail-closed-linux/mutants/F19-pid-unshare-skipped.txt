@@ -1,0 +1,10 @@
+id: F19-pid-unshare-skipped
+file: src/real.rs
+test: real_kernel::real_confined_provider_has_every_layer
+test: real_kernel::real_confined_child_cannot_signal_host
+--- old
+        check(unsafe { libc::unshare(libc::CLONE_NEWPID) }.into()).map(drop)
+--- new
+        let _ = libc::CLONE_NEWPID;
+        Ok(())
+--- end

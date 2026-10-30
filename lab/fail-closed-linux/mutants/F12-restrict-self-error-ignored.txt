@@ -1,0 +1,11 @@
+id: F12-restrict-self-error-ignored
+file: src/lib.rs
+test: simulated::sim_landlock_ruleset_unappliable_refuses
+test: real_kernel::real_landlock_ruleset_unappliable_refuses
+--- old
+    kernel
+        .landlock_restrict_self(ruleset)
+        .map_err(os(Step::RestrictSelf))?;
+--- new
+    let _ = kernel.landlock_restrict_self(ruleset);
+--- end

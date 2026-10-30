@@ -1,0 +1,11 @@
+id: F28-first-child-exit-tears-down
+file: src/real.rs
+test: real_kernel::real_daemonize_keeps_namespace_until_init_dies
+--- old
+            if first.is_none() {
+                first = Some(status);
+            }
+            continue;
+--- new
+            exit_from_wait_status(status);
+--- end

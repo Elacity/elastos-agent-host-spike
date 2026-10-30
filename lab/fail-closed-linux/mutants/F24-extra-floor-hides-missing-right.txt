@@ -1,0 +1,20 @@
+id: F24-extra-floor-hides-missing-right
+file: src/lib.rs
+test: simulated::sim_extra_floor_still_names_the_missing_right
+test: real_kernel::real_extra_floor_still_names_the_missing_right
+--- old
+    // Name a missing right first. The extra ABI floor must not hide it.
+    if let Some(mask) = missing_required_mask_with(abi, plan.extra_needed_mask) {
+        return Err(Fault::missing_rights(abi, mask));
+    }
+    if abi < plan.abi_floor {
+        return Err(Fault::abi_floor(abi));
+    }
+--- new
+    if abi < plan.abi_floor {
+        return Err(Fault::abi_floor(abi));
+    }
+    if let Some(mask) = missing_required_mask_with(abi, plan.extra_needed_mask) {
+        return Err(Fault::missing_rights(abi, mask));
+    }
+--- end

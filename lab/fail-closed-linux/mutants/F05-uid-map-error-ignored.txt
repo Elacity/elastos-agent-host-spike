@@ -1,0 +1,11 @@
+id: F05-uid-map-error-ignored
+file: src/lib.rs
+test: simulated::sim_id_maps_unwritable_refuses
+test: real_kernel::real_id_map_unwritable_refuses
+--- old
+    kernel
+        .write_uid_map(&plan.uid_map)
+        .map_err(os(Step::UidMap))?;
+--- new
+    let _ = kernel.write_uid_map(&plan.uid_map);
+--- end

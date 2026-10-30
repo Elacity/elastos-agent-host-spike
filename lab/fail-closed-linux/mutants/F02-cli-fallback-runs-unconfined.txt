@@ -1,0 +1,20 @@
+id: F02-cli-fallback-runs-unconfined
+file: src/bin/fcl-launch.rs
+test: real_kernel::real_user_namespaces_off_refuses
+test: real_kernel::real_seccomp_install_failure_refuses
+test: real_kernel::real_landlock_abi_below_required_refuses
+--- old
+        Err(refusal) => {
+            eprintln!("{refusal}");
+            exit(REFUSAL_EXIT_CODE);
+        }
+--- new
+        Err(_refusal) => {
+            let args: Vec<OsString> = std::env::args_os().collect();
+            let dash = args.iter().position(|arg| arg == "--").unwrap_or(0);
+            let status = std::process::Command::new(&args[dash + 1])
+                .args(&args[dash + 2..])
+                .status();
+            exit(status.ok().and_then(|status| status.code()).unwrap_or(REFUSAL_EXIT_CODE));
+        }
+--- end

@@ -1,0 +1,9 @@
+id: F15-refusal-omits-provider
+file: src/lib.rs
+test: simulated::sim_user_namespaces_off_refuses
+test: real_kernel::real_id_map_unwritable_refuses
+--- old
+            self.provider, self.layer, self.step, self.reason
+--- new
+            "a provider", self.layer, self.step, self.reason
+--- end

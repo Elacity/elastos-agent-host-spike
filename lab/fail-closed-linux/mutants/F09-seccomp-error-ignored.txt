@@ -1,0 +1,11 @@
+id: F09-seccomp-error-ignored
+file: src/lib.rs
+test: simulated::sim_seccomp_install_failure_refuses
+test: real_kernel::real_seccomp_install_failure_refuses
+--- old
+    kernel
+        .install_seccomp_filter(&plan.filter)
+        .map_err(os(Step::InstallFilter))?;
+--- new
+    let _ = kernel.install_seccomp_filter(&plan.filter);
+--- end

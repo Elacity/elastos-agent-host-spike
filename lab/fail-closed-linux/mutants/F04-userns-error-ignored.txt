@@ -1,0 +1,9 @@
+id: F04-userns-error-ignored
+file: src/lib.rs
+test: simulated::sim_user_namespaces_off_refuses
+test: real_kernel::real_user_namespaces_off_refuses
+--- old
+    kernel.unshare_user_namespace().map_err(os(Step::Unshare))?;
+--- new
+    let _ = kernel.unshare_user_namespace();
+--- end
