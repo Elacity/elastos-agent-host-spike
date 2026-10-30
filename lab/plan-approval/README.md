@@ -21,11 +21,11 @@ reads no clock, directory or planner. The test reads the stand-in only through
 `get_capability_list` and `get_capsules`, so the live grant list and the
 capsule list stay as they were.
 
-`deny_shown_plan` only calls `post_capability_deny` as the shell with reason
-`deny the shown plan`. A denied step is not a live grant and cannot be granted
-later. `execute` of a step with no live grant is refused with the reason
-`unknown grant`, and that reason omits the id. A deny settles one request, so
-the sibling request stays pending for its own allow-once grant.
+`deny_shown_plan` only calls `post_capability_deny`, with the caller it is
+given and the reason `deny the shown plan`. A denied step is not a live grant
+and cannot be granted later. `execute` of a step with no live grant is refused
+with the reason `unknown grant`, and that reason omits the id. A deny settles
+one request, so the sibling request stays pending for its own allow-once grant.
 `deny_one_shown_step` stores both steps through `journeys::request` after
 `running_agent` names the running session. The denied step is `request-1` for
 `PLAN_A`, and the sibling is `request-2` for `PLAN_B`; both use resource
@@ -215,6 +215,28 @@ and neither plant calls `seed_request`. `preview`, `plan_sha256`, `approve`,
 copy the stand-in, and it names no planner. A passing run gives the Runtime no
 A15 credit.
 
+A client call through `deny_shown_plan` is refused before the deny body is
+read, so the agent that showed the plan cannot settle it. `deny_shown_plan` is
+the only deny call and passes the caller it is given. The design keeps the
+settlement in the Runtime:
+
+> The UI does not mint the grant itself.
+
+The session that posted the shown plan and the other running session are each
+refused with status 403 and `This endpoint requires shell privileges`, for the
+step they own and for the sibling step. A missing id is that same refusal,
+because the shell check runs before the request lookup. Each refusal settles
+nothing: both requests stay pending with their stored hashes and the shell's
+live list stays empty. The shell's deny of `request-1` then stores `denied`
+under `shell` with `deny the shown plan` and leaves the sibling `request-2`
+pending for its own allow-once use, which `approve` grants and `execute`
+spends. A client deny after that settlement is still the shell refusal, and
+not `request is not pending: request-1`. This crate stores no copy of the shell
+check; the stand-in's deny route makes it. `preview`, `plan_sha256`, `approve`,
+`execute`, `age_shown_plan` and `stop_shown_session` are unchanged by this
+slice. The crate does not copy the stand-in, and it names no planner. A
+passing run gives the Runtime no A15 credit.
+
 `preview`, `plan_sha256`, `execute`, `deny_shown_plan`, `age_shown_plan` and
 `stop_shown_session` are unchanged by this slice; `approve` gains the duration
 argument and remains the only grant call. This crate calls
@@ -240,6 +262,7 @@ open.
   `shown_session_lasts_until_stop`, `shown_grant_authorises_only_its_session`,
   `owner_approves_only_the_shown_hash`,
   `agent_cannot_approve_its_own_shown_plan`,
+  `agent_cannot_deny_its_own_shown_plan`,
   `shell_cannot_spend_a_shown_grant`, `shell_cannot_submit_a_shown_plan`,
   `only_a_live_session_submits_a_shown_plan` and the bound-plan journey.
 
@@ -247,6 +270,7 @@ open.
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_cannot_deny_its_own_shown_plan -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib only_a_live_session_submits_a_shown_plan -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shell_cannot_submit_a_shown_plan -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shell_cannot_spend_a_shown_grant -- --exact

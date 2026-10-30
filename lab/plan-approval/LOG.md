@@ -14,6 +14,7 @@
 - 017: `execute` gains `caller: Caller<'_>` after `stand_in` and passes that value to `post_capability_validate`, staying the one use call; `shell_cannot_spend_a_shown_grant` proves a shell caller is refused for the bound plan, a different plan and empty plan bytes before the plan check, the grant stays live, the other session is refused as `wrong capsule` without a spend, the owning session's use then runs once, and a shell call after that spend is still the session refusal; two hand-run plants caught and restored; 1 test, 2 plants.
 - 023: `deny_one_shown_step` stores both shown steps through `journeys::request` after `running_agent`; the shell deny of `request-1` for `PLAN_A` settles it as denied and leaves `request-2` for `PLAN_B` pending, whose allow-once `approve` lets `execute` spend `PLAN_B`; the test calls no `seed_request` and the helpers stay unchanged; two hand-run plants caught and restored; 1 test, 2 plants.
 - 024: `only_a_live_session_submits_a_shown_plan` proves `request` is submitted only by a live instance session: the never-launched session and the stopped session are each refused for `PLAN_A`, `PLAN_B` and empty plan bytes and store nothing, while the other running session's submit stores one pending request that the shell grants and that session's `execute` spends; two hand-run plants return the route error as `Ok("request-1")` and neither calls `seed_request`; 1 test, 2 plants.
+- 020: `deny_shown_plan` gains `caller: Caller<'_>` after `stand_in` and passes that value to `post_capability_deny`, staying the one deny call; `agent_cannot_deny_its_own_shown_plan` proves the session that posted the shown plan and the other running session are refused with `This endpoint requires shell privileges` for their own step, the sibling step and an absent id before the deny body is read, both requests stay pending with the live list empty, the shell's deny then settles `request-1` and leaves `request-2` pending for its allow-once `approve` and `execute`; two hand-run plants caught and restored; 1 test, 2 plants.
 
 ## 001
 
@@ -496,4 +497,77 @@ cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib only_a_li
 
 After both restores, `git diff -- lab/plan-approval/src/lib.rs` shows no plant. The restored proof
 command set (the fmt check and the fourteen test commands in the task) took 2.31 s real. This lane
+has no `falsifiers.json`; no id is added.
+
+## 020
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md), Request flow step 8:
+
+> The UI does not mint the grant itself.
+
+This task proves that sentence for a deny: the agent that posted the shown plan and the other
+running session cannot settle it, while the shell's own deny settles exactly one step and leaves
+the sibling for its own allow-once grant. `deny_shown_plan` stays the one deny call and gains
+`caller: Caller<'_>` after `stand_in`; it passes that value to `post_capability_deny`, contains no
+match on `Caller` and no copy of the shell check. `agent_cannot_deny_its_own_shown_plan` asserts a
+fresh client deny of `request-absent` is the 403 shell refusal and not an unknown request, with an
+empty capsule list and an empty live list; two `running_agent` calls return `component-1` and
+`component-2`; both submits return `request-1` and `request-2` with 64-character hashes; four client
+denies (the posting session on its own step, the other session on `request-1`, the posting session
+on `request-2` and on the absent id) are each the same 403 refusal, never an unknown-request or
+not-pending error, and leave both requests pending with the live list empty; the shell's absent-id
+deny is `unknown request: request-absent`; the shell's deny of `request-1` stores `denied` under
+`shell` with `deny the shown plan` and leaves `request-2` pending; a client deny after that
+settlement is still the shell refusal; `approve` of `request-2` as the shell with `once` and the
+`PLAN_B` hash stores the one live entry; `execute` of `request-1` is `unknown grant` and leaves it
+live; `execute` of `request-2` spends it. This test calls no `seed_request` and no
+`post_capability_*` method. This crate stores no copy of the shell check, does not copy the
+stand-in and names no planner. A passing run gives the Runtime no A15 credit.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_cannot_deny_its_own_shown_plan -- --exact
+```
+
+### F-deny-forces-shell
+
+- old bytes, 51:
+  ```
+      stand_in.post_capability_deny(
+          caller,
+  ```
+- new bytes, 58:
+  ```
+      stand_in.post_capability_deny(
+          Caller::Shell,
+  ```
+- planted crate compiled; `agent_cannot_deny_its_own_shown_plan` failed at `src/lib.rs:891:5`
+  (planted tree) on the first client deny: `assertion left == right failed: the agent that showed
+  the plan cannot deny it: a client deny runs before the request lookup, so even an absent id is
+  the shell refusal`; left held `Err((400, "unknown request: request-absent"))`, right expected
+  `Err((403, "This endpoint requires shell privileges"))`. The forced shell caller settled the
+  client's deny before the caller was judged.
+- restored, the test passes.
+
+### F-absent-before-shell
+
+- old bytes, 51: the same `old bytes` block as F-deny-forces-shell.
+- new bytes, 166:
+  ```
+      if request_id == "request-absent" {
+          return Err((400, format!("unknown request: {request_id}")));
+      }
+      stand_in.post_capability_deny(
+          caller,
+  ```
+- planted crate compiled; `agent_cannot_deny_its_own_shown_plan` failed at `src/lib.rs:894:5`
+  (planted tree) on the first client deny: the same assertion, left held
+  `Err((400, "unknown request: request-absent"))`, right expected
+  `Err((403, "This endpoint requires shell privileges"))`. The absent-id branch ran before the
+  shell check.
+- restored, the test passes.
+
+After both restores, `git diff -- lab/plan-approval/src/lib.rs` shows no plant. The restored proof
+command set (the fmt check and the fifteen test commands in the task) took 2.66 s real. This lane
 has no `falsifiers.json`; no id is added.
