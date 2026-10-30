@@ -117,9 +117,11 @@ fn valid_signature_grants_nothing_by_itself() {
 /// binding: its payload, its signer and its two verifiers. The last two are
 /// task 049's: the package record's one signer and one verifier over a lab
 /// CID, which the folder and checked record calls use. `CheckedBundle::entry`
-/// reads one file's bytes from the walk the bundle already holds. None
-/// admits, grants or launches.
-const IDENTITY_FUNCTIONS: [&str; 31] = [
+/// reads one file's bytes from the walk the bundle already holds.
+/// `dependency_closure` is task 081's: the walk checks a caller-supplied map
+/// of printed lab CIDs and does not admit or launch. None admits, grants or
+/// launches.
+const IDENTITY_FUNCTIONS: [&str; 32] = [
     "lab_cid",
     "lab_cid_observed",
     "checked_bundle",
@@ -151,6 +153,7 @@ const IDENTITY_FUNCTIONS: [&str; 31] = [
     "verify_variant_binding",
     "sign_cid_record",
     "verify_cid_record",
+    "dependency_closure",
 ];
 
 /// How many times each name occurs in `names`.

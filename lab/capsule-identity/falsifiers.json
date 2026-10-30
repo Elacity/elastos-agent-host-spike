@@ -1,5 +1,5 @@
 {
- "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048, 049, 076, 071, 072, 078, 082, 085, 086 and 087). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+ "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048, 049, 076, 071, 072, 078, 082, 085, 086, 087 and 081). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
  "falsifiers": [
   {
    "id": "F-CI1a",
@@ -4865,6 +4865,150 @@
    ],
    "tests": [
     "a_folder_with_no_file_is_refused_with_its_reason"
+   ]
+  },
+  {
+   "id": "F-CI81a",
+   "title": "the open-stack arm continues instead of returning the cycle",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/src/lib.rs",
+     "old": "        if let Some(at) = stack.iter().position(|on_stack| on_stack == name) {\n            let mut path = stack[at..].to_vec();\n            path.push(name.to_owned());\n            return Err(DependencyRefusal::Cycle(path));\n        }\n",
+     "new": "        if let Some(_at) = stack.iter().position(|on_stack| on_stack == name) {\n            return Ok(());\n        }\n"
+    }
+   ],
+   "tests": [
+    "dependency_cycle_names_its_path"
+   ]
+  },
+  {
+   "id": "F-CI81b",
+   "title": "a missing child is skipped instead of refused",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/src/lib.rs",
+     "old": "        let children = deps\n            .get(name)\n            .ok_or_else(|| DependencyRefusal::Missing(name.to_owned()))?;\n",
+     "new": "        let Some(children) = deps.get(name) else {\n            return Ok(());\n        };\n"
+    }
+   ],
+   "tests": [
+    "missing_dependency_is_refused"
+   ]
+  },
+  {
+   "id": "F-CI81c",
+   "title": "the depth cap accepts a chain one level past the caller's cap",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/src/lib.rs",
+     "old": "        if depth > max_depth {\n",
+     "new": "        if depth > max_depth.saturating_add(1) {\n"
+    }
+   ],
+   "tests": [
+    "dependency_depth_cap_is_enforced"
+   ]
+  },
+  {
+   "id": "F-CI81d",
+   "title": "a name that starts bafybei and has 59 characters is accepted without the one parse",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/src/lib.rs",
+     "old": "        LabCid::from_str(name).map_err(DependencyRefusal::NotALabCid)?;\n",
+     "new": "        if !(name.starts_with(\"bafybei\") && name.len() == 59) {\n            return Err(DependencyRefusal::NotALabCid(Refusal::NotALabCid {\n                claimed: name.to_owned(),\n            }));\n        }\n"
+    }
+   ],
+   "tests": [
+    "dependency_name_that_is_not_a_lab_cid_is_refused"
+   ]
+  },
+  {
+   "id": "F-CI81e",
+   "title": "lists a node again each time it is finished",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/src/lib.rs",
+     "old": "        if finished\n            .get(name)\n            .is_some_and(|checked_at| depth <= *checked_at)\n        {\n            return Ok(());\n        }\n",
+     "new": "        if finished\n            .get(name)\n            .is_some_and(|checked_at| depth <= *checked_at)\n        {\n            order.push(name.to_owned());\n            return Ok(());\n        }\n"
+    }
+   ],
+   "tests": [
+    "dependency_diamond_visits_the_shared_node_once"
+   ]
+  },
+  {
+   "id": "F-CI81f",
+   "title": "a finished node is always skipped, even when the new depth is greater",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/src/lib.rs",
+     "old": "        if finished\n            .get(name)\n            .is_some_and(|checked_at| depth <= *checked_at)\n        {\n            return Ok(());\n        }\n",
+     "new": "        if finished.contains_key(name) {\n            return Ok(());\n        }\n"
+    }
+   ],
+   "tests": [
+    "dependency_depth_rechecks_a_finished_node"
+   ]
+  },
+  {
+   "id": "F-CI81g",
+   "title": "walks each stored child list from last to first",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/src/lib.rs",
+     "old": "        for child in children {\n",
+     "new": "        for child in children.iter().rev() {\n"
+    }
+   ],
+   "tests": [
+    "dependency_diamond_visits_the_shared_node_once"
+   ]
+  },
+  {
+   "id": "F-CI81h",
+   "title": "returns a cycle path of the repeated node alone, [node, node]",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/src/lib.rs",
+     "old": "            let mut path = stack[at..].to_vec();\n            path.push(name.to_owned());\n",
+     "new": "            let mut path = vec![stack[at].clone()];\n            path.push(stack[at].clone());\n"
+    }
+   ],
+   "tests": [
+    "dependency_cycle_names_its_path"
+   ]
+  },
+  {
+   "id": "F-CI81i",
+   "title": "the missing display loses its name",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/src/lib.rs",
+     "old": "            DependencyRefusal::Missing(name) => write!(f, \"missing dependency: {name}\"),\n",
+     "new": "            DependencyRefusal::Missing(_) => write!(f, \"missing dependency\"),\n"
+    }
+   ],
+   "tests": [
+    "missing_dependency_is_refused"
    ]
   }
  ]

@@ -2043,7 +2043,8 @@ them with its cause.
 Cargo.toml, Cargo.lock   the package, its own workspace and lockfile
 src/lib.rs               checked_bundle, lab_cid, check_name and its checked form,
                          the encoder, the walk, the test-key signature, the shared
-                         digest, the lab package record and the lab variant binding
+                         digest, the lab package record, the lab variant binding
+                         and the dependency closure walk
 fixtures/                content-sample, web-app, wc001-core, agent-host, provider,
                          model, provider-variant-a, provider-variant-b
 consumer-fixtures/       photo-stand-in-photo-set: the photo lane's PH6 fixture,
@@ -2074,6 +2075,9 @@ tests/closure_listing.rs a closure listing gets the lab CID of its folder; the P
 tests/cross_implementation.rs
                          README's Python rule, the pins and the encoder agree;
                          README's two digest blocks and the signed bytes agree
+tests/dependency_closure.rs
+                         one lab-CID walk: a missing, cyclic or too-deep link
+                         is refused, and every node is listed once
 tests/encoding.rs        order, boundaries, the printed form, one file per path,
                          each UnixFS profile setting
 tests/fixtures.rs        Runtime manifest checks, pins, the wc-001 bundle
@@ -2097,7 +2101,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 294 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 303 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -2148,7 +2152,8 @@ F-CI76a and F-CI76b (see [the encoding](#the-encoding)), and
 task 071's F-CI71a and F-CI71b (see [the encoding](#the-encoding)) and
 F-CI71c to F-CI71e (see
 [the cross-implementation check](#the-cross-implementation-check)), and task
-072's F-CI72a and task 082's F-CI82a (see [the encoding](#the-encoding)).
+072's F-CI72a and task 082's F-CI82a (see [the encoding](#the-encoding)), and
+task 081's F-CI81a to F-CI81i (see [dependency closure](#dependency-closure)).
 Task 077 moves F-CI18h to the links estimate, F-CI18m to the shared Tsize
 rule, F-CI19c to the missing-block empty result caught by the 23-bundle count,
 F-CI23b to the new module-doc sentence,
@@ -2486,3 +2491,48 @@ The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
 030, 031 and 032 prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.
+
+## Dependency closure
+
+`dependency_closure(root, deps, max_depth)` walks a caller-supplied map from
+a node's printed lab CID to the printed lab CIDs it depends on, in the order
+the map stores each list. Every node's name is parsed with the one
+`LabCid::from_str` before the walk visits it, the root included, and the
+result is every reachable node once in post-order: a node's dependencies
+appear before the node. The walk reads no folder, no manifest and no
+network. It checks a closure, and it does not admit or launch.
+
+A refusal returns no list. `DependencyRefusal` holds four reasons, each with
+its own text:
+
+| Refusal | Text |
+| --- | --- |
+| `NotALabCid(Refusal)` | that `Refusal`'s own text |
+| `Missing(String)` | `missing dependency: {name}` |
+| `Cycle(Vec<String>)` | `cycle: {a} -> {b} -> {a}` |
+| `TooDeep(usize)` | `dependency chain deeper than {max_depth}` |
+
+The root is visited at depth 0. A visit past `max_depth` is `TooDeep` before
+the node's children are walked. A node on the current stack is a `Cycle`,
+named from that node through the current node and back to it. A finished
+node stays listed once: the walk records the depth at which its children
+were checked, and a later path that reaches it deeper checks those children
+again at the new depth, while an arrival at an equal or smaller depth walks
+them no further. A name that parses and is absent from the map is `Missing`.
+Text that does not parse is `NotALabCid` with the parse's refusal, which is
+preferred when the name is also absent from the map.
+
+| Rule | Named test | Falsifiers |
+| --- | --- | --- |
+| A shared dependency is listed once and the root is last | `dependency_diamond_visits_the_shared_node_once` | F-CI81e (a finished node listed again), F-CI81g (children walked last first) |
+| A cycle is named from the repeated node through the current node and back | `dependency_cycle_names_its_path` | F-CI81a (the open-stack arm continues), F-CI81h (the repeated node alone) |
+| A missing child and a missing root each get their own reason | `missing_dependency_is_refused` | F-CI81b (a missing child skipped), F-CI81i (the name dropped from the text) |
+| A chain past the depth cap is refused with the cap | `dependency_depth_cap_is_enforced` | F-CI81c (a cap one level too deep) |
+| A finished node's children are checked again at a greater depth, and the node stays listed once | `dependency_depth_rechecks_a_finished_node` | F-CI81f (every finished node skipped) |
+| A name that is not a printed lab CID is refused before the map is read | `dependency_name_that_is_not_a_lab_cid_is_refused` | F-CI81d (a `bafybei` prefix and 59 characters accepted) |
+
+`tests/dependency_closure.rs` mints every node with `encode_entries` of one
+distinct `BundleEntry` and uses its printed lab CID, so the map holds real
+names. The file reads no fixture folder and uses no shared test support. The
+install path and the launch path stay the Runtime's: this walk checks a
+closure and makes no admission or launch decision.

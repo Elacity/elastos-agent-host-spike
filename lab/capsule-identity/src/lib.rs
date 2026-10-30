@@ -211,6 +211,7 @@ extern crate self as capsule_identity;
 #[path = "../tests/common/mod.rs"]
 mod test_common;
 
+use std::collections::BTreeMap;
 use std::ffi::{CString, OsStr};
 use std::fmt;
 use std::fs::File;
@@ -218,6 +219,7 @@ use std::io::{self, Read};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::str::FromStr;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use elastos_common::{CapsuleManifest, CapsuleType};
@@ -2345,6 +2347,123 @@ fn require_recipe_cid(binding: &VariantBinding, recipe: &[u8]) -> Result<(), Ref
         });
     }
     Ok(())
+}
+
+/// Why a dependency walk stopped: a node's name is not a printed lab CID, a
+/// node's dependency is absent from the caller's map, the map holds a cycle,
+/// or a chain reaches past the depth the caller allows. Each refusal has its
+/// own text, and a refusal returns no list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DependencyRefusal {
+    /// A node's name is not a printed lab CID: the parse's own refusal,
+    /// [`Refusal::NotALabCid`], with its text.
+    NotALabCid(Refusal),
+    /// A node's dependency list names this printed lab CID, and the map
+    /// holds no entry for it.
+    Missing(String),
+    /// The map holds a cycle. `path` is the stack from the repeated node
+    /// through the current node, then that node again.
+    Cycle(Vec<String>),
+    /// A node is deeper than the caller's cap. `usize` is that cap.
+    TooDeep(usize),
+}
+
+impl fmt::Display for DependencyRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DependencyRefusal::NotALabCid(refusal) => write!(f, "{refusal}"),
+            DependencyRefusal::Missing(name) => write!(f, "missing dependency: {name}"),
+            DependencyRefusal::Cycle(path) => write!(f, "cycle: {}", path.join(" -> ")),
+            DependencyRefusal::TooDeep(max_depth) => {
+                write!(f, "dependency chain deeper than {max_depth}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DependencyRefusal {}
+
+/// Check the dependency closure of `root` over the map `deps` gives, and
+/// return every reachable node once, in post-order: a node's dependencies
+/// appear before the node.
+///
+/// A node is a printed lab CID, so the walk parses every name, the root and
+/// each child, with [`LabCid`]'s `FromStr` before it walks it. The caller
+/// supplies the map from a node's printed name to the nodes it depends on,
+/// in stored order; the walk reads no folder, no manifest and no network.
+/// It checks a closure, and it does not admit or launch.
+///
+/// The root is visited at depth 0. A visit with a depth over `max_depth`
+/// returns [`DependencyRefusal::TooDeep`] before that node's children are
+/// walked. A node already on the current stack returns
+/// [`DependencyRefusal::Cycle`] with its path from that node through the
+/// current node and back to it. A node already finished is not listed again:
+/// the walk records the depth at which its children were checked, and a
+/// later arrival at a greater depth checks those children again at the new
+/// depth while the node stays listed once. A later arrival at an equal or
+/// smaller depth does not walk it again. A name that parses and is absent
+/// from the map returns [`DependencyRefusal::Missing`]; text that does not
+/// parse returns [`DependencyRefusal::NotALabCid`] with the parse's refusal,
+/// preferred to `Missing` when the name is also absent. An error returns no
+/// list.
+pub fn dependency_closure(
+    root: &str,
+    deps: &BTreeMap<String, Vec<String>>,
+    max_depth: usize,
+) -> Result<Vec<String>, DependencyRefusal> {
+    fn visit(
+        name: &str,
+        depth: usize,
+        deps: &BTreeMap<String, Vec<String>>,
+        max_depth: usize,
+        stack: &mut Vec<String>,
+        finished: &mut BTreeMap<String, usize>,
+        order: &mut Vec<String>,
+    ) -> Result<(), DependencyRefusal> {
+        LabCid::from_str(name).map_err(DependencyRefusal::NotALabCid)?;
+        if let Some(at) = stack.iter().position(|on_stack| on_stack == name) {
+            let mut path = stack[at..].to_vec();
+            path.push(name.to_owned());
+            return Err(DependencyRefusal::Cycle(path));
+        }
+        if depth > max_depth {
+            return Err(DependencyRefusal::TooDeep(max_depth));
+        }
+        if finished
+            .get(name)
+            .is_some_and(|checked_at| depth <= *checked_at)
+        {
+            return Ok(());
+        }
+        let first = !finished.contains_key(name);
+        let children = deps
+            .get(name)
+            .ok_or_else(|| DependencyRefusal::Missing(name.to_owned()))?;
+        stack.push(name.to_owned());
+        for child in children {
+            visit(child, depth + 1, deps, max_depth, stack, finished, order)?;
+        }
+        stack.pop();
+        finished.insert(name.to_owned(), depth);
+        if first {
+            order.push(name.to_owned());
+        }
+        Ok(())
+    }
+
+    let mut stack = Vec::new();
+    let mut finished = BTreeMap::new();
+    let mut order = Vec::new();
+    visit(
+        root,
+        0,
+        deps,
+        max_depth,
+        &mut stack,
+        &mut finished,
+        &mut order,
+    )?;
+    Ok(order)
 }
 
 /// The one HAMT hash: murmur3 x64-128 of the link name, seed 0, its first 64
