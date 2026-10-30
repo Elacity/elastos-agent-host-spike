@@ -13214,3 +13214,901 @@ fn shown_failed_start_is_not_the_grant() {
         "a shown failed start is not the grant: the sibling's session grant stays live after its use"
     );
 }
+
+#[cfg(test)]
+#[test]
+fn shown_ended_session_leaves_the_list() {
+    use agent_conformance::standin_runtime::{Caller, StandIn, Start};
+    use fixtures::{PLAN_A, PLAN_B};
+    use journeys::{request, running_agent};
+    use serde_json::{json, Value};
+
+    fn capsules(stand_in: &StandIn) -> Value {
+        stand_in
+            .get_capsules(Caller::Shell)
+            .expect("shell capsules")
+    }
+
+    fn capsule_state(stand_in: &StandIn, id: &str) -> Value {
+        capsules(stand_in)["capsules"]
+            .as_array()
+            .and_then(|entries| entries.iter().find(|entry| entry["id"] == id))
+            .cloned()
+            .unwrap_or_else(|| panic!("the capsule list names {id}: {}", capsules(stand_in)))
+    }
+
+    fn listed(stand_in: &StandIn, id: &str) -> bool {
+        capsules(stand_in)["capsules"]
+            .as_array()
+            .map(|entries| entries.iter().any(|entry| entry["id"] == id))
+            .unwrap_or(false)
+    }
+
+    fn shell_live(stand_in: &StandIn) -> Value {
+        read_shown_grants(stand_in, Caller::Shell, None).expect("shell live list")
+    }
+
+    fn shown(stand_in: &StandIn, session: &str) -> Value {
+        read_shown_requests(stand_in, Caller::Shell, Some(session)).expect("shell request list")
+    }
+
+    let keep = "an ended shown session leaves the shell list at the stand-in's keep window";
+    let empty_shell = json!({ "scope": "all_sessions_live", "capabilities": [] });
+    let not_failed = Err((400, "instance is not live: failed".to_owned()));
+    let not_stopped = Err((400, "instance is not live: stopped".to_owned()));
+    let revoked = Err((400, "grant is not live: Revoked".to_owned()));
+    let mut stand_in = StandIn::new();
+
+    // The fresh stand-in lists no capsule and no live grant.
+    assert_eq!(
+        capsules(&stand_in),
+        json!({ "capsules": [] }),
+        "{keep}: the fresh stand-in lists no capsule"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "{keep}: the fresh stand-in lists no live grant"
+    );
+
+    // The failed-start session submits and is granted before its one finish.
+    let failed_start = running_agent(
+        &mut stand_in,
+        Caller::Shell,
+        Start::Error("start refused".to_owned()),
+    )
+    .expect("the shell launches the failed-start session");
+    assert_eq!(
+        failed_start, "component-1",
+        "{keep}: the failed-start session is component-1"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-1"),
+        json!({
+            "id": "component-1",
+            "name": "agent-host",
+            "status": "starting",
+            "session_id": "component-1",
+            "cause": "",
+        }),
+        "{keep}: the stored failed start is not applied at launch"
+    );
+    let shown_a = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        PLAN_A,
+        "localhost://Public/plan-approval/a.txt",
+        "read",
+        "show this step",
+    )
+    .expect("the failed-start session submits its granted step");
+    assert_eq!(
+        shown_a, "request-1",
+        "{keep}: the first stored request is request-1"
+    );
+    let hash_a = plan_sha256(PLAN_A);
+    assert_eq!(
+        hash_a.len(),
+        64,
+        "{keep}: the shown plan hash is 64 hex characters"
+    );
+    assert_eq!(
+        approve(
+            &mut stand_in,
+            Caller::Shell,
+            &shown_a,
+            "once",
+            &hash_a,
+            "show this grant"
+        ),
+        Ok(json!({ "success": true })),
+        "{keep}: the owner approves request-1 with the shown hash"
+    );
+    let shown_b = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        PLAN_B,
+        "localhost://Public/plan-approval/a.txt",
+        "read",
+        "show this step",
+    )
+    .expect("the failed-start session submits its pending step");
+    assert_eq!(
+        shown_b, "request-2",
+        "{keep}: the second stored request is request-2"
+    );
+    let hash_b = plan_sha256(PLAN_B);
+    assert_eq!(
+        hash_b.len(),
+        64,
+        "{keep}: the second shown plan hash is 64 hex characters"
+    );
+
+    // The one finish stores the start's own cause.
+    assert_eq!(
+        shown_finish_start(&mut stand_in, &failed_start),
+        Ok(()),
+        "{keep}: the one finish applies the stored start"
+    );
+    let failed = capsule_state(&stand_in, "component-1");
+    assert_eq!(
+        failed,
+        json!({
+            "id": "component-1",
+            "name": "agent-host",
+            "status": "failed",
+            "session_id": "component-1",
+            "cause": "start refused",
+        }),
+        "{keep}: the finish stores the start's own cause"
+    );
+    assert_ne!(
+        failed["cause"],
+        json!("stopped: start refused"),
+        "{keep}: the start cause is not a stop reason"
+    );
+    let component_one = shown(&stand_in, "component-1");
+    assert_eq!(
+        component_one,
+        json!({
+            "requests": [
+                {
+                    "request_id": "request-1",
+                    "session_id": "component-1",
+                    "resource": "localhost://Public/plan-approval/a.txt",
+                    "action": "read",
+                    "reason": "show this step",
+                    "status": "granted",
+                    "decision_reason": "show this grant",
+                    "settled_by": "shell",
+                    "plan": hash_a,
+                },
+                {
+                    "request_id": "request-2",
+                    "session_id": "component-1",
+                    "resource": "localhost://Public/plan-approval/a.txt",
+                    "action": "read",
+                    "reason": "show this step",
+                    "status": "denied",
+                    "decision_reason": "start refused",
+                    "settled_by": "runtime",
+                    "plan": hash_b,
+                },
+            ],
+        }),
+        "{keep}: the failed session keeps its granted and denied rows"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "{keep}: the failed start revokes its once grant"
+    );
+
+    // The running sibling is granted a session step.
+    let sibling = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
+        .expect("the shell launches the running sibling");
+    assert_eq!(
+        sibling, "component-2",
+        "{keep}: the running sibling is component-2"
+    );
+    assert_eq!(
+        shown_finish_start(&mut stand_in, &sibling),
+        Ok(()),
+        "{keep}: the sibling's Ok start is applied by the one finish"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-2"),
+        json!({
+            "id": "component-2",
+            "name": "agent-host-1",
+            "status": "running",
+            "session_id": "component-2",
+            "cause": "",
+        }),
+        "{keep}: the Ok start runs the sibling with no cause"
+    );
+    let sibling_a = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-2",
+        },
+        PLAN_A,
+        "localhost://Public/plan-approval/a.txt",
+        "write",
+        "",
+    )
+    .expect("the sibling submits its write step");
+    assert_eq!(
+        sibling_a, "request-3",
+        "{keep}: the sibling's write step is request-3"
+    );
+    assert_eq!(
+        approve(
+            &mut stand_in,
+            Caller::Shell,
+            &sibling_a,
+            "session",
+            &hash_a,
+            "keep the other"
+        ),
+        Ok(json!({ "success": true })),
+        "{keep}: the owner grants the sibling's write step for its session"
+    );
+    let sibling_b = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-2",
+        },
+        PLAN_B,
+        "localhost://Public/plan-approval/a.txt",
+        "read",
+        "show this step",
+    )
+    .expect("the sibling submits its pending step");
+    assert_eq!(
+        sibling_b, "request-4",
+        "{keep}: the sibling's pending step is request-4"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-2",
+            },
+            &sibling_b,
+        ),
+        Ok(json!({ "status": "pending" })),
+        "{keep}: the sibling's pending step waits pending"
+    );
+
+    // A stopped session has one granted row and one denied row.
+    let stopped = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
+        .expect("the shell launches the stopped session");
+    assert_eq!(
+        stopped, "component-3",
+        "{keep}: the stopped session is component-3"
+    );
+    assert_eq!(
+        shown_finish_start(&mut stand_in, &stopped),
+        Ok(()),
+        "{keep}: the stopped session's Ok start is applied by the one finish"
+    );
+    let stopped_a = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-3",
+        },
+        PLAN_A,
+        "localhost://Public/plan-approval/a.txt",
+        "read",
+        "show this step",
+    )
+    .expect("the stopped session submits its granted step");
+    assert_eq!(
+        stopped_a, "request-5",
+        "{keep}: the stopped session's granted step is request-5"
+    );
+    assert_eq!(
+        approve(
+            &mut stand_in,
+            Caller::Shell,
+            &stopped_a,
+            "once",
+            &hash_a,
+            "show this grant"
+        ),
+        Ok(json!({ "success": true })),
+        "{keep}: the owner grants the stopped session's once step"
+    );
+    let stopped_b = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-3",
+        },
+        PLAN_B,
+        "localhost://Public/plan-approval/a.txt",
+        "read",
+        "show this step",
+    )
+    .expect("the stopped session submits its pending step");
+    assert_eq!(
+        stopped_b, "request-6",
+        "{keep}: the stopped session's pending step is request-6"
+    );
+    assert_eq!(
+        stop_shown_session(
+            &mut stand_in,
+            Caller::Shell,
+            &stopped,
+            "stop the shown session"
+        ),
+        Ok(json!(null)),
+        "{keep}: the shell stops the shown session"
+    );
+    let stopped_state = capsule_state(&stand_in, "component-3");
+    assert_eq!(
+        stopped_state,
+        json!({
+            "id": "component-3",
+            "name": "agent-host-2",
+            "status": "stopped",
+            "session_id": "component-3",
+            "cause": "stopped: stop the shown session",
+        }),
+        "{keep}: the stop stores its own reason as the cause"
+    );
+    assert_ne!(
+        stopped_state["cause"],
+        json!("start refused"),
+        "{keep}: the stop cause is not the failed start's cause"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-3",
+            },
+            &stopped_b,
+        ),
+        Ok(json!({ "status": "denied", "reason": "stopped: stop the shown session" })),
+        "{keep}: the stop denies the pending step with its cause"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-3",
+            },
+            &stopped_a,
+        ),
+        Ok(json!({ "status": "granted" })),
+        "{keep}: the stop leaves the granted step granted"
+    );
+
+    // A starting session stays starting before any clock move.
+    let starting = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
+        .expect("the shell launches the starting session");
+    assert_eq!(
+        starting, "component-4",
+        "{keep}: the starting session is component-4"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-4"),
+        json!({
+            "id": "component-4",
+            "name": "agent-host-3",
+            "status": "starting",
+            "session_id": "component-4",
+            "cause": "",
+        }),
+        "{keep}: the unfinshed launch stays starting with no cause"
+    );
+    let starting_a = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-4",
+        },
+        PLAN_A,
+        "localhost://Public/plan-approval/a.txt",
+        "read",
+        "show this step",
+    )
+    .expect("the starting session submits its first step");
+    assert_eq!(
+        starting_a, "request-7",
+        "{keep}: the starting session's first step is request-7"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-4",
+            },
+            &starting_a,
+        ),
+        Ok(json!({ "status": "pending" })),
+        "{keep}: the starting session's step waits pending"
+    );
+
+    // Before the clock moves, the ended sessions are still listed.
+    assert_eq!(
+        capsules(&stand_in),
+        json!({
+            "capsules": [
+                {
+                    "id": "component-1",
+                    "name": "agent-host",
+                    "status": "failed",
+                    "session_id": "component-1",
+                    "cause": "start refused",
+                },
+                {
+                    "id": "component-2",
+                    "name": "agent-host-1",
+                    "status": "running",
+                    "session_id": "component-2",
+                    "cause": "",
+                },
+                {
+                    "id": "component-3",
+                    "name": "agent-host-2",
+                    "status": "stopped",
+                    "session_id": "component-3",
+                    "cause": "stopped: stop the shown session",
+                },
+                {
+                    "id": "component-4",
+                    "name": "agent-host-3",
+                    "status": "starting",
+                    "session_id": "component-4",
+                    "cause": "",
+                },
+            ],
+        }),
+        "{keep}: the ended sessions are listed before that instant"
+    );
+    let sibling_live = json!({
+        "scope": "all_sessions_live",
+        "capabilities": [{
+            "request_id": "request-3",
+            "session_id": "component-2",
+            "resource": "localhost://Public/plan-approval/a.txt",
+            "action": "write",
+            "duration": "session",
+            "granted_at": 0,
+        }],
+    });
+    assert_eq!(
+        shell_live(&stand_in),
+        sibling_live,
+        "{keep}: the sibling's session grant is the only live entry"
+    );
+    assert!(
+        shell_live(&stand_in)["capabilities"][0]
+            .get("run_id")
+            .is_none(),
+        "{keep}: the live entry carries no run id"
+    );
+
+    // Find the stand-in's own keep instant through the one clock. This test
+    // stores no keep constant and moves the clock only through the helper.
+    let mut last_listed = 0;
+    let mut probe = 1;
+    let mut steps = 0;
+    while steps < 24 {
+        age_shown_plan(&mut stand_in, probe);
+        if !listed(&stand_in, "component-1") {
+            break;
+        }
+        last_listed = probe;
+        probe = probe.saturating_mul(2);
+        steps += 1;
+    }
+    assert!(
+        !listed(&stand_in, "component-1"),
+        "{keep}: the ended session left the shell list"
+    );
+    let mut due = None;
+    let mut instant = last_listed + 1;
+    while instant <= probe {
+        age_shown_plan(&mut stand_in, instant);
+        if !listed(&stand_in, "component-1") {
+            due = Some(instant);
+            break;
+        }
+        instant += 1;
+    }
+    let due = due.expect("the ended session left the shell list at some instant");
+
+    // One instant earlier, both ended sessions are still listed.
+    age_shown_plan(&mut stand_in, due - 1);
+    let four = json!({
+        "capsules": [
+            {
+                "id": "component-1",
+                "name": "agent-host",
+                "status": "failed",
+                "session_id": "component-1",
+                "cause": "start refused",
+            },
+            {
+                "id": "component-2",
+                "name": "agent-host-1",
+                "status": "running",
+                "session_id": "component-2",
+                "cause": "",
+            },
+            {
+                "id": "component-3",
+                "name": "agent-host-2",
+                "status": "stopped",
+                "session_id": "component-3",
+                "cause": "stopped: stop the shown session",
+            },
+            {
+                "id": "component-4",
+                "name": "agent-host-3",
+                "status": "starting",
+                "session_id": "component-4",
+                "cause": "",
+            },
+        ],
+    });
+    assert_eq!(
+        capsules(&stand_in),
+        four,
+        "{keep}: the ended sessions are still listed one instant earlier"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        sibling_live,
+        "{keep}: the sibling's session grant stays live one instant earlier"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-2",
+            },
+            &sibling_b,
+        ),
+        Ok(json!({ "status": "pending" })),
+        "{keep}: the sibling's pending step is not yet expired"
+    );
+    assert_ne!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-2",
+            },
+            &sibling_b,
+        ),
+        Ok(json!({ "status": "expired", "reason": "Request timed out" })),
+        "{keep}: the keep instant is earlier than the request timeout"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-4",
+            },
+            &starting_a,
+        ),
+        Ok(json!({ "status": "pending" })),
+        "{keep}: the starting session's step is still pending one instant earlier"
+    );
+
+    // At that instant the failed and the stopped session leave together.
+    age_shown_plan(&mut stand_in, due);
+    assert_eq!(
+        capsules(&stand_in),
+        json!({
+            "capsules": [
+                {
+                    "id": "component-2",
+                    "name": "agent-host-1",
+                    "status": "running",
+                    "session_id": "component-2",
+                    "cause": "",
+                },
+                {
+                    "id": "component-4",
+                    "name": "agent-host-3",
+                    "status": "starting",
+                    "session_id": "component-4",
+                    "cause": "",
+                },
+            ],
+        }),
+        "{keep}: the ended sessions leave the shell list at that instant"
+    );
+    assert!(
+        !listed(&stand_in, "component-1"),
+        "{keep}: the failed session is absent at that instant"
+    );
+    assert!(
+        !listed(&stand_in, "component-3"),
+        "{keep}: the stopped session is absent at that same instant"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        sibling_live,
+        "{keep}: the sibling's session grant stays live at that instant"
+    );
+    assert_eq!(
+        shown(&stand_in, "component-1"),
+        component_one,
+        "{keep}: the failed session's rows stay after it leaves the list"
+    );
+    let component_three = shown(&stand_in, "component-3");
+    assert_eq!(
+        component_three,
+        json!({
+            "requests": [
+                {
+                    "request_id": "request-5",
+                    "session_id": "component-3",
+                    "resource": "localhost://Public/plan-approval/a.txt",
+                    "action": "read",
+                    "reason": "show this step",
+                    "status": "granted",
+                    "decision_reason": "show this grant",
+                    "settled_by": "shell",
+                    "plan": hash_a,
+                },
+                {
+                    "request_id": "request-6",
+                    "session_id": "component-3",
+                    "resource": "localhost://Public/plan-approval/a.txt",
+                    "action": "read",
+                    "reason": "show this step",
+                    "status": "denied",
+                    "decision_reason": "stopped: stop the shown session",
+                    "settled_by": "runtime",
+                    "plan": hash_b,
+                },
+            ],
+        }),
+        "{keep}: the stopped session keeps its granted and denied rows"
+    );
+
+    // A submit from a session that left the list is still the not-live
+    // refusal, and it stores nothing.
+    let resubmit_failed = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        PLAN_A,
+        "localhost://Public/plan-approval/a.txt",
+        "read",
+        "show this step",
+    );
+    assert_eq!(
+        resubmit_failed, not_failed,
+        "{keep}: the failed session submits nothing after it leaves the list"
+    );
+    assert_ne!(
+        resubmit_failed,
+        Err((400, "unknown instance: component-1".to_owned())),
+        "{keep}: the failed session is still known and not live"
+    );
+    assert_ne!(
+        resubmit_failed,
+        Ok("request-8".to_owned()),
+        "{keep}: the failed session stores no request"
+    );
+    assert_eq!(
+        shown(&stand_in, "component-1"),
+        component_one,
+        "{keep}: the failed session's rows stay after the refused submit"
+    );
+    let resubmit_stopped = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-3",
+        },
+        PLAN_A,
+        "localhost://Public/plan-approval/a.txt",
+        "read",
+        "show this step",
+    );
+    assert_eq!(
+        resubmit_stopped, not_stopped,
+        "{keep}: the stopped session submits nothing after it leaves the list"
+    );
+    assert_ne!(
+        resubmit_stopped,
+        Err((400, "unknown instance: component-3".to_owned())),
+        "{keep}: the stopped session is still known and not live"
+    );
+    assert_eq!(
+        shown(&stand_in, "component-3"),
+        component_three,
+        "{keep}: the stopped session's rows stay after the refused submit"
+    );
+
+    // The live sessions still submit.
+    let starting_b = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-4",
+        },
+        PLAN_B,
+        "localhost://Public/plan-approval/a.txt",
+        "read",
+        "show this step",
+    )
+    .expect("the starting session submits its second step");
+    assert_eq!(
+        starting_b, "request-8",
+        "{keep}: the starting session's second step is request-8"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-4",
+            },
+            &starting_b,
+        ),
+        Ok(json!({ "status": "pending" })),
+        "{keep}: the starting session's second step waits pending"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-4"),
+        json!({
+            "id": "component-4",
+            "name": "agent-host-3",
+            "status": "starting",
+            "session_id": "component-4",
+            "cause": "",
+        }),
+        "{keep}: the starting session stays starting at that instant"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        sibling_live,
+        "{keep}: the live list stays the sibling's session grant after that submit"
+    );
+
+    // The revoked once grants stay revoked, and the sibling's session grant
+    // still validates.
+    let spent_failed = execute(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        &shown_a,
+        PLAN_A,
+        None,
+    );
+    assert_eq!(
+        spent_failed, revoked,
+        "{keep}: the failed session's once grant is revoked, not live"
+    );
+    assert_ne!(
+        spent_failed,
+        Ok(json!({ "valid": true })),
+        "{keep}: the failed session's shown step does not execute"
+    );
+    assert_ne!(
+        spent_failed,
+        Err((400, "grant is not live: Exhausted".to_owned())),
+        "{keep}: the revoked grant is not an exhausted grant"
+    );
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: "component-3",
+            },
+            &stopped_a,
+            PLAN_A,
+            None,
+        ),
+        revoked,
+        "{keep}: the stopped session's once grant is revoked, not live"
+    );
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: "component-2",
+            },
+            &sibling_a,
+            PLAN_A,
+            None,
+        ),
+        Ok(json!({ "valid": true })),
+        "{keep}: the sibling's session grant still validates"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        sibling_live,
+        "{keep}: the sibling's session grant stays live after its use"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-2",
+            },
+            &sibling_b,
+        ),
+        Ok(json!({ "status": "pending" })),
+        "{keep}: the sibling's pending step is still pending after its sibling use"
+    );
+
+    // Moving the instant back lists the ended sessions again, and the session
+    // stays not live.
+    age_shown_plan(&mut stand_in, due - 1);
+    assert_eq!(
+        capsules(&stand_in),
+        four,
+        "{keep}: moving the instant back lists the ended sessions again"
+    );
+    let failed_back = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        PLAN_B,
+        "localhost://Public/plan-approval/a.txt",
+        "read",
+        "show this step",
+    );
+    assert_eq!(
+        failed_back, not_failed,
+        "{keep}: the listed failed session still submits nothing"
+    );
+    assert_ne!(
+        failed_back,
+        Err((400, "unknown instance: component-1".to_owned())),
+        "{keep}: the listed failed session is known and not live"
+    );
+    assert_eq!(
+        shown(&stand_in, "component-1"),
+        component_one,
+        "{keep}: moving the instant back leaves the failed session's rows"
+    );
+    assert_eq!(
+        shown(&stand_in, "component-4"),
+        json!({
+            "requests": [
+                {
+                    "request_id": "request-7",
+                    "session_id": "component-4",
+                    "resource": "localhost://Public/plan-approval/a.txt",
+                    "action": "read",
+                    "reason": "show this step",
+                    "status": "pending",
+                    "decision_reason": "",
+                    "settled_by": null,
+                    "plan": hash_a,
+                },
+                {
+                    "request_id": "request-8",
+                    "session_id": "component-4",
+                    "resource": "localhost://Public/plan-approval/a.txt",
+                    "action": "read",
+                    "reason": "show this step",
+                    "status": "pending",
+                    "decision_reason": "",
+                    "settled_by": null,
+                    "plan": hash_b,
+                },
+            ],
+        }),
+        "{keep}: the starting session keeps its two pending rows"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        sibling_live,
+        "{keep}: the live list stays the sibling's session grant"
+    );
+}

@@ -2110,3 +2110,137 @@ restored proof command set (the fmt check and the twenty-nine test commands in
 the task) took 5.10 s real. This lane has no `falsifiers.json`; no id is added.
 
 036: `running_agent(stand_in, caller, start)` is the only launch and passes the stored start to `admit_resident` without finishing; `shown_finish_start(stand_in, id)` is the only finish call and passes only the id; `shown_failed_start_is_not_the_grant` proves a failed start stores its own cause, denies the pending step with that cause and `runtime`, revokes the live once grant, leaves the granted step and the sibling session alone, refuses a second finish and a later submit or stop with the not-live reason, and stores no stop reason; two hand-run plants caught and restored.
+
+## 037
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md), Session and interaction contract:
+
+> visible current state, progress, selected provider and model, and last durable
+> event
+
+This task proves the shell list shows an ended shown session only while the
+stand-in's own keep window holds it. The task adds no function and changes no
+helper: `get_capsules` is the one list, `age_shown_plan` is the one clock, and
+`src/lib.rs` stores no keep constant, contains no copy of `keeps_instance`, and
+holds neither the integer 60 nor `FAILED_KEEP`. `age_shown_plan` still calls
+`stand_in.set_instant(secs)` and returns nothing. The new test calls no
+`set_instant`, so it finds the instant by probing with the one clock: for at
+most twenty-four steps it ages to a doubling instant while `component-1` is
+still listed, then walks one instant at a time to the first instant where that
+capsule is absent.
+
+`shown_ended_session_leaves_the_list` drives four sessions through
+`running_agent`. `component-1` launches with `Start::Error("start refused")`,
+submits `request-1` (read of `PLAN_A`, reason `show this step`), is granted
+`once` with rationale `show this grant`, submits `request-2` (read of `PLAN_B`,
+reason `show this step`), and its one finish stores `failed` with cause
+`start refused` and denies `request-2` with that cause. `component-2` runs with
+`request-3` (write of `PLAN_A`, reason `""`) granted for its session and
+`request-4` (read of `PLAN_B`, reason `show this step`) pending.
+`component-3` runs, is granted `request-5` once and left with `request-6`
+pending, then the shell stops it with reason `stop the shown session`, which
+stores cause `stopped: stop the shown session` and denies `request-6` with that
+cause. `component-4` launches with `Start::Ok` and is never finished, so it
+stays `starting`, with `request-7` pending.
+
+Before any age, the shell list holds all four capsules and the live list holds
+one `request-3` entry that carries no `run_id`. One instant before the found
+instant, the four capsules, the one live entry and both pending steps are
+unchanged. At the found instant, `component-1` and `component-3` leave together
+while `component-2` stays `running` and `component-4` stays `starting`; the two
+request lists stay exact, the live list stays that one entry, and a submit from
+either ended session is status 400 `instance is not live: failed` or
+`instance is not live: stopped`, not `unknown instance: <id>`, and stores
+nothing. `component-4` then stores `request-8` as pending. The revoked once
+grants of `request-1` and `request-5` are `grant is not live: Revoked`, while
+the sibling's `request-3` still returns `{"valid": true}` and stays live on the
+list. Moving the instant back one step lists the ended sessions again, and a
+submit from `component-1` is still `instance is not live: failed` and stores
+nothing. `read_shown_requests` for `component-4` still holds its two pending
+rows, and the live list is still that one entry.
+
+The test calls no `set_instant`, `watch_ended`, `finish_start`, `delete_capsule`,
+`worker_exited`, `seed_request` or any stand-in route directly except
+`get_capsules` through its own helpers. `preview`, `plan_sha256`, `approve`,
+`execute`, `deny_shown_plan`, `age_shown_plan`, `stop_shown_session`,
+`read_shown_request`, `read_shown_grants`, `read_shown_requests`,
+`shown_worker_exited`, `read_shown_run`, `shown_finish_start`, `running_agent`,
+`request` and every existing test are unchanged. This crate does not copy the
+stand-in, and it names no planner. A passing run gives the Runtime no A15
+credit.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_ended_session_leaves_the_list -- --exact
+```
+
+### F-keep-freezes
+
+Old body bytes, 93:
+
+```rust
+pub fn age_shown_plan(stand_in: &mut StandIn, secs: u64) {
+    stand_in.set_instant(secs);
+}
+```
+
+New body bytes, 108:
+
+```rust
+pub fn age_shown_plan(stand_in: &mut StandIn, secs: u64) {
+    let _ = secs;
+    stand_in.set_instant(0);
+}
+```
+
+The planted crate compiled. `shown_ended_session_leaves_the_list` failed at
+`src/lib.rs:13712:5` (planted tree) on the probe's closing assertion:
+`an ended shown session leaves the shell list at the stand-in's keep window:
+the ended session left the shell list`. The frozen clock never reached the keep
+window, so `component-1` stayed listed for all twenty-four probe steps.
+Restored, the test passes.
+
+### F-keep-mints
+
+Old body bytes, 93:
+
+```rust
+pub fn age_shown_plan(stand_in: &mut StandIn, secs: u64) {
+    stand_in.set_instant(secs);
+}
+```
+
+New body bytes, 337:
+
+```rust
+pub fn age_shown_plan(stand_in: &mut StandIn, secs: u64) {
+    stand_in.set_instant(secs);
+    stand_in.seed_grant(
+        "request-plant",
+        "component-2",
+        "localhost://Public/plan-approval/a.txt",
+        "read",
+        "once",
+        0,
+        agent_conformance::standin_runtime::Life::Live,
+        false,
+    );
+}
+```
+
+The planted crate compiled. `shown_ended_session_leaves_the_list` failed at
+`src/lib.rs:13776:5` (planted tree) on the live list one instant earlier:
+`assertion `left == right` failed: an ended shown session leaves the shell list
+at the stand-in's keep window: the sibling's session grant stays live one
+instant earlier`; left held the `request-3` entry plus repeated `request-plant`
+entries, right expected the one-entry body. The clock minted a grant instead of
+only moving the instant. Restored, the test passes.
+
+Neither plant calls `seed_request`; the first plant freezes the clock and the
+second plant calls `seed_grant`. After both restores, `git diff -- lab/plan-approval/src/lib.rs`
+holds no `request-plant` and no `let _ = secs;` inside `age_shown_plan`. The
+restored proof command set (the fmt check and the thirty test commands in the
+task) took 3.01 s real. This lane has no `falsifiers.json`; no id is added.
+
+037: `shown_ended_session_leaves_the_list` proves the shell list drops a failed session and a stopped session together at the stand-in's own keep instant while the running and starting sessions stay, the request records and the sibling session grant stay, a later submit is still the not-live refusal, and moving the instant back lists the ended sessions again; `get_capsules` is the one list and `age_shown_plan` the one clock, no keep constant is stored, and two hand-run plants were caught and restored.

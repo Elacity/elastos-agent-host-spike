@@ -711,6 +711,52 @@ stand-in's own `finish_start`, reached only through `shown_finish_start`.
 unchanged. This crate does not copy the stand-in and it names no planner. A
 passing run gives the Runtime no A15 credit.
 
+An ended shown session leaves the shell list at the stand-in's own keep window.
+The interaction contract requires:
+
+> visible current state, progress, selected provider and model, and last durable
+> event
+
+`get_capsules` is the only list and `age_shown_plan` is the only clock. This
+crate stores no keep constant, does not copy `keeps_instance` and adds no
+function. `shown_ended_session_leaves_the_list` drives four sessions through
+`running_agent`: `component-1` fails its start with cause `start refused`,
+`component-2` runs with one granted `session` step (`request-3`) and one pending
+step (`request-4`), `component-3` runs and is then stopped with cause
+`stopped: stop the shown session`, and `component-4` stays `starting`. Before
+any `age_shown_plan`, the shell list holds all four capsules and the live list
+holds that one `request-3` entry, which carries no `run_id`.
+
+The test finds the instant with `age_shown_plan` alone and calls no
+`set_instant`, so it stores no keep number. Probing up to twenty-four steps, it
+doubles the instant while `component-1` is still listed, then walks one instant
+at a time to the first instant where `component-1` is absent. One instant
+earlier, the failed session and the stopped session are both listed with their
+causes, `component-2` stays `running`, `component-4` stays `starting`, and both
+pending steps are still `pending`, because the keep instant is earlier than the
+request timeout. At that instant the failed session and the stopped session
+leave the shell list together, while the running session and the starting
+session stay listed. The request records stay: `component-1` keeps its granted
+and denied rows, and `component-3` keeps `request-5` granted and `request-6`
+denied with the stop cause. The live list still holds that one `request-3`
+entry, and the sibling session grant still validates, so `execute` returns
+`{"valid": true}` and the entry stays live.
+
+Moving the instant back one step lists the ended sessions again, and a submit
+from `component-1` is still status 400 `instance is not live: failed`, not
+`unknown instance: component-1`, so it stores nothing and the two rows stay.
+The first submit from `component-3` at that instant was `instance is not live:
+stopped`. The revoked once grants stay `grant is not live: Revoked`, which is
+neither `{"valid": true}` nor `grant is not live: Exhausted`. The test calls no
+`watch_ended`, `finish_start`, `delete_capsule`, `worker_exited` or
+`seed_request`. `preview`, `plan_sha256`, `approve`, `execute`,
+`deny_shown_plan`, `age_shown_plan`, `stop_shown_session`,
+`read_shown_request`, `read_shown_grants`, `read_shown_requests`,
+`shown_worker_exited`, `read_shown_run`, `shown_finish_start`, `running_agent`
+and `request` are unchanged by this slice. This crate does not copy the
+stand-in, and it names no planner. A passing run gives the Runtime no A15
+credit.
+
 ## Layout
 
 - `src/lib.rs`: `Preview`, `preview`, `plan_sha256`, `approve`,
@@ -738,12 +784,14 @@ passing run gives the Runtime no A15 credit.
   `shown_worker_exit_is_not_the_grant`,
   `shown_run_pair_is_not_the_grant`,
   `shown_failed_start_is_not_the_grant`,
-  `shown_use_names_the_minted_run` and the bound-plan journey.
+  `shown_use_names_the_minted_run`, `shown_ended_session_leaves_the_list`
+  and the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_ended_session_leaves_the_list -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_failed_start_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_use_names_the_minted_run -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_run_pair_is_not_the_grant -- --exact
