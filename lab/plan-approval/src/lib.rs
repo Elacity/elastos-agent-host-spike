@@ -1911,3 +1911,167 @@ fn shown_grant_authorises_only_its_session() {
         "a shown grant authorises only its session: the second request stays granted under the shell with the owner's decision"
     );
 }
+
+#[cfg(test)]
+#[test]
+fn owner_approves_only_the_shown_hash() {
+    use agent_conformance::standin_runtime::Caller;
+    use fixtures::{PLAN_A, PLAN_B};
+    use journeys::{request, running_agent};
+    use serde_json::{json, Value};
+
+    fn live(stand_in: &StandIn) -> Vec<Value> {
+        stand_in
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
+            .expect("shell live list")["capabilities"]
+            .as_array()
+            .cloned()
+            .expect("the shell live list holds a capabilities array")
+    }
+
+    fn record(stand_in: &StandIn, session: &str, request_id: &str) -> Value {
+        stand_in
+            .get_capability_requests(Caller::Shell, Some(session))
+            .expect("the shell reads the session's requests")["requests"]
+            .as_array()
+            .cloned()
+            .expect("the shell request view holds a requests array")
+            .into_iter()
+            .find(|entry| entry["request_id"] == request_id)
+            .expect("the session's request view holds that id")
+    }
+
+    let mut stand_in = StandIn::new();
+    let session = running_agent(&mut stand_in);
+    assert_eq!(
+        session, "component-1",
+        "the owner grant mints only the hash the shown request stored: the fresh stand-in names its session component-1"
+    );
+
+    let step = request(&mut stand_in, &session, PLAN_A);
+    assert_eq!(
+        step, "request-1",
+        "the owner grant mints only the hash the shown request stored: the agent's first step is request-1"
+    );
+
+    let shown = plan_sha256(PLAN_A);
+    assert_eq!(
+        shown.len(),
+        64,
+        "the owner grant mints only the hash the shown request stored: the shown hash is 64 lowercase hex characters"
+    );
+
+    // The shell's request view shows the plan hash the request stored. The
+    // owner's card carries a hash to compare with that one value.
+    let pending = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "pending",
+        "decision_reason": "",
+        "settled_by": Value::Null,
+        "plan": shown,
+    });
+    assert_eq!(
+        record(&stand_in, &session, &step),
+        pending,
+        "the owner grant mints only the hash the shown request stored: the agent's request stays pending with the hash of plan A"
+    );
+
+    // Another plan, an empty hash and a truncated hash are each not the hash
+    // the shown request stored. Each refusal mints nothing.
+    let refused = Err((
+        403,
+        "approved plan does not match the requested plan".to_owned(),
+    ));
+    let candidates = [plan_sha256(PLAN_B), String::new(), shown[..63].to_owned()];
+    for candidate in &candidates {
+        assert_eq!(
+            approve(&mut stand_in, &step, "once", candidate),
+            refused,
+            "the owner grant mints only the hash the shown request stored: the owner's approval with a hash other than {shown} is refused"
+        );
+        assert_eq!(
+            record(&stand_in, &session, &step),
+            pending,
+            "the owner grant mints only the hash the shown request stored: the request stays pending after the refused hash {candidate:?}"
+        );
+        assert_eq!(
+            live(&stand_in),
+            Vec::<Value>::new(),
+            "the owner grant mints only the hash the shown request stored: the refused hash {candidate:?} mints no grant"
+        );
+    }
+
+    // A refused approval leaves nothing to run.
+    assert_eq!(
+        execute(&mut stand_in, &session, &step, PLAN_A),
+        Err((400, "unknown grant".to_owned())),
+        "the owner grant mints only the hash the shown request stored: running the request before the owner grants it is refused as unknown grant"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "the owner grant mints only the hash the shown request stored: the refused use mints nothing"
+    );
+
+    // The exact hash mints one grant for one use.
+    assert_eq!(
+        approve(&mut stand_in, &step, "once", &shown),
+        Ok(json!({ "success": true })),
+        "the owner grant mints only the hash the shown request stored: the owner's approval with the stored hash is accepted"
+    );
+    let granted = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "granted",
+        "decision_reason": "owner approved",
+        "settled_by": "shell",
+        "plan": shown,
+    });
+    assert_eq!(
+        record(&stand_in, &session, &step),
+        granted,
+        "the owner grant mints only the hash the shown request stored: the request is granted under the shell with the hash of plan A"
+    );
+    let live_one = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "duration": "once",
+        "granted_at": 0,
+    });
+    assert_eq!(
+        live(&stand_in),
+        vec![live_one],
+        "the owner grant mints only the hash the shown request stored: the exact hash stores one once grant"
+    );
+
+    // The grant runs for the plan it is bound to and spends one use.
+    assert_eq!(
+        execute(&mut stand_in, &session, &step, PLAN_A),
+        Ok(json!({ "valid": true })),
+        "the owner grant mints only the hash the shown request stored: the granted plan runs once"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "the owner grant mints only the hash the shown request stored: the spent once grant leaves the live list"
+    );
+    assert_eq!(
+        execute(&mut stand_in, &session, &step, PLAN_A),
+        Err((400, "grant is not live: Exhausted".to_owned())),
+        "the owner grant mints only the hash the shown request stored: a second use of the same plan is refused as Exhausted"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "the owner grant mints only the hash the shown request stored: the refused second use leaves the live list empty"
+    );
+}

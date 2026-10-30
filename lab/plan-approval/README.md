@@ -96,6 +96,29 @@ stand-in compares the grant's session with the caller's. `preview`,
 stand-in, and it names no planner. A passing run gives the Runtime no A15
 credit.
 
+A shown grant mints only the hash the shown request stored. `approve` is the
+only grant call and sends the hash it is given; this crate stores no hash
+compare of its own. The design keeps the grant in the Runtime:
+
+> The UI does not mint the grant itself.
+
+and principle 16 states the card's place:
+
+> A visible approval card is not the grant authority.
+
+A shown request whose record stores a plan hash is granted only when the body
+carries that same hash. Another plan, an empty hash and the first 63 characters
+of the stored hash are each refused with status 403 and `approved plan does not
+match the requested plan`. Each refusal mints nothing, and the request stays
+pending with its stored hash. The exact hash then grants one use, which
+`execute` spends, and a second use is refused with `grant is not live:
+Exhausted`. `preview`, `plan_sha256`, `approve`, `execute`, `deny_shown_plan`,
+`age_shown_plan` and `stop_shown_session` are unchanged by this slice. This
+crate stores no hash compare of its own; the stand-in's grant route compares
+the body hash with the hash the request stored. The crate does not copy the
+stand-in, and it names no planner. A passing run gives the Runtime no A15
+credit.
+
 `preview`, `plan_sha256`, `execute`, `deny_shown_plan`, `age_shown_plan` and
 `stop_shown_session` are unchanged by this slice; `approve` gains the duration
 argument and remains the only grant call. This crate calls
@@ -106,10 +129,10 @@ the first; it adds no second launch path. The June planner path is an open
 question with Sash via Flint; this crate names no planner and guesses no path.
 
 A passing run gives the Runtime no A15 credit. The expiry of an allow-once grant
-and the lifetime of a session grant are the two halves of M1 check A15;
-approval binding (step 8, where an allow-once decision authorises one exact
-operation, and principle 16, "A visible approval card is not the grant
-authority") is a later slice; RA-4 and RA-5 stay open.
+and the lifetime of a session grant are two parts of M1 check A15; the
+owner-hash binding of this slice is the third part. The principal and restart
+stay open, and the remaining binding rules stay open, so RA-4 and RA-5 stay
+open.
 
 ## Layout
 
@@ -118,13 +141,14 @@ authority") is a later slice; RA-4 and RA-5 stay open.
   `preview_makes_no_effect`, `plan_sha256_hashes_the_exact_bytes`,
   `deny_one_shown_step`, `unanswered_shown_step_expires`,
   `stop_settles_that_sessions_shown_steps`, `shown_allow_once_expires`,
-  `shown_session_lasts_until_stop`, `shown_grant_authorises_only_its_session`
-  and the bound-plan journey.
+  `shown_session_lasts_until_stop`, `shown_grant_authorises_only_its_session`,
+  `owner_approves_only_the_shown_hash` and the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib owner_approves_only_the_shown_hash -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_grant_authorises_only_its_session -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_session_lasts_until_stop -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_allow_once_expires -- --exact
