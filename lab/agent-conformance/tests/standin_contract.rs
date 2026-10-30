@@ -1605,3 +1605,148 @@ fn standin_refuses_to_admit_a_bundle_whose_asks_carry_an_unknown_key() {
         "asks.json carries an unknown key: note",
     );
 }
+
+/// M1 check A7: the one budget cap on the stand-in's admission path.
+///
+/// One guest, five routes and nothing else: `admit_resident` for setup, then
+/// `post_capsules`, `finish_start`, `post_capability_request`,
+/// `post_capability_grant` and `post_capability_validate`. The grant route
+/// binds the grant on the shared ledger and stores the ledger's own handle,
+/// so each admitted ask below is the ledger's `admit_ask` call with that
+/// handle. No journey seeds a request or a grant and none reads the handle.
+#[test]
+fn standin_admission_admits_a_granted_ask_within_budget_and_refuses_one_above() {
+    let mut standin = StandIn::new();
+    let shared = SignedBundle::new();
+    declare_asks(&shared, &[(SHARED_RESOURCE, "read")]);
+    let session = launched_guest(&mut standin, &shared);
+    let owner = Caller::Client {
+        session_id: &session,
+    };
+    let requested = standin
+        .post_capability_request(
+            owner,
+            &json!({
+                "resource": SHARED_RESOURCE,
+                "action": "read",
+                "reason": "one read effect",
+            }),
+        )
+        .expect("the agent's route stores one pending request");
+    let request_id = requested["request_id"]
+        .as_str()
+        .expect("the stand-in names the request")
+        .to_owned();
+    standin
+        .post_capability_grant(
+            Caller::Shell,
+            &json!({ "request_id": request_id, "duration": "session" }),
+        )
+        .expect("the shell grants the pending request");
+
+    let live = |standin: &StandIn| {
+        request_ids(
+            &standin
+                .get_capability_list(Caller::Shell, Some("all_sessions_live"))
+                .expect("the stand-in shell live view"),
+        )
+    };
+    let victim = BTreeSet::from([request_id.clone()]);
+
+    // One above the cap is refused with the cap and the ask. That refusal is
+    // the guarded check's: the grant is live, unspent and carries the handle
+    // the grant route minted, so nothing before the cap compare refuses it.
+    // The refused grant is the victim and stays live and unspent.
+    let above = standin
+        .post_capability_validate(owner, &json!({ "request_id": request_id, "amount": 4097 }));
+    assert_eq!(
+        above,
+        Err((
+            403,
+            "budget ask exceeds the admission cap: asked 4097, cap 4096".to_owned()
+        )),
+        "the stand-in refuses an ask one above the cap with AdmitRefuse's reason"
+    );
+    assert_eq!(
+        live(&standin),
+        victim,
+        "the refused ask leaves the granted effect live on the stand-in"
+    );
+
+    // The cap itself is admitted, so the refusal above is the boundary.
+    let at_cap = standin
+        .post_capability_validate(owner, &json!({ "request_id": request_id, "amount": 4096 }));
+    assert_eq!(
+        at_cap,
+        Ok(json!({ "valid": true })),
+        "the stand-in admits an ask at the cap"
+    );
+    let default_ask = standin.post_capability_validate(owner, &json!({ "request_id": request_id }));
+    assert_eq!(
+        default_ask,
+        Ok(json!({ "valid": true })),
+        "the grant route's binding still admits a later ask on the same grant"
+    );
+
+    // A malformed amount is refused against the same victim grant, before
+    // the grant is read, so it spends nothing.
+    for amount in [json!(-1), json!(1.5), json!("4096"), json!(null)] {
+        let refused = standin.post_capability_validate(
+            owner,
+            &json!({ "request_id": request_id, "amount": amount }),
+        );
+        assert_eq!(
+            refused,
+            Err((
+                400,
+                "budget ask needs a non-negative integer amount".to_owned()
+            )),
+            "the stand-in refuses a malformed amount {amount} on a live granted request"
+        );
+    }
+    assert_eq!(
+        live(&standin),
+        victim,
+        "the malformed amounts leave the grant live and unspent"
+    );
+
+    // The store and the re-resolve of the grant run before the admission, so
+    // the order is proved on a second, `once` grant: the admitted use makes
+    // it `Exhausted`, an ask above the cap is then `grant is not live`, and
+    // the exhausted grant stays out of the one live view.
+    let pending = standin
+        .post_capability_request(
+            owner,
+            &json!({
+                "resource": SHARED_RESOURCE,
+                "action": "read",
+                "reason": "one once effect",
+            }),
+        )
+        .expect("the agent's route stores a second pending request");
+    let once_id = pending["request_id"]
+        .as_str()
+        .expect("the stand-in names the request")
+        .to_owned();
+    standin
+        .post_capability_grant(
+            Caller::Shell,
+            &json!({ "request_id": once_id, "duration": "once" }),
+        )
+        .expect("the shell grants the second request for one use");
+    assert_eq!(
+        standin.post_capability_validate(owner, &json!({ "request_id": once_id })),
+        Ok(json!({ "valid": true })),
+        "the once grant admits its one ask under the default cap"
+    );
+    assert_eq!(
+        standin.post_capability_validate(owner, &json!({ "request_id": once_id, "amount": 4097 })),
+        Err((400, "grant is not live: Exhausted".to_owned())),
+        "the once grant was spent before the admission read it"
+    );
+    assert_eq!(
+        live(&standin),
+        victim,
+        "the spent once grant is out of the live view"
+    );
+}

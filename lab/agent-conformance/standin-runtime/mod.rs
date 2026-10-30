@@ -50,6 +50,7 @@
 use capsule_identity::{
     checked_bundle, verify_checked_signature, CheckedBundle, LabCid, NameSignature, Refusal,
 };
+use grant_binding::{AdmitRefuse, BudgetAsk, GuestRequest, Handle, InstanceId, Rights, Verifier};
 use serde_json::{json, Map, Value};
 use std::os::fd::OwnedFd;
 use std::path::{Component, Path, PathBuf};
@@ -79,6 +80,11 @@ const NOT_DIR_REASON: &str = "storage directory is not a directory";
 const EXISTING_STORAGE_REASON: &str = "storage directory already exists";
 const DATA_STEP: &str = "storage directory";
 const ENTRY_STEP: &str = "storage file";
+
+/// The one budget cap for one granted effect on the stand-in's admission
+/// path. An ask above it is refused and the grant on the shared ledger keeps
+/// its binding.
+const EFFECT_BUDGET_CAP: u64 = 4_096;
 
 /// Authenticated caller. A method argument, not a JSON field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,6 +136,11 @@ struct Grant {
     /// and `authorise` compares it with the plan hash of the use. No caller
     /// holds or constructs it.
     plan: Option<PlanBinding>,
+    /// The grant ledger's own handle for this grant (M1 check A7). Only
+    /// `Verifier::bind_grant` mints one, on the stand-in's shared ledger, and
+    /// the grant route stores it here. Callers never present a handle and
+    /// never choose it; the admission path passes this stored value back.
+    binding: Option<Handle>,
 }
 
 /// One approved-plan binding on a grant. Its one field is private, so only
@@ -245,6 +256,14 @@ pub struct StandIn {
     next_id: u64,
     next_request: u64,
     instant: u64,
+    /// The one grant ledger this stand-in shares with the reference model
+    /// (M1 check A7). Each instance registered here takes its `InstanceId`
+    /// and each grant route binds that instance to `UsersAI/<name>`, so the
+    /// stored `Handle` is the only value the admission path passes on.
+    ledger: Verifier,
+    /// The `InstanceId` each live instance holds on `ledger`. It maps one
+    /// instance id to one number and never goes the other way.
+    instances_on_ledger: Vec<(String, InstanceId)>,
 }
 
 impl StandIn {
@@ -261,6 +280,8 @@ impl StandIn {
             next_id: 1,
             next_request: 1,
             instant: 0,
+            ledger: Verifier::new(),
+            instances_on_ledger: Vec::new(),
         }
     }
 
@@ -642,8 +663,10 @@ impl StandIn {
     /// Lab test seam, not a route.
     ///
     /// `granted_at` is the seeded value. This method reads no clock. A seeded
-    /// grant is unbound: the plan binding is minted only by
-    /// `post_capability_grant`, so this seam can never create one.
+    /// grant has no plan binding, which only `post_capability_grant` mints.
+    /// It also stores no ledger handle; `admit_effect` asks through the
+    /// ledger's own `bind_grant` on the seeded grant's session instead, so
+    /// the budget check still reads every seeded ask.
     #[allow(clippy::too_many_arguments)]
     pub fn seed_grant(
         &mut self,
@@ -667,6 +690,7 @@ impl StandIn {
             life,
             session_ended,
             plan: None,
+            binding: None,
         });
     }
 
@@ -951,6 +975,8 @@ impl StandIn {
         let resource = request.resource.clone();
         let action = request.action.clone();
         let plan = request.plan.clone();
+        let instance = self.instance_on_ledger(&session_id);
+        let bound = self.bind_on_ledger(instance, &session_id);
         self.settle_record(&request_id, RequestStatus::Granted, rationale, "shell");
         let instant = self.instant;
         self.seed_grant(
@@ -963,13 +989,14 @@ impl StandIn {
             Life::Live,
             false,
         );
+        let stored = self
+            .grants
+            .iter_mut()
+            .find(|grant| grant.request_id == request_id.as_str())
+            .expect("the grant route just stored this request's grant");
+        stored.binding = Some(bound);
         let minted = mint_plan_binding(&plan);
         if let Some(minted) = minted {
-            let stored = self
-                .grants
-                .iter_mut()
-                .find(|grant| grant.request_id == request_id.as_str())
-                .expect("the grant route just stored this request's grant");
             stored.plan = Some(minted);
         }
         Ok(json!({ "success": true }))
@@ -1036,6 +1063,15 @@ impl StandIn {
     /// on every other client route. A `once` grant stores `Exhausted` on the
     /// first success, so the live view omits it and a second use is not live.
     /// A grant bound to a plan authorises that plan's hash alone.
+    ///
+    /// An authorised grant is then admitted for its one effect (M1 check
+    /// A7): the body's optional `amount` is the ask, defaulting to
+    /// `EFFECT_BUDGET_CAP`, and `admit_effect` reads it against that cap on
+    /// the shared ledger. A missing, non-numeric or negative `amount` is
+    /// status 400 with `budget ask needs a non-negative integer amount`, and
+    /// it is refused before the grant is read, so it spends nothing. An ask
+    /// above the cap is status 403 with the `AdmitRefuse` text, and the
+    /// grant stays live and unspent.
     pub fn post_capability_validate(
         &mut self,
         caller: Caller<'_>,
@@ -1043,7 +1079,20 @@ impl StandIn {
     ) -> Result<Value, (u16, String)> {
         require_client(caller)?;
         let (request_id, plan_sha256) = validate_body(body)?;
+        let amount = match body.get("amount") {
+            Some(amount) => amount
+                .as_u64()
+                .ok_or_else(|| (400, ASK_REASON.to_owned()))?,
+            None => EFFECT_BUDGET_CAP,
+        };
         self.authorise(caller, request_id, plan_sha256)?;
+        let (session_id, binding) = self
+            .grants
+            .iter()
+            .find(|grant| grant.request_id == request_id)
+            .map(|grant| (grant.session_id.clone(), grant.binding))
+            .expect("authorise leaves exactly the grant it read");
+        self.admit_effect(&session_id, binding, amount)?;
         Ok(json!({ "valid": true }))
     }
 
@@ -1417,6 +1466,97 @@ impl StandIn {
         ))
     }
 
+    /// The one ledger binding. `post_capability_grant` is its route.
+    ///
+    /// Takes the granting instance `admit_effect` registered for this session
+    /// and binds it to its own owned root, `UsersAI/<session_id>/effects`,
+    /// through the reference model's one path rule. The returned `Handle` is
+    /// the ledger's value, never a caller's; this method reads no disk.
+    fn bind_on_ledger(&mut self, instance: InstanceId, session_id: &str) -> Handle {
+        let root = format!("UsersAI/{session_id}/effects");
+        self.ledger
+            .bind_grant(instance, &root, Self::effect_rights())
+            .expect("a registered agent instance binds its own owned root")
+    }
+
+    /// The one instance registration for a session. The first call for a
+    /// session registers it and every later call returns that same instance,
+    /// so one session holds one ledger instance and its `bind_grant` lands on
+    /// the instance its `admit_ask` resolves against.
+    fn instance_on_ledger(&mut self, session_id: &str) -> InstanceId {
+        match self
+            .instances_on_ledger
+            .iter()
+            .find(|(bound, _)| bound == session_id)
+        {
+            Some((_, instance)) => *instance,
+            None => {
+                let instance = self.ledger.register_instance(session_id, session_id);
+                self.instances_on_ledger
+                    .push((session_id.to_owned(), instance));
+                instance
+            }
+        }
+    }
+
+    /// The one rights set for the grant route's effect binding. The root is
+    /// the session's own `UsersAI/<session_id>/effects`, written once.
+    fn effect_rights() -> Rights {
+        Rights {
+            append: false,
+            overwrite: true,
+            child_journal: false,
+        }
+    }
+
+    /// The one budget admission. `post_capability_validate` is its route.
+    ///
+    /// The granted effect asks `amount` units, and the one ledger call
+    /// `Verifier::admit_ask` reads that ask against `EFFECT_BUDGET_CAP` and
+    /// records it as the agent's ceiling. The request carries the handle the
+    /// grant route stored on this grant, so the resolve on the ledger is the
+    /// same binding that minted it. An over-budget ask or a binding refusal
+    /// is status 403 with `AdmitRefuse`'s own text, and the ledger keeps the
+    /// grant bound and stores no ceiling. An ask at the cap is admitted.
+    /// A grant the grant route bound carries the route's handle. A seeded
+    /// grant, which this lab seam writes without a handle, asks through the
+    /// ledger's own `bind_grant` on the same instance, so every admission is
+    /// the ledger's and the two falsifiers stay distinct.
+    fn admit_effect(
+        &mut self,
+        session_id: &str,
+        binding: Option<Handle>,
+        amount: u64,
+    ) -> Result<u64, (u16, String)> {
+        let instance = self.instance_on_ledger(session_id);
+        let call = self.ledger.open_call(instance);
+        let handle = match binding {
+            Some(stored) => stored,
+            None => self
+                .ledger
+                .bind_grant(
+                    instance,
+                    &format!("UsersAI/{session_id}/effects"),
+                    Self::effect_rights(),
+                )
+                .map_err(|refusal| (403, refusal.to_string()))?,
+        };
+        let request = GuestRequest {
+            handle,
+            forged_identity: None,
+            forged_session: None,
+            forged_instance: None,
+            reported_usage: 0,
+            forged_ceiling: 0,
+            forged_append: false,
+            forged_overwrite: false,
+            forged_child_journal: false,
+        };
+        self.ledger
+            .admit_ask(&call, &request, BudgetAsk { amount }, EFFECT_BUDGET_CAP)
+            .map_err(|refusal| (403, admit_text(&refusal)))
+    }
+
     fn not_admitted(&self, cid: LabCid) -> (u16, String) {
         (
             404,
@@ -1779,6 +1919,12 @@ fn validate_body(body: &Value) -> Result<(&str, Option<&str>), (u16, String)> {
     let mut plan_sha256 = None;
     for (key, value) in object {
         match key.as_str() {
+            "amount" => match value {
+                // A present amount is read against the cap after the
+                // grant, so only its shape is checked here.
+                Value::Number(number) if number.as_u64().is_some() => {}
+                _ => return Err((400, ASK_REASON.to_owned())),
+            },
             "request_id" => match value {
                 Value::String(text) => request_id = Some(text.as_str()),
                 _ => return Err((400, "validate request_id must be a string".to_owned())),
@@ -2037,6 +2183,21 @@ fn life_text(life: Life) -> &'static str {
         Life::Exhausted => "Exhausted",
         Life::Revoked => "Revoked",
         Life::Expired => "Expired",
+    }
+}
+
+/// The one reason a malformed budget ask carries. `post_capability_validate`
+/// reads it before the grant.
+const ASK_REASON: &str = "budget ask needs a non-negative integer amount";
+
+/// The one reason text for a refused budget admission: `AdmitRefuse`'s own.
+/// An over-budget refusal names the cap and the ask it compared.
+fn admit_text(refusal: &AdmitRefuse) -> String {
+    match refusal {
+        AdmitRefuse::OverBudget { cap, asked } => {
+            format!("budget ask exceeds the admission cap: asked {asked}, cap {cap}")
+        }
+        AdmitRefuse::Binding(refusal) => refusal.to_string(),
     }
 }
 
