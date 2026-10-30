@@ -429,6 +429,16 @@ impl Verifier {
         Ok(TimeoutRecord)
     }
 
+    /// Ends one handle's binding (M1 check A7, condition c). The grant record
+    /// is dropped from the one store `resolve` reads, so every later use of
+    /// that handle is refused with `unknown handle`, the same refusal an
+    /// unbound handle gets. A handle that already ended is not an error. A
+    /// stop or revoke path is its only caller and passes the handle the grant
+    /// route stored.
+    pub fn end_grant(&mut self, handle: Handle) {
+        self.grants.remove(&handle);
+    }
+
     /// Returns one hold's amount to the ceiling and drops the hold.
     #[allow(unused_variables)]
     fn return_unused_hold(
@@ -508,6 +518,23 @@ fn books(verifier: &Verifier) -> Books {
             .map(|(id, open)| (*id, open.timed_out))
             .collect(),
     }
+}
+
+#[test]
+fn model_end_grant_refuses_the_ended_handle() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .use_grant(call, &guest(handle))
+        .expect("bound handle");
+    verifier.end_grant(handle);
+    let refusal = verifier
+        .use_grant(call, &guest(handle))
+        .expect_err("the ended handle no longer resolves");
+    assert_eq!(refusal, Refuse::UnknownHandle);
+    assert_eq!(refusal.to_string(), "unknown handle");
+    assert_eq!(books(&verifier).held, 0, "ending a binding holds nothing");
 }
 
 #[test]
