@@ -13,6 +13,7 @@
 - 016: `approve` gains `caller: Caller<'_>` after `stand_in` and passes that value to `post_capability_grant`, staying the one grant call; `agent_cannot_approve_its_own_shown_plan` proves the session that posted a plan and the other running session are refused with `This endpoint requires shell privileges` before the body is read, for another hash, an empty hash, a 63-character hash and the duration word `standing` too, and that the shell's call with the exact hash then grants one use which `execute` spends; two hand-run plants caught and restored; 1 test, 2 plants.
 - 017: `execute` gains `caller: Caller<'_>` after `stand_in` and passes that value to `post_capability_validate`, staying the one use call; `shell_cannot_spend_a_shown_grant` proves a shell caller is refused for the bound plan, a different plan and empty plan bytes before the plan check, the grant stays live, the other session is refused as `wrong capsule` without a spend, the owning session's use then runs once, and a shell call after that spend is still the session refusal; two hand-run plants caught and restored; 1 test, 2 plants.
 - 023: `deny_one_shown_step` stores both shown steps through `journeys::request` after `running_agent`; the shell deny of `request-1` for `PLAN_A` settles it as denied and leaves `request-2` for `PLAN_B` pending, whose allow-once `approve` lets `execute` spend `PLAN_B`; the test calls no `seed_request` and the helpers stay unchanged; two hand-run plants caught and restored; 1 test, 2 plants.
+- 024: `only_a_live_session_submits_a_shown_plan` proves `request` is submitted only by a live instance session: the never-launched session and the stopped session are each refused for `PLAN_A`, `PLAN_B` and empty plan bytes and store nothing, while the other running session's submit stores one pending request that the shell grants and that session's `execute` spends; two hand-run plants return the route error as `Ok("request-1")` and neither calls `seed_request`; 1 test, 2 plants.
 
 ## 001
 
@@ -398,3 +399,101 @@ cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib deny_one_
 - restored, the test passes.
 
 After both restores, `git diff -- lab/plan-approval/src/lib.rs` shows no plant. The restored proof command set (the fmt check and the thirteen test commands in the task) took 3.39 s real. This lane has no `falsifiers.json`; no id is added.
+
+## 024
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md), Request flow step 6:
+
+> The Agent Host submits the proposed operation to Runtime as the active agent principal and session
+
+This task proves the live-instance half of that sentence: a session that was never launched and a
+session that was stopped are each refused before anything is stored, while the other running
+session's own submit stores one pending request that the shell grants and that session's `execute`
+spends. The principal stays BACKLOG item 4; the shell checks on `approve`, `execute` and `request`
+stay 016, 017 and 018, and a client deny stays 020. `request` stays the only submit call and gains
+no branch on `Caller`; the two plants below are temporary. `only_a_live_session_submits_a_shown_plan`
+asserts the never-launched refusal `unknown instance: component-absent` for `PLAN_A`, `PLAN_B` and
+empty plan bytes with an empty capsule list, empty request arrays and an empty live list; both
+`running_agent` calls return `component-1` and `component-2` as `running` with cause `""`;
+`stop_shown_session` of `component-1` returns JSON null and leaves it `stopped` with cause
+`stopped: stop the shown session` while `component-2` stays running; the stopped session's submits
+for the same three bodies are `instance is not live: stopped` and store nothing; `component-2`'s
+submit of `PLAN_A` is `request-1` with the 64-character shown hash; the shell's `approve` with
+`once` stores `granted` under `shell` with `owner approved` and one live grant, which the session's
+`execute` spends; a stopped-session submit after that spend is still `instance is not live: stopped`
+and leaves `request-1` granted with the live list empty. This crate stores no copy of the instance
+lookup, does not copy the stand-in and names no planner. A passing run gives the Runtime no A15
+credit.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib only_a_live_session_submits_a_shown_plan -- --exact
+```
+
+### F-not-live-returns-ok
+
+- old bytes, 258:
+  ```
+          let stored = stand_in.post_capability_request(
+              caller,
+              &json!({
+                  "resource": "localhost://Public/plan-approval/a.txt",
+                  "action": "read",
+                  "plan": hash,
+              }),
+          )?;
+  ```
+- new bytes, 454:
+  ```
+          let stored = match stand_in.post_capability_request(
+              caller,
+              &json!({
+                  "resource": "localhost://Public/plan-approval/a.txt",
+                  "action": "read",
+                  "plan": hash,
+              }),
+          ) {
+              Err((400, reason)) if reason.starts_with("instance is not live:") => {
+                  return Ok("request-1".to_owned());
+              }
+              result => result?,
+          };
+  ```
+- planted crate compiled; `only_a_live_session_submits_a_shown_plan` failed at `src/lib.rs:3351:9`
+  (planted tree) on the stopped-session assertion: `assertion left == right failed: only a live
+  session submits a shown plan: the stopped session's submit with plan bytes [...] is refused as not
+  live`; left held `Ok("request-1")`, right expected `Err((400, "instance is not live: stopped"))`.
+  The not-live refusal returned Ok instead of the route error.
+- restored, the test passes.
+
+### F-unknown-returns-ok
+
+- old bytes, 258: the same `old bytes` block as F-not-live-returns-ok.
+- new bytes, 450:
+  ```
+          let stored = match stand_in.post_capability_request(
+              caller,
+              &json!({
+                  "resource": "localhost://Public/plan-approval/a.txt",
+                  "action": "read",
+                  "plan": hash,
+              }),
+          ) {
+              Err((400, reason)) if reason.starts_with("unknown instance:") => {
+                  return Ok("request-1".to_owned());
+              }
+              result => result?,
+          };
+  ```
+- planted crate compiled; `only_a_live_session_submits_a_shown_plan` failed at `src/lib.rs:3214:9`
+  (planted tree) on the never-launched-session assertion: `assertion left == right failed: only a
+  live session submits a shown plan: the never-launched session's submit with plan bytes [...] is
+  refused as an unknown instance`; left held `Ok("request-1")`, right expected `Err((400, "unknown
+  instance: component-absent"))`. The unknown-instance refusal returned Ok instead of the route
+  error.
+- restored, the test passes.
+
+After both restores, `git diff -- lab/plan-approval/src/lib.rs` shows no plant. The restored proof
+command set (the fmt check and the fourteen test commands in the task) took 2.31 s real. This lane
+has no `falsifiers.json`; no id is added.

@@ -3144,3 +3144,394 @@ fn shell_cannot_submit_a_shown_plan() {
         "the shell cannot submit a shown plan: the refused shell submit after the spend leaves the live list empty"
     );
 }
+
+#[test]
+fn only_a_live_session_submits_a_shown_plan() {
+    use agent_conformance::standin_runtime::Caller;
+    use fixtures::{PLAN_A, PLAN_B};
+    use journeys::{request, running_agent};
+    use serde_json::{json, Value};
+
+    fn shown(stand_in: &StandIn, session: &str) -> Vec<Value> {
+        stand_in
+            .get_capability_requests(Caller::Shell, Some(session))
+            .expect("the shell reads the session's requests")["requests"]
+            .as_array()
+            .cloned()
+            .expect("the shell request view holds a requests array")
+    }
+
+    fn record(stand_in: &StandIn, session: &str, request_id: &str) -> Value {
+        shown(stand_in, session)
+            .into_iter()
+            .find(|entry| entry["request_id"] == request_id)
+            .expect("the session's request view holds that id")
+    }
+
+    fn live(stand_in: &StandIn) -> Vec<Value> {
+        stand_in
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
+            .expect("shell live list")["capabilities"]
+            .as_array()
+            .cloned()
+            .expect("the shell live list holds a capabilities array")
+    }
+
+    fn capsule(stand_in: &StandIn, id: &str) -> Value {
+        let listed = stand_in
+            .get_capsules(Caller::Shell)
+            .expect("shell capsules");
+        listed["capsules"]
+            .as_array()
+            .and_then(|capsules| capsules.iter().find(|entry| entry["id"] == id))
+            .cloned()
+            .unwrap_or_else(|| panic!("the capsule list names {id}: {listed}"))
+    }
+
+    fn state(stand_in: &StandIn, id: &str) -> Value {
+        let listed = capsule(stand_in, id);
+        json!({ "id": listed["id"], "status": listed["status"], "cause": listed["cause"] })
+    }
+
+    let mut stand_in = StandIn::new();
+
+    // One session that was never launched. The instance lookup runs after the
+    // body is accepted, so all three bodies reach it and are refused by name.
+    let plans: [&[u8]; 3] = [PLAN_A, PLAN_B, b""];
+    for plan in plans {
+        let result = request(
+            &mut stand_in,
+            Caller::Client {
+                session_id: "component-absent",
+            },
+            plan,
+        );
+        assert_eq!(
+            result,
+            Err((400, "unknown instance: component-absent".to_owned())),
+            "only a live session submits a shown plan: the never-launched session's submit with plan bytes {plan:?} is refused as an unknown instance"
+        );
+        assert_ne!(
+            result,
+            Err((
+                403,
+                "capability request needs an instance session".to_owned()
+            )),
+            "only a live session submits a shown plan: the client caller reaches the instance lookup, so {plan:?} never reports a caller refusal"
+        );
+        assert_ne!(
+            result,
+            Err((
+                403,
+                "ask not declared in the signed manifest: localhost://Public/plan-approval/a.txt read".to_owned()
+            )),
+            "only a live session submits a shown plan: the instance lookup runs before the manifest check, so {plan:?} never reaches it"
+        );
+        assert_ne!(
+            result,
+            Err((
+                400,
+                "Invalid action: read. Expected: read, write, execute, delete, message, admin"
+                    .to_owned()
+            )),
+            "only a live session submits a shown plan: the body is accepted before the instance lookup, so {plan:?} never reports an action refusal"
+        );
+        assert_ne!(
+            result,
+            Err((
+                400,
+                "Unsupported resource scheme. Allowed: elastos://, localhost://".to_owned()
+            )),
+            "only a live session submits a shown plan: the body is accepted before the instance lookup, so {plan:?} never reports a scheme refusal"
+        );
+        assert_ne!(
+            result,
+            Err((400, "request body needs resource".to_owned())),
+            "only a live session submits a shown plan: the body carries its resource, so {plan:?} never reports a missing resource"
+        );
+        assert_ne!(
+            result,
+            Err((400, "instance is not live: stopped".to_owned())),
+            "only a live session submits a shown plan: the never-launched session is absent rather than stopped for {plan:?}"
+        );
+        assert_eq!(
+            stand_in
+                .get_capsules(Caller::Shell)
+                .expect("shell capsules"),
+            json!({ "capsules": [] }),
+            "only a live session submits a shown plan: the unknown-instance refusal for {plan:?} mints no instance"
+        );
+        for session in ["component-absent", "component-1", "component-2"] {
+            assert_eq!(
+                shown(&stand_in, session),
+                Vec::<Value>::new(),
+                "only a live session submits a shown plan: the unknown-instance refusal for {plan:?} stores no request for {session}"
+            );
+        }
+        assert_eq!(
+            live(&stand_in),
+            Vec::<Value>::new(),
+            "only a live session submits a shown plan: the unknown-instance refusal for {plan:?} mints no grant"
+        );
+    }
+
+    // Two live sessions come from the one launch journey.
+    let first = running_agent(&mut stand_in);
+    let second = running_agent(&mut stand_in);
+    assert_eq!(
+        first, "component-1",
+        "only a live session submits a shown plan: the fresh stand-in names its first session component-1"
+    );
+    assert_eq!(
+        second, "component-2",
+        "only a live session submits a shown plan: the stand-in names its second session component-2"
+    );
+    assert_eq!(
+        state(&stand_in, &first),
+        json!({ "id": "component-1", "status": "running", "cause": "" }),
+        "only a live session submits a shown plan: the first session runs with no cause"
+    );
+    assert_eq!(
+        state(&stand_in, &second),
+        json!({ "id": "component-2", "status": "running", "cause": "" }),
+        "only a live session submits a shown plan: the second session runs with no cause"
+    );
+
+    // The owner stops the first session. It stays listed as stopped.
+    assert_eq!(
+        stop_shown_session(&mut stand_in, &first),
+        Ok(json!(null)),
+        "only a live session submits a shown plan: the owner's stop of component-1 is accepted"
+    );
+    assert_eq!(
+        state(&stand_in, &first),
+        json!({
+            "id": "component-1",
+            "status": "stopped",
+            "cause": "stopped: stop the shown session",
+        }),
+        "only a live session submits a shown plan: the stopped session stays listed as stopped with the stop cause"
+    );
+    assert_eq!(
+        state(&stand_in, &second),
+        json!({ "id": "component-2", "status": "running", "cause": "" }),
+        "only a live session submits a shown plan: the stop leaves the other session running with no cause"
+    );
+    assert_eq!(
+        shown(&stand_in, &first),
+        Vec::<Value>::new(),
+        "only a live session submits a shown plan: the stop leaves component-1's request array empty"
+    );
+    assert_eq!(
+        shown(&stand_in, &second),
+        Vec::<Value>::new(),
+        "only a live session submits a shown plan: the stop leaves component-2's request array empty"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "only a live session submits a shown plan: the stop leaves the live list empty"
+    );
+
+    // The stopped session's submit is the not-live refusal for all three
+    // bodies, because the instance lookup runs after the body is accepted.
+    for plan in plans {
+        let result = request(
+            &mut stand_in,
+            Caller::Client {
+                session_id: "component-1",
+            },
+            plan,
+        );
+        assert_eq!(
+            result,
+            Err((400, "instance is not live: stopped".to_owned())),
+            "only a live session submits a shown plan: the stopped session's submit with plan bytes {plan:?} is refused as not live"
+        );
+        assert_ne!(
+            result,
+            Err((400, "unknown instance: component-1".to_owned())),
+            "only a live session submits a shown plan: the stopped session is still listed, so {plan:?} is not an unknown instance"
+        );
+        assert_ne!(
+            result,
+            Err((
+                403,
+                "capability request needs an instance session".to_owned()
+            )),
+            "only a live session submits a shown plan: the client caller reaches the instance lookup, so {plan:?} never reports a caller refusal"
+        );
+        assert_ne!(
+            result,
+            Err((400, "instance is not live: failed".to_owned())),
+            "only a live session submits a shown plan: the stop is not a worker failure, so {plan:?} never reports a failed instance"
+        );
+        assert_eq!(
+            shown(&stand_in, &first),
+            Vec::<Value>::new(),
+            "only a live session submits a shown plan: the stopped session's refused submit with plan bytes {plan:?} stores no request"
+        );
+        assert_eq!(
+            shown(&stand_in, &second),
+            Vec::<Value>::new(),
+            "only a live session submits a shown plan: the stopped session's refused submit with plan bytes {plan:?} leaves component-2's request array empty"
+        );
+        assert_eq!(
+            live(&stand_in),
+            Vec::<Value>::new(),
+            "only a live session submits a shown plan: the stopped session's refused submit with plan bytes {plan:?} mints no grant"
+        );
+        assert_eq!(
+            state(&stand_in, &first),
+            json!({
+                "id": "component-1",
+                "status": "stopped",
+                "cause": "stopped: stop the shown session",
+            }),
+            "only a live session submits a shown plan: the stopped session's refused submit with plan bytes {plan:?} leaves component-1 stopped with the stop cause"
+        );
+        assert_eq!(
+            state(&stand_in, &second),
+            json!({ "id": "component-2", "status": "running", "cause": "" }),
+            "only a live session submits a shown plan: the stopped session's refused submit with plan bytes {plan:?} leaves component-2 running with no cause"
+        );
+    }
+
+    // The other running session's submit is the one stored request.
+    assert_eq!(
+        request(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &second,
+            },
+            PLAN_A
+        ),
+        Ok("request-1".to_owned()),
+        "only a live session submits a shown plan: the live session's own submit stores the stand-in's first request"
+    );
+
+    let shown_hash = plan_sha256(PLAN_A);
+    assert_eq!(
+        shown_hash.len(),
+        64,
+        "only a live session submits a shown plan: the shown hash is 64 lowercase hex characters"
+    );
+
+    let pending = json!({
+        "request_id": "request-1",
+        "session_id": "component-2",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "pending",
+        "decision_reason": "",
+        "settled_by": null,
+        "plan": shown_hash,
+    });
+    assert_eq!(
+        record(&stand_in, &second, "request-1"),
+        pending,
+        "only a live session submits a shown plan: the live session's submit stores one pending request with the shown hash and no decision"
+    );
+    assert_eq!(
+        shown(&stand_in, &first),
+        Vec::<Value>::new(),
+        "only a live session submits a shown plan: the live session's submit stores no request for component-1"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "only a live session submits a shown plan: the pending request mints no grant"
+    );
+
+    // The shell grants the request the live session submitted.
+    assert_eq!(
+        approve(&mut stand_in, Caller::Shell, "request-1", "once", &shown_hash),
+        Ok(json!({ "success": true })),
+        "only a live session submits a shown plan: the owner's approval of request-1 with the shown hash is accepted"
+    );
+
+    let granted = json!({
+        "request_id": "request-1",
+        "session_id": "component-2",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "granted",
+        "decision_reason": "owner approved",
+        "settled_by": "shell",
+        "plan": shown_hash,
+    });
+    assert_eq!(
+        record(&stand_in, &second, "request-1"),
+        granted,
+        "only a live session submits a shown plan: the shell's approval settles request-1 as granted under the shell with the shown hash"
+    );
+
+    let live_one = json!({
+        "request_id": "request-1",
+        "session_id": "component-2",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "duration": "once",
+        "granted_at": 0,
+    });
+    assert_eq!(
+        live(&stand_in),
+        vec![live_one.clone()],
+        "only a live session submits a shown plan: the shell's approval stores one once grant for request-1"
+    );
+
+    // That live session's own use runs once and spends the grant.
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &second,
+            },
+            "request-1",
+            PLAN_A
+        ),
+        Ok(json!({ "valid": true })),
+        "only a live session submits a shown plan: the live session's own use of request-1 runs"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "only a live session submits a shown plan: the spent once grant leaves the live list"
+    );
+
+    // The stopped session's submit after that spend is still the not-live
+    // refusal, so the instance lookup runs before any request-state check.
+    let after_spend = request(&mut stand_in, Caller::Client { session_id: &first }, PLAN_A);
+    assert_eq!(
+        after_spend,
+        Err((400, "instance is not live: stopped".to_owned())),
+        "only a live session submits a shown plan: the stopped session's submit after the spend is still refused as not live"
+    );
+    assert_ne!(
+        after_spend,
+        Err((400, "request is not pending: request-1".to_owned())),
+        "only a live session submits a shown plan: the instance lookup runs before any request-state check, so the spent request never reports not pending"
+    );
+    assert_ne!(
+        after_spend,
+        Err((400, "unknown request: request-1".to_owned())),
+        "only a live session submits a shown plan: the submit mints a new request id, so request-1 never reports unknown"
+    );
+    assert_eq!(
+        shown(&stand_in, &first),
+        Vec::<Value>::new(),
+        "only a live session submits a shown plan: the stopped session's refused submit after the spend stores no request"
+    );
+    assert_eq!(
+        record(&stand_in, &second, "request-1"),
+        granted,
+        "only a live session submits a shown plan: the refused submit after the spend leaves request-1 granted with the shown hash"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "only a live session submits a shown plan: the refused submit after the spend leaves the live list empty"
+    );
+}
