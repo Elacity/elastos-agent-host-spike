@@ -1081,10 +1081,12 @@ pub const COMPUTED_BY_THE_LAB: &str = "Kubo v0.40.1 profile, computed by the lab
 pub const CLAIM_SCOPE_HEADING: &str = "## Claim scope\n";
 
 /// The gate README's "Claim scope" states, as written (white space aside):
-/// what must happen before the lab CID may be called anything more.
-pub const KUBO_GATE: &str = "No offline Kubo cross-check has been run (Kubo v0.40.1, the same \
-     profile flags, hash-only import, no network). Until one prints the same value as a \
-     committed pin, the lab CID is not called equal to the Runtime's CID or to Kubo's output.";
+/// what Kubo has checked (task 050), and that the claim words do not change
+/// until Rong or Flint changes them.
+pub const KUBO_GATE: &str = "One offline Kubo v0.40.1 hash-only cross-check with the Runtime's \
+     profile flags was run by hand on this Mac (task 050) and printed every committed pin, and \
+     the claim words stay \"Kubo v0.40.1 profile, computed by the lab\" until Rong or Flint \
+     changes them.";
 
 /// Words that would claim the lab CID equals the Runtime's CID or Kubo's
 /// output, in lowercase. No lane doc and no file under `src/` holds one, in
