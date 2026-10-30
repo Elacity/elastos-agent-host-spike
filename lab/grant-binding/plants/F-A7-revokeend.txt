@@ -1,0 +1,13 @@
+id: F-A7-revokeend
+file: src/ledger.rs
+test: ledger::model_revoked_grant_still_releases
+test: ledger::model_revoked_grant_still_times_out
+--- old
+            if live_instance != held_instance {
+                return Err(HoldBind::Refused(Refuse::Instance));
+            }
+--- new
+            let _live_instance = live_instance;
+            self.resolve(*call, request.handle)
+                .map_err(HoldBind::Refused)?;
+--- end
