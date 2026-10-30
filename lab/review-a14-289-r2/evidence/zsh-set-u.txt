@@ -1,0 +1,15 @@
+zsh version: zsh 5.9 (x86_64-ubuntu-linux-gnu)
+
+--- set -euo pipefail with unset A14_CLONE / A14_REMOTE ---
+url=/tmp/a14-289-head
+dest=/workspace/lab/review-a14-289-r2/scratch/morning-zsh/clone
+branch=cursor/demo-a14-installed-demo-83e1
+zsh dest-line: OK
+
+--- zsh last-line && chain when this-run is missing (set -e) ---
+zsh reached after failed step-5 chain
+
+--- bash same dest-line ---
+url=/tmp/a14-289-head
+dest=/workspace/lab/review-a14-289-r2/scratch/morning-zsh/clone
+bash dest-line: OK

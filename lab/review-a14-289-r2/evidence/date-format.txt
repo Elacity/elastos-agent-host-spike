@@ -1,0 +1,3 @@
+date +%Y%m%d-%H%M%S -> 20261026-221513
+GNU date --version:
+date (GNU coreutils) 9.4

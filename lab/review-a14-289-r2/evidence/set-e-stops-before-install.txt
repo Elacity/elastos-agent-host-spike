@@ -1,0 +1,5 @@
+A failing preflight is exit 1. With set -e the pasted block never reaches install.sh.
+install.sh is the writer of this-run/summary.txt on a machine-not-ready refusal.
+before preflight
+preflight: FAIL
+block stopped with exit 1

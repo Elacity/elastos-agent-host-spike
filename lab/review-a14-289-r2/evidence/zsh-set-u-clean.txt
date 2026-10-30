@@ -1,0 +1,9 @@
+zsh version: zsh 5.9 (x86_64-ubuntu-linux-gnu)
+A14_CLONE set? yes
+A14_REMOTE set? yes
+zsh url=https://github.com/Elacity/elastos-agent-host-spike.git
+zsh dest=/workspace/lab/review-a14-289-r2/scratch/clean/empty-home/a14-run-20261026-221658
+zsh dest-line with unset A14_*: OK
+bash url=https://github.com/Elacity/elastos-agent-host-spike.git
+bash dest=/workspace/lab/review-a14-289-r2/scratch/clean/empty-home/a14-run-20261026-221658
+bash dest-line with unset A14_*: OK
