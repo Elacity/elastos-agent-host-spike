@@ -1,0 +1,9 @@
+id: M-A6-LIVE-PIDS
+file: src/a6.rs
+test: tests::a6_this_process_and_pid1_cannot_pass
+--- old
+    prove_resident_capsule_instance(ev.instance_1_pid, &ev.instance_1_id)?;
+    prove_resident_capsule_instance(ev.instance_2_pid, &ev.instance_2_id)?;
+--- new
+    let _ = (ev.instance_1_id.as_str(), ev.instance_2_id.as_str());
+--- end

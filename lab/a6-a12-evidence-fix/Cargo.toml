@@ -1,0 +1,13 @@
+[package]
+name = "a6-a12-evidence-fix"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+agent-conformance = { path = "../agent-conformance" }
+elastos-runtime = { path = "../../elastos/crates/elastos-runtime" }
+libc = "0.2"
+tokio = { version = "1", features = ["rt"] }

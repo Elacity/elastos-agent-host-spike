@@ -1,0 +1,12 @@
+id: M-A12-HANDLE-EMPTY-OK
+file: src/a12.rs
+test: tests::a12_empty_file_handle_is_not_run
+--- old
+    if bytes.is_empty() {
+        Err("name_to_handle_at empty handle; FileId NOT RUN".into())
+    } else {
+        Ok(bytes)
+    }
+--- new
+    Ok(bytes)
+--- end

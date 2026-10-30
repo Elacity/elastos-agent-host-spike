@@ -1,0 +1,17 @@
+id: M-A12-INODE-REUSE
+file: src/a12.rs
+test: tests::a12_inode_reuse_same_path_is_found
+--- old
+fn keep_created_path(before: &FsSnapshot, path: &Path, id: &FileId) -> bool {
+    match before.ids.get(path) {
+        None => true,
+        Some(old) => old != id,
+    }
+}
+--- new
+fn keep_created_path(before: &FsSnapshot, path: &Path, id: &FileId) -> bool {
+    let new_inode = !before.inodes.contains(&(id.dev, id.ino));
+    let new_path = !before.paths.contains(path);
+    new_inode || new_path
+}
+--- end

@@ -1,0 +1,13 @@
+id: M-A6-PROVE-ALWAYS-OK
+file: src/a6.rs
+test: tests::a6_this_process_and_pid1_cannot_pass
+test: tests::a6_sleep_child_is_not_proven_resident
+--- old
+pub fn prove_resident_capsule_instance(pid: u32, instance_id: &str) -> Result<(), String> {
+    if instance_id.is_empty() {
+--- new
+pub fn prove_resident_capsule_instance(pid: u32, instance_id: &str) -> Result<(), String> {
+    let _ = (pid, instance_id);
+    return Ok(());
+    if instance_id.is_empty() {
+--- end

@@ -1,0 +1,9 @@
+id: M-A12-NO-RECHECK
+file: src/a12.rs
+test: tests::a12_write_isolated_leftover_rechecks_tmp_root
+--- old
+    check_tmp_root(tmp_root)?;
+    let isolation = isolation_root();
+--- new
+    let isolation = isolation_root();
+--- end

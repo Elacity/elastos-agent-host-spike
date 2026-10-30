@@ -1,0 +1,20 @@
+id: M-A12-HASH-MTIME
+file: src/a12.rs
+test: tests::a12_large_file_inplace_rewrite_mtime_restored_is_found
+--- old
+    hash_whole_file_sparse(path, meta, &mut hasher);
+    hasher.finish()
+--- new
+    let size = file_len(meta);
+    if size > 64 * 1024 {
+        size.hash(&mut hasher);
+        if let Ok(modified) = meta.modified() {
+            if let Ok(d) = modified.duration_since(UNIX_EPOCH) {
+                d.as_nanos().hash(&mut hasher);
+            }
+        }
+        return hasher.finish();
+    }
+    hash_whole_file_sparse(path, meta, &mut hasher);
+    hasher.finish()
+--- end
