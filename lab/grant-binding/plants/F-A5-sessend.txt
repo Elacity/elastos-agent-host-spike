@@ -1,0 +1,8 @@
+id: F-A5-sessend
+file: src/lib.rs
+test: model_session_grant_ends_when_the_session_changes
+--- old
+            self.revoke_grant(handle);
+--- new
+            let _handle = handle;
+--- end
