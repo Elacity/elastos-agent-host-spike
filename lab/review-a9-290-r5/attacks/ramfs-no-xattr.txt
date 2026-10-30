@@ -1,0 +1,6 @@
+id: ramfs-no-xattr
+must: CAUGHT
+journey: unshare -Urm, mount ramfs, Store::open/bind/write. ramfs has no
+  user xattr. write_nonce must fail closed (OutsideRoot/HardLink), not skip
+  the stamp and then grant a later read.
+survivor: write and read succeed without a nonce.
