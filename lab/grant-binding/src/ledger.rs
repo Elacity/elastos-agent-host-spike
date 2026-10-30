@@ -19,7 +19,14 @@
 
 use std::collections::HashMap;
 
-use crate::{Call, GuestRequest, Handle, Refuse, Verifier};
+use crate::{Call, EndedGrant, GuestRequest, Handle, HeldGrant, Refuse, Verifier};
+
+/// Copies the binding a hold keeps once its grant ends.
+fn held_binding(grant: &EndedGrant) -> HeldGrant {
+    HeldGrant {
+        record: grant.record.clone(),
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct OpenHold {
@@ -37,7 +44,7 @@ fn handles_match(bound: Handle, presented: Handle) -> bool {
 
 fn held_for_identity(
     open: &HashMap<u64, OpenHold>,
-    grants: &HashMap<Handle, crate::GrantRecord>,
+    grants: &HashMap<Handle, crate::EndedGrant>,
     identity: &str,
 ) -> u64 {
     let mut sum: u64 = 0;
@@ -45,7 +52,7 @@ fn held_for_identity(
         let Some(grant) = grants.get(&open_hold.handle) else {
             continue;
         };
-        if grant.identity != identity {
+        if grant.record.identity != identity {
             continue;
         }
         sum = sum.saturating_add(open_hold.amount);
@@ -65,6 +72,8 @@ pub(crate) struct Ledger {
     verifier_deadline: u64,
     deadline_set: bool,
     open: HashMap<u64, OpenHold>,
+    /// The ended bindings a hold keeps, by handle.
+    pub(crate) ended: HashMap<Handle, HeldGrant>,
 }
 
 impl Ledger {
@@ -80,6 +89,7 @@ impl Ledger {
             verifier_deadline: 0,
             deadline_set: false,
             open: HashMap::new(),
+            ended: HashMap::new(),
         }
     }
 }
@@ -256,6 +266,7 @@ impl Verifier {
             .grants
             .get(&request.handle)
             .expect("resolved grant")
+            .record
             .identity
             .clone();
         let mut ledger = self.ledger.lock().expect("ledger lock");
@@ -333,7 +344,9 @@ impl Verifier {
         reservation: Reservation,
         outcome: SettleOutcome,
     ) -> Result<u64, SettleRefuse> {
-        self.resolve(*call, request.handle)
+        // A hold that opened before its grant ended resolves through the kept
+        // binding; every other refusal stands as `resolve` made it.
+        self.resolve_for_hold(*call, request.handle)
             .map_err(SettleRefuse::Binding)?;
         let measured = match outcome {
             SettleOutcome::Known(measured) => measured,
@@ -353,7 +366,6 @@ impl Verifier {
             }
         };
         let mut ledger = self.ledger.lock().expect("ledger lock");
-        let ledger: &mut Ledger = &mut ledger;
         let (bound, stored) = match ledger.open.get(&reservation.id) {
             Some(open) => (open.handle, open.amount),
             None => return Err(SettleRefuse::NotOutstanding),
@@ -372,6 +384,8 @@ impl Verifier {
         ledger.charged = charged;
         ledger.held -= stored;
         ledger.open.remove(&reservation.id);
+        // The ended binding left with its last hold.
+        Self::clear_gone(&mut ledger, bound);
         Ok(charge)
     }
 
@@ -396,7 +410,9 @@ impl Verifier {
         reservation: Reservation,
         now: u64,
     ) -> Result<TimeoutRecord, TimeoutRefuse> {
-        self.resolve(*call, request.handle)
+        // A hold that opened before its grant ended resolves through the kept
+        // binding; every other refusal stands as `resolve` made it.
+        self.resolve_for_hold(*call, request.handle)
             .map_err(TimeoutRefuse::Binding)?;
         let mut ledger = self.ledger.lock().expect("ledger lock");
         let open = match ledger.open.get(&reservation.id) {
@@ -429,6 +445,39 @@ impl Verifier {
         Ok(TimeoutRecord)
     }
 
+    /// Drops the ended binding once no open hold uses it, so an ended handle
+    /// leaves the ledger with its last hold. While a hold uses it the binding
+    /// stays, because `settle` and `release` still resolve it.
+    fn clear_gone(ledger: &mut Ledger, handle: Handle) {
+        if ledger.open.values().any(|open| open.handle == handle) {
+            return;
+        }
+        ledger.ended.remove(&handle);
+    }
+
+    /// Ends one handle's binding (M1 check A7, condition c). The store keeps
+    /// the record, marked ended, so every later use of that handle is refused
+    /// with `unknown handle`, the same refusal an unbound handle gets. A
+    /// handle that already ended is not an error. A stop or revoke path is its
+    /// only caller and passes the handle the grant route stored.
+    ///
+    /// The record also goes to the ledger, so a hold the handle opened before
+    /// the end still resolves through `settle`, `release` and `timeout_hold`
+    /// and gives back its amount. `held_for_identity` counts it until then,
+    /// and the ledger forgets the record with that last hold. A grant ended
+    /// with no open hold leaves the ledger at once.
+    pub fn end_grant(&mut self, handle: Handle) {
+        if let Some(grant) = self.grants.get_mut(&handle) {
+            grant.ended = true;
+            let mut ledger = self.ledger.lock().expect("ledger lock");
+            ledger
+                .ended
+                .entry(handle)
+                .or_insert_with(|| held_binding(grant));
+            Self::clear_gone(&mut ledger, handle);
+        }
+    }
+
     /// Returns one hold's amount to the ceiling and drops the hold.
     #[allow(unused_variables)]
     fn return_unused_hold(
@@ -451,7 +500,9 @@ impl Verifier {
         request: &GuestRequest,
         reservation: Reservation,
     ) -> Result<(), ReleaseRefuse> {
-        self.resolve(*call, request.handle)
+        // A hold that opened before its grant ended resolves through the kept
+        // binding; every other refusal stands as `resolve` made it.
+        self.resolve_for_hold(*call, request.handle)
             .map_err(ReleaseRefuse::Binding)?;
         let mut ledger = self.ledger.lock().expect("ledger lock");
         let (bound, amount, uncertain) = match ledger.open.get(&reservation.id) {
@@ -465,6 +516,8 @@ impl Verifier {
             return Err(ReleaseRefuse::Uncertain);
         }
         Self::return_unused_hold(&mut ledger, reservation, amount, request);
+        // The ended binding left with its last hold.
+        Self::clear_gone(&mut ledger, bound);
         Ok(())
     }
 }
@@ -508,6 +561,135 @@ fn books(verifier: &Verifier) -> Books {
             .map(|(id, open)| (*id, open.timed_out))
             .collect(),
     }
+}
+
+#[test]
+fn model_end_grant_refuses_the_ended_handle() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .use_grant(call, &guest(handle))
+        .expect("bound handle");
+    verifier.end_grant(handle);
+    let refusal = verifier
+        .use_grant(call, &guest(handle))
+        .expect_err("the ended handle no longer resolves");
+    assert_eq!(refusal, Refuse::UnknownHandle);
+    assert_eq!(refusal.to_string(), "unknown handle");
+    assert_eq!(books(&verifier).held, 0, "ending a binding holds nothing");
+}
+
+/// Sets a ceiling of 5 for the bound identity and opens one hold of 5.
+#[cfg(test)]
+fn reserve_five(verifier: &mut Verifier, call: &Call, handle: Handle) -> Reservation {
+    verifier
+        .admit_ask(call, &guest(handle), crate::ask::BudgetAsk { amount: 5 }, 5)
+        .expect("ask");
+    verifier.reserve(call, &guest(handle), 5).expect("reserve")
+}
+
+#[test]
+fn model_ended_grant_refuses_a_new_reserve() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 5 },
+            5,
+        )
+        .expect("ask");
+    verifier.end_grant(handle);
+    let refusal = verifier
+        .reserve(&call, &guest(handle), 1)
+        .expect_err("the ended handle opens no hold");
+    assert_eq!(refusal, ReserveRefuse::Binding(Refuse::UnknownHandle));
+    assert_eq!(refusal.to_string(), "unknown handle");
+    assert!(
+        verifier
+            .admit_ask(
+                &call,
+                &guest(handle),
+                crate::ask::BudgetAsk { amount: 5 },
+                5
+            )
+            .is_err(),
+        "the ended handle admits no ask"
+    );
+    assert_eq!(books(&verifier).held, 0, "a refused reserve holds nothing");
+}
+
+#[test]
+fn model_ended_grant_release_clears_the_hold_it_opened() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    let reservation = reserve_five(&mut verifier, &call, handle);
+    assert_eq!(books(&verifier).held, 5);
+    verifier.end_grant(handle);
+    assert_eq!(
+        verifier.release(&call, &guest(handle), reservation),
+        Ok(()),
+        "a hold opened before the end still releases"
+    );
+    assert_eq!(
+        books(&verifier).held,
+        0,
+        "the released hold gives its amount back"
+    );
+    assert!(books(&verifier).open.is_empty(), "no hold stays open");
+}
+
+#[test]
+fn model_ended_grant_settle_clears_the_hold_it_opened() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    let reservation = reserve_five(&mut verifier, &call, handle);
+    verifier.end_grant(handle);
+    assert_eq!(
+        verifier.settle(&call, &guest(handle), reservation, SettleOutcome::Known(0)),
+        Ok(0),
+        "a hold opened before the end still settles"
+    );
+    assert_eq!(
+        books(&verifier).held,
+        0,
+        "the settled hold gives its amount back"
+    );
+    assert!(books(&verifier).open.is_empty(), "no hold stays open");
+}
+
+#[test]
+fn model_ended_grant_timeout_hold_reaches_the_hold_it_opened() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    let reservation = reserve_five(&mut verifier, &call, handle);
+    verifier.set_verifier_deadline(10);
+    assert_eq!(
+        verifier.settle(&call, &guest(handle), reservation, SettleOutcome::Unknown),
+        Err(SettleRefuse::UnknownOutcome)
+    );
+    verifier.end_grant(handle);
+    assert_eq!(
+        verifier.timeout_hold(&call, &guest(handle), reservation, 10),
+        Ok(TimeoutRecord),
+        "a hold opened before the end still times out at its deadline"
+    );
+    assert_eq!(
+        books(&verifier).timed_out.get(&reservation.id),
+        Some(&true),
+        "the kept uncertain hold records its timeout"
+    );
+    assert_eq!(
+        books(&verifier).held,
+        5,
+        "the uncertain hold stays counted while it is open"
+    );
 }
 
 #[test]
@@ -4996,4 +5178,42 @@ fn model_reported_usage_does_not_pick_the_reserve_ceiling() {
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
     assert_eq!(after.held, 0);
+}
+
+#[test]
+fn model_ended_grant_hold_still_counts_against_the_identity_ceiling() {
+    let mut verifier = Verifier::new();
+    let (instance, a) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    let _hold = reserve_five(&mut verifier, &call, a);
+    verifier.end_grant(a);
+    let b = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("second bind");
+    verifier
+        .admit_ask(&call, &guest(b), crate::ask::BudgetAsk { amount: 5 }, 5)
+        .expect("ask on b");
+    assert!(
+        verifier.reserve(&call, &guest(b), 1).is_err(),
+        "the ended grant's open hold of 5 still fills the identity ceiling of 5"
+    );
+}
+
+#[test]
+fn model_end_grant_with_no_hold_leaves_no_kept_binding() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.end_grant(handle);
+    let ended_empty = verifier
+        .ledger
+        .lock()
+        .expect("ledger lock")
+        .ended
+        .is_empty();
+    assert!(ended_empty, "a grant ended with no open hold keeps nothing");
+    let call = verifier.open_call(instance);
+    let refusal = verifier
+        .reserve(&call, &guest(handle), 1)
+        .expect_err("the ended handle opens no hold");
+    assert_eq!(refusal, ReserveRefuse::Binding(Refuse::UnknownHandle));
 }

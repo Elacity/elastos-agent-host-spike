@@ -9,7 +9,7 @@ test: ask::model_forged_session_does_not_retarget_the_ceiling
             request
                 .forged_session
                 .as_deref()
-                .filter(|forged| self.grants.values().any(|grant| grant.identity == *forged))
+                .filter(|forged| self.grants.values().any(|grant| grant.record.identity == *forged))
                 .unwrap_or(&identity),
             ),
             ask.amount,

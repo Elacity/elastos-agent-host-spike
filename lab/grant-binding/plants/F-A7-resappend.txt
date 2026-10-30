@@ -6,6 +6,7 @@ test: ledger::model_forged_append_does_not_pick_the_reserve_ceiling
             .grants
             .get(&request.handle)
             .expect("resolved grant")
+            .record
             .identity
             .clone();
 --- new
@@ -13,13 +14,14 @@ test: ledger::model_forged_append_does_not_pick_the_reserve_ceiling
             .grants
             .get(&request.handle)
             .expect("resolved grant")
+            .record
             .identity
             .clone();
         let other = if request.forged_append {
             self.grants
                 .values()
-                .find(|grant| grant.identity != stored)
-                .map(|grant| grant.identity.clone())
+                .find(|grant| grant.record.identity != stored)
+                .map(|grant| grant.record.identity.clone())
         } else {
             None
         };
