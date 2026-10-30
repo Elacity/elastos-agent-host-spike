@@ -1,0 +1,30 @@
+[package]
+name = "cache-tamper"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dev-dependencies]
+elastos-server = { path = "../../../elastos/crates/elastos-server" }
+cid = "0.11"
+ed25519-dalek = "2.1"
+hex = "0.4"
+libc = "0.2"
+serde_json = "1.0"
+sha2 = "0.10"
+tempfile = "3.10"
+tokio = { version = "1.0", features = ["rt"] }
+
+# The profiles in elastos/Cargo.toml.
+[profile.dev]
+opt-level = 0
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 1
+
+[profile.test]
+opt-level = 0
+debug = "line-tables-only"
