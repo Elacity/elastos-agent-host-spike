@@ -1577,3 +1577,113 @@ fmt check and the twenty-five test commands in the task) took 1.91 s real. This
 lane has no `falsifiers.json`; no id is added.
 
 032: `stop_shown_session` takes the reason it is given and sends it on the one stop call; `shown_stop_reason_is_not_the_grant` proves the stated reason is the capsule cause and the pending step's decision reason, that `granted` and `""` are text and mint nothing, and that a use of either stopped session's once grant is revoked; two hand-run plants caught and restored.
+
+## 033
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md), Harness conformance:
+
+> accept Runtime denial, expiry, revocation, and unknown settlement as
+> authoritative outcomes.
+
+This task proves the reap the Runtime performs when the worker dies with no stop
+request. `shown_worker_exited(stand_in, session_id)` is the one reap call: it
+passes the session id to the stand-in's own `worker_exited` seam and returns
+that result. It takes no caller and no reason, matches no id, contains no
+`worker exited`, `stopped:` or `Caller`, and adds no second settle step. The
+cause is the stand-in's fixed cause; this crate stores no copy of `end_instance`,
+`settle_pending` or `revoke_live`, and it does not call `watch_ended`. No
+existing helper and no existing assertion changed.
+
+`shown_worker_exit_is_not_the_grant` drives two sessions through `running_agent`.
+A reap before any launch is `unknown instance: component-1` and stores no
+capsule, request or grant. Two sessions then run with no cause; a reap of
+`component-absent` is `unknown instance: component-absent` and leaves both
+running. The first session submits `request-1` and `request-2`; the owner grants
+`request-1` once. The other session submits `request-3` (write) and `request-4`;
+the owner grants `request-3` once. The reap of `component-1` stores the capsule
+status `failed` with cause `worker exited`, denies `request-2` under `runtime`
+with that cause, and revokes `request-1`'s once grant. `execute` then returns
+`grant is not live: Revoked`. A second reap of that failed session is
+`instance is not live: failed` and leaves the first cause, the two rows and the
+other live grant. A later shell stop with reason `granted` is the same refusal
+and stores no `stopped: granted`. A later submit on that session is
+`instance is not live: failed` and stores nothing. The reap of `component-2`
+stores the same fixed cause, denies `request-4` under `runtime` with it, and
+revokes `request-3`'s once grant; `execute` returns `grant is not live:
+Revoked` and the shell live list is empty.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_worker_exit_is_not_the_grant -- --exact
+```
+
+### F-worker-exit-is-a-stop
+
+Old bytes, 38:
+
+```rust
+    stand_in.worker_exited(session_id)
+```
+
+New bytes, 170:
+
+```rust
+    stand_in
+        .delete_capsule(
+            Caller::Shell,
+            session_id,
+            &json!({ "reason": "worker exited" }),
+        )
+        .map(|_| ())
+```
+
+The planted crate compiled. `shown_worker_exit_is_not_the_grant` failed at
+`src/lib.rs:10824:5` (planted tree) on the capsule state after the first reap:
+`assertion left == right failed: a shown worker exit is not the grant: the reap
+stores the fixed cause as the capsule cause`; left held status `stopped` with
+cause `stopped: worker exited`, right expected status `failed` with cause
+`worker exited`. The reap was a stop route, not the fixed cause. Restored, the
+test passes.
+
+### F-worker-exit-mints
+
+Old bytes, 38:
+
+```rust
+    stand_in.worker_exited(session_id)
+```
+
+New bytes, 377:
+
+```rust
+    let reaped = stand_in.worker_exited(session_id);
+    if reaped.is_ok() {
+        stand_in.seed_grant(
+            "request-plant",
+            "component-2",
+            "localhost://Public/plan-approval/a.txt",
+            "read",
+            "once",
+            0,
+            agent_conformance::standin_runtime::Life::Live,
+            false,
+        );
+    }
+    reaped
+```
+
+The planted crate compiled. `shown_worker_exit_is_not_the_grant` failed at
+`src/lib.rs:10973:5` (planted tree) on the shell live list after the first reap:
+`assertion left == right failed: a shown worker exit is not the grant: the reap
+revokes only the reaped session's live grant`; left held the seeded
+`request-plant` grant, right expected only `request-3`. The fixed cause minted a
+grant. Restored, the test passes.
+
+Neither plant calls `seed_request`; the second plant calls `seed_grant`. After
+both restores, `git diff -- lab/plan-approval/src/lib.rs` holds no
+`request-plant` and no plant `delete_capsule` inside `shown_worker_exited`. The
+restored proof command set (the fmt check and the twenty-six test commands in
+the task) took 4.46 s real. This lane has no `falsifiers.json`; no id is added.
+
+033: `shown_worker_exited(stand_in, session_id)` is the one reap call and passes only the session id to the stand-in's own seam; `shown_worker_exit_is_not_the_grant` proves the fixed cause `worker exited` is the capsule cause and the pending step's decision reason with `settled_by` `runtime`, that the granted step and the other session's live grant stay, that a second reap and a later shell stop and submit are `instance is not live: failed`, and that a use of either failed session's once grant is revoked; two hand-run plants caught and restored.

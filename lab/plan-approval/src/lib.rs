@@ -178,6 +178,26 @@ pub fn stop_shown_session(
     stand_in.delete_capsule(caller, session_id, &json!({ "reason": reason }))
 }
 
+/// One worker reap through the stand-in's own reap seam.
+///
+/// `session_id` is the instance id, a method argument. This helper passes it to
+/// that seam unchanged and returns its result, so the stand-in's own lookup and
+/// its own live check decide the answer. An unknown id is status 400 with the
+/// reason that names it and stores nothing. An instance that is not `starting`
+/// or `running` is status 400 with the not-live reason, and its stored cause
+/// stays. A live instance becomes `failed` with the stand-in's fixed cause; that
+/// session's pending requests are denied with that same cause and `runtime` as
+/// settler, and its live grants are revoked. A granted record stays `granted`
+/// and another session stays as it was. Ok is `()`.
+///
+/// The helper takes no caller and no reason, so the cause is not text this
+/// crate states. It is not the stop route: this crate stores no copy of the
+/// stand-in's end path, its settle step or its revoke step, and it does not
+/// watch the worker.
+pub fn shown_worker_exited(stand_in: &mut StandIn, session_id: &str) -> Result<(), (u16, String)> {
+    stand_in.worker_exited(session_id)
+}
+
 /// One status read of a shown request through
 /// `GET /api/capability/request/:id`.
 ///
@@ -10535,5 +10555,665 @@ fn shown_stop_reason_is_not_the_grant() {
         shell_live(&stand_in),
         empty_shell,
         "a shown stop reason is not the grant: the refused use leaves the empty live list"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn shown_worker_exit_is_not_the_grant() {
+    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use fixtures::{PLAN_A, PLAN_B};
+    use journeys::{request, running_agent};
+    use serde_json::{json, Value};
+
+    fn shell_requests(stand_in: &StandIn, session: Option<&str>) -> Value {
+        read_shown_requests(stand_in, Caller::Shell, session)
+            .expect("the shell reads a session's request list")
+    }
+
+    fn shell_live(stand_in: &StandIn) -> Value {
+        read_shown_grants(stand_in, Caller::Shell, None).expect("the shell reads the live list")
+    }
+
+    fn shell_capsules(stand_in: &StandIn) -> Vec<Value> {
+        stand_in
+            .get_capsules(Caller::Shell)
+            .expect("shell capsules")["capsules"]
+            .as_array()
+            .cloned()
+            .expect("the shell capsule list holds a capsules array")
+    }
+
+    fn capsule_state(stand_in: &StandIn, id: &str) -> Value {
+        let listed = shell_capsules(stand_in)
+            .into_iter()
+            .find(|entry| entry["id"] == id)
+            .expect("the shell capsule list holds that id");
+        json!({ "id": listed["id"], "status": listed["status"], "cause": listed["cause"] })
+    }
+
+    let plan_a = plan_sha256(PLAN_A);
+    let plan_b = plan_sha256(PLAN_B);
+    let resource_a = "localhost://Public/plan-approval/a.txt";
+    let empty_requests: Value = json!({ "requests": [] });
+    let empty_shell: Value = json!({ "scope": "all_sessions_live", "capabilities": [] });
+
+    let mut stand_in = StandIn::new();
+
+    // No instance is live yet: the reap is refused by the id and stores nothing.
+    let absent_before = shown_worker_exited(&mut stand_in, "component-1");
+    assert_eq!(
+        absent_before,
+        Err((400, "unknown instance: component-1".to_owned())),
+        "a shown worker exit is not the grant: a reap before any launch is refused by that id"
+    );
+    assert_ne!(
+        absent_before,
+        Err((400, "instance is not live: failed".to_owned())),
+        "a shown worker exit is not the grant: the unknown-id refusal is not the not-live refusal"
+    );
+    assert_eq!(
+        shell_capsules(&stand_in),
+        Vec::<Value>::new(),
+        "a shown worker exit is not the grant: a refused early reap stores no capsule"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        empty_requests,
+        "a shown worker exit is not the grant: a refused early reap stores no request"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown worker exit is not the grant: a refused early reap mints no grant"
+    );
+
+    // Two sessions run, and both keep no cause.
+    let first = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    let second = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    assert_eq!(
+        first, "component-1",
+        "a shown worker exit is not the grant: the fresh stand-in names the first session component-1"
+    );
+    assert_eq!(
+        second, "component-2",
+        "a shown worker exit is not the grant: the second running session is component-2"
+    );
+    for id in [&first, &second] {
+        assert_eq!(
+            capsule_state(&stand_in, id),
+            json!({ "id": id, "status": "running", "cause": "" }),
+            "a shown worker exit is not the grant: each launched session runs with no cause"
+        );
+    }
+
+    // A reap of an absent id is refused by that id and leaves both sessions.
+    let absent_live = shown_worker_exited(&mut stand_in, "component-absent");
+    assert_eq!(
+        absent_live,
+        Err((400, "unknown instance: component-absent".to_owned())),
+        "a shown worker exit is not the grant: a reap of an absent id is refused by that id"
+    );
+    assert_ne!(
+        absent_live,
+        Err((400, "instance is not live: failed".to_owned())),
+        "a shown worker exit is not the grant: the absent-id refusal is not the not-live refusal"
+    );
+    for id in [&first, &second] {
+        assert_eq!(
+            capsule_state(&stand_in, id),
+            json!({ "id": id, "status": "running", "cause": "" }),
+            "a shown worker exit is not the grant: the absent-id reap leaves each session running"
+        );
+    }
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown worker exit is not the grant: the absent-id reap mints no grant"
+    );
+
+    // The first session submits two steps and the owner grants the first once.
+    let first_step = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        PLAN_A,
+        resource_a,
+        "read",
+        "show this step",
+    )
+    .expect("the agent's request route stores one pending request");
+    assert_eq!(
+        first_step, "request-1",
+        "a shown worker exit is not the grant: the first stored request is request-1"
+    );
+    assert_eq!(
+        plan_a.len(),
+        64,
+        "a shown worker exit is not the grant: the hash of plan A has length 64"
+    );
+    assert_eq!(
+        approve(
+            &mut stand_in,
+            Caller::Shell,
+            "request-1",
+            "once",
+            &plan_a,
+            "show this grant"
+        ),
+        Ok(json!({ "success": true })),
+        "a shown worker exit is not the grant: the shell approval of the first step succeeds"
+    );
+    let second_step = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        PLAN_B,
+        resource_a,
+        "read",
+        "approved",
+    )
+    .expect("the agent's request route stores the second pending request");
+    assert_eq!(
+        second_step, "request-2",
+        "a shown worker exit is not the grant: the second stored request is request-2"
+    );
+    assert_eq!(
+        plan_b.len(),
+        64,
+        "a shown worker exit is not the grant: the hash of plan B has length 64"
+    );
+
+    // The other session submits a write and a read; the owner grants the write once.
+    let third_step = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-2",
+        },
+        PLAN_A,
+        resource_a,
+        "write",
+        "",
+    )
+    .expect("the agent's request route stores the empty-reason request");
+    assert_eq!(
+        third_step, "request-3",
+        "a shown worker exit is not the grant: the third stored request is request-3"
+    );
+    assert_eq!(
+        approve(
+            &mut stand_in,
+            Caller::Shell,
+            "request-3",
+            "once",
+            &plan_a,
+            "keep the other"
+        ),
+        Ok(json!({ "success": true })),
+        "a shown worker exit is not the grant: the shell approval of the other session's write succeeds"
+    );
+    let fourth_step = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-2",
+        },
+        PLAN_B,
+        resource_a,
+        "read",
+        "show this step",
+    )
+    .expect("the agent's request route stores the fourth pending request");
+    assert_eq!(
+        fourth_step, "request-4",
+        "a shown worker exit is not the grant: the fourth stored request is request-4"
+    );
+
+    let shell_entry_a = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": resource_a,
+        "action": "read",
+        "duration": "once",
+        "granted_at": 0,
+    });
+    let shell_entry_c = json!({
+        "request_id": "request-3",
+        "session_id": "component-2",
+        "resource": resource_a,
+        "action": "write",
+        "duration": "once",
+        "granted_at": 0,
+    });
+    let two_shell_grants = json!({
+        "scope": "all_sessions_live",
+        "capabilities": [shell_entry_a.clone(), shell_entry_c.clone()],
+    });
+    let two_live = shell_live(&stand_in);
+    assert_eq!(
+        two_live, two_shell_grants,
+        "a shown worker exit is not the grant: the two granted steps are the live list"
+    );
+    for index in 0..2 {
+        assert!(
+            two_live["capabilities"][index].get("reason").is_none(),
+            "a shown worker exit is not the grant: the live entry has no reason key"
+        );
+        assert!(
+            two_live["capabilities"][index].get("rationale").is_none(),
+            "a shown worker exit is not the grant: the live entry has no rationale key"
+        );
+    }
+
+    // The Runtime reaps the first session with its own fixed cause.
+    assert_eq!(
+        shown_worker_exited(&mut stand_in, "component-1"),
+        Ok(()),
+        "a shown worker exit is not the grant: the reap reports its settlement"
+    );
+    let failed_a = capsule_state(&stand_in, "component-1");
+    assert_eq!(
+        failed_a,
+        json!({ "id": "component-1", "status": "failed", "cause": "worker exited" }),
+        "a shown worker exit is not the grant: the reap stores the fixed cause as the capsule cause"
+    );
+    assert_ne!(
+        failed_a,
+        json!({ "id": "component-1", "status": "failed", "cause": "stopped: worker exited" }),
+        "a shown worker exit is not the grant: the fixed cause is not a stop cause"
+    );
+    assert_ne!(
+        failed_a,
+        json!({ "id": "component-1", "status": "failed", "cause": "granted" }),
+        "a shown worker exit is not the grant: the fixed cause is not a grant word"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-2"),
+        json!({ "id": "component-2", "status": "running", "cause": "" }),
+        "a shown worker exit is not the grant: the other session stays running with no cause"
+    );
+
+    let granted_a = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": resource_a,
+        "action": "read",
+        "reason": "show this step",
+        "status": "granted",
+        "decision_reason": "show this grant",
+        "settled_by": "shell",
+        "plan": plan_a,
+    });
+    let denied_b = json!({
+        "request_id": "request-2",
+        "session_id": "component-1",
+        "resource": resource_a,
+        "action": "read",
+        "reason": "approved",
+        "status": "denied",
+        "decision_reason": "worker exited",
+        "settled_by": "runtime",
+        "plan": plan_b,
+    });
+    let settled_a = json!({ "requests": [granted_a.clone(), denied_b.clone()] });
+    let rows_after_reap = shell_requests(&stand_in, Some("component-1"));
+    assert_eq!(
+        rows_after_reap, settled_a,
+        "a shown worker exit is not the grant: the reap denies the pending step and keeps the granted step"
+    );
+    assert_eq!(
+        rows_after_reap["requests"][0]["decision_reason"],
+        json!("show this grant"),
+        "a shown worker exit is not the grant: the granted step keeps its approval rationale"
+    );
+    assert_eq!(
+        rows_after_reap["requests"][1]["settled_by"],
+        json!("runtime"),
+        "a shown worker exit is not the grant: the runtime settles the pending step"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "request-2",
+        ),
+        Ok(json!({ "status": "denied", "reason": "worker exited" })),
+        "a shown worker exit is not the grant: the denied status body carries the fixed cause"
+    );
+    assert_ne!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "request-2",
+        ),
+        Ok(json!({ "status": "granted" })),
+        "a shown worker exit is not the grant: the denied pending step is not a grant"
+    );
+    assert_ne!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "request-2",
+        ),
+        Ok(json!({ "status": "denied", "reason": "approved" })),
+        "a shown worker exit is not the grant: the status reason is the fixed cause, not the request reason"
+    );
+    let granted_read = read_shown_request(
+        &stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        "request-1",
+    )
+    .expect("the owning session reads its granted step");
+    assert_eq!(
+        granted_read,
+        json!({ "status": "granted" }),
+        "a shown worker exit is not the grant: the granted status body is the status word alone"
+    );
+    assert!(
+        granted_read.get("reason").is_none(),
+        "a shown worker exit is not the grant: the granted status body has no reason key"
+    );
+
+    let granted_c = json!({
+        "request_id": "request-3",
+        "session_id": "component-2",
+        "resource": resource_a,
+        "action": "write",
+        "reason": "",
+        "status": "granted",
+        "decision_reason": "keep the other",
+        "settled_by": "shell",
+        "plan": plan_a,
+    });
+    let pending_d = json!({
+        "request_id": "request-4",
+        "session_id": "component-2",
+        "resource": resource_a,
+        "action": "read",
+        "reason": "show this step",
+        "status": "pending",
+        "decision_reason": "",
+        "settled_by": null,
+        "plan": plan_b,
+    });
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-2")),
+        json!({ "requests": [granted_c.clone(), pending_d.clone()] }),
+        "a shown worker exit is not the grant: the other session's granted and pending steps stay"
+    );
+
+    let one_shell_grant = json!({
+        "scope": "all_sessions_live",
+        "capabilities": [shell_entry_c.clone()],
+    });
+    assert_eq!(
+        shell_live(&stand_in),
+        one_shell_grant,
+        "a shown worker exit is not the grant: the reap revokes only the reaped session's live grant"
+    );
+    assert_eq!(
+        read_shown_grants(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-1",
+            },
+            None,
+        ),
+        Ok(json!({ "capabilities": [] })),
+        "a shown worker exit is not the grant: the reaped session's live list is empty"
+    );
+
+    let revoked_a = execute(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        "request-1",
+        PLAN_A,
+    );
+    assert_eq!(
+        revoked_a,
+        Err((400, "grant is not live: Revoked".to_owned())),
+        "a shown worker exit is not the grant: the reaped session's once grant is revoked"
+    );
+    assert_ne!(
+        revoked_a,
+        Err((400, "grant is not live: Exhausted".to_owned())),
+        "a shown worker exit is not the grant: the refused use is not an exhausted grant"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        settled_a,
+        "a shown worker exit is not the grant: the refused use leaves the two rows"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1"))["requests"][0]["decision_reason"],
+        json!("show this grant"),
+        "a shown worker exit is not the grant: the refused use keeps the approval rationale"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        one_shell_grant,
+        "a shown worker exit is not the grant: the refused use leaves the other session's live grant"
+    );
+
+    // A second reap of the failed session is the not-live refusal, not a second settlement.
+    assert_eq!(
+        shown_worker_exited(&mut stand_in, "component-1"),
+        Err((400, "instance is not live: failed".to_owned())),
+        "a shown worker exit is not the grant: a second reap of the failed session is refused"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-1"),
+        json!({ "id": "component-1", "status": "failed", "cause": "worker exited" }),
+        "a shown worker exit is not the grant: the refused second reap keeps the first cause"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1"))["requests"][0],
+        granted_a,
+        "a shown worker exit is not the grant: the refused second reap keeps the granted step"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1"))["requests"][1],
+        denied_b,
+        "a shown worker exit is not the grant: the refused second reap keeps the denied step"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1"))["requests"][1]["decision_reason"],
+        json!("worker exited"),
+        "a shown worker exit is not the grant: the refused second reap keeps the fixed cause"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-2"))["requests"][1],
+        pending_d,
+        "a shown worker exit is not the grant: the other session's pending step keeps its empty decision reason"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-2"))["requests"][1]["decision_reason"],
+        json!(""),
+        "a shown worker exit is not the grant: the refused second reap leaves the other pending step empty"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        one_shell_grant,
+        "a shown worker exit is not the grant: the refused second reap leaves the live grant"
+    );
+
+    // A later stop with a grant word is that same refusal and stores nothing.
+    assert_eq!(
+        stop_shown_session(&mut stand_in, Caller::Shell, "component-1", "granted"),
+        Err((400, "instance is not live: failed".to_owned())),
+        "a shown worker exit is not the grant: a later shell stop of the failed session is refused"
+    );
+    let stopped_a = capsule_state(&stand_in, "component-1");
+    assert_eq!(
+        stopped_a,
+        json!({ "id": "component-1", "status": "failed", "cause": "worker exited" }),
+        "a shown worker exit is not the grant: the refused stop keeps the fixed cause"
+    );
+    assert_ne!(
+        stopped_a,
+        json!({ "id": "component-1", "status": "failed", "cause": "stopped: granted" }),
+        "a shown worker exit is not the grant: the refused stop does not store a stop cause"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        one_shell_grant,
+        "a shown worker exit is not the grant: the refused stop leaves the live grant"
+    );
+
+    // A later submit on the failed session is the not-live refusal and stores nothing.
+    let late_submit = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        PLAN_A,
+        resource_a,
+        "read",
+        "granted",
+    );
+    assert_eq!(
+        late_submit,
+        Err((400, "instance is not live: failed".to_owned())),
+        "a shown worker exit is not the grant: a later submit on the failed session is refused"
+    );
+    assert_ne!(
+        late_submit,
+        Err((400, "unknown instance: component-1".to_owned())),
+        "a shown worker exit is not the grant: the later submit is the not-live refusal, not the unknown-id refusal"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        settled_a,
+        "a shown worker exit is not the grant: the refused submit leaves the two rows"
+    );
+
+    // The Runtime reaps the other session too.
+    assert_eq!(
+        shown_worker_exited(&mut stand_in, "component-2"),
+        Ok(()),
+        "a shown worker exit is not the grant: the second reap reports its settlement"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-2"),
+        json!({ "id": "component-2", "status": "failed", "cause": "worker exited" }),
+        "a shown worker exit is not the grant: the second reap stores the fixed cause"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-1"),
+        json!({ "id": "component-1", "status": "failed", "cause": "worker exited" }),
+        "a shown worker exit is not the grant: the first session keeps its own fixed cause"
+    );
+
+    let denied_d = json!({
+        "request_id": "request-4",
+        "session_id": "component-2",
+        "resource": resource_a,
+        "action": "read",
+        "reason": "show this step",
+        "status": "denied",
+        "decision_reason": "worker exited",
+        "settled_by": "runtime",
+        "plan": plan_b,
+    });
+    let settled_b = json!({ "requests": [granted_c.clone(), denied_d.clone()] });
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-2")),
+        settled_b,
+        "a shown worker exit is not the grant: the second reap denies the pending step and keeps the granted step"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "request-4",
+        ),
+        Ok(json!({ "status": "denied", "reason": "worker exited" })),
+        "a shown worker exit is not the grant: the second denied status body carries the fixed cause"
+    );
+    assert_ne!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "request-4",
+        ),
+        Ok(json!({ "status": "granted" })),
+        "a shown worker exit is not the grant: the second denied pending step is not a grant"
+    );
+    assert_ne!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "request-4",
+        ),
+        Ok(json!({ "status": "denied", "reason": "show this step" })),
+        "a shown worker exit is not the grant: the second status reason is the fixed cause, not the request reason"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown worker exit is not the grant: the second reap revokes the last live grant"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        settled_a,
+        "a shown worker exit is not the grant: the first session's two rows stay"
+    );
+
+    let revoked_c = execute(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-2",
+        },
+        "request-3",
+        PLAN_A,
+    );
+    assert_eq!(
+        revoked_c,
+        Err((400, "grant is not live: Revoked".to_owned())),
+        "a shown worker exit is not the grant: the second reaped session's once grant is revoked"
+    );
+    assert_ne!(
+        revoked_c,
+        Ok(json!({ "valid": true })),
+        "a shown worker exit is not the grant: the fixed cause mints no use"
+    );
+    assert_ne!(
+        revoked_c,
+        Err((400, "grant is not live: Exhausted".to_owned())),
+        "a shown worker exit is not the grant: the refused use is not an exhausted grant"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-2")),
+        settled_b,
+        "a shown worker exit is not the grant: the refused use leaves the two rows"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-2"))["requests"][0]["decision_reason"],
+        json!("keep the other"),
+        "a shown worker exit is not the grant: the refused use keeps the other rationale"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown worker exit is not the grant: the refused use leaves the empty live list"
     );
 }

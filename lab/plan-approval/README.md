@@ -558,11 +558,43 @@ Every earlier stop still passes `stop the shown session`. `preview`,
 copy the stand-in, and it names no planner. A passing run gives the Runtime no
 A15 credit.
 
+A shown worker exit is the Runtime's own reap, not the grant. The Harness
+conformance section states:
+
+> accept Runtime denial, expiry, revocation, and unknown settlement as
+> authoritative outcomes.
+
+`shown_worker_exited` is the only reap call and passes only the session id to
+the stand-in's own reap seam. It takes no caller and no reason, and the cause is
+the stand-in's fixed cause `worker exited`, not text this crate states. That
+cause is stored as the capsule cause `worker exited` and as the pending step's
+`decision_reason` with `settled_by` `runtime`, while the granted step keeps
+`decision_reason` `show this grant`. The other session's pending step and its
+live grant stay. A second reap is `instance is not live: failed` and leaves the
+first cause. A later shell stop with reason `granted` is that same refusal and
+does not store `stopped: granted`. A later submit on the failed session is
+`instance is not live: failed` and stores nothing. A use of either failed
+session's once grant is `grant is not live: Revoked`.
+
+`shown_worker_exit_is_not_the_grant` drives two sessions through
+`running_agent`, submits four requests through `request`, grants through
+`approve`, reaps through `shown_worker_exited`, attempts a stop through
+`stop_shown_session`, reads every request list and status through
+`read_shown_requests` and `read_shown_request`, reads every live list through
+`read_shown_grants`, reads the capsule list through `get_capsules` and spends
+through `execute`. This crate stores no copy of `end_instance`. `preview`,
+`plan_sha256`, `approve`, `execute`, `deny_shown_plan`, `age_shown_plan`,
+`stop_shown_session`, `read_shown_request`, `read_shown_grants`,
+`read_shown_requests`, `running_agent` and `request` are unchanged by this
+slice. The crate does not copy the stand-in, and it names no planner. A passing
+run gives the Runtime no A15 credit.
+
 ## Layout
 
 - `src/lib.rs`: `Preview`, `preview`, `plan_sha256`, `approve`,
   `age_shown_plan`, `deny_shown_plan`, `stop_shown_session`,
-  `read_shown_request`, `read_shown_grants`, `read_shown_requests`, `execute`,
+  `shown_worker_exited`, `read_shown_request`, `read_shown_grants`,
+  `read_shown_requests`, `execute`,
   `preview_makes_no_effect`, `plan_sha256_hashes_the_exact_bytes`,
   `deny_one_shown_step`, `unanswered_shown_step_expires`,
   `stop_settles_that_sessions_shown_steps`, `shown_allow_once_expires`,
@@ -580,12 +612,14 @@ A15 credit.
   `shown_request_reason_is_not_the_grant`,
   `shown_grant_rationale_is_not_the_grant`,
   `shown_deny_reason_is_not_the_grant`,
-  `shown_stop_reason_is_not_the_grant` and the bound-plan journey.
+  `shown_stop_reason_is_not_the_grant`,
+  `shown_worker_exit_is_not_the_grant` and the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_worker_exit_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_stop_reason_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_deny_reason_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_grant_rationale_is_not_the_grant -- --exact
