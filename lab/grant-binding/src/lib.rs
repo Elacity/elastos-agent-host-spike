@@ -444,9 +444,7 @@ impl Verifier {
             let mut expiry = grant.expiry;
             let mut parent = grant.parent;
             while let Some(handle) = parent {
-                let Some(ancestor) = self.grants.get(&handle) else {
-                    break;
-                };
+                let ancestor = self.grants.get(&handle).ok_or(Refuse::UnknownHandle)?;
                 expiry = ancestor.expiry;
                 parent = ancestor.parent;
             }
@@ -2050,6 +2048,14 @@ fn model_revoke_stops_derived_child_journals() {
         "UsersAI/photo/library/roll"
     );
     verifier.revoke_grant(library);
+    assert!(
+        !verifier.grants.contains_key(&roll),
+        "revoked child journal is removed"
+    );
+    assert!(
+        !verifier.grants.contains_key(&frame),
+        "revoked nested journal is removed"
+    );
     let stopped = verifier
         .use_grant(photo_call, &guest(library))
         .expect_err("revoked library");
@@ -2158,14 +2164,24 @@ fn model_missing_handle_removes_nothing() {
     assert_eq!(gone, Refuse::UnknownHandle);
     assert_eq!(gone.to_string(), "unknown handle");
     verifier.revoke_grant(library);
-    let child_kept = verifier
+    assert!(
+        verifier.grants.contains_key(&roll),
+        "a missing handle leaves the child journal"
+    );
+    assert!(
+        verifier.grants.contains_key(&frame),
+        "a missing handle leaves the nested journal"
+    );
+    let child_refused = verifier
         .use_grant(photo_call, &guest(roll))
-        .expect("a missing handle leaves the child journal");
-    assert_eq!(child_kept.owned_root, "UsersAI/photo/library/roll");
-    let nested_kept = verifier
+        .expect_err("a missing ancestor refuses the child journal");
+    assert_eq!(child_refused, Refuse::UnknownHandle);
+    assert_eq!(child_refused.to_string(), "unknown handle");
+    let nested_refused = verifier
         .use_grant(photo_call, &guest(frame))
-        .expect("a missing handle leaves the nested journal");
-    assert_eq!(nested_kept.owned_root, "UsersAI/photo/library/roll/frame");
+        .expect_err("a missing ancestor refuses the nested journal");
+    assert_eq!(nested_refused, Refuse::UnknownHandle);
+    assert_eq!(nested_refused.to_string(), "unknown handle");
     let notes_kept = verifier
         .use_grant(notes_call, &guest(notes_handle))
         .expect("notes grant stays");
@@ -2366,4 +2382,32 @@ fn model_unset_issuing_expiry_does_not_expire_the_child() {
         .use_grant(call, &guest(frame))
         .expect("unset issuing expiry is not due");
     assert_eq!(decision.owned_root, "UsersAI/photo/library/roll/frame");
+}
+
+#[test]
+fn model_missing_ancestor_is_refused() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_until(photo, "UsersAI/photo/library", rights(), 5)
+        .expect("issuing expiry");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    let frame = verifier
+        .create_child_journal(&call, &guest(roll), "UsersAI/photo/library/roll/frame")
+        .expect("nested journal");
+    verifier.grants.remove(&library);
+    verifier.set_verifier_now(6);
+    let child_missing = verifier
+        .use_grant(call, &guest(roll))
+        .expect_err("a missing ancestor refuses the child journal");
+    assert_eq!(child_missing, Refuse::UnknownHandle);
+    assert_eq!(child_missing.to_string(), "unknown handle");
+    let nested_missing = verifier
+        .use_grant(call, &guest(frame))
+        .expect_err("a missing ancestor refuses the nested journal");
+    assert_eq!(nested_missing, Refuse::UnknownHandle);
+    assert_eq!(nested_missing.to_string(), "unknown handle");
 }
