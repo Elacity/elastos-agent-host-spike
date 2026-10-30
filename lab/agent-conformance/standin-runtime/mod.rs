@@ -1229,6 +1229,94 @@ impl StandIn {
 
     /// Lab test seam, not a route.
     ///
+    /// The one hostcall. A `request_capability` line copies every key of
+    /// `request` except `type` and calls `post_capability_request` for
+    /// `capsule_id`. A `resource_invoke` line calls `authorise` for that
+    /// capsule id with the token and no plan hash, so a bound grant stays
+    /// live. The principal argument does not choose the caller. This method
+    /// mints no grant.
+    pub fn bridge_envelope(
+        &mut self,
+        line: &str,
+        capsule_id: &str,
+        principal: Option<&str>,
+    ) -> Result<String, String> {
+        let _ = principal;
+        let parsed: Value =
+            serde_json::from_str(line).map_err(|err| format!("Invalid JSON: {err}"))?;
+        let ok_line = |id: u64, data: Value| {
+            serde_json::to_string(&json!({
+                "id": id,
+                "response": {
+                    "type": "ok",
+                    "data": data,
+                },
+            }))
+            .expect("the stand-in encodes one bridge object")
+        };
+        let error_line = |id: u64, message: &str| {
+            serde_json::to_string(&json!({
+                "id": id,
+                "response": {
+                    "type": "error",
+                    "code": "denied",
+                    "message": message,
+                },
+            }))
+            .expect("the stand-in encodes one bridge object")
+        };
+        let request = match parsed.get("request") {
+            Some(Value::Object(object)) => object,
+            _ => return Err("Invalid JSON: request must be an object".to_owned()),
+        };
+        let id = match parsed.get("id") {
+            None => 0,
+            Some(id) => id
+                .as_u64()
+                .ok_or_else(|| "bridge id must be a number".to_owned())?,
+        };
+        match request.get("type").and_then(Value::as_str) {
+            Some("request_capability") => {
+                let body = Value::Object(
+                    request
+                        .iter()
+                        .filter(|(key, _)| key.as_str() != "type")
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect(),
+                );
+                match self.post_capability_request(
+                    Caller::Client {
+                        session_id: capsule_id,
+                    },
+                    &body,
+                ) {
+                    Ok(data) => Ok(ok_line(id, data)),
+                    Err((_, message)) => Ok(error_line(id, &message)),
+                }
+            }
+            Some("resource_invoke") => {
+                let token = match request.get("token") {
+                    None => "",
+                    Some(Value::String(text)) => text.as_str(),
+                    Some(_) => return Err("invoke token must be a string".to_owned()),
+                };
+                match self.authorise(
+                    Caller::Client {
+                        session_id: capsule_id,
+                    },
+                    token,
+                    None,
+                ) {
+                    Ok(()) => Ok(ok_line(id, Value::Null)),
+                    Err((_, message)) => Ok(error_line(id, &message)),
+                }
+            }
+            _ => Ok(error_line(id, "unsupported bridge request")),
+        }
+    }
+
+    /// Lab test seam, not a route.
+    ///
     /// Stores one resident guest for the bundle at `bundle`, keyed by that
     /// bundle's lab CID, with the manifest's own name (M1 check B1). The one
     /// walk is `checked_bundle`; the one signature check is
@@ -9751,6 +9839,470 @@ mod tests {
             "reason-sat",
             u64::MAX - 10,
             u64::MAX,
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 stays running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running",
+        );
+    }
+
+    fn bridge_value(text: &str) -> Value {
+        assert!(
+            !text.starts_with(char::is_whitespace) && !text.ends_with(char::is_whitespace),
+            "the stand-in did the work: one bridge object and no trailing text: {text:?}"
+        );
+        let parsed: Value = serde_json::from_str(text).unwrap_or_else(|error| {
+            panic!(
+                "the stand-in did the work: one bridge object and no trailing text: {text:?} {error}"
+            )
+        });
+        assert!(
+            parsed.is_object(),
+            "the stand-in did the work: the bridge answer is one object: {text}"
+        );
+        parsed
+    }
+
+    fn bridge_request_ids(standin: &StandIn) -> BTreeSet<String> {
+        ["component-1", "component-2"]
+            .into_iter()
+            .flat_map(|session| request_entries(standin, session))
+            .map(|entry| {
+                entry["request_id"]
+                    .as_str()
+                    .expect("the stand-in did the work: a request names request_id")
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    fn assert_bridge_ok(parsed: &Value, id: u64, data: Value, note: &str) {
+        assert_eq!(parsed["id"], json!(id), "the stand-in did the work: {note}");
+        assert_eq!(
+            parsed["response"]["type"], "ok",
+            "the stand-in did the work: {note}"
+        );
+        assert_eq!(
+            parsed["response"]["data"], data,
+            "the stand-in did the work: {note}"
+        );
+        assert_keys(
+            &parsed["response"],
+            &["data", "type"],
+            "the stand-in did the work: {note}",
+        );
+        assert_keys(
+            parsed,
+            &["id", "response"],
+            "the stand-in did the work: {note}",
+        );
+    }
+
+    fn assert_bridge_error(parsed: &Value, id: u64, message: &str, note: &str) {
+        assert_eq!(parsed["id"], json!(id), "the stand-in did the work: {note}");
+        assert_eq!(
+            parsed["response"]["type"], "error",
+            "the stand-in did the work: {note}"
+        );
+        assert_eq!(
+            parsed["response"]["code"], "denied",
+            "the stand-in did the work: {note}"
+        );
+        assert_eq!(
+            parsed["response"]["message"], message,
+            "the stand-in did the work: {note}"
+        );
+        assert_keys(
+            &parsed["response"],
+            &["code", "message", "type"],
+            "the stand-in did the work: {note}",
+        );
+        assert_keys(
+            parsed,
+            &["id", "response"],
+            "the stand-in did the work: {note}",
+        );
+    }
+
+    #[test]
+    fn standin_bridge_envelope_records_the_capsule_request() {
+        const PLAN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let shared = Shared::new();
+        let mut standin = StandIn::new();
+        launch_two_running(&shared, &mut standin);
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 is running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 is running",
+        );
+
+        let line = r#"{"id":7,"request":{"type":"request_capability","resource":"localhost://Public/resident-instances/shared.txt","action":"read","reason":"read shared"}}"#;
+        let first = standin
+            .bridge_envelope(line, "component-1", Some("person-a"))
+            .expect("the stand-in did the work: the capsule request is recorded");
+        let parsed = bridge_value(&first);
+        assert_bridge_ok(
+            &parsed,
+            7,
+            json!({"status":"pending","request_id":"request-1"}),
+            "the capability line records request-1",
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![pending_request("request-1", "component-1")],
+            "the stand-in did the work: component-1 holds the capsule request"
+        );
+        assert!(
+            request_entries(&standin, "component-2").is_empty(),
+            "the stand-in did the work: component-2 has no request"
+        );
+
+        let second = standin
+            .bridge_envelope(line, "component-2", None)
+            .expect("the stand-in did the work: the second capsule records its own request");
+        let parsed = bridge_value(&second);
+        assert_eq!(
+            parsed["response"]["data"]["request_id"], "request-2",
+            "the stand-in did the work: component-2 receives request-2"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![pending_request("request-1", "component-1")],
+            "the stand-in did the work: component-1 still has only request-1"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-2"),
+            vec![pending_request("request-2", "component-2")],
+            "the stand-in did the work: the caller session is the capsule id"
+        );
+
+        let scheme = r#"{"id":7,"request":{"type":"request_capability","resource":"https://example","action":"read","reason":"read shared"}}"#;
+        let denied = standin
+            .bridge_envelope(scheme, "component-1", None)
+            .expect("the stand-in did the work: the scheme refusal is an envelope");
+        assert_bridge_error(
+            &bridge_value(&denied),
+            7,
+            "Unsupported resource scheme. Allowed: elastos://, localhost://",
+            "the scheme is refused and request-3 is not stored",
+        );
+        let stored = bridge_request_ids(&standin);
+        assert_eq!(
+            stored,
+            BTreeSet::from(["request-1".to_owned(), "request-2".to_owned()]),
+            "the stand-in did the work: no request-3 is stored"
+        );
+
+        let not_json = standin
+            .bridge_envelope("not json", "component-1", None)
+            .expect_err("the stand-in did the work: a line that is not JSON is refused");
+        assert!(
+            not_json.contains("Invalid JSON"),
+            "the stand-in did the work: the refusal names Invalid JSON: {not_json}"
+        );
+        assert!(
+            !not_json.contains("request must be an object"),
+            "the stand-in did the work: the JSON error is not the request-object error: {not_json}"
+        );
+        for line in [r#"{"id":7}"#, r#"{"id":7,"request":"nope"}"#] {
+            let err = standin
+                .bridge_envelope(line, "component-1", None)
+                .expect_err("the stand-in did the work: a missing request object is refused");
+            assert_eq!(
+                err, "Invalid JSON: request must be an object",
+                "the stand-in did the work: the request must be an object: {line}"
+            );
+        }
+        for line in [
+            r#"{"id":"7","request":{"type":"request_capability","resource":"localhost://Public/resident-instances/shared.txt","action":"read","reason":"read shared"}}"#,
+            r#"{"id":7.5,"request":{"type":"request_capability","resource":"localhost://Public/resident-instances/shared.txt","action":"read","reason":"read shared"}}"#,
+            r#"{"id":-1,"request":{"type":"request_capability","resource":"localhost://Public/resident-instances/shared.txt","action":"read","reason":"read shared"}}"#,
+        ] {
+            let err = standin
+                .bridge_envelope(line, "component-1", None)
+                .expect_err("the stand-in did the work: a nonnumeric id is refused");
+            assert_eq!(
+                err, "bridge id must be a number",
+                "the stand-in did the work: the bridge id must be a number: {line}"
+            );
+        }
+        assert_eq!(
+            bridge_request_ids(&standin),
+            stored,
+            "the stand-in did the work: a bad line stores nothing"
+        );
+        assert!(
+            standin.grants.is_empty(),
+            "the stand-in did the work: a bad line stores no grant"
+        );
+
+        let missing_resource =
+            r#"{"request":{"type":"request_capability","action":"read","reason":"read shared"}}"#;
+        let denied = standin
+            .bridge_envelope(missing_resource, "component-1", None)
+            .expect("the stand-in did the work: a missing resource is an envelope");
+        assert_bridge_error(
+            &bridge_value(&denied),
+            0,
+            "request body needs resource",
+            "an absent id is 0 and the body needs resource",
+        );
+        let not_string =
+            r#"{"id":9,"request":{"type":"request_capability","resource":1,"action":"read"}}"#;
+        let denied = standin
+            .bridge_envelope(not_string, "component-1", None)
+            .expect("the stand-in did the work: a non-string resource is an envelope");
+        assert_bridge_error(
+            &bridge_value(&denied),
+            9,
+            "request resource must be a string",
+            "the resource must be a string",
+        );
+        assert_eq!(
+            bridge_request_ids(&standin),
+            stored,
+            "the stand-in did the work: a refused body stores nothing"
+        );
+
+        let empty_reason = r#"{"request":{"type":"request_capability","resource":"localhost://Public/resident-instances/shared.txt","action":"read"}}"#;
+        let recorded = standin
+            .bridge_envelope(empty_reason, "component-1", None)
+            .expect("the stand-in did the work: a missing reason is still recorded");
+        assert_bridge_ok(
+            &bridge_value(&recorded),
+            0,
+            json!({"status":"pending","request_id":"request-3"}),
+            "the missing reason records request-3",
+        );
+        let mut request_3 = pending_request("request-3", "component-1");
+        request_3["reason"] = json!("");
+        assert_eq!(
+            request_entries(&standin, "component-1")
+                .into_iter()
+                .find(|entry| entry["request_id"] == "request-3")
+                .expect("the stand-in did the work: request-3 is stored"),
+            request_3,
+            "the stand-in did the work: request-3 stores an empty reason and a null plan"
+        );
+
+        let token_key = r#"{"id":4,"request":{"type":"request_capability","resource":"localhost://Public/resident-instances/shared.txt","action":"read","reason":"read shared","token":"no"}}"#;
+        let denied = standin
+            .bridge_envelope(token_key, "component-1", None)
+            .expect("the stand-in did the work: a capability token is an envelope");
+        assert_bridge_error(
+            &bridge_value(&denied),
+            4,
+            "request body rejects token",
+            "the capability body rejects token",
+        );
+
+        let plan_line = format!(
+            r#"{{"id":5,"request":{{"type":"request_capability","resource":"{SHARED_RESOURCE}","action":"read","reason":"read shared","plan":"{PLAN}"}}}}"#
+        );
+        let recorded = standin
+            .bridge_envelope(&plan_line, "component-1", None)
+            .expect("the stand-in did the work: the plan line is recorded");
+        let parsed = bridge_value(&recorded);
+        assert_eq!(
+            parsed["response"]["data"]["request_id"], "request-4",
+            "the stand-in did the work: the plan line records request-4"
+        );
+        let mut request_4 = pending_request("request-4", "component-1");
+        request_4["plan"] = json!(PLAN);
+        assert_eq!(
+            request_entries(&standin, "component-1")
+                .into_iter()
+                .find(|entry| entry["request_id"] == "request-4")
+                .expect("the stand-in did the work: request-4 is stored"),
+            request_4,
+            "the stand-in did the work: request-4 stores the plan hash"
+        );
+
+        let ping = r#"{"id":6,"request":{"type":"ping"}}"#;
+        let denied = standin
+            .bridge_envelope(ping, "component-1", None)
+            .expect("the stand-in did the work: an unsupported type is an envelope");
+        assert_bridge_error(
+            &bridge_value(&denied),
+            6,
+            "unsupported bridge request",
+            "ping is unsupported and stores nothing",
+        );
+        assert_eq!(
+            bridge_request_ids(&standin),
+            BTreeSet::from([
+                "request-1".to_owned(),
+                "request-2".to_owned(),
+                "request-3".to_owned(),
+                "request-4".to_owned(),
+            ]),
+            "the stand-in did the work: ping stores no further request"
+        );
+
+        standin.seed_grant(
+            "req-once",
+            "component-1",
+            SHARED_RESOURCE,
+            "read",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Live, false),
+            "the stand-in did the work: req-once starts live"
+        );
+        let invoke = r#"{"id":8,"request":{"type":"resource_invoke","uri":"localhost://Public/resident-instances/shared.txt","operation":"read","body":{},"token":"req-once"}}"#;
+        let denied = standin
+            .bridge_envelope(invoke, "component-2", Some("component-1"))
+            .expect("the stand-in did the work: the sibling invoke is an envelope");
+        assert_bridge_error(
+            &bridge_value(&denied),
+            8,
+            "wrong capsule: expected component-1, got component-2",
+            "the principal does not choose the caller",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Live, false),
+            "the stand-in did the work: the sibling invoke leaves req-once live"
+        );
+        let spent = standin
+            .bridge_envelope(invoke, "component-1", Some("person-a"))
+            .expect("the stand-in did the work: the owner invoke is an envelope");
+        assert_bridge_ok(
+            &bridge_value(&spent),
+            8,
+            Value::Null,
+            "the owner invoke returns data null",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: the owner invoke spends the once grant"
+        );
+        let again = standin
+            .bridge_envelope(invoke, "component-1", Some("person-a"))
+            .expect("the stand-in did the work: the second owner invoke is an envelope");
+        assert_bridge_error(
+            &bridge_value(&again),
+            8,
+            "grant is not live: Exhausted",
+            "the second owner invoke finds the grant exhausted",
+        );
+
+        standin.seed_grant(
+            "req-tok",
+            "component-1",
+            SHARED_RESOURCE,
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        let bad_token = r#"{"id":10,"request":{"type":"resource_invoke","token":1}}"#;
+        let err = standin
+            .bridge_envelope(bad_token, "component-1", None)
+            .expect_err("the stand-in did the work: a non-string token is refused");
+        assert_eq!(
+            err, "invoke token must be a string",
+            "the stand-in did the work: the invoke token must be a string"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-tok"),
+            (Life::Live, false),
+            "the stand-in did the work: a bad token leaves req-tok live"
+        );
+        let missing_token = r#"{"id":11,"request":{"type":"resource_invoke","uri":"localhost://Public/resident-instances/shared.txt","operation":"read","body":{}}}"#;
+        let denied = standin
+            .bridge_envelope(missing_token, "component-1", None)
+            .expect("the stand-in did the work: a missing token is an envelope");
+        assert_bridge_error(
+            &bridge_value(&denied),
+            11,
+            "unknown grant",
+            "a missing token is the empty grant id",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-tok"),
+            (Life::Live, false),
+            "the stand-in did the work: the empty token leaves req-tok live"
+        );
+
+        let granted = standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({
+                    "request_id": "request-4",
+                    "duration": "once",
+                    "rationale": "grant the plan",
+                    "plan_sha256": PLAN,
+                }),
+            )
+            .expect("the stand-in did the work: the shell grants request-4");
+        assert_eq!(
+            granted,
+            json!({ "success": true }),
+            "the stand-in did the work: the shell grant is success true"
+        );
+        let bound = r#"{"id":12,"request":{"type":"resource_invoke","uri":"localhost://Public/resident-instances/shared.txt","operation":"read","body":{},"token":"request-4"}}"#;
+        let denied = standin
+            .bridge_envelope(bound, "component-1", None)
+            .expect("the stand-in did the work: the bound invoke is an envelope");
+        assert_bridge_error(
+            &bridge_value(&denied),
+            12,
+            "grant is not bound to this plan",
+            "a bound grant stays live",
+        );
+        assert_eq!(
+            grant_record(&standin, "request-4"),
+            (Life::Live, false),
+            "the stand-in did the work: the unbound invoke leaves request-4 live"
+        );
+
+        let other = r#"{"id":13,"request":{"type":"request_capability","resource":"localhost://Public/resident-instances/other.txt","action":"read","reason":"read shared"}}"#;
+        let denied = standin
+            .bridge_envelope(other, "component-1", None)
+            .expect("the stand-in did the work: an undeclared ask is an envelope");
+        assert_bridge_error(
+            &bridge_value(&denied),
+            13,
+            "ask not declared in the signed manifest: localhost://Public/resident-instances/other.txt read",
+            "the undeclared ask is refused",
+        );
+        let (plain, query) = shell_pair(&standin);
+        assert_eq!(
+            request_ids(&plain),
+            request_ids(&query),
+            "the stand-in did the work: the shell live view is one set"
+        );
+        assert_eq!(
+            request_ids(&plain),
+            BTreeSet::from(["req-tok".to_owned(), "request-4".to_owned()]),
+            "the stand-in did the work: the shell live-grant set is req-tok and request-4"
         );
         assert_capsule(
             &standin,
