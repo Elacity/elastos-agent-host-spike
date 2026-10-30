@@ -1,0 +1,21 @@
+        let host_key: Result<(), elastos::bus::types::BusError> = (|| {
+            use elastos::bus::{capabilities, providers, types::*};
+            let resource = "@RESOURCE@";
+            if core::hint::black_box(0u32) == 1 {
+                let _ = capabilities::request(&CapabilityRequest {
+                    resource: resource.into(),
+                    actions: vec!["read".into()],
+                    reason: "Agent Host task journal".into(),
+                });
+                let _ = providers::invoke(&InvokeRequest {
+                    resource: resource.into(),
+                    operation: "read".into(),
+                    body: br#"{"encoding":"utf8"}"#.to_vec(),
+                    grant: None,
+                });
+            }
+            Err(BusError::Invalid(
+                "the journal append did not follow its grants".into(),
+            ))
+        })();
+        host_key?;
