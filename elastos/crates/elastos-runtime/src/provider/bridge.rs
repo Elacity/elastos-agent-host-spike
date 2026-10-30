@@ -3250,11 +3250,11 @@ mod tests {
     }
 
     /// Falsifier A removes the `install_on_command` attach (bridge.rs:882) and
-    /// this test fails at its `no_new_privs` assertion: bridge.rs:3296:9 on the
-    /// aarch64 Jetson run, bridge.rs:3308:9 on x86_64. Scope:
-    /// rong-review/C9-plan-stacked-v3-20261030.md, S1a bar 5. The aarch64 Jetson
-    /// run (Linux 5.15.148-tegra) is done: 1 passed, and the same falsifier
-    /// failed at bridge.rs:3296:9 (c9-s1a-jetson-20261030-1640.md).
+    /// this test fails at its `no_new_privs` assertion (bridge.rs:3307:9 with
+    /// the attach line deleted; 3308 in this file). Scope:
+    /// rong-review/C9-plan-stacked-v3-20261030.md, S1a bar 5. On the aarch64
+    /// Jetson (Linux 5.15.148-tegra) it passed, and this falsifier failed at
+    /// bridge.rs:3296:9 on the #1220 head (c9-s1a-jetson-20261030-1640.md).
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn spawn_confined_model_linux_child_inherits_socket_filter() {
