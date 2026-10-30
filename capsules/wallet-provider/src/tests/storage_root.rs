@@ -348,3 +348,122 @@ fn wallet_operations_stay_under_root() {
         other => panic!("expected the persisted account from the root, got {other:?}"),
     }
 }
+
+/// The provider publishes the parent entry of every directory its `missing`
+/// walk observed absent, and leaves the entry of an existing wallet directory
+/// to the actor that created it.
+///
+/// The parent is set to mode `0o300`: it can be written and searched, so an
+/// entry can be created inside it, and it cannot be opened for reading. The
+/// first case therefore answers `ok` only when nothing publishes its entry; the
+/// second creates `Wallet` in the same parent, so it must publish that entry
+/// and report the parent's own open failure.
+///
+/// This proves which directories the provider opens for publishing. It does not
+/// prove that the filesystem's durability guarantee holds, and it is macOS
+/// evidence only: it claims no Linux row, no namespace and no kernel behaviour.
+///
+/// Falsifier: WP179 publishes the wallet directory's parent entry at the
+/// `src/main.rs` call, so the first case answers `storage_error`. Dropping the
+/// creation loop's parent publish makes the second case answer `ok`.
+#[cfg(unix)]
+#[test]
+fn wallet_init_publishes_only_the_entries_it_creates() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let existing = tempfile::tempdir().unwrap();
+    let base = existing.path();
+    let wallet_dir = base.join("ElastOS").join("SystemServices").join("Wallet");
+    fs::create_dir_all(&wallet_dir).unwrap();
+    let parent = wallet_dir.parent().unwrap();
+    let mut permissions = fs::metadata(parent).unwrap().permissions();
+    permissions.set_mode(0o300);
+    fs::set_permissions(parent, permissions).unwrap();
+
+    let mut provider = WalletProvider::new();
+    let response = init_with_config(
+        &mut provider,
+        json!({ "base_path": base.display().to_string() }),
+    );
+    // The mode is restored before the answer is read, so a failing assertion
+    // cannot leave 0o300 behind for the temporary directory's own cleanup.
+    let mut permissions = fs::metadata(parent).unwrap().permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(parent, permissions).unwrap();
+
+    match response {
+        Response::Ok { data: Some(data) } => assert_eq!(data["storage_configured"], true),
+        other => panic!(
+            "an existing wallet directory publishes no parent entry, so init must answer ok, \
+             got {other:?}"
+        ),
+    }
+    assert!(
+        provider.store_path.is_some() && provider.storage_key.is_some(),
+        "a served init must set the store path and the storage key"
+    );
+    assert!(
+        wallet_dir.join(WALLET_KEY_FILE).is_file(),
+        "a served init must leave the storage key under the wallet directory"
+    );
+
+    let absent = tempfile::tempdir().unwrap();
+    let base = absent.path();
+    let wallet_dir = base.join("ElastOS").join("SystemServices").join("Wallet");
+    fs::create_dir_all(wallet_dir.parent().unwrap()).unwrap();
+    let parent = wallet_dir.parent().unwrap();
+    let mut permissions = fs::metadata(parent).unwrap().permissions();
+    permissions.set_mode(0o300);
+    fs::set_permissions(parent, permissions).unwrap();
+
+    let mut provider = WalletProvider::new();
+    let response = init_with_config(
+        &mut provider,
+        json!({ "base_path": base.display().to_string() }),
+    );
+    let open_error = fs::File::open(parent).err();
+    let mut permissions = fs::metadata(parent).unwrap().permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(parent, permissions).unwrap();
+
+    let open_error = open_error.expect("mode 0o300 must refuse opening the parent for reading");
+    assert_storage_refusal(
+        response,
+        &format!("failed to sync wallet storage parent directory: {open_error}"),
+    );
+    assert!(
+        provider.store_path.is_none() && provider.storage_key.is_none(),
+        "a refused Init must leave no usable root"
+    );
+}
+
+/// An existing wallet directory beneath a symlinked `SystemServices` is
+/// refused, because the provider inspects its parent even when it creates
+/// nothing there.
+///
+/// Falsifier: WP180 canonicalizes the wallet directory at the `src/main.rs`
+/// call, so the inspection reads the link's target and `init` answers `ok`.
+#[cfg(unix)]
+#[test]
+fn wallet_init_refuses_symlink_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let real_services = dir.path().join("real-services");
+    fs::create_dir_all(real_services.join("Wallet")).unwrap();
+    let base = dir.path().join("base");
+    fs::create_dir_all(base.join("ElastOS")).unwrap();
+    std::os::unix::fs::symlink(&real_services, base.join("ElastOS").join("SystemServices"))
+        .unwrap();
+
+    let mut provider = WalletProvider::new();
+    assert_storage_refusal(
+        init_with_config(
+            &mut provider,
+            json!({ "base_path": base.display().to_string() }),
+        ),
+        "wallet storage parent directory must be a non-symlink directory",
+    );
+    assert!(
+        provider.store_path.is_none() && provider.storage_key.is_none(),
+        "a refused Init must leave no usable root"
+    );
+}
