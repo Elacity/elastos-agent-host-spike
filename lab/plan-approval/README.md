@@ -160,6 +160,30 @@ route makes it. `preview`, `plan_sha256`, `approve`, `deny_shown_plan`,
 crate does not copy the stand-in, and it names no planner. A passing run gives
 the Runtime no A15 credit.
 
+A shell call through `request` cannot submit a shown plan. The design states
+the submit boundary at Request flow step 6:
+
+> The Agent Host submits the proposed operation to Runtime as the active agent
+> principal and session
+
+`request` is the only submit call, and it passes the caller it is given. A
+shell caller is refused with status 403 and `capability request needs an
+instance session` for `PLAN_A`, for `PLAN_B` and for empty plan bytes, before
+any instance exists and while both sessions are running, because the caller
+check runs before the body is read and before the instance lookup. Each refusal
+stores nothing: both request arrays stay empty, the live list stays empty and
+both capsules stay `running` with no cause. The instance session's own submit
+then stores one pending request with the shown hash, which the shell grants
+with `once`, and that session's `execute` spends. A shell submit after that
+spend is still the session refusal, `capability request needs an instance
+session`, and not `request is not pending: request-1` or
+`unknown request: request-1`. This crate stores no copy of the caller check;
+the stand-in's request route makes it. `preview`, `plan_sha256`, `approve`,
+`execute`, `deny_shown_plan`, `age_shown_plan`, `stop_shown_session` and
+`running_agent` are unchanged by this slice. The crate does not copy the
+stand-in, and it names no planner. A passing run gives the Runtime no A15
+credit.
+
 `preview`, `plan_sha256`, `execute`, `deny_shown_plan`, `age_shown_plan` and
 `stop_shown_session` are unchanged by this slice; `approve` gains the duration
 argument and remains the only grant call. This crate calls
@@ -185,12 +209,14 @@ open.
   `shown_session_lasts_until_stop`, `shown_grant_authorises_only_its_session`,
   `owner_approves_only_the_shown_hash`,
   `agent_cannot_approve_its_own_shown_plan`,
-  `shell_cannot_spend_a_shown_grant` and the bound-plan journey.
+  `shell_cannot_spend_a_shown_grant`, `shell_cannot_submit_a_shown_plan` and
+  the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shell_cannot_submit_a_shown_plan -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shell_cannot_spend_a_shown_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_cannot_approve_its_own_shown_plan -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib owner_approves_only_the_shown_hash -- --exact

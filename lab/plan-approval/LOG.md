@@ -337,3 +337,33 @@ cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shell_can
 - restored, the test passes.
 
 After both restores, `git diff -- lab/plan-approval/src/lib.rs` shows no plant. The restored proof command set (the fmt check and the twelve test commands in the task) took 1.54 s real. This lane has no `falsifiers.json`; no id is added.
+
+## 018
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md), Request flow step 6:
+
+> The Agent Host submits the proposed operation to Runtime as the active agent principal and session
+
+This task proves the session half of that sentence: the shell is not the instance session, so a shell submit is refused before the plan body is read and stores nothing, while that session's own submit stores one pending request that the shell grants and that session's `execute` spends. The principal stays BACKLOG item 4, the shell check on `approve` stays 016, the shell check on `execute` stays 017, a standing mandate stays item 11, and an audit record stays item 16. `request` gains `caller: Caller<'_>` in place of `session` and returns `Result<String, (u16, String)>`; it stays the only caller of `post_capability_request`, passes that caller through, does not match on `Caller` and holds no copy of the refusal string. Each of the seventeen existing calls replaces its session argument with `Caller::Client { session_id: <that session expression> }` and unwraps the Ok id with `expect("the agent's request route stores one pending request")`, keeping its other arguments and assertions. The new test calls only `journeys::running_agent`, `journeys::request`, `approve` and `execute`; it calls `seed_request`, the route methods, `set_instant` and `delete_capsule` nowhere.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shell_cannot_submit_a_shown_plan -- --exact
+```
+
+### F-request-forces-client
+
+- old bytes, 16: `        caller,\n`
+- new bytes, 75: `        Caller::Client {\n            session_id: "component-1",\n        },\n`
+- planted crate compiled with one `unused variable: caller` warning; `shell_cannot_submit_a_shown_plan` failed at `src/lib.rs:2872:5` (planted tree) on the first shell-submit assertion: `assertion left == right failed: the shell cannot submit a shown plan: the shell's submit of plan A on a fresh stand-in is refused as a caller without an instance session`; left held `Err((400, "unknown instance: component-1"))`, right expected `Err((403, "capability request needs an instance session"))`. The forced client caller reached the instance lookup, so the shell was not refused as a caller.
+- restored, the test passes.
+
+### F-empty-before-caller
+
+- old bytes, 55: `        let stored = stand_in.post_capability_request(\n`
+- new bytes, 167: `        if plan.is_empty() {\n            return Err((400, "request body needs resource".to_owned()));\n        }\n        let stored = stand_in.post_capability_request(\n`
+- planted crate compiled; `shell_cannot_submit_a_shown_plan` failed at `src/lib.rs:2933:9` (planted tree) on the shell-submit assertion for empty plan bytes: `assertion left == right failed: the shell cannot submit a shown plan: the shell's submit with plan bytes [] is refused as a caller without an instance session`; left held `Err((400, "request body needs resource"))`, right expected `Err((403, "capability request needs an instance session"))`. The plan-body check ran before the caller check, so a shell reached a body check.
+- restored, the test passes.
+
+After both restores, `git diff -- lab/plan-approval/src/lib.rs` shows no plant. The restored proof command set (the fmt check and the thirteen test commands in the task) took 1.52 s real. This lane has no `falsifiers.json`; no id is added.
