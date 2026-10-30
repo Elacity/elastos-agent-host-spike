@@ -27,21 +27,34 @@ use elastos_protected_content_contracts::{
 use elastos_wallet_contract::{
     Erc1271ProofEvidenceV1, ManagedRecoveryKeyEntryV1, ManagedRecoverySetV1, PublicNetwork,
     ValidatedChainOutcomeBindingV1, ValidatedChainOutcomeV1, VerifiedWalletInvocationContext,
-    WalletProviderOperationV2, WalletProviderRequestV2, WalletProviderResponseV2, WalletResultV2,
-    PROTECTED_CONTENT_RIGHTS_SIGNATURE_INTENT, VALIDATED_CHAIN_OUTCOME_SCHEMA,
+    WalletOperationClass, WalletProviderOperationV2, WalletProviderRequestV2,
+    WalletProviderResponseV2, WalletResultV2, PROTECTED_CONTENT_RIGHTS_SIGNATURE_INTENT,
+    VALIDATED_CHAIN_OUTCOME_SCHEMA,
 };
 use k256::ecdsa::SigningKey;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sha3::Keccak256;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::LazyLock;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+// The one lab profile generator, included rather than copied: the did, wallet
+// and model test crates all name this one file (P10).
+#[path = "common/profile_generator.rs"]
+mod profile_generator;
+
+use profile_generator::{
+    declared_entries, generate_profile, platform_baseline_justification, platform_baseline_status,
+    write_generated_profile, DeclaredClaim, CONTRACT_RIGHTS, DECLARED_RIGHTS_ROLE,
+    PLATFORM_BASELINE, PLATFORM_BASELINE_IDS, PROFILE_HEAD,
+};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 /// The host OSes where `CONFINEMENT.md` says the confinement tests exercise
@@ -51,6 +64,10 @@ const DECLARED_CONFINED_OS: [&str; 1] = ["macos"];
 const PROVIDER_BINARY: &str = env!("CARGO_BIN_EXE_wallet-provider");
 const PROFILE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/confine.sb");
 const WALLET_KEY_FILE: &str = "wallet-key.hex";
+/// The storage key's length in bytes; its file holds the same value as lowercase
+/// hex digits and one newline.
+#[cfg(target_os = "linux")]
+const WALLET_KEY_BYTES: usize = 32;
 const WALLET_DIR: [&str; 3] = ["ElastOS", "SystemServices", "Wallet"];
 /// The provider names the stand-in launcher serves. One derivation picks each
 /// provider's storage-root layout from its name.
@@ -65,6 +82,51 @@ const CHILD_EXIT_DEADLINE: Duration = Duration::from_secs(10);
 const CHILD_EXIT_POLL: Duration = Duration::from_millis(20);
 
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+
+/// The heap allocations a probe child makes after its fork. A forked child may
+/// rely only on async-signal-safe calls, and the allocator is not one of them:
+/// another thread of the parent can hold its lock at the moment of the fork, so
+/// an allocation in the child can block for ever. The child counts its own
+/// allocations and refuses its own report when the count is not zero.
+///
+/// The child is a fork of this process and holds only the calling thread, so
+/// this flag in the child's own copy is the child's alone and the parent's
+/// threads, which keep running in the parent's copy, cannot set it.
+static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+static COUNT_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
+
+/// The test binary's allocator, which counts the probe child's allocations and
+/// changes nothing else.
+struct CountingAllocator;
+
+unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        self.count_one();
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+        unsafe { std::alloc::System.dealloc(pointer, layout) }
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+        self.count_one();
+        unsafe { std::alloc::System.realloc(pointer, layout, size) }
+    }
+}
+
+impl CountingAllocator {
+    /// Counts this allocation when the calling process is a counted probe
+    /// child.
+    fn count_one(&self) {
+        if COUNT_ALLOCATIONS.load(Ordering::Relaxed) {
+            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 /// Whether a sandbox test runs on this host.
 ///
@@ -500,6 +562,43 @@ fn storage_parent(name: &str, base: &Path) -> PathBuf {
         .to_path_buf()
 }
 
+/// One provider's inputs to its Landlock ruleset: the declared rights its
+/// committed file holds, the three parameter bindings its launch uses, and the
+/// binary that launch starts.
+struct ProviderRulesetInputs {
+    declared: Value,
+    bindings: [(&'static str, PathBuf); 3],
+    binary: &'static Path,
+}
+
+/// The one chooser of a provider's ruleset inputs under `base`. The ruleset
+/// test and the did journey read a provider's inputs here, so each provider's
+/// rules name its own root and no second derivation exists (P10).
+///
+/// It adds no provider-name refusal of its own. The bindings come from
+/// `canonical_bindings`, which derives every path through
+/// `provider_storage_root`, so an unknown name is refused there with that one
+/// message; the declared rights come from that provider's own file through
+/// `read_declared_rights`, which refuses a file that names another provider
+/// (P11).
+fn provider_ruleset_inputs(name: &str, base: &Path) -> Result<ProviderRulesetInputs, String> {
+    // did's binary is the one this crate builds; every other served name uses
+    // this crate's own binary. An unknown name never reaches a returned value,
+    // because `canonical_bindings` refuses it through `provider_storage_root`.
+    let binary = if name == DID_PROVIDER {
+        did_provider_binary()
+    } else {
+        Path::new(PROVIDER_BINARY)
+    };
+    let bindings = canonical_bindings(name, base, binary);
+    let declared = read_declared_rights(name, &declared_rights_path(name))?;
+    Ok(ProviderRulesetInputs {
+        declared,
+        bindings,
+        binary,
+    })
+}
+
 /// The `init` config the stand-in sends for `name` at `base`. The stand-in
 /// sends `base_path` to both providers, and did also receives the isolated
 /// fixture device key so its `get_did` answers. It builds this one config for
@@ -621,17 +720,25 @@ struct ConfinedProvider {
     stdout: BufReader<ChildStdout>,
     stderr_reader: Option<JoinHandle<String>>,
     stderr_text: String,
+    /// The marker's answer before and after the launcher's own filter install,
+    /// reported by the child over the one fixed record. `None` for a child that
+    /// installed none.
+    #[cfg(target_os = "linux")]
+    seccomp_launch_answers: Option<[i64; 2]>,
 }
 
 impl ConfinedProvider {
-    /// The one spawn path; `command` already carries its arguments.
-    fn spawn(mut command: Command) -> Self {
+    /// The one spawn path; `command` already carries its arguments. A spawn
+    /// that fails, including a `pre_exec` install that refuses, returns the OS
+    /// error instead of panicking, because a caller that must report the
+    /// failing install step reads the child's record and not this errno.
+    fn try_spawn(mut command: Command) -> Result<Self, String> {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("the test child must start");
+            .map_err(|err| format!("the test child must start: {err}"))?;
         let stdin = child.stdin.take().expect("provider stdin");
         let stdout = BufReader::new(child.stdout.take().expect("provider stdout"));
         let mut stderr_pipe = child.stderr.take().expect("provider stderr");
@@ -640,13 +747,21 @@ impl ConfinedProvider {
             let _ = stderr_pipe.read_to_end(&mut bytes);
             String::from_utf8_lossy(&bytes).into_owned()
         });
-        Self {
+        Ok(Self {
             child,
             stdin,
             stdout,
             stderr_reader: Some(stderr_reader),
             stderr_text: String::new(),
-        }
+            #[cfg(target_os = "linux")]
+            seccomp_launch_answers: None,
+        })
+    }
+
+    /// The same path for a caller whose child must start: a failure is the
+    /// test's own failure, so it panics with the reason `try_spawn` returned.
+    fn spawn(command: Command) -> Self {
+        Self::try_spawn(command).unwrap_or_else(|failure| panic!("{failure}"))
     }
 
     fn start(base: &Path) -> Self {
@@ -685,6 +800,174 @@ impl ConfinedProvider {
         }
         command.arg(program);
         Self::spawn(command)
+    }
+
+    /// The Linux seat of the one launch builder: `program` with the launch
+    /// list installed in `pre_exec`, through the same `spawn`. The program is
+    /// the one this function is given, so a Linux start cannot run another
+    /// binary.
+    ///
+    /// The install report crosses the fork as one fixed record on a socket
+    /// pair, because Rust's exec-error pipe carries only a raw errno and no
+    /// step. An install that refuses reports the step and its errno, and the
+    /// parent turns it into that step's own reason, so a failed install starts
+    /// nothing (P11). A missing, short, long or unknown-step record is a
+    /// refusal with its own reason and never a bare spawn error.
+    ///
+    /// Every other OS refuses the start by name and starts nothing: a seccomp
+    /// filter is installed on Linux only, and a provider never runs
+    /// unconfined here. The file row uses this same function.
+    #[cfg(target_os = "linux")]
+    fn start_under_seccomp(allow: &SeccompAllowList, program: &Path) -> Result<Self, String> {
+        Self::start_under_linux_policy(allow, None, program)
+    }
+
+    /// The one Linux launch path. `start_under_seccomp` and the file-row start
+    /// both reach it, so there is one socket pair, one `pre_exec` and one
+    /// `spawn`. `landlock` is the file row when the policy carries one.
+    ///
+    /// The installs run in the order the kernel forces: the ruleset first, then
+    /// the seccomp filter. Landlock's own calls are in no seccomp list row, so a
+    /// filter installed first would refuse them and the file row would never
+    /// apply. A start that cannot apply its ruleset reports that step and starts
+    /// nothing (P11). The copies the closure holds are made before the fork, so
+    /// the child allocates nothing after it.
+    #[cfg(target_os = "linux")]
+    fn start_under_linux_policy(
+        allow: &SeccompAllowList,
+        landlock: Option<&LandlockRuleset>,
+        program: &Path,
+    ) -> Result<Self, String> {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::net::UnixStream;
+        use std::os::unix::process::CommandExt as _;
+
+        let allow = allow.with_launch_essentials();
+        // The `pre_exec` closure must be `'static`, so it owns its own copy of
+        // the ruleset rather than borrowing the caller's. The copy is made
+        // before the fork.
+        let landlock = landlock
+            .map(PreparedLandlockRuleset::new)
+            .transpose()
+            .map_err(|failure| format!("{} start is refused: {failure}", allow.provider))?;
+        let provider_name = allow.provider.clone();
+        let (mut reader, writer) = UnixStream::pair().map_err(|err| {
+            format!(
+                "{} start is refused: the seccomp install report channel could not open: {err}",
+                allow.provider
+            )
+        })?;
+        let mut command = Command::new(program);
+        // The closure holds the list, the prepared ruleset and the reporting
+        // socket before the fork, so the child allocates nothing after it.
+        unsafe {
+            command.pre_exec(move || {
+                let before = seccomp_launch_marker_answer();
+                // The file row first, because no seccomp row admits Landlock's
+                // own system calls.
+                let install = match &landlock {
+                    Some(ruleset) => {
+                        install_landlock(ruleset).map_err(SeccompInstallFailure::Landlock)
+                    }
+                    None => Ok(()),
+                }
+                .and_then(|()| install_seccomp(&allow));
+                let record = match install {
+                    Ok(()) => seccomp_launch_record(
+                        SECCOMP_LAUNCH_INSTALLED,
+                        before,
+                        seccomp_launch_marker_answer(),
+                    ),
+                    Err(failure) => failure.launch_record(),
+                };
+                // `write` is admitted by the list and is async-signal-safe
+                // after a fork; a socket write is not in the list at all.
+                write_seccomp_launch_record(&record, |bytes| {
+                    let written =
+                        libc::write(writer.as_raw_fd(), bytes.as_ptr().cast(), bytes.len());
+                    if written < 0 {
+                        return Err(*libc::__errno_location());
+                    }
+                    Ok(written as usize)
+                })
+                .map_err(|failure| std::io::Error::from_raw_os_error(failure.errno()))?;
+                install.map_err(|failure| std::io::Error::from_raw_os_error(failure.errno()))
+            });
+        }
+        // `try_spawn` owns the command, so the parent's copy of the report
+        // socket closes when it returns and the read below sees end of file.
+        let spawned = Self::try_spawn(command);
+        let mut record = Vec::new();
+        reader
+            .read_to_end(&mut record)
+            .map_err(|err| format!("{provider_name} start is refused: {err}"))?;
+        // What the child did instead of reporting: it did not start, with that
+        // reason, or it started and its own report never arrived. Either way the
+        // record decides the first half of the refusal, so a reporting failure
+        // keeps the install report's own reason (P11).
+        let child = match &spawned {
+            Err(failure) => failure.as_str(),
+            Ok(_) => "the child started and its install report arrived incomplete",
+        };
+        let answers = match seccomp_launch_answers_or_refusal(&record, child) {
+            Ok(answers) => answers,
+            Err(refusal) => return Err(format!("{provider_name} start is refused: {refusal}")),
+        };
+        let mut provider = spawned?;
+        provider.seccomp_launch_answers = Some(answers);
+        Ok(provider)
+    }
+
+    /// The file row's launch: the same one Linux path, with the ruleset
+    /// installed before the seccomp filter.
+    #[cfg(target_os = "linux")]
+    fn start_under_landlock(
+        allow: &SeccompAllowList,
+        ruleset: &LandlockRuleset,
+        program: &Path,
+    ) -> Result<Self, String> {
+        Self::start_under_linux_policy(allow, Some(ruleset), program)
+    }
+
+    /// The same function where no seccomp filter exists: the start is refused
+    /// by name and nothing runs (P11). The file-row start calls this one
+    /// refusal, so both name the filter's OS and run nothing.
+    #[cfg(not(target_os = "linux"))]
+    fn start_under_seccomp(allow: &SeccompAllowList, _: &Path) -> Result<Self, String> {
+        Err(format!(
+            "{} start is refused: a seccomp filter is installed on linux only",
+            allow.provider
+        ))
+    }
+
+    /// The same refusal where no seccomp filter exists, so a file-row start on
+    /// another OS names the filter's OS and runs nothing (P11).
+    #[cfg(not(target_os = "linux"))]
+    fn start_under_landlock(
+        allow: &SeccompAllowList,
+        _: &LandlockRuleset,
+        program: &Path,
+    ) -> Result<Self, String> {
+        Self::start_under_seccomp(allow, program)
+    }
+
+    /// The filter mode the launched child reports in its own
+    /// `/proc/<pid>/status`: `2` for `SECCOMP_MODE_FILTER`. The mode alone also
+    /// accepts an inherited filter, so the journey compares the marker's answer
+    /// across this launcher's own install as well.
+    #[cfg(target_os = "linux")]
+    fn launched_seccomp_mode(&self) -> u32 {
+        let path = format!("/proc/{}/status", self.child.id());
+        let status = fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("the launched provider's {path} must be readable: {err}"));
+        let line = status
+            .lines()
+            .find(|line| line.starts_with("Seccomp:"))
+            .unwrap_or_else(|| panic!("{path} must report a Seccomp line: {status}"));
+        line["Seccomp:".len()..]
+            .trim()
+            .parse()
+            .unwrap_or_else(|err| panic!("{path} must report a filter mode: {line}: {err}"))
     }
 
     /// Sends one request and returns its answer; a failure panics with the
@@ -891,42 +1174,88 @@ impl StandinHost {
     }
 }
 
-/// The one rule that decides whether the stand-in can confine `host`.
+/// The one confinement policy a stand-in start carries.
+///
+/// A macOS start runs under its generated Seatbelt profile, the one file the
+/// lab writer generates; a Linux start would run under the seccomp allow list
+/// generated from the same declared rights. The file row adds the Landlock
+/// ruleset beside that list. The policy is one input of the one launcher, so
+/// the OS policies reach the start by one entry point (P10).
+#[derive(Debug, Clone, Copy)]
+enum StandinPolicy<'a> {
+    /// The generated Seatbelt profile the start runs under.
+    Seatbelt(&'a Path),
+    /// The generated seccomp allow list the start installs.
+    Seccomp(&'a SeccompAllowList),
+    /// The generated seccomp allow list and the Landlock file row. The one
+    /// Linux launch installs the ruleset first and the filter second.
+    Landlock {
+        allow: &'a SeccompAllowList,
+        ruleset: &'a LandlockRuleset,
+    },
+}
+
+/// The one rule that decides whether the stand-in can confine `host` under
+/// `policy`.
 ///
 /// A host that reports a primitive unavailable is refused first, on every OS,
 /// so the report reaches this rule before the `DECLARED_CONFINED_OS` lookup and
 /// an OS in that list cannot pass a start with a missing primitive. That
 /// early refusal is the one host check (P10).
 ///
-/// `DECLARED_CONFINED_OS` is the only list of OSes where the stand-in applies
-/// confinement. Each refusal starts `{name} start on {os} is refused:` and then
-/// carries only its own case's words: a host that reports a primitive
-/// unavailable carries the design's exact words for that primitive; an OS with
-/// no confinement design names that OS and the list; a simulated Linux host
-/// that reports nothing missing says Linux is designed, not enforced, in this
-/// lab, so `linux` is not in `DECLARED_CONFINED_OS`.
-fn standin_host_refusal(name: &str, host: StandinHost) -> Result<(), String> {
+/// Each refusal starts `{name} start on {os} is refused:` and then carries only
+/// its own case's words. Under a `Seatbelt` policy, `DECLARED_CONFINED_OS` is
+/// the only list of OSes where the stand-in applies confinement: a host that
+/// reports a primitive unavailable carries the design's exact words for that
+/// primitive; an OS with no confinement design names that OS and the list; and
+/// a simulated Linux host that reports nothing missing says Linux is designed,
+/// not enforced, in this lab, so `linux` is not in `DECLARED_CONFINED_OS`. A
+/// `Seccomp` policy is the Linux policy, so the same rule accepts it on `linux`
+/// alone and refuses it on every other OS by name. A `Landlock` policy carries
+/// that same filter, so it is accepted on `linux` alone in those same words.
+/// `DECLARED_CONFINED_OS` stays the macOS list: accepting a seccomp policy on a
+/// simulated Linux host is a host-report answer about that policy, not a claim
+/// that Linux is confined.
+fn standin_host_refusal(
+    name: &str,
+    host: StandinHost,
+    policy: StandinPolicy<'_>,
+) -> Result<(), String> {
     let confined_os = DECLARED_CONFINED_OS.join(", ");
     if let Some(primitive) = host.unavailable {
         let reason = primitive.design_refusal();
         return Err(format!("{name} start on {} is refused: {reason}", host.os));
     }
-    if DECLARED_CONFINED_OS.contains(&host.os) {
-        return Ok(());
+    match policy {
+        StandinPolicy::Seatbelt(_) => {
+            if DECLARED_CONFINED_OS.contains(&host.os) {
+                return Ok(());
+            }
+            let reason = if host.os == "linux" {
+                format!(
+                    "linux is designed, not enforced, in this lab, so linux is not in \
+                     DECLARED_CONFINED_OS ({confined_os})"
+                )
+            } else {
+                format!(
+                    "{os} has no confinement design, and the lab stand-in applies confinement only on \
+                     {confined_os}",
+                    os = host.os
+                )
+            };
+            Err(format!("{name} start on {} is refused: {reason}", host.os))
+        }
+        StandinPolicy::Seccomp(_) | StandinPolicy::Landlock { .. } => {
+            if host.os == "linux" {
+                return Ok(());
+            }
+            Err(format!(
+                "{name} start on {} is refused: the seccomp allow list is the linux policy, \
+                 and {} is not linux",
+                host.os, host.os
+            ))
+        }
     }
-    let reason = if host.os == "linux" {
-        format!(
-            "linux is designed, not enforced, in this lab, so linux is not in \
-             DECLARED_CONFINED_OS ({confined_os})"
-        )
-    } else {
-        format!(
-            "{os} has no confinement design, and the lab stand-in applies confinement only on \
-             {confined_os}",
-            os = host.os
-        )
-    };
-    Err(format!("{name} start on {} is refused: {reason}", host.os))
 }
 
 /// Lab stand-in for the Runtime's provider launch, not the Runtime.
@@ -939,62 +1268,103 @@ fn standin_host_refusal(name: &str, host: StandinHost) -> Result<(), String> {
 ///
 /// It copies the inputs of `ProviderBridge::spawn(binary_path, config)` with
 /// `ProviderConfig.base_path` (read only, in `elastos/`), plus the provider
-/// name, the host report, the confinement tool and the declared rights the lab
-/// generator profiles from. `Ok(ConfinedProvider)` is Started: the provider
-/// answered `init` `ok` under the generated profile. `Err(String)` is Refused:
-/// no provider is returned, and the reason says why.
+/// name, the host report, the one confinement policy and the declared rights
+/// the lab generator profiles from. `Ok(ConfinedProvider)` is Started: the
+/// provider answered `init` `ok` under the generated profile. `Err(String)` is
+/// Refused: no provider is returned, and the reason says why.
 ///
 /// It refuses, in this order:
 ///
-/// 1. a host that `standin_host_refusal` refuses, with that one reason, before
-///    any tool, binary or profile check, so a refused host writes no profile
-///    and creates no storage root. A host that reports a missing primitive is
-///    refused whatever its OS. The reason starts
+/// 1. a host that `standin_host_refusal` refuses under this policy, with that
+///    one reason, before any tool, binary or profile check, so a refused host
+///    writes no profile and creates no storage root. A host that reports a
+///    missing primitive is refused whatever its OS. The reason starts
 ///    `{name} start on {os} is refused:` and holds the words of its own case
 ///    for a host that reports a primitive unavailable, for an OS with no
-///    confinement design, and for a simulated Linux host that reports nothing
-///    missing;
+///    confinement design, for a simulated Linux host that reports nothing
+///    missing under a `Seatbelt` policy, and for a host that is not Linux under
+///    a `Seccomp` policy;
 /// 2. an absent `sandbox_exec`, with a reason that names the OS and the path;
 /// 3. a present `sandbox_exec` that is not `SANDBOX_EXEC`, with a reason that
 ///    names the OS, the given path and `SANDBOX_EXEC`, so the tool the stand-in
 ///    checks is the one `start_under` runs;
-/// 4. a `binary_path` that is not a file, with a reason that names the
+/// 4. a `Seccomp` or `Landlock` policy whose list was generated for another
+///    provider, with a reason that names both providers, and a `Landlock`
+///    policy whose ruleset was generated for another provider, with a reason
+///    that names both providers;
+/// 5. a `binary_path` that is not a file, with a reason that names the
 ///    provider and that path, before any profile is written;
-/// 5. a refusal of `write_generated_profile`, returned unchanged;
-/// 6. a start that `sandbox-exec` refuses, with the `try_send` failure;
-/// 7. an `init` that does not answer `ok`, with the answer.
+/// 6. a refusal of `write_generated_profile`, returned unchanged;
+/// 7. a start that `sandbox-exec` refuses, with the `try_send` failure;
+/// 8. an `init` that does not answer `ok`, with the answer.
 ///
-/// Otherwise it writes the profile the one lab writer generates from the
-/// declared rights into `profile_dir`, creates the shared ancestors, starts
+/// `policy` is the one input that says how the start is confined. A `Seatbelt`
+/// policy writes the profile the one lab writer generates from the declared
+/// rights into `profile_dir`, creates the shared ancestors, starts
 /// `binary_path` under that profile through `start_under` with the canonical
-/// bindings for `name`, `base_path` and `binary_path`, and sends `init` with
-/// the provider config from `provider_init_config`. It never starts
-/// `binary_path` outside `sandbox-exec`. `name` and `binary_path` are inputs
-/// rather than this provider's constants, so another provider's binary can
-/// start through this same function.
+/// bindings for `name`, `base_path` and `binary_path`, and never starts
+/// `binary_path` outside `sandbox-exec`. A `Seccomp` policy writes no profile
+/// and starts that same `binary_path` through the same `ConfinedProvider::spawn`
+/// by `start_under_seccomp`, which installs the allow list in `pre_exec`; on a
+/// host without a filter that call refuses the start by name, so no provider
+/// starts unconfined on any host this build runs on. A `Landlock` policy starts
+/// through `start_under_landlock`, the same launch with the ruleset installed
+/// before the filter. Before that fork the launcher creates and syncs
+/// `STORAGE_ROOT`: a path rule needs a descriptor on the path, and the actor
+/// that creates the root publishes its entry. The provider does not publish a
+/// directory another actor created. A failure there refuses the start and names
+/// the path. Both then send `init` with
+/// the provider config from `provider_init_config`. `name` and `binary_path`
+/// are inputs rather than this provider's constants, so another provider's
+/// binary can start through this same function.
 fn standin_spawn_confined_provider(
     host: StandinHost,
-    sandbox_exec: &Path,
+    policy: StandinPolicy<'_>,
     name: &str,
     binary_path: &Path,
     base_path: &Path,
     declared: &Value,
     profile_dir: &Path,
 ) -> Result<ConfinedProvider, String> {
-    standin_host_refusal(name, host)?;
+    standin_host_refusal(name, host, policy)?;
     let os = host.os;
-    if !sandbox_exec.is_file() {
-        return Err(format!(
-            "{name} start on {os} is refused: the confinement tool {} is absent",
-            sandbox_exec.display()
-        ));
+    if let StandinPolicy::Seatbelt(sandbox_exec) = policy {
+        if !sandbox_exec.is_file() {
+            return Err(format!(
+                "{name} start on {os} is refused: the confinement tool {} is absent",
+                sandbox_exec.display()
+            ));
+        }
+        if sandbox_exec != Path::new(SANDBOX_EXEC) {
+            return Err(format!(
+                "{name} start on {os} is refused: the confinement tool {} is not {SANDBOX_EXEC}, \
+                 which is the one the stand-in runs",
+                sandbox_exec.display()
+            ));
+        }
     }
-    if sandbox_exec != Path::new(SANDBOX_EXEC) {
-        return Err(format!(
-            "{name} start on {os} is refused: the confinement tool {} is not {SANDBOX_EXEC}, \
-             which is the one the stand-in runs",
-            sandbox_exec.display()
-        ));
+    if let StandinPolicy::Seccomp(allow) = policy {
+        if allow.provider != name {
+            return Err(format!(
+                "{name} start is refused: the seccomp allow list was generated for {}",
+                allow.provider
+            ));
+        }
+    }
+    if let StandinPolicy::Landlock { allow, ruleset } = policy {
+        // The same list check as the Seccomp arm, then the ruleset's provider.
+        if allow.provider != name {
+            return Err(format!(
+                "{name} start is refused: the seccomp allow list was generated for {}",
+                allow.provider
+            ));
+        }
+        if ruleset.provider != name {
+            return Err(format!(
+                "{name} start is refused: the landlock ruleset was generated for {}",
+                ruleset.provider
+            ));
+        }
     }
     if !binary_path.is_file() {
         return Err(format!(
@@ -1002,15 +1372,48 @@ fn standin_spawn_confined_provider(
             binary_path.display()
         ));
     }
-    let profile = profile_dir.join(format!("{name}-standin.sb"));
-    write_generated_profile(name, declared, &profile)?;
     let canonical = canonical_bindings(name, base_path, binary_path);
-    create_shared_ancestors(&canonical);
-    let bindings: Vec<(&str, &Path)> = canonical
-        .iter()
-        .map(|(binding, path)| (*binding, path.as_path()))
-        .collect();
-    let mut provider = ConfinedProvider::start_under(&profile, &bindings, binary_path);
+    let mut provider = match policy {
+        StandinPolicy::Seatbelt(_) => {
+            let profile = profile_dir.join(format!("{name}-standin.sb"));
+            write_generated_profile(name, declared, &profile)?;
+            create_shared_ancestors(&canonical);
+            let bindings: Vec<(&str, &Path)> = canonical
+                .iter()
+                .map(|(binding, path)| (*binding, path.as_path()))
+                .collect();
+            ConfinedProvider::start_under(&profile, &bindings, binary_path)
+        }
+        StandinPolicy::Seccomp(allow) => {
+            create_shared_ancestors(&canonical);
+            ConfinedProvider::start_under_seccomp(allow, binary_path)?
+        }
+        StandinPolicy::Landlock { allow, ruleset } => {
+            create_shared_ancestors(&canonical);
+            // A Landlock path rule needs a descriptor on `STORAGE_ROOT`, so the
+            // root must exist before any rule is installed. The launcher creates
+            // and syncs it here, in the parent, before the fork. This is the
+            // half the provider no longer does: the provider stops publishing a
+            // directory another actor created, and the actor that creates the
+            // root publishes its entry. No profile form and no right is added.
+            let storage_root = provider_storage_root(name, base_path);
+            let parent = storage_root
+                .parent()
+                .expect("a bound storage root has a parent");
+            fs::create_dir_all(&storage_root)
+                .and_then(|()| {
+                    fs::File::open(&storage_root)?.sync_all()?;
+                    fs::File::open(parent)?.sync_all()
+                })
+                .map_err(|err| {
+                    format!(
+                        "{name} start is refused: the storage root {} must be creatable: {err}",
+                        storage_root.display()
+                    )
+                })?;
+            ConfinedProvider::start_under_landlock(allow, ruleset, binary_path)?
+        }
+    };
     let init = json!({
         "op": "init",
         "config": provider_init_config(name, base_path),
@@ -3777,13 +4180,6 @@ fn standin_launcher_finds_the_built_did_binary() {
         "the binary must be named {DID_PROVIDER}: {}",
         binary.display()
     );
-    assert!(
-        binary
-            .ancestors()
-            .any(|dir| dir.file_name().is_some_and(|part| part == "target")),
-        "the binary must sit under a target directory: {}",
-        binary.display()
-    );
     let did_target = did_provider_dir().join("target");
     let cargo_target = std::env::var_os("CARGO_TARGET_DIR").map(|dir| {
         let dir = PathBuf::from(dir);
@@ -3973,7 +4369,7 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
         let profile_dir = resolved(profile_root.path());
         let refusal = standin_spawn_confined_provider(
             host,
-            sandbox_exec,
+            StandinPolicy::Seatbelt(sandbox_exec),
             name,
             provider,
             &base,
@@ -4032,7 +4428,7 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
     );
     let refusal = standin_spawn_confined_provider(
         StandinHost::reporting(std::env::consts::OS),
-        Path::new(SANDBOX_EXEC),
+        StandinPolicy::Seatbelt(Path::new(SANDBOX_EXEC)),
         name,
         &absent_binary,
         &base,
@@ -4079,7 +4475,7 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
         }));
     let refusal = standin_spawn_confined_provider(
         StandinHost::reporting(std::env::consts::OS),
-        Path::new(SANDBOX_EXEC),
+        StandinPolicy::Seatbelt(Path::new(SANDBOX_EXEC)),
         name,
         provider,
         &base,
@@ -4129,7 +4525,7 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
         ));
     let refusal = standin_spawn_confined_provider(
         StandinHost::reporting(std::env::consts::OS),
-        Path::new(SANDBOX_EXEC),
+        StandinPolicy::Seatbelt(Path::new(SANDBOX_EXEC)),
         name,
         provider,
         &base,
@@ -4167,7 +4563,7 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
     fs::write(&planted, b"not a directory").expect("plant a regular file at the storage root");
     let refusal = standin_spawn_confined_provider(
         StandinHost::reporting(std::env::consts::OS),
-        Path::new(SANDBOX_EXEC),
+        StandinPolicy::Seatbelt(Path::new(SANDBOX_EXEC)),
         name,
         provider,
         &base,
@@ -4215,7 +4611,7 @@ fn standin_confined_journey(name: &str, provider: &Path, declared: &Value) {
     let profile_dir = resolved(profile_root.path());
     let mut started = standin_spawn_confined_provider(
         StandinHost::reporting(std::env::consts::OS),
-        Path::new(SANDBOX_EXEC),
+        StandinPolicy::Seatbelt(Path::new(SANDBOX_EXEC)),
         name,
         provider,
         &base,
@@ -4449,11 +4845,16 @@ const SUITE_CASES: [(&str, SuiteClass); 9] = [
 /// half of `planted_file_beneath_storage_parent_is_neither_read_nor_written`;
 /// and the final `get_did` is the service check both tests make after a
 /// refusal.
-const DID_SUITE_CASES: [(&str, SuiteClass); 9] = [
+///
+/// The permitted cases come first, as `DID_PERMITTED_CASES` says, so a caller
+/// that runs only them judges its record against the same leading entries
+/// instead of a second case list.
+const DID_SUITE_CASES: [(&str, SuiteClass); 10] = [
     // `confined_provider_serves_did_operations_under_its_root` (did's
-    // tests/confine.rs:407) runs these five operations.
+    // tests/confine.rs:407) runs these six operations.
     ("init at the did root", SuiteClass::Permitted),
     ("get_did", SuiteClass::Permitted),
+    ("resolve", SuiteClass::Permitted),
     ("set_nickname", SuiteClass::Permitted),
     ("get_nickname", SuiteClass::Permitted),
     ("get_persona_did", SuiteClass::Permitted),
@@ -4480,6 +4881,14 @@ const DID_SUITE_CASES: [(&str, SuiteClass); 9] = [
     // The service check that both tests make after a refusal.
     ("get_did after the denied cases", SuiteClass::Permitted),
 ];
+
+/// How many leading entries of `DID_SUITE_CASES` are the permitted operations,
+/// which is the part `did_standin_permitted_operations` records. The denied
+/// cases follow them, and the trailing service check is not one of these
+/// operations, so it is not counted. Only the Linux journey slices that prefix,
+/// so the constant is compiled where that journey is.
+#[cfg(target_os = "linux")]
+const DID_PERMITTED_CASES: usize = 6;
 
 /// The stable start of a refusal message: its text before the first path
 /// separator, trimmed. Each provider runs on its own temporary root, so the
@@ -4643,23 +5052,28 @@ fn wallet_standin_suite(
     record
 }
 
-/// The did suite on one started provider and one root, using the record type
-/// and judgement of `wallet_standin_suite`. It returns one entry per case of
-/// `DID_SUITE_CASES` in its order: `init` with did's fixture device key,
-/// `get_did`, `set_nickname`, `get_nickname` and `get_persona_did`; the outside
-/// writes of both `outside_write_denied` targets, the first pointing the
-/// granted nickname file at an unrelated directory and the second at a sibling
-/// of `did/` under the same base; the planted read of
-/// `planted_file_beneath_storage_parent_is_neither_read_nor_written`, which
-/// points the granted file at its own encrypted copy beneath `STORAGE_PARENT`;
-/// and `get_did` after the denied cases. Each entry carries the class of the
-/// case it was pushed for. A refusal keeps the answer's `status`, its `code`
-/// and the stable start of its `message`, so two records from different roots
-/// compare equal. Both callers drive one started provider through this
-/// function; it starts none. `label` names the provider, the `B3 journey` and
-/// the start this call drives, and every refusal this function raises starts
-/// with it, so a failed step names the provider and the step.
-fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path, label: &str) -> Vec<SuiteEntry> {
+/// The permitted did operations on one started provider and one root, using the
+/// record type and judgement of `wallet_standin_suite`, and the did suite's
+/// first half.
+///
+/// It returns one entry per case of the first `DID_PERMITTED_CASES` entries of
+/// `DID_SUITE_CASES`, in that order: `init` with did's fixture device key,
+/// `get_did`, `resolve` of that DID, `set_nickname`, `get_nickname` returning
+/// the stored nickname, and `get_persona_did`. `get_did` must answer a
+/// `did:key:` value and `resolve` must echo that DID as its document id, so a
+/// provider that answers neither call cannot pass on an `ok` status alone.
+/// `set_nickname`, `get_nickname` and `get_persona_did` need `init`'s device
+/// key and the nickname file it wrote, so this helper is kept whole: a caller
+/// that wants only the calls a filter cannot change drives all six, and the
+/// calls under `STORAGE_ROOT` that need file state stay in the one helper.
+///
+/// Every refusal this function raises starts with `label`, which names the
+/// provider, the journey and the start this call drives. It starts no provider.
+fn did_standin_permitted_operations(
+    provider: &mut ConfinedProvider,
+    root: &Path,
+    label: &str,
+) -> Vec<SuiteEntry> {
     let mut record = Vec::new();
 
     let init = provider.send(&json!({
@@ -4677,7 +5091,18 @@ fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path, label: &str) 
         .as_str()
         .unwrap_or_else(|| panic!("{label}: get_did must name the DID: {did_data}"))
         .to_string();
+    assert!(
+        did.starts_with("did:key:"),
+        "{label}: get_did must answer a did:key DID: {did}"
+    );
     record.push(suite_entry("get_did", SuiteClass::Permitted, &did_data));
+
+    let resolved = provider.send(&json!({ "op": "resolve", "did": did }));
+    assert_eq!(
+        resolved["data"]["document"]["id"], did,
+        "{label}: resolve must answer the document of the DID it was asked about: {resolved}"
+    );
+    record.push(suite_entry("resolve", SuiteClass::Permitted, &resolved));
 
     let set = provider.send(&json!({ "op": "set_nickname", "nickname": "Confined" }));
     record.push(suite_entry("set_nickname", SuiteClass::Permitted, &set));
@@ -4703,6 +5128,28 @@ fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path, label: &str) 
         SuiteClass::Permitted,
         &persona,
     ));
+
+    record
+}
+
+/// The did suite on one started provider and one root, using the record type
+/// and judgement of `wallet_standin_suite`. It returns one entry per case of
+/// `DID_SUITE_CASES` in its order: the six permitted operations of
+/// `did_standin_permitted_operations`; the outside writes of both
+/// `outside_write_denied` targets, the first pointing the granted nickname file
+/// at an unrelated directory and the second at a sibling of `did/` under the
+/// same base; the planted read of
+/// `planted_file_beneath_storage_parent_is_neither_read_nor_written`, which
+/// points the granted file at its own encrypted copy beneath `STORAGE_PARENT`;
+/// and `get_did` after the denied cases. Each entry carries the class of the
+/// case it was pushed for. A refusal keeps the answer's `status`, its `code`
+/// and the stable start of its `message`, so two records from different roots
+/// compare equal. Both callers drive one started provider through this
+/// function; it starts none. `label` names the provider, the `B3 journey` and
+/// the start this call drives, and every refusal this function raises starts
+/// with it, so a failed step names the provider and the step.
+fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path, label: &str) -> Vec<SuiteEntry> {
+    let mut record = did_standin_permitted_operations(provider, root, label);
 
     // The first `outside_write_denied` target: an unrelated directory. The
     // granted nickname file is a symlink to that target, so the profile must
@@ -4999,7 +5446,7 @@ fn standin_b3_journey(provider: &B3Provider) {
     let profile_dir = resolved(profile_fixture.path());
     let mut standin = standin_spawn_confined_provider(
         StandinHost::reporting(std::env::consts::OS),
-        Path::new(SANDBOX_EXEC),
+        StandinPolicy::Seatbelt(Path::new(SANDBOX_EXEC)),
         name,
         provider.binary,
         &standin_root,
@@ -5139,7 +5586,7 @@ fn standin_start_runs_under_the_generated_profile_not_the_committed_file() {
     let profile_dir = resolved(profile_fixture.path());
     let refusal = standin_spawn_confined_provider(
         StandinHost::reporting(std::env::consts::OS),
-        Path::new(SANDBOX_EXEC),
+        StandinPolicy::Seatbelt(Path::new(SANDBOX_EXEC)),
         "wallet-provider",
         Path::new(PROVIDER_BINARY),
         &base,
@@ -5605,18 +6052,45 @@ fn invalid_json_answer_names_the_request_and_the_parse_error() {
     eprintln!("invalid-JSON failure: {failure}");
 }
 
+/// Whether `form` is a top-level allow rule, whichever way it writes the
+/// operator: `(allow file-read*)` and `(allow(literal "/x"))` put a space or a
+/// nested form after `allow`, `(allow)` is the bare operator, and
+/// `(allow network*)` is the spaced spelling. The three predicates below, the
+/// allow-form selector `allow_forms`, the seccomp mapping table's lookup and
+/// the Landlock ruleset builder all call this one function, so the rule has
+/// one spelling in this file (P10).
+///
+/// `allow` must be a whole token of the form: `(allowed ...)`, `(allowing x)`
+/// and `(notallow)` are not allow forms.
+fn is_allow_form(form: &str) -> bool {
+    allow_form_rest(form).is_some()
+}
+
+/// The text after the `allow` operator of a top-level allow form, or `None`
+/// where the form is not one. `is_allow_form` answers the boolean question and
+/// `is_exec_allow` reads its operation names from this same rest, so the form
+/// head has one spelling (P10).
+fn allow_form_rest(form: &str) -> Option<&str> {
+    let rest = form.strip_prefix('(')?.trim_start();
+    let operation = rest.split([' ', '(', ')']).next().unwrap_or_default();
+    if operation != "allow" {
+        return None;
+    }
+    Some(&rest[operation.len()..])
+}
+
 /// Whether `form` is a top-level allow rule that grants the network. This is
 /// the one copy of the rule, used both by the provider's own profile test and
 /// by the shared file-profile contract check (P10).
 fn is_network_allow(form: &str) -> bool {
-    form.starts_with("(allow ") && form.contains("network")
+    is_allow_form(form) && form.contains("network")
 }
 
 /// Whether `form` is a top-level allow rule that grants every operation by
 /// default. This is the one copy of the rule, used both by the provider's own
 /// profile test and by the shared file-profile contract check (P10).
 fn is_default_allow(form: &str) -> bool {
-    form.starts_with("(allow ") && form.split([' ', '(', ')']).any(|token| token == "default")
+    is_allow_form(form) && form.split([' ', '(', ')']).any(|token| token == "default")
 }
 
 /// Whether `form` is a top-level allow rule that grants `process-exec`: one of
@@ -5629,10 +6103,10 @@ fn is_default_allow(form: &str) -> bool {
 /// quote or parenthesis reads here as `profile_forms` reads it. This is the one
 /// copy of the rule, used by the shared file-profile contract check (P10).
 fn is_exec_allow(form: &str) -> bool {
-    let Some(rest) = form.strip_prefix("(allow") else {
+    let Some(rest) = allow_form_rest(form) else {
         return false;
     };
-    if !rest.starts_with([' ', '(']) {
+    if !rest.is_empty() && !rest.starts_with([' ', '(']) {
         return false;
     }
     let mut operations: Vec<String> = Vec::new();
@@ -5716,11 +6190,6 @@ const SHARED_RULES: [&str; 3] = [
     r#"(allow file-read* (literal (param "STORAGE_PARENT")))"#,
     r#"(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))"#,
 ];
-/// The three head forms every file profile starts with, in profile order.
-const PROFILE_HEAD: [&str; 3] = ["(version 1)", "(deny default)", "(deny network*)"];
-/// The right ids the shared contract names. A declared-rights file may claim
-/// only these.
-const CONTRACT_RIGHTS: [&str; 2] = ["storage", "bound-executable"];
 /// The two allow forms did and wallet hold for startup: the provider reads the
 /// root directory to resolve its own path, and reads kernel facts before the
 /// protocol starts.
@@ -5728,10 +6197,6 @@ const STARTUP_RULES: [&str; 2] = [
     r#"(allow file-read* (literal "/"))"#,
     r#"(allow sysctl-read)"#,
 ];
-/// The platform-baseline ids the shared contract names. A declared-rights file
-/// may claim only these under its platform baseline; they are the Runtime
-/// platform baseline for the provider executable on macOS, not approved rights.
-const PLATFORM_BASELINE_IDS: [&str; 2] = ["startup-root-directory", "startup-sysctl"];
 /// The one id the shared contract names for each pinned allow rule: the three
 /// shared rules and the two startup forms. A shared rule must be claimed by its
 /// id, and a startup form must be claimed by its id whenever the profile holds
@@ -5744,24 +6209,26 @@ const PINNED_RULES: &[(&str, &str)] = &[
     (STARTUP_RULES[0], "startup-root-directory"),
     (STARTUP_RULES[1], "startup-sysctl"),
 ];
-/// The sentence a declared-rights file gives for its own role.
-const DECLARED_RIGHTS_ROLE: &str =
-    "lab stand-in for the Runtime generator's input, not a manifest field";
-/// The one key a declared-rights file holds its platform baseline under.
-const PLATFORM_BASELINE: &str = "platform_baseline";
-/// The status sentence a declared-rights file gives its platform baseline for
-/// `name`, the provider executable the Runtime binds on macOS.
-fn platform_baseline_status(name: &str) -> String {
-    format!("Runtime platform baseline for the {name} executable on macOS, not approved rights")
-}
-/// The prefix every platform-baseline justification starts with, naming the
-/// provider executable the Runtime binds as PROVIDER_EXECUTABLE.
-fn platform_baseline_justification(name: &str) -> String {
-    format!("macOS {name} executable bound as PROVIDER_EXECUTABLE: ")
-}
 /// The file profiles the one contract check requires. Every one of them must
 /// present the contract, in this order.
 const FILE_PROFILES: [&str; 3] = ["did-provider", "wallet-provider", "model-provider"];
+
+/// The parameter names one form's `(param "NAME")` tokens carry, in order.
+/// An unclosed token is a refusal. The contract check and the Landlock path
+/// reader both use this scan, so the token has one reader (P10).
+fn parameter_tokens(form: &str) -> Result<Vec<&str>, ()> {
+    let mut tokens = Vec::new();
+    let mut rest = form;
+    while let Some(at) = rest.find(PARAM_PREFIX) {
+        let tail = &rest[at + PARAM_PREFIX.len()..];
+        let Some(end) = tail.find('"') else {
+            return Err(());
+        };
+        tokens.push(&tail[..end]);
+        rest = &tail[end..];
+    }
+    Ok(tokens)
+}
 
 /// The one file-profile contract every file profile declares: `(version 1)`
 /// first, `(deny default)` second, an explicit `(deny network*)`, no
@@ -5798,20 +6265,17 @@ fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
         if is_exec_allow(form) {
             exec_allows.push(form.as_str());
         }
-        let mut rest = form.as_str();
-        while let Some(at) = rest.find(PARAM_PREFIX) {
-            let tail = &rest[at + PARAM_PREFIX.len()..];
-            let Some(end) = tail.find('"') else {
-                return Err(format!("{name} parameter token must close: {form}"));
-            };
-            let token = &tail[..end];
+        let tokens = match parameter_tokens(form) {
+            Ok(tokens) => tokens,
+            Err(()) => return Err(format!("{name} parameter token must close: {form}")),
+        };
+        for token in tokens {
             if !CANONICAL_PARAMS.contains(&token) {
                 return Err(format!(
                     "{name} declares the non-canonical parameter token {token}; \
                      every file profile binds STORAGE_ROOT, STORAGE_PARENT and PROVIDER_EXECUTABLE"
                 ));
             }
-            rest = &tail[end..];
         }
     }
     if exec_allows.len() > 1 {
@@ -5859,14 +6323,6 @@ fn check_file_profiles(capsules: &Path) -> Result<Vec<&'static str>, String> {
         checked.push(name);
     }
     Ok(checked)
-}
-
-/// One declared entry of a declared-rights file: its id and the allow rules it
-/// claims.
-#[derive(Debug)]
-struct DeclaredClaim {
-    id: String,
-    rules: Vec<String>,
 }
 
 /// The one declared-rights check for the did and wallet profiles: every
@@ -5970,169 +6426,6 @@ fn check_declared_rights(name: &str, profile: &str, declared: &Value) -> Result<
     Ok(())
 }
 
-/// The rights claims and the platform-baseline claims of `declared`, each
-/// proven to hold an id the shared contract names and a rules list of strings,
-/// and each platform-baseline entry proven to give a justification that starts
-/// with the provider's executable prefix and a reason after it.
-///
-/// The one declared-rights check and the one lab generator both read the
-/// declared entries through this function (P10). It refuses, in this order: a
-/// document without the role, provider, rights list or platform baseline; a
-/// platform baseline without its own status sentence; a platform baseline
-/// without its rules list; an entry of the declared rights list or the
-/// platform-baseline rules list without a string id, whose reason names that
-/// list and the entry; an entry without a rules list; a rule that is not a
-/// string; an id the shared contract does not name; and a platform-baseline
-/// entry without a justification that starts with the provider's prefix and
-/// gives a reason. Each refusal starts with the provider name and quotes the
-/// rule or names the id (P11).
-fn declared_entries(
-    name: &str,
-    declared: &Value,
-) -> Result<(Vec<DeclaredClaim>, Vec<DeclaredClaim>), String> {
-    if declared["role"].as_str() != Some(DECLARED_RIGHTS_ROLE) {
-        return Err(format!(
-            "{name} declared-rights file must give the role {DECLARED_RIGHTS_ROLE:?}"
-        ));
-    }
-    if declared["provider"].as_str() != Some(name) {
-        return Err(format!(
-            "{name} declared-rights file must name the provider {name}"
-        ));
-    }
-    let Some(rights) = declared["rights"].as_array() else {
-        return Err(format!(
-            "{name} declared-rights file must hold a rights list"
-        ));
-    };
-    let Some(baseline) = declared[PLATFORM_BASELINE].as_object() else {
-        return Err(format!(
-            "{name} declared-rights file must hold a platform baseline"
-        ));
-    };
-    let status = platform_baseline_status(name);
-    if baseline.get("status").and_then(Value::as_str) != Some(status.as_str()) {
-        return Err(format!(
-            "{name} platform baseline must give the status {status:?}"
-        ));
-    }
-    let Some(baseline_rules) = baseline.get("rules").and_then(Value::as_array) else {
-        return Err(format!("{name} platform baseline must hold a rules list"));
-    };
-    let rights = declared_claims(name, "declared rights list", rights)?;
-    let baseline = declared_claims(name, "platform baseline rules", baseline_rules)?;
-    for claim in &rights {
-        if !CONTRACT_RIGHTS.contains(&claim.id.as_str()) {
-            return Err(format!(
-                "{name} declares {}, which the shared contract does not name",
-                claim.id
-            ));
-        }
-    }
-    for claim in &baseline {
-        if !PLATFORM_BASELINE_IDS.contains(&claim.id.as_str()) {
-            return Err(format!(
-                "{name} declares {}, which the shared contract does not name",
-                claim.id
-            ));
-        }
-    }
-    let prefix = platform_baseline_justification(name);
-    for (entry, claim) in baseline_rules.iter().zip(&baseline) {
-        let Some(justification) = entry["justification"].as_str() else {
-            return Err(format!(
-                "{name} platform baseline {} must give a string justification",
-                claim.id
-            ));
-        };
-        if !justification.starts_with(&prefix) {
-            return Err(format!(
-                "{name} platform baseline {} justification must start with {prefix:?}",
-                claim.id
-            ));
-        }
-        if justification[prefix.len()..].trim().is_empty() {
-            return Err(format!(
-                "{name} platform baseline {} justification gives no reason after {prefix:?}",
-                claim.id
-            ));
-        }
-    }
-    Ok((rights, baseline))
-}
-
-/// The one lab generator for a file profile: the contract head, then every
-/// rule of every rights claim in file order, then every rule of every
-/// platform-baseline claim in file order, one form per line. It emits no
-/// comment and nothing else, it reads and writes no file, and it refuses an id
-/// the shared contract does not name through `declared_entries`.
-fn generate_profile(name: &str, declared: &Value) -> Result<String, String> {
-    let (rights, baseline) = declared_entries(name, declared)?;
-    let mut profile = String::new();
-    for form in PROFILE_HEAD {
-        profile.push_str(form);
-        profile.push('\n');
-    }
-    for claim in rights.iter().chain(&baseline) {
-        for rule in &claim.rules {
-            profile.push_str(rule);
-            profile.push('\n');
-        }
-    }
-    Ok(profile)
-}
-
-/// The one lab writer of a generated profile: it calls `generate_profile`
-/// first and returns that refusal unchanged, before it creates, opens or
-/// truncates `path`; only a generated profile is written, and a write failure
-/// is a refusal that names the provider and the path. It adds no validation of
-/// its own: every refusal reason comes from `declared_entries`.
-fn write_generated_profile(name: &str, declared: &Value, path: &Path) -> Result<(), String> {
-    let profile = generate_profile(name, declared)?;
-    fs::write(path, profile).map_err(|err| {
-        format!(
-            "{name} generated profile {} must be writable: {err}",
-            path.display()
-        )
-    })
-}
-
-/// The declared entries of `entries`, each proven to hold a string id and a
-/// rules list of strings. `label` names the list in the missing-id refusal, so
-/// the reader knows which of the two lists holds the entry; the index names
-/// the entry. The two other refusals name the id.
-fn declared_claims(
-    name: &str,
-    label: &str,
-    entries: &[Value],
-) -> Result<Vec<DeclaredClaim>, String> {
-    let mut claims = Vec::with_capacity(entries.len());
-    for (index, entry) in entries.iter().enumerate() {
-        let Some(id) = entry["id"].as_str() else {
-            return Err(format!(
-                "{name} {label} entry {index} must give a string id"
-            ));
-        };
-        let Some(rules) = entry["rules"].as_array() else {
-            return Err(format!("{name} declares {id} without a rules list"));
-        };
-        let mut claimed = Vec::with_capacity(rules.len());
-        for rule in rules {
-            let Some(rule) = rule.as_str() else {
-                return Err(format!(
-                    "{name} declares {id} with a rule that is not a string"
-                ));
-            };
-            claimed.push(rule.to_owned());
-        }
-        claims.push(DeclaredClaim {
-            id: id.to_owned(),
-            rules: claimed,
-        });
-    }
-    Ok(claims)
-}
-
 /// Reads one provider's declared-rights file. A missing, unreadable or invalid
 /// file is a refusal that names the path; there is no skip path.
 fn read_declared_rights(name: &str, path: &Path) -> Result<Value, String> {
@@ -6148,6 +6441,6357 @@ fn read_declared_rights(name: &str, path: &Path) -> Result<Value, String> {
             path.display()
         )
     })
+}
+
+/// The one mapping table from a top-level allow form's text to the syscall
+/// names it admits: the Linux seat of the file-profile contract.
+///
+/// The rows follow the contract's meaning rather than one kernel call.
+/// `file-read*` keeps the calls that read an opened file or a directory entry;
+/// `file-write*` keeps the calls that change one, plus the reads its own
+/// callers make. The startup rows carry the loader's start reads and the kernel
+/// facts `sysctl-read` names.
+///
+/// `ptrace`, `mount`, `bpf`, `keyctl`, `socket`, `socketpair`, `connect`,
+/// `sendmsg`, `recvmsg`, `process_vm_readv`, `process_vm_writev` and
+/// `pidfd_getfd` appear in no row, so the program's default decision is the only
+/// answer they receive. Adding one of them to a row would grant it and turn
+/// `seccomp_program_denies_by_default_and_lists_no_undeclared_call` red.
+///
+/// This table is the only source of the list's syscalls: the builder adds none
+/// of its own, so a syscall enters the filter only through a row an allow form
+/// of the generated profile selects.
+const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
+    (SHARED_RULES[0], &["execve", "execveat"]),
+    (
+        SHARED_RULES[1],
+        &[
+            "faccessat",
+            "fstat",
+            "getdents64",
+            "lseek",
+            "newfstatat",
+            "openat",
+            "openat2",
+            "pread64",
+            "read",
+            "readlinkat",
+            "readv",
+            "statx",
+        ],
+    ),
+    (
+        SHARED_RULES[2],
+        &[
+            "faccessat",
+            "fchmod",
+            "fdatasync",
+            "fstat",
+            "fsync",
+            "ftruncate",
+            "getdents64",
+            "linkat",
+            "lseek",
+            "mkdirat",
+            "newfstatat",
+            "openat",
+            "openat2",
+            "pread64",
+            "pwrite64",
+            "read",
+            "readlinkat",
+            "readv",
+            "renameat2",
+            "statx",
+            "unlinkat",
+            "write",
+            "writev",
+        ],
+    ),
+    (
+        STARTUP_RULES[0],
+        &[
+            "faccessat",
+            "fstat",
+            "getdents64",
+            "lseek",
+            "newfstatat",
+            "openat",
+            "openat2",
+            "pread64",
+            "read",
+            "readlinkat",
+            "readv",
+            "statx",
+        ],
+    ),
+    (STARTUP_RULES[1], &["uname", "sysinfo"]),
+];
+
+/// The system call numbers the filter tests against, per audit architecture:
+/// x86-64 first, then aarch64. `None` marks a call the target does not have.
+///
+/// The socket rows carry the number `libc::SYS_*` gives that architecture:
+/// `socket`, `socketpair`, `connect`, `sendmsg`, `recvmsg`, `process_vm_readv`,
+/// `process_vm_writev` and `pidfd_getfd`. No allow-form row names one of them,
+/// so each keeps the default decision, and the journey's sweep proves the
+/// refusal on the Linux host.
+const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
+    ("bpf", Some(321), Some(280)),
+    ("close", Some(3), Some(57)),
+    ("connect", Some(42), Some(203)),
+    ("execve", Some(59), Some(221)),
+    ("execveat", Some(322), Some(281)),
+    ("exit_group", Some(231), Some(94)),
+    ("faccessat", Some(269), Some(48)),
+    ("fchmod", Some(91), Some(52)),
+    ("fdatasync", Some(75), Some(83)),
+    ("fstat", Some(5), Some(80)),
+    ("fsync", Some(74), Some(82)),
+    ("ftruncate", Some(77), Some(46)),
+    ("getdents64", Some(217), Some(61)),
+    ("getrandom", Some(318), Some(278)),
+    ("keyctl", Some(250), Some(219)),
+    ("linkat", Some(265), Some(37)),
+    ("lseek", Some(8), Some(62)),
+    ("mkdirat", Some(258), Some(34)),
+    ("mmap", Some(9), Some(222)),
+    ("mount", Some(165), Some(40)),
+    ("mprotect", Some(10), Some(226)),
+    ("newfstatat", Some(262), Some(79)),
+    ("openat", Some(257), Some(56)),
+    ("openat2", Some(437), Some(437)),
+    ("pidfd_getfd", Some(438), Some(438)),
+    ("ppoll", Some(271), Some(73)),
+    ("pread64", Some(17), Some(67)),
+    ("process_vm_readv", Some(310), Some(270)),
+    ("process_vm_writev", Some(311), Some(271)),
+    ("ptrace", Some(101), Some(117)),
+    ("pwrite64", Some(18), Some(68)),
+    ("read", Some(0), Some(63)),
+    ("readlinkat", Some(267), Some(78)),
+    ("readv", Some(19), Some(65)),
+    ("recvmsg", Some(47), Some(212)),
+    ("renameat2", Some(316), Some(276)),
+    ("rt_sigaction", Some(13), Some(134)),
+    ("sendmsg", Some(46), Some(211)),
+    ("socket", Some(41), Some(198)),
+    ("socketpair", Some(53), Some(199)),
+    ("statx", Some(332), Some(291)),
+    ("sysinfo", Some(99), Some(179)),
+    ("uname", Some(63), Some(160)),
+    ("unlinkat", Some(263), Some(35)),
+    ("write", Some(1), Some(64)),
+    ("writev", Some(20), Some(66)),
+];
+
+/// The audit architecture this target's kernel reports in `seccomp_data.arch`.
+/// A filter built for one architecture refuses the other instead of reading its
+/// syscall numbers as its own.
+#[cfg(target_arch = "x86_64")]
+const SECCOMP_AUDIT_ARCH: u32 = 0xc000_003e;
+#[cfg(target_arch = "aarch64")]
+const SECCOMP_AUDIT_ARCH: u32 = 0xc000_00b7;
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+const SECCOMP_AUDIT_ARCH: u32 = 0;
+
+/// The first number of the x32 call space on x86-64.
+const SECCOMP_X32_FIRST: u32 = 0x4000_0000;
+/// `seccomp_data.arch` sits at byte offset 4 and `seccomp_data.nr` at 0.
+const SECCOMP_ARCH_OFFSET: u32 = 4;
+const SECCOMP_NUMBER_OFFSET: u32 = 0;
+/// The classic-BPF codes the filter uses: load a word, test equality, test
+/// greater-or-equal, and return a decision.
+const SECCOMP_BPF_LD_W_ABS: u16 = 0x20;
+const SECCOMP_BPF_JEQ_K: u16 = 0x15;
+const SECCOMP_BPF_JGE_K: u16 = 0x35;
+const SECCOMP_BPF_RET_K: u16 = 0x06;
+/// `SECCOMP_RET_ALLOW`, and the marker errno this filter answers with. The
+/// marker is `EACCES`, so a refusal is distinguishable from the `EPERM` a
+/// kernel gives an unprivileged process for a call it may not make: a `bpf`
+/// assertion that reads `EPERM` would pass with no filter installed.
+const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+const SECCOMP_DENY_ERRNO: i32 = libc::EACCES;
+
+/// One classic-BPF instruction. The filter is built as this plain value so a
+/// test can walk it on every OS, and it becomes a `libc::sock_filter` only
+/// where a kernel reads it (task 148).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SeccompInstruction {
+    code: u16,
+    jt: u8,
+    jf: u8,
+    k: u32,
+}
+
+impl SeccompInstruction {
+    const fn stmt(code: u16, k: u32) -> Self {
+        Self {
+            code,
+            jt: 0,
+            jf: 0,
+            k,
+        }
+    }
+
+    const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> Self {
+        Self { code, jt, jf, k }
+    }
+}
+
+/// The value the filter returns for a refused call: `SECCOMP_RET_ERRNO` with
+/// the deny marker.
+const fn seccomp_deny_return() -> u32 {
+    0x0005_0000 | SECCOMP_DENY_ERRNO as u32
+}
+
+/// The generated Linux policy of one provider: the provider name, the audit
+/// architecture the program was built for, the syscall names it admits in
+/// program order, and the program itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SeccompAllowList {
+    provider: String,
+    audit_arch: u32,
+    syscalls: Vec<&'static str>,
+    program: Vec<SeccompInstruction>,
+    /// A step an install must refuse, so a launch refusal is proved without a
+    /// kernel that would refuse it. It is test input and `None` in every real
+    /// launch.
+    #[cfg(target_os = "linux")]
+    injected_step_failure: Option<(SeccompStep, i32)>,
+}
+
+impl SeccompAllowList {
+    /// Whether the list admits `name`.
+    fn admits(&self, name: &str) -> bool {
+        self.syscalls.contains(&name)
+    }
+
+    /// The list a launch installs: this declared list plus the measured launch
+    /// set, rebuilt by the one program builder. It is the only place the two
+    /// sources join, so the launcher and the probe install the same filter and
+    /// no second list is written (P10).
+    ///
+    /// The launch set is measured, not declared: no declared right covers a
+    /// runtime's own plumbing, and a launch that loses one cannot speak its
+    /// protocol. `LAUNCH_ESSENTIALS` holds none of the four calls the default
+    /// decision refuses, and none of the socket calls either, so adding the set
+    /// leaves every one of their answers unchanged.
+    ///
+    /// It makes no kernel call and reads no file, so it runs on every OS: the
+    /// journey that installs the result is Linux-only, and the list a launch
+    /// would install can be read and compared wherever the tests run.
+    fn with_launch_essentials(&self) -> Self {
+        let mut syscalls = self.syscalls.clone();
+        for (syscall, _) in LAUNCH_ESSENTIALS {
+            let syscall = *syscall;
+            if !syscalls.contains(&syscall) {
+                syscalls.push(syscall);
+            }
+        }
+        syscalls.sort_unstable();
+        Self {
+            provider: self.provider.clone(),
+            audit_arch: self.audit_arch,
+            program: seccomp_program(&syscalls, self.audit_arch),
+            syscalls,
+            #[cfg(target_os = "linux")]
+            injected_step_failure: self.injected_step_failure,
+        }
+    }
+}
+
+/// The number `name` has on `audit_arch`, or `None` where the call does not
+/// exist there. One reader serves the filter builder and every test (P10).
+fn seccomp_syscall_number(name: &str, audit_arch: u32) -> Option<u32> {
+    let (_, x86_64, aarch64) = SECCOMP_SYSCALL_NUMBERS
+        .iter()
+        .find(|(candidate, _, _)| *candidate == name)
+        .unwrap_or_else(|| panic!("{name} has no syscall number row"));
+    match audit_arch {
+        0xc000_003e => *x86_64,
+        0xc000_00b7 => *aarch64,
+        _ => None,
+    }
+}
+
+/// The one builder: the allow list of `name`, rendered from the profile
+/// `generate_profile` produces from `declared` and read back through
+/// `profile_forms`. It reads no file, holds no rule text of its own and never
+/// reads the declared-rights document directly, so the JSON has one reader and
+/// the profile one parser (P10).
+///
+/// Every admitted syscall comes from a mapping-table row an allow form selects,
+/// so a declaration with no allow form yields an empty list and a program whose
+/// only decisions are the ABI guards and the deny marker. The launch set a
+/// Linux start additionally needs is measured on the Linux host by the task
+/// that owns the kernel calls; nothing here adds a syscall of its own.
+///
+/// It refuses, in this order: whatever `generate_profile` refuses, with that
+/// reason unchanged; an allow form the mapping table does not hold, with a
+/// reason that names the provider and the form, before any filter is built; and
+/// a target whose audit architecture the filter cannot name.
+///
+/// The head forms and the deny forms grant nothing, so they take no row and add
+/// no syscall.
+fn seccomp_allow_list_from_declared_rights(
+    name: &str,
+    declared: &Value,
+) -> Result<SeccompAllowList, String> {
+    let rendered = generate_profile(name, declared)?;
+    let mut syscalls: Vec<&'static str> = Vec::new();
+    for form in profile_forms(&rendered) {
+        if !is_allow_form(&form) {
+            // The version, the default denial and the network denial grant
+            // nothing, so no syscall answers to them.
+            continue;
+        }
+        let Some(row) = SECCOMP_RULE_SYSCALLS
+            .iter()
+            .find(|(allowed, _)| *allowed == form.as_str())
+        else {
+            return Err(format!(
+                "{name} seccomp allow list refuses the allow form {form}: \
+                 the mapping table has no syscall row for it, so no filter is built"
+            ));
+        };
+        for syscall in row.1 {
+            if !syscalls.contains(syscall) {
+                syscalls.push(syscall);
+            }
+        }
+    }
+    if SECCOMP_AUDIT_ARCH == 0 {
+        return Err(format!(
+            "{name} seccomp allow list is unavailable on target architecture {}: \
+             the lab filter checks one audit architecture and this target has none",
+            std::env::consts::ARCH
+        ));
+    }
+    syscalls.sort_unstable();
+    let program = seccomp_program(&syscalls, SECCOMP_AUDIT_ARCH);
+    Ok(SeccompAllowList {
+        provider: name.to_string(),
+        audit_arch: SECCOMP_AUDIT_ARCH,
+        syscalls,
+        program,
+        #[cfg(target_os = "linux")]
+        injected_step_failure: None,
+    })
+}
+
+/// The program of `syscalls`, in the one shape the list has: the audit-arch
+/// check, the x32 guard, one equality test per admitted number with an `ALLOW`
+/// return behind it, and the deny marker as the final decision. The default arm
+/// is the marker, so every call the list does not name is refused.
+fn seccomp_program(syscalls: &[&'static str], audit_arch: u32) -> Vec<SeccompInstruction> {
+    let mut program = vec![
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARCH_OFFSET),
+        // A wrong audit architecture falls through to the deny marker.
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, audit_arch, 1, 0),
+        SeccompInstruction::stmt(SECCOMP_BPF_RET_K, seccomp_deny_return()),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_NUMBER_OFFSET),
+        // A number in the x32 space is not the call it looks like.
+        SeccompInstruction::jump(SECCOMP_BPF_JGE_K, SECCOMP_X32_FIRST, 0, 1),
+        SeccompInstruction::stmt(SECCOMP_BPF_RET_K, seccomp_deny_return()),
+    ];
+    for syscall in syscalls {
+        let Some(number) = seccomp_syscall_number(syscall, audit_arch) else {
+            continue;
+        };
+        program.push(SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number, 0, 1));
+        program.push(SeccompInstruction::stmt(
+            SECCOMP_BPF_RET_K,
+            SECCOMP_RET_ALLOW,
+        ));
+    }
+    program.push(SeccompInstruction::stmt(
+        SECCOMP_BPF_RET_K,
+        seccomp_deny_return(),
+    ));
+    program
+}
+
+/// The two steps a seccomp install takes, in order. Each has its own refusal,
+/// so a failure names the step that failed and keeps its errno (P11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeccompStep {
+    NoNewPrivileges,
+    Filter,
+}
+
+/// A fixed-size refusal value. Its `Display` implementation allocates, so the
+/// launcher formats it in the parent and never after fork.
+///
+/// The `Landlock` arm carries the file row's install failure, so the one record
+/// layout and the one decoder carry both installs and no second reporting path
+/// exists (P10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeccompInstallFailure {
+    Step(SeccompStep, i32),
+    AuditArchitecture(u32),
+    Landlock(LandlockInstallFailure),
+}
+
+impl SeccompInstallFailure {
+    /// Both child paths report failures through the same fixed record and
+    /// decoder. This conversion uses only stack values after a fork. A Landlock
+    /// step is encoded here, in this one record builder. The byte writer stays
+    /// the writer of a finished record.
+    fn launch_record(self) -> [u8; SECCOMP_LAUNCH_RECORD_LEN] {
+        match self {
+            Self::Landlock(failure) => failure.launch_record(),
+            Self::Step(SeccompStep::NoNewPrivileges, errno) => {
+                seccomp_launch_record(SECCOMP_LAUNCH_NO_NEW_PRIVS, i64::from(errno), 0)
+            }
+            Self::Step(SeccompStep::Filter, errno) => {
+                seccomp_launch_record(SECCOMP_LAUNCH_FILTER, i64::from(errno), 0)
+            }
+            Self::AuditArchitecture(arch) => {
+                seccomp_launch_record(SECCOMP_LAUNCH_AUDIT_ARCH, 0, i64::from(arch))
+            }
+        }
+    }
+}
+
+/// The errno an install failure reports to the spawn's error pipe. One mapping
+/// serves every `pre_exec` caller, so the child's exit status cannot differ
+/// between the two installs (P10).
+#[cfg(target_os = "linux")]
+impl SeccompInstallFailure {
+    fn errno(self) -> i32 {
+        match self {
+            Self::Step(_, errno) => errno,
+            Self::AuditArchitecture(_) => libc::EINVAL,
+            Self::Landlock(failure) => failure.errno,
+        }
+    }
+}
+
+impl std::fmt::Display for SeccompInstallFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Step(SeccompStep::NoNewPrivileges, errno) => write!(
+                f,
+                "seccomp install refused: PR_SET_NO_NEW_PRIVS failed with errno {errno}"
+            ),
+            Self::Step(SeccompStep::Filter, errno) => write!(
+                f,
+                "seccomp install refused: the filter install failed with errno {errno}"
+            ),
+            Self::AuditArchitecture(arch) => write!(
+                f,
+                "seccomp install refused: the list was built for audit architecture {arch:#x} \
+                 and this target reports {SECCOMP_AUDIT_ARCH:#x}"
+            ),
+            Self::Landlock(failure) => write!(f, "{failure}"),
+        }
+    }
+}
+
+/// The one step sequencer, and it makes no kernel call: the architecture check
+/// first, then `NoNewPrivileges`, then `Filter`, stopping at the first failure
+/// with that step's own reason and errno. A failure of the first step means the
+/// second never runs.
+fn install_seccomp_with(
+    allow: &SeccompAllowList,
+    mut steps: impl FnMut(SeccompStep) -> Result<(), i32>,
+) -> Result<(), SeccompInstallFailure> {
+    if allow.audit_arch != SECCOMP_AUDIT_ARCH {
+        return Err(SeccompInstallFailure::AuditArchitecture(allow.audit_arch));
+    }
+    for step in [SeccompStep::NoNewPrivileges, SeccompStep::Filter] {
+        steps(step).map_err(|errno| SeccompInstallFailure::Step(step, errno))?;
+    }
+    Ok(())
+}
+
+/// The Landlock filesystem rights, by the bit the ABI numbers. The values are
+/// the kernel's `<linux/landlock.h>` flags, written here as plain numbers so the
+/// ruleset builder and every test read one table on every OS. `REFER`,
+/// `TRUNCATE` and `IOCTL_DEV` arrived in ABI 2, 3 and 5, so a row that needs one
+/// of them departs a lower-ABI kernel wider, and the builder refuses that ABI
+/// instead of installing a weaker rule.
+const LANDLOCK_ACCESS_FS_EXECUTE: u64 = 1 << 0;
+const LANDLOCK_ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
+const LANDLOCK_ACCESS_FS_READ_FILE: u64 = 1 << 2;
+const LANDLOCK_ACCESS_FS_READ_DIR: u64 = 1 << 3;
+const LANDLOCK_ACCESS_FS_REMOVE_DIR: u64 = 1 << 4;
+const LANDLOCK_ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
+const LANDLOCK_ACCESS_FS_MAKE_CHAR: u64 = 1 << 6;
+const LANDLOCK_ACCESS_FS_MAKE_DIR: u64 = 1 << 7;
+const LANDLOCK_ACCESS_FS_MAKE_REG: u64 = 1 << 8;
+const LANDLOCK_ACCESS_FS_MAKE_SOCK: u64 = 1 << 9;
+const LANDLOCK_ACCESS_FS_MAKE_FIFO: u64 = 1 << 10;
+const LANDLOCK_ACCESS_FS_MAKE_BLOCK: u64 = 1 << 11;
+const LANDLOCK_ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
+const LANDLOCK_ACCESS_FS_REFER: u64 = 1 << 13;
+const LANDLOCK_ACCESS_FS_TRUNCATE: u64 = 1 << 14;
+const LANDLOCK_ACCESS_FS_IOCTL_DEV: u64 = 1 << 15;
+
+/// The one mapping table from a top-level allow form's text to the Landlock
+/// filesystem rights its path rule carries: the file row of the Linux seat of
+/// the file-profile contract.
+///
+/// An entry whose rights are `0` is a form that is deliberately given no path
+/// right, and it is written down rather than omitted so a reader cannot mistake
+/// "no rule" for "not yet considered". Every allow form a wallet profile
+/// carries has exactly one entry here, so no form is left without a decision and
+/// no form can be added to a profile without one:
+///
+/// - the `STORAGE_ROOT` subpath form carries read-file, read-dir, write-file,
+///   remove-file, remove-dir, make-dir and make-reg, because `init` creates the
+///   wallet directory and its key file inside the root, and a path rule on that
+///   directory covers the tree `subpath` names;
+/// - the `bound-executable` exec form carries only `EXECUTE` on that file,
+///   which is what the declared `process-exec` permission authorizes;
+/// - the `STORAGE_PARENT` read form carries no right: a Landlock path rule on a
+///   directory covers the whole tree beneath it, so a read rule on the parent
+///   would grant every sibling of `STORAGE_ROOT`;
+/// - the root read form `(allow file-read* (literal "/"))` carries no right: a
+///   read rule on `/` would grant the whole filesystem and add a fourth path;
+/// - `(allow sysctl-read)` carries no path right. Landlock has no sysctl right,
+///   and the form names kernel facts rather than a path.
+///
+/// The head forms (`(version 1)`, `(deny default)`) and the deny forms grant
+/// nothing, so they take no entry at all.
+///
+/// Falsifier: WP202 adds `READ_FILE` to the `STORAGE_PARENT` row, so
+/// `landlock_ruleset_follows_the_declared_rights` fails on that decision.
+const LANDLOCK_RULE_RIGHTS: &[(&str, u64)] = &[
+    (
+        SHARED_RULES[2],
+        LANDLOCK_ACCESS_FS_READ_FILE
+            | LANDLOCK_ACCESS_FS_READ_DIR
+            | LANDLOCK_ACCESS_FS_WRITE_FILE
+            | LANDLOCK_ACCESS_FS_REMOVE_FILE
+            | LANDLOCK_ACCESS_FS_REMOVE_DIR
+            | LANDLOCK_ACCESS_FS_MAKE_DIR
+            | LANDLOCK_ACCESS_FS_MAKE_REG,
+    ),
+    (SHARED_RULES[0], LANDLOCK_ACCESS_FS_EXECUTE),
+    (SHARED_RULES[1], 0),
+    (STARTUP_RULES[0], 0),
+    (STARTUP_RULES[1], 0),
+];
+
+/// The ABI each Landlock right needs. `READ_FILE`, `READ_DIR`, `WRITE_FILE`
+/// and `EXECUTE` are ABI 1; `REMOVE_FILE`, `REMOVE_DIR`, `MAKE_DIR` and
+/// `MAKE_REG` are also ABI 1. A row whose rights all exist at ABI 1 needs ABI
+/// 1, and the builder reads this table to name the row a lower ABI cannot
+/// express.
+///
+/// The table holds one entry per Landlock right so a row added later with a
+/// newer right cannot silently claim ABI 1: a right with no entry is a
+/// programmatic error the builder reports as its own reason.
+const LANDLOCK_RIGHT_ABI: &[(u64, u32)] = &[
+    (LANDLOCK_ACCESS_FS_EXECUTE, 1),
+    (LANDLOCK_ACCESS_FS_WRITE_FILE, 1),
+    (LANDLOCK_ACCESS_FS_READ_FILE, 1),
+    (LANDLOCK_ACCESS_FS_READ_DIR, 1),
+    (LANDLOCK_ACCESS_FS_REMOVE_DIR, 1),
+    (LANDLOCK_ACCESS_FS_REMOVE_FILE, 1),
+    (LANDLOCK_ACCESS_FS_MAKE_CHAR, 1),
+    (LANDLOCK_ACCESS_FS_MAKE_DIR, 1),
+    (LANDLOCK_ACCESS_FS_MAKE_REG, 1),
+    (LANDLOCK_ACCESS_FS_MAKE_SOCK, 1),
+    (LANDLOCK_ACCESS_FS_MAKE_FIFO, 1),
+    (LANDLOCK_ACCESS_FS_MAKE_BLOCK, 1),
+    (LANDLOCK_ACCESS_FS_MAKE_SYM, 1),
+    (LANDLOCK_ACCESS_FS_REFER, 2),
+    (LANDLOCK_ACCESS_FS_TRUNCATE, 3),
+    (LANDLOCK_ACCESS_FS_IOCTL_DEV, 5),
+];
+
+/// The lowest Landlock ABI that can express every right of `rights`, or `None`
+/// where a right has no table entry. It reads the one ABI table. A missing
+/// entry is `None`, never ABI 1.
+fn landlock_rights_abi(rights: u64) -> Option<u32> {
+    let mut needed = 0u32;
+    let mut known = 0u64;
+    for (right, abi) in LANDLOCK_RIGHT_ABI {
+        known |= *right;
+        if rights & right == 0 {
+            continue;
+        }
+        needed = needed.max(*abi);
+    }
+    if rights & !known != 0 {
+        return None;
+    }
+    Some(needed)
+}
+
+/// The refusal of one row the reported `abi` cannot express, naming the row, or
+/// `None` where the ABI can express it. This is the one copy of the ABI rule:
+/// the ruleset builder and the test that presents a low ABI both read it (P10).
+fn landlock_row_abi_refusal(row: &str, rights: u64, abi: u32) -> Option<String> {
+    let Some(needed) = landlock_rights_abi(rights) else {
+        return Some(format!(
+            "linux confinement refused: the Landlock ABI cannot express {row}, \
+             because a right in it has no ABI table entry"
+        ));
+    };
+    if abi < needed {
+        return Some(format!(
+            "linux confinement refused: the Landlock ABI cannot express {row}, \
+             which needs ABI {needed} and this kernel reports ABI {abi}"
+        ));
+    }
+    None
+}
+
+/// The rights the file row must be able to *deny*, with the row name its refusal
+/// uses. The oracle's `(deny default)` file row refuses every file write outside
+/// `STORAGE_ROOT`, and a truncation and a device ioctl are writes there, so a
+/// kernel whose ABI reports no right for them leaves them permitted outside the
+/// root. `CONFINEMENT-LINUX.md` states the same rule for the `STORAGE_ROOT` row:
+/// a wider departure is not confinement, so the start is refused.
+///
+/// The ABI each right needs is read from the one ABI table by
+/// `landlock_row_abi_refusal`, so this constant holds no ABI version of its own.
+/// `TRUNCATE` arrives at ABI 3 and `IOCTL_DEV` at ABI 5, so only ABI 5 or later
+/// can refuse a write outside the root and a lower ABI builds no ruleset.
+///
+/// Falsifier: WP203 drops the builder's check of this pair, so ABI 1 builds a
+/// ruleset and `landlock_ruleset_refuses_an_abi_that_cannot_express_a_row` fails.
+const LANDLOCK_REQUIRED_DENIALS: (&str, u64) = (
+    "the default-denial file rights",
+    LANDLOCK_ACCESS_FS_TRUNCATE | LANDLOCK_ACCESS_FS_IOCTL_DEV,
+);
+
+/// The rights the builder handles in every ruleset: every right the ABI can
+/// report at the version the ruleset was built for, so a right no rule covers is
+/// refused by the default denial instead of being permitted. `handled_access_fs`
+/// must name every right the kernel knows at that ABI, because an unnamed right
+/// is not restricted at all.
+///
+/// `REFER`, `TRUNCATE` and `IOCTL_DEV` are added only at the ABI that defines
+/// them: naming a right a lower-ABI kernel does not know makes
+/// `landlock_create_ruleset` fail with `EINVAL`, so the mask is built from the
+/// same ABI table the rows are checked against.
+///
+/// Falsifier: WP204 keeps only the read rights, so
+/// `landlock_ruleset_handles_every_right_the_abi_reports` fails on the mask.
+fn landlock_handled_rights(abi: u32) -> u64 {
+    let mut handled = 0u64;
+    for (right, introduced) in LANDLOCK_RIGHT_ABI {
+        if *introduced <= abi {
+            handled |= *right;
+        }
+    }
+    handled
+}
+
+/// One path rule of a Landlock ruleset: the parameter it names, the path bound
+/// to that parameter, and the rights the rule grants there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LandlockPathRule {
+    parameter: &'static str,
+    path: PathBuf,
+    rights: u64,
+}
+
+/// The generated Landlock policy of one provider: the provider name, the ABI it
+/// was built for, the access mask it handles, and its path rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LandlockRuleset {
+    provider: String,
+    abi: u32,
+    handled: u64,
+    rules: Vec<LandlockPathRule>,
+    /// A step an install must refuse, so a launch refusal is proved without a
+    /// kernel that would refuse it. It is test input and `None` in every real
+    /// launch.
+    injected_step_failure: Option<(LandlockStep, i32)>,
+}
+
+/// The loader paths a dynamically linked provider needs under a path-only
+/// ruleset, and the failure that follows when that entry alone is dropped.
+///
+/// On the Linux host measured for the stopped file-row branch, a ruleset that
+/// grants `EXECUTE` on the bound wallet binary alone makes `execve` fail
+/// `EACCES` (13) before the provider's first instruction. These four paths are
+/// the aarch64 loader and the libraries that binary maps. Each entry carries
+/// `EXECUTE | READ_FILE`. The note after each path is the failure that named it
+/// when that entry alone was dropped from a working ruleset on that host:
+///
+/// - `/lib/ld-linux-aarch64.so.1`: without `EXECUTE` the loader cannot be
+///   entered, and `execve` answers `EACCES` (13) before the provider's first
+///   instruction; without `READ_FILE` the loader cannot map itself.
+/// - `/lib/aarch64-linux-gnu/libc.so.6`: without `READ_FILE` the loader fails
+///   to map `libc.so.6` and exits with `error while loading shared libraries:
+///   libc.so.6: cannot open shared object file`.
+/// - `/lib/aarch64-linux-gnu/libgcc_s.so.1`: without `READ_FILE` the loader
+///   fails to map `libgcc_s.so.1` and exits with `error while loading shared
+///   libraries: libgcc_s.so.1: cannot open shared object file`.
+/// - `/lib/aarch64-linux-gnu/libm.so.6`: without `READ_FILE` the loader fails
+///   to map `libm.so.6` and exits with `error while loading shared libraries:
+///   libm.so.6: cannot open shared object file`.
+///
+/// This session did not repeat that drop-one measurement against the wallet
+/// binary on spark1, so `CONFINEMENT-LINUX.md` records the file row as GAP.
+/// The paths stay here so the ruleset the installer would apply is the one the
+/// Mac test reads. The table is compiled on every OS.
+const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
+    (
+        "/lib/ld-linux-aarch64.so.1",
+        "without EXECUTE here the loader cannot be entered, and execve answers \
+         EACCES (13) before the provider's first instruction; without READ_FILE the loader \
+         cannot map itself",
+    ),
+    (
+        "/lib/aarch64-linux-gnu/libc.so.6",
+        "without READ_FILE here the loader fails to map libc.so.6 and exits with \
+         `error while loading shared libraries: libc.so.6: cannot open shared object file`",
+    ),
+    (
+        "/lib/aarch64-linux-gnu/libgcc_s.so.1",
+        "without READ_FILE here the loader fails to map libgcc_s.so.1 and exits with \
+         `error while loading shared libraries: libgcc_s.so.1: cannot open shared object file`",
+    ),
+    (
+        "/lib/aarch64-linux-gnu/libm.so.6",
+        "without READ_FILE here the loader fails to map libm.so.6 and exits with \
+         `error while loading shared libraries: libm.so.6: cannot open shared object file`",
+    ),
+];
+
+/// The one builder of a provider's Landlock file row: the ruleset of `name`,
+/// rendered from the profile `generate_profile` produces from `declared` and read
+/// back through `profile_forms`. Like the seccomp builder it reads no file, holds
+/// no rule text of its own and never reads the declared-rights document
+/// directly, so the JSON has one reader and the profile one parser (P10).
+///
+/// `bindings` carries the three parameter paths the launch binds, so the ruleset
+/// names the same paths the start uses and no second derivation exists. A rule is
+/// built only for a parameter a row grants a right on: a row whose rights are
+/// `0` is a decision written down, and it adds no rule.
+///
+/// `abi` is the version the kernel reported, passed in rather than read here, so
+/// every OS can drive this function and a test can present an ABI below a row's.
+/// It refuses, in this order: whatever `generate_profile` refuses, with that
+/// reason unchanged; an allow form the rights table does not hold, with a reason
+/// that names the provider and the form and builds no ruleset; an ABI below a
+/// row's, with `linux confinement refused: the Landlock ABI cannot express
+/// <row>`, naming the row; a form whose parameter the launch does not bind; and
+/// an ABI below the rights the default denial must be able to refuse, with the
+/// same words and `LANDLOCK_REQUIRED_DENIALS`' row name. Every refusal builds no
+/// ruleset.
+///
+/// The loader entries are added only where the provider needs them, which is
+/// every launch of a dynamically linked provider; the builder takes them as an
+/// input so a test can build a ruleset without them and read the difference.
+/// A launch of the real binary passes `LANDLOCK_LOADER_PATHS`. A test that
+/// reads the declared rows alone passes an empty list.
+fn landlock_path_rules(
+    name: &str,
+    declared: &Value,
+    bindings: &[(&'static str, PathBuf)],
+    abi: u32,
+    loader: &[(&str, &str)],
+) -> Result<LandlockRuleset, String> {
+    let rendered = generate_profile(name, declared)?;
+    let mut rules: Vec<LandlockPathRule> = Vec::new();
+    for form in profile_forms(&rendered) {
+        if !is_allow_form(&form) {
+            // The version, the default denial and the network denial grant
+            // nothing, so they take no row and add no path.
+            continue;
+        }
+        let Some((_, rights)) = LANDLOCK_RULE_RIGHTS
+            .iter()
+            .find(|(allowed, _)| *allowed == form.as_str())
+        else {
+            return Err(format!(
+                "{name} landlock ruleset refuses the allow form {form}: \
+                 the rights table has no row for it, so no ruleset is built"
+            ));
+        };
+        if *rights == 0 {
+            // A row that grants no right is a decision, not an omission.
+            continue;
+        }
+        if let Some(refusal) = landlock_row_abi_refusal(&format!("the {form} row"), *rights, abi) {
+            return Err(refusal);
+        }
+        let Some((parameter, path)) = parameter_path_for_form(&form, bindings) else {
+            // A form whose parameter the launch does not bind is a refusal
+            // rather than a skipped rule: a rule on a path nobody bound would
+            // grant nothing and hide a drift between the profile and the launch.
+            return Err(format!(
+                "{name} landlock ruleset refuses the allow form {form}: \
+                 the launch binds no parameter it names, so no ruleset is built"
+            ));
+        };
+        rules.push(LandlockPathRule {
+            parameter,
+            path,
+            rights: *rights,
+        });
+    }
+    for (path, _) in loader {
+        rules.push(LandlockPathRule {
+            parameter: "LANDLOCK_LOADER_PATHS",
+            path: PathBuf::from(path),
+            rights: LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE,
+        });
+    }
+    // The row's decisions are checked above; the denial the default arm must
+    // make is checked here, so an ABI that grants every row but cannot refuse a
+    // write outside `STORAGE_ROOT` builds no ruleset.
+    let (denial_row, denial_rights) = LANDLOCK_REQUIRED_DENIALS;
+    if let Some(refusal) = landlock_row_abi_refusal(denial_row, denial_rights, abi) {
+        return Err(refusal);
+    }
+    Ok(LandlockRuleset {
+        provider: name.to_string(),
+        abi,
+        handled: landlock_handled_rights(abi),
+        rules,
+        injected_step_failure: None,
+    })
+}
+
+/// The parameter and bound path an allow form names, or `None` where the form
+/// names no parameter the launch binds. It reads the form's `(param "NAME")`
+/// token through `parameter_tokens`, the same reader the contract check uses,
+/// so the token has one spelling, and it answers the path from the one
+/// bindings list.
+fn parameter_path_for_form<'a>(
+    form: &str,
+    bindings: &'a [(&'static str, PathBuf)],
+) -> Option<(&'static str, PathBuf)> {
+    let Ok(tokens) = parameter_tokens(form) else {
+        return None;
+    };
+    for (parameter, path) in bindings {
+        if tokens.contains(parameter) {
+            return Some((*parameter, path.clone()));
+        }
+    }
+    None
+}
+
+/// The step a Landlock install was taking when it failed. Each has its own
+/// refusal, so a failure names the step and keeps its errno (P11).
+///
+/// `AddRule` names its rule by position in the ruleset rather than by parameter,
+/// because the loader entries share one parameter name and a name would not tell
+/// four rules apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LandlockStep {
+    /// `landlock_create_ruleset`.
+    CreateRuleset,
+    /// `landlock_add_rule` for the rule at this position.
+    AddRule(usize),
+    /// `prctl(PR_SET_NO_NEW_PRIVS)`, which `landlock_restrict_self` requires.
+    NoNewPrivileges,
+    /// `landlock_restrict_self`.
+    RestrictSelf,
+}
+
+/// One Landlock install failure: the step that failed and its errno.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LandlockInstallFailure {
+    step: LandlockStep,
+    errno: i32,
+}
+
+impl LandlockInstallFailure {
+    const fn new(step: LandlockStep, errno: i32) -> Self {
+        Self { step, errno }
+    }
+
+    /// The step's own words. `Display` and the launch record both read this one
+    /// copy, so the step wording cannot drift (P10).
+    fn step_words(self) -> String {
+        match self.step {
+            LandlockStep::CreateRuleset => "the ruleset could not be created".to_string(),
+            LandlockStep::AddRule(index) => format!("the path rule {index} could not be added"),
+            LandlockStep::NoNewPrivileges => "PR_SET_NO_NEW_PRIVS failed".to_string(),
+            LandlockStep::RestrictSelf => "landlock_restrict_self failed".to_string(),
+        }
+    }
+
+    /// The one fixed record this failure crosses the fork as. The record's
+    /// first field names a Landlock outcome, the second names the step, and the
+    /// third holds the errno. `SeccompInstallFailure::launch_record` is the
+    /// caller, so the tags are encoded in that one builder.
+    fn launch_record(self) -> [u8; SECCOMP_LAUNCH_RECORD_LEN] {
+        let step = match self.step {
+            LandlockStep::CreateRuleset => SECCOMP_LAUNCH_LANDLOCK_CREATE,
+            LandlockStep::AddRule(index) => SECCOMP_LAUNCH_LANDLOCK_ADD_FIRST + index as i64,
+            LandlockStep::NoNewPrivileges => SECCOMP_LAUNCH_LANDLOCK_NO_NEW_PRIVS,
+            LandlockStep::RestrictSelf => SECCOMP_LAUNCH_LANDLOCK_RESTRICT_SELF,
+        };
+        seccomp_launch_record(SECCOMP_LAUNCH_LANDLOCK, step, i64::from(self.errno))
+    }
+
+    /// The failure a record's two fields name, or `None` where the step it names
+    /// is no Landlock step. The decoder turns `Some` into this step's words
+    /// through `step_words`.
+    fn from_record(step: i64, errno: i32) -> Option<Self> {
+        let step = match step {
+            SECCOMP_LAUNCH_LANDLOCK_CREATE => LandlockStep::CreateRuleset,
+            SECCOMP_LAUNCH_LANDLOCK_NO_NEW_PRIVS => LandlockStep::NoNewPrivileges,
+            SECCOMP_LAUNCH_LANDLOCK_RESTRICT_SELF => LandlockStep::RestrictSelf,
+            index if index >= SECCOMP_LAUNCH_LANDLOCK_ADD_FIRST => {
+                LandlockStep::AddRule((index - SECCOMP_LAUNCH_LANDLOCK_ADD_FIRST) as usize)
+            }
+            _ => return None,
+        };
+        Some(Self::new(step, errno))
+    }
+}
+
+impl std::fmt::Display for LandlockInstallFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "landlock install refused: {} with errno {}",
+            self.step_words(),
+            self.errno
+        )
+    }
+}
+
+/// The one Landlock step sequencer, and it makes no kernel call: it runs the
+/// steps in the order an install must take them, stopping at the first failure
+/// with that step's own errno. A failure of the first step means no later step
+/// runs, so a partly built ruleset is never installed.
+///
+/// The order is the one the kernel requires: every rule is added first, then
+/// `PR_SET_NO_NEW_PRIVS`, then `landlock_restrict_self`. Without
+/// `PR_SET_NO_NEW_PRIVS` first, `restrict_self` fails `EPERM` (1) and nothing is
+/// confined, so an install that skipped or reordered that step would leave the
+/// provider unconfined while answering `ok`.
+///
+/// Falsifier: WP210 runs the final call before `PR_SET_NO_NEW_PRIVS`, so
+/// `landlock_install_refuses_each_failed_step` fails on its recorded order.
+fn install_landlock_with(
+    ruleset: &LandlockRuleset,
+    mut steps: impl FnMut(LandlockStep) -> Result<(), i32>,
+) -> Result<(), LandlockInstallFailure> {
+    let mut run =
+        |step: LandlockStep| steps(step).map_err(|errno| LandlockInstallFailure::new(step, errno));
+    run(LandlockStep::CreateRuleset)?;
+    for index in 0..ruleset.rules.len() {
+        run(LandlockStep::AddRule(index))?;
+    }
+    run(LandlockStep::NoNewPrivileges)?;
+    run(LandlockStep::RestrictSelf)
+}
+
+/// The ABI refusal of `ruleset`, or an empty string where its rows fit its ABI.
+/// It reads the ruleset's own rows through the one ABI rule, so a row the ABI
+/// cannot express has one refusal spelling (P10).
+fn landlock_abi_refusal(ruleset: &LandlockRuleset) -> String {
+    for rule in &ruleset.rules {
+        if let Some(refusal) = landlock_row_abi_refusal(
+            &format!("the {} row", rule.parameter),
+            rule.rights,
+            ruleset.abi,
+        ) {
+            return refusal;
+        }
+    }
+    String::new()
+}
+
+/// Each served provider's committed declared rights yield the `STORAGE_ROOT`
+/// rule on that provider's own root and the `EXECUTE` rule on that provider's
+/// own binary, the three zero-right rows stay decisions that add no path, and a
+/// declaration the shared contract does not name keeps `declared_entries`'
+/// reason. One body runs over `DID_PROVIDER` and `WALLET_PROVIDER`, each with
+/// its own base, its own declared-rights file and its own binary, so a rule
+/// path cannot be read for one provider and bound for the other (P10).
+///
+/// The test reads a ruleset's own rules and the paths the launch binds. It
+/// installs no ruleset and starts no provider, so it says nothing about a
+/// kernel.
+///
+/// Falsifier: WP202 adds `READ_FILE` to the `STORAGE_PARENT` row, so this test
+/// fails on the parent decision. WP216 makes the chooser ignore the provider
+/// name and answer wallet's `STORAGE_ROOT` binding for both, so the did
+/// iteration fails on the expected root.
+#[test]
+fn landlock_ruleset_follows_the_declared_rights() {
+    for name in [DID_PROVIDER, WALLET_PROVIDER] {
+        let fixture = tempfile::tempdir().expect("temporary provider base");
+        let base = resolved(fixture.path());
+        let inputs = provider_ruleset_inputs(name, &base).unwrap_or_else(|err| panic!("{err}"));
+        let declared = &inputs.declared;
+        let bindings = &inputs.bindings;
+        let ruleset = landlock_path_rules(name, declared, bindings, 7, &[])
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(ruleset.injected_step_failure.is_none());
+        assert_eq!(LANDLOCK_RULE_RIGHTS.len(), 5);
+
+        let rule = |parameter: &str| {
+            ruleset
+                .rules
+                .iter()
+                .find(|rule| rule.parameter == parameter)
+                .unwrap_or_else(|| {
+                    panic!("{name}: the ruleset must hold the {parameter} rule: {ruleset:?}")
+                })
+        };
+        let bound = |parameter: &str| {
+            bindings
+                .iter()
+                .find(|(binding, _)| *binding == parameter)
+                .unwrap_or_else(|| panic!("{name}: the launch must bind {parameter}"))
+                .1
+                .clone()
+        };
+        println!(
+            "{name}: STORAGE_PARENT {}, STORAGE_ROOT {} (rights {:#x}), PROVIDER_EXECUTABLE {}",
+            bound("STORAGE_PARENT").display(),
+            rule("STORAGE_ROOT").path.display(),
+            rule("STORAGE_ROOT").rights,
+            rule("PROVIDER_EXECUTABLE").path.display(),
+        );
+
+        assert_eq!(
+            rule("STORAGE_ROOT").rights,
+            LANDLOCK_ACCESS_FS_READ_FILE
+                | LANDLOCK_ACCESS_FS_READ_DIR
+                | LANDLOCK_ACCESS_FS_WRITE_FILE
+                | LANDLOCK_ACCESS_FS_REMOVE_FILE
+                | LANDLOCK_ACCESS_FS_REMOVE_DIR
+                | LANDLOCK_ACCESS_FS_MAKE_DIR
+                | LANDLOCK_ACCESS_FS_MAKE_REG,
+            "{name}: the storage subpath row must carry the seven rights init needs"
+        );
+        assert_eq!(rule("STORAGE_ROOT").path, bound("STORAGE_ROOT"));
+        // The expected root is written from the layout this provider keeps, not
+        // from the chooser under test: did keeps `<base>/did` and wallet keeps the
+        // three-component wallet path under its base.
+        let expected_root = if name == DID_PROVIDER {
+            base.join("did")
+        } else {
+            wallet_dir(&base)
+        };
+        assert_eq!(
+            provider_storage_root(name, &base),
+            expected_root,
+            "{name}: the layout derivation must keep the root this provider's name names"
+        );
+        assert_eq!(
+            rule("STORAGE_ROOT").path,
+            expected_root,
+            "{name}: the STORAGE_ROOT rule must bind this provider's own root"
+        );
+        assert_eq!(
+            rule("PROVIDER_EXECUTABLE").rights,
+            LANDLOCK_ACCESS_FS_EXECUTE,
+            "{name}: the bound-executable row must carry execution-only rights"
+        );
+        assert_eq!(
+            rule("PROVIDER_EXECUTABLE").path,
+            bound("PROVIDER_EXECUTABLE")
+        );
+        assert_eq!(
+            rule("PROVIDER_EXECUTABLE").path,
+            resolved(inputs.binary),
+            "{name}: the PROVIDER_EXECUTABLE rule must bind this provider's own binary"
+        );
+
+        let parent = LANDLOCK_RULE_RIGHTS
+            .iter()
+            .find(|(form, _)| *form == SHARED_RULES[1])
+            .expect("the parent form must have an explicit decision")
+            .1;
+        assert_eq!(parent, 0, "the STORAGE_PARENT row must grant no right");
+        assert_eq!(
+            parent & LANDLOCK_ACCESS_FS_READ_FILE,
+            0,
+            "the STORAGE_PARENT row must grant no read"
+        );
+        assert_eq!(
+            parent & LANDLOCK_ACCESS_FS_WRITE_FILE,
+            0,
+            "the STORAGE_PARENT row must grant no write"
+        );
+        for form in [STARTUP_RULES[0], STARTUP_RULES[1]] {
+            let rights = LANDLOCK_RULE_RIGHTS
+                .iter()
+                .find(|(candidate, _)| *candidate == form)
+                .unwrap_or_else(|| panic!("{form} must have an explicit decision"))
+                .1;
+            assert_eq!(rights, 0, "{form} must grant no path right");
+        }
+        assert!(
+            !ruleset
+                .rules
+                .iter()
+                .any(|rule| rule.parameter == "STORAGE_PARENT"),
+            "the zero-right parent form must add no path"
+        );
+
+        let mut without_storage = declared.clone();
+        without_storage["rights"]
+            .as_array_mut()
+            .expect("the declared rights must hold a rights list")
+            .retain(|entry| entry["id"] != "storage");
+        let reduced = landlock_path_rules(name, &without_storage, bindings, 7, &[])
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            !reduced
+                .rules
+                .iter()
+                .any(|rule| rule.parameter == "STORAGE_ROOT"),
+            "{name}: removing the storage right must remove the STORAGE_ROOT rule: {reduced:?}"
+        );
+        assert!(
+            reduced
+                .rules
+                .iter()
+                .any(|rule| rule.parameter == "PROVIDER_EXECUTABLE"),
+            "{name}: the bound-executable right stays, so its rule stays: {reduced:?}"
+        );
+
+        let mut unnamed = declared.clone();
+        unnamed["rights"]
+            .as_array_mut()
+            .expect("the declared rights must hold a rights list")
+            .push(json!({
+                "id": "unnamed-right",
+                "rules": [r#"(allow file-read* (literal "/private/var/cc-landlock-unnamed"))"#],
+            }));
+        let refusal = landlock_path_rules(name, &unnamed, bindings, 7, &[])
+            .expect_err("an id the shared contract does not name must be refused");
+        assert_eq!(
+            refusal,
+            format!("{name} declares unnamed-right, which the shared contract does not name"),
+            "{name}: the refusal must be declared_entries' own reason, unchanged"
+        );
+
+        let mut unmapped = declared.clone();
+        unmapped["rights"]
+            .as_array_mut()
+            .expect("the declared rights must hold a rights list")
+            .iter_mut()
+            .find(|entry| entry["id"] == "storage")
+            .expect("the declared rights must hold the storage right")["rules"]
+            .as_array_mut()
+            .expect("the storage right must hold a rules list")
+            .push(json!(
+                r#"(allow mach-lookup (global-name "com.apple.system.logger"))"#
+            ));
+        let refusal = landlock_path_rules(name, &unmapped, bindings, 7, &[])
+            .expect_err("an allow form with no rights row must be refused");
+        assert_eq!(
+        refusal,
+        format!(
+            "{name} landlock ruleset refuses the allow form \
+             (allow mach-lookup (global-name \"com.apple.system.logger\")): \
+             the rights table has no row for it, so no ruleset is built"
+        ),
+        "{name}: an allow form the rights table does not hold must be refused in these exact words"
+    );
+
+        let exec_binding: Vec<(&'static str, PathBuf)> = bindings
+            .iter()
+            .filter(|(binding, _)| *binding == "PROVIDER_EXECUTABLE")
+            .cloned()
+            .collect();
+        let refusal = landlock_path_rules(name, declared, &exec_binding, 7, &[])
+            .expect_err("a form whose parameter the launch does not bind must be refused");
+        assert_eq!(
+            refusal,
+            format!(
+                "{name} landlock ruleset refuses the allow form {}: \
+             the launch binds no parameter it names, so no ruleset is built",
+                SHARED_RULES[2]
+            ),
+            "{name}: an unbound parameter must be refused rather than skipped"
+        );
+    }
+}
+
+/// ABI 1, 2 and 4 build no ruleset, because the default denial must be able to
+/// refuse a truncation and a device ioctl. ABI 5 and above build one. `REFER`,
+/// `TRUNCATE` and `IOCTL_DEV` are each refused below the ABI that introduced
+/// them and accepted at their own, by `landlock_row_abi_refusal`.
+///
+/// Falsifier: WP203 drops the required-denial check, so ABI 1 builds a ruleset
+/// and this test fails.
+#[test]
+fn landlock_ruleset_refuses_an_abi_that_cannot_express_a_row() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let fixture = tempfile::tempdir().expect("temporary wallet base");
+    let base = resolved(fixture.path());
+    let bindings = canonical_bindings(WALLET_PROVIDER, &base, Path::new(PROVIDER_BINARY));
+
+    for (rights, required, too_low) in [
+        (LANDLOCK_ACCESS_FS_REFER, 2, 1),
+        (LANDLOCK_ACCESS_FS_TRUNCATE, 3, 2),
+        (LANDLOCK_ACCESS_FS_IOCTL_DEV, 5, 4),
+    ] {
+        assert_eq!(landlock_rights_abi(rights), Some(required));
+        let mut fixture = LandlockRuleset {
+            provider: WALLET_PROVIDER.to_string(),
+            abi: too_low,
+            handled: landlock_handled_rights(too_low),
+            rules: vec![LandlockPathRule {
+                parameter: "STORAGE_ROOT",
+                path: PathBuf::from("/fixture/base/ElastOS/SystemServices/Wallet"),
+                rights,
+            }],
+            injected_step_failure: None,
+        };
+        assert_eq!(
+            landlock_abi_refusal(&fixture),
+            format!(
+                "linux confinement refused: the Landlock ABI cannot express the STORAGE_ROOT row, \
+                 which needs ABI {required} and this kernel reports ABI {too_low}"
+            ),
+            "a row the ABI cannot express must be refused in these exact words"
+        );
+        assert_eq!(
+            landlock_row_abi_refusal("the STORAGE_ROOT row", rights, too_low),
+            Some(landlock_abi_refusal(&fixture)),
+            "the three rights must be refused by the one ABI function"
+        );
+        fixture.abi = required;
+        assert!(
+            landlock_abi_refusal(&fixture).is_empty(),
+            "the row must be accepted at ABI {required}"
+        );
+        assert!(
+            landlock_row_abi_refusal("the STORAGE_ROOT row", rights, required).is_none(),
+            "the same function must accept the right at its own ABI"
+        );
+    }
+
+    assert_eq!(
+        landlock_rights_abi(1u64 << 16),
+        None,
+        "a right with no ABI table entry must not be read as ABI 1"
+    );
+    assert_eq!(
+        landlock_row_abi_refusal("the unknown row", 1u64 << 16, 7),
+        Some(
+            "linux confinement refused: the Landlock ABI cannot express the unknown row, \
+             because a right in it has no ABI table entry"
+                .to_string()
+        ),
+        "a right with no ABI table entry is its own refusal"
+    );
+
+    for (too_low, needed) in [(1, 5), (2, 5), (4, 5)] {
+        let refusal = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, too_low, &[])
+            .expect_err("an ABI below the default denial's rights must be refused");
+        assert_eq!(
+            refusal,
+            format!(
+                "linux confinement refused: the Landlock ABI cannot express {}, \
+                 which needs ABI {needed} and this kernel reports ABI {too_low}",
+                LANDLOCK_REQUIRED_DENIALS.0
+            ),
+            "an ABI that cannot refuse the write boundary must be refused in these words"
+        );
+    }
+    let needed = landlock_rights_abi(LANDLOCK_REQUIRED_DENIALS.1)
+        .expect("the default denial's rights must have ABI entries");
+    assert_eq!(needed, 5);
+    for abi in needed..8 {
+        let ruleset = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, abi, &[])
+            .unwrap_or_else(|err| panic!("ABI {abi} must build a ruleset: {err}"));
+        assert_eq!(ruleset.abi, abi);
+        assert!(
+            ruleset
+                .rules
+                .iter()
+                .any(|rule| rule.parameter == "STORAGE_ROOT"),
+            "ABI {abi} must keep the STORAGE_ROOT rule: {ruleset:?}"
+        );
+    }
+}
+
+/// The handled mask equals the ABI table's rights for the version the ruleset
+/// claims, so no right that version knows is left unrestricted.
+///
+/// Falsifier: WP204 keeps only the read rights in the mask, so this test fails.
+#[test]
+fn landlock_ruleset_handles_every_right_the_abi_reports() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let fixture = tempfile::tempdir().expect("temporary wallet base");
+    let base = resolved(fixture.path());
+    let bindings = canonical_bindings(WALLET_PROVIDER, &base, Path::new(PROVIDER_BINARY));
+    for abi in [5, 6, 7] {
+        let ruleset = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, abi, &[])
+            .unwrap_or_else(|err| panic!("ABI {abi} must build a ruleset: {err}"));
+        let mut reported = 0u64;
+        for (right, introduced) in LANDLOCK_RIGHT_ABI {
+            if abi >= *introduced {
+                reported |= *right;
+            }
+        }
+        assert_eq!(
+            ruleset.handled, reported,
+            "ABI {abi} must handle every right its table reports"
+        );
+        for right in [
+            LANDLOCK_ACCESS_FS_EXECUTE,
+            LANDLOCK_ACCESS_FS_WRITE_FILE,
+            LANDLOCK_ACCESS_FS_TRUNCATE,
+            LANDLOCK_ACCESS_FS_IOCTL_DEV,
+        ] {
+            assert_ne!(
+                ruleset.handled & right,
+                0,
+                "ABI {abi} must restrict {right:#x}"
+            );
+        }
+    }
+}
+
+/// The five install steps run in order, each failure keeps its step and errno
+/// and its own reason, and a failed first step runs no later step.
+///
+/// Falsifier: WP210 runs the final call before `PR_SET_NO_NEW_PRIVS`, so this
+/// test fails on its recorded order.
+#[test]
+fn landlock_install_refuses_each_failed_step() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let fixture = tempfile::tempdir().expect("temporary install fixture");
+    let base = resolved(fixture.path());
+    let bindings = canonical_bindings(WALLET_PROVIDER, &base, Path::new(PROVIDER_BINARY));
+    let ruleset = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, 7, &[]).unwrap();
+    assert_eq!(ruleset.rules.len(), 2);
+    let order = [
+        LandlockStep::CreateRuleset,
+        LandlockStep::AddRule(0),
+        LandlockStep::AddRule(1),
+        LandlockStep::NoNewPrivileges,
+        LandlockStep::RestrictSelf,
+    ];
+    let cases = [
+        (
+            LandlockStep::CreateRuleset,
+            libc::EINVAL,
+            "landlock install refused: the ruleset could not be created with errno 22",
+        ),
+        (
+            LandlockStep::AddRule(0),
+            libc::EACCES,
+            "landlock install refused: the path rule 0 could not be added with errno 13",
+        ),
+        (
+            LandlockStep::AddRule(1),
+            libc::ENOENT,
+            "landlock install refused: the path rule 1 could not be added with errno 2",
+        ),
+        (
+            LandlockStep::NoNewPrivileges,
+            libc::EPERM,
+            "landlock install refused: PR_SET_NO_NEW_PRIVS failed with errno 1",
+        ),
+        (
+            LandlockStep::RestrictSelf,
+            libc::EBADF,
+            "landlock install refused: landlock_restrict_self failed with errno 9",
+        ),
+    ];
+    let mut seen = Vec::new();
+    install_landlock_with(&ruleset, |step| {
+        seen.push(step);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(seen, order);
+    for (position, (failed, errno, expected)) in cases.into_iter().enumerate() {
+        let mut seen = Vec::new();
+        let failure = install_landlock_with(&ruleset, |step| {
+            seen.push(step);
+            if step == failed {
+                Err(errno)
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("each failed install step must refuse");
+        assert_eq!(
+            seen,
+            &order[..=position],
+            "a refused install must stop at its failed step"
+        );
+        assert_eq!(failure, LandlockInstallFailure::new(failed, errno));
+        assert_eq!(failure.step, failed);
+        assert_eq!(failure.errno, errno);
+        assert_eq!(failure.to_string(), expected);
+    }
+}
+
+/// The one record carries each Landlock step's own words across the fork. The
+/// test drives `decode_seccomp_launch_record` and
+/// `seccomp_launch_answers_or_refusal`, the one decoder and the one place a
+/// record becomes a launch result. It reads `LandlockInstallFailure`'s one
+/// wording function, so it is not a second copy of
+/// `landlock_install_refuses_each_failed_step`, which holds the sequencer's
+/// order. An unknown first field keeps the existing unknown-step reason. No
+/// case is a bare spawn error.
+///
+/// The test builds records and reads them. It starts no process and calls no
+/// kernel, so it runs on every OS.
+///
+/// Falsifier: WP211 reads a Landlock step as an installed record, so this test
+/// loses that step's reason.
+#[test]
+fn landlock_install_record_decodes_each_failed_step() {
+    let child = "the child started and its install report arrived incomplete";
+    let cases = [
+        (
+            LandlockStep::CreateRuleset,
+            libc::EINVAL,
+            "landlock install refused: the ruleset could not be created with errno 22",
+        ),
+        (
+            LandlockStep::AddRule(0),
+            libc::EACCES,
+            "landlock install refused: the path rule 0 could not be added with errno 13",
+        ),
+        (
+            LandlockStep::AddRule(3),
+            libc::ENOENT,
+            "landlock install refused: the path rule 3 could not be added with errno 2",
+        ),
+        (
+            LandlockStep::NoNewPrivileges,
+            libc::EPERM,
+            "landlock install refused: PR_SET_NO_NEW_PRIVS failed with errno 1",
+        ),
+        (
+            LandlockStep::RestrictSelf,
+            libc::EPERM,
+            "landlock install refused: landlock_restrict_self failed with errno 1",
+        ),
+    ];
+    for (step, errno, expected) in cases {
+        let failure = LandlockInstallFailure::new(step, errno);
+        assert!(
+            failure.to_string().contains(&failure.step_words()),
+            "the launch words must come from the one wording function"
+        );
+        assert_eq!(failure.to_string(), expected);
+        let record = SeccompInstallFailure::Landlock(failure).launch_record();
+        let decoded = decode_seccomp_launch_record(&record)
+            .unwrap_or_else(|err| panic!("the record must decode {step:?}: {err}"));
+        assert_eq!(
+            decoded,
+            SeccompLaunchRecord::Refused(SeccompInstallFailure::Landlock(failure)),
+            "the one decoder must carry {step:?}"
+        );
+        let refusal = seccomp_launch_answers_or_refusal(&record, child)
+            .expect_err("a Landlock step must be a launch refusal");
+        assert_eq!(
+            refusal, expected,
+            "the launch answer must be the step's own words"
+        );
+        assert!(
+            !refusal.contains("the test child must start"),
+            "a Landlock refusal must not be a bare spawn error: {refusal}"
+        );
+    }
+
+    let mut unknown = [0u8; SECCOMP_LAUNCH_RECORD_LEN];
+    unknown[..8].copy_from_slice(&9i64.to_ne_bytes());
+    let step_refusal =
+        decode_seccomp_launch_record(&unknown).expect_err("an unknown first field must be refused");
+    assert_eq!(
+        step_refusal,
+        "seccomp install report refused: the child named step 9, which is no install step"
+    );
+    let launch = seccomp_launch_answers_or_refusal(&unknown, child)
+        .expect_err("an unknown first field must refuse the launch");
+    assert_eq!(
+        launch,
+        format!("{step_refusal}; {child}"),
+        "the unknown first field must keep the record's reason and name the child"
+    );
+    assert!(
+        !launch.contains("the test child must start"),
+        "an unknown first field must not be a bare spawn error: {launch}"
+    );
+}
+
+/// Wallet's ruleset names each measured loader entry with `EXECUTE | READ_FILE`,
+/// and the storage-root rule keeps the seven rights the declared row carries.
+/// The test builds the ruleset from wallet's committed declared-rights file
+/// through `landlock_path_rules` and `LANDLOCK_LOADER_PATHS`. It starts no
+/// process and calls no kernel, so it runs on every OS.
+///
+/// Falsifier: WP212 adds the loader entry without `READ_FILE`, so this test
+/// fails on the rule's rights.
+#[test]
+fn landlock_ruleset_names_each_measured_loader_entry() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let fixture = tempfile::tempdir().expect("temporary wallet base");
+    let base = resolved(fixture.path());
+    let bindings = canonical_bindings(WALLET_PROVIDER, &base, Path::new(PROVIDER_BINARY));
+    let ruleset = landlock_path_rules(
+        WALLET_PROVIDER,
+        &declared,
+        &bindings,
+        7,
+        LANDLOCK_LOADER_PATHS,
+    )
+    .unwrap_or_else(|err| panic!("{err}"));
+    let loaders: Vec<_> = ruleset
+        .rules
+        .iter()
+        .filter(|rule| rule.parameter == "LANDLOCK_LOADER_PATHS")
+        .collect();
+    assert_eq!(
+        loaders.len(),
+        LANDLOCK_LOADER_PATHS.len(),
+        "the ruleset must hold one rule per measured loader entry"
+    );
+    for (rule, (path, _)) in loaders.iter().zip(LANDLOCK_LOADER_PATHS) {
+        assert_eq!(rule.path, PathBuf::from(path));
+        assert_eq!(
+            rule.rights,
+            LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE,
+            "the loader rule for {path} must carry EXECUTE and READ_FILE"
+        );
+    }
+    let storage = ruleset
+        .rules
+        .iter()
+        .find(|rule| rule.parameter == "STORAGE_ROOT")
+        .expect("the ruleset must hold the STORAGE_ROOT rule");
+    assert_eq!(
+        storage.rights,
+        LANDLOCK_ACCESS_FS_READ_FILE
+            | LANDLOCK_ACCESS_FS_READ_DIR
+            | LANDLOCK_ACCESS_FS_WRITE_FILE
+            | LANDLOCK_ACCESS_FS_REMOVE_FILE
+            | LANDLOCK_ACCESS_FS_REMOVE_DIR
+            | LANDLOCK_ACCESS_FS_MAKE_DIR
+            | LANDLOCK_ACCESS_FS_MAKE_REG,
+        "the storage-root rule must keep the seven rights the declared row carries"
+    );
+}
+
+/// The one install record writer, and it makes no kernel call: it writes the
+/// whole record to `write`, completing a short write and retrying on `EINTR`.
+///
+/// The install report crosses `pre_exec` as a fixed record, because Rust's
+/// exec-error pipe carries only a raw errno and no step. A failed write and a
+/// zero-byte write keep their own reasons and their own errno, so the two are
+/// told apart (P11).
+fn write_seccomp_launch_record(
+    record: &[u8],
+    mut write: impl FnMut(&[u8]) -> Result<usize, i32>,
+) -> Result<(), SeccompLaunchWriteFailure> {
+    let mut written = 0;
+    while written < record.len() {
+        match write(&record[written..]) {
+            Ok(0) => return Err(SeccompLaunchWriteFailure::WroteNothing),
+            Ok(count) => written += count,
+            Err(errno) if errno == libc::EINTR => continue,
+            Err(errno) => return Err(SeccompLaunchWriteFailure::Failed(errno)),
+        }
+    }
+    Ok(())
+}
+
+/// One of the two ways the install report fails to reach the parent. Each keeps
+/// its own reason and errno, so a failed write and a zero-byte write are told
+/// apart (P11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeccompLaunchWriteFailure {
+    Failed(i32),
+    WroteNothing,
+}
+
+impl SeccompLaunchWriteFailure {
+    fn errno(self) -> i32 {
+        match self {
+            Self::Failed(errno) => errno,
+            Self::WroteNothing => libc::EIO,
+        }
+    }
+}
+
+impl std::fmt::Display for SeccompLaunchWriteFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(errno) => write!(
+                f,
+                "seccomp launch refused: the install record could not be written, errno {errno}"
+            ),
+            Self::WroteNothing => {
+                write!(
+                    f,
+                    "seccomp launch refused: the install record wrote no bytes"
+                )
+            }
+        }
+    }
+}
+
+/// The system calls a launch needs beside the forms-derived part, and the call
+/// whose failure named each entry. No declared right covers them: they are the
+/// runtime's own plumbing, and a launch that loses one cannot speak its
+/// protocol.
+///
+/// The list is measured, not guessed. Each entry earned its place by dropping it
+/// alone from the whole list and reading the call that failed on the Linux host
+/// the proof ran on, and the comment after each name is that call, quoted from
+/// the run. `mount`, `ptrace`, `bpf` and `keyctl` are in no entry here and in no
+/// table row, so the default decision is the only answer they receive.
+///
+/// The table is data and makes no kernel call, so it is compiled on every OS
+/// where the list's launch set is compared; the install that reads it stays
+/// Linux-only.
+const LAUNCH_ESSENTIALS: &[(&str, &str)] = &[
+    (
+        "close",
+        "close(3) refused in the loader, before the first mapping",
+    ),
+    (
+        "exit_group",
+        "exit_group(0) refused as the provider ended its own run",
+    ),
+    (
+        "getrandom",
+        "getrandom(0xec92ac7c6700, 8, GRND_NONBLOCK) refused in the loader",
+    ),
+    (
+        "mmap",
+        "mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) refused \
+         in the loader, and the provider then took SIGSEGV",
+    ),
+    (
+        "mprotect",
+        "mprotect(0xf2640329f000, 65536, PROT_NONE) refused in the loader",
+    ),
+    (
+        "ppoll",
+        "ppoll([{fd=0, events=0}, {fd=1, events=0}, {fd=2, events=0}], 3, {tv_sec=0, \
+         tv_nsec=0}, NULL, 0) refused while the provider waits",
+    ),
+    (
+        "rt_sigaction",
+        "rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[PIPE], sa_flags=SA_RESTART}, \
+         0xffffea09ff80, 8) refused in the loader",
+    ),
+];
+
+/// The largest program the install's stack buffer holds.
+#[cfg(target_os = "linux")]
+const SECCOMP_PROGRAM_CAPACITY: usize = 256;
+
+/// The one install function, and the only place a seccomp filter becomes a
+/// kernel call. The launcher calls it from `pre_exec` and the probe child calls
+/// it in-process, so both install the same filter by one path (P10).
+///
+/// It copies the program into a fixed stack buffer and makes only the two
+/// `prctl` calls, in the Runtime's order and through 147's sequencing:
+/// `no_new_privs` first, then the filter, each with its own refusal and errno
+/// (P11). It allocates nothing after a fork, so a `pre_exec` caller may use it
+/// as is. `install_seccomp_with` checks the audit architecture first, so a list
+/// built for another architecture is refused before either kernel call.
+#[cfg(target_os = "linux")]
+fn install_seccomp(allow: &SeccompAllowList) -> Result<(), SeccompInstallFailure> {
+    if allow.program.len() > SECCOMP_PROGRAM_CAPACITY {
+        // The buffer is fixed because this runs after a fork. A longer program
+        // is refused as a failed filter step instead of installed truncated,
+        // because a short filter loses rows and could end on an `ALLOW`.
+        return Err(SeccompInstallFailure::Step(
+            SeccompStep::Filter,
+            libc::E2BIG,
+        ));
+    }
+    let mut code = [libc::sock_filter {
+        code: 0,
+        jt: 0,
+        jf: 0,
+        k: 0,
+    }; SECCOMP_PROGRAM_CAPACITY];
+    for (slot, instruction) in code.iter_mut().zip(&allow.program) {
+        *slot = libc::sock_filter {
+            code: instruction.code,
+            jt: instruction.jt,
+            jf: instruction.jf,
+            k: instruction.k,
+        };
+    }
+    let mut program = libc::sock_fprog {
+        len: allow.program.len() as u16,
+        filter: code.as_mut_ptr(),
+    };
+    install_seccomp_with(allow, |step| {
+        if let Some((failed, errno)) = allow.injected_step_failure {
+            if failed == step {
+                return Err(errno);
+            }
+        }
+        let installed = unsafe {
+            match step {
+                SeccompStep::NoNewPrivileges => libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0),
+                SeccompStep::Filter => libc::prctl(
+                    libc::PR_SET_SECCOMP,
+                    libc::SECCOMP_MODE_FILTER,
+                    &mut program as *mut libc::sock_fprog,
+                ),
+            }
+        };
+        if installed == 0 {
+            return Ok(());
+        }
+        Err(unsafe { *libc::__errno_location() })
+    })
+}
+
+/// The `PR_SET_NO_NEW_PRIVS` value `install_landlock` sets before its
+/// `restrict_self` call, and the one the seccomp installer also sets. Both
+/// installers ask the kernel for the same state. Without it
+/// `landlock_restrict_self` fails `EPERM` (1) and nothing is confined.
+#[cfg(target_os = "linux")]
+const LANDLOCK_NO_NEW_PRIVS: libc::c_int = 1;
+
+/// The Landlock ruleset and path-rule attribute layouts the kernel's
+/// `<linux/landlock.h>` declares. They are written here as plain values so the
+/// kernel calls take exactly the size and fields the ABI names, and so a reader
+/// sees the whole layout in one place.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct LandlockRulesetAttr {
+    handled_access_fs: u64,
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct LandlockPathBeneathAttr {
+    allowed_access: u64,
+    parent_fd: libc::c_int,
+}
+
+/// `LANDLOCK_RULE_PATH_BENEATH`, the one rule type this ruleset uses.
+#[cfg(target_os = "linux")]
+const LANDLOCK_RULE_PATH_BENEATH: libc::c_int = 1;
+
+/// `LANDLOCK_CREATE_RULESET_VERSION`, which asks the kernel for the ABI version
+/// instead of creating a ruleset.
+#[cfg(target_os = "linux")]
+const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
+
+/// The reported Landlock ABI of the running kernel, read once through
+/// `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`. A kernel
+/// without Landlock answers `ENOSYS` or `EOPNOTSUPP`, which is its own refusal
+/// so a start says the kernel has no Landlock rather than assuming a version.
+///
+/// The caller passes the result to `landlock_path_rules`, so the ABI is read once
+/// and the ruleset is built against the version the kernel actually reports.
+#[cfg(target_os = "linux")]
+fn landlock_abi() -> Result<u32, LandlockInstallFailure> {
+    let reported = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<LandlockRulesetAttr>(),
+            0usize,
+            LANDLOCK_CREATE_RULESET_VERSION,
+        )
+    };
+    if reported >= 0 {
+        return Ok(reported as u32);
+    }
+    let errno = unsafe { *libc::__errno_location() };
+    // `ENOSYS` and `EOPNOTSUPP` are the kernel's own answer that Landlock is
+    // absent. They stay this step's refusal, with that errno, and are not read
+    // as ABI 0.
+    Err(LandlockInstallFailure::new(
+        LandlockStep::CreateRuleset,
+        errno,
+    ))
+}
+
+/// All owned paths are converted before fork. Both child callers take this
+/// prepared value, so the installer cannot allocate or perform lossy conversion.
+#[cfg(target_os = "linux")]
+struct PreparedLandlockRuleset {
+    ruleset: LandlockRuleset,
+    paths: Vec<std::ffi::CString>,
+    /// Negative fixture only: reach restrict_self with no_new_privs still clear.
+    skip_no_new_privileges: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl PreparedLandlockRuleset {
+    fn new(ruleset: &LandlockRuleset) -> Result<Self, LandlockInstallFailure> {
+        use std::os::unix::ffi::OsStrExt as _;
+        let paths = ruleset
+            .rules
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| {
+                std::ffi::CString::new(rule.path.as_os_str().as_bytes()).map_err(|_| {
+                    LandlockInstallFailure::new(LandlockStep::AddRule(index), libc::EINVAL)
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            ruleset: ruleset.clone(),
+            paths,
+            skip_no_new_privileges: false,
+        })
+    }
+}
+
+/// The one install function, and the only place a Landlock ruleset becomes a
+/// kernel call. The launcher and the probe child both call it, so both install
+/// the same policy by one path (P10).
+/// It runs `install_landlock_with`'s steps in that order and makes one kernel
+/// call for each: `landlock_create_ruleset` with the handled mask the ruleset
+/// carries, one `landlock_add_rule` per path rule with an `O_PATH` descriptor
+/// on that path, `prctl(PR_SET_NO_NEW_PRIVS)`, and `landlock_restrict_self` on
+/// the ruleset descriptor the create step returned. Each failure returns that
+/// step's own errno (P11). A rule's descriptor is closed as soon as its rule is
+/// added, and the ruleset descriptor is closed on every result, so a refused
+/// install leaves no descriptor behind. It allocates nothing after the fork.
+///
+/// `injected_step_failure` is test input: a launch can be refused at a named
+/// step without a kernel that would refuse it, and every real launch has `None`.
+#[cfg(target_os = "linux")]
+fn install_landlock(prepared: &PreparedLandlockRuleset) -> Result<(), LandlockInstallFailure> {
+    let ruleset = &prepared.ruleset;
+    let mut descriptor: libc::c_int = -1;
+    let result = install_landlock_with(ruleset, |step| {
+        if let Some((failed, errno)) = ruleset.injected_step_failure {
+            if failed == step {
+                return Err(errno);
+            }
+        }
+        // Each arm makes one kernel call and answers its errno. `errno` is read
+        // at once, before any later call can overwrite it.
+        let (answer, errno) = match step {
+            LandlockStep::CreateRuleset => {
+                let mut attr = LandlockRulesetAttr {
+                    handled_access_fs: ruleset.handled,
+                };
+                let answer = unsafe {
+                    libc::syscall(
+                        libc::SYS_landlock_create_ruleset,
+                        &mut attr as *mut LandlockRulesetAttr,
+                        std::mem::size_of::<LandlockRulesetAttr>(),
+                        0u32,
+                    )
+                };
+                let errno = unsafe { *libc::__errno_location() };
+                if answer >= 0 {
+                    descriptor = answer as libc::c_int;
+                }
+                (answer, errno)
+            }
+            LandlockStep::AddRule(index) => {
+                let Some(rule) = ruleset.rules.get(index) else {
+                    return Err(libc::EINVAL);
+                };
+                let Some(path) = prepared.paths.get(index) else {
+                    return Err(libc::EINVAL);
+                };
+                let path_descriptor =
+                    unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+                if path_descriptor < 0 {
+                    return Err(unsafe { *libc::__errno_location() });
+                }
+                let mut attr = LandlockPathBeneathAttr {
+                    allowed_access: rule.rights,
+                    parent_fd: path_descriptor,
+                };
+                let answer = unsafe {
+                    libc::syscall(
+                        libc::SYS_landlock_add_rule,
+                        descriptor,
+                        LANDLOCK_RULE_PATH_BENEATH,
+                        &mut attr as *mut LandlockPathBeneathAttr,
+                        0u32,
+                    )
+                };
+                let errno = unsafe { *libc::__errno_location() };
+                unsafe { libc::close(path_descriptor) };
+                (answer, errno)
+            }
+            LandlockStep::NoNewPrivileges => {
+                if prepared.skip_no_new_privileges {
+                    return Ok(());
+                }
+                let answer = unsafe {
+                    libc::prctl(libc::PR_SET_NO_NEW_PRIVS, LANDLOCK_NO_NEW_PRIVS, 0, 0, 0)
+                };
+                (answer as libc::c_long, unsafe { *libc::__errno_location() })
+            }
+            LandlockStep::RestrictSelf => {
+                let answer =
+                    unsafe { libc::syscall(libc::SYS_landlock_restrict_self, descriptor, 0u32) };
+                (answer, unsafe { *libc::__errno_location() })
+            }
+        };
+        if answer < 0 {
+            Err(errno)
+        } else {
+            Ok(())
+        }
+    });
+    if descriptor >= 0 {
+        unsafe { libc::close(descriptor) };
+    }
+    result
+}
+
+/// The one install record: three signed 64-bit fields, in native byte order,
+/// written by the child before it execs. The first field names the outcome, and
+/// the other two carry that outcome's two values.
+const SECCOMP_LAUNCH_RECORD_LEN: usize = 24;
+/// The record's first field when the filter is installed: the marker's answer
+/// before the install, then the marker's answer after it.
+const SECCOMP_LAUNCH_INSTALLED: i64 = 0;
+/// `PR_SET_NO_NEW_PRIVS` failed: the second field is that step's errno.
+const SECCOMP_LAUNCH_NO_NEW_PRIVS: i64 = 1;
+/// The filter install failed: the second field is that step's errno.
+const SECCOMP_LAUNCH_FILTER: i64 = 2;
+/// The list was built for another audit architecture: the third field is it.
+const SECCOMP_LAUNCH_AUDIT_ARCH: i64 = 3;
+/// A Landlock step failed: the second field is the step below and the third is
+/// its errno. Encoding these tags belongs to `SeccompInstallFailure::launch_record`.
+/// `write_seccomp_launch_record` still writes the finished bytes.
+const SECCOMP_LAUNCH_LANDLOCK: i64 = 4;
+/// The Landlock steps a record can name, in the record's second field.
+const SECCOMP_LAUNCH_LANDLOCK_CREATE: i64 = 0;
+/// The first rule position; a rule's record value is this plus its position.
+const SECCOMP_LAUNCH_LANDLOCK_ADD_FIRST: i64 = 1;
+/// `PR_SET_NO_NEW_PRIVS` failed inside the Landlock install. It is a value no
+/// rule position can take, because a ruleset holds far fewer rules than this.
+const SECCOMP_LAUNCH_LANDLOCK_NO_NEW_PRIVS: i64 = 1_000_000;
+/// `landlock_restrict_self` failed.
+const SECCOMP_LAUNCH_LANDLOCK_RESTRICT_SELF: i64 = 1_000_001;
+
+/// One child's install report, read from the fixed record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeccompLaunchRecord {
+    /// The filter is installed: the marker's answer before and after it.
+    Installed([i64; 2]),
+    /// The install refused at this step, with its errno.
+    Refused(SeccompInstallFailure),
+}
+
+/// The one record reader. A record that is not exactly one record's length is
+/// `RecordLength`, and a first field that names no outcome is `UnknownStep`, so
+/// each has its own reason and neither reads as a bare spawn error (P11).
+///
+/// The refusal names only counts and no bytes: a partly written record is the
+/// child's report, not evidence to quote.
+fn decode_seccomp_launch_record(record: &[u8]) -> Result<SeccompLaunchRecord, String> {
+    if record.len() != SECCOMP_LAUNCH_RECORD_LEN {
+        return Err(format!(
+            "seccomp install report refused: the child reported {} bytes and one record is {}",
+            record.len(),
+            SECCOMP_LAUNCH_RECORD_LEN
+        ));
+    }
+    let mut fields = [0i64; 3];
+    for (field, bytes) in fields.iter_mut().zip(record.chunks_exact(8)) {
+        *field = i64::from_ne_bytes(bytes.try_into().expect("one 8-byte record field"));
+    }
+    let [step, first, second] = fields;
+    match step {
+        SECCOMP_LAUNCH_INSTALLED => Ok(SeccompLaunchRecord::Installed([first, second])),
+        SECCOMP_LAUNCH_NO_NEW_PRIVS => Ok(SeccompLaunchRecord::Refused(
+            SeccompInstallFailure::Step(SeccompStep::NoNewPrivileges, first as i32),
+        )),
+        SECCOMP_LAUNCH_FILTER => Ok(SeccompLaunchRecord::Refused(SeccompInstallFailure::Step(
+            SeccompStep::Filter,
+            first as i32,
+        ))),
+        SECCOMP_LAUNCH_AUDIT_ARCH => Ok(SeccompLaunchRecord::Refused(
+            SeccompInstallFailure::AuditArchitecture(second as u32),
+        )),
+        SECCOMP_LAUNCH_LANDLOCK => {
+            let failure = LandlockInstallFailure::from_record(first, second as i32).ok_or_else(
+                || {
+                    format!(
+                        "seccomp install report refused: the child named step {first}, which is no install step"
+                    )
+                },
+            )?;
+            Ok(SeccompLaunchRecord::Refused(
+                SeccompInstallFailure::Landlock(failure),
+            ))
+        }
+        other => Err(format!(
+            "seccomp install report refused: the child named step {other}, which is no install step"
+        )),
+    }
+}
+
+/// The one place a launched child's install report becomes the launcher's
+/// answer: the marker's two answers when the filter is installed, that step's
+/// own reason when the install refused, and, for a record that is missing,
+/// short, long or names an unknown step, the record reader's reason together
+/// with what the child did instead.
+///
+/// `child` describes the launched child: it did not start, with the reason the
+/// spawn gave, or it started and reported nothing. A child whose own write
+/// failed or that never ran leaves no record, so without this the caller would
+/// receive a bare spawn error and lose the reason the install report carries.
+/// The reader reads bytes and makes no kernel call, so every OS can hold it.
+fn seccomp_launch_answers_or_refusal(record: &[u8], child: &str) -> Result<[i64; 2], String> {
+    match decode_seccomp_launch_record(record) {
+        Ok(SeccompLaunchRecord::Installed(answers)) => Ok(answers),
+        Ok(SeccompLaunchRecord::Refused(failure)) => Err(failure.to_string()),
+        Err(refusal) => Err(format!("{refusal}; {child}")),
+    }
+}
+
+/// What one marker call answers in this process right now: the errno it failed
+/// with, or the value it returned.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeccompAnswer {
+    Errno(i32),
+    Returned(i64),
+}
+
+#[cfg(target_os = "linux")]
+impl SeccompAnswer {
+    /// The answer as the probe writes it and reads it back: `errno:<n>` for a
+    /// failed call and `ok:<n>` for one that returned.
+    fn text(self) -> String {
+        match self {
+            Self::Errno(errno) => format!("errno:{errno}"),
+            Self::Returned(value) => format!("ok:{value}"),
+        }
+    }
+
+    /// The answer a probe record token names, or `None` when it names none.
+    fn parse(token: &str) -> Option<Self> {
+        if let Some(errno) = token.strip_prefix("errno:") {
+            return errno.parse().ok().map(Self::Errno);
+        }
+        token
+            .strip_prefix("ok:")
+            .and_then(|value| value.parse().ok())
+            .map(Self::Returned)
+    }
+}
+
+/// Runs one kernel call and turns it into its answer. One reader serves every
+/// probe call, so the four calls cannot measure their failures differently.
+#[cfg(target_os = "linux")]
+fn seccomp_answer(call: impl FnOnce() -> i64) -> SeccompAnswer {
+    let answer = call();
+    if answer == -1 {
+        let errno = std::io::Error::last_os_error()
+            .raw_os_error()
+            .expect("a failed call must carry an errno");
+        SeccompAnswer::Errno(errno)
+    } else {
+        SeccompAnswer::Returned(answer)
+    }
+}
+
+/// The call whose answer distinguishes this filter from the host: a `bpf`
+/// request with an invalid command and null attributes, which the kernel
+/// refuses with `EINVAL` and which this filter refuses with the deny marker.
+///
+/// The marker is read before and after the install in the same process, so a
+/// child that inherits a filter from its parent cannot show the change. The
+/// answer is negative for an errno, so a returned value is distinguishable.
+#[cfg(target_os = "linux")]
+fn seccomp_launch_marker_answer() -> i64 {
+    let answer = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            -1 as libc::c_long,
+            0 as libc::c_long,
+            0 as libc::c_long,
+        )
+    };
+    if answer == -1 {
+        -i64::from(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+    } else {
+        answer
+    }
+}
+
+/// The four calls the filter refuses and no allow form names. The journey
+/// requires each of them to answer the deny marker after the install and to
+/// answer something else before it, so a host that already refuses a call
+/// cannot stand in for the filter.
+#[cfg(target_os = "linux")]
+const SECCOMP_PROBE_CALLS: &[&str] = &["ptrace", "mount", "bpf", "keyctl"];
+
+/// The keyring `keyctl` names in the probe: the session keyring. It is a real
+/// keyring this process is expected to hold, so without the filter the call
+/// answers a usable id and the filter's refusal is the only reason it stops.
+const SECCOMP_PROBE_KEYRING: libc::c_long = -3;
+
+/// The `keyctl` request the probe makes: `KEYCTL_GET_KEYRING_ID`, command `0`.
+const SECCOMP_PROBE_KEYCTL_GET_KEYRING_ID: libc::c_long = 0;
+
+/// How many registers `keyctl` reads for the probe's request: the command, the
+/// keyring, the create flag and two unused arguments.
+const SECCOMP_PROBE_KEYCTL_ARGUMENTS: usize = 5;
+
+/// Every argument the probe passes to one call, so the call's whole argument
+/// list is visible in one place and no register is left to chance.
+///
+/// `keyctl`'s command decides how many of its other arguments the kernel reads,
+/// and command `0` reads a special keyring id that may hold `-1` to `-9`. A
+/// call that passed a shorter argument list would leave the registers after it
+/// unspecified, so the kernel could select another keyring or be asked to
+/// create one. This table names all of them: the command, the keyring, and a
+/// create flag of `0` that refuses creation, followed by two unused zeros. It
+/// carries no kernel call, so every OS can read it.
+const SECCOMP_PROBE_KEYCTL_TABLE: [libc::c_long; SECCOMP_PROBE_KEYCTL_ARGUMENTS] = [
+    SECCOMP_PROBE_KEYCTL_GET_KEYRING_ID,
+    SECCOMP_PROBE_KEYRING,
+    0,
+    0,
+    0,
+];
+
+/// The `keyctl` probe passes its complete argument list: command `0`, a named
+/// keyring, and a create flag of `0` that refuses creation, with two unused
+/// zeros behind it. The command's own reference makes all of these arguments
+/// part of the request, and a short argument list would leave the kernel
+/// reading registers this probe never set, so it could select another keyring
+/// or be asked to create one.
+///
+/// The test reads the table and the probe's call, so a call that passed fewer
+/// arguments than the command reads fails here even though the call compiles.
+/// It makes no kernel call and starts no process, so it runs on every OS.
+///
+/// Falsifier: WP166 passes only the command to `keyctl`, so the call's own
+/// list omits the keyring, create flag and unused arguments while the table
+/// still supplies the complete fixture.
+#[test]
+fn seccomp_keyctl_probe_supplies_every_argument_without_creation() {
+    assert_eq!(
+        SECCOMP_PROBE_KEYCTL_TABLE[0], SECCOMP_PROBE_KEYCTL_GET_KEYRING_ID,
+        "the probe must make the KEYCTL_GET_KEYRING_ID request"
+    );
+    assert_eq!(
+        SECCOMP_PROBE_KEYCTL_TABLE[1], SECCOMP_PROBE_KEYRING,
+        "the probe must name the keyring it reads, and a special id is a real id"
+    );
+    assert!(
+        SECCOMP_PROBE_KEYCTL_TABLE[1] < 0 && SECCOMP_PROBE_KEYCTL_TABLE[1] >= -9,
+        "the keyring must be a special keyring id, which is -1 to -9: {}",
+        SECCOMP_PROBE_KEYCTL_TABLE[1]
+    );
+    assert_eq!(
+        SECCOMP_PROBE_KEYCTL_TABLE[2], 0,
+        "the create flag must be 0, because a probe asks for no keyring to be created"
+    );
+    assert_eq!(
+        SECCOMP_PROBE_KEYCTL_TABLE[3..],
+        [0; SECCOMP_PROBE_KEYCTL_ARGUMENTS - 3],
+        "the arguments after the create flag are unused and must be named as zeros"
+    );
+
+    // The call's own argument list, read from the source that makes it, so a
+    // probe that passed a shorter list cannot pass on a table it never uses.
+    let source = fs::read_to_string(Path::new("tests/confine.rs"))
+        .expect("this test's own source must be readable");
+    let signature = "fn seccomp_probe_answers(call: &str) -> SeccompAnswer {";
+    let call = source
+        .rsplit_once(signature)
+        .map(|(_, call)| call)
+        .expect("the probe must hold its one call reader");
+    let keyctl = call
+        .split("\"keyctl\" =>")
+        .nth(1)
+        .expect("the probe must hold its keyctl arm");
+    let keyctl = keyctl
+        .split("other =>")
+        .next()
+        .expect("the keyctl arm must end before the catch-all");
+    assert!(
+        keyctl.contains("libc::syscall(libc::SYS_keyctl, command, keyring, create, first, second)"),
+        "the keyctl call must pass the table's five arguments and no register it did not set: \
+         {keyctl}"
+    );
+    assert!(
+        keyctl.contains(
+            "let [command, keyring, create, first, second] = SECCOMP_PROBE_KEYCTL_TABLE;"
+        ),
+        "the keyctl call must read its whole argument list from the one table: {keyctl}"
+    );
+}
+
+/// What `call` answers in this process right now. The probe child calls this
+/// once before the filter and once after, through the same function, so the two
+/// records cannot differ in what they measure. Each arm passes its complete
+/// argument list: no call relies on a register this function did not set.
+#[cfg(target_os = "linux")]
+fn seccomp_probe_answers(call: &str) -> SeccompAnswer {
+    match call {
+        "ptrace" => {
+            seccomp_answer(|| unsafe { libc::ptrace(libc::PTRACE_TRACEME, 0, 0, 0) as i64 })
+        }
+        "mount" => seccomp_answer(|| unsafe {
+            libc::mount(
+                c"/nonexistent-seccomp-probe-source".as_ptr(),
+                c"/nonexistent-seccomp-probe-target".as_ptr(),
+                c"none".as_ptr(),
+                0,
+                std::ptr::null(),
+            ) as i64
+        }),
+        "bpf" => seccomp_answer(|| unsafe {
+            libc::syscall(
+                libc::SYS_bpf,
+                0 as libc::c_long,
+                0 as libc::c_long,
+                0 as libc::c_long,
+            )
+        }),
+        "keyctl" => seccomp_answer(|| unsafe {
+            let [command, keyring, create, first, second] = SECCOMP_PROBE_KEYCTL_TABLE;
+            libc::syscall(libc::SYS_keyctl, command, keyring, create, first, second)
+        }),
+        other => panic!("the probe names no call {other}"),
+    }
+}
+
+/// The allow list is an allow list, not a deny list.
+///
+/// The program's final decision is the deny marker, and every `ALLOW` return is
+/// reachable only through an equality test against a number the list names: the
+/// test walks each test's true and false jump and requires the true jump to land
+/// on its `ALLOW` and the false jump to step over it, so a changed jump target
+/// fails even when the syscall number is right. It then collects every number
+/// the program tests and requires that set to equal the numbers the admitted
+/// syscalls name, so a number swapped for an undeclared call's fails even when
+/// every jump target is right.
+///
+/// It also holds the architecture guard: a program whose audit-arch test
+/// refused the target instead of admitting it would deny every call, and one
+/// with no guard would read another architecture's numbers as its own. A
+/// fixture program built for the other architecture shows the guard is part of
+/// the program and falls through to the marker.
+///
+/// The test reads the built program, starts no process and calls no kernel, so
+/// it runs on every OS.
+///
+/// It holds two sets of calls that are in no allow-list entry. `ptrace`,
+/// `mount`, `bpf` and `keyctl` are the calls the kernel proof measures, and the
+/// socket calls are the network row's whole-call refusal: `socket`,
+/// `socketpair`, `connect`, `sendmsg`, `recvmsg`, `process_vm_readv`,
+/// `process_vm_writev` and `pidfd_getfd`. Each socket call must have a number row
+/// on this target, and a call whose row is `None` here is reported as not covered
+/// on this target rather than skipped silently. On a Linux target each of those
+/// rows must also equal the number `libc::SYS_*` gives the call, so the table
+/// cannot drift from the header it was written from.
+///
+/// Falsifier: WP146 replaces the default decision with `ALLOW` and refuses only
+/// `socket`, `connect` and `execve`, so the last instruction allows. WP150
+/// admits both architecture branches. WP151 makes a false jump land on its own
+/// `ALLOW`, so a call the test does not name is admitted. WP161 tests `ptrace`'s
+/// number where an admitted syscall's belongs, so the program tests a number no
+/// row names and admits a call the list never derived. WP223 adds `socket` to the
+/// `STORAGE_ROOT` row, so an allow-form row admits a network call.
+#[test]
+fn seccomp_program_denies_by_default_and_lists_no_undeclared_call() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let allow = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &declared)
+        .unwrap_or_else(|err| panic!("{err}"));
+    let program = &allow.program;
+
+    let last = program.last().expect("the program must hold a decision");
+    assert_eq!(
+        *last,
+        SeccompInstruction::stmt(SECCOMP_BPF_RET_K, seccomp_deny_return()),
+        "the final decision must be the deny marker, not ALLOW"
+    );
+
+    let mut allowed = 0usize;
+    for (index, instruction) in program.iter().enumerate() {
+        if instruction.code != SECCOMP_BPF_RET_K || instruction.k != SECCOMP_RET_ALLOW {
+            continue;
+        }
+        allowed += 1;
+        let test_index = index
+            .checked_sub(1)
+            .expect("an ALLOW return must follow its equality test");
+        let test = program[test_index];
+        assert_eq!(
+            test.code, SECCOMP_BPF_JEQ_K,
+            "instruction {index} allows without an equality test in front of it"
+        );
+        assert_eq!(
+            index + usize::from(test.jt),
+            index,
+            "instruction {test_index} must jump to its own ALLOW on a true test"
+        );
+        assert_eq!(
+            index + usize::from(test.jf),
+            index + 1,
+            "instruction {test_index} must step over its ALLOW on a false test"
+        );
+        assert_eq!(
+            test.jt, 0,
+            "instruction {test_index} must not jump past its own ALLOW on a true test"
+        );
+        assert_eq!(
+            test.jf, 1,
+            "instruction {test_index} must step over its own ALLOW on a false test"
+        );
+    }
+    assert_eq!(
+        allowed,
+        allow.syscalls.len(),
+        "the program must hold one ALLOW per admitted syscall"
+    );
+
+    // Every equality test names a number the list admits, and every admitted
+    // syscall has its own equality test: a number swapped for an undeclared
+    // call's passes the layout checks above but fails here.
+    let mut expected: Vec<u32> = allow
+        .syscalls
+        .iter()
+        .filter_map(|syscall| seccomp_syscall_number(syscall, SECCOMP_AUDIT_ARCH))
+        .collect();
+    expected.sort_unstable();
+    let mut tested: Vec<u32> = program
+        .iter()
+        .filter(|instruction| instruction.code == SECCOMP_BPF_JEQ_K)
+        .map(|instruction| instruction.k)
+        .filter(|number| *number != SECCOMP_AUDIT_ARCH)
+        .collect();
+    tested.sort_unstable();
+    for number in &tested {
+        assert!(
+            expected.contains(number),
+            "the program must test only admitted syscall numbers, and {number} is in no row: {:?}",
+            allow.syscalls
+        );
+    }
+    assert_eq!(
+        tested, expected,
+        "the program must test exactly the admitted syscall numbers: {:?}",
+        allow.syscalls
+    );
+
+    for denied in [
+        "bpf",
+        "connect",
+        "keyctl",
+        "mount",
+        "pidfd_getfd",
+        "process_vm_readv",
+        "process_vm_writev",
+        "ptrace",
+        "recvmsg",
+        "sendmsg",
+        "socket",
+        "socketpair",
+    ] {
+        assert!(
+            !allow.admits(denied),
+            "{denied} must be in no allow-list entry, so the default decision refuses it"
+        );
+        let Some(number) = seccomp_syscall_number(denied, SECCOMP_AUDIT_ARCH) else {
+            panic!("{denied} has no syscall number row on this target, so it is not covered here");
+        };
+        assert!(
+            !program
+                .iter()
+                .any(|instruction| instruction.code == SECCOMP_BPF_JEQ_K
+                    && instruction.k == number),
+            "the program must test no equality against {denied}'s number {number}"
+        );
+    }
+    // On the target the numbers describe, each socket row must equal the number
+    // this crate's `libc` gives that call, so the table cannot drift from the
+    // kernel header it was written from.
+    #[cfg(target_os = "linux")]
+    for (name, libc_number) in [
+        ("socket", libc::SYS_socket),
+        ("socketpair", libc::SYS_socketpair),
+        ("connect", libc::SYS_connect),
+        ("sendmsg", libc::SYS_sendmsg),
+        ("recvmsg", libc::SYS_recvmsg),
+        ("process_vm_readv", libc::SYS_process_vm_readv),
+        ("process_vm_writev", libc::SYS_process_vm_writev),
+        ("pidfd_getfd", libc::SYS_pidfd_getfd),
+    ] {
+        assert_eq!(
+            seccomp_syscall_number(name, SECCOMP_AUDIT_ARCH),
+            Some(libc_number as u32),
+            "{name}'s row must be the number libc gives this target"
+        );
+    }
+
+    // The audit-arch check reads `seccomp_data.arch`, jumps to its admit arm
+    // only for this target's architecture, and falls through to the marker.
+    assert_eq!(
+        program[0],
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARCH_OFFSET),
+        "the program must load seccomp_data.arch first"
+    );
+    assert_eq!(
+        program[1],
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, SECCOMP_AUDIT_ARCH, 1, 0),
+        "the architecture test must jump to its admit arm only for {SECCOMP_AUDIT_ARCH:#x}"
+    );
+    assert_eq!(
+        program[2],
+        SeccompInstruction::stmt(SECCOMP_BPF_RET_K, seccomp_deny_return()),
+        "a wrong architecture must be refused with the deny marker"
+    );
+    assert_eq!(
+        program[3],
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_NUMBER_OFFSET),
+        "the admit arm must load seccomp_data.nr"
+    );
+
+    // A program built for the other architecture carries that architecture in
+    // its guard and the other architecture's numbers, so the guard is part of
+    // the program and not of the caller.
+    for foreign in [0xc000_003e, 0xc000_00b7]
+        .into_iter()
+        .filter(|arch| *arch != SECCOMP_AUDIT_ARCH)
+    {
+        let fixture = seccomp_program(&["read"], foreign);
+        assert_eq!(
+            fixture[1],
+            SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, foreign, 1, 0),
+            "a fixture program must guard its own architecture {foreign:#x}"
+        );
+        assert_eq!(
+            fixture[2],
+            SeccompInstruction::stmt(SECCOMP_BPF_RET_K, seccomp_deny_return()),
+            "the foreign fixture's wrong-architecture arm must be the deny marker"
+        );
+        assert_eq!(
+            fixture.last(),
+            Some(&SeccompInstruction::stmt(
+                SECCOMP_BPF_RET_K,
+                seccomp_deny_return()
+            )),
+            "the foreign fixture must also deny by default"
+        );
+    }
+}
+
+/// The allow list follows the declared rights: the file syscalls of `storage`
+/// and the exec syscalls of `bound-executable` come from the two rights, a copy
+/// of the file without `storage` yields a list without the calls only that right
+/// brings, a copy with no allow form at all yields an empty list and a program
+/// with no `ALLOW` decision, and a copy holding an id the shared contract does
+/// not name is refused with `declared_entries`' existing reason, unchanged.
+///
+/// The removed right's own calls are the ones the startup-root-directory row
+/// does not also grant, because that row still admits `read`, `openat` and the
+/// other reads of an opened file. The empty case is the one that forbids a
+/// second permission source: the builder adds no syscall of its own beside the
+/// rows an allow form selects. The test reads the committed fixture, starts no
+/// process and calls no kernel, so it runs on every OS.
+///
+/// Falsifier: WP147 makes the builder return a fixed list and ignore its
+/// declared input, so neither the removal case nor its syscalls change. WP160
+/// adds an unconditional syscall beside the rows, so the empty case admits it
+/// and this test fails on the empty list.
+#[test]
+fn seccomp_allow_list_follows_the_declared_rights() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let allow = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &declared)
+        .unwrap_or_else(|err| panic!("{err}"));
+
+    for syscall in ["execve", "execveat"] {
+        assert!(
+            allow.admits(syscall),
+            "the bound-executable row must admit {syscall}: {:?}",
+            allow.syscalls
+        );
+    }
+    for syscall in ["mkdirat", "write", "unlinkat", "renameat2", "fchmod"] {
+        assert!(
+            allow.admits(syscall),
+            "the storage rows must admit {syscall}: {:?}",
+            allow.syscalls
+        );
+    }
+
+    let mut without_storage = declared.clone();
+    without_storage["rights"]
+        .as_array_mut()
+        .expect("the declared rights must hold a rights list")
+        .retain(|entry| entry["id"] != "storage");
+    let reduced = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &without_storage)
+        .unwrap_or_else(|err| panic!("{err}"));
+    for syscall in ["mkdirat", "write", "unlinkat", "renameat2", "fchmod"] {
+        assert!(
+            allow.admits(syscall),
+            "the storage right must admit {syscall}: {:?}",
+            allow.syscalls
+        );
+        assert!(
+            !reduced.admits(syscall),
+            "removing the storage right must remove {syscall} from the list: {:?}",
+            reduced.syscalls
+        );
+    }
+    assert!(
+        reduced.admits("execve"),
+        "the bound-executable right stays, so execve stays: {:?}",
+        reduced.syscalls
+    );
+    assert!(
+        reduced.admits("read"),
+        "the startup-root-directory row still admits read: {:?}",
+        reduced.syscalls
+    );
+
+    // A declaration with no allow form grants nothing: the list is empty and the
+    // program holds no `ALLOW` decision, so a builder that adds a syscall of its
+    // own beside the rows shows here.
+    let mut empty = declared.clone();
+    empty["rights"]
+        .as_array_mut()
+        .expect("the declared rights must hold a rights list")
+        .clear();
+    empty[PLATFORM_BASELINE]["rules"]
+        .as_array_mut()
+        .expect("the platform baseline must hold a rules list")
+        .clear();
+    let nothing = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &empty)
+        .unwrap_or_else(|err| panic!("{err}"));
+    assert!(
+        nothing.syscalls.is_empty(),
+        "a declaration with no allow form must admit no syscall: {:?}",
+        nothing.syscalls
+    );
+    assert!(
+        !nothing
+            .program
+            .iter()
+            .any(|instruction| instruction.code == SECCOMP_BPF_RET_K
+                && instruction.k == SECCOMP_RET_ALLOW),
+        "a program built from no allow form must hold no ALLOW decision"
+    );
+    assert_eq!(
+        nothing.program.last(),
+        Some(&SeccompInstruction::stmt(
+            SECCOMP_BPF_RET_K,
+            seccomp_deny_return()
+        )),
+        "a program built from no allow form must end on the deny marker"
+    );
+
+    let mut unnamed = declared.clone();
+    unnamed["rights"]
+        .as_array_mut()
+        .expect("the declared rights must hold a rights list")
+        .push(json!({
+            "id": "unnamed-right",
+            "rules": [r#"(allow file-read* (literal "/private/var/cc-seccomp-unnamed"))"#],
+        }));
+    let refusal = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &unnamed)
+        .expect_err("an id the shared contract does not name must be refused");
+    assert_eq!(
+        refusal,
+        format!(
+            "{WALLET_PROVIDER} declares unnamed-right, which the shared contract does not name"
+        ),
+        "the refusal must be declared_entries' own reason, unchanged"
+    );
+}
+
+/// An allow form the mapping table does not hold is a refusal that names the
+/// provider and the form and builds no filter, symmetrical to
+/// `check_profile_contract`'s refusals.
+///
+/// Each of the three spellings of an allow form is tried: `(allow)`,
+/// `(allow(file-read*))` and the spaced `(allow file-read*)`. All three are
+/// allow forms to the one recogniser, and none of them is a row of the mapping
+/// table, so each is refused by name. The test reads the committed fixture,
+/// starts no process and calls no kernel, so it runs on every OS.
+///
+/// Falsifier: WP148 skips an allow form with no row instead of refusing it, so
+/// the list is built and no refusal comes. WP149 makes the recogniser require a
+/// space after the operator, so `(allow)` and `(allow(file-read*))` are not
+/// allow forms, take no row and are read as head forms instead of refused.
+#[test]
+fn seccomp_rejects_unmapped_allow_form() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    for form in [
+        "(allow)",
+        r#"(allow(file-read* (literal "/private/var/cc-seccomp-unmapped")))"#,
+        r#"(allow mach-lookup (global-name "com.apple.system.logger"))"#,
+    ] {
+        let mut unmapped = declared.clone();
+        let storage = unmapped["rights"]
+            .as_array_mut()
+            .expect("the declared rights must hold a rights list")
+            .iter_mut()
+            .find(|entry| entry["id"] == "storage")
+            .expect("the declared rights must hold the storage right");
+        storage["rules"]
+            .as_array_mut()
+            .expect("the storage right must hold a rules list")
+            .push(json!(form));
+
+        let refusal = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &unmapped)
+            .expect_err("an allow form with no syscall row must be refused");
+        assert!(
+            refusal.contains(WALLET_PROVIDER),
+            "the refusal must name the provider: {refusal}"
+        );
+        assert!(
+            refusal.contains(form),
+            "the refusal must quote the offending form: {refusal}"
+        );
+        assert!(
+            refusal.contains("no filter is built"),
+            "the refusal must state that no filter is built: {refusal}"
+        );
+        assert_eq!(
+            refusal,
+            format!(
+                "{WALLET_PROVIDER} seccomp allow list refuses the allow form {form}: \
+                 the mapping table has no syscall row for it, so no filter is built"
+            )
+        );
+    }
+}
+
+/// The install rule gives each failed step its own reason and keeps its errno:
+/// `PR_SET_NO_NEW_PRIVS` failing and the filter failing are told apart, each
+/// message carries the errno it read, a failed first step stops before the
+/// filter, and the two steps run in that order.
+///
+/// The test injects the steps, so it runs on every OS and calls no kernel.
+///
+/// Falsifier: WP152 reverses the two steps, so the filter runs before
+/// `no_new_privs` and the test fails on its recorded order. WP153 returns one
+/// fixed reason for both steps, so the second step's refusal names the first
+/// step and the test fails on it. WP154 continues after a failed first step, so
+/// the test fails on its recorded order.
+#[test]
+fn seccomp_install_refuses_each_failed_step() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let allow = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &declared)
+        .unwrap_or_else(|err| panic!("{err}"));
+
+    let mut ran: Vec<SeccompStep> = Vec::new();
+    let failure = install_seccomp_with(&allow, |step| {
+        ran.push(step);
+        if step == SeccompStep::NoNewPrivileges {
+            Err(libc::EPERM)
+        } else {
+            Ok(())
+        }
+    })
+    .expect_err("a failed no_new_privs step must be refused");
+    assert_eq!(
+        failure.to_string(),
+        format!(
+            "seccomp install refused: PR_SET_NO_NEW_PRIVS failed with errno {}",
+            libc::EPERM
+        ),
+        "the first step's refusal must name that step and its errno"
+    );
+    assert_eq!(
+        ran,
+        vec![SeccompStep::NoNewPrivileges],
+        "a failed first step must stop before the filter"
+    );
+
+    let mut ran: Vec<SeccompStep> = Vec::new();
+    let failure = install_seccomp_with(&allow, |step| {
+        ran.push(step);
+        if step == SeccompStep::Filter {
+            Err(libc::EINVAL)
+        } else {
+            Ok(())
+        }
+    })
+    .expect_err("a failed filter step must be refused");
+    assert_eq!(
+        failure.to_string(),
+        format!(
+            "seccomp install refused: the filter install failed with errno {}",
+            libc::EINVAL
+        ),
+        "the filter step's refusal must name that step and its errno"
+    );
+    assert_eq!(
+        ran,
+        vec![SeccompStep::NoNewPrivileges, SeccompStep::Filter],
+        "the filter runs after no_new_privs"
+    );
+
+    let first = SeccompInstallFailure::Step(SeccompStep::NoNewPrivileges, libc::EPERM);
+    let second = SeccompInstallFailure::Step(SeccompStep::Filter, libc::EPERM);
+    assert_ne!(
+        first.to_string(),
+        second.to_string(),
+        "the two steps must give distinct reasons for one errno"
+    );
+
+    let mut wrong_arch = allow.clone();
+    wrong_arch.audit_arch = SECCOMP_AUDIT_ARCH.wrapping_add(1);
+    let failure = install_seccomp_with(&wrong_arch, |_| {
+        panic!("the architecture refusal precedes both kernel steps")
+    })
+    .expect_err("a list built for another architecture must be refused");
+    assert!(
+        failure.to_string().contains("audit architecture"),
+        "the refusal must name the audit architecture: {failure}"
+    );
+}
+
+/// The install record's two reporting failures each keep their own reason and
+/// errno, and the two reasons differ: a failed write and a zero-byte write are
+/// told apart. The write loop completes a short write and retries on `EINTR`
+/// instead of giving up.
+///
+/// The test reads the one pure write function and calls no kernel, so it runs on
+/// every OS.
+///
+/// Falsifier: WP155 truncates the record at its first short write, so the loop
+/// stops early and the test fails on the record it expects. WP156 suppresses the
+/// `EINTR` retry, so the interrupted write is reported as a failure and the test
+/// fails on it. WP157 returns one fixed reason for both reporting failures, so
+/// the test fails because the two reasons are equal.
+#[test]
+fn seccomp_launch_refuses_each_reporting_failure() {
+    let record = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+
+    // A short write is completed, and `EINTR` is retried, so the whole record
+    // arrives.
+    let mut written: Vec<u8> = Vec::new();
+    let mut calls = 0usize;
+    write_seccomp_launch_record(&record, |bytes| {
+        calls += 1;
+        match calls {
+            1 => {
+                written.extend_from_slice(&bytes[..2]);
+                Ok(2)
+            }
+            2 => Err(libc::EINTR),
+            _ => {
+                written.extend_from_slice(&bytes[..1]);
+                Ok(1)
+            }
+        }
+    })
+    .expect("a short write and an interrupted write must both be completed");
+    assert_eq!(
+        written,
+        record.to_vec(),
+        "the loop must write every byte of the record"
+    );
+    assert_eq!(
+        calls,
+        record.len(),
+        "the loop must retry after EINTR and finish one byte at a time"
+    );
+
+    let failed = write_seccomp_launch_record(&record, |_| Err(libc::EPIPE))
+        .expect_err("a failed write must be refused");
+    assert_eq!(failed, SeccompLaunchWriteFailure::Failed(libc::EPIPE));
+    assert_eq!(failed.errno(), libc::EPIPE);
+
+    let nothing = write_seccomp_launch_record(&record, |_| Ok(0))
+        .expect_err("a zero-byte write must be refused");
+    assert_eq!(nothing, SeccompLaunchWriteFailure::WroteNothing);
+    assert_eq!(nothing.errno(), libc::EIO);
+
+    assert_ne!(
+        failed.to_string(),
+        nothing.to_string(),
+        "the two reporting failures must give distinct reasons"
+    );
+    assert!(
+        failed.to_string().contains("could not be written")
+            && failed
+                .to_string()
+                .contains(&format!("errno {}", libc::EPIPE)),
+        "the failed write must carry its own words and errno: {failed}"
+    );
+    assert!(
+        nothing.to_string().contains("wrote no bytes"),
+        "the zero-byte write must carry its own words: {nothing}"
+    );
+}
+
+/// The install record's shape decides the launch reason: a record that is
+/// missing, short, long or names an unknown step is a refusal with its own
+/// words and never a bare spawn error, and a complete installed record carries
+/// the two marker answers the journey compares.
+///
+/// The launcher's own answer is read through `seccomp_launch_answers_or_refusal`,
+/// the one place the record becomes a launch result, so a child that never wrote
+/// a record keeps the record's reason and adds what it did instead. A failed
+/// write, a zero-byte write, a child that did not start and a child that started
+/// and reported nothing each give their own refusal, and no case is the bare
+/// spawn error finding 4 named.
+///
+/// The test reads the one pure record reader and parses no bytes a kernel wrote,
+/// so it runs on every OS.
+///
+/// Falsifier: WP163 accepts any record length, so a short record decodes as an
+/// installed one and the missing-length refusal does not come. WP164 decodes an
+/// unknown first field as an installed record, so the unknown-step refusal does
+/// not come. WP167 bypasses the reader when the child also failed to start, so
+/// the missing-report case answers the spawn's reason alone and the test fails
+/// on it.
+#[test]
+fn seccomp_launch_record_refuses_missing_or_unknown_report() {
+    let missing = decode_seccomp_launch_record(&[]).expect_err("a missing record must be refused");
+    assert_eq!(
+        missing,
+        format!(
+            "seccomp install report refused: the child reported 0 bytes and one record is \
+             {SECCOMP_LAUNCH_RECORD_LEN}"
+        ),
+        "a missing record must name its own reason"
+    );
+
+    let mut reasons: Vec<String> = vec![missing.clone()];
+    for length in [SECCOMP_LAUNCH_RECORD_LEN - 8, SECCOMP_LAUNCH_RECORD_LEN + 8] {
+        let record = vec![0u8; length];
+        let refusal = decode_seccomp_launch_record(&record)
+            .expect_err("a short or long record must be refused");
+        assert_eq!(
+            refusal,
+            format!(
+                "seccomp install report refused: the child reported {length} bytes and one \
+                 record is {SECCOMP_LAUNCH_RECORD_LEN}"
+            ),
+            "a record of {length} bytes must name its length and the record's"
+        );
+        reasons.push(refusal);
+    }
+
+    let mut unknown = [0u8; SECCOMP_LAUNCH_RECORD_LEN];
+    unknown[..8].copy_from_slice(&7i64.to_ne_bytes());
+    let refusal =
+        decode_seccomp_launch_record(&unknown).expect_err("an unknown step must be refused");
+    assert_eq!(
+        refusal, "seccomp install report refused: the child named step 7, which is no install step",
+        "an unknown step must name the step the child gave"
+    );
+    reasons.push(refusal);
+    assert_eq!(
+        reasons.len(),
+        reasons
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        "each record case must give its own reason: {reasons:?}"
+    );
+
+    // The launcher's own answer, one case per child outcome. Each keeps the
+    // record's reason and names what the child did instead, and no case is the
+    // bare spawn error.
+    let mut launch_reasons: Vec<String> = Vec::new();
+    for (record, child) in [
+        (
+            Vec::new(),
+            "the test child must start: No such file or directory (os error 2)",
+        ),
+        (
+            Vec::new(),
+            "the child started and its install report arrived incomplete",
+        ),
+        (
+            vec![0u8; SECCOMP_LAUNCH_RECORD_LEN - 8],
+            "the child started and its install report arrived incomplete",
+        ),
+        (
+            unknown.to_vec(),
+            "the child started and its install report arrived incomplete",
+        ),
+    ] {
+        let refusal = seccomp_launch_answers_or_refusal(&record, child)
+            .expect_err("a record this child did not complete must be refused");
+        assert!(
+            refusal.starts_with("seccomp install report refused: "),
+            "the launcher's refusal must carry the record's reason: {refusal}"
+        );
+        assert!(
+            refusal.contains(child),
+            "the launcher's refusal must say what the child did instead: {refusal}"
+        );
+        launch_reasons.push(refusal);
+    }
+    let missing_report = &launch_reasons[0];
+    assert!(
+        missing_report.contains("reported 0 bytes"),
+        "a child that never reported must answer the missing-report reason, not the spawn's \
+         alone: {missing_report}"
+    );
+    assert_eq!(
+        launch_reasons.len(),
+        launch_reasons
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        "each child outcome must give its own reason: {launch_reasons:?}"
+    );
+    assert_eq!(
+        seccomp_launch_answers_or_refusal(
+            &seccomp_launch_record(
+                SECCOMP_LAUNCH_INSTALLED,
+                -i64::from(libc::EINVAL),
+                -i64::from(SECCOMP_DENY_ERRNO),
+            ),
+            "the child started and reported an installed filter"
+        )
+        .expect("a complete installed record must answer the launcher's two answers"),
+        [-i64::from(libc::EINVAL), -i64::from(SECCOMP_DENY_ERRNO)],
+        "the launcher must carry the marker's two answers"
+    );
+
+    let installed = decode_seccomp_launch_record(&seccomp_launch_record(
+        SECCOMP_LAUNCH_INSTALLED,
+        -i64::from(libc::EINVAL),
+        -i64::from(SECCOMP_DENY_ERRNO),
+    ))
+    .expect("a complete installed record must decode");
+    assert_eq!(
+        installed,
+        SeccompLaunchRecord::Installed([-i64::from(libc::EINVAL), -i64::from(SECCOMP_DENY_ERRNO)]),
+        "an installed record must carry the marker's answer before and after the install"
+    );
+
+    for (step, errno) in [
+        (SECCOMP_LAUNCH_NO_NEW_PRIVS, libc::EPERM),
+        (SECCOMP_LAUNCH_FILTER, libc::EINVAL),
+    ] {
+        let decoded =
+            decode_seccomp_launch_record(&seccomp_launch_record(step, i64::from(errno), 0))
+                .expect("a failed-step record must decode");
+        let SeccompLaunchRecord::Refused(failure) = decoded else {
+            panic!("a failed step must decode as a refusal");
+        };
+        assert_eq!(
+            failure.launch_record(),
+            seccomp_launch_record(step, i64::from(errno), 0),
+            "both child paths must encode the same failed-step record"
+        );
+        assert!(
+            failure.to_string().starts_with("seccomp install refused: ")
+                && failure.to_string().contains(&format!("errno {errno}")),
+            "the refusal must name the step and its errno: {failure}"
+        );
+    }
+    let supplied_arch = SECCOMP_AUDIT_ARCH.wrapping_add(1);
+    let failure = SeccompInstallFailure::AuditArchitecture(supplied_arch);
+    assert_eq!(
+        failure.launch_record(),
+        seccomp_launch_record(SECCOMP_LAUNCH_AUDIT_ARCH, 0, i64::from(supplied_arch)),
+        "the architecture must keep all its unsigned bits in the fixed record"
+    );
+    assert_eq!(
+        decode_seccomp_launch_record(&failure.launch_record()).unwrap(),
+        SeccompLaunchRecord::Refused(failure),
+        "the shared decoder must preserve the architecture refusal for both child paths"
+    );
+}
+
+/// One install record's bytes, so the reader's cases are built by the record's
+/// own layout instead of a hand-written literal.
+fn seccomp_launch_record(step: i64, first: i64, second: i64) -> [u8; SECCOMP_LAUNCH_RECORD_LEN] {
+    let mut record = [0u8; SECCOMP_LAUNCH_RECORD_LEN];
+    for (field, value) in record.chunks_exact_mut(8).zip([step, first, second]) {
+        field.copy_from_slice(&value.to_ne_bytes());
+    }
+    record
+}
+
+/// A failed install starts nothing, and says which step failed with its errno:
+/// each injected step failure and a list built for another architecture come
+/// back from the launcher as that step's own reason, and no program runs.
+///
+/// The requested program is a byte-identical copy of the provider binary, so a
+/// start that got past the install would show as a live process whose own
+/// `/proc/<pid>/exe` names that copy. The test requires the refusal and then
+/// requires no such process to exist, so "starts nothing" is observed and not
+/// inferred. On another OS the launcher has no filter at all, and the refusal
+/// there names the provider and says the filter is a linux policy.
+///
+/// Falsifier: WP168 suppresses the `NoNewPrivileges` install failure, so the
+/// filter case names `no_new_privs` and the test fails on it. WP169 suppresses
+/// the `Filter` install failure, so that case never refuses.
+///
+/// All three plants reach this test's Linux arm only, which is not compiled on
+/// the Mac, so none of them is registered in `falsifiers.json`: they are
+/// recorded in `CONFINEMENT-LINUX.md` and re-run on the Linux host with their
+/// red output quoted there.
+#[test]
+fn linux_seccomp_launch_refuses_each_failed_install() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let allow = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &declared)
+        .unwrap_or_else(|err| panic!("{err}"));
+    let fixture = tempfile::tempdir().expect("temporary launch fixture");
+    let fixture = resolved(fixture.path());
+    let program = fixture.join("requested-program");
+    fs::copy(Path::new(PROVIDER_BINARY), &program).expect("the fixture copy must be writable");
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let refusal = ConfinedProvider::start_under_seccomp(&allow, &program)
+            .err()
+            .expect("a start without a filter must be refused");
+        assert_eq!(
+            refusal,
+            format!(
+                "{WALLET_PROVIDER} start is refused: a seccomp filter is installed on linux only"
+            ),
+            "the refusal must name the provider and say the filter is a linux policy"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut cases: Vec<(SeccompAllowList, String)> = Vec::new();
+        for (failed, errno) in [
+            (SeccompStep::NoNewPrivileges, libc::EPERM),
+            (SeccompStep::Filter, libc::EINVAL),
+        ] {
+            let mut candidate = allow.clone();
+            candidate.injected_step_failure = Some((failed, errno));
+            cases.push((
+                candidate,
+                format!(
+                    "{WALLET_PROVIDER} start is refused: {}",
+                    SeccompInstallFailure::Step(failed, errno)
+                ),
+            ));
+        }
+        let mut wrong_arch = allow.clone();
+        wrong_arch.audit_arch = SECCOMP_AUDIT_ARCH.wrapping_add(1);
+        cases.push((
+            wrong_arch.clone(),
+            format!(
+                "{WALLET_PROVIDER} start is refused: {}",
+                SeccompInstallFailure::AuditArchitecture(wrong_arch.audit_arch)
+            ),
+        ));
+
+        for (candidate, expected) in cases {
+            let refusal = ConfinedProvider::start_under_seccomp(&candidate, &program)
+                .err()
+                .unwrap_or_else(|| panic!("{expected} must refuse the start"));
+            assert_eq!(
+                refusal, expected,
+                "the refusal must be that step's own reason and errno"
+            );
+            assert!(
+                running_programs(&program).is_empty(),
+                "a refused install must start nothing, and {} runs {}",
+                program.display(),
+                running_programs(&program).len()
+            );
+        }
+    }
+}
+
+/// The launcher starts the program it is given and no other: the fixture holds
+/// the provider binary and a byte-identical copy of it, the launcher is given the
+/// copy, and the started child's own `/proc/<pid>/exe` must name that copy. A
+/// start that substituted the provider binary would run a different path and fail
+/// here, even though both files hold the same bytes.
+///
+/// The copy is byte-identical so only the path can tell them apart, and the
+/// provider binary is the program under test because it is the one the filter's
+/// measured launch set was measured against.
+///
+/// Falsifier: WP170 substitutes `PROVIDER_BINARY` for the given program, so the
+/// child's `/proc/<pid>/exe` names the original and the test fails on it. It
+/// reaches a Linux-only arm, so it is not registered in `falsifiers.json` and
+/// `CONFINEMENT-LINUX.md` records it with the red run on the Linux host.
+#[test]
+fn linux_seccomp_launcher_runs_the_requested_program() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let allow = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &declared)
+        .unwrap_or_else(|err| panic!("{err}"));
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let refusal = ConfinedProvider::start_under_seccomp(&allow, Path::new(PROVIDER_BINARY))
+            .err()
+            .expect("a start without a filter must be refused");
+        assert_eq!(
+            refusal,
+            format!(
+                "{WALLET_PROVIDER} start is refused: a seccomp filter is installed on linux only"
+            ),
+            "the refusal must name the provider and say the filter is a linux policy"
+        );
+        return;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let fixture = tempfile::tempdir().expect("temporary launch fixture");
+        let fixture = resolved(fixture.path());
+        let original = resolved(Path::new(PROVIDER_BINARY));
+        let requested = fixture.join("requested-program");
+        fs::copy(&original, &requested).expect("the fixture copy must be writable");
+        assert_eq!(
+            fs::read(&requested).expect("the copy must be readable"),
+            fs::read(&original).expect("the provider binary must be readable"),
+            "the copy must be byte-identical, so only its path tells the two apart"
+        );
+
+        let mut provider = ConfinedProvider::start_under_seccomp(&allow, &requested)
+            .unwrap_or_else(|refusal| panic!("the requested program must start: {refusal}"));
+        let launched = fs::read_link(format!("/proc/{}/exe", provider.child.id()))
+            .expect("the launched child's own /proc exe link must be readable");
+        let _ = provider.wait_for_exit();
+        assert_eq!(
+            launched, requested,
+            "the launcher must run the program it is given and no other"
+        );
+    }
+}
+
+/// The pids whose own `/proc/<pid>/exe` names `program`. It reads `/proc` and
+/// starts nothing, so a refusal can be checked for the process it must not
+/// leave behind.
+#[cfg(target_os = "linux")]
+fn running_programs(program: &Path) -> Vec<libc::pid_t> {
+    let mut pids = Vec::new();
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return pids;
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<libc::pid_t>().ok())
+        else {
+            continue;
+        };
+        if fs::read_link(entry.path().join("exe")).is_ok_and(|exe| exe == program) {
+            pids.push(pid);
+        }
+    }
+    pids
+}
+
+/// What one socket type's sweep reported: the type's name, the family bound the
+/// child walked, how many families answered the deny marker before the filter,
+/// how many answered it after, and the first family that answered something
+/// else after it.
+///
+/// It is a plain value, so the Mac can hold fixture sweeps and the journey can
+/// hold the child's. The family bound is the sweep's own number and never a
+/// `libc` constant here, so the judge names none and runs on every OS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SocketSweep {
+    name: &'static str,
+    families: usize,
+    refused_before: usize,
+    refused_after: usize,
+    first_unrefused: Option<usize>,
+}
+
+/// Judges the socket sweeps the probe reported against the types the one type
+/// table names. It reads the values it is given, so it makes no kernel call,
+/// reads no file and starts no process, and it runs on every OS.
+///
+/// It refuses, with a reason that names the type and the family where there is
+/// one: a type the table names and the report omits; an after-count below the
+/// family bound, which means the filter admitted at least one family, and the
+/// family that was not refused when the line names one; a before-count that
+/// covers every family, which is missing evidence rather than a pass, because a
+/// host that already refuses a call cannot stand in for the filter; and a family
+/// named as not refused at or above the sweep's own family bound, which means
+/// the line does not describe the sweep it claims.
+fn socket_sweep_problem(sweeps: &[SocketSweep], types: &[&'static str]) -> Result<(), String> {
+    for name in types {
+        let sweep = sweeps
+            .iter()
+            .find(|sweep| sweep.name == *name)
+            .ok_or_else(|| format!("socket sweep: the report records no line for {name}"))?;
+        if sweep.refused_after < sweep.families {
+            return Err(match sweep.first_unrefused {
+                Some(family) => format!(
+                    "socket sweep: {name} refused only {} of {} families after the filter, and \
+                     family {family} was not refused",
+                    sweep.refused_after, sweep.families
+                ),
+                None => format!(
+                    "socket sweep: {name} refused only {} of {} families after the filter, so the \
+                     filter does not refuse the whole call",
+                    sweep.refused_after, sweep.families
+                ),
+            });
+        }
+        if sweep.refused_before >= sweep.families {
+            return Err(format!(
+                "socket sweep: {name} was refused for every one of its {} families before the \
+                 filter, so this host cannot stand in for the filter",
+                sweep.families
+            ));
+        }
+        if let Some(family) = sweep.first_unrefused {
+            if family >= sweep.families {
+                return Err(format!(
+                    "socket sweep: {name} names family {family} as not refused, and its family \
+                     count is {}",
+                    sweep.families
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The prefix every probe socket-sweep line starts with.
+#[cfg(target_os = "linux")]
+const SECCOMP_PROBE_SOCKETS: &str = "seccomp-probe-socket:";
+
+/// The marker a sweep line writes in place of a family number when every family
+/// was refused.
+#[cfg(target_os = "linux")]
+const SECCOMP_SOCKET_UNREFUSED_NONE: &str = "none";
+
+/// The socket types the sweep walks for every family, one row per type the
+/// crate defines for this target. The name is the crate's own constant name, so
+/// a report line says which type it swept and the document can name it.
+///
+/// `SOCK_PACKET` is deprecated in `libc` because `AF_PACKET` replaces it, and the
+/// sweep still walks it because the design names it among the types a filter
+/// must refuse; the deprecation note is silenced for this table alone.
+#[cfg(target_os = "linux")]
+#[allow(deprecated)]
+const SECCOMP_SOCKET_SWEEP_TYPES: &[(&str, libc::c_int)] = &[
+    ("SOCK_STREAM", libc::SOCK_STREAM),
+    ("SOCK_DGRAM", libc::SOCK_DGRAM),
+    ("SOCK_SEQPACKET", libc::SOCK_SEQPACKET),
+    ("SOCK_RAW", libc::SOCK_RAW),
+    ("SOCK_RDM", libc::SOCK_RDM),
+    ("SOCK_DCCP", libc::SOCK_DCCP),
+    ("SOCK_PACKET", libc::SOCK_PACKET),
+];
+
+/// The name the `socketpair` sweep reports under. `socketpair` is swept over the
+/// same family bound as every type row, so it is one more line and not a fourth
+/// kind of probe.
+#[cfg(target_os = "linux")]
+const SECCOMP_SOCKET_PAIR_NAME: &str = "socketpair";
+
+/// The socket type the `socketpair` sweep asks for: `SOCK_STREAM`, the type a
+/// Unix-domain socket pair is made with. The filter refuses `socketpair` by
+/// number whatever the type is.
+#[cfg(target_os = "linux")]
+const SECCOMP_SOCKET_PAIR_TYPE: libc::c_int = libc::SOCK_STREAM;
+
+/// The family bound the child sweeps: every family number the crate defines,
+/// plus one, so family `44` (`AF_XDP`, the highest this crate defines for
+/// Linux) is swept and nothing above it is claimed.
+///
+/// This target's `libc` defines no `AF_MAX`, so the bound is built from the
+/// highest family constant it does define. `CONFINEMENT-LINUX.md` names the
+/// bound it produced. The judge never reads it: it reads each sweep's own
+/// count.
+#[cfg(target_os = "linux")]
+const SECCOMP_SOCKET_FAMILY_BOUND: libc::c_int = libc::AF_XDP + 1;
+
+/// The prefix every probe record line starts with.
+#[cfg(target_os = "linux")]
+const SECCOMP_PROBE_MARKER: &str = "seccomp-probe:";
+/// The prefix the probe child's own refusal starts with.
+#[cfg(target_os = "linux")]
+const SECCOMP_PROBE_REFUSED: &str = "seccomp-probe-refused:";
+/// The prefix the probe child writes its own allocation count under.
+#[cfg(target_os = "linux")]
+const SECCOMP_PROBE_ALLOCATIONS: &str = "seccomp-probe-allocations:";
+/// `SECCOMP_MODE_FILTER`, the mode `/proc/<pid>/status` reports for a process
+/// that carries a seccomp filter.
+#[cfg(target_os = "linux")]
+const SECCOMP_MODE_FILTER: u32 = 2;
+
+/// The probe child's report: one `(call, before, after)` per refused call, one
+/// `SocketSweep` per socket type the sweep walked, and the number of times the
+/// child allocated after its fork.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SeccompProbeReport {
+    records: Vec<(&'static str, SeccompAnswer, SeccompAnswer)>,
+    /// The socket sweeps, in the type table's order.
+    sweeps: Vec<SocketSweep>,
+    /// The child's own allocation count after the fork, which must be zero.
+    allocations: usize,
+}
+
+/// What the probe child is asked to do; a plain value, because it crosses a fork
+/// into a child that allocates nothing.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeccompProbeRun {
+    /// The kernel proof: record the four calls and the socket sweeps, install
+    /// the filter, record them again and report.
+    Filter,
+    /// Exit at once with no report, so a complete report is required to pass.
+    WithoutReport,
+    /// Write a complete report and never exit, so only the bounded wait ends
+    /// the run.
+    WithoutExit,
+    /// Trace itself and stop, so the wait sees a stopped child that is still
+    /// alive: `PTRACE_TRACEME` makes its stops reportable without `WUNTRACED`.
+    Stopped,
+    /// Allocate after the fork, so the allocation guard has something to count.
+    Allocating,
+    /// Check that another probe's pipe ends were closed in this fork-only
+    /// child, then run the normal filter proof.
+    CheckInheritedDescriptors([std::os::fd::RawFd; 2]),
+}
+
+/// What one socket family answers for one type: how many families the sweep
+/// walked, how many answered the deny marker, and the first family that did
+/// not.
+///
+/// The child allocates nothing after its fork, so every answer it counts lives
+/// in a fixed value and the report is written from a fixed buffer.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SocketSweepCount {
+    families: usize,
+    refused: usize,
+    first_unrefused: Option<usize>,
+}
+
+#[cfg(target_os = "linux")]
+impl SocketSweepCount {
+    const EMPTY: Self = Self {
+        families: 0,
+        refused: 0,
+        first_unrefused: None,
+    };
+}
+
+/// Whether `result` is the deny marker, without formatting it.
+#[cfg(target_os = "linux")]
+fn socket_refused(result: libc::c_int) -> bool {
+    result == -1 && unsafe { *libc::__errno_location() } == SECCOMP_DENY_ERRNO
+}
+
+/// Sweeps one socket type over every family below `SECCOMP_SOCKET_FAMILY_BOUND`
+/// and counts the families that answered the deny marker.
+///
+/// Every descriptor the sweep opened is closed before it returns, whether its
+/// socket call succeeded or not, so a descriptor never leaves a type's sweep
+/// and never reaches the filtered run. Nothing here allocates: the counters are
+/// fixed values and the loop reads no table.
+#[cfg(target_os = "linux")]
+fn sweep_socket_type(socket_type: libc::c_int) -> SocketSweepCount {
+    let mut count = SocketSweepCount::EMPTY;
+    for family in 0..SECCOMP_SOCKET_FAMILY_BOUND {
+        count.families += 1;
+        let descriptor = unsafe { libc::socket(family, socket_type, 0) };
+        if socket_refused(descriptor) {
+            count.refused += 1;
+        } else {
+            if count.first_unrefused.is_none() {
+                count.first_unrefused = Some(family as usize);
+            }
+            if descriptor >= 0 {
+                unsafe { libc::close(descriptor) };
+            }
+        }
+    }
+    count
+}
+
+/// Sweeps `socketpair` over every family below the same bound and counts the
+/// families that answered the deny marker. A pair that was made is closed
+/// before the sweep moves on, so no descriptor is left behind.
+#[cfg(target_os = "linux")]
+fn sweep_socket_pair() -> SocketSweepCount {
+    let mut count = SocketSweepCount::EMPTY;
+    let mut pair = [0 as libc::c_int; 2];
+    for family in 0..SECCOMP_SOCKET_FAMILY_BOUND {
+        count.families += 1;
+        let result =
+            unsafe { libc::socketpair(family, SECCOMP_SOCKET_PAIR_TYPE, 0, pair.as_mut_ptr()) };
+        if socket_refused(result) {
+            count.refused += 1;
+        } else {
+            if count.first_unrefused.is_none() {
+                count.first_unrefused = Some(family as usize);
+            }
+            for descriptor in pair {
+                if descriptor >= 0 {
+                    unsafe { libc::close(descriptor) };
+                }
+            }
+        }
+        pair = [0 as libc::c_int; 2];
+    }
+    count
+}
+
+/// One socket line of the report: the type's name, the family bound, the count
+/// refused before the filter, the count refused after it, and the number of the
+/// first family not refused after it, or `none`.
+///
+/// It is written into a fixed buffer with `copy_bytes` and `copy_number`, so
+/// the child formats nothing and allocates nothing. One line is under 80 bytes,
+/// so nine lines fit beside the five record lines inside `PIPE_BUF`.
+#[cfg(target_os = "linux")]
+fn write_socket_sweep_line(
+    report: std::os::fd::RawFd,
+    name: &str,
+    before: SocketSweepCount,
+    after: SocketSweepCount,
+) {
+    let mut buffer = [0u8; 96];
+    let mut written = 0usize;
+    written += copy_bytes(&mut buffer[written..], SECCOMP_PROBE_SOCKETS.as_bytes());
+    written += copy_bytes(&mut buffer[written..], name.as_bytes());
+    written += copy_bytes(&mut buffer[written..], b" ");
+    written += copy_number(&mut buffer[written..], after.families as i64);
+    written += copy_bytes(&mut buffer[written..], b" ");
+    written += copy_number(&mut buffer[written..], before.refused as i64);
+    written += copy_bytes(&mut buffer[written..], b" ");
+    written += copy_number(&mut buffer[written..], after.refused as i64);
+    written += copy_bytes(&mut buffer[written..], b" ");
+    match after.first_unrefused {
+        Some(family) => written += copy_number(&mut buffer[written..], family as i64),
+        None => {
+            written += copy_bytes(
+                &mut buffer[written..],
+                SECCOMP_SOCKET_UNREFUSED_NONE.as_bytes(),
+            )
+        }
+    }
+    written += copy_bytes(&mut buffer[written..], b"\n");
+    write_all(report, &buffer[..written]);
+}
+
+/// The probe child's own body: record the four calls and sweep every socket
+/// type, install the filter through `install_seccomp`, record them again, write
+/// one line per call and per socket type and end the process at once.
+///
+/// It runs in a forked child before any exec, so its filter reaches only that
+/// child and the harness above it stays unfiltered. It allocates nothing and
+/// writes with raw `write` calls, because a forked child may rely only on
+/// async-signal-safe calls. The allocation guard counts this child's own
+/// allocations, and a child that allocated refuses its own report instead of
+/// writing it, so a `Vec` after the fork cannot pass as a fixed array. Both sets
+/// of answers live in fixed arrays of the list's own length. It ends with
+/// `exit_group`, because ending one thread would leave the other waiting on
+/// calls this filter refuses.
+#[cfg(target_os = "linux")]
+fn run_seccomp_probe_child(
+    report: std::os::fd::RawFd,
+    run: SeccompProbeRun,
+    allow: &SeccompAllowList,
+    prepared_report: Option<&[u8]>,
+) -> ! {
+    // CLOEXEC protects exec children. This one shared ownership check also
+    // closes other probes' pipes and launcher sockets in fork-only children.
+    if let Err(errno) = retain_probe_report_descriptor(report) {
+        write_all(
+            report,
+            b"the probe child could not close inherited descriptors: errno ",
+        );
+        write_number(report, i64::from(errno));
+        unsafe { libc::_exit(71) }
+    }
+    if let SeccompProbeRun::CheckInheritedDescriptors(inherited) = run {
+        for fd in inherited {
+            let result = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            if result != -1 || unsafe { *libc::__errno_location() } != libc::EBADF {
+                write_all(
+                    report,
+                    b"the probe child retained another probe's descriptor",
+                );
+                unsafe { libc::_exit(71) }
+            }
+        }
+    }
+    if run == SeccompProbeRun::WithoutReport {
+        unsafe { libc::_exit(0) }
+    }
+    if run == SeccompProbeRun::Stopped {
+        // A traced child's stops are reportable without `WUNTRACED`, so a wait
+        // that read this stop as an end would leave the child alive. Raising
+        // SIGSTOP is the same observable state as an external stop.
+        unsafe {
+            libc::ptrace(libc::PTRACE_TRACEME, 0, 0, 0);
+            libc::raise(libc::SIGSTOP);
+        }
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    }
+    if run == SeccompProbeRun::WithoutExit {
+        write_all(
+            report,
+            prepared_report.expect("the parent prepares this report"),
+        );
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    }
+
+    // From here on this child counts its own allocations, so the report can
+    // say whether anything after the fork took the allocator.
+    begin_counting_child_allocations();
+    if run == SeccompProbeRun::Allocating {
+        // The guard's own fixture: one allocation after the fork, so the count
+        // is not zero and the test can see the guard fire.
+        let allocated: Vec<u8> = Vec::with_capacity(1);
+        let _ = allocated.capacity();
+    }
+
+    let mut before = [SeccompAnswer::Returned(0); SECCOMP_PROBE_CALLS.len()];
+    for (slot, call) in before.iter_mut().zip(SECCOMP_PROBE_CALLS) {
+        *slot = seccomp_probe_answers(call);
+    }
+    // The socket sweep, before the filter: one count per type table row, and one
+    // for `socketpair`. Every descriptor a family opened is closed inside its own
+    // sweep, so the filtered run below inherits no socket and no descriptor.
+    let mut sweep_before = [SocketSweepCount::EMPTY; SECCOMP_SOCKET_SWEEP_TYPES.len()];
+    for (slot, (_, socket_type)) in sweep_before.iter_mut().zip(SECCOMP_SOCKET_SWEEP_TYPES) {
+        *slot = sweep_socket_type(*socket_type);
+    }
+    let pair_before = sweep_socket_pair();
+    // The probe installs the same filter the launcher installs, so it proves
+    // that filter and not a second one. `LAUNCH_ESSENTIALS` holds none of the
+    // four refused calls, so their answer is still the default decision.
+    if let Err(failure) = install_seccomp(allow) {
+        write_all(report, SECCOMP_PROBE_REFUSED.as_bytes());
+        write_all(report, &failure.launch_record());
+        unsafe { libc::_exit(70) }
+    }
+    let mut after = [SeccompAnswer::Returned(0); SECCOMP_PROBE_CALLS.len()];
+    for (slot, call) in after.iter_mut().zip(SECCOMP_PROBE_CALLS) {
+        *slot = seccomp_probe_answers(call);
+    }
+    let mut sweep_after = [SocketSweepCount::EMPTY; SECCOMP_SOCKET_SWEEP_TYPES.len()];
+    for (slot, (_, socket_type)) in sweep_after.iter_mut().zip(SECCOMP_SOCKET_SWEEP_TYPES) {
+        *slot = sweep_socket_type(*socket_type);
+    }
+    let pair_after = sweep_socket_pair();
+    let mut buffer = [0u8; 512];
+    for ((call, before), after) in SECCOMP_PROBE_CALLS.iter().zip(before).zip(after) {
+        let mut written = 0usize;
+        written += copy_bytes(&mut buffer[written..], SECCOMP_PROBE_MARKER.as_bytes());
+        written += copy_bytes(&mut buffer[written..], b" ");
+        written += copy_bytes(&mut buffer[written..], call.as_bytes());
+        written += copy_bytes(&mut buffer[written..], b" ");
+        written += copy_answer(&mut buffer[written..], before);
+        written += copy_bytes(&mut buffer[written..], b" ");
+        written += copy_answer(&mut buffer[written..], after);
+        written += copy_bytes(&mut buffer[written..], b"\n");
+        write_all(report, &buffer[..written]);
+    }
+    // One summary line per socket type and one for `socketpair`, so the sweep
+    // reaches the parent without a line per family: dozens of families times
+    // eight types would not fit `PIPE_BUF`.
+    for (index, (name, _)) in SECCOMP_SOCKET_SWEEP_TYPES.iter().enumerate() {
+        write_socket_sweep_line(report, name, sweep_before[index], sweep_after[index]);
+    }
+    write_socket_sweep_line(report, SECCOMP_SOCKET_PAIR_NAME, pair_before, pair_after);
+    // The guard: this child writes how many times it allocated after the fork,
+    // and the test that decides the rule requires the count to be zero. The
+    // line is written whatever the count, so a child that allocated still
+    // reports and the count itself is the evidence.
+    write_all(report, SECCOMP_PROBE_ALLOCATIONS.as_bytes());
+    write_number(report, child_allocations() as i64);
+    write_all(report, b"\n");
+    unsafe {
+        libc::syscall(libc::SYS_exit_group, 0 as libc::c_long);
+    }
+    unreachable!("exit_group must not return")
+}
+
+/// The fork-only child owns exactly its report writer. Closing both ranges
+/// also covers descriptors created by concurrent threads before the fork.
+/// This runs before installing the filter, using raw syscalls and stack values.
+/// A kernel that cannot close the ranges refuses the probe before it runs.
+#[cfg(target_os = "linux")]
+fn retain_probe_report_descriptor(report: std::os::fd::RawFd) -> Result<(), i32> {
+    for (first, last) in [(0, report as u32), (report as u32 + 1, u32::MAX)] {
+        if first == last {
+            continue;
+        }
+        let last = if first == 0 { last - 1 } else { last };
+        if unsafe { libc::syscall(libc::SYS_close_range, first, last, 0u32) } != 0 {
+            return Err(unsafe { *libc::__errno_location() });
+        }
+    }
+    Ok(())
+}
+
+/// Makes this probe child count its own allocations. It runs in the forked
+/// child, after the fork, so the flag it sets is the child's own copy: the
+/// parent's threads keep running in the parent's copy and set nothing here.
+#[cfg(target_os = "linux")]
+fn begin_counting_child_allocations() {
+    ALLOCATIONS.store(0, Ordering::SeqCst);
+    COUNT_ALLOCATIONS.store(true, Ordering::SeqCst);
+}
+
+/// How many allocations this probe child made since it started counting.
+#[cfg(target_os = "linux")]
+fn child_allocations() -> usize {
+    ALLOCATIONS.load(Ordering::SeqCst)
+}
+
+/// Writes `bytes` to `fd` with the raw `write` call the filter admits.
+#[cfg(target_os = "linux")]
+fn write_all(fd: std::os::fd::RawFd, bytes: &[u8]) {
+    let mut written = 0usize;
+    while written < bytes.len() {
+        let count =
+            unsafe { libc::write(fd, bytes[written..].as_ptr().cast(), bytes.len() - written) };
+        if count <= 0 {
+            return;
+        }
+        written += count as usize;
+    }
+}
+
+/// Writes `value` as decimal digits to `fd`, with no formatting and no
+/// allocation.
+#[cfg(target_os = "linux")]
+fn write_number(fd: std::os::fd::RawFd, value: i64) {
+    let mut digits = [0u8; 20];
+    let mut count = 0usize;
+    let negative = value < 0;
+    let mut magnitude = value.unsigned_abs();
+    loop {
+        digits[count] = b'0' + (magnitude % 10) as u8;
+        magnitude /= 10;
+        count += 1;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if negative {
+        write_all(fd, b"-");
+    }
+    while count > 0 {
+        count -= 1;
+        write_all(fd, &digits[count..=count]);
+    }
+}
+
+/// The list the launcher and the probe both install for `name`: the one list
+/// built from that provider's committed declared rights, plus the measured
+/// launch set, through the one builder and the one join. It is built once per
+/// run, in the parent, before any fork.
+///
+/// The provider name is an argument and not this crate's constant, so the list a
+/// launch installs for either provider is read through the same helper (P10). It
+/// makes no kernel call and reads one file, so the provider-name test can ask it
+/// about both providers wherever the tests run; the journey that installs the
+/// result is Linux-only.
+///
+/// It refuses, with `read_declared_rights`' or `seccomp_allow_list_from_declared_rights`'
+/// own reason unchanged, a name whose declared-rights file cannot be read.
+fn seccomp_probe_list(name: &str) -> Result<SeccompAllowList, String> {
+    let declared = read_declared_rights(name, &declared_rights_path(name))?;
+    seccomp_allow_list_from_declared_rights(name, &declared)
+        .map(|allow| allow.with_launch_essentials())
+}
+
+/// The one file-to-list helper reads the provider it was asked for, and the one
+/// builder refuses a name whose declared-rights read fails.
+///
+/// Asking for both providers must give two lists whose `provider` fields are the
+/// two names asked for, and whose admitted syscalls still carry each provider's
+/// own declared rights, so a helper that ignored its argument and read wallet's
+/// file twice would answer wallet's name both times. The refusal case reads a
+/// name with no committed file and requires the reader's own reason, which names
+/// that provider and that path, so the helper has no fallback.
+///
+/// The test reads files and builds two lists. It starts no process and makes no
+/// kernel call, so it runs on every OS: the journey that installs a list is
+/// Linux-only, and this rule about which provider's file was read is not.
+///
+/// Falsifier: a `seccomp_probe_list` that ignores its provider argument and
+/// always reads wallet's declared-rights file makes both lists answer
+/// `wallet-provider`, so this test fails on the did case.
+#[test]
+fn seccomp_allow_list_names_the_provider_it_was_built_for() {
+    for name in [DID_PROVIDER, WALLET_PROVIDER] {
+        let allow = seccomp_probe_list(name).unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            allow.provider, name,
+            "the allow list must name the provider it was built for"
+        );
+        for syscall in ["execve", "execveat", "mkdirat", "write", "unlinkat"] {
+            assert!(
+                allow.admits(syscall),
+                "{name}'s declared rights must admit {syscall}: {:?}",
+                allow.syscalls
+            );
+        }
+        for syscall in ["ptrace", "mount", "bpf", "keyctl", "fchmodat"] {
+            assert!(
+                !allow.admits(syscall),
+                "{name}'s list must admit no undeclared call, and it admits {syscall}"
+            );
+        }
+    }
+    let missing = "absent-provider";
+    let refusal = seccomp_probe_list(missing)
+        .expect_err("a name with no committed declared-rights file must be refused");
+    assert!(
+        refusal.starts_with(&format!("{missing} declared-rights file ")),
+        "the refusal must be the reader's own reason, which names the provider: {refusal}"
+    );
+    assert!(
+        refusal.contains("must be readable"),
+        "the refusal must say the file could not be read: {refusal}"
+    );
+    assert!(
+        refusal.contains(&declared_rights_path(missing).display().to_string()),
+        "the refusal must name the path it could not read: {refusal}"
+    );
+}
+
+/// The one judge of the socket sweep accepts a report where every type swept
+/// every family and every family was refused after the filter, and refuses each
+/// way a report can fall short, with its own reason.
+///
+/// The fixtures are plain values, so this test makes no kernel call, reads no
+/// file and starts no process: it runs on every OS, and the Linux child that
+/// produces the real numbers is the only part gated on that host.
+///
+/// Falsifier: WP224 makes the judge accept a returned descriptor for one
+/// family, so the family 2 case passes and this test fails on that case's
+/// reason.
+#[test]
+fn socket_sweep_reports_every_family_and_type_refused() {
+    const TYPES: [&str; 2] = ["SOCK_STREAM", "socketpair"];
+    const FAMILIES: usize = 45;
+    let refused = |name: &'static str| SocketSweep {
+        name,
+        families: FAMILIES,
+        refused_before: 1,
+        refused_after: FAMILIES,
+        first_unrefused: None,
+    };
+    let clean = [refused(TYPES[0]), refused(TYPES[1])];
+    socket_sweep_problem(&clean, &TYPES)
+        .unwrap_or_else(|problem| panic!("a fully refused sweep must pass: {problem}"));
+
+    let omitted = [refused(TYPES[0])];
+    assert_eq!(
+        socket_sweep_problem(&omitted, &TYPES).unwrap_err(),
+        "socket sweep: the report records no line for socketpair",
+        "a type the table names and the report omits must be refused by name"
+    );
+
+    let short = [
+        refused(TYPES[0]),
+        SocketSweep {
+            refused_after: FAMILIES - 1,
+            first_unrefused: Some(2),
+            ..refused(TYPES[1])
+        },
+    ];
+    assert_eq!(
+        socket_sweep_problem(&short, &TYPES).unwrap_err(),
+        format!(
+            "socket sweep: socketpair refused only {} of {FAMILIES} families after the filter, \
+             and family 2 was not refused",
+            FAMILIES - 1
+        ),
+        "a type whose after-count is below the family count must name the family"
+    );
+
+    let control = [
+        refused(TYPES[0]),
+        SocketSweep {
+            refused_before: FAMILIES,
+            ..refused(TYPES[1])
+        },
+    ];
+    assert_eq!(
+        socket_sweep_problem(&control, &TYPES).unwrap_err(),
+        format!(
+            "socket sweep: socketpair was refused for every one of its {FAMILIES} families before \
+             the filter, so this host cannot stand in for the filter"
+        ),
+        "a before-count that covers every family is missing evidence, not a pass"
+    );
+
+    let outside = [
+        refused(TYPES[0]),
+        SocketSweep {
+            first_unrefused: Some(FAMILIES),
+            ..refused(TYPES[1])
+        },
+    ];
+    assert_eq!(
+        socket_sweep_problem(&outside, &TYPES).unwrap_err(),
+        format!(
+            "socket sweep: socketpair names family {FAMILIES} as not refused, and its family \
+             count is {FAMILIES}"
+        ),
+        "a family named as unrefused at or above the family count must be refused"
+    );
+}
+
+/// Copies `bytes` into `into` and returns how much it wrote. The probe's report
+/// is built in a fixed buffer after the filter is installed, where no allocator
+/// may be called.
+#[cfg(target_os = "linux")]
+fn copy_bytes(into: &mut [u8], bytes: &[u8]) -> usize {
+    into[..bytes.len()].copy_from_slice(bytes);
+    bytes.len()
+}
+
+/// Writes one answer as `errno:<n>` or `ok:<n>` into `into` and returns how much
+/// it wrote, without formatting a `String`.
+#[cfg(target_os = "linux")]
+fn copy_answer(into: &mut [u8], answer: SeccompAnswer) -> usize {
+    let (prefix, value) = match answer {
+        SeccompAnswer::Errno(errno) => (&b"errno:"[..], i64::from(errno)),
+        SeccompAnswer::Returned(value) => (&b"ok:"[..], value),
+    };
+    let written = copy_bytes(into, prefix);
+    written + copy_number(&mut into[written..], value)
+}
+
+/// Writes `value` in decimal into `into` and returns how much it wrote, without
+/// formatting a `String`. The answer line and the socket sweep line both use it,
+/// so the report has one number writer (P10).
+#[cfg(target_os = "linux")]
+fn copy_number(into: &mut [u8], value: i64) -> usize {
+    let mut digits = [0u8; 20];
+    let mut count = 0usize;
+    let negative = value < 0;
+    let mut magnitude = value.unsigned_abs();
+    loop {
+        digits[count] = b'0' + (magnitude % 10) as u8;
+        magnitude /= 10;
+        count += 1;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    let mut written = 0usize;
+    if negative {
+        written += copy_bytes(&mut into[written..], b"-");
+    }
+    while count > 0 {
+        count -= 1;
+        written += copy_bytes(&mut into[written..], &digits[count..=count]);
+    }
+    written
+}
+
+/// How a probe child ended.
+///
+/// A stop is its own end, because a stopped child is alive: `PTRACE_TRACEME`
+/// makes a child's stops reportable without `WUNTRACED`, so a wait that read a
+/// stop as an end would leave the child and its pipe behind (P11).
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeExit {
+    Code(i32),
+    Signal(i32),
+    /// The child stopped with this signal; it was killed and reaped.
+    Stopped(i32),
+    TimedOut,
+    /// The child could not be waited on any more, with this errno.
+    Gone(i32),
+}
+
+#[cfg(target_os = "linux")]
+impl std::fmt::Display for ProbeExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Code(0) => write!(f, "exit status: 0"),
+            Self::Code(code) => write!(f, "exit status: {code}"),
+            Self::Signal(signal) => write!(f, "signal: {signal}"),
+            Self::Stopped(signal) => write!(
+                f,
+                "stopped by signal: {signal}, so it was killed and reaped"
+            ),
+            Self::Gone(errno) => write!(f, "no longer waitable, errno {errno}"),
+            Self::TimedOut => write!(
+                f,
+                "no exit within {}s, so it was killed",
+                CHILD_EXIT_DEADLINE.as_secs()
+            ),
+        }
+    }
+}
+
+/// The child's report, or a refusal naming what it did instead. The child is a
+/// fork of this process, so its filter reaches only itself. The read is bounded
+/// and the child is reaped on every result, including a timeout, so a repeated
+/// journey leaves no probe behind.
+///
+/// The reap is asserted before the report is read, so no early return can skip
+/// it: a wait that ended without reaping the child fails here whatever the child
+/// wrote.
+#[cfg(target_os = "linux")]
+fn seccomp_denied_call_probe(
+    allow: &SeccompAllowList,
+    run: SeccompProbeRun,
+) -> Result<SeccompProbeReport, String> {
+    seccomp_denied_call_probe_with_pipe(allow, run, |_| {})
+}
+
+/// The probe's one channel and fork path. The observer runs in the parent
+/// after pipe creation and before the fork, so the inheritance test can hold
+/// that exact race window open while it launches other children.
+#[cfg(target_os = "linux")]
+fn seccomp_denied_call_probe_with_pipe(
+    allow: &SeccompAllowList,
+    run: SeccompProbeRun,
+    observe_pipe: impl FnOnce([std::os::fd::RawFd; 2]),
+) -> Result<SeccompProbeReport, String> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    let mut fds = [0 as libc::c_int; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
+        return Err(format!(
+            "seccomp probe refused: the report pipe could not open: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let mut reader = unsafe { fs::File::from_raw_fd(fds[0]) };
+    let writer = unsafe { fs::File::from_raw_fd(fds[1]) };
+    observe_pipe(fds);
+    // The lifecycle fixture's report is built here, where an allocator is
+    // allowed, and the child only writes it. Counted children allocate nothing,
+    // so that report says zero.
+    let prepared = match run {
+        SeccompProbeRun::WithoutExit => Some(probe_report_text(&SeccompProbeReport {
+            records: SECCOMP_PROBE_CALLS
+                .iter()
+                .map(|call| {
+                    (
+                        *call,
+                        SeccompAnswer::Errno(libc::EPERM),
+                        SeccompAnswer::Errno(SECCOMP_DENY_ERRNO),
+                    )
+                })
+                .collect(),
+            // A complete fixture report carries one sweep line per swept type,
+            // so a parser that required them still reads this one. The numbers
+            // are fixtures: only the bounded wait decides this run.
+            sweeps: SECCOMP_SOCKET_SWEEP_TYPES
+                .iter()
+                .map(|(name, _)| *name)
+                .chain(std::iter::once(SECCOMP_SOCKET_PAIR_NAME))
+                .map(|name| SocketSweep {
+                    name,
+                    families: SECCOMP_SOCKET_FAMILY_BOUND as usize,
+                    refused_before: 0,
+                    refused_after: SECCOMP_SOCKET_FAMILY_BOUND as usize,
+                    first_unrefused: None,
+                })
+                .collect(),
+            allocations: 0,
+        })),
+        _ => None,
+    };
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(format!(
+            "seccomp probe refused: the probe child could not start: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if pid == 0 {
+        run_seccomp_probe_child(
+            writer.as_raw_fd(),
+            run,
+            allow,
+            prepared.as_deref().map(str::as_bytes),
+        );
+    }
+    drop(writer);
+
+    let exit = wait_for_probe_exit(pid);
+    // The wait must have reaped the child on every result: a second wait finds
+    // no child, so a repeated journey leaves no probe running. This is asserted
+    // here, before any arm can return, so no early return skips it.
+    assert_probe_reaped(pid);
+    // Reports fit within PIPE_BUF, so the child can write before this read.
+    // The parent owns the nonblocking reader throughout, including every
+    // error and deadline. A concurrent exec may briefly hold a CLOEXEC writer
+    // before exec closes it; wait for that close within the same bound.
+    let started = Instant::now();
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 512];
+    loop {
+        if started.elapsed() >= CHILD_EXIT_DEADLINE {
+            return Err(format!(
+                "seccomp probe refused: child {exit} wrote no complete report within {}s",
+                CHILD_EXIT_DEADLINE.as_secs()
+            ));
+        }
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                bytes.extend_from_slice(&buffer[..count]);
+                if bytes.len() > libc::PIPE_BUF {
+                    return Err("seccomp probe refused: the report exceeds PIPE_BUF".into());
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(CHILD_EXIT_POLL);
+            }
+            Err(err) => {
+                return Err(format!(
+                    "seccomp probe refused: reading the report failed: {err}"
+                ))
+            }
+        }
+    }
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+
+    match exit {
+        ProbeExit::Code(code) if code == 0 => {}
+        ProbeExit::Code(_) if bytes.starts_with(SECCOMP_PROBE_REFUSED.as_bytes()) => {
+            return Err(
+                match decode_seccomp_launch_record(&bytes[SECCOMP_PROBE_REFUSED.len()..]) {
+                    Ok(SeccompLaunchRecord::Refused(failure)) => format!(
+                        "seccomp probe refused: the probe child must install the filter: {failure}"
+                    ),
+                    Ok(SeccompLaunchRecord::Installed(_)) => {
+                        "seccomp probe refused: the refused child reported an installed filter"
+                            .into()
+                    }
+                    Err(reason) => format!("seccomp probe refused: {reason}"),
+                },
+            );
+        }
+        other => {
+            return Err(format!(
+                "seccomp probe refused: child {other}; report: {text}"
+            ))
+        }
+    }
+    let report = parse_seccomp_probe_report(&text)
+        .map_err(|refusal| format!("seccomp probe refused: {refusal}"))?;
+    // The guard's one decision: a child that allocated after its fork may have
+    // blocked on an allocator lock another thread held at the fork, so its
+    // report is refused with its own reason. A child that allocated nothing
+    // reports zero and is accepted.
+    if report.allocations != 0 {
+        return Err(format!(
+            "seccomp probe refused: the probe child allocated {} times after its fork, where \
+             only async-signal-safe calls are available",
+            report.allocations
+        ));
+    }
+    Ok(report)
+}
+
+/// Asserts that this process no longer holds `pid`: a second wait answers
+/// `ECHILD`, so the child was reaped. It is called on every probe result before
+/// any arm can return, so no path can skip the reaping rule.
+#[cfg(target_os = "linux")]
+fn assert_probe_reaped(pid: libc::pid_t) {
+    let mut status = 0;
+    let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    let errno = std::io::Error::last_os_error().raw_os_error();
+    assert_eq!(
+        waited, -1,
+        "the probe child must already be reaped, and a second wait answered {waited}"
+    );
+    assert_eq!(
+        errno,
+        Some(libc::ECHILD),
+        "the probe child must already be reaped with ECHILD, and the wait answered {errno:?}"
+    );
+}
+
+/// Waits up to `CHILD_EXIT_DEADLINE` for `pid` to end, killing and reaping it
+/// on every other result. It is the one wait for a probe child.
+///
+/// A stop is not an end: `PTRACE_TRACEME` makes a child's stops reportable
+/// without `WUNTRACED`, so a stopped child is killed with `SIGKILL` and reaped
+/// before this returns, exactly as a timed-out child is. An `EINTR` from
+/// `waitpid` retries the same wait instead of ending it, and a child the kernel
+/// no longer holds is `Gone` with its errno. Every arm leaves no child behind,
+/// so the caller can finish its bounded read and a repeated journey reaps everything.
+#[cfg(target_os = "linux")]
+fn wait_for_probe_exit(pid: libc::pid_t) -> ProbeExit {
+    let started = Instant::now();
+    loop {
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        let errno = if waited < 0 {
+            std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::ECHILD)
+        } else {
+            0
+        };
+        if waited == pid {
+            if libc::WIFEXITED(status) {
+                return ProbeExit::Code(libc::WEXITSTATUS(status));
+            }
+            if libc::WIFSIGNALED(status) {
+                return ProbeExit::Signal(libc::WTERMSIG(status));
+            }
+            if libc::WIFSTOPPED(status) {
+                // The child is alive and stopped, and this wait will never see
+                // its end: kill and reap it here rather than return a result a
+                // reader could read as an end.
+                return ProbeExit::Stopped(kill_and_reap(pid, libc::WSTOPSIG(status)));
+            }
+            return ProbeExit::Code(libc::WEXITSTATUS(status));
+        }
+        if waited < 0 {
+            if errno == libc::EINTR {
+                continue;
+            }
+            // `ECHILD` is the one errno that says this process holds no such
+            // child any more, so nothing is left to reap and no wait can help.
+            return ProbeExit::Gone(errno);
+        }
+        if started.elapsed() >= CHILD_EXIT_DEADLINE {
+            kill_and_reap(pid, 0);
+            return ProbeExit::TimedOut;
+        }
+        std::thread::sleep(CHILD_EXIT_POLL);
+    }
+}
+
+/// Kills `pid` with `SIGKILL` and reaps it, returning `stop_signal` so its
+/// caller can report a stop. A child the kernel no longer holds is already
+/// reaped, so this returns without waiting. It is the one kill-and-reap for a
+/// probe child.
+#[cfg(target_os = "linux")]
+fn kill_and_reap(pid: libc::pid_t, stop_signal: i32) -> i32 {
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+    loop {
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if waited == pid {
+            break;
+        }
+        let errno = std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::ECHILD);
+        if errno == libc::EINTR {
+            continue;
+        }
+        // Any other errno means the kernel holds no child for this pid, so it
+        // has been reaped already and the wait cannot succeed.
+        break;
+    }
+    stop_signal
+}
+
+/// The report text for `report`, built with an allocator before a fork. It is
+/// the same text the child writes, so the parser reads one shape from both.
+#[cfg(target_os = "linux")]
+fn probe_report_text(report: &SeccompProbeReport) -> String {
+    let mut text: String = report
+        .records
+        .iter()
+        .map(|(call, before, after)| {
+            format!(
+                "{SECCOMP_PROBE_MARKER} {call} {} {}\n",
+                before.text(),
+                after.text()
+            )
+        })
+        .collect();
+    for sweep in &report.sweeps {
+        let first_unrefused = match sweep.first_unrefused {
+            Some(family) => family.to_string(),
+            None => SECCOMP_SOCKET_UNREFUSED_NONE.to_string(),
+        };
+        text.push_str(&format!(
+            "{SECCOMP_PROBE_SOCKETS}{} {} {} {} {first_unrefused}\n",
+            sweep.name, sweep.families, sweep.refused_before, sweep.refused_after
+        ));
+    }
+    text.push_str(&format!(
+        "{SECCOMP_PROBE_ALLOCATIONS}{}\n",
+        report.allocations
+    ));
+    text
+}
+
+/// The four records the probe child wrote, each with its unfiltered and filtered
+/// answer, the socket sweep lines, and the child's own allocation count. A
+/// missing or unreadable record is a refusal that names the call, so a child
+/// that stopped early cannot pass the journey, and a missing count is its own
+/// refusal.
+///
+/// Every socket type the one type table names must have its own line; a report
+/// with no sweep line at all is a refusal, so an older child can never be read
+/// as a passing sweep. A missing type, a count that is not a number and a line
+/// with no known prefix each get their own reason.
+#[cfg(target_os = "linux")]
+fn parse_seccomp_probe_report(text: &str) -> Result<SeccompProbeReport, String> {
+    let mut records = Vec::new();
+    for call in SECCOMP_PROBE_CALLS {
+        let marker = format!("{SECCOMP_PROBE_MARKER} {call} ");
+        let line = text
+            .lines()
+            .find(|line| line.starts_with(&marker))
+            .ok_or_else(|| format!("the probe recorded no answer for {call}: {text}"))?;
+        let (before, after) = line[marker.len()..]
+            .split_once(' ')
+            .ok_or_else(|| format!("{call} must hold two answers: {line}"))?;
+        let before = SeccompAnswer::parse(before)
+            .ok_or_else(|| format!("{call}: {before} is not an answer"))?;
+        let after = SeccompAnswer::parse(after)
+            .ok_or_else(|| format!("{call}: {after} is not an answer"))?;
+        records.push((*call, before, after));
+    }
+    let mut sweeps = Vec::new();
+    for name in SECCOMP_SOCKET_SWEEP_TYPES
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(std::iter::once(SECCOMP_SOCKET_PAIR_NAME))
+    {
+        let marker = format!("{SECCOMP_PROBE_SOCKETS}{name} ");
+        let line = text
+            .lines()
+            .find(|line| line.starts_with(&marker))
+            .ok_or_else(|| format!("the probe swept no socket type {name}: {text}"))?;
+        let mut fields = line[marker.len()..].split(' ');
+        let mut count = |label: &str| -> Result<usize, String> {
+            let field = fields
+                .next()
+                .ok_or_else(|| format!("{name} must report its {label}: {line}"))?;
+            field
+                .parse::<usize>()
+                .map_err(|err| format!("{name}: {field} is not its {label}: {err}"))
+        };
+        let families = count("family count")?;
+        let refused_before = count("before count")?;
+        let refused_after = count("after count")?;
+        let first_unrefused = fields
+            .next()
+            .ok_or_else(|| format!("{name} must report its first unrefused family: {line}"))?;
+        let first_unrefused = if first_unrefused == SECCOMP_SOCKET_UNREFUSED_NONE {
+            None
+        } else {
+            Some(first_unrefused.parse::<usize>().map_err(|err| {
+                format!("{name}: {first_unrefused} is not its first unrefused family: {err}")
+            })?)
+        };
+        sweeps.push(SocketSweep {
+            name,
+            families,
+            refused_before,
+            refused_after,
+            first_unrefused,
+        });
+    }
+    let line = text
+        .lines()
+        .find(|line| line.starts_with(SECCOMP_PROBE_ALLOCATIONS))
+        .ok_or_else(|| format!("the probe recorded no allocation count: {text}"))?;
+    let allocations = line[SECCOMP_PROBE_ALLOCATIONS.len()..]
+        .trim()
+        .parse::<usize>()
+        .map_err(|err| format!("the probe's allocation count is not a number: {line}: {err}"))?;
+    for line in text.lines() {
+        let known = line.starts_with(SECCOMP_PROBE_MARKER)
+            || line.starts_with(SECCOMP_PROBE_SOCKETS)
+            || line.starts_with(SECCOMP_PROBE_ALLOCATIONS);
+        if !known {
+            return Err(format!(
+                "the probe wrote a line with no known prefix: {line}"
+            ));
+        }
+    }
+    Ok(SeccompProbeReport {
+        records,
+        sweeps,
+        allocations,
+    })
+}
+
+/// Every child the probe starts is reaped, a failed install is reported rather
+/// than left to hang, a stopped child and a child that never exits are both
+/// killed at a bound, a child that allocated after its fork is refused, and a
+/// repeated journey answers the same as the first.
+///
+/// The test covers both failed install steps and a wrong audit architecture,
+/// then missing reports, stops, timeouts, allocations and repeated kernel
+/// proofs. Each child must end, and the kernel proof must give the same four
+/// records twice in a row, so the second journey reaps everything the first
+/// started.
+///
+/// Falsifier: WP171 reads a stopped child as an end, so this test hangs on the
+/// stopped case until the harness kills it, and the stopped child is never
+/// reaped. WP172 omits the `SIGKILL` and reap for a timed-out probe, so that
+/// child is left behind. WP173 removes the reaping assertion, so a child the
+/// harness leaves running keeps the test green where it must fail. WP174 omits
+/// the `waitpid` and reap entirely, so no child is ever reaped. WP175 collects
+/// the filtered answers with a `Vec` after the fork, so the allocation guard
+/// counts one and the guard case's refusal does not come.
+///
+/// Every plant here reaches a Linux-only arm, so none of them is registered in
+/// `falsifiers.json`; `CONFINEMENT-LINUX.md` records them and quotes the red run
+/// on the Linux host.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_seccomp_probe_reaps_failures_and_repeated_journeys() {
+    let started = Instant::now();
+
+    let allow = seccomp_probe_list(WALLET_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+    for (step, errno, reason) in [
+        (
+            SeccompStep::NoNewPrivileges,
+            libc::EPERM,
+            "seccomp install refused: PR_SET_NO_NEW_PRIVS failed with errno 1",
+        ),
+        (
+            SeccompStep::Filter,
+            libc::EINVAL,
+            "seccomp install refused: the filter install failed with errno 22",
+        ),
+    ] {
+        let mut candidate = allow.clone();
+        candidate.injected_step_failure = Some((step, errno));
+        assert_eq!(
+            seccomp_denied_call_probe(&candidate, SeccompProbeRun::Filter).unwrap_err(),
+            format!("seccomp probe refused: the probe child must install the filter: {reason}"),
+            "the probe must preserve each install step's own refusal"
+        );
+    }
+    let mut wrong_arch = allow.clone();
+    wrong_arch.audit_arch = SECCOMP_AUDIT_ARCH.wrapping_add(1);
+    assert_eq!(
+        seccomp_denied_call_probe(&wrong_arch, SeccompProbeRun::Filter).unwrap_err(),
+        format!(
+            "seccomp probe refused: the probe child must install the filter: \
+             seccomp install refused: the list was built for audit architecture {:#x} \
+             and this target reports {SECCOMP_AUDIT_ARCH:#x}",
+            wrong_arch.audit_arch
+        ),
+        "the probe must preserve the supplied and target audit architectures"
+    );
+    let failed = seccomp_denied_call_probe(&allow, SeccompProbeRun::Filter)
+        .expect("the filter proof must pass on this host");
+    assert_eq!(
+        failed.records.len(),
+        SECCOMP_PROBE_CALLS.len(),
+        "the probe must record every refused call"
+    );
+    assert_eq!(
+        failed.allocations, 0,
+        "the kernel-proof child must allocate nothing after its fork, and it allocated"
+    );
+
+    let empty = seccomp_denied_call_probe(&allow, SeccompProbeRun::WithoutReport)
+        .expect_err("a child with no report must be refused");
+    assert!(
+        empty.contains("the probe recorded no answer for ptrace"),
+        "a child that reports nothing must name the first record: {empty}"
+    );
+
+    // A stopped child is alive, not ended. The wait must kill and reap it, and
+    // the report it never finished must be refused by name.
+    let stopped = seccomp_denied_call_probe(&allow, SeccompProbeRun::Stopped)
+        .expect_err("a child that stops must be killed and reaped");
+    assert!(
+        stopped.contains("stopped by signal") && stopped.contains("killed and reaped"),
+        "a stopped child must be reported as stopped and reaped: {stopped}"
+    );
+
+    let held = seccomp_denied_call_probe(&allow, SeccompProbeRun::WithoutExit)
+        .expect_err("a child that never exits must be killed at the deadline");
+    assert!(
+        held.contains("so it was killed"),
+        "a child that never exits must be reported as killed: {held}"
+    );
+
+    // The guard fires on a child that allocates after its fork, so the zero the
+    // kernel proof reported above is a measurement and not a constant.
+    let allocated = seccomp_denied_call_probe(&allow, SeccompProbeRun::Allocating)
+        .expect_err("a child that allocates after its fork must be refused");
+    assert!(
+        allocated.contains("allocated") && allocated.contains("after its fork"),
+        "a child that allocates must be refused with that reason: {allocated}"
+    );
+
+    let first = seccomp_denied_call_probe(&allow, SeccompProbeRun::Filter)
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    let second = seccomp_denied_call_probe(&allow, SeccompProbeRun::Filter)
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(
+        first, second,
+        "a repeated journey must answer the same as the first"
+    );
+    assert_eq!(
+        first.records.len(),
+        SECCOMP_PROBE_CALLS.len(),
+        "the probe must record every refused call"
+    );
+    assert_eq!(
+        first.allocations, 0,
+        "both kernel-proof children must allocate nothing after their forks"
+    );
+    assert_eq!(
+        first.sweeps.len(),
+        SECCOMP_SOCKET_SWEEP_TYPES.len() + 1,
+        "both kernel-proof children must sweep every socket type and socketpair"
+    );
+    // A report whose sweep lines are missing, unreadable or prefixed by a name
+    // no line uses is refused with its own reason, so an older child can never
+    // be read as a passing sweep.
+    let text = probe_report_text(&first);
+    let no_sweeps: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.starts_with(SECCOMP_PROBE_SOCKETS))
+        .collect();
+    let refusal = parse_seccomp_probe_report(&no_sweeps.join("\n"))
+        .expect_err("a report with no sweep line must be refused");
+    assert!(
+        refusal.starts_with("the probe swept no socket type SOCK_STREAM:"),
+        "a report with no sweep must name the first type: {refusal}"
+    );
+    let bad_count = text.replacen(
+        &format!("{SECCOMP_PROBE_SOCKETS}SOCK_STREAM "),
+        &format!("{SECCOMP_PROBE_SOCKETS}SOCK_STREAM not-a-number "),
+        1,
+    );
+    let refusal = parse_seccomp_probe_report(&bad_count)
+        .expect_err("a sweep count that is not a number must be refused");
+    assert!(
+        refusal.starts_with("SOCK_STREAM: not-a-number is not its family count:"),
+        "an unreadable count must name the type and the field: {refusal}"
+    );
+    let unknown = format!("{text}not-a-probe-line\n");
+    let refusal = parse_seccomp_probe_report(&unknown)
+        .expect_err("a line with no known prefix must be refused");
+    assert_eq!(
+        refusal, "the probe wrote a line with no known prefix: not-a-probe-line",
+        "an unknown line prefix must be refused with its own reason"
+    );
+    assert!(
+        started.elapsed() < CHILD_EXIT_DEADLINE * 8,
+        "the probe cases must finish well inside eight deadlines, and this took {:?}",
+        started.elapsed()
+    );
+}
+
+/// Hold the report pipe open before its fork while a concurrent launch execs
+/// and another fork-only probe runs. Both ends belong to the first probe;
+/// neither other child may use them or keep its report reader waiting for EOF.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_seccomp_probe_descriptors_stay_with_their_owner() {
+    let allow = seccomp_probe_list(WALLET_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+    let mut provider = None;
+    let started = Instant::now();
+    let report = seccomp_denied_call_probe_with_pipe(&allow, SeccompProbeRun::Filter, |fds| {
+        let channel = fs::read_link(format!("/proc/self/fd/{}", fds[0]))
+            .expect("the probe pipe must have a kernel identity");
+        for fd in fds {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(flags >= 0, "the report descriptor must be open");
+            assert_ne!(
+                flags & libc::FD_CLOEXEC,
+                0,
+                "each report descriptor must be close-on-exec at creation"
+            );
+        }
+        // The callback is a barrier after pipe creation: both pipe ends stay
+        // open until this other thread has completed the provider's exec.
+        provider = Some(std::thread::scope(|scope| {
+            scope
+                .spawn(|| ConfinedProvider::start_under_seccomp(&allow, Path::new(PROVIDER_BINARY)))
+                .join()
+                .expect("the concurrent launch thread must finish")
+                .expect("the concurrent provider must start")
+        }));
+        let pid = provider.as_ref().unwrap().child.id();
+        for entry in fs::read_dir(format!("/proc/{pid}/fd")).expect("the provider's descriptors") {
+            let path = entry.expect("a provider descriptor").path();
+            let identity = match fs::read_link(path) {
+                Ok(identity) => identity,
+                // The loader may close a descriptor after read_dir listed it.
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => panic!("the descriptor's kernel identity must be readable: {err}"),
+            };
+            assert_ne!(
+                identity, channel,
+                "the concurrent provider must inherit neither probe pipe end"
+            );
+        }
+        let sibling =
+            seccomp_denied_call_probe(&allow, SeccompProbeRun::CheckInheritedDescriptors(fds))
+                .expect("a fork-only probe must close both inherited pipe ends before its calls");
+        assert_eq!(sibling.allocations, 0);
+    })
+    .expect("the owner must reap its probe and reach EOF while the provider stays alive");
+    assert_eq!(report.allocations, 0);
+    let mut provider = provider.expect("the observer started the concurrent provider");
+    assert!(
+        provider.child.try_wait().unwrap().is_none(),
+        "the provider must remain alive when the probe report reaches EOF"
+    );
+    assert!(
+        started.elapsed() < CHILD_EXIT_DEADLINE,
+        "descriptor ownership must let both probes finish before a timeout"
+    );
+    provider.shutdown();
+
+    // Hold an extra writer in the parent to force the read deadline even after
+    // the probe is reaped. The caller must close its reader on that error too.
+    use std::os::fd::FromRawFd as _;
+    let mut held_writer = None;
+    let mut owned_fds = [0; 2];
+    let mut channel = None;
+    let refusal =
+        seccomp_denied_call_probe_with_pipe(&allow, SeccompProbeRun::WithoutReport, |fds| {
+            owned_fds = fds;
+            channel = Some(fs::read_link(format!("/proc/self/fd/{}", fds[0])).unwrap());
+            let duplicate = unsafe { libc::fcntl(fds[1], libc::F_DUPFD_CLOEXEC, 0) };
+            assert!(duplicate >= 0, "the deadline fixture must hold a writer");
+            held_writer = Some(unsafe { fs::File::from_raw_fd(duplicate) });
+        })
+        .expect_err("an open writer must cause a bounded report refusal");
+    assert_eq!(
+        refusal,
+        "seccomp probe refused: child exit status: 0 wrote no complete report within 10s"
+    );
+    for fd in owned_fds {
+        assert_ne!(
+            fs::read_link(format!("/proc/self/fd/{fd}")).ok(),
+            channel,
+            "the deadline must close the probe owner's descriptors"
+        );
+    }
+    drop(held_writer);
+    assert!(started.elapsed() < CHILD_EXIT_DEADLINE * 3);
+}
+
+/// The one launcher decides each policy: a `Seatbelt` policy keeps today's host
+/// answers unchanged, a `Seccomp` policy is accepted on `linux` alone, and a
+/// start this build cannot confine is refused by name so no provider runs
+/// unconfined on any OS.
+///
+/// The test drives `standin_host_refusal` and `standin_spawn_confined_provider`,
+/// so it covers the launcher's own `Seccomp` seat and not only the host rule. It
+/// creates no storage root, writes no profile file and starts no provider.
+///
+/// Falsifier: WP158 accepts a `linux` host under a `Seatbelt` policy, so the
+/// unchanged refusal is lost. WP159 bypasses the launcher's `Seccomp` seat and
+/// lets the start continue, so the `Seccomp` case returns Started.
+#[test]
+fn standin_host_refusal_decides_each_policy() {
+    let name = WALLET_PROVIDER;
+    let declared = read_declared_rights(name, &declared_rights_path(name))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let allow = seccomp_allow_list_from_declared_rights(name, &declared)
+        .unwrap_or_else(|err| panic!("{err}"));
+    let confined_os = DECLARED_CONFINED_OS.join(", ");
+    let seatbelt = StandinPolicy::Seatbelt(Path::new(SANDBOX_EXEC));
+    let seccomp = StandinPolicy::Seccomp(&allow);
+
+    // A Seatbelt policy keeps every today answer.
+    standin_host_refusal(name, StandinHost::reporting("macos"), seatbelt)
+        .expect("a macos host under a Seatbelt policy must be accepted");
+    assert_eq!(
+        standin_host_refusal(name, StandinHost::reporting("linux"), seatbelt).unwrap_err(),
+        format!(
+            "{name} start on linux is refused: linux is designed, not enforced, in this lab, \
+             so linux is not in DECLARED_CONFINED_OS ({confined_os})"
+        ),
+        "a linux host under a Seatbelt policy must keep today's exact words"
+    );
+    assert_eq!(
+        standin_host_refusal(name, StandinHost::reporting("plan9"), seatbelt).unwrap_err(),
+        format!(
+            "{name} start on plan9 is refused: plan9 has no confinement design, and the lab \
+             stand-in applies confinement only on {confined_os}"
+        ),
+        "an OS with no confinement design must keep today's exact words"
+    );
+
+    // A Seccomp policy is the linux policy: linux is accepted, another OS is
+    // refused by name, and a missing primitive outranks both.
+    standin_host_refusal(name, StandinHost::reporting("linux"), seccomp)
+        .expect("a linux host under a Seccomp policy must be accepted");
+    assert_eq!(
+        standin_host_refusal(name, StandinHost::reporting("macos"), seccomp).unwrap_err(),
+        format!(
+            "{name} start on macos is refused: the seccomp allow list is the linux policy, \
+             and macos is not linux"
+        ),
+        "a non-linux host under a Seccomp policy must be refused by name"
+    );
+    assert_eq!(
+        standin_host_refusal(
+            name,
+            StandinHost::missing("macos", StandinPrimitive::Landlock),
+            seccomp
+        )
+        .unwrap_err(),
+        format!(
+            "{name} start on macos is refused: linux confinement refused: the kernel has no \
+             Landlock"
+        ),
+        "a reported missing primitive must be refused before the policy's OS rule"
+    );
+
+    // A Landlock policy carries the same filter, so it is accepted on linux
+    // alone in the Seccomp policy's words.
+    let bindings = canonical_bindings(
+        name,
+        Path::new("/fixture/landlock"),
+        Path::new(PROVIDER_BINARY),
+    );
+    let ruleset = landlock_path_rules(name, &declared, &bindings, 7, &[])
+        .unwrap_or_else(|err| panic!("{err}"));
+    let landlock = StandinPolicy::Landlock {
+        allow: &allow,
+        ruleset: &ruleset,
+    };
+    standin_host_refusal(name, StandinHost::reporting("linux"), landlock)
+        .expect("a linux host under a Landlock policy must be accepted");
+    assert_eq!(
+        standin_host_refusal(name, StandinHost::reporting("macos"), landlock).unwrap_err(),
+        format!(
+            "{name} start on macos is refused: the seccomp allow list is the linux policy, \
+             and macos is not linux"
+        ),
+        "a non-linux host under a Landlock policy must be refused in the Seccomp policy's words"
+    );
+    assert_eq!(
+        standin_host_refusal(
+            name,
+            StandinHost::linux_missing(StandinPrimitive::Landlock),
+            landlock
+        )
+        .unwrap_err(),
+        format!(
+            "{name} start on linux is refused: linux confinement refused: the kernel has no \
+             Landlock"
+        ),
+        "a host that reports Landlock missing must be refused before the policy's OS rule"
+    );
+
+    // The launcher's own seat: a Seccomp start under a list generated for
+    // another provider is refused by name before anything is created, and a
+    // list generated for this provider reaches the one spawn path on linux and
+    // the linux-only refusal on every other OS.
+    let fixture = tempfile::tempdir().expect("temporary wallet base");
+    let base = resolved(fixture.path());
+    let profile_root = tempfile::tempdir().expect("temporary profile root");
+    let profile_dir = resolved(profile_root.path());
+    let other = SeccompAllowList {
+        provider: DID_PROVIDER.to_string(),
+        ..allow.clone()
+    };
+    let refusal = standin_spawn_confined_provider(
+        StandinHost::reporting("linux"),
+        StandinPolicy::Seccomp(&other),
+        name,
+        Path::new(PROVIDER_BINARY),
+        &base,
+        &declared,
+        &profile_dir,
+    )
+    .err()
+    .expect("a list generated for another provider must refuse the start");
+    assert_eq!(
+        refusal,
+        format!("{name} start is refused: the seccomp allow list was generated for {DID_PROVIDER}"),
+        "the launcher must refuse a list generated for another provider"
+    );
+    assert!(
+        !provider_storage_root(name, &base).exists(),
+        "a refused Seccomp start must create no storage root: {}",
+        provider_storage_root(name, &base).display()
+    );
+    assert!(
+        fs::read_dir(&profile_dir)
+            .expect("the profile directory must be readable")
+            .next()
+            .is_none(),
+        "a Seccomp start must write no profile: {}",
+        profile_dir.display()
+    );
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let refusal = ConfinedProvider::start_under_seccomp(&allow, Path::new(PROVIDER_BINARY))
+            .err()
+            .expect("a start without a filter must be refused");
+        assert_eq!(
+            refusal,
+            format!("{name} start is refused: a seccomp filter is installed on linux only"),
+            "the linux-only refusal must name the provider and the policy's OS"
+        );
+        let file_row =
+            ConfinedProvider::start_under_landlock(&allow, &ruleset, Path::new(PROVIDER_BINARY))
+                .err()
+                .expect("a file-row start without a filter must be refused");
+        assert_eq!(
+            file_row, refusal,
+            "the file-row start must use the one linux-only refusal"
+        );
+    }
+}
+
+/// The journey's own label, on every OS: the one helper both the label test and
+/// the journey print. On Linux it names the host and kernel the proof ran on;
+/// anywhere else it says the journey is not applicable and names this OS, so a
+/// Mac run cannot read as a Linux claim.
+///
+/// It reads no filter and starts no process, so it runs everywhere.
+fn linux_seccomp_journey_label() -> String {
+    if cfg!(target_os = "linux") {
+        format!(
+            "linux seccomp journey: applicable, host {}/{}, kernel {}",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            linux_kernel_release()
+        )
+    } else {
+        format!(
+            "linux seccomp journey: not applicable on {}, because a seccomp filter is \
+             installed on linux only and this test passes nothing on for a Linux claim",
+            std::env::consts::OS
+        )
+    }
+}
+
+/// The kernel release this process runs under, read from `uname`; off Linux no
+/// kernel release answers the question, so it names the OS instead.
+fn linux_kernel_release() -> String {
+    if !cfg!(target_os = "linux") {
+        return std::env::consts::OS.to_string();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut name: libc::utsname = unsafe { std::mem::zeroed() };
+        let read = unsafe { libc::uname(&mut name) };
+        assert_eq!(
+            read,
+            0,
+            "uname must answer: {}",
+            std::io::Error::last_os_error()
+        );
+        let release: Vec<u8> = name
+            .release
+            .iter()
+            .take_while(|byte| **byte != 0)
+            .map(|byte| *byte as u8)
+            .collect();
+        String::from_utf8_lossy(&release).into_owned()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::env::consts::OS.to_string()
+    }
+}
+
+/// The journey's label says where the journey stands: off Linux the shared
+/// helper says it is not applicable and names this OS, and on Linux it names
+/// the Linux host. The test reads no filter, starts no process and builds none,
+/// so it runs on every OS.
+///
+/// Falsifier: WP162 labels the journey with a Linux host on a host that is not
+/// Linux, so the off-Linux case reads a claim instead of `not applicable` and
+/// the test fails on it.
+#[test]
+fn linux_seccomp_journey_is_not_applicable_off_linux() {
+    let line = linux_seccomp_journey_label();
+    if cfg!(target_os = "linux") {
+        assert!(
+            line.contains("linux") && !line.contains("not applicable"),
+            "on Linux the label must name the host the journey ran on: {line}"
+        );
+    } else {
+        assert!(
+            line.contains("not applicable"),
+            "off Linux the label must say the journey is not applicable: {line}"
+        );
+        assert!(
+            line.contains(std::env::consts::OS),
+            "the label must name this OS: {line}"
+        );
+        assert!(
+            !line.contains("applicable, host"),
+            "off Linux the label must claim no Linux host: {line}"
+        );
+    }
+    eprintln!("{line}");
+}
+
+/// The file row's own label, on every OS: the one helper the label test and the
+/// journey print. On Linux it names the host, kernel and reported ABI; anywhere
+/// else it says the row is not applicable and names this OS, so a Mac run cannot
+/// read as a Linux claim.
+///
+/// It reads no ruleset and starts no process, so it runs everywhere.
+fn linux_landlock_journey_label(abi: Option<u32>) -> String {
+    if cfg!(target_os = "linux") {
+        match abi {
+            Some(abi) => format!(
+                "linux landlock file row: applicable, host {}/{}, kernel {}, Landlock ABI {abi}",
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                linux_kernel_release()
+            ),
+            None => format!(
+                "linux landlock file row: applicable, host {}/{}, kernel {}, and the kernel \
+                 reports no Landlock ABI",
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                linux_kernel_release()
+            ),
+        }
+    } else {
+        format!(
+            "linux landlock file row: not applicable on {}, because a Landlock ruleset is \
+             installed on linux only and this test passes nothing on for a Linux claim",
+            std::env::consts::OS
+        )
+    }
+}
+
+/// The file row's label says where the row stands: off Linux the shared helper
+/// says it is not applicable and names this OS, and on Linux it names the host
+/// and the ABI. The test reads no ruleset, starts no process and calls no
+/// kernel, so it runs on every OS. The host and ABI assertions run only on
+/// Linux, so a Mac run does not skip this test.
+///
+/// Falsifier: WP213 labels the row with a Linux host on a host that is not
+/// Linux, so the off-Linux case reads a claim instead of `not applicable`.
+#[test]
+fn linux_landlock_journey_is_not_applicable_off_linux() {
+    let line = linux_landlock_journey_label(Some(7));
+    if cfg!(target_os = "linux") {
+        assert!(
+            line.contains("linux") && !line.contains("not applicable"),
+            "on Linux the label must name the host the row ran on: {line}"
+        );
+        assert!(
+            line.contains("Landlock ABI"),
+            "on Linux the label must name the reported ABI: {line}"
+        );
+    } else {
+        assert!(
+            line.contains("not applicable"),
+            "off Linux the label must say the row is not applicable: {line}"
+        );
+        assert!(
+            line.contains(std::env::consts::OS),
+            "the label must name this OS: {line}"
+        );
+        assert!(
+            !line.contains("applicable, host"),
+            "off Linux the label must claim no Linux host: {line}"
+        );
+    }
+    eprintln!("{line}");
+}
+
+/// One file call the Landlock probe makes and the path it makes it on.
+///
+/// The calls are plain names and paths, so the rule that each provider's probe
+/// reads its own root, its own parent and its own executable is checked on
+/// every OS by `landlock_probe_paths_follow_the_bound_parameters`. Only the
+/// Linux journey and its probe child make the calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LandlockProbeCall {
+    ReadInside,
+    WriteInside,
+    ReadExecutable,
+    ReadBeneathParent,
+    WriteBesideParent,
+    TruncateBesideParent,
+    ListParent,
+    ListSibling,
+    ListSiblingPrivate,
+}
+
+/// The file calls the probe makes, so a caller that reads them names the one
+/// list rather than restating it.
+const LANDLOCK_PROBE_CALLS: [LandlockProbeCall; 9] = [
+    LandlockProbeCall::ReadInside,
+    LandlockProbeCall::WriteInside,
+    LandlockProbeCall::ReadExecutable,
+    LandlockProbeCall::ReadBeneathParent,
+    LandlockProbeCall::WriteBesideParent,
+    LandlockProbeCall::TruncateBesideParent,
+    LandlockProbeCall::ListParent,
+    LandlockProbeCall::ListSibling,
+    LandlockProbeCall::ListSiblingPrivate,
+];
+
+impl LandlockProbeCall {
+    /// The path this call uses, derived from the three parameter bindings the
+    /// launch carries. The read of the bound executable and the two inside
+    /// calls name that launch's own program and root, so the probe and the
+    /// ruleset cannot drift and a second provider's probe reads its own paths.
+    fn path(self, bindings: &[(&'static str, PathBuf)]) -> PathBuf {
+        let bound = |parameter: &str| {
+            bindings
+                .iter()
+                .find(|(binding, _)| *binding == parameter)
+                .unwrap_or_else(|| panic!("the launch must bind {parameter}"))
+                .1
+                .clone()
+        };
+        let root = bound("STORAGE_ROOT");
+        let parent = bound("STORAGE_PARENT");
+        match self {
+            Self::ReadInside => root.join(LANDLOCK_PROBE_INSIDE_FILE),
+            Self::WriteInside => root.join(LANDLOCK_PROBE_INSIDE_WRITE),
+            Self::ReadExecutable => bound("PROVIDER_EXECUTABLE"),
+            Self::ReadBeneathParent => parent
+                .join(LANDLOCK_PROBE_PARENT_SIBLING)
+                .join("private")
+                .join(LANDLOCK_PROBE_BENEATH_FILE),
+            Self::WriteBesideParent => parent.join(LANDLOCK_PROBE_BESIDE_PARENT_WRITE),
+            Self::TruncateBesideParent => parent.join(LANDLOCK_PROBE_BESIDE_PARENT_TRUNCATE),
+            Self::ListParent => parent,
+            Self::ListSibling => parent.join(LANDLOCK_PROBE_PARENT_SIBLING),
+            Self::ListSiblingPrivate => parent.join(LANDLOCK_PROBE_PARENT_SIBLING).join("private"),
+        }
+    }
+
+    /// The name the probe writes in its report and the test reads back.
+    fn name(self) -> &'static str {
+        match self {
+            Self::ReadInside => "read-inside-storage-root",
+            Self::WriteInside => "write-inside-storage-root",
+            Self::ReadExecutable => "read-bound-executable",
+            Self::ReadBeneathParent => "read-beneath-storage-parent",
+            Self::WriteBesideParent => "write-beside-storage-parent",
+            Self::TruncateBesideParent => "truncate-beside-storage-parent",
+            Self::ListParent => "list-storage-parent",
+            Self::ListSibling => "list-sibling",
+            Self::ListSiblingPrivate => "list-sibling-private",
+        }
+    }
+}
+
+/// Each provider's probe reads its own root, its own parent and its own
+/// executable: every inside call is under that provider's `STORAGE_ROOT`, every
+/// parent call is under its `STORAGE_PARENT`, and the bound-executable read is
+/// the binary that provider's launch binds. One body runs over `DID_PROVIDER`
+/// and `WALLET_PROVIDER`, each through `provider_ruleset_inputs`, so the probe
+/// and the ruleset cannot drift and did's probe cannot read wallet's binary.
+///
+/// The test builds each provider's inputs and reads the nine paths. It makes no
+/// file call, starts no process and calls no kernel, so it runs on every OS: the
+/// journey that makes the calls is Linux-only, and the rule about whose paths
+/// they are is not.
+///
+/// Falsifier: WP217 reads `PROVIDER_BINARY` for the bound-executable call
+/// instead of the launch's own binding, so did's probe would read wallet's
+/// binary and the did iteration fails on that path.
+#[test]
+fn landlock_probe_paths_follow_the_bound_parameters() {
+    for name in [DID_PROVIDER, WALLET_PROVIDER] {
+        let fixture = tempfile::tempdir().expect("temporary provider base");
+        let base = resolved(fixture.path());
+        let inputs = provider_ruleset_inputs(name, &base).unwrap_or_else(|err| panic!("{err}"));
+        let bindings = &inputs.bindings;
+        let bound = |parameter: &str| {
+            bindings
+                .iter()
+                .find(|(binding, _)| *binding == parameter)
+                .unwrap_or_else(|| panic!("{name}: the launch must bind {parameter}"))
+                .1
+                .clone()
+        };
+        let root = bound("STORAGE_ROOT");
+        let parent = bound("STORAGE_PARENT");
+
+        for call in LANDLOCK_PROBE_CALLS {
+            let path = call.path(bindings);
+            let expected_owner = match call {
+                LandlockProbeCall::ReadInside | LandlockProbeCall::WriteInside => &root,
+                LandlockProbeCall::ReadExecutable => &bound("PROVIDER_EXECUTABLE"),
+                LandlockProbeCall::ReadBeneathParent
+                | LandlockProbeCall::WriteBesideParent
+                | LandlockProbeCall::TruncateBesideParent
+                | LandlockProbeCall::ListParent
+                | LandlockProbeCall::ListSibling
+                | LandlockProbeCall::ListSiblingPrivate => &parent,
+            };
+            assert!(
+                path.starts_with(expected_owner),
+                "{name}: {} must use a path under the parameter it names, and it used {} \
+                 outside {}",
+                call.name(),
+                path.display(),
+                expected_owner.display()
+            );
+        }
+        assert_eq!(
+            LandlockProbeCall::ReadExecutable.path(bindings),
+            resolved(inputs.binary),
+            "{name}: the bound-executable read must use this provider's own binary"
+        );
+    }
+}
+
+/// The fixture names the file-row journey plants under a provider's root and its
+/// parent. The files are planted by the parent, outside the ruleset, so a write
+/// the probe is refused cannot be mistaken for a file it could not create.
+const LANDLOCK_PROBE_INSIDE_FILE: &str = "landlock-inside-read.txt";
+const LANDLOCK_PROBE_INSIDE_WRITE: &str = "landlock-inside-write.txt";
+const LANDLOCK_PROBE_PARENT_SIBLING: &str = "sibling";
+const LANDLOCK_PROBE_BENEATH_FILE: &str = "marker";
+const LANDLOCK_PROBE_BESIDE_PARENT_WRITE: &str = "landlock-beside-write.txt";
+/// The file the probe truncates outside `STORAGE_ROOT`. The parent plants it
+/// with content before each run, so a truncation that succeeds is visible in its
+/// bytes afterwards and not only in the probe's answer.
+const LANDLOCK_PROBE_BESIDE_PARENT_TRUNCATE: &str = "landlock-beside-truncate.txt";
+/// The exact bytes the planted read and write fixtures hold.
+#[cfg(target_os = "linux")]
+const LANDLOCK_PROBE_FIXTURE_BYTES: &[u8] = b"landlock file row fixture\n";
+
+/// The prefix every Landlock probe record line starts with.
+#[cfg(target_os = "linux")]
+const LANDLOCK_PROBE_MARKER: &str = "landlock-probe:";
+#[cfg(target_os = "linux")]
+const LANDLOCK_PROBE_REFUSED: &[u8] = b"landlock-probe-refused:";
+
+/// What one file call answered: the errno it failed with or the value it
+/// returned. It is `SeccompAnswer`'s shape, so the probe record format and its
+/// parser stay one (P10).
+#[cfg(target_os = "linux")]
+type LandlockAnswer = SeccompAnswer;
+
+/// The answers one probe child recorded, in `LANDLOCK_PROBE_CALLS` order.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LandlockProbeReport {
+    answers: [LandlockAnswer; LANDLOCK_PROBE_CALLS.len()],
+}
+
+/// What the Landlock probe child is asked to do.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LandlockProbeRun {
+    /// Install the ruleset through `install_landlock`, make the calls and
+    /// report them.
+    Confined,
+    /// Make the same calls with no ruleset, which is the positive control.
+    Control,
+    /// Run the confined case beneath an allow-all seccomp fixture filter.
+    /// The child handles it. No test in this slice asks for it.
+    #[allow(dead_code)]
+    ConfinedUnderFilter,
+    /// Prove Landlock sets the flag itself, before a seccomp installer can.
+    RequireNoNewPrivileges,
+    /// Negative control through the same installer, with just that step skipped.
+    WithoutNoNewPrivileges,
+}
+
+/// One file call, as the answer the kernel gave it. Each arm makes the call its
+/// name states and passes the complete argument list, so no call relies on a
+/// register this function left unset.
+#[cfg(target_os = "linux")]
+fn landlock_probe_call(call: LandlockProbeCall, path: &std::ffi::CStr) -> LandlockAnswer {
+    match call {
+        LandlockProbeCall::ReadInside
+        | LandlockProbeCall::ReadBeneathParent
+        | LandlockProbeCall::ReadExecutable => seccomp_answer(|| read_file_answer(path)),
+        LandlockProbeCall::WriteInside | LandlockProbeCall::WriteBesideParent => {
+            seccomp_answer(|| write_file_answer(path))
+        }
+        LandlockProbeCall::TruncateBesideParent => seccomp_answer(|| truncate_file_answer(path)),
+        LandlockProbeCall::ListParent
+        | LandlockProbeCall::ListSibling
+        | LandlockProbeCall::ListSiblingPrivate => seccomp_answer(|| list_directory_answer(path)),
+    }
+}
+
+/// Opens `path` for reading and reads up to 256 bytes, or returns its errno.
+#[cfg(target_os = "linux")]
+fn read_file_answer(path: &std::ffi::CStr) -> i64 {
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return -1;
+    }
+    let mut buffer = [0u8; 256];
+    let read = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+    let errno = unsafe { *libc::__errno_location() };
+    unsafe { libc::close(fd) };
+    if read < 0 {
+        unsafe { *libc::__errno_location() = errno };
+        return -1;
+    }
+    read as i64
+}
+
+/// Creates `path` for writing and writes the fixture bytes, answering their
+/// length, or `-1` with its errno.
+#[cfg(target_os = "linux")]
+fn write_file_answer(path: &std::ffi::CStr) -> i64 {
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC,
+            0o600 as libc::c_uint,
+        )
+    };
+    if fd < 0 {
+        return -1;
+    }
+    let written = unsafe {
+        libc::write(
+            fd,
+            LANDLOCK_PROBE_FIXTURE_BYTES.as_ptr().cast(),
+            LANDLOCK_PROBE_FIXTURE_BYTES.len(),
+        )
+    };
+    let errno = unsafe { *libc::__errno_location() };
+    unsafe { libc::close(fd) };
+    if written < 0 {
+        unsafe { *libc::__errno_location() = errno };
+        return -1;
+    }
+    written as i64
+}
+
+/// Truncates `path` to zero bytes with `truncate(2)` and answers `0`, or `-1`
+/// with its errno. It is a write outside `STORAGE_ROOT` that opens nothing for
+/// writing, so a ruleset whose handled mask names `WRITE_FILE` alone still
+/// permits it and the answer shows that mask's gap. The path is one the parent
+/// plants with content before each run, so the test reads the file's length
+/// afterwards and a permitted truncation is visible there.
+#[cfg(target_os = "linux")]
+fn truncate_file_answer(path: &std::ffi::CStr) -> i64 {
+    (unsafe { libc::truncate(path.as_ptr(), 0) }) as i64
+}
+
+/// Read directory entries into a fixed stack buffer. `opendir`/`readdir` own
+/// libc heap state, so the forked child uses open/getdents64/close directly.
+#[cfg(target_os = "linux")]
+fn list_directory_answer(path: &std::ffi::CStr) -> i64 {
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return -1;
+    }
+    let mut buffer = [0u8; 4096];
+    let mut count = 0i64;
+    let result = loop {
+        let read =
+            unsafe { libc::syscall(libc::SYS_getdents64, fd, buffer.as_mut_ptr(), buffer.len()) };
+        if read < 0 {
+            break Err(unsafe { *libc::__errno_location() });
+        }
+        if read == 0 {
+            break Ok(count);
+        }
+        let mut offset = 0;
+        while offset < read as usize {
+            // linux_dirent64: u64 inode, i64 offset, u16 record length.
+            if offset + 19 > read as usize {
+                break;
+            }
+            let length = u16::from_ne_bytes([buffer[offset + 16], buffer[offset + 17]]) as usize;
+            if length < 19 || offset + length > read as usize {
+                break;
+            }
+            count += 1;
+            offset += length;
+        }
+        if offset != read as usize {
+            break Err(libc::EIO);
+        }
+    };
+    unsafe { libc::close(fd) };
+    match result {
+        Ok(count) => count,
+        Err(errno) => {
+            unsafe { *libc::__errno_location() = errno };
+            -1
+        }
+    }
+}
+
+/// The probe child's body: make the nine calls under `run`'s policy, write one
+/// line per call, and end the process at once.
+///
+/// It runs in a forked child before any exec, so a ruleset it installs reaches
+/// only that child and the harness above it stays unconfined. It allocates
+/// nothing after the fork and writes with raw `write` calls, because a forked
+/// child may rely only on async-signal-safe calls. The base path arrives as a C
+/// string the parent built, so the child formats no path. It counts allocations
+/// with the one guard the seccomp probe uses.
+#[cfg(target_os = "linux")]
+fn run_landlock_probe_child(
+    report: std::os::fd::RawFd,
+    run: LandlockProbeRun,
+    ruleset: &PreparedLandlockRuleset,
+    paths: &[std::ffi::CString],
+    fixture_filter: &SeccompAllowList,
+) -> ! {
+    if let Err(errno) = retain_probe_report_descriptor(report) {
+        write_all(
+            report,
+            b"the landlock probe child could not close inherited descriptors: errno ",
+        );
+        write_number(report, i64::from(errno));
+        unsafe { libc::_exit(71) }
+    }
+    begin_counting_child_allocations();
+    if matches!(
+        run,
+        LandlockProbeRun::RequireNoNewPrivileges | LandlockProbeRun::WithoutNoNewPrivileges
+    ) {
+        let flag = unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) };
+        if flag != 0 {
+            write_all(
+                report,
+                b"no_new_privs must be clear before the Landlock install\n",
+            );
+            unsafe { libc::_exit(72) }
+        }
+    }
+    // The seccomp fixture filter is installed first so the confined case still
+    // runs under it; it admits every call, so it changes no answer here.
+    if run == LandlockProbeRun::ConfinedUnderFilter {
+        if let Err(failure) = install_seccomp(fixture_filter) {
+            write_all(report, LANDLOCK_PROBE_REFUSED);
+            write_all(report, &failure.launch_record());
+            unsafe { libc::_exit(70) }
+        }
+    }
+    if run != LandlockProbeRun::Control {
+        if let Err(failure) = install_landlock(ruleset) {
+            write_all(report, LANDLOCK_PROBE_REFUSED);
+            write_all(report, &failure.launch_record());
+            unsafe { libc::_exit(70) }
+        }
+    }
+    if run == LandlockProbeRun::RequireNoNewPrivileges
+        && unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) } != 1
+    {
+        write_all(
+            report,
+            b"no_new_privs must be set by the Landlock install\n",
+        );
+        unsafe { libc::_exit(73) }
+    }
+    let mut buffer = [0u8; 256];
+    for (call, path) in LANDLOCK_PROBE_CALLS.into_iter().zip(paths) {
+        let answer = landlock_probe_call(call, path);
+        let mut written = copy_bytes(&mut buffer, LANDLOCK_PROBE_MARKER.as_bytes());
+        written += copy_bytes(&mut buffer[written..], b" ");
+        written += copy_bytes(&mut buffer[written..], call.name().as_bytes());
+        written += copy_bytes(&mut buffer[written..], b" ");
+        written += copy_answer(&mut buffer[written..], answer);
+        written += copy_bytes(&mut buffer[written..], b"\n");
+        write_all(report, &buffer[..written]);
+    }
+    unsafe {
+        libc::syscall(libc::SYS_exit_group, 0 as libc::c_long);
+    }
+    unreachable!("exit_group must not return")
+}
+
+/// The allow-all seccomp fixture filter the confined-under-filter case installs:
+/// wallet's probe list with one `ALLOW` decision, built before the fork because
+/// the child allocates nothing.
+#[cfg(target_os = "linux")]
+fn landlock_probe_allow_all() -> SeccompAllowList {
+    let mut allow =
+        seccomp_probe_list(WALLET_PROVIDER).unwrap_or_else(|err| panic!("wallet's list: {err}"));
+    allow.program = vec![SeccompInstruction::stmt(
+        SECCOMP_BPF_RET_K,
+        SECCOMP_RET_ALLOW,
+    )];
+    allow
+}
+
+/// Runs one Landlock probe child and returns its answers, or a refusal
+/// naming what happened. The child is a fork of this process, so its ruleset
+/// reaches only itself. The child is reaped on every result, including a
+/// timeout, so a repeated journey leaves no probe behind.
+///
+/// `bindings` are the three parameter paths the launch carries, so the probe
+/// reads the same root, parent and executable the ruleset binds and the
+/// calling provider's own paths, never a second derivation.
+#[cfg(target_os = "linux")]
+fn landlock_file_probe(
+    ruleset: &LandlockRuleset,
+    run: LandlockProbeRun,
+    bindings: &[(&'static str, PathBuf)],
+) -> Result<LandlockProbeReport, String> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut prepared =
+        PreparedLandlockRuleset::new(ruleset).map_err(|failure| failure.to_string())?;
+    prepared.skip_no_new_privileges = run == LandlockProbeRun::WithoutNoNewPrivileges;
+    let paths = LANDLOCK_PROBE_CALLS
+        .into_iter()
+        .map(|call| {
+            std::ffi::CString::new(call.path(bindings).as_os_str().as_bytes())
+                .map_err(|_| format!("landlock probe refused: {} path contains NUL", call.name()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let fixture_filter = landlock_probe_allow_all();
+
+    let mut fds = [0; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
+        return Err(format!(
+            "landlock probe refused: the report pipe could not open: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let mut reader = unsafe { fs::File::from_raw_fd(fds[0]) };
+    let writer = unsafe { fs::File::from_raw_fd(fds[1]) };
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(format!(
+            "landlock probe refused: the probe child could not start: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if pid == 0 {
+        run_landlock_probe_child(writer.as_raw_fd(), run, &prepared, &paths, &fixture_filter);
+    }
+    drop(writer);
+
+    let exit = wait_for_probe_exit(pid);
+    assert_probe_reaped(pid);
+    let started = Instant::now();
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 256];
+    loop {
+        if started.elapsed() >= CHILD_EXIT_DEADLINE {
+            return Err(format!(
+                "landlock probe refused: child {exit} wrote no complete report within {}s",
+                CHILD_EXIT_DEADLINE.as_secs()
+            ));
+        }
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                bytes.extend_from_slice(&buffer[..count]);
+                if bytes.len() > libc::PIPE_BUF {
+                    return Err("landlock probe refused: the report exceeds PIPE_BUF".into());
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(CHILD_EXIT_POLL);
+            }
+            Err(err) => {
+                return Err(format!(
+                    "landlock probe refused: reading the report failed: {err}"
+                ))
+            }
+        }
+    }
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    match exit {
+        ProbeExit::Code(code) if code == 0 => {}
+        ProbeExit::Code(_) if bytes.starts_with(LANDLOCK_PROBE_REFUSED) => {
+            return Err(
+                match decode_seccomp_launch_record(&bytes[LANDLOCK_PROBE_REFUSED.len()..]) {
+                    Ok(SeccompLaunchRecord::Refused(failure)) => format!(
+                        "landlock probe refused: the probe child must install the ruleset: {failure}"
+                    ),
+                    Ok(SeccompLaunchRecord::Installed(_)) => {
+                        "landlock probe refused: the refused child reported an installed policy"
+                            .into()
+                    }
+                    Err(reason) => reason,
+                },
+            );
+        }
+        other => {
+            return Err(format!(
+                "landlock probe refused: child {other}; report: {text}"
+            ))
+        }
+    }
+    parse_landlock_probe_report(&text)
+        .map_err(|refusal| format!("landlock probe refused: {refusal}"))
+}
+
+/// The records the probe child wrote, each with its answer. A missing or
+/// unreadable record is a refusal that names the call, so a child that stopped
+/// early cannot pass the journey.
+#[cfg(target_os = "linux")]
+fn parse_landlock_probe_report(text: &str) -> Result<LandlockProbeReport, String> {
+    let mut answers = [LandlockAnswer::Returned(0); LANDLOCK_PROBE_CALLS.len()];
+    for (slot, call) in answers.iter_mut().zip(LANDLOCK_PROBE_CALLS) {
+        let marker = format!("{LANDLOCK_PROBE_MARKER} {} ", call.name());
+        let line = text
+            .lines()
+            .find(|line| line.starts_with(&marker))
+            .ok_or_else(|| format!("the probe recorded no answer for {}: {text}", call.name()))?;
+        let answer = line[marker.len()..].trim();
+        *slot = LandlockAnswer::parse(answer)
+            .ok_or_else(|| format!("{}: {answer} is not an answer", call.name()))?;
+    }
+    Ok(LandlockProbeReport { answers })
+}
+
+/// One file-row journey's prepared inputs: the temporary directory the run
+/// keeps alive, that run's base, the three parameter bindings its launch
+/// carries and the ruleset built from that provider's own declared rights.
+///
+/// One builder serves both providers, so the did journey and the wallet journey
+/// plant the same fixtures and install the same shape of ruleset (P10).
+#[cfg(target_os = "linux")]
+struct LandlockFileFixture {
+    _root: tempfile::TempDir,
+    base: PathBuf,
+    declared: Value,
+    bindings: [(&'static str, PathBuf); 3],
+    ruleset: LandlockRuleset,
+}
+
+/// One fixture for all file-row probes, for `name` and that provider's own
+/// `binary`. Paths and marker bytes are prepared before fork; only the child
+/// receives the ruleset.
+///
+/// The declared rights come from that provider's own committed file, the
+/// bindings from `canonical_bindings` for that name and binary, and the ruleset
+/// from `landlock_path_rules` with those bindings and `loader`, so a caller
+/// cannot plant one provider's paths under another provider's ruleset.
+#[cfg(target_os = "linux")]
+fn landlock_file_fixture(
+    name: &str,
+    binary: &Path,
+    loader: &[(&str, &str)],
+) -> LandlockFileFixture {
+    let declared = read_declared_rights(name, &declared_rights_path(name))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let fixture = tempfile::tempdir().expect("temporary provider base");
+    let base = resolved(fixture.path());
+
+    let bindings = canonical_bindings(name, &base, binary);
+    create_shared_ancestors(&bindings);
+    let root = provider_storage_root(name, &base);
+    fs::create_dir_all(&root).expect("the provider root must be creatable");
+
+    let reported_abi = landlock_abi().unwrap_or_else(|failure| {
+        panic!("the host must report a Landlock ABI for this row: {failure}")
+    });
+    eprintln!("{}", linux_landlock_journey_label(Some(reported_abi)));
+    let ruleset = landlock_path_rules(name, &declared, &bindings, reported_abi, loader)
+        .unwrap_or_else(|err| panic!("{err}"));
+
+    let inside_read = LandlockProbeCall::ReadInside.path(&bindings);
+    let beneath_read = LandlockProbeCall::ReadBeneathParent.path(&bindings);
+    fs::write(&inside_read, LANDLOCK_PROBE_FIXTURE_BYTES).unwrap_or_else(|err| {
+        panic!(
+            "the inside fixture {} must be writable: {err}",
+            inside_read.display()
+        )
+    });
+    fs::create_dir_all(
+        beneath_read
+            .parent()
+            .expect("the planted file's sibling directory"),
+    )
+    .expect("the sibling directory must be creatable");
+    fs::write(&beneath_read, LANDLOCK_PROBE_FIXTURE_BYTES).unwrap_or_else(|err| {
+        panic!(
+            "the planted file {} must be writable: {err}",
+            beneath_read.display()
+        )
+    });
+    assert_eq!(
+        fs::read(&beneath_read).expect("the planted file must be readable outside any ruleset"),
+        LANDLOCK_PROBE_FIXTURE_BYTES,
+        "the planted file beneath STORAGE_PARENT must hold its bytes before the confined run"
+    );
+    plant_landlock_probe_truncate_fixture(&bindings);
+
+    LandlockFileFixture {
+        _root: fixture,
+        base,
+        declared,
+        bindings,
+        ruleset,
+    }
+}
+
+/// Plants the file the probe truncates beside `STORAGE_PARENT`, outside every
+/// grant, with the fixture bytes. A truncation the ruleset permits leaves it
+/// empty, so the test reads its length on both sides of a run and a permitted
+/// truncation cannot hide behind a file the parent never wrote.
+#[cfg(target_os = "linux")]
+fn plant_landlock_probe_truncate_fixture(bindings: &[(&'static str, PathBuf)]) {
+    let path = LandlockProbeCall::TruncateBesideParent.path(bindings);
+    fs::write(&path, LANDLOCK_PROBE_FIXTURE_BYTES).unwrap_or_else(|err| {
+        panic!(
+            "the truncate fixture {} must be writable: {err}",
+            path.display()
+        )
+    });
+    assert_eq!(
+        fs::read(&path).expect("the truncate fixture must be readable outside any ruleset"),
+        LANDLOCK_PROBE_FIXTURE_BYTES,
+        "the truncate fixture must hold its bytes before the run"
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn clear_landlock_probe_writes(bindings: &[(&'static str, PathBuf)]) {
+    for call in [
+        LandlockProbeCall::WriteInside,
+        LandlockProbeCall::WriteBesideParent,
+    ] {
+        match fs::remove_file(call.path(bindings)) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => panic!("the probe write fixture must be removable: {err}"),
+        }
+    }
+}
+
+/// The child enters with `no_new_privs` clear. `restrict_self` must refuse
+/// `EPERM` (1) while that flag is clear, and a clear flag must still install a
+/// fully confined report once the installer sets the flag itself.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_landlock_requires_no_new_privs() {
+    let fixture = landlock_file_fixture(WALLET_PROVIDER, Path::new(PROVIDER_BINARY), &[]);
+    let refusal = landlock_file_probe(
+        &fixture.ruleset,
+        LandlockProbeRun::WithoutNoNewPrivileges,
+        &fixture.bindings,
+    )
+    .expect_err("restrict_self must refuse when no_new_privs is clear");
+    assert_eq!(
+        refusal,
+        "landlock probe refused: the probe child must install the ruleset: landlock install refused: landlock_restrict_self failed with errno 1"
+    );
+    let report = landlock_file_probe(
+        &fixture.ruleset,
+        LandlockProbeRun::RequireNoNewPrivileges,
+        &fixture.bindings,
+    )
+    .expect("Landlock must set no_new_privs from a clear flag and install successfully");
+    for (call, answer) in LANDLOCK_PROBE_CALLS.into_iter().zip(report.answers) {
+        if matches!(
+            call,
+            LandlockProbeCall::ReadInside | LandlockProbeCall::WriteInside
+        ) {
+            assert!(
+                matches!(answer, LandlockAnswer::Returned(_)),
+                "{} must succeed in the confined report, and it answered {answer:?}",
+                call.name()
+            );
+        } else {
+            assert_eq!(
+                answer,
+                LandlockAnswer::Errno(libc::EACCES),
+                "{} must be refused EACCES in the confined report, and it answered {answer:?}",
+                call.name()
+            );
+        }
+    }
+}
+
+/// The journey: `name` starts under the Landlock file row built from that
+/// provider's own declared rights and under the seccomp list built the same
+/// way, and one probe child under the same ruleset shows the file row refusing
+/// every path outside that provider's `STORAGE_ROOT` while the same calls
+/// succeed without it.
+///
+/// `binary` is that provider's own binary, `declared` its own declared rights,
+/// `bindings` the three paths its launch carries and `base` the temporary root
+/// both the launch and the probe use. The permitted calls are the caller's own:
+/// `permitted` drives them on the started provider and returns the number of
+/// answers the caller then judges, so this one body serves both providers
+/// without a per-provider launcher, list builder or probe (P10).
+///
+/// The positive control uses the same uid and the same fixtures and no ruleset,
+/// and every control call must succeed. The confined run requires `EACCES` (13),
+/// never `EPERM`, for the read of the bound executable, the read beneath
+/// `STORAGE_PARENT`, the write beside it, the truncation beside it, and the
+/// listings of `STORAGE_PARENT`, `sibling` and `sibling/private`. The inside
+/// read and write succeed. The caller drives its own permitted calls through
+/// `permitted`, because `status` is wallet's and did's `handle` has no such
+/// arm. An `Init` for a base outside `STORAGE_ROOT` is refused `storage_error`
+/// with `Permission denied` and creates nothing. The truncate fixture keeps its
+/// bytes. A start on a non-Linux host, and a start on a host that reports
+/// Landlock missing, are refused.
+///
+/// The two Linux-only plants are recorded in `CONFINEMENT-LINUX.md` and are not
+/// registered: a launcher that skips only its own Landlock install fails the
+/// outside `Init`, and a `STORAGE_PARENT` row that grants a read fails the
+/// planted read beneath the parent.
+#[cfg(target_os = "linux")]
+fn landlock_file_row_journey(
+    name: &str,
+    binary: &Path,
+    declared: &Value,
+    base: &Path,
+    bindings: &[(&'static str, PathBuf)],
+    ruleset: &LandlockRuleset,
+    permitted: impl FnOnce(&mut ConfinedProvider),
+) {
+    let profile_fixture = tempfile::tempdir().expect("temporary profile root");
+    let profile_dir = resolved(profile_fixture.path());
+    let root = provider_storage_root(name, base);
+    let inside_read = LandlockProbeCall::ReadInside.path(bindings);
+    let allow = seccomp_probe_list(name).unwrap_or_else(|err| panic!("{err}"));
+    let policy = StandinPolicy::Landlock {
+        allow: &allow,
+        ruleset,
+    };
+
+    let missing = standin_spawn_confined_provider(
+        StandinHost::linux_missing(StandinPrimitive::Landlock),
+        policy,
+        name,
+        binary,
+        base,
+        declared,
+        &profile_dir,
+    )
+    .err()
+    .expect("a host that reports Landlock missing must refuse the start");
+    assert!(
+        missing.contains("linux confinement refused: the kernel has no Landlock"),
+        "a missing Landlock report must keep the design's words: {missing}"
+    );
+    let other_os = standin_spawn_confined_provider(
+        StandinHost::reporting("macos"),
+        policy,
+        name,
+        binary,
+        base,
+        declared,
+        &profile_dir,
+    )
+    .err()
+    .expect("a non-linux host must refuse the start");
+    assert!(
+        other_os.contains("the seccomp allow list is the linux policy")
+            && other_os.contains("macos is not linux"),
+        "a non-linux host must be refused by name: {other_os}"
+    );
+
+    let control = landlock_file_probe(ruleset, LandlockProbeRun::Control, bindings)
+        .unwrap_or_else(|failure| panic!("the positive control must run: {failure}"));
+    for (call, answer) in LANDLOCK_PROBE_CALLS.iter().zip(control.answers) {
+        assert!(
+            matches!(answer, LandlockAnswer::Returned(_)),
+            "the control must show {} succeeding without the ruleset, and it answered {answer:?} \
+             ({call:?} on {}), so this run has no evidence for that call",
+            call.name(),
+            call.path(bindings).display()
+        );
+        eprintln!("control {}: {}", call.name(), answer.text());
+    }
+    clear_landlock_probe_writes(bindings);
+    plant_landlock_probe_truncate_fixture(bindings);
+
+    let mut provider = standin_spawn_confined_provider(
+        StandinHost::reporting("linux"),
+        policy,
+        name,
+        binary,
+        base,
+        declared,
+        &profile_dir,
+    )
+    .unwrap_or_else(|err| panic!("the linux {name} start must be confined: {err}"));
+
+    // The `status` call belongs to wallet's own permitted calls: did's `handle`
+    // names no `status` arm, so the shared body sends only what the caller
+    // drives and wallet's caller sends `status` itself.
+    permitted(&mut provider);
+    assert!(
+        profile_dir_entries(&profile_dir).is_empty(),
+        "a landlock start writes no profile: {}",
+        profile_dir.display()
+    );
+
+    let outside_base = storage_parent(name, base).join("landlock-outside-base");
+    let outside_init = provider.init(&outside_base);
+    assert_eq!(
+        outside_init["status"], "error",
+        "an Init for a base outside STORAGE_ROOT must be refused under the launch: {outside_init}"
+    );
+    assert_eq!(
+        outside_init["code"], "storage_error",
+        "the outside Init must be a storage refusal: {outside_init}"
+    );
+    let reason = outside_init["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the outside Init must carry a reason: {outside_init}"));
+    assert!(
+        reason.contains("Permission denied"),
+        "the outside Init must be refused by the kernel's own denial, and it answered: {reason}"
+    );
+    assert!(
+        !outside_base.exists() && !provider_storage_root(name, &outside_base).exists(),
+        "a refused outside Init must create nothing: {}",
+        outside_base.display()
+    );
+    eprintln!("launch outside Init: {outside_init}");
+    provider.shutdown();
+
+    assert_eq!(
+        fs::read(&inside_read).expect("the inside fixture must stay readable"),
+        LANDLOCK_PROBE_FIXTURE_BYTES,
+        "the launch must leave the inside fixture's bytes unchanged"
+    );
+
+    let confined = landlock_file_probe(ruleset, LandlockProbeRun::Confined, bindings)
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    for ((call, control_answer), confined_answer) in LANDLOCK_PROBE_CALLS
+        .iter()
+        .zip(control.answers)
+        .zip(confined.answers)
+    {
+        eprintln!(
+            "confined {}: control {}, ruleset {}",
+            call.name(),
+            control_answer.text(),
+            confined_answer.text()
+        );
+    }
+    let refused = |call: LandlockProbeCall| {
+        let index = LANDLOCK_PROBE_CALLS
+            .iter()
+            .position(|candidate| *candidate == call)
+            .expect("the call is one of the probe's own");
+        confined.answers[index]
+    };
+    for call in [
+        LandlockProbeCall::ReadInside,
+        LandlockProbeCall::WriteInside,
+    ] {
+        assert!(
+            matches!(refused(call), LandlockAnswer::Returned(_)),
+            "{} must succeed inside STORAGE_ROOT under the ruleset, and it answered {:?}",
+            call.name(),
+            refused(call)
+        );
+    }
+    for call in [
+        LandlockProbeCall::ReadExecutable,
+        LandlockProbeCall::ReadBeneathParent,
+        LandlockProbeCall::WriteBesideParent,
+        LandlockProbeCall::TruncateBesideParent,
+        LandlockProbeCall::ListParent,
+        LandlockProbeCall::ListSibling,
+        LandlockProbeCall::ListSiblingPrivate,
+    ] {
+        assert_eq!(
+            refused(call),
+            LandlockAnswer::Errno(libc::EACCES),
+            "{} must be refused EACCES (13), never EPERM, and it answered {:?}",
+            call.name(),
+            refused(call)
+        );
+    }
+    assert_eq!(
+        fs::read(LandlockProbeCall::WriteInside.path(bindings))
+            .expect("the confined write must have created the file inside the root"),
+        LANDLOCK_PROBE_FIXTURE_BYTES,
+        "the confined write inside the root must hold its bytes"
+    );
+    assert!(
+        !LandlockProbeCall::WriteBesideParent.path(bindings).exists(),
+        "a refused write beside the parent must leave no file: {}",
+        LandlockProbeCall::WriteBesideParent
+            .path(bindings)
+            .display()
+    );
+    assert_eq!(
+        fs::read(LandlockProbeCall::TruncateBesideParent.path(bindings))
+            .expect("a refused truncation must leave the planted file in place"),
+        LANDLOCK_PROBE_FIXTURE_BYTES,
+        "a refused truncation beside the parent must leave its bytes unchanged"
+    );
+    eprintln!("{name} launched storage root: {}", root.display());
+}
+
+/// The wallet caller of the file row: wallet's own binary, its own declared
+/// rights, its own bindings and its own permitted calls. Wallet's assertions,
+/// fixtures and plants are `landlock_file_row_journey`'s, unchanged.
+///
+/// The test keeps its name, because wallet's `CONFINEMENT-LINUX.md` and the
+/// falsifier list name it.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_wallet_file_row_is_refused_outside_storage_root() {
+    let binary = Path::new(PROVIDER_BINARY);
+    let fixture = landlock_file_fixture(WALLET_PROVIDER, binary, LANDLOCK_LOADER_PATHS);
+    landlock_file_row_journey(
+        WALLET_PROVIDER,
+        binary,
+        &fixture.declared,
+        &fixture.base,
+        &fixture.bindings,
+        &fixture.ruleset,
+        |provider| {
+            let status = provider.send(&json!({ "op": "status" }));
+            assert_eq!(status["status"], "ok", "status must answer: {status}");
+            let accounts = provider.wallet(WalletProviderOperationV2::ListAccounts {
+                include_revoked: false,
+            });
+            assert_eq!(
+                ok_data(accounts)["accounts"],
+                json!([]),
+                "a fresh wallet lists no account"
+            );
+        },
+    );
+    assert!(
+        provider_storage_root(WALLET_PROVIDER, &fixture.base)
+            .join(WALLET_KEY_FILE)
+            .exists(),
+        "the confined launch must create its storage key under STORAGE_ROOT"
+    );
+}
+
+/// The did caller of the one file row. The same body, the same installer, the
+/// same `StandinPolicy::Landlock` variant and the same `pre_exec` start did's
+/// own binary, with did's own committed declared-rights file, did's own
+/// `canonical_bindings` for its `STORAGE_ROOT` (`<base>/did`) and its
+/// `STORAGE_PARENT` (`<base>`), and the one `LANDLOCK_LOADER_PATHS`.
+///
+/// The permitted calls are `did_standin_permitted_operations` driven whole: the
+/// six calls `init`, `get_did`, `resolve`, `set_nickname`, `get_nickname` and
+/// `get_persona_did`, judged against `DID_SUITE_CASES`' permitted prefix, so
+/// the did run proves its own operations answer under did's ruleset.
+///
+/// The two Linux-only plants are the wallet caller's: a did launcher that skips
+/// only its own Landlock install fails the outside `Init`, and a
+/// `STORAGE_PARENT` row that grants a read fails the planted read beneath did's
+/// parent. Both reach a Linux-only test, so neither is registered in
+/// `falsifiers.json`; `CONFINEMENT-LINUX.md` records them with the red run.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_did_file_row_is_refused_outside_storage_root() {
+    let binary = did_provider_binary();
+    let fixture = landlock_file_fixture(DID_PROVIDER, binary, LANDLOCK_LOADER_PATHS);
+    let label = "did-provider landlock file row";
+    landlock_file_row_journey(
+        DID_PROVIDER,
+        binary,
+        &fixture.declared,
+        &fixture.base,
+        &fixture.bindings,
+        &fixture.ruleset,
+        |provider| {
+            let record = did_standin_permitted_operations(provider, &fixture.base, label);
+            assert_suite_outcomes(label, &record, &DID_SUITE_CASES[..DID_PERMITTED_CASES]);
+        },
+    );
+}
+
+/// Runs the calling test again in a child test process beneath an installed
+/// allow-all fixture filter, so a launcher that skips only its own `pre_exec`
+/// install cannot pass on the inherited filter alone.
+///
+/// `test_name` is the caller's own test name, which the child runs by that exact
+/// name, so one fixture serves both providers' journeys instead of a copy per
+/// caller. The fixture filter is installed through the one `install_seccomp`, and
+/// its `ALLOW` decision leaves the host's own marker answer intact.
+///
+/// It returns `false` in the parent, which has run the child and required its
+/// exit 0, and `true` in the child, whose own `/proc/self/status` the caller then
+/// checks. The parent test runner keeps its own policy and the existing process
+/// owner reaps the run.
+#[cfg(target_os = "linux")]
+fn seccomp_journey_runs_beneath_an_inherited_filter(name: &str, test_name: &str) -> bool {
+    use std::os::unix::process::CommandExt as _;
+
+    const INHERITED_FIXTURE: &str = "SECCOMP_INHERITED_FIXTURE";
+    if std::env::var_os(INHERITED_FIXTURE).as_deref() == Some(std::ffi::OsStr::new("1")) {
+        return true;
+    }
+    let mut inherited = seccomp_probe_list(name).unwrap_or_else(|err| panic!("{err}"));
+    inherited.program = vec![SeccompInstruction::stmt(
+        SECCOMP_BPF_RET_K,
+        SECCOMP_RET_ALLOW,
+    )];
+    let mut command = Command::new(std::env::current_exe().expect("the journey test binary"));
+    command
+        .args(["--exact", test_name, "--nocapture"])
+        .env(INHERITED_FIXTURE, "1");
+    unsafe {
+        command.pre_exec(move || {
+            install_seccomp(&inherited)
+                .map_err(|failure| std::io::Error::from_raw_os_error(failure.errno()))
+        });
+    }
+    let mut journey = ConfinedProvider::spawn(command);
+    let exit = journey.wait_for_exit();
+    let stderr = journey.stderr().to_owned();
+    let mut stdout = String::new();
+    journey
+        .stdout
+        .read_to_string(&mut stdout)
+        .expect("the journey output");
+    eprintln!("{stdout}{stderr}");
+    assert_eq!(
+        exit.code(),
+        Some(0),
+        "{test_name} under an inherited filter must pass: {exit}"
+    );
+    false
+}
+
+/// One provider's named seccomp journey paths, so both journeys compare the same
+/// three named fixtures instead of restating them per caller.
+///
+/// `inside` is the file the run writes under `STORAGE_ROOT`, `inside_fixture` is
+/// a fixed-byte file beside it that the read-only calls must not change, and
+/// `outside` is a sibling path outside `STORAGE_ROOT` that must stay absent. The
+/// sibling is derived from `storage_parent` for both providers, so a path that
+/// drifts out of the grant shows as a present file. `expected_fixture` is the
+/// provider's own known bytes, so a run that wrote the wrong file fails.
+struct SeccompJourneyFiles {
+    inside: PathBuf,
+    inside_fixture: PathBuf,
+    outside: PathBuf,
+    expected_fixture: &'static [u8],
+}
+
+/// The named journey fixtures of `name` under `base`, or a panic naming the
+/// provider whose layout this function does not know. The lab serves two
+/// providers and a guessed layout would be a fallback (P11).
+fn seccomp_journey_files(name: &str, base: &Path) -> SeccompJourneyFiles {
+    let root = provider_storage_root(name, base);
+    let (inside_name, expected_fixture): (&str, &[u8]) = match name {
+        WALLET_PROVIDER => (WALLET_KEY_FILE, b"wallet seccomp journey fixture\n"),
+        DID_PROVIDER => ("nickname.enc", b"did seccomp journey fixture\n"),
+        other => panic!("the journey names no provider whose fixtures it knows: {other}"),
+    };
+    SeccompJourneyFiles {
+        inside: root.join(inside_name),
+        inside_fixture: root.join("seccomp-inside-write"),
+        outside: storage_parent(name, base).join("seccomp-outside-write"),
+        expected_fixture,
+    }
+}
+
+/// Both callers use these same comparisons after shutdown. Wallet's key-format
+/// assertions then inspect the returned bytes separately.
+fn assert_seccomp_journey_files(
+    name: &str,
+    files: &SeccompJourneyFiles,
+    expected_inside: &[u8],
+) -> Vec<u8> {
+    let inside_reason = match name {
+        WALLET_PROVIDER => {
+            "the read-only journey must keep the exact key bytes from init".to_owned()
+        }
+        DID_PROVIDER => format!(
+            "the {name} journey must keep the exact bytes set_nickname wrote under STORAGE_ROOT"
+        ),
+        other => panic!("the journey names no provider whose file evidence it knows: {other}"),
+    };
+    let written = fs::read(&files.inside)
+        .unwrap_or_else(|err| panic!("the launch must write {}: {err}", files.inside.display()));
+    assert_eq!(written, expected_inside, "{inside_reason}");
+    assert_eq!(
+        fs::read(&files.inside_fixture).expect("the named inside fixture must remain readable"),
+        files.expected_fixture,
+        "the named inside fixture must keep its exact expected bytes"
+    );
+    assert!(
+        !files.outside.exists(),
+        "the named sibling outside STORAGE_ROOT must stay absent after the run: {}",
+        files.outside.display()
+    );
+    written
+}
+
+/// A changed provider file, a corrupt fixed-byte fixture and a present outside
+/// sibling each fail the journey's one comparison for both provider layouts.
+#[test]
+fn seccomp_journey_file_comparison_catches_corruption_for_each_provider() {
+    for name in [WALLET_PROVIDER, DID_PROVIDER] {
+        for changed in ["inside", "inside_fixture", "outside"] {
+            let base = tempfile::tempdir().expect("temporary journey comparison root");
+            let files = seccomp_journey_files(name, base.path());
+            fs::create_dir_all(provider_storage_root(name, base.path()))
+                .expect("the provider fixture root must exist");
+            let expected_inside = b"bytes written by the provider";
+            fs::write(&files.inside, expected_inside).expect("the provider file must be writable");
+            fs::write(&files.inside_fixture, files.expected_fixture)
+                .expect("the named inside fixture must be writable");
+            assert_seccomp_journey_files(name, &files, expected_inside);
+
+            let changed_path = match changed {
+                "inside" => &files.inside,
+                "inside_fixture" => &files.inside_fixture,
+                "outside" => &files.outside,
+                _ => unreachable!(),
+            };
+            fs::write(changed_path, b"corrupt journey bytes")
+                .expect("the plant must write its file");
+            let failure = std::panic::catch_unwind(|| {
+                assert_seccomp_journey_files(name, &files, expected_inside)
+            })
+            .expect_err("each changed file must fail the shared journey comparison");
+            let reason = failure
+                .downcast_ref::<String>()
+                .expect("the comparison must report its assertion reason");
+            let expected_reason = match changed {
+                "inside" => match name {
+                    WALLET_PROVIDER => "the read-only journey must keep the exact key bytes from init",
+                    DID_PROVIDER => "the did-provider journey must keep the exact bytes set_nickname wrote under STORAGE_ROOT",
+                    _ => unreachable!(),
+                },
+                "inside_fixture" => "the named inside fixture must keep its exact expected bytes",
+                "outside" => "the named sibling outside STORAGE_ROOT must stay absent after the run",
+                _ => unreachable!(),
+            };
+            assert!(
+                reason.contains(expected_reason),
+                "{name} {changed} must fail its own comparison: {reason}"
+            );
+        }
+    }
+}
+
+/// One provider's Linux journey: `name` starts under the seccomp allow list built
+/// from that provider's own committed declared-rights file, its permitted calls
+/// answer under the filter. Wallet also runs the one probe child under that
+/// filter to show the four refused calls answering the filter's own marker.
+///
+/// `binary` is that provider's own binary and `declared` its own declared rights,
+/// so the one body serves both providers through `standin_spawn_confined_provider`
+/// with a `Seccomp` policy, which reaches `ConfinedProvider::start_under_seccomp`
+/// and that function's one `spawn`. `test_name` is the caller's own test name,
+/// which the inherited-filter fixture re-runs. There is no per-provider launcher,
+/// list builder or probe.
+///
+/// The list carries `name` as its `provider`, and its program must equal the
+/// program built the same way for wallet. The two committed declared-rights files
+/// declare the same rights and the same two platform-baseline ids, whose rule
+/// text is identical, so the equality follows from that sameness: a difference
+/// would be a per-provider widening of the filter and fails here.
+///
+/// The launched child must report `SECCOMP_MODE_FILTER` in its own
+/// `/proc/<pid>/status`, and the mode alone also accepts an inherited filter, so
+/// the launcher's record must additionally show the marker answering differently
+/// before and after this launcher's own install.
+///
+/// For wallet, one probe child records what `ptrace(PTRACE_TRACEME)`, `mount`,
+/// `bpf` and `keyctl` answer before the filter, installs the filter through
+/// `install_seccomp`, and records the same four after. Each filtered answer must
+/// be the deny marker, and the marker must differ from the unfiltered answer the
+/// same probe recorded, so a host that already refuses a call cannot stand in
+/// for the filter. That evidence belongs to the one probe and is not re-proven
+/// per provider.
+///
+/// The comment below is the record of where this ran: the marker errno, the
+/// host, and the call whose failure named each `LAUNCH_ESSENTIALS` entry.
+#[cfg(target_os = "linux")]
+fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_name: &str) {
+    if !seccomp_journey_runs_beneath_an_inherited_filter(name, test_name) {
+        return;
+    }
+    let inherited_status = fs::read_to_string("/proc/self/status").expect("the fixture's status");
+    assert!(
+        inherited_status.lines().any(|line| line == "Seccomp:\t2"),
+        "the journey fixture must already carry an inherited filter"
+    );
+    eprintln!("journey fixture before provider launch: Seccomp: 2 (inherited)");
+    // Ran on spark1.local: aarch64, Ubuntu 24.04.4, kernel 6.17.0-1029-nvidia.
+    // The deny marker is EACCES (13). Each unfiltered answer differed from it on
+    // that host: ptrace(PTRACE_TRACEME) returned 0, mount answered ENOENT (2),
+    // bpf answered EINVAL (22) and keyctl(KEYCTL_GET_KEYRING_ID, session
+    // keyring, create 0) answered a session keyring id. EACCES is chosen because
+    // the kernel answers EPERM for a call an unprivileged process may not make,
+    // so a plain EPERM assertion would pass with no filter installed.
+    //
+    // Each LAUNCH_ESSENTIALS entry was dropped alone from the whole list on that
+    // host and the call that then failed was read, for wallet's binary and again
+    // for did's. The did measurement used the wider fchmodat policy recorded in
+    // CONFINEMENT-LINUX.md; its journey still needs a policy-owner decision.
+    // Both measurements named the same seven entries, so the set is one table:
+    // close -> close(3) in the loader, refused before the first mapping;
+    // exit_group -> exit_group(0) as the provider ended its own run; getrandom ->
+    // getrandom(0xec92ac7c6700, 8, GRND_NONBLOCK) in the loader; mmap ->
+    // mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+    // in the loader, after which the provider took SIGSEGV; mprotect ->
+    // mprotect(0xf2640329f000, 65536, PROT_NONE) in the loader; ppoll ->
+    // ppoll([{fd=0}, {fd=1}, {fd=2}], 3, {tv_sec=0, tv_nsec=0}, NULL, 0) while
+    // the provider waits; rt_sigaction -> rt_sigaction(SIGPIPE,
+    // {sa_handler=SIG_IGN, sa_mask=[PIPE], sa_flags=SA_RESTART},
+    // 0xffffea09ff80, 8). For did the same seven failed as
+    // `libgcc_s.so.1: cannot close file descriptor`, an unclean exit, a `rand`
+    // seed panic, `SIGSEGV`, `libgcc_s.so.1: cannot change memory protections`,
+    // `SIGTRAP`, and `assertion failed: signal(libc::SIGPIPE, handler)`.
+
+    let allow = seccomp_probe_list(name).unwrap_or_else(|err| panic!("{err}"));
+    assert_eq!(
+        allow.provider, name,
+        "the seccomp allow list must name the provider it was built for"
+    );
+    let wallet_allow = seccomp_probe_list(WALLET_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+    assert_eq!(
+        allow.program, wallet_allow.program,
+        "the {name} program must equal wallet's: the two declared-rights files \
+         declare the same rights and the same two platform-baseline ids with \
+         identical rule text, so a difference is a per-provider widening"
+    );
+    eprintln!("{}", linux_seccomp_journey_label());
+
+    let fixture = tempfile::tempdir().expect("temporary provider base");
+    let base = resolved(fixture.path());
+    let profile_fixture = tempfile::tempdir().expect("temporary profile root");
+    let profile_dir = resolved(profile_fixture.path());
+    let files = seccomp_journey_files(name, &base);
+
+    let mut provider = standin_spawn_confined_provider(
+        StandinHost::reporting("linux"),
+        StandinPolicy::Seccomp(&allow),
+        name,
+        binary,
+        &base,
+        declared,
+        &profile_dir,
+    )
+    .unwrap_or_else(|err| panic!("the linux {name} start must be confined: {err}"));
+
+    let label = format!("{name} seccomp journey");
+    // Wallet init has made its root; did first creates it when writing a
+    // nickname. Prepare the sentinel before either provider's operation suite
+    // so an operation that corrupts it leaves the evidence for the comparison.
+    fs::create_dir_all(provider_storage_root(name, &base))
+        .expect("the provider fixture root must exist");
+    fs::write(&files.inside_fixture, files.expected_fixture)
+        .expect("the named inside fixture must be writable");
+    // The bytes of the file the run wrote under STORAGE_ROOT, read at the point
+    // the provider wrote it: wallet's `init` writes the random key, and did's
+    // `set_nickname` writes the encrypted nickname.
+    let expected_inside = match name {
+        WALLET_PROVIDER => {
+            // Init creates the random key. Keep those exact bytes as the expected
+            // value across the read-only calls, and also compare a fixed byte
+            // fixture.
+            let expected_key = fs::read(&files.inside).expect("init must create the storage key");
+            let status = provider.send(&json!({ "op": "status" }));
+            assert_eq!(status["status"], "ok", "status must answer: {status}");
+            let accounts = provider.wallet(WalletProviderOperationV2::ListAccounts {
+                include_revoked: false,
+            });
+            assert_eq!(
+                ok_data(accounts)["accounts"],
+                json!([]),
+                "a fresh wallet lists no account"
+            );
+            expected_key
+        }
+        DID_PROVIDER => {
+            let record = did_standin_permitted_operations(&mut provider, &base, &label);
+            assert_suite_outcomes(&label, &record, &DID_SUITE_CASES[..DID_PERMITTED_CASES]);
+            fs::read(&files.inside).unwrap_or_else(|err| {
+                panic!(
+                    "{label}: set_nickname must write {}: {err}",
+                    files.inside.display()
+                )
+            })
+        }
+        other => panic!("the journey names no provider whose permitted calls it knows: {other}"),
+    };
+    assert_eq!(
+        provider.launched_seccomp_mode(),
+        SECCOMP_MODE_FILTER,
+        "the launched provider must carry SECCOMP_MODE_FILTER in its own /proc status, \
+         so the launcher's pre_exec install is observed"
+    );
+    let [before_install, after_install] = provider
+        .seccomp_launch_answers
+        .expect("the launcher must report its own install's before and after answers");
+    eprintln!("launcher marker: before {before_install}, after {after_install}");
+    assert_ne!(
+        before_install, after_install,
+        "an inherited filter alone must not satisfy the launcher's own install"
+    );
+    assert_eq!(
+        after_install,
+        -i64::from(SECCOMP_DENY_ERRNO),
+        "this launcher's install must supply the deny marker"
+    );
+    assert!(
+        profile_dir_entries(&profile_dir).is_empty(),
+        "a seccomp start writes no profile: {}",
+        profile_dir.display()
+    );
+    provider.shutdown();
+
+    let written = assert_seccomp_journey_files(name, &files, &expected_inside);
+    if name == WALLET_PROVIDER {
+        let text = String::from_utf8(written).expect("the storage key must be hex text");
+        let digits = text
+            .strip_suffix('\n')
+            .expect("the storage key must end with a newline");
+        assert_eq!(
+            digits.len(),
+            2 * WALLET_KEY_BYTES,
+            "the storage key must hold its {} hex digits and a newline: {}",
+            2 * WALLET_KEY_BYTES,
+            files.inside.display()
+        );
+        assert!(
+            digits.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "the storage key must be hex: {}",
+            files.inside.display()
+        );
+    }
+
+    // Wallet owns the four-call kernel proof; did proves program equality.
+    if name == WALLET_PROVIDER {
+        let probe = seccomp_denied_call_probe(&allow, SeccompProbeRun::Filter)
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        for (call, before, after) in &probe.records {
+            assert_eq!(
+                *after,
+                SeccompAnswer::Errno(SECCOMP_DENY_ERRNO),
+                "{call} must answer the deny marker {SECCOMP_DENY_ERRNO} under the filter, \
+                 and it answered {after:?}"
+            );
+            assert_ne!(
+                after, before,
+                "{call} answered {after:?} both with and without the filter, so this probe \
+                 does not show the filter's own answer"
+            );
+            eprintln!("{call}: before {}, after {}", before.text(), after.text());
+        }
+        assert_eq!(
+            probe.allocations, 0,
+            "the probe child must allocate nothing after its fork"
+        );
+        // The socket half of the network row: the same child swept every family
+        // for every type before and after the filter, and the one portable judge
+        // decides what it reported.
+        let types: Vec<&'static str> = SECCOMP_SOCKET_SWEEP_TYPES
+            .iter()
+            .map(|(name, _)| *name)
+            .chain(std::iter::once(SECCOMP_SOCKET_PAIR_NAME))
+            .collect();
+        socket_sweep_problem(&probe.sweeps, &types).unwrap_or_else(|problem| panic!("{problem}"));
+        for sweep in &probe.sweeps {
+            eprintln!(
+                "{}: {} families, refused before {}, after {}, first unrefused {}",
+                sweep.name,
+                sweep.families,
+                sweep.refused_before,
+                sweep.refused_after,
+                sweep.first_unrefused.map_or_else(
+                    || SECCOMP_SOCKET_UNREFUSED_NONE.to_string(),
+                    |family| family.to_string()
+                )
+            );
+        }
+    }
+}
+
+/// The wallet half of the Linux journey, and the body is
+/// `seccomp_confined_journey`: this caller passes wallet's own binary, file and
+/// test name.
+///
+/// Falsifier: WP176 skips only the launcher's `pre_exec` install and leaves the
+/// self-filtering probe intact. The journey inherits an allow-all fixture filter,
+/// so the mode assertion passes and the before/after assertion fails. WP177
+/// writes the named outside sibling, so the journey finds it present and fails.
+/// WP162 labels the journey with a Linux host off Linux and is caught by
+/// `linux_seccomp_journey_is_not_applicable_off_linux` on the Mac. Both Linux
+/// plants reach a Linux-only test, so neither is registered in `falsifiers.json`;
+/// `CONFINEMENT-LINUX.md` records them with the red run.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    seccomp_confined_journey(
+        WALLET_PROVIDER,
+        Path::new(PROVIDER_BINARY),
+        &declared,
+        "linux_wallet_journey_runs_under_the_seccomp_allow_list",
+    );
+}
+
+/// The did half of the Linux journey: the same body, the same installer and the
+/// program as wallet, with did's own binary, did's own committed declared-rights
+/// file and did's own operations. Wallet owns the four-call probe run.
+///
+/// The permitted calls are `did_standin_permitted_operations`, judged by
+/// `assert_suite_outcomes` against the permitted prefix of `DID_SUITE_CASES`, so
+/// `init`, `get_did` with a `did:key:` value, `resolve`, `set_nickname`,
+/// `get_nickname` and `get_persona_did` answer under the filter. The did suite's
+/// file-denial cases stay in the B3 and C0 journeys: a seccomp filter carries
+/// syscall policy and not path policy, so they cannot pass under it alone.
+///
+/// Falsifier: a did launcher that skips only its `pre_exec` install is the same
+/// plant as WP176 on this caller, caught by the `SECCOMP_MODE_FILTER` mode plus
+/// the inherited-fixture before/after comparison; and a did provider that writes
+/// the named outside sibling is WP177's plant on this caller, caught by the absent
+/// sibling. Both reach a Linux-only test, so neither is registered in
+/// `falsifiers.json`; `CONFINEMENT-LINUX.md` records them with the red run.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_did_journey_runs_under_the_seccomp_allow_list() {
+    let declared = read_declared_rights(DID_PROVIDER, &declared_rights_path(DID_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    seccomp_confined_journey(
+        DID_PROVIDER,
+        did_provider_binary(),
+        &declared,
+        "linux_did_journey_runs_under_the_seccomp_allow_list",
+    );
+}
+
+/// The names directly under `path`, sorted. A path that does not exist yet names
+/// nothing, which is what an empty profile directory must report.
+#[cfg(target_os = "linux")]
+fn profile_dir_entries(path: &Path) -> Vec<String> {
+    let mut names: Vec<String> = match fs::read_dir(path) {
+        Ok(entries) => entries
+            .map(|entry| {
+                entry
+                    .expect("a profile directory entry must list")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    names.sort_unstable();
+    names
 }
 
 /// Selects the removal check's profiles from the one file-profile list. The
@@ -6575,6 +13219,19 @@ fn operations_table_citation_problems(
 /// right.
 const NO_DECLARED_RIGHT: &str = "none: needs no declared right";
 
+/// The `storage` id of `CONTRACT_RIGHTS`: the declared right a row holds when
+/// its call writes under the storage root. It is read from that one list, so
+/// the rule names the same id the vocabulary does and no second copy.
+const STORAGE_RIGHT: &str = CONTRACT_RIGHTS[0];
+
+/// The canonical parameter whose subtree a `storage` row's Effect cell names.
+/// It is one `CANONICAL_PARAMS` entry, so the rule names the same token the
+/// profile does.
+const STORAGE_ROOT_PARAM: &str = CANONICAL_PARAMS[1];
+
+/// The store file every Effectful wallet kind writes.
+const STORE_FILE_NAME: &str = "wallet-state.json";
+
 /// The one Linux cell value every operations row uses in this lab.
 const LINUX_STATUS: &str = "designed, not enforced";
 
@@ -6591,10 +13248,44 @@ const REQUEST_ARM: &str = "Request::";
 /// The one contract operation type wallet's dispatch expands.
 const WALLET_OPERATION_ARM: &str = "WalletProviderOperationV2::";
 
+/// The one row whose answer is an arm of `fn handle` rather than a function
+/// body.
+const SHUTDOWN_ARM: &str = "Request::Shutdown";
+
+/// The wire name of `SHUTDOWN_ARM`, and the row that names it.
+const SHUTDOWN_OPERATION: &str = "shutdown";
+
+/// The call one handler makes when it answers without data.
+const EMPTY_OK_CALL: &str = "Response::empty_ok()";
+
+/// The one text an `EMPTY_OK_CALL` row writes as its ok side.
+const EMPTY_OK_TEXT: &str = "`{\"status\":\"ok\"}` only";
+
+/// The macro one handler writes its ok answer with, also inside
+/// `serde_json::json!`.
+const OK_JSON_MACRO: &str = "json!";
+
+/// The wire field one handler's ok `json!` answers as its key list.
+const OK_DATA_NAME: &str = "data";
+
+/// The two markers that split an Outputs cell into its ok and error sides.
+const OUTPUTS_OK_MARKER: &str = "ok: ";
+const OUTPUTS_ERROR_MARKER: &str = ". error: ";
+
+/// The two fixed markers one `wallet_contract` row's ok side writes.
+const WALLET_RESPONSE_MARKER: &str = " from `WalletProviderResponseV2`";
+const WALLET_RESPONSE_NAMES_ONLY: &str = ", names only";
+
+/// The contract type one `wallet_contract` row answers as `data`.
+const RESPONSE_CONTRACT_ITEM: &str = "WalletProviderResponseV2";
+
 /// One operations table row, reduced to the cells the row check reads.
 struct OperationsRow {
     operation: String,
+    inputs: String,
+    outputs: String,
     right: String,
+    effect: String,
     macos: String,
     linux: String,
 }
@@ -6703,7 +13394,10 @@ fn operations_table_rows(
         }
         rows.push(OperationsRow {
             operation: cells[0].to_string(),
+            inputs: cells[1].to_string(),
+            outputs: cells[2].to_string(),
             right: cells[3].to_string(),
+            effect: cells[4].to_string(),
             macos: cells[5].to_string(),
             linux: cells[6].to_string(),
         });
@@ -6759,30 +13453,549 @@ fn dispatch_arm_variants(source: &str, signature: &str, arm_type: &str) -> Optio
     body.then_some(variants)
 }
 
-/// Every problem with one table's row set, each naming the document and the row
-/// or the arm that has no partner.
+/// The body of the `enum <name>` or `struct <name>` declaration in `source`,
+/// or `None` when `source` holds no such declaration.
 ///
-/// The row set must equal the operations `provider_source` answers. Every
-/// `Request::<Variant>` arm of `fn handle` is one name, and the names of the
-/// ordinary arms appear in the table in dispatch order. Where `fn handle`
-/// answers `wallet_contract`, every `WalletProviderOperationV2::<Variant>` arm
-/// of `fn dispatch_wallet_operation` is one `wallet_contract <kind>` row, and
-/// those rows follow the ordinary rows in their own dispatch order. Each arm
-/// matches exactly one row. A name reaches snake_case by
-/// `variant_snake_case`. The contract enum is the only list of kinds, so a new
-/// kind fails here until its row exists.
-fn row_set_problems(
-    document_name: &str,
-    rows: &[OperationsRow],
+/// The declaration is a line whose qualifier words precede `enum <name> {` or
+/// `struct <name> {`, and whose text after the brace is empty, so a use of the
+/// name elsewhere does not count. The body runs from that `{` to the `}` that
+/// closes it, and a brace inside a string literal does not count. Comments are
+/// removed before selecting the declaration or finding its closing brace. A
+/// declaration spelled inside a string literal, including one that spans lines,
+/// is text in that string and never the declaration.
+fn item_body(source: &str, name: &str, kind: &str) -> Option<String> {
+    let source = without_comments(source);
+    let declaration = format!("{kind} {name} {{");
+    let mut from = 0;
+    while let Some(offset) = source[from..].find(&declaration) {
+        let start = from + offset;
+        from = start + declaration.len();
+        if inside_string(&source, start) {
+            continue;
+        }
+        let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
+        if !declaration_qualifier(source[line_start..start].trim()) {
+            continue;
+        }
+        let line_end = source[from..]
+            .find('\n')
+            .map_or(source.len(), |index| from + index);
+        if !source[from..line_end].trim().is_empty() {
+            continue;
+        }
+        let body = &source[from..];
+        return declaration_end(body).map(|end| body[..end].to_string());
+    }
+    None
+}
+
+/// Whether the text before a declaration's name on its line can precede an
+/// item: nothing, or the qualifier words `pub`, a `pub(...)` visibility, and
+/// the item kinds `struct` and `enum`.
+fn declaration_qualifier(text: &str) -> bool {
+    text.split_whitespace()
+        .all(|word| word == "pub" || word.starts_with("pub(") || matches!(word, "struct" | "enum"))
+}
+
+/// One declaration's wire field names, or the reason the declaration cannot be
+/// read.
+#[derive(Debug, PartialEq)]
+enum WireFieldNames {
+    /// The source holds no such declaration.
+    NoDeclaration,
+    /// The declaration's field list cannot be read, with its reason.
+    Unsupported(&'static str),
+    /// The declaration's wire field names, in declaration order.
+    Names(Vec<String>),
+}
+
+/// The wire field names of one enum arm or struct `item` in `source`, in
+/// declaration order, or why they cannot be read.
+///
+/// A declaration starts at a line whose items before `item` are qualifier words
+/// and whose text after it is `{` or `,`; a longer name that merely starts with
+/// `item`, and a name that sits inside another item or a string, are other
+/// items. A declaration with no fields, such as `Status,`, returns an empty
+/// list, so a missing item and an item with no fields stay apart. Inside the
+/// braces every field is one comma-separated item, and the active
+/// `#[serde(rename = "...")]` on that item names the wire field; every other
+/// field keeps its Rust name without a raw-identifier `r#` prefix. A trailing
+/// comma is optional. The source's
+/// comments are read as nothing, so no comment names an item or a field, and a
+/// declaration spelled inside a string literal, including one that spans lines,
+/// is text in that string and never the declaration. A field list whose
+/// delimiters do not balance is `Unsupported` with its reason, never a shorter
+/// list, so an unreadable declaration cannot pass by naming fewer fields.
+fn wire_field_names(source: &str, item: &str) -> WireFieldNames {
+    let source = without_comments(source);
+    let source = source.as_str();
+    let mut from = 0;
+    while let Some(offset) = source[from..].find(item) {
+        let start = from + offset;
+        from = start + item.len();
+        if inside_string(source, start) {
+            continue;
+        }
+        let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
+        if !declaration_qualifier(source[line_start..start].trim()) {
+            continue;
+        }
+        let rest = &source[from..];
+        let head = rest.trim_start();
+        let after_item = from + (rest.len() - head.len());
+        match head.chars().next() {
+            Some('{') => {
+                let body = &source[after_item + 1..];
+                let Some(end) = declaration_end(body) else {
+                    return WireFieldNames::NoDeclaration;
+                };
+                return match field_names(&body[..end]) {
+                    Ok(fields) => WireFieldNames::Names(fields),
+                    Err(reason) => WireFieldNames::Unsupported(reason),
+                };
+            }
+            Some(',') => return WireFieldNames::Names(Vec::new()),
+            _ => continue,
+        }
+    }
+    WireFieldNames::NoDeclaration
+}
+
+/// The wire names of the field items of one declaration body, or
+/// `UNBALANCED_FIELD_LIST` when the body's delimiters do not balance.
+fn field_names(body: &str) -> Result<Vec<String>, &'static str> {
+    Ok(declaration_items(body)?
+        .into_iter()
+        .filter(|field| !field.trim().is_empty())
+        .map(field_wire_name)
+        .collect())
+}
+
+/// Whether `index`, a byte offset into `text`, falls inside a `"..."` string
+/// literal, so text a string holds never selects a declaration.
+///
+/// The scan starts at the beginning of `text` and counts quote characters the
+/// way `without_comments` does: a `"` opens a string, the matching unescaped
+/// `"` closes it, and a backslash escapes the character after it, so an escaped
+/// quote keeps the string open. Text at `index` itself is not read, so the
+/// opening quote of a string is outside it. This is the one boundary test for
+/// both item and field selection (P10).
+fn inside_string(text: &str, index: usize) -> bool {
+    let mut in_string = false;
+    let mut quote_escape = false;
+    for (at, character) in text.char_indices() {
+        if at >= index {
+            break;
+        }
+        if in_string {
+            if character == '"' && !quote_escape {
+                in_string = false;
+            }
+            quote_escape = character == '\\' && !quote_escape;
+            continue;
+        }
+        if character == '"' {
+            in_string = true;
+            quote_escape = false;
+        }
+    }
+    in_string
+}
+
+/// `text` with every `//` line comment and every `/* ... */` block comment
+/// removed, and Rust strings decoded and quoted in ordinary escaped form.
+/// Normalizing raw strings here lets every declaration scanner use the same
+/// quoted-string boundary, including raw strings holding quotes or backslashes.
+/// Character and byte-character literals are quoted as text at this same
+/// boundary, so their punctuation cannot close a declaration or split a field.
+/// Lifetime apostrophes stay in the source.
+/// A `//` or `/*` inside a string literal stays part of that string, a
+/// line comment ends at its newline and keeps it, so the items around it keep
+/// their own lines, and a block comment keeps its newlines and one space so the
+/// tokens around it stay apart. Block comments can nest.
+fn without_comments(text: &str) -> String {
+    let mut kept = String::with_capacity(text.len());
+    let mut characters = text.char_indices().peekable();
+    while let Some((index, character)) = characters.next() {
+        let rest = &text[index..];
+        if let Some(length) = rust_character_literal_length(rest) {
+            kept.push_str(&format!("{:?}", &rest[..length]));
+            while characters
+                .peek()
+                .is_some_and(|(at, _)| *at < index + length)
+            {
+                characters.next();
+            }
+            continue;
+        }
+        if character == '"'
+            || (character == 'r' && rest[1..].trim_start_matches('#').starts_with('"'))
+        {
+            let (value, length) = rust_string_literal(rest)
+                .unwrap_or_else(|reason| panic!("wire field reader: {reason}"));
+            kept.push_str(&format!("{value:?}"));
+            while characters
+                .peek()
+                .is_some_and(|(at, _)| *at < index + length)
+            {
+                characters.next();
+            }
+            continue;
+        }
+        if character == '/' && characters.peek().is_some_and(|(_, next)| *next == '/') {
+            for (_, next) in characters.by_ref() {
+                if next == '\n' {
+                    kept.push('\n');
+                    break;
+                }
+            }
+            continue;
+        }
+        if character == '/' && characters.peek().is_some_and(|(_, next)| *next == '*') {
+            characters.next();
+            let mut depth = 1usize;
+            kept.push(' ');
+            while let Some((_, next)) = characters.next() {
+                if next == '/' && characters.peek().is_some_and(|(_, next)| *next == '*') {
+                    characters.next();
+                    depth += 1;
+                } else if next == '*' && characters.peek().is_some_and(|(_, next)| *next == '/') {
+                    characters.next();
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                } else if next == '\n' {
+                    kept.push('\n');
+                }
+            }
+            continue;
+        }
+        kept.push(character);
+    }
+    kept
+}
+
+/// The byte length of a character literal, or `None` for another token,
+/// including a lifetime. Only literals starting with a backslash need a scan
+/// for an unescaped closing apostrophe; a plain character has exactly one
+/// scalar before its closing apostrophe. Byte characters use this same reader
+/// after their `b` prefix. Escaped punctuation stays inside the literal.
+fn rust_character_literal_length(text: &str) -> Option<usize> {
+    let body = text.strip_prefix('\'')?;
+    let first = body.chars().next()?;
+    if first != '\\' {
+        return body[first.len_utf8()..]
+            .starts_with('\'')
+            .then_some(first.len_utf8() + 2);
+    }
+    let mut escaped = false;
+    for (index, character) in body.char_indices() {
+        if character == '\'' && !escaped {
+            return Some(index + 2);
+        }
+        escaped = character == '\\' && !escaped;
+    }
+    panic!("wire field reader: unterminated Rust character escape");
+}
+
+/// Decode one Rust string literal and return its byte length. Ordinary strings
+/// support Rust's simple, ASCII and Unicode escapes and line continuations;
+/// raw strings end at their matching quote and hash delimiter. A malformed or
+/// unsupported literal has an explicit reason instead of supplying a wire name.
+fn rust_string_literal(text: &str) -> Result<(String, usize), &'static str> {
+    if let Some(raw) = text.strip_prefix('r') {
+        let hashes = raw.len() - raw.trim_start_matches('#').len();
+        let body = raw[hashes..]
+            .strip_prefix('"')
+            .ok_or("expected a Rust string literal")?;
+        let closing = format!("\"{}", "#".repeat(hashes));
+        let end = body.find(&closing).ok_or("unterminated raw Rust string")?;
+        return Ok((
+            body[..end].replace("\r\n", "\n"),
+            2 + hashes + end + closing.len(),
+        ));
+    }
+    let body = text
+        .strip_prefix('"')
+        .ok_or("expected a Rust string literal")?;
+    let mut characters = body.char_indices().peekable();
+    let mut value = String::new();
+    while let Some((index, character)) = characters.next() {
+        match character {
+            '"' => return Ok((value, index + 2)),
+            '\r' if characters.peek().is_some_and(|(_, next)| *next == '\n') => {
+                characters.next();
+                value.push('\n');
+            }
+            '\\' => {
+                let (_, escape) = characters.next().ok_or("unterminated Rust string escape")?;
+                match escape {
+                    '\\' | '"' | '\'' => value.push(escape),
+                    'n' => value.push('\n'),
+                    'r' => value.push('\r'),
+                    't' => value.push('\t'),
+                    '0' => value.push('\0'),
+                    'x' => {
+                        let mut byte = 0;
+                        for _ in 0..2 {
+                            let digit = characters
+                                .next()
+                                .and_then(|(_, digit)| digit.to_digit(16))
+                                .ok_or("invalid Rust ASCII escape")?;
+                            byte = byte * 16 + digit;
+                        }
+                        if byte > 0x7f {
+                            return Err("Rust ASCII escape exceeds 0x7f");
+                        }
+                        value.push(char::from_u32(byte).unwrap());
+                    }
+                    'u' => {
+                        if characters.next().map(|(_, next)| next) != Some('{') {
+                            return Err("invalid Rust Unicode escape");
+                        }
+                        let mut scalar = 0;
+                        let mut digits = 0;
+                        loop {
+                            let (_, digit) = characters
+                                .next()
+                                .ok_or("unterminated Rust Unicode escape")?;
+                            match digit {
+                                '}' if digits > 0 => break,
+                                '_' if digits > 0 => continue,
+                                _ => {
+                                    let digit = digit
+                                        .to_digit(16)
+                                        .filter(|_| digits < 6)
+                                        .ok_or("invalid Rust Unicode escape")?;
+                                    scalar = scalar * 16 + digit;
+                                    digits += 1;
+                                }
+                            }
+                        }
+                        value.push(char::from_u32(scalar).ok_or("invalid Rust Unicode scalar")?);
+                    }
+                    '\n' | '\r' => {
+                        if escape == '\r' && characters.next().map(|(_, next)| next) != Some('\n') {
+                            return Err("invalid Rust line continuation");
+                        }
+                        while characters
+                            .peek()
+                            .is_some_and(|(_, next)| matches!(next, ' ' | '\t' | '\n' | '\r'))
+                        {
+                            characters.next();
+                        }
+                    }
+                    _ => return Err("unsupported Rust string escape"),
+                }
+            }
+            _ => value.push(character),
+        }
+    }
+    Err("unterminated Rust string literal")
+}
+
+/// The index of the `}` that closes a body whose opening brace sits directly
+/// before `text`, or `None` when `text` ends first. A brace inside a string
+/// literal does not count. `without_comments` normalizes character and raw
+/// string literals to this quoted form before the scan.
+fn declaration_end(text: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut in_string = false;
+    let mut quote_escape = false;
+    for (index, character) in text.char_indices() {
+        if in_string {
+            if character == '"' && !quote_escape {
+                in_string = false;
+            }
+            quote_escape = character == '\\' && !quote_escape;
+            continue;
+        }
+        match character {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The one reason a field list whose delimiters do not balance is refused.
+const UNBALANCED_FIELD_LIST: &str =
+    "unbalanced parentheses, brackets, braces or angle brackets in the field list";
+
+/// The comma-separated items of one declaration body, split at the commas
+/// outside parentheses, brackets, braces and angle brackets, so a field type
+/// such as `Option<String>` and an attribute such as
+/// `#[serde(default, skip_serializing_if = "x")]` each stay one item. Delimiters
+/// inside a string literal, including after an escaped quote, do not count.
+///
+/// A body whose delimiters do not balance is refused with
+/// `UNBALANCED_FIELD_LIST`, never read. An operator such as the `<<` of
+/// `[u8; 1 << 2]` is not a delimiter, so it opens one that never closes and
+/// every later field would join the item before it, which would drop a required
+/// field from the list.
+fn declaration_items(text: &str) -> Result<Vec<&str>, &'static str> {
+    let mut items = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    let mut in_string = false;
+    let mut quote_escape = false;
+    for (index, character) in text.char_indices() {
+        if in_string {
+            if character == '"' && !quote_escape {
+                in_string = false;
+            }
+            quote_escape = character == '\\' && !quote_escape;
+            continue;
+        }
+        match character {
+            '"' => in_string = true,
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' | ']' | '}' | '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                items.push(&text[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return Err(UNBALANCED_FIELD_LIST);
+    }
+    items.push(&text[start..]);
+    Ok(items)
+}
+
+/// The wire name of one field item: the `rename = "..."` of the active
+/// `#[serde(...)]` attribute the field carries, else the name it declares
+/// before its `:`, without its leading attributes and without a `pub`
+/// qualifier or raw-identifier prefix.
+///
+/// Only a `serde` attribute that stands before the field's name is read, and
+/// only its `rename` entry supplies the decoded Rust string. Spacing around
+/// `=` is immaterial; text inside another entry's value stays in that value.
+/// Split serialize/deserialize renames and expressions are refused explicitly.
+fn field_wire_name(field: &str) -> String {
+    let mut declared = field.trim_start();
+    let mut renamed = None;
+    while let Some(attribute) = declared.strip_prefix('#') {
+        let attributes = attribute
+            .trim_start()
+            .strip_prefix('[')
+            .expect("wire field reader: expected a bracketed field attribute");
+        let end =
+            attribute_end(attributes).expect("wire field reader: unterminated field attribute");
+        if is_serde_attribute(&attributes[..end]) {
+            let (_, arguments) = attributes[..end].split_once('(').unwrap();
+            let arguments = arguments
+                .trim_end()
+                .strip_suffix(')')
+                .expect("wire field reader: unterminated serde attribute");
+            for entry in declaration_items(arguments)
+                .unwrap_or_else(|reason| panic!("wire field reader: serde attribute: {reason}"))
+            {
+                let entry = entry.trim();
+                let entry = entry.strip_prefix("r#").unwrap_or(entry);
+                let key_end = entry
+                    .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                    .unwrap_or(entry.len());
+                if &entry[..key_end] != "rename" {
+                    continue;
+                }
+                let literal = entry[key_end..].trim_start().strip_prefix('=')
+                    .expect("wire field reader: unsupported serde rename syntax; expected rename = <Rust string literal>")
+                    .trim_start();
+                let (name, length) = rust_string_literal(literal)
+                    .unwrap_or_else(|reason| panic!("wire field reader: serde rename: {reason}"));
+                assert!(
+                    literal[length..].trim().is_empty(),
+                    "wire field reader: unsupported tokens after serde rename string"
+                );
+                assert!(
+                    renamed.replace(name).is_none(),
+                    "wire field reader: duplicate serde rename"
+                );
+            }
+        }
+        declared = attributes[end + 1..].trim_start();
+    }
+    if let Some(name) = renamed {
+        return name;
+    }
+    let name = declared
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .last()
+        .unwrap_or_default();
+    name.strip_prefix("r#").unwrap_or(name).to_string()
+}
+
+/// Whether the text of one attribute, after its `#[`, is `serde(...)`. A longer
+/// path such as `serde_with(...)` is another attribute.
+fn is_serde_attribute(attribute: &str) -> bool {
+    let attribute = attribute.trim_start();
+    let attribute = attribute.strip_prefix("r#").unwrap_or(attribute);
+    attribute
+        .trim_start()
+        .strip_prefix("serde")
+        .is_some_and(|rest| rest.trim_start().starts_with('('))
+}
+
+/// The index of the `]` that closes the attribute whose text follows `#[`, or
+/// `None` when the attribute ends first.
+fn attribute_end(text: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut in_string = false;
+    let mut quote_escape = false;
+    for (index, character) in text.char_indices() {
+        if in_string {
+            if character == '"' && !quote_escape {
+                in_string = false;
+            }
+            quote_escape = character == '\\' && !quote_escape;
+            continue;
+        }
+        match character {
+            '"' => in_string = true,
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Every operation name `provider_source` answers, in dispatch order, or the
+/// reason they cannot be read.
+///
+/// Every `Request::<Variant>` arm of `fn handle` is one name, and the names of
+/// the ordinary arms keep dispatch order. Where `fn handle` answers
+/// `wallet_contract`, every `WalletProviderOperationV2::<Variant>` arm of
+/// `fn dispatch_wallet_operation` is one `wallet_contract <kind>` name, and
+/// those names follow the ordinary names in their own dispatch order. A name
+/// reaches snake_case by `variant_snake_case`. The contract enum is the only
+/// list of kinds. This is the one reader of the answered surface: the row-set
+/// rule and the manifest rule both call it (P10).
+fn answered_operation_names(
     provider_source: &str,
     provider_path: &Path,
-) -> Vec<String> {
+) -> Result<Vec<String>, String> {
     let Some(arms) = dispatch_arm_variants(provider_source, "fn handle(", REQUEST_ARM) else {
-        return vec![format!(
-            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set cannot be checked \
-             because {} holds no fn handle",
-            provider_path.display()
-        )];
+        return Err(format!("{} holds no fn handle", provider_path.display()));
     };
     let arm_names: Vec<String> = arms.iter().map(|arm| variant_snake_case(arm)).collect();
     let answers_contract = arm_names.iter().any(|name| name == WALLET_CONTRACT_ARM);
@@ -6796,12 +14009,10 @@ fn row_set_problems(
             "fn dispatch_wallet_operation(",
             WALLET_OPERATION_ARM,
         ) else {
-            return vec![format!(
-                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set cannot be checked \
-                 because {} answers {WALLET_CONTRACT_ARM} and holds no \
-                 fn dispatch_wallet_operation",
+            return Err(format!(
+                "{} answers {WALLET_CONTRACT_ARM} and holds no fn dispatch_wallet_operation",
                 provider_path.display()
-            )];
+            ));
         };
         for kind in &kinds {
             expected.push(format!(
@@ -6810,6 +14021,33 @@ fn row_set_problems(
             ));
         }
     }
+    Ok(expected)
+}
+
+/// Every problem with one table's row set, each naming the document and the row
+/// or the arm that has no partner.
+///
+/// The row set must equal the operations `provider_source` answers, as
+/// `answered_operation_names` reads them. The names of the ordinary arms appear
+/// in the table in dispatch order, the `wallet_contract <kind>` rows follow them
+/// in their own dispatch order, and each arm matches exactly one row. The
+/// contract enum is the only list of kinds, so a new kind fails here until its
+/// row exists.
+fn row_set_problems(
+    document_name: &str,
+    rows: &[OperationsRow],
+    provider_source: &str,
+    provider_path: &Path,
+) -> Vec<String> {
+    let expected = match answered_operation_names(provider_source, provider_path) {
+        Ok(expected) => expected,
+        Err(reason) => {
+            return vec![format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set cannot be checked \
+                 because {reason}"
+            )];
+        }
+    };
     let observed: Vec<&str> = rows.iter().map(|row| row.operation.as_str()).collect();
     let mut unmatched_rows = observed.clone();
     let mut problems = Vec::new();
@@ -6902,6 +14140,723 @@ fn row_set_order_problems(
     problems
 }
 
+/// The one manifest file a capsule declares its operation surface in.
+const CAPSULE_MANIFEST_FILE: &str = "capsule.json";
+
+/// The field of a manifest capability that lists the operations it declares.
+const MANIFEST_OPERATIONS_FIELD: &str = "operations";
+
+/// The field of a manifest interface method that names the one operation it
+/// declares.
+const MANIFEST_OPERATION_FIELD: &str = "operation";
+
+/// Every problem with the operations one manifest declares, each naming the
+/// document, `capsule.json` and the operation or the field.
+///
+/// A manifest declares only operations the provider answers, and a provider may
+/// own operations its manifest does not name: the rule is one-way, so it refuses
+/// a declared operation that `fn handle` does not answer and never demands that
+/// every answered operation be declared. The two declared lists are
+/// `authority.capabilities[].operations` and `interfaces[].methods[].operation`,
+/// and each declared name is compared with the names
+/// `answered_operation_names` reads through `dispatch_arm_variants` and
+/// `variant_snake_case`. A manifest that cannot be read, that is not JSON, whose
+/// `authority.capabilities` is absent or empty, a capability with no
+/// `operations` list, an interface method with no `operation` or one that is not
+/// a string, and a method whose `operation` differs from its `id` are each a
+/// refusal, so a capsule cannot pass by having no manifest. The check reads
+/// files, makes no kernel call and starts no process, so it runs on every OS.
+fn manifest_operation_problems(
+    document_name: &str,
+    provider_dir: &Path,
+    provider_source: &str,
+    provider_path: &Path,
+) -> Vec<String> {
+    let manifest_path = provider_dir.join(CAPSULE_MANIFEST_FILE);
+    let refusal = |reason: String| {
+        format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} declared operations cannot be \
+             checked because {reason}"
+        )
+    };
+    let text = match fs::read_to_string(&manifest_path) {
+        Ok(text) => text,
+        Err(err) => {
+            return vec![refusal(format!(
+                "{} is not readable: {err}",
+                manifest_path.display()
+            ))];
+        }
+    };
+    let manifest: Value = match serde_json::from_str(&text) {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            return vec![refusal(format!(
+                "{} is not valid JSON: {err}",
+                manifest_path.display()
+            ))];
+        }
+    };
+    let capabilities = manifest["authority"]["capabilities"]
+        .as_array()
+        .filter(|capabilities| !capabilities.is_empty());
+    let Some(capabilities) = capabilities else {
+        return vec![refusal(format!(
+            "{} holds no authority.capabilities entry",
+            manifest_path.display()
+        ))];
+    };
+    let mut declared: Vec<String> = Vec::new();
+    let mut problems = Vec::new();
+    for capability in capabilities {
+        let Some(operations) = capability[MANIFEST_OPERATIONS_FIELD].as_array() else {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} capability entry in {} holds \
+                 no {MANIFEST_OPERATIONS_FIELD} list",
+                manifest_path.display()
+            ));
+            continue;
+        };
+        for operation in operations {
+            match operation.as_str() {
+                Some(operation) => declared.push(operation.to_string()),
+                None => problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} capability entry in {} \
+                     holds an item of its {MANIFEST_OPERATIONS_FIELD} list that is not a string: \
+                     {operation}",
+                    manifest_path.display()
+                )),
+            }
+        }
+    }
+    let methods = manifest["interfaces"]
+        .as_array()
+        .map(|interfaces| {
+            interfaces
+                .iter()
+                .flat_map(|interface| interface["methods"].as_array())
+                .flatten()
+        })
+        .into_iter()
+        .flatten();
+    for method in methods {
+        let Some(operation) = method[MANIFEST_OPERATION_FIELD].as_str() else {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} interface method in {} holds \
+                 an {MANIFEST_OPERATION_FIELD} that is not a string: {method}",
+                manifest_path.display()
+            ));
+            continue;
+        };
+        match method["id"].as_str() {
+            Some(id) if id == operation => {}
+            Some(id) => problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} interface method in {} names \
+                 the id {id} and the operation {operation}, and its operation must be its id",
+                manifest_path.display()
+            )),
+            None => problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} interface method in {} holds \
+                 no id string beside its operation {operation}",
+                manifest_path.display()
+            )),
+        }
+        declared.push(operation.to_string());
+    }
+    let answered = match answered_operation_names(provider_source, provider_path) {
+        Ok(answered) => answered,
+        // `row_set_problems` already refuses a provider whose answered surface
+        // cannot be read, so this rule adds no second line for that cause.
+        Err(_) => return problems,
+    };
+    for operation in &declared {
+        if !answered.contains(operation) {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} {} declares the operation \
+                 {operation}, and {} does not answer it",
+                manifest_path.display(),
+                provider_path.display()
+            ));
+        }
+    }
+    problems
+}
+
+/// One item of an Inputs cell: its name, whether the cell wrote that name as a
+/// backticked span (`true`) or as a bare word (`false`), and the child list a
+/// balanced parenthesised group on that item holds.
+///
+/// `quoted` is part of the item. The bare word `none` and a backticked field
+/// whose wire name is `none` are different items. Children are not: the one
+/// compare is `inputs_match`.
+#[derive(Debug)]
+struct InputsItem {
+    name: String,
+    quoted: bool,
+    children: Vec<InputsItem>,
+}
+
+impl PartialEq for InputsItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.quoted == other.quoted
+    }
+}
+
+/// One leaf item, with the quoting the cell writes and no children.
+fn input_leaf(name: &str, quoted: bool) -> InputsItem {
+    InputsItem {
+        name: name.to_string(),
+        quoted,
+        children: Vec::new(),
+    }
+}
+
+/// The items of one Inputs cell, or `None` when the cell is not a list of
+/// names the reader can take apart.
+///
+/// An item is one backticked span or one bare word, and each item records
+/// which of the two the cell wrote. A balanced `(...)` group after the name is
+/// that item's child list, read by this same function. An unbalanced or stray
+/// parenthesis, an empty item and an unterminated backtick span each return
+/// `None`, and the rule turns every `None` into a named refusal, never a pass.
+fn input_items(cell: &str) -> Option<Vec<InputsItem>> {
+    if cell.contains(['(', ')']) {
+        return grouped_input_items(cell);
+    }
+    let mut items = Vec::new();
+    for item in cell.split(',') {
+        let item = item.trim();
+        let quoted = item.starts_with('`');
+        let name = if quoted {
+            item.strip_prefix('`')?.strip_suffix('`')?
+        } else {
+            item
+        };
+        if name.is_empty() || name.contains('`') {
+            return None;
+        }
+        items.push(InputsItem {
+            name: name.to_string(),
+            quoted,
+            children: Vec::new(),
+        });
+    }
+    Some(items)
+}
+
+/// The items of a cell that holds parentheses. A group is children of the item
+/// it follows. A parenthesis inside a name, a group that does not close on the
+/// item, and a cell whose groups do not balance each return `None`.
+fn grouped_input_items(cell: &str) -> Option<Vec<InputsItem>> {
+    let mut items = Vec::new();
+    for part in split_input_list(cell)? {
+        items.push(parse_input_item(part)?);
+    }
+    Some(items)
+}
+
+/// The comma-separated pieces of one Inputs list, split only at commas outside
+/// backticks and outside parentheses, or `None` when a parenthesis has no pair.
+fn split_input_list(cell: &str) -> Option<Vec<&str>> {
+    let mut items = Vec::new();
+    let mut start = 0;
+    let mut depth = 0usize;
+    let mut in_ticks = false;
+    for (index, character) in cell.char_indices() {
+        match character {
+            '`' => in_ticks = !in_ticks,
+            '(' if !in_ticks => depth += 1,
+            ')' if !in_ticks => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+            }
+            ',' if depth == 0 && !in_ticks => {
+                items.push(&cell[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 || in_ticks {
+        return None;
+    }
+    items.push(&cell[start..]);
+    Some(items)
+}
+
+/// One Inputs item. The name ends at the group that follows it, and a
+/// parenthesis inside the name is a stray parenthesis.
+fn parse_input_item(raw: &str) -> Option<InputsItem> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let (name, quoted, rest) = if let Some(after) = raw.strip_prefix('`') {
+        let end = after.find('`')?;
+        let name = &after[..end];
+        if name.is_empty() || name.contains(['`', '(', ')']) {
+            return None;
+        }
+        (name, true, after[end + 1..].trim())
+    } else if raw.contains('`') {
+        return None;
+    } else {
+        let (name, rest) = match raw.find('(') {
+            Some(index) => (raw[..index].trim(), raw[index..].trim()),
+            None => (raw, ""),
+        };
+        if name.is_empty() || name.contains(['(', ')']) {
+            return None;
+        }
+        (name, false, rest)
+    };
+    let children = if rest.is_empty() {
+        Vec::new()
+    } else {
+        input_items(input_group(rest)?)?
+    };
+    Some(InputsItem {
+        name: name.to_string(),
+        quoted,
+        children,
+    })
+}
+
+/// The text inside one `(...)` group that ends `text`, or `None` when the
+/// parentheses do not form that one group.
+fn input_group(text: &str) -> Option<&str> {
+    let text = text.trim();
+    let inner = text.strip_prefix('(')?;
+    let mut depth = 1usize;
+    let mut in_ticks = false;
+    for (index, character) in inner.char_indices() {
+        match character {
+            '`' => in_ticks = !in_ticks,
+            '(' if !in_ticks => depth += 1,
+            ')' if !in_ticks => {
+                depth -= 1;
+                if depth == 0 {
+                    if inner[index + 1..].trim().is_empty() {
+                        return Some(inner[..index].trim());
+                    }
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether one observed Inputs cell is exactly the expected item list: the same
+/// names in the same order, each written the way the expected item is written,
+/// and the same children under each item. A cell that stops before a declared
+/// field, names another order, adds a name, writes a bare word where the table
+/// writes a backticked name, or names a different child list is a different cell.
+///
+/// Equality of two items sees the name and the quoting. This function is the
+/// one compare that also sees the children, including the names inside `params`.
+fn inputs_match(observed: &[InputsItem], expected: &[InputsItem]) -> bool {
+    observed.len() == expected.len()
+        && observed
+            .iter()
+            .zip(expected)
+            .all(|(observed, expected)| observed == expected)
+        && observed
+            .iter()
+            .zip(expected)
+            .all(|(observed, expected)| inputs_match(&observed.children, &expected.children))
+}
+
+/// One item list as an Inputs cell writes it, for a refusal's expected side.
+/// A backticked name keeps its backticks, a bare word keeps none, and a child
+/// list is the parenthesised group the cell writes after the name.
+fn render_inputs(items: &[InputsItem]) -> String {
+    items
+        .iter()
+        .map(render_input_item)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_input_item(item: &InputsItem) -> String {
+    let mut text = if item.quoted {
+        format!("`{}`", item.name)
+    } else {
+        item.name.clone()
+    };
+    if !item.children.is_empty() {
+        text.push_str(" (");
+        text.push_str(&render_inputs(&item.children));
+        text.push(')');
+    }
+    text
+}
+
+/// The Inputs items an ordinary row must hold: the backticked `op`, then the
+/// arm's wire field names in declaration order.
+fn ordinary_row_inputs(fields: &[String]) -> Vec<InputsItem> {
+    let mut items = Vec::with_capacity(fields.len() + 1);
+    items.push(input_leaf("op", true));
+    for name in fields {
+        items.push(input_leaf(name, true));
+    }
+    items
+}
+
+/// The children of one `params` group. An empty field list is the one bare
+/// word `none`. A declared field is one backticked name, including a field
+/// whose wire name is `none`. The bare word and the backticked name are
+/// different items.
+fn param_field_items(fields: &[String]) -> Vec<InputsItem> {
+    if fields.is_empty() {
+        return vec![input_leaf("none", false)];
+    }
+    fields.iter().map(|name| input_leaf(name, true)).collect()
+}
+
+/// The Inputs items one `wallet_contract <kind>` row must hold.
+///
+/// The cell starts with the backticked `op`. Each envelope field is a
+/// backticked leaf, except the field whose wire name is `request`: that item's
+/// children are the backticked token `kind: <kind>` and the backticked `params`
+/// group. `params` holds the arm's wire field names, in declaration order.
+/// The empty arm's only `params` child is the bare word `none`.
+fn contract_row_inputs(kind: &str, envelope: &[String], params: &[String]) -> Vec<InputsItem> {
+    let mut items = vec![input_leaf("op", true)];
+    for name in envelope {
+        if name == "request" {
+            items.push(InputsItem {
+                name: "request".to_string(),
+                quoted: true,
+                children: vec![
+                    input_leaf(&format!("kind: {kind}"), true),
+                    InputsItem {
+                        name: "params".to_string(),
+                        quoted: true,
+                        children: param_field_items(params),
+                    },
+                ],
+            });
+        } else {
+            items.push(input_leaf(name, true));
+        }
+    }
+    items
+}
+
+/// The contract enum's source file. A provider source that declares the enum
+/// is that source instead, so a fixture does not read this file.
+fn wallet_operation_contract_path() -> PathBuf {
+    let relative = Path::new("elastos/crates/elastos-wallet-contract/src/lib.rs");
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .find(|dir| dir.join(relative).is_file())
+        .map(|dir| dir.join(relative))
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(relative)
+        })
+}
+
+/// The path a refusal names for the contract enum, and the text that holds it.
+/// The provider dispatch is the text when it declares the enum. Otherwise this
+/// opens the contract file.
+fn contract_enum_text(sources: &WireSources<'_>) -> Result<(PathBuf, String), String> {
+    if item_body(sources.dispatch, "WalletProviderOperationV2", "enum").is_some() {
+        return Ok((
+            sources.dispatch_path.to_path_buf(),
+            sources.dispatch.to_string(),
+        ));
+    }
+    let path = wallet_operation_contract_path();
+    match fs::read_to_string(&path) {
+        Ok(text) => Ok((path, text)),
+        Err(err) => Err(format!(
+            "Inputs cells cannot be checked because {} is not readable: {err}",
+            path.display()
+        )),
+    }
+}
+
+/// The declaration path and the contract path, once when they are the same file.
+fn inputs_source_label(declaration: &Path, contract: &Path) -> String {
+    if declaration == contract {
+        declaration.display().to_string()
+    } else {
+        format!("{} and {}", declaration.display(), contract.display())
+    }
+}
+
+/// The file, relative to a provider directory, that declares the `Request`
+/// enum a table's Inputs cells name. Wallet declares it in `src/protocol.rs`
+/// and answers it from `src/main.rs`; did declares and answers it in its one
+/// `src/main.rs`, and every other provider uses that one file for both.
+fn request_declaration_file(name: &str) -> &'static str {
+    match name {
+        "wallet-provider" => "src/protocol.rs",
+        _ => "src/main.rs",
+    }
+}
+
+/// The provider sources one operations table's Inputs cells are read, each with
+/// the path a refusal names. The caller reads both files; the rule opens none.
+struct WireSources<'a> {
+    /// The provider's `src/main.rs`, which holds its dispatch.
+    dispatch: &'a str,
+    dispatch_path: &'a Path,
+    /// The provider file that declares its `Request` enum.
+    declarations: &'a str,
+    declarations_path: &'a Path,
+}
+
+/// Every problem with one table's ordinary Inputs cells, each naming the
+/// document, the row, the cell and the source it read.
+///
+/// An ordinary row's cell holds the backticked `op` and then the wire names its
+/// provider's `Request` arm declares, in declaration order. A first item other
+/// than the backticked `op`, another name, another order, a missing name, an
+/// extra name, a bare word where the table writes a backticked name and a cell
+/// the reader cannot parse are each one problem for that row. A row whose
+/// operation has no arm in `Request` is a named refusal, never a skip. A source
+/// with no `fn handle` and one with no `enum Request` each keep their own
+/// reason naming the file.
+///
+/// A row whose operation starts `wallet_contract ` names the backticked `op`,
+/// the `WalletContract` envelope, and that kind's `params`. The kind is
+/// `variant_snake_case` of the `WalletProviderOperationV2` arm. The field
+/// whose wire name is `request` holds the backticked `kind: <kind>` token and
+/// the backticked `params` group. An empty arm's `params` holds the bare word
+/// `none`. The contract file is opened only when the table has such a row. An
+/// unreadable contract file is one refusal that names the path. A row with no
+/// matching dispatch arm stays with `row_set_problems`.
+///
+/// Honesty limits: the rule reads declarations, not serde's output, so a field
+/// carrying `#[serde(skip)]` would be required here and would need the rule
+/// widened when one is added, while `#[serde(default)]` and
+/// `#[serde(skip_serializing_if = ...)]` fields are real wire names and are
+/// required. It checks the names and their order, not a value's type.
+///
+/// Falsifier: WP181 makes `field_wire_name` honour no `serde` attribute, so a
+/// renamed field reads as its Rust name; WP182 makes `inputs_match` tolerate a
+/// cell that stops before a declared field.
+/// WP183 and WP184 change character-literal and raw-identifier handling.
+/// WP185 through WP197 change quoting, order, cell syntax, or source refusals.
+/// WP198 makes the field-list reader read a list whose delimiters do not
+/// balance as a shorter list. WP214 makes an empty arm and a field named
+/// `none` the same item. WP215 makes `inputs_match` ignore children, so a
+/// `params` list can name a field the arm does not declare.
+/// `operations_table_row_check_refuses_each_bad_table` fails on each.
+fn inputs_cell_problems(
+    document_name: &str,
+    rows: &[OperationsRow],
+    sources: &WireSources<'_>,
+) -> Vec<String> {
+    let Some(handle_arms) = dispatch_arm_variants(sources.dispatch, "fn handle(", REQUEST_ARM)
+    else {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} Inputs cells cannot be checked \
+             because {} holds no fn handle",
+            sources.dispatch_path.display()
+        )];
+    };
+    let Some(request_body) = item_body(sources.declarations, "Request", "enum") else {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} Inputs cells cannot be checked \
+             because {} declares no enum Request",
+            sources.declarations_path.display()
+        )];
+    };
+    let contract_prefix = format!("{WALLET_CONTRACT_ARM} ");
+    let mut problems = Vec::new();
+    let has_contract_row = rows
+        .iter()
+        .any(|row| row.operation.starts_with(&contract_prefix));
+    // Open the contract file only when a row names a contract kind. did's table
+    // has no such row, so it does not depend on that file.
+    let mut loaded_contract: Option<LoadedContract> = None;
+    let mut contract_blocked = false;
+    if has_contract_row {
+        match contract_enum_text(sources) {
+            Err(reason) => {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} {reason}"
+                ));
+                contract_blocked = true;
+            }
+            Ok((path, text)) => {
+                match prepare_contract_inputs(sources, &request_body, &path, &text) {
+                    Ok(loaded) => loaded_contract = Some(loaded),
+                    Err(reason) => {
+                        problems.push(format!(
+                            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} {reason}"
+                        ));
+                        contract_blocked = true;
+                    }
+                }
+            }
+        }
+    }
+    for row in rows {
+        let (expected, source_label) = if row.operation.starts_with(&contract_prefix) {
+            if contract_blocked {
+                continue;
+            }
+            let loaded = loaded_contract
+                .as_ref()
+                .expect("a contract row is checked only after its enum loads");
+            let kind = &row.operation[contract_prefix.len()..];
+            let Some(variant) = loaded
+                .kinds
+                .iter()
+                .find(|arm| variant_snake_case(arm) == kind)
+            else {
+                // A row with no dispatch arm is `row_set_problems`'s to refuse.
+                continue;
+            };
+            let params = match wire_field_names(&loaded.body, variant) {
+                WireFieldNames::Names(fields) => fields,
+                WireFieldNames::NoDeclaration => {
+                    problems.push(format!(
+                        "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the \
+                         Inputs cell {}, and {} declares no {variant} arm",
+                        row.operation,
+                        row.inputs,
+                        loaded.path.display()
+                    ));
+                    continue;
+                }
+                WireFieldNames::Unsupported(reason) => {
+                    problems.push(format!(
+                        "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the \
+                         Inputs cell {}, and the {variant} arm of {} cannot be read: {reason}",
+                        row.operation,
+                        row.inputs,
+                        loaded.path.display()
+                    ));
+                    continue;
+                }
+            };
+            (
+                contract_row_inputs(kind, &loaded.envelope, &params),
+                loaded.label.clone(),
+            )
+        } else {
+            let Some(variant) = handle_arms
+                .iter()
+                .find(|arm| variant_snake_case(arm) == row.operation)
+            else {
+                // A row with no dispatch arm is `row_set_problems`'s to refuse; this
+                // rule names no second reason for it.
+                continue;
+            };
+            let fields = match wire_field_names(&request_body, variant) {
+                WireFieldNames::Names(fields) => fields,
+                WireFieldNames::NoDeclaration => {
+                    problems.push(format!(
+                        "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the Inputs \
+                         cell {}, and {} declares no {variant} arm",
+                        row.operation,
+                        row.inputs,
+                        sources.declarations_path.display()
+                    ));
+                    continue;
+                }
+                WireFieldNames::Unsupported(reason) => {
+                    problems.push(format!(
+                        "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the Inputs \
+                         cell {}, and the {variant} arm of {} cannot be read: {reason}",
+                        row.operation,
+                        row.inputs,
+                        sources.declarations_path.display()
+                    ));
+                    continue;
+                }
+            };
+            (
+                ordinary_row_inputs(&fields),
+                sources.declarations_path.display().to_string(),
+            )
+        };
+        let matched =
+            input_items(&row.inputs).is_some_and(|observed| inputs_match(&observed, &expected));
+        if !matched {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the Inputs cell \
+                 {}, and {} names {}",
+                row.operation,
+                row.inputs,
+                source_label,
+                render_inputs(&expected)
+            ));
+        }
+    }
+    problems
+}
+
+/// One loaded contract enum: its path, the enum body, the dispatch kinds, the
+/// `WalletContract` envelope fields, and the source label a refusal names.
+struct LoadedContract {
+    path: PathBuf,
+    body: String,
+    kinds: Vec<String>,
+    envelope: Vec<String>,
+    label: String,
+}
+
+/// The contract enum, the dispatch kinds and the `WalletContract` envelope, or
+/// one reason the cells cannot be checked.
+fn prepare_contract_inputs(
+    sources: &WireSources<'_>,
+    request_body: &str,
+    path: &Path,
+    text: &str,
+) -> Result<LoadedContract, String> {
+    let Some(kinds) = dispatch_arm_variants(
+        sources.dispatch,
+        "fn dispatch_wallet_operation(",
+        WALLET_OPERATION_ARM,
+    ) else {
+        return Err(format!(
+            "Inputs cells cannot be checked because {} answers {WALLET_CONTRACT_ARM} and holds \
+             no fn dispatch_wallet_operation",
+            sources.dispatch_path.display()
+        ));
+    };
+    let Some(body) = item_body(text, "WalletProviderOperationV2", "enum") else {
+        return Err(format!(
+            "Inputs cells cannot be checked because {} declares no enum WalletProviderOperationV2",
+            path.display()
+        ));
+    };
+    let envelope = match wire_field_names(request_body, "WalletContract") {
+        WireFieldNames::Names(fields) => fields,
+        WireFieldNames::NoDeclaration => {
+            return Err(format!(
+                "Inputs cells cannot be checked because {} declares no WalletContract arm",
+                sources.declarations_path.display()
+            ));
+        }
+        WireFieldNames::Unsupported(reason) => {
+            return Err(format!(
+                "Inputs cells cannot be checked because the WalletContract arm of {} cannot be \
+                 read: {reason}",
+                sources.declarations_path.display()
+            ));
+        }
+    };
+    Ok(LoadedContract {
+        path: path.to_path_buf(),
+        body,
+        kinds,
+        envelope,
+        label: inputs_source_label(sources.declarations_path, path),
+    })
+}
+
 /// Whether `right` is exactly `NO_DECLARED_RIGHT` or one backtick span holding
 /// an id `CONTRACT_RIGHTS` or `PLATFORM_BASELINE_IDS` declares.
 fn declared_right_cell(right: &str) -> bool {
@@ -6912,6 +14867,552 @@ fn declared_right_cell(right: &str) -> bool {
         .strip_prefix('`')
         .and_then(|inner| inner.strip_suffix('`'))
         .is_some_and(|id| CONTRACT_RIGHTS.contains(&id) || PLATFORM_BASELINE_IDS.contains(&id))
+}
+
+/// The one answer a row's handler writes, or the reason it cannot be read.
+enum RowAnswer {
+    /// One ok `json!` object body and the label its keys come from.
+    Json { body: String, label: String },
+    /// The one arm that calls `EMPTY_OK_CALL` and writes no `json!`.
+    Empty { label: String },
+    /// One `WalletProviderResponseV2` value, read from the contract file.
+    Contract,
+}
+
+/// Every problem with one row's Outputs cell, each naming the document, the
+/// row and the value it read.
+///
+/// The cell is read once, from the two markers that split it into its ok side
+/// and its error side; a cell without either marker is one refusal. The error
+/// side goes through `input_items` and must be the serde tag of the provider's
+/// `Response` enum, then `wire_field_names` of its `Error` variant, in
+/// declaration order, with no children. A renamed tag, a renamed field and a
+/// reordered side are each a refusal, and there is no second list of error
+/// envelope names.
+///
+/// An ordinary ok side is the backticked `status` and `data`, and `data`'s
+/// children are the top-level keys of the one ok `json!` in that row's handler,
+/// in source order. The handler region is the `fn <operation>(` body, except
+/// `SHUTDOWN_OPERATION`, whose region is the `SHUTDOWN_ARM` arm of `fn handle`.
+/// A region with no such `json!`, or with two, is a refusal that names the
+/// document, the row and the function. A key the literal writes and the cell
+/// omits, or a key the cell names and the literal does not write, is a refusal.
+///
+/// The one row whose handler region calls `EMPTY_OK_CALL` writes no `data`: its
+/// ok side is `EMPTY_OK_TEXT`, compared as that text, and that text on a row
+/// that writes `data` or a `data` side on an `EMPTY_OK_CALL` row is a refusal.
+///
+/// A `wallet_contract` ok side holds `WALLET_RESPONSE_MARKER` and ends with
+/// `WALLET_RESPONSE_NAMES_ONLY`; both markers are stripped and the rest goes
+/// through the same cell reader. Its `data`'s children are `wire_field_names`
+/// of `WalletProviderResponseV2` in the contract file, in declaration order. A
+/// missing marker, a reordered field and an extra child are each a refusal, and
+/// an ordinary row is not given those markers.
+///
+/// A row whose operation has no arm in `fn handle` or in
+/// `fn dispatch_wallet_operation` is left to `row_set_problems`, which already
+/// refuses it, so this rule names no second reason for it.
+///
+/// Honesty limits: the rule reads a handler's `json!` keys and a declaration's
+/// fields as source text. It does not read a serialized value, a key a helper
+/// adds at run time, or a key inside a nested value, so `resolve`'s `document`
+/// is one key, and a `wallet_contract` row checks the envelope fields and never
+/// the keys of `result`.
+fn outputs_cell_problems(
+    document_name: &str,
+    row: &OperationsRow,
+    sources: &WireSources<'_>,
+) -> Vec<String> {
+    let answer = match row_answer(row, sources) {
+        Ok(Some(answer)) => answer,
+        Ok(None) => return Vec::new(),
+        Err(reason) => return vec![outputs_refusal(document_name, row, &reason)],
+    };
+    let Some((ok_side, error_side)) = row.outputs.split_once(OUTPUTS_ERROR_MARKER) else {
+        return vec![outputs_refusal(
+            document_name,
+            row,
+            &format!("every Outputs cell holds {OUTPUTS_ERROR_MARKER:?}"),
+        )];
+    };
+    let Some(ok_side) = ok_side.strip_prefix(OUTPUTS_OK_MARKER) else {
+        return vec![outputs_refusal(
+            document_name,
+            row,
+            &format!("every Outputs cell starts its ok side with {OUTPUTS_OK_MARKER:?}"),
+        )];
+    };
+    let mut problems = error_side_problems(document_name, row, error_side, sources);
+    problems.extend(ok_side_problems(document_name, row, ok_side, &answer));
+    problems
+}
+
+/// Every problem with every row's Outputs cell, in row order.
+fn outputs_cell_problems_rows(
+    document_name: &str,
+    rows: &[OperationsRow],
+    sources: &WireSources<'_>,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    for row in rows {
+        problems.extend(outputs_cell_problems(document_name, row, sources));
+    }
+    problems
+}
+
+/// One Outputs-cell refusal naming the document, the row, the whole cell and
+/// the rule that refused it.
+fn outputs_refusal(document_name: &str, row: &OperationsRow, reason: &str) -> String {
+    format!(
+        "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the Outputs cell {}, \
+         and {reason}",
+        row.operation, row.outputs
+    )
+}
+
+/// The answer one row's handler writes, `None` when the dispatch holds no arm
+/// for that row, or the reason the region cannot be read.
+///
+/// An ordinary row is answered by the one `json!` in its handler region, or by
+/// `EMPTY_OK_CALL` alone. A `wallet_contract` row is answered by one
+/// `WalletProviderResponseV2` value, which no per-kind `json!` describes.
+///
+/// A dispatch with no `fn handle`, and one that answers `wallet_contract` with
+/// no `fn dispatch_wallet_operation`, return `None` for every row:
+/// `row_set_problems` and `inputs_cell_problems` already refuse each of those
+/// sources once, so this rule names no third reason for them.
+fn row_answer(row: &OperationsRow, sources: &WireSources<'_>) -> Result<Option<RowAnswer>, String> {
+    let contract_prefix = format!("{WALLET_CONTRACT_ARM} ");
+    if let Some(kind) = row.operation.strip_prefix(&contract_prefix) {
+        let Some(kinds) = dispatch_arm_variants(
+            sources.dispatch,
+            "fn dispatch_wallet_operation(",
+            WALLET_OPERATION_ARM,
+        ) else {
+            return Ok(None);
+        };
+        if !kinds.iter().any(|arm| variant_snake_case(arm) == kind) {
+            return Ok(None);
+        }
+        return Ok(Some(RowAnswer::Contract));
+    }
+    let Some(arms) = dispatch_arm_variants(sources.dispatch, "fn handle(", REQUEST_ARM) else {
+        return Ok(None);
+    };
+    if !arms
+        .iter()
+        .any(|arm| variant_snake_case(arm) == row.operation)
+    {
+        return Ok(None);
+    }
+    let (region, label) = handler_region(row, sources)?;
+    match ok_json_literals(&region).as_slice() {
+        [only] => Ok(Some(RowAnswer::Json {
+            body: only.clone(),
+            label,
+        })),
+        [] if region.contains(EMPTY_OK_CALL) => Ok(Some(RowAnswer::Empty { label })),
+        [] => Err(format!("{label} writes no {OK_JSON_MACRO} answer")),
+        many => Err(format!(
+            "{label} writes {} {OK_JSON_MACRO} answers, and one handler writes one",
+            many.len()
+        )),
+    }
+}
+
+/// Every problem with one Outputs cell's error side.
+///
+/// The side goes through the one cell reader and must be the backticked serde
+/// tag of `Response`, then the wire field names of its `Error` variant, in
+/// declaration order, with no children.
+fn error_side_problems(
+    document_name: &str,
+    row: &OperationsRow,
+    error_side: &str,
+    sources: &WireSources<'_>,
+) -> Vec<String> {
+    let path = sources.declarations_path.display();
+    let tag = match serde_tag_name(sources.declarations, "Response") {
+        Ok(tag) => tag,
+        Err(reason) => {
+            return vec![outputs_refusal(
+                document_name,
+                row,
+                &format!("the error side cannot be read because {reason}"),
+            )]
+        }
+    };
+    // Every cell ends its sentence with a full stop, which is not a name.
+    let error_side = error_side.trim().trim_end_matches('.').trim_end();
+    let fields = match wire_field_names(sources.declarations, "Error") {
+        WireFieldNames::Names(fields) => fields,
+        WireFieldNames::NoDeclaration => {
+            return vec![outputs_refusal(
+                document_name,
+                row,
+                &format!("{path} declares no Error variant"),
+            )]
+        }
+        WireFieldNames::Unsupported(reason) => {
+            return vec![outputs_refusal(
+                document_name,
+                row,
+                &format!("the Error variant of {path} cannot be read: {reason}"),
+            )]
+        }
+    };
+    let mut expected = vec![input_leaf(&tag, true)];
+    expected.extend(fields.iter().map(|name| input_leaf(name, true)));
+    if input_items(error_side).is_some_and(|observed| inputs_match(&observed, &expected)) {
+        return Vec::new();
+    }
+    vec![outputs_refusal(
+        document_name,
+        row,
+        &format!("{path} names the error side {}", render_inputs(&expected)),
+    )]
+}
+
+/// Every problem with one Outputs cell's ok side, read against `answer`.
+fn ok_side_problems(
+    document_name: &str,
+    row: &OperationsRow,
+    ok_side: &str,
+    answer: &RowAnswer,
+) -> Vec<String> {
+    match answer {
+        RowAnswer::Empty { label } => {
+            if ok_side == EMPTY_OK_TEXT {
+                return Vec::new();
+            }
+            vec![outputs_refusal(
+                document_name,
+                row,
+                &format!(
+                    "{label} calls {EMPTY_OK_CALL} and writes no data, so its ok side is \
+                     {EMPTY_OK_TEXT}"
+                ),
+            )]
+        }
+        RowAnswer::Json { body, label } => {
+            if ok_side == EMPTY_OK_TEXT {
+                return vec![outputs_refusal(
+                    document_name,
+                    row,
+                    &format!(
+                        "{label} writes data, and {EMPTY_OK_TEXT} belongs to the row whose \
+                         handler calls {EMPTY_OK_CALL}"
+                    ),
+                )];
+            }
+            let keys = match object_keys(body) {
+                Ok(keys) => keys,
+                Err(reason) => {
+                    return vec![outputs_refusal(
+                        document_name,
+                        row,
+                        &format!("the {OK_JSON_MACRO} of {label} {reason}"),
+                    )]
+                }
+            };
+            ok_names_problems(
+                document_name,
+                row,
+                ok_side,
+                &keys,
+                &format!("{label} names"),
+            )
+        }
+        RowAnswer::Contract => {
+            if ok_side == EMPTY_OK_TEXT {
+                return vec![outputs_refusal(
+                    document_name,
+                    row,
+                    &format!(
+                        "a {WALLET_CONTRACT_ARM} row answers one {RESPONSE_CONTRACT_ITEM} as data"
+                    ),
+                )];
+            }
+            let stripped = match contract_ok_side(ok_side) {
+                Ok(stripped) => stripped,
+                Err(reason) => return vec![outputs_refusal(document_name, row, &reason)],
+            };
+            let path = wallet_operation_contract_path();
+            let fields = match contract_response_fields(&path) {
+                Ok(fields) => fields,
+                Err(reason) => return vec![outputs_refusal(document_name, row, &reason)],
+            };
+            ok_names_problems(
+                document_name,
+                row,
+                &stripped,
+                &fields,
+                &format!("{} names", path.display()),
+            )
+        }
+    }
+}
+
+/// Every problem with one ok side read against the `data` children `keys`.
+fn ok_names_problems(
+    document_name: &str,
+    row: &OperationsRow,
+    ok_side: &str,
+    keys: &[String],
+    label: &str,
+) -> Vec<String> {
+    let expected = ok_row_items(keys);
+    if input_items(ok_side).is_some_and(|observed| inputs_match(&observed, &expected)) {
+        return Vec::new();
+    }
+    vec![outputs_refusal(
+        document_name,
+        row,
+        &format!("{label} {}", render_inputs(&expected)),
+    )]
+}
+
+/// The backticked `status` and `data` items whose `data` children are `keys`,
+/// in order.
+fn ok_row_items(keys: &[String]) -> Vec<InputsItem> {
+    let mut data = input_leaf(OK_DATA_NAME, true);
+    data.children = keys.iter().map(|key| input_leaf(key, true)).collect();
+    vec![input_leaf("status", true), data]
+}
+
+/// One `wallet_contract` ok side with its two fixed markers removed, or the
+/// reason a marker is missing.
+///
+/// `WALLET_RESPONSE_MARKER` sits inside the `data` group, directly before its
+/// closing parenthesis, and `WALLET_RESPONSE_NAMES_ONLY` ends the cell. Both are
+/// fixed text, so the rest of the side is the same `status` and `data` list
+/// every other row writes, and the one cell reader reads it.
+fn contract_ok_side(ok_side: &str) -> Result<String, String> {
+    let Some(names_only_stripped) = ok_side.strip_suffix(WALLET_RESPONSE_NAMES_ONLY) else {
+        return Err(format!(
+            "a {WALLET_CONTRACT_ARM} ok side ends with {WALLET_RESPONSE_NAMES_ONLY:?}"
+        ));
+    };
+    let Some((names, group_end)) = names_only_stripped.split_once(WALLET_RESPONSE_MARKER) else {
+        return Err(format!(
+            "a {WALLET_CONTRACT_ARM} ok side names {WALLET_RESPONSE_MARKER:?}"
+        ));
+    };
+    if group_end.trim() != ")" {
+        return Err(format!(
+            "a {WALLET_CONTRACT_ARM} ok side closes its data group directly after \
+             {WALLET_RESPONSE_MARKER:?}"
+        ));
+    }
+    Ok(format!("{names})"))
+}
+
+/// The wire field names of `WalletProviderResponseV2` in the contract file, in
+/// declaration order, or the reason they cannot be read.
+fn contract_response_fields(path: &Path) -> Result<Vec<String>, String> {
+    let source = fs::read_to_string(path)
+        .map_err(|err| format!("{} is not readable: {err}", path.display()))?;
+    match wire_field_names(&source, RESPONSE_CONTRACT_ITEM) {
+        WireFieldNames::Names(fields) => Ok(fields),
+        WireFieldNames::NoDeclaration => Err(format!(
+            "{} declares no {RESPONSE_CONTRACT_ITEM}",
+            path.display()
+        )),
+        WireFieldNames::Unsupported(reason) => Err(format!(
+            "the {RESPONSE_CONTRACT_ITEM} declaration of {} cannot be read: {reason}",
+            path.display()
+        )),
+    }
+}
+
+/// The handler text one row's ok answer comes from, and the label a refusal
+/// names for it.
+///
+/// An ordinary row's region is the `fn <operation>(` body of the dispatch
+/// file. `SHUTDOWN_OPERATION`'s region is the `SHUTDOWN_ARM` arm of `fn handle`
+/// in that same file.
+fn handler_region(
+    row: &OperationsRow,
+    sources: &WireSources<'_>,
+) -> Result<(String, String), String> {
+    let path = sources.dispatch_path.display();
+    if row.operation == SHUTDOWN_OPERATION {
+        let region = shutdown_arm_body(sources.dispatch)
+            .ok_or_else(|| format!("{path} holds no {SHUTDOWN_ARM} arm of fn handle"))?;
+        return Ok((
+            region,
+            format!("the {SHUTDOWN_ARM} arm of fn handle of {path}"),
+        ));
+    }
+    let signature = format!("fn {}(", row.operation);
+    let body = function_body(sources.dispatch, &signature)
+        .ok_or_else(|| format!("{path} holds no fn {}", row.operation))?;
+    Ok((body, format!("fn {} of {path}", row.operation)))
+}
+
+/// The top-level keys of one `json!` object body, in source order, or the
+/// reason a key cannot be read.
+///
+/// Each entry is one comma-separated item, split by `declaration_items`, and
+/// its key is the Rust string literal that starts it. A nested object or array
+/// is a value, so its keys stay one level down.
+fn object_keys(body: &str) -> Result<Vec<String>, String> {
+    let mut keys = Vec::new();
+    for entry in declaration_items(body).map_err(|reason| format!("cannot be read: {reason}"))? {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (name, length) = rust_string_literal(entry)
+            .map_err(|reason| format!("holds a key it cannot read: {reason}"))?;
+        if !entry[length..].trim_start().starts_with(':') {
+            return Err(format!("holds the key {name} before its value"));
+        }
+        keys.push(name);
+    }
+    Ok(keys)
+}
+
+/// The object bodies of every `json!(...)` call whose argument is an object
+/// literal in `region`, in source order. `serde_json::json!` holds the same
+/// macro name, so both read the same way.
+///
+/// A macro name inside a string literal, and a call whose argument is not a
+/// braced object, is not an answer this rule reads.
+fn ok_json_literals(region: &str) -> Vec<String> {
+    let normalized = without_comments(region);
+    let mut literals = Vec::new();
+    let mut from = 0;
+    while let Some(offset) = normalized[from..].find(OK_JSON_MACRO) {
+        let at = from + offset;
+        from = at + OK_JSON_MACRO.len();
+        if inside_string(&normalized, at) {
+            continue;
+        }
+        let rest = normalized[from..].trim_start();
+        let Some(rest) = rest
+            .strip_prefix('(')
+            .map(str::trim_start)
+            .and_then(|rest| rest.strip_prefix('{'))
+        else {
+            continue;
+        };
+        if let Some(end) = declaration_end(rest) {
+            literals.push(rest[..end].to_string());
+        }
+    }
+    literals
+}
+
+/// The text of the `fn <signature>` body in `source`, or `None` when no line
+/// starts with `signature`.
+///
+/// The body is every line after the signature line, up to the next line that
+/// starts a `fn` at the signature's own indentation, or the end of the file, so
+/// the function after it is not part of the body. `dispatch_arm_variants` reads
+/// the same body for an indented method (P10).
+fn function_body(source: &str, signature: &str) -> Option<String> {
+    let mut body: Option<String> = None;
+    let mut indent = 0;
+    for line in source.lines() {
+        match body.as_mut() {
+            None => {
+                if line.trim_start().starts_with(signature) {
+                    indent = line.len() - line.trim_start().len();
+                    body = Some(String::new());
+                }
+            }
+            Some(text) => {
+                let trimmed = line.trim_start();
+                let starts_function =
+                    trimmed.starts_with("fn ") && line.len() - trimmed.len() == indent;
+                if starts_function {
+                    break;
+                }
+                text.push_str(line);
+                text.push('\n');
+            }
+        }
+    }
+    body
+}
+
+/// The text of the `SHUTDOWN_ARM` arm inside `fn handle`'s body, or `None` when
+/// that body holds no such arm.
+fn shutdown_arm_body(source: &str) -> Option<String> {
+    let body = function_body(source, "fn handle(")?;
+    let start = body.find(SHUTDOWN_ARM)?;
+    Some(body[start..].to_string())
+}
+
+/// The wire name of the `tag = "..."` entry in the `#[serde(...)]` attribute
+/// above the `enum <item> {` declaration in `source`, or the reason it cannot
+/// be read.
+///
+/// The declaration is selected by the same qualifier rule `item_body` and
+/// `wire_field_names` use, and its attribute is read with the same field-list
+/// reader, so a renamed tag is a different name rather than a second list of
+/// envelope fields. A declaration with no attribute above it, and an attribute
+/// with no `tag`, are each a refusal.
+fn serde_tag_name(source: &str, item: &str) -> Result<String, String> {
+    let normalized = without_comments(source);
+    let declaration = format!("enum {item} {{");
+    let mut from = 0;
+    while let Some(offset) = normalized[from..].find(&declaration) {
+        let start = from + offset;
+        from = start + declaration.len();
+        if inside_string(&normalized, start) {
+            continue;
+        }
+        let line_start = normalized[..start].rfind('\n').map_or(0, |index| index + 1);
+        if !declaration_qualifier(normalized[line_start..start].trim()) {
+            continue;
+        }
+        let attributes = attributes_above(&normalized, line_start)
+            .ok_or_else(|| format!("the enum {item} declaration holds no attribute above it"))?;
+        for attribute in attributes.split("#[") {
+            let Some(arguments) = attribute.trim_start().strip_prefix("serde(") else {
+                continue;
+            };
+            for entry in declaration_items(arguments)
+                .map_err(|reason| format!("the serde attribute of enum {item} {reason}"))?
+            {
+                let Some(rest) = entry.trim().strip_prefix("tag") else {
+                    continue;
+                };
+                let Some(literal) = rest.trim_start().strip_prefix('=') else {
+                    continue;
+                };
+                let (name, _) = rust_string_literal(literal.trim_start())
+                    .map_err(|reason| format!("the serde tag of enum {item} {reason}"))?;
+                return Ok(name);
+            }
+        }
+        return Err(format!(
+            "the serde attribute of enum {item} holds no tag = entry"
+        ));
+    }
+    Err(format!("the source declares no enum {item}"))
+}
+
+/// The attribute lines directly above the line at `line_start` in `text`,
+/// joined in source order, or `None` when no attribute sits above it.
+fn attributes_above(text: &str, line_start: usize) -> Option<String> {
+    let mut lines: Vec<&str> = Vec::new();
+    let mut cursor = line_start;
+    while let Some(previous_end) = cursor.checked_sub(1) {
+        let previous_start = text[..previous_end]
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
+        let line = text[previous_start..previous_end].trim();
+        if !line.starts_with("#[") {
+            break;
+        }
+        lines.push(line);
+        cursor = previous_start;
+    }
+    lines.reverse();
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 /// Every problem with one row's Right value, naming the document, the row and
@@ -6974,25 +15475,449 @@ fn linux_status_problems(document_name: &str, row: &OperationsRow) -> Vec<String
     )]
 }
 
+/// The one declared-rights file under a provider directory. The row check
+/// reads the file the provider folder holds, so it reads no crate path of its
+/// own and no second JSON reader (P10).
+const DECLARED_RIGHTS_FILE: &str = "tests/fixtures/confine/declared-rights.json";
+
+/// The one signature the contract's dispatch class reader looks for, and the
+/// value it must return.
+const CLASS_SIGNATURE: &str = "fn class(";
+const CLASS_RESULT: &str = "-> WalletOperationClass";
+/// The two values the `class()` arms return, as the contract spells them.
+const READ_CLASS: &str = "Read";
+const EFFECTFUL_CLASS: &str = "Effectful";
+/// The one variant prefix a `class()` arm names its kinds with.
+const CLASS_ARM_VARIANT: &str = "Self::";
+
+/// Every variant name the body of one enum declares, in declaration order, or
+/// one reason the body cannot be read.
+///
+/// An item is one comma-separated entry of the body, and its variant name is
+/// the identifier after any attributes it carries.
+fn enum_variant_names(body: &str) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for item in declaration_items(body).map_err(str::to_string)? {
+        let mut declared = item.trim_start();
+        while let Some(attribute) = declared.strip_prefix('#') {
+            let Some(attributes) = attribute.trim_start().strip_prefix('[') else {
+                break;
+            };
+            let Some(end) = attribute_end(attributes) else {
+                break;
+            };
+            declared = attributes[end + 1..].trim_start();
+        }
+        let name: String = declared
+            .chars()
+            .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+            .collect();
+        if !name.is_empty() {
+            names.push(name);
+        }
+    }
+    Ok(names)
+}
+
+/// The body of the contract's one `fn class(` that returns
+/// `WalletOperationClass`, or `None` when that signature is absent.
+///
+/// The signature line must carry both its return type and its opening brace,
+/// and the body then ends at the brace that closes it, so a later function's
+/// match is never read. Comments are removed first, so a commented-out
+/// signature and a `fn class(` inside a string are text.
+fn class_match_body(text: &str) -> Option<String> {
+    let text = without_comments(text);
+    let start = text.find(CLASS_SIGNATURE)?;
+    let line_end = text[start..].find('\n').map_or(text.len(), |at| start + at);
+    if !text[start..line_end].contains(CLASS_RESULT) {
+        return None;
+    }
+    let open = text[start..line_end].find('{')? + start;
+    let body = &text[open + 1..];
+    declaration_end(body).map(|end| body[..end].to_string())
+}
+
+/// The variant names one `class()` arm lists, from its text up to its `=>`.
+///
+/// The `Read` arm's text ends at its value, so it holds every alternative it
+/// matches. The remaining arm's text starts after that value and ends at its
+/// own value, so a catch-all `_` arm names no variant and an arm that lists
+/// kinds names them.
+fn class_arm_variants(text: &str) -> Vec<String> {
+    let head = text.rsplit_once("=>").map_or(text, |(before, _)| before);
+    let mut variants = Vec::new();
+    let mut rest = head;
+    while let Some(offset) = rest.find(CLASS_ARM_VARIANT) {
+        let tail = &rest[offset + CLASS_ARM_VARIANT.len()..];
+        let variant: String = tail
+            .chars()
+            .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+            .collect();
+        if !variant.is_empty() {
+            variants.push(variant);
+        }
+        rest = tail;
+    }
+    variants.dedup();
+    variants
+}
+
+/// Every declared wallet contract kind and the class the contract's `class()`
+/// gives it, in declaration order, or one reason the arms cannot be read.
+///
+/// The reader takes the text `contract_enum_text` already returns and reads it
+/// through `item_body`, `without_comments` and `declaration_end`: the enum body
+/// names every declared kind, and the one `fn class(` that returns
+/// `WalletOperationClass` decides each kind's class. The arm whose value is
+/// `WalletOperationClass::Read` lists the read kinds; every other declared kind
+/// is `Effectful`, whether the remaining arm names it or falls to the catch-all
+/// `_`. A missing enum body, `class()` signature, `Read` arm or remaining arm
+/// is one named refusal; so is a `Read` arm that names no `Self::<Kind>`
+/// variant and a kind named in both arms.
+///
+/// Honesty limits: the reader reads declarations, not a run. The class of a
+/// kind comes from the `class()` arms as source text, so a branch the match
+/// adds by a guard or a nested condition is not read, and a kind the match
+/// does not name falls to the catch-all arm. A cell is compared by the words it
+/// names, not by what a handler does. did's table holds no `wallet_contract`
+/// row, so that half of the rule is wallet's alone. The rule makes no kernel
+/// call, starts no process and reads files only, so it runs on every OS.
+fn wallet_operation_classes(text: &str) -> Result<HashMap<String, WalletOperationClass>, String> {
+    let Some(body) = item_body(text, "WalletProviderOperationV2", "enum") else {
+        return Err("the contract declares no enum WalletProviderOperationV2".to_string());
+    };
+    let declared = enum_variant_names(&body)?;
+    let Some(class_body) = class_match_body(text) else {
+        return Err(format!(
+            "the contract declares no {CLASS_SIGNATURE}) that returns WalletOperationClass"
+        ));
+    };
+    let class_body = without_comments(&class_body);
+    let Some((read_arm, rest)) =
+        class_body.split_once(&format!("WalletOperationClass::{READ_CLASS}"))
+    else {
+        return Err(format!(
+            "the fn class match holds no arm whose value is WalletOperationClass::{READ_CLASS}"
+        ));
+    };
+    let Some((effectful_arm, _)) =
+        rest.split_once(&format!("WalletOperationClass::{EFFECTFUL_CLASS}"))
+    else {
+        return Err(format!(
+            "the fn class match holds no arm whose value is \
+             WalletOperationClass::{EFFECTFUL_CLASS}"
+        ));
+    };
+    let read = class_arm_variants(read_arm);
+    if read.is_empty() {
+        return Err(format!(
+            "the {READ_CLASS} arm of fn class names no {CLASS_ARM_VARIANT}<Kind> variant"
+        ));
+    }
+    let read: Vec<String> = read.iter().map(|kind| variant_snake_case(kind)).collect();
+    let effectful: Vec<String> = class_arm_variants(effectful_arm)
+        .iter()
+        .map(|kind| variant_snake_case(kind))
+        .collect();
+    if let Some(both) = effectful.iter().find(|kind| read.contains(kind)) {
+        return Err(format!("the kind {both} is named in both arms of fn class"));
+    }
+    let mut classes = HashMap::new();
+    for kind in declared {
+        let kind = variant_snake_case(&kind);
+        let class = if read.contains(&kind) {
+            WalletOperationClass::Read
+        } else {
+            WalletOperationClass::Effectful
+        };
+        classes.insert(kind, class);
+    }
+    Ok(classes)
+}
+
+/// Every problem with one table's Effect cells, each naming the document, the
+/// row and the cell.
+///
+/// A row whose Right is `NO_DECLARED_RIGHT` names no granted access, so its
+/// Effect cell names none of `CANONICAL_PARAMS` and quotes no allow form. A
+/// `storage` row's Effect cell names `STORAGE_ROOT`. A `wallet_contract <kind>`
+/// row follows the class the contract's `class()` gives that kind: a `Read`
+/// kind's cell names no `STORE_FILE_NAME`, and an `Effectful` kind's cell names
+/// `STORE_FILE_NAME` or `STORAGE_ROOT`. A `wallet_contract` row whose kind the
+/// contract does not declare is a refusal that names the kind.
+///
+/// Honesty limits: the rule reads declarations and cells as words, so it shows
+/// which words a cell uses, not that a handler writes only those. It reads the
+/// class `class()` declares, so a kind the match does not name reads as
+/// `Effectful` through the catch-all arm. did's table has no
+/// `wallet_contract` row, so the class half never runs there. The rule starts
+/// no process and makes no kernel call.
+fn effect_cell_problems(
+    document_name: &str,
+    rows: &[OperationsRow],
+    classes: &HashMap<String, WalletOperationClass>,
+) -> Vec<String> {
+    let contract_prefix = format!("{WALLET_CONTRACT_ARM} ");
+    let mut problems = Vec::new();
+    for row in rows {
+        if row.right == NO_DECLARED_RIGHT {
+            if let Some(param) = CANONICAL_PARAMS
+                .iter()
+                .find(|param| row.effect.contains(*param))
+            {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} is \
+                     {NO_DECLARED_RIGHT} and its Effect cell names {param}",
+                    row.operation
+                ));
+                continue;
+            }
+            if let Some(form) = backtick_spans(&row.effect)
+                .into_iter()
+                .find(|span| span.starts_with(ALLOW_QUOTE_PREFIX))
+            {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} is \
+                     {NO_DECLARED_RIGHT} and quotes the allow form `{form}` in its Effect cell",
+                    row.operation
+                ));
+                continue;
+            }
+        }
+        if declared_right_id(&row.right) == Some(STORAGE_RIGHT)
+            && !row.effect.contains(STORAGE_ROOT_PARAM)
+        {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names the Right {} \
+                 and its Effect cell names no {STORAGE_ROOT_PARAM}",
+                row.operation, row.right
+            ));
+            continue;
+        }
+        let Some(kind) = row.operation.strip_prefix(&contract_prefix) else {
+            continue;
+        };
+        let Some(class) = classes.get(kind) else {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names the kind \
+                 {kind}, which the contract does not declare",
+                row.operation
+            ));
+            continue;
+        };
+        let names_store = row.effect.contains(STORE_FILE_NAME);
+        let names_root = row.effect.contains(STORAGE_ROOT_PARAM);
+        match class {
+            WalletOperationClass::Read if names_store => problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names the kind \
+                 {kind}, which fn class gives {READ_CLASS}, and its Effect cell names \
+                 {STORE_FILE_NAME}",
+                row.operation
+            )),
+            WalletOperationClass::Effectful if !names_store && !names_root => {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names the kind \
+                     {kind}, which fn class gives {EFFECTFUL_CLASS}, and its Effect cell names \
+                     neither {STORE_FILE_NAME} nor {STORAGE_ROOT_PARAM}",
+                    row.operation
+                ))
+            }
+            _ => {}
+        }
+    }
+    problems
+}
+
+/// The prefix a macOS cell's allow quote starts with. The cell writes a rule in
+/// its spaced spelling, so `(allow(file-read*))` is prose and is not a quote.
+const ALLOW_QUOTE_PREFIX: &str = "(allow ";
+
+/// Whether `cell` ends inside a backtick span. `backtick_spans` leaves such a
+/// tail out of its answer, so this one test refuses it by name instead of
+/// reading prose as a form.
+fn has_unclosed_span(cell: &str) -> bool {
+    cell.matches('`').count() % 2 == 1
+}
+
+/// The one allow form `span` quotes, or `None` where the span is not an allow
+/// quote. A span quotes a form only when `profile_forms` of that span alone
+/// returns exactly one form and that form starts with `ALLOW_QUOTE_PREFIX`, so
+/// a prose span and a span holding two forms are not read. Only a closed span
+/// reaches `profile_forms`, never a whole cell.
+fn allow_quote(span: &str) -> Option<String> {
+    match profile_forms(span).as_slice() {
+        [form] if form.starts_with(ALLOW_QUOTE_PREFIX) => Some(form.clone()),
+        _ => None,
+    }
+}
+
+/// The one declared contract id `right` names, or `None` where the Right cell
+/// is `NO_DECLARED_RIGHT` or holds another value. `declared_right_cell` is the
+/// one vocabulary reader, so this function reads the same cell it reads (P10).
+fn declared_right_id(right: &str) -> Option<&str> {
+    if !declared_right_cell(right) || right == NO_DECLARED_RIGHT {
+        return None;
+    }
+    right.strip_prefix('`')?.strip_suffix('`')
+}
+
+/// Every problem with one row's macOS allow quote, each naming the document,
+/// the row and the form.
+///
+/// A row whose Right is one declared id quotes at least one allow form, and
+/// every quoted allow form is one rule of that id in the `rights` list
+/// `declared_entries` returns. A form the right does not own, including a
+/// platform-baseline form, is a refusal that names `declared_path`. A declared
+/// right that quotes no allow form is a refusal, and a `NO_DECLARED_RIGHT` row
+/// that quotes one is a refusal.
+///
+/// Honesty limit: a declared right may own more than one form. The cell quotes
+/// at least one, and every quoted allow form is one of that right's rules, so a
+/// cell that quotes only the parent-read form passes. A form written outside
+/// backticks is not read, and an unclosed span is refused by name. The
+/// platform-baseline list is not a row right, so a Right cell that names one of
+/// its ids has no right whose rules its quote could follow and is refused with
+/// those words.
+fn macos_allow_quote_problems(
+    document_name: &str,
+    row: &OperationsRow,
+    rights: &[DeclaredClaim],
+    declared_path: &Path,
+) -> Vec<String> {
+    if has_unclosed_span(&row.macos) {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} quotes an unclosed \
+             backtick span in its macOS cell",
+            row.operation
+        )];
+    }
+    let quotes: Vec<String> = backtick_spans(&row.macos)
+        .into_iter()
+        .filter_map(allow_quote)
+        .collect();
+    if row.right == NO_DECLARED_RIGHT {
+        return quotes
+            .iter()
+            .map(|form| {
+                format!(
+                    "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} is \
+                     {NO_DECLARED_RIGHT} and quotes the macOS allow form {form}",
+                    row.operation
+                )
+            })
+            .collect();
+    }
+    let Some(id) = declared_right_id(&row.right) else {
+        return Vec::new();
+    };
+    let Some(rules) = rights
+        .iter()
+        .find(|claim| claim.id == id)
+        .map(|claim| &claim.rules)
+    else {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names the Right {}, \
+             which is no right of the rights list in {}, so its macOS cell has no right whose \
+             rules its quote follows",
+            row.operation,
+            row.right,
+            declared_path.display()
+        )];
+    };
+    if quotes.is_empty() {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names the Right {} and \
+             its macOS cell quotes no allow form of that right",
+            row.operation, row.right
+        )];
+    }
+    quotes
+        .iter()
+        .filter(|form| !rules.contains(form))
+        .map(|form| {
+            format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} quotes the macOS \
+                 allow form {form}, which is not a rule of the Right {} in {}",
+                row.operation,
+                row.right,
+                declared_path.display()
+            )
+        })
+        .collect()
+}
+
+/// Every problem with every row's Effect cell, in row order.
+///
+/// The contract enum is opened only when a row names a contract kind, so did's
+/// table, which has none, reads no contract file. The class reader is the one
+/// `wallet_operation_classes` over the text `contract_enum_text` returns, and
+/// an unreadable file or unreadable arms is one refusal that names the reason.
+fn effect_cell_problems_rows(
+    document_name: &str,
+    rows: &[OperationsRow],
+    sources: &WireSources<'_>,
+) -> Vec<String> {
+    let contract_prefix = format!("{WALLET_CONTRACT_ARM} ");
+    if !rows
+        .iter()
+        .any(|row| row.operation.starts_with(&contract_prefix))
+    {
+        return effect_cell_problems(document_name, rows, &HashMap::new());
+    }
+    match contract_enum_text(sources) {
+        Ok((_, text)) => match wallet_operation_classes(&text) {
+            Ok(classes) => effect_cell_problems(document_name, rows, &classes),
+            Err(reason) => vec![format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} Effect cells cannot be \
+                 checked because {reason}"
+            )],
+        },
+        Err(reason) => vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} {reason}"
+        )],
+    }
+}
+
 /// Every problem with one operations table's rows, each naming the document,
 /// the row (or the arm) and the value.
 ///
 /// The section under `OPERATIONS_HEADING` must hold a table whose first line is
 /// complete `TABLE_HEADER` and whose second is the dash separator. Every later
 /// nonempty line is a row, including repeated headers and rows with leading
-/// whitespace or omitted outer bars. Then the section must hold four things. Its row set,
-/// in table order, must equal the operations `<provider_dir>/src/main.rs`
-/// answers through `fn handle`, with a `wallet_contract` arm expanded to one
-/// `wallet_contract <kind>` row per `fn dispatch_wallet_operation` arm. Each
+/// whitespace or omitted outer bars. Then the section must hold six things. Its
+/// row set, in table order, must equal the operations
+/// `<provider_dir>/src/main.rs` answers through `fn handle`, with a
+/// `wallet_contract` arm expanded to one `wallet_contract <kind>` row per
+/// `fn dispatch_wallet_operation` arm. An ordinary row's Inputs cell must name
+/// the backticked `op` and then the wire field names its `Request` arm
+/// declares, in declaration order, from the file `request_declaration_file`
+/// names. Each
 /// Right cell must be exactly `NO_DECLARED_RIGHT` or one backtick span holding
 /// an id `CONTRACT_RIGHTS` or `PLATFORM_BASELINE_IDS` declares. A row whose
 /// Right is a declared right must cite `permitted:` and `nearest outside
 /// refused:` in its macOS cell, and a `none:` row must cite neither. Every
-/// Linux cell must be `LINUX_STATUS`.
+/// Linux cell must be `LINUX_STATUS`. Every Outputs cell must name its error
+/// side as the provider's serde tag and `Error` fields, and its ok side's
+/// `data` children as its handler's own `json!` keys, or as
+/// `WalletProviderResponseV2`'s declared fields on a `wallet_contract` row.
+/// A declared-right row's macOS cell quotes at least one allow form of that
+/// right through `macos_allow_quote_problems`, and a `none:` row quotes none.
+/// A `NO_DECLARED_RIGHT` row's Effect cell names no canonical parameter and
+/// quotes no allow form, a `storage` row's Effect cell names `STORAGE_ROOT`,
+/// and a `wallet_contract <kind>` row's Effect cell follows the class the
+/// contract's `class()` gives that kind through `effect_cell_problems`.
 ///
 /// Honesty limits: rule 1 reads the dispatch arms as text, so it shows the row
-/// set matches the arms, not that every arm is reachable; and it says nothing
-/// about the Outputs keys, which stay held in BACKLOG item 21.
+/// set matches the arms, not that every arm is reachable; rule 2 reads a
+/// `wallet_contract` row's Inputs cell against that kind's declared `params`;
+/// rule 6 reads a handler's `json!` keys and a declaration's fields as source
+/// text, so it does not read a serialized value, a key a helper adds at run
+/// time, or a key inside a nested value; and the allow quote reads the rules a
+/// right owns, not the Effect cell's prose, so a right with two forms passes on
+/// either one. The Effect rule reads the cells against the dispatch class the
+/// contract declares, and it does not show that a handler writes only what its
+/// cell names.
 fn operations_table_row_problems(
     document_name: &str,
     document: &str,
@@ -7007,6 +15932,7 @@ fn operations_table_row_problems(
         Err(problems) => return problems,
     };
     let provider_path = provider_dir.join("src").join("main.rs");
+    let mut dispatch: Option<String> = None;
     match fs::read_to_string(&provider_path) {
         Ok(source) => {
             problems.extend(row_set_problems(
@@ -7015,6 +15941,13 @@ fn operations_table_row_problems(
                 &source,
                 &provider_path,
             ));
+            problems.extend(manifest_operation_problems(
+                document_name,
+                provider_dir,
+                &source,
+                &provider_path,
+            ));
+            dispatch = Some(source);
         }
         Err(err) => problems.push(format!(
             "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set cannot be checked \
@@ -7027,6 +15960,51 @@ fn operations_table_row_problems(
         problems.extend(right_side_problems(document_name, row));
         problems.extend(linux_status_problems(document_name, row));
     }
+    let declared_path = provider_dir.join(DECLARED_RIGHTS_FILE);
+    match read_declared_rights(document_name, &declared_path)
+        .and_then(|declared| declared_entries(document_name, &declared))
+    {
+        Ok((rights, _baseline)) => {
+            for row in &rows {
+                problems.extend(macos_allow_quote_problems(
+                    document_name,
+                    row,
+                    &rights,
+                    &declared_path,
+                ));
+            }
+        }
+        Err(reason) => problems.push(format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} macOS cells cannot be checked \
+             because {reason}"
+        )),
+    }
+    if let Some(source) = &dispatch {
+        let declaration_path = provider_dir.join(request_declaration_file(document_name));
+        let declarations = if declaration_path == provider_path {
+            Ok(source.clone())
+        } else {
+            fs::read_to_string(&declaration_path)
+        };
+        match declarations {
+            Ok(declarations) => {
+                let wire = WireSources {
+                    dispatch: source,
+                    dispatch_path: &provider_path,
+                    declarations: &declarations,
+                    declarations_path: &declaration_path,
+                };
+                problems.extend(inputs_cell_problems(document_name, &rows, &wire));
+                problems.extend(outputs_cell_problems_rows(document_name, &rows, &wire));
+                problems.extend(effect_cell_problems_rows(document_name, &rows, &wire));
+            }
+            Err(err) => problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} Inputs cells cannot be \
+                 checked because {} is not readable: {err}",
+                declaration_path.display()
+            )),
+        }
+    }
     problems
 }
 
@@ -7035,7 +16013,7 @@ fn operations_table_row_problems(
 fn allow_forms(profile: &str) -> Vec<String> {
     profile_forms(profile)
         .into_iter()
-        .filter(|form| form.starts_with("(allow "))
+        .filter(|form| is_allow_form(form))
         .collect()
 }
 
@@ -7191,6 +16169,97 @@ fn write_declared_rights(capsules: &Path, provider: &str, declared: &Value) {
     fs::create_dir_all(&dir).expect("fixture declared-rights directory");
     fs::write(dir.join("declared-rights.json"), declared.to_string())
         .expect("fixture declared rights");
+}
+
+/// Writes the row check's declared-rights fixture into one provider directory,
+/// at the path the row check reads.
+fn write_declared_rights_in(provider_dir: &Path, provider: &str) {
+    let path = provider_dir.join(DECLARED_RIGHTS_FILE);
+    fs::create_dir_all(
+        path.parent()
+            .expect("the declared-rights file must sit under a directory"),
+    )
+    .expect("fixture declared-rights directory");
+    fs::write(&path, row_check_declared_rights(provider).to_string())
+        .expect("fixture declared rights");
+}
+
+/// The manifest fixture the operations row check reads: one capability that
+/// declares every operation the fixture dispatch answers, and one interface
+/// whose methods name the same operations.
+fn row_check_capsule_manifest() -> Value {
+    capsule_manifest(&FIXTURE_OPERATIONS)
+}
+
+/// A manifest declaring exactly `operations`, in one capability and one
+/// interface method each.
+fn capsule_manifest(operations: &[&str]) -> Value {
+    json!({
+        "authority": {
+            "capabilities": [{
+                MANIFEST_OPERATIONS_FIELD: operations,
+            }],
+        },
+        "interfaces": [{
+            "id": "elastos.provider.fixture",
+            "methods": operations
+                .iter()
+                .map(|operation| json!({"id": operation, MANIFEST_OPERATION_FIELD: operation}))
+                .collect::<Vec<Value>>(),
+        }],
+    })
+}
+
+/// Writes the row check's manifest fixture into one provider directory, at the
+/// path the row check reads.
+fn write_capsule_manifest_in(provider_dir: &Path) {
+    write_capsule_manifest_declaring(provider_dir, &FIXTURE_OPERATIONS);
+}
+
+/// Writes a manifest declaring exactly `operations` into one provider
+/// directory, at the path the row check reads.
+fn write_capsule_manifest_declaring(provider_dir: &Path, operations: &[&str]) {
+    fs::write(
+        provider_dir.join(CAPSULE_MANIFEST_FILE),
+        capsule_manifest(operations).to_string(),
+    )
+    .expect("fixture capsule manifest");
+}
+
+/// The declared-rights fixture the operations row check reads: `storage` owns
+/// the one subpath form a `storage` row quotes, `bound-executable` owns the
+/// exec form, and both platform-baseline ids keep their own forms. The other
+/// fields are the ones `declared_entries` accepts.
+fn row_check_declared_rights(provider: &str) -> Value {
+    let prefix = platform_baseline_justification(provider);
+    json!({
+        "role": DECLARED_RIGHTS_ROLE,
+        "provider": provider,
+        "rights": [
+            {"id": "storage", "rules": [SHARED_RULES[2]]},
+            {"id": "bound-executable", "rules": [SHARED_RULES[0]]},
+        ],
+        PLATFORM_BASELINE: {
+            "status": platform_baseline_status(provider),
+            "rules": [
+                {
+                    "id": "startup-root-directory",
+                    "justification": format!(
+                        "{prefix}file-read* of literal / is the startup root-directory read."
+                    ),
+                    "rules": [STARTUP_RULES[0]],
+                },
+                {
+                    "id": "startup-sysctl",
+                    "justification": format!(
+                        "{prefix}sysctl-read is the startup read of kernel facts by the loader \
+                         and the allocator."
+                    ),
+                    "rules": [STARTUP_RULES[1]],
+                },
+            ],
+        },
+    })
 }
 
 /// The did, wallet and model file profiles present one contract: the same
@@ -8009,13 +17078,18 @@ fn every_operations_table_cites_existing_tests() {
 ///
 /// The check reads `capsules/<name>/CONFINEMENT.md` for each name in
 /// `OPERATIONS_TABLES`, cuts the section under `OPERATIONS_HEADING`, and
-/// requires four things of every row: the row set, in table order, equals the
+/// requires five things of every row: the row set, in table order, equals the
 /// operations `capsules/<name>/src/main.rs` answers through `fn handle`, with a
 /// `wallet_contract` arm expanded to one row per `fn dispatch_wallet_operation`
-/// arm; the Right cell is exactly `none: needs no declared right` or one
+/// arm; an ordinary row's Inputs cell names the backticked `op` and then its
+/// `Request` arm's wire field names in declaration order; a `wallet_contract`
+/// row's Inputs cell names that kind's `params`; the Right cell is
+/// exactly `none: needs no declared right` or one
 /// declared id in a backtick span; a row whose Right is a declared right cites
 /// both `permitted:` and `nearest outside refused:`, and a `none:` row cites
-/// neither; and every Linux cell is exactly `designed, not enforced`. Each
+/// neither; a declared-right row's macOS cell quotes at least one allow form of
+/// that right and a `none:` row quotes none; and every Linux cell is exactly
+/// `designed, not enforced`. Each
 /// fault is one line naming the document, the row (or the arm) and the value.
 /// The check reads files and starts no process, so it runs on every platform.
 ///
@@ -8024,7 +17098,11 @@ fn every_operations_table_cites_existing_tests() {
 /// naming an undeclared id or `no named test shows this` passes; WP143 disables
 /// the both-sides rule, so a right row with one side and a `none:` row with a
 /// side pass; WP144 disables the Linux-status rule, so a cell naming another
-/// status passes. `operations_table_row_check_refuses_each_bad_table` catches
+/// status passes; WP181 disables the field reader's `serde` attribute and
+/// WP182 the Inputs compare's length rule, so an ordinary row's stale Inputs
+/// cell passes; WP221 accepts any allow quote and WP222 does not read a `none:`
+/// row's quote, so a bad macOS cell passes.
+/// `operations_table_row_check_refuses_each_bad_table` catches
 /// each mutation with a bad-table fixture; this test checks the real tables.
 #[test]
 fn every_operations_table_row_matches_its_provider_and_the_contract() {
@@ -8763,17 +17841,79 @@ fn operations_table_check_rejects_paths_outside_provider() {
     }
 }
 
-/// The operations-table fixtures' provider source: `fn handle` answers
-/// `init`, `status`, `wallet_contract` and `shutdown`, and `fn
-/// dispatch_wallet_operation` answers the one `list_accounts` kind.
+/// The operations-table fixtures' provider source: `enum Request` declares the
+/// arms the fixture table names, `fn handle` answers `init`, `status`, `echo`,
+/// `wallet_contract` and `shutdown`, and `fn dispatch_wallet_operation` answers
+/// the one `list_accounts` kind.
+///
+/// `init` carries a field whose wire name is `wire_name` by
+/// `#[serde(rename = "...")]`, under a `//` comment that names an older
+/// `stale_name`, so only the active attribute may name the field. `echo`
+/// declares two plain fields. `Ping` declares one field and no dispatch arm
+/// answers it, so the fixture table names no field of it. `Status` and
+/// `Shutdown` declare no field.
 const ROW_FIXTURE_PROVIDER: &str = "\
+enum Request {
+    Init {
+        config: Value,
+        // Previously rename = \"stale_name\".
+        #[serde(rename = \"wire_name\")]
+        field_name: Option<Value>,
+    },
+    Status,
+    Echo {
+        message: String,
+        retry: u64,
+    },
+    WalletContract {
+        request: Value,
+        #[serde(rename = \"_runtime_invocation\")]
+        runtime_invocation: Box<RuntimeInvocationEnvelope>,
+    },
+    Ping {
+        reason: String,
+    },
+    Shutdown,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = \"status\", rename_all = \"snake_case\")]
+enum Response {
+    Ok {
+        data: Option<Value>,
+    },
+    Error {
+        code: String,
+        message: String,
+    },
+}
+
 fn handle(&mut self, request: Request) -> Response {
     match request {
         Request::Init { config } => self.init(config),
         Request::Status => self.status(),
+        Request::Echo { message, retry } => self.echo(message, retry),
         Request::WalletContract { request } => self.handle_wallet_contract(request),
         Request::Shutdown => Response::empty_ok(),
     }
+}
+
+fn init(&mut self, config: Value) -> Response {
+    Response::ok(json!({
+        \"provider\": \"fixture\",
+        \"wire_name\": config,
+    }))
+}
+
+fn status(&self) -> Response {
+    Response::ok(json!({ \"supported_operations\": [\"status\"] }))
+}
+
+fn echo(&mut self, message: String, retry: u64) -> Response {
+    Response::ok(json!({
+        \"message\": message,
+        \"retry\": retry,
+    }))
 }
 
 fn dispatch_wallet_operation(&mut self, request: &WalletProviderRequestV2) -> Response {
@@ -8781,34 +17921,160 @@ fn dispatch_wallet_operation(&mut self, request: &WalletProviderRequestV2) -> Re
         WalletProviderOperationV2::ListAccounts { include_revoked } => self.accounts(*include_revoked),
     }
 }
+
+enum WalletProviderOperationV2 {
+    ListAccounts {
+        include_revoked: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalletOperationClass {
+    Read,
+    Effectful,
+}
+
+impl WalletProviderOperationV2 {
+    pub const fn class(&self) -> WalletOperationClass {
+        match self {
+            Self::ListAccounts { .. } => WalletOperationClass::Read,
+            _ => WalletOperationClass::Effectful,
+        }
+    }
+}
 ";
 
-/// One fixture operations row. The Inputs, Outputs and Effect cells are unread
-/// by the row check, so every row carries the same filler there.
-fn fixture_row(operation: &str, right: &str, macos: &str, linux: &str) -> String {
+/// The Outputs cell of one fixture operation's row.
+///
+/// An ordinary row's ok side names `status` and `data`, and `data`'s children
+/// are the keys the fixture handler's one `json!` writes. `shutdown` writes
+/// `EMPTY_OK_TEXT`, because its arm calls `EMPTY_OK_CALL`. Every row's error
+/// side is the fixture `Response` tag and `Error` fields.
+fn fixture_outputs(operation: &str) -> String {
+    if operation == SHUTDOWN_OPERATION {
+        return format!(
+            "{OUTPUTS_OK_MARKER}{EMPTY_OK_TEXT}{OUTPUTS_ERROR_MARKER}`status`, `code`, \
+                        `message`"
+        );
+    }
+    let keys = match operation {
+        "init" => "`provider`, `wire_name`",
+        "status" => "`supported_operations`",
+        "echo" => "`message`, `retry`",
+        _ => {
+            "`schema`, `protocol_version`, `request_id`, `operation`, `audit_id`, `lifecycle_id`, \
+             `session_binding`, `account_binding`, `approval_binding`, `result`"
+        }
+    };
+    let response = if operation.starts_with(&format!("{WALLET_CONTRACT_ARM} ")) {
+        format!("{WALLET_RESPONSE_MARKER}){WALLET_RESPONSE_NAMES_ONLY}")
+    } else {
+        ")".to_string()
+    };
     format!(
-        "| {operation} | `op` | ok: `status` | {right} | answers in memory | {macos} | {linux} |\n"
+        "{OUTPUTS_OK_MARKER}`status`, `data` ({keys}{response}{OUTPUTS_ERROR_MARKER}`status`, \
+         `code`, `message`"
     )
 }
 
-/// One fixture operations row whose rows are in the fixture dispatch order and
-/// whose Right, macOS and Linux cells follow all four rules.
-fn passing_fixture_row(operation: &str) -> String {
+/// The Inputs cell of one fixture operation's row: the backticked `op` and then
+/// the wire names the fixture `Request` arm declares, in declaration order. The
+/// `wallet_contract list_accounts` cell names the real `ListAccounts` params,
+/// because the fixture dispatch does not declare that enum.
+fn fixture_inputs(operation: &str) -> String {
+    match operation {
+        "init" => "`op`, `config`, `wire_name`".to_string(),
+        "echo" => "`op`, `message`, `retry`".to_string(),
+        "wallet_contract list_accounts" => "`op`, `request` (`kind: list_accounts`, `params` \
+                                            (`include_revoked`)), `_runtime_invocation`"
+            .to_string(),
+        "wallet_contract get_d_i_d" => "`op`, `request` (`kind: get_d_i_d`, `params` (none)), \
+                                       `_runtime_invocation`"
+            .to_string(),
+        _ => "`op`".to_string(),
+    }
+}
+
+/// One fixture operations row.
+fn fixture_row(
+    operation: &str,
+    inputs: &str,
+    outputs: &str,
+    right: &str,
+    effect: &str,
+    macos: &str,
+    linux: &str,
+) -> String {
+    format!("| {operation} | {inputs} | {outputs} | {right} | {effect} | {macos} | {linux} |\n")
+}
+
+/// The kinds the fixture contract's own `class()` gives `Read`. Every other
+/// kind that contract declares falls to its catch-all arm, so it is
+/// `Effectful`. This is fixture data that mirrors the fixture's `class()`.
+const FIXTURE_READ_KINDS: [&str; 1] = ["list_accounts"];
+
+/// Whether one fixture row writes under the storage root: `init`, and every
+/// `wallet_contract` kind `FIXTURE_READ_KINDS` does not name.
+fn fixture_writes_storage(operation: &str) -> bool {
     if operation == "init" {
-        fixture_row(
-            operation,
-            "`storage`",
-            "permitted: `tests/confine.rs::present_case` shows the write. \
-             nearest outside refused: `tests/confine.rs::present_case` shows the refusal.",
-            LINUX_STATUS,
-        )
+        return true;
+    }
+    let prefix = format!("{WALLET_CONTRACT_ARM} ");
+    operation
+        .strip_prefix(&prefix)
+        .is_some_and(|kind| !FIXTURE_READ_KINDS.contains(&kind))
+}
+
+/// The Effect cell of one fixture row that writes under the storage root.
+fn fixture_storage_effect() -> String {
+    format!("writes `{STORE_FILE_NAME}` under `{STORAGE_ROOT_PARAM}`")
+}
+
+/// The macOS cell of one fixture row that holds the `storage` right: it quotes
+/// that right's own allow form and cites both sides.
+fn fixture_storage_macos() -> &'static str {
+    "The `storage` rule is `(allow file-read* file-write* (subpath (param \
+     \"STORAGE_ROOT\")))`. permitted: `tests/confine.rs::present_case` shows the write. \
+     nearest outside refused: `tests/confine.rs::present_case` shows the refusal."
+}
+
+/// One fixture operations row that holds the `storage` right.
+fn fixture_storage_row(operation: &str, inputs: &str, outputs: &str) -> String {
+    fixture_row(
+        operation,
+        inputs,
+        outputs,
+        "`storage`",
+        &fixture_storage_effect(),
+        fixture_storage_macos(),
+        LINUX_STATUS,
+    )
+}
+
+/// One fixture operations row that needs no declared right and answers from
+/// memory, which is every ordinary fixture row but `init` and every
+/// `FIXTURE_READ_KINDS` kind.
+fn fixture_none_row(operation: &str, inputs: &str, outputs: &str) -> String {
+    fixture_row(
+        operation,
+        inputs,
+        outputs,
+        NO_DECLARED_RIGHT,
+        "answers from the in-memory store",
+        "`tests/confine.rs::present_case` shows the answer.",
+        LINUX_STATUS,
+    )
+}
+
+/// One fixture operations row whose Inputs, Outputs, Right, Effect, macOS and
+/// Linux cells follow every rule.
+fn passing_fixture_row(operation: &str) -> String {
+    let inputs = fixture_inputs(operation);
+    let outputs = fixture_outputs(operation);
+    if fixture_writes_storage(operation) {
+        fixture_storage_row(operation, &inputs, &outputs)
     } else {
-        fixture_row(
-            operation,
-            NO_DECLARED_RIGHT,
-            "`tests/confine.rs::present_case` shows the answer.",
-            LINUX_STATUS,
-        )
+        fixture_none_row(operation, &inputs, &outputs)
     }
 }
 
@@ -8825,11 +18091,12 @@ fn fixture_row_document(operations: &[&str]) -> String {
     document
 }
 
-/// The four operations the fixture dispatch answers, in table order: the
+/// The five operations the fixture dispatch answers, in table order: the
 /// ordinary arms of `fn handle` in dispatch order, then the one contract kind.
-const FIXTURE_OPERATIONS: [&str; 4] = [
+const FIXTURE_OPERATIONS: [&str; 5] = [
     "init",
     "status",
+    "echo",
     "shutdown",
     "wallet_contract list_accounts",
 ];
@@ -8837,10 +18104,12 @@ const FIXTURE_OPERATIONS: [&str; 4] = [
 /// The row check refuses each bad table, one case per rule and sub-rule, and
 /// names the rule.
 ///
-/// A temporary provider folder holds `src/main.rs` with the fixture dispatch:
-/// `fn handle` answers `init`, `status`, `wallet_contract` and `shutdown`, and
-/// `fn dispatch_wallet_operation` answers `list_accounts`. The passing table
-/// returns no problem. Rule 1 refuses a `handle` arm with no row, a row with no
+/// A temporary provider folder holds `src/main.rs` with the fixture dispatch
+/// and its `enum Request`, its declared-rights fixture, and a `capsule.json` that
+/// declares the same operations: `fn handle` answers `init`, `status`, `echo`,
+/// `wallet_contract` and `shutdown`, and `fn dispatch_wallet_operation` answers
+/// `list_accounts`. The passing table returns no problem. Rule 1 refuses a
+/// `handle` arm with no row, a row with no
 /// arm, a kind arm with no row, ordinary rows in another order and a kind row
 /// before an ordinary row. A two-kind fixture also refuses swapped kind rows,
 /// duplicate ordinary and kind rows, and equal-length rows with the wrong
@@ -8854,22 +18123,70 @@ const FIXTURE_OPERATIONS: [&str; 4] = [
 /// another cell count are each refused as one problem. Rule 2 refuses a Right
 /// cell that names an undeclared
 /// id and one that says `no named test shows this`. Rule 3 refuses a right row
-/// missing `permitted:`, a right row missing `nearest outside refused:` and a
-/// `none:` row citing `permitted:`. Rule 4 refuses a Linux cell that is not
-/// `designed, not enforced`, naming every row. The four `snake_case` names the
+/// missing `permitted:`, a right row missing `nearest outside refused:`, a
+/// `none:` row citing `permitted:`, a right row quoting an allow form it does
+/// not own, a right row quoting no allow form, a `none:` row quoting one and a
+/// right row quoting an unclosed span. Rule 4 refuses a Linux cell that is not
+/// `designed, not enforced`, naming every row. Rule 5 refuses an ordinary row's
+/// Inputs cell with an extra name, a missing name, another order, a renamed
+/// field's Rust name, a name only a comment mentions, a bare word where the
+/// table writes backticked names, no backticked `op`, an unterminated backtick
+/// span, an empty item, a parenthesis and a longer name that starts with a
+/// declared one. A two-field arm and a fieldless arm each pin their own expected
+/// cell. An arm spelled inside an attribute string cannot hide a declared field.
+/// Character and byte-character literals retain the field after their type;
+/// raw identifiers use their wire spelling, and explicit renames keep their
+/// literal value. Unsupported field attributes and literals keep exact reasons.
+/// A `wallet_contract` row's Inputs cell is read against that kind's `params`.
+/// A fixture enum keeps the bare word `none` apart from a field named `none`,
+/// and a `params` list that drops, reorders or adds a name is refused.
+/// A source with no
+/// `enum Request`, an arm the declaration omits, a declaration file the caller
+/// cannot read and a source with no `fn handle` each keep their own reason. The
+/// four `snake_case` names the
 /// contract already uses pin the helper. A missing or doubled heading stays with
 /// `section_under_one_heading`, which already refuses it once. The fixtures are
 /// a temporary directory; no process starts.
 ///
 /// Falsifiers: WP141 disables the row-set rule, WP142 the Right-vocabulary
-/// rule, WP143 the both-sides rule and WP144 the Linux-status rule; this test
-/// fails on that rule's cases, because the bad table is then accepted.
+/// rule, WP143 the both-sides rule, WP144 the Linux-status rule, WP181 the one
+/// field reader's `serde` attribute and WP182 the Inputs compare's length rule;
+/// this test fails on that rule's cases, because the bad table is then accepted.
+/// WP181 also fails the passing table, because `init`'s renamed field then reads
+/// as its Rust name.
+/// WP183 through WP197 cover literal boundaries, raw identifiers, quoting,
+/// order, malformed cells and missing source or arm refusals. WP198 removes
+/// the field-list reader's balance refusal, so a shift expression hides the
+/// field after it. WP214 makes an empty arm and a field named `none` the same
+/// item, so the bare marker passes for the renamed field. WP215 makes
+/// `inputs_match` ignore children, so a `params` list can name an undeclared
+/// field. WP221 accepts any allow quote on a declared-right row, so the exec
+/// form on the `init` row passes; WP222 does not read a `none:` row's allow
+/// quote, so the subpath form on that row passes. Rule 7 refuses a manifest that
+/// declares an operation the provider does not answer, one that cannot be read,
+/// is not JSON, or holds no `authority.capabilities` entry, a capability with no
+/// `operations` list, a `operations` item that is not a string, an interface
+/// method with no `operation` string or no `id` string, and a method whose
+/// `operation` differs from its `id`. WP225 accepts a declared operation the
+/// provider does not answer, so the phantom case passes; WP226 reads a missing
+/// `operations` list as an empty list, so the missing-list case passes. Rule 8
+/// refuses a `none:` row whose Effect cell names a canonical parameter or
+/// quotes an allow form, a `storage` row whose Effect cell names no
+/// `STORAGE_ROOT`, a `Read` kind that claims the store write, an `Effectful`
+/// kind that claims only in-memory work, and a `wallet_contract` row whose kind
+/// the contract does not declare. WP227 makes the `none:` check return early,
+/// WP228 treats every kind as `Effectful` and WP229 treats the catch-all arm as
+/// `Read`, so this test fails on those cases.
 #[test]
 fn operations_table_row_check_refuses_each_bad_table() {
     let provider = tempfile::tempdir().expect("temporary provider folder");
     fs::create_dir_all(provider.path().join("src")).expect("fixture src folder");
     let provider_source = provider.path().join("src/main.rs");
     fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source");
+    let declared_path = provider.path().join(DECLARED_RIGHTS_FILE);
+    write_declared_rights_in(provider.path(), "fixture-provider");
+    let manifest_path = provider.path().join(CAPSULE_MANIFEST_FILE);
+    write_capsule_manifest_in(provider.path());
 
     for (case, variant) in [
         ("VerifyDidRecovery", "verify_did_recovery"),
@@ -8891,7 +18208,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
     assert_eq!(
         operations_table_row_problems("fixture-provider", &passing, provider.path()),
         Vec::<String>::new(),
-        "a table that follows all four rules must pass"
+        "a table that follows every rule, with its manifest present, must pass"
     );
 
     // Rule 1: an arm with no row, and a kind arm with no row.
@@ -9163,6 +18480,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
             &fixture_row_document(&[
                 "status",
                 "init",
+                "echo",
                 "shutdown",
                 "wallet_contract list_accounts",
             ]),
@@ -9182,6 +18500,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
                 "wallet_contract list_accounts",
                 "init",
                 "status",
+                "echo",
                 "shutdown",
             ]),
             provider.path()
@@ -9195,16 +18514,29 @@ fn operations_table_row_check_refuses_each_bad_table() {
     );
 
     // Rule 1: both contract kinds retain their dispatch order and multiplicity.
-    let two_kind_source = ROW_FIXTURE_PROVIDER.replace(
-        "        WalletProviderOperationV2::ListAccounts",
-        "        WalletProviderOperationV2::GetDID {} => self.get_did(),\n\
-                WalletProviderOperationV2::ListAccounts",
-    );
+    // A second kind also gives the fixture `class()` both of its arms: the
+    // `Read` arm names `ListAccounts` and the catch-all arm carries `GetDID`.
+    let two_kind_source = ROW_FIXTURE_PROVIDER
+        .replace(
+            "        WalletProviderOperationV2::ListAccounts",
+            "        WalletProviderOperationV2::GetDID {} => self.get_did(),\n\
+                    WalletProviderOperationV2::ListAccounts",
+        )
+        .replace(
+            "enum WalletProviderOperationV2 {\n    ListAccounts {\n        include_revoked: bool,\n    },\n}",
+            "enum WalletProviderOperationV2 {\n    GetDID {},\n    ListAccounts {\n        \
+             include_revoked: bool,\n    },\n}",
+        );
     assert_ne!(two_kind_source, ROW_FIXTURE_PROVIDER);
+    assert!(
+        two_kind_source.contains("GetDID {},"),
+        "the two-kind source must declare the second kind"
+    );
     fs::write(&provider_source, &two_kind_source).expect("two-kind fixture provider source");
     let two_kind_operations = [
         "init",
         "status",
+        "echo",
         "shutdown",
         "wallet_contract get_d_i_d",
         "wallet_contract list_accounts",
@@ -9220,7 +18552,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
     );
 
     let mut swapped_kinds = two_kind_operations;
-    swapped_kinds.swap(3, 4);
+    swapped_kinds.swap(4, 5);
     assert_eq!(
         operations_table_row_problems(
             "fixture-provider",
@@ -9236,7 +18568,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
         "contract kinds out of dispatch order must be refused"
     );
 
-    for (case, index) in [("the final kind row", 4), ("shutdown before the kinds", 2)] {
+    for (case, index) in [("the final kind row", 5), ("shutdown before the kinds", 3)] {
         let mut duplicate = two_kind_operations.to_vec();
         duplicate.insert(index + 1, duplicate[index]);
         assert_eq!(
@@ -9256,7 +18588,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
     }
 
     let mut replaced_kind = two_kind_operations;
-    replaced_kind[3] = replaced_kind[4];
+    replaced_kind[4] = replaced_kind[5];
     assert_eq!(
         operations_table_row_problems(
             "fixture-provider",
@@ -9279,7 +18611,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
     );
 
     let mut wrong_acronym = two_kind_operations;
-    wrong_acronym[3] = "wallet_contract get_did";
+    wrong_acronym[4] = "wallet_contract get_did";
     assert_eq!(
         operations_table_row_problems(
             "fixture-provider",
@@ -9297,10 +18629,78 @@ fn operations_table_row_check_refuses_each_bad_table() {
                  wallet_contract get_did has no arm in {}",
                 provider_source.display()
             ),
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row wallet_contract \
+                 get_did names the kind get_did, which the contract does not declare"
+            ),
         ],
         "an acronym row must name the operation as serde does"
     );
     fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
+    // Rule 8: the `Effectful` kind that claims only in-memory work follows the
+    // fixture `class()` catch-all arm. The two-kind source declares `GetDID`
+    // there, so its row must name the store it writes.
+    {
+        fs::write(&provider_source, &two_kind_source).expect("two-kind fixture provider source");
+        let operation = "wallet_contract get_d_i_d";
+        let document = fixture_row_document(&two_kind_operations).replacen(
+            &passing_fixture_row(operation),
+            &fixture_none_row(
+                operation,
+                &fixture_inputs(operation),
+                &fixture_outputs(operation),
+            ),
+            1,
+        );
+        assert_ne!(
+            document,
+            fixture_row_document(&two_kind_operations),
+            "the Effectful kind's Effect cell must change"
+        );
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row wallet_contract \
+                 get_d_i_d names the kind get_d_i_d, which fn class gives {EFFECTFUL_CLASS}, and \
+                 its Effect cell names neither {STORE_FILE_NAME} nor {STORAGE_ROOT_PARAM}"
+            )],
+            "an Effectful kind that claims only in-memory work must be refused"
+        );
+        fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+    }
+
+    // Rule 8: a `wallet_contract` row whose kind the contract does not declare
+    // is refused by name. The fixture enum renames its one kind while the
+    // dispatch still answers `ListAccounts`, so the class reader has no class
+    // for that kind and names it. The Inputs rule keeps its own reason beside
+    // it, because that declaration no longer holds the arm either.
+    {
+        let undeclared = ROW_FIXTURE_PROVIDER.replace(
+            "enum WalletProviderOperationV2 {\n    ListAccounts {\n        include_revoked: bool,\n    },\n}",
+            "enum WalletProviderOperationV2 {\n    ListApprovals {\n        include_resolved: bool,\n    },\n}",
+        );
+        assert_ne!(undeclared, ROW_FIXTURE_PROVIDER);
+        fs::write(&provider_source, &undeclared).expect("undeclared kind fixture source");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &passing, provider.path()),
+            vec![
+                format!(
+                    "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row wallet_contract \
+                     list_accounts holds the Inputs cell {}, and {} declares no ListAccounts arm",
+                    fixture_inputs("wallet_contract list_accounts"),
+                    provider_source.display()
+                ),
+                format!(
+                    "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row wallet_contract \
+                     list_accounts names the kind list_accounts, which the contract does not \
+                     declare"
+                ),
+            ],
+            "a row naming a kind the contract does not declare must be refused by name"
+        );
+        fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+    }
 
     // Rule 2: a Right cell with an undeclared id, and one naming no test.
     for (case, right) in [
@@ -9360,6 +18760,978 @@ fn operations_table_row_check_refuses_each_bad_table() {
         );
     }
 
+    // Rule 3: the macOS allow quote. A `storage` row quotes an allow form of
+    // its own right, so the exec form, no form and a `none:` row's form are
+    // each refused.
+    let storage_quote = format!("`{}`", SHARED_RULES[2]);
+    let exec_quote = format!("`{}`", SHARED_RULES[0]);
+    {
+        let document = passing.replacen(&storage_quote, &exec_quote, 1);
+        assert_ne!(document, passing, "the exec form must replace the quote");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init quotes the macOS \
+                 allow form {}, which is not a rule of the Right `storage` in {}",
+                SHARED_RULES[0],
+                declared_path.display()
+            )],
+            "the exec form on a storage row must be refused"
+        );
+    }
+    {
+        let document = passing.replacen(&storage_quote, "`tests/confine.rs::present_case`", 1);
+        assert_ne!(document, passing, "the quote must be removed");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init names the Right \
+                 `storage` and its macOS cell quotes no allow form of that right"
+            )],
+            "a declared-right row with no allow quote must be refused"
+        );
+    }
+    for (case, quoted) in [
+        ("the subpath form", storage_quote.clone()),
+        (
+            "an allow form outside backticks",
+            SHARED_RULES[2].to_string(),
+        ),
+    ] {
+        let document = passing.replacen(
+            "| `tests/confine.rs::present_case` shows the answer. |",
+            &format!("| {quoted}. |"),
+            1,
+        );
+        assert_ne!(document, passing, "{case} must change the none: row");
+        let expected = if case == "the subpath form" {
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status is \
+                 {NO_DECLARED_RIGHT} and quotes the macOS allow form {}",
+                SHARED_RULES[2]
+            )]
+        } else {
+            Vec::<String>::new()
+        };
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            expected,
+            "{case} on a none: row must be read by its backticks"
+        );
+    }
+    {
+        let document = passing.replacen(&storage_quote, "`(allow file-read*", 1);
+        assert_ne!(document, passing, "the unclosed span must change the quote");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init quotes an unclosed \
+                 backtick span in its macOS cell"
+            )],
+            "an unclosed span must be refused by name, not read as a form"
+        );
+    }
+
+    // Rule 3: the platform baseline is not a row right, so a Right cell that
+    // names one of its ids is refused with those words.
+    {
+        let right = format!("`{}`", PLATFORM_BASELINE_IDS[0]);
+        let document = passing.replacen("| `storage` |", &format!("| {right} |"), 1);
+        assert_ne!(
+            document, passing,
+            "the baseline id must replace the Right cell"
+        );
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init names the Right \
+                 {right}, which is no right of the rights list in {}, so its macOS cell has no \
+                 right whose rules its quote follows",
+                declared_path.display()
+            )],
+            "a platform-baseline id on a row must be refused, because it is not a row right"
+        );
+    }
+
+    // Rule 3: the file the row check reads names its path when it is missing,
+    // and every later case reads the restored file.
+    fs::remove_file(&declared_path).expect("remove the fixture declared rights");
+    let read_error = fs::read_to_string(&declared_path).expect_err("missing declared rights");
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &passing, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} macOS cells cannot be checked \
+             because fixture-provider declared-rights file {} must be readable: {read_error}",
+            declared_path.display()
+        )],
+        "a missing declared-rights file must be one refusal naming its path"
+    );
+    write_declared_rights_in(provider.path(), "fixture-provider");
+
+    // Rule 5: an ordinary row's Inputs cell against its `Request` arm. One
+    // case per refusal: another name, a missing name, another order, a renamed
+    // field's Rust name, a name the comment above the active attribute
+    // mentions, a bare word where the table writes backticked names, a first
+    // item that is not the backticked `op`, a cell the reader cannot parse and
+    // a name that starts with an arm's name.
+    let provider_paths = provider.path().join("src/main.rs").display().to_string();
+    for (case, cell) in [
+        ("an extra name", "`op`, `config`, `phantom`, `wire_name`"),
+        ("a missing name", "`op`, `config`"),
+        ("another order", "`op`, `wire_name`, `config`"),
+        (
+            "a renamed field's Rust name",
+            "`op`, `config`, `field_name`",
+        ),
+        ("a name a comment names", "`op`, `config`, `stale_name`"),
+        ("a bare word", "`op`, `config`, wire_name"),
+        ("no backticked op", "op, `config`, `wire_name`"),
+        ("no op", "`config`, `wire_name`"),
+        (
+            "an unterminated backtick span",
+            "`op`, `config`, `wire_name",
+        ),
+        ("an empty item", "`op`, , `config`, `wire_name`"),
+        ("a parenthesis", "`op`, `config` (`wire_name`)"),
+        ("an opening parenthesis", "`op`, `config`, `wire(name`"),
+        ("a closing parenthesis", "`op`, `config`, `wire)name`"),
+        ("an empty cell", ""),
+        ("an empty quoted item", "`op`, `config`, ``"),
+        ("a leading empty item", ", `op`, `config`, `wire_name`"),
+        ("a trailing empty item", "`op`, `config`, `wire_name`,"),
+        ("an embedded backtick", "`op`, `config`, `wire`name`"),
+        ("a longer name", "`op`, `config`, `wire_name_extra`"),
+    ] {
+        let document = passing.replacen(&fixture_inputs("init"), cell, 1);
+        assert_ne!(document, passing, "{case} must change the Inputs cell");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init holds the Inputs \
+                 cell {cell}, and {provider_paths} names `op`, `config`, `wire_name`"
+            )],
+            "an Inputs cell with {case} must be refused"
+        );
+    }
+
+    // Pin the cell reader's syntax refusals independently of the field-name
+    // comparison: malformed punctuation may also change the observed name.
+    for cell in [
+        "`op`, `wire(name`",
+        "`op`, `wire)name`",
+        "",
+        "`op`, ``",
+        ", `op`",
+        "`op`, , `config`",
+        "`op`,",
+        "`op`, `config",
+        "`op`, `con`fig`",
+        "`op`, config`",
+    ] {
+        assert_eq!(input_items(cell), None, "malformed Inputs cell: {cell}");
+    }
+
+    // Character punctuation stays inside its literal in every declaration
+    // scan. Each stale cell must name the field it omitted in the refusal.
+    let init_start = ROW_FIXTURE_PROVIDER.find("    Init {").unwrap();
+    let init_end = ROW_FIXTURE_PROVIDER.find("    Status,").unwrap();
+    for field_type in [
+        "[u8; ('}' as usize - '{' as usize)]",
+        "[u8; (b'}' as usize - b'{' as usize)]",
+        "[u8; (']' as usize + ',' as usize)]",
+        r#"[u8; ('"' as usize + '\\' as usize + '\'' as usize)]"#,
+        r#"[u8; ('\u{7d}' as usize - '\x7b' as usize)]"#,
+        "&'static [u8; ('é' as usize + '>' as usize + '<' as usize)]",
+    ] {
+        let mut source = ROW_FIXTURE_PROVIDER.to_string();
+        source.replace_range(
+            init_start..init_end,
+            &format!(
+                "    Init {{\n        config: {field_type},\n        required: String,\n    }},\n"
+            ),
+        );
+        fs::write(&provider_source, source).expect("character literal fixture");
+        let stale = "`op`, `config`";
+        let expected = "`op`, `config`, `required`";
+        assert_eq!(
+            operations_table_row_problems(
+                "fixture-provider",
+                &passing.replacen(&fixture_inputs("init"), stale, 1),
+                provider.path()
+            ),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init holds the Inputs \
+                 cell {stale}, and {provider_paths} names {expected}"
+            )],
+            "character literals in {field_type} must preserve the required field"
+        );
+        assert_eq!(
+            operations_table_row_problems(
+                "fixture-provider",
+                &passing.replacen(&fixture_inputs("init"), expected, 1),
+                provider.path()
+            ),
+            Vec::<String>::new(),
+            "the complete field list must pass for {field_type}"
+        );
+    }
+
+    // A field list whose delimiters do not balance is refused with its own
+    // reason, never read as a shorter list. The `<<` of a shift expression
+    // opens a delimiter that never closes, so every later field would join the
+    // item before it and a cell that omits one would pass.
+    for field_type in [
+        "[u8; 1 << 2]",
+        "[u8; 1 << 2 << 3]",
+        "[u8; (1 << 2) as usize]",
+        "Vec<[u8; 1 << 2]>",
+    ] {
+        let mut source = ROW_FIXTURE_PROVIDER.to_string();
+        source.replace_range(
+            init_start..init_end,
+            &format!(
+                "    Init {{\n        config: {field_type},\n        required: String,\n    }},\n"
+            ),
+        );
+        fs::write(&provider_source, source).expect("unbalanced field list fixture");
+        for cell in ["`op`, `config`", "`op`, `config`, `required`"] {
+            assert_eq!(
+                operations_table_row_problems(
+                    "fixture-provider",
+                    &passing.replacen(&fixture_inputs("init"), cell, 1),
+                    provider.path()
+                ),
+                vec![format!(
+                    "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init holds the \
+                     Inputs cell {cell}, and the Init arm of {provider_paths} cannot be read: \
+                     {UNBALANCED_FIELD_LIST}"
+                )],
+                "an unbalanced field list in {field_type} must be refused, not read"
+            );
+        }
+    }
+
+    // An arrow's `>` needs no opener of its own, so it does not unbalance a
+    // field list and the fields after it stay their own items.
+    for field_type in ["Box<dyn Fn() -> u8>", "[u8; 3 >> 1]", "[u8; 1 > 0]"] {
+        let mut source = ROW_FIXTURE_PROVIDER.to_string();
+        source.replace_range(
+            init_start..init_end,
+            &format!(
+                "    Init {{\n        config: {field_type},\n        required: String,\n    }},\n"
+            ),
+        );
+        fs::write(&provider_source, source).expect("balanced field list fixture");
+        let expected = "`op`, `config`, `required`";
+        assert_eq!(
+            operations_table_row_problems(
+                "fixture-provider",
+                &passing.replacen(&fixture_inputs("init"), expected, 1),
+                provider.path()
+            ),
+            Vec::<String>::new(),
+            "the complete field list must pass for {field_type}"
+        );
+        let stale = "`op`, `config`";
+        assert_eq!(
+            operations_table_row_problems(
+                "fixture-provider",
+                &passing.replacen(&fixture_inputs("init"), stale, 1),
+                provider.path()
+            ),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init holds the Inputs \
+                 cell {stale}, and {provider_paths} names {expected}"
+            )],
+            "the field after {field_type} must still be required"
+        );
+    }
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
+    // Serde removes r# from an identifier, while an explicit rename supplies
+    // its literal wire name even when that name itself starts with r#.
+    for (field, expected, stale) in [
+        ("r#type: String", "`op`, `type`", "`op`, `r#type`"),
+        (
+            "#[serde(rename = \"r#type\")] r#type: String",
+            "`op`, `r#type`",
+            "`op`, `type`",
+        ),
+    ] {
+        let mut source = ROW_FIXTURE_PROVIDER.to_string();
+        source.replace_range(
+            init_start..init_end,
+            &format!("    Init {{\n        {field},\n    }},\n"),
+        );
+        fs::write(&provider_source, source).expect("raw identifier fixture");
+        assert_eq!(
+            operations_table_row_problems(
+                "fixture-provider",
+                &passing.replacen(&fixture_inputs("init"), expected, 1),
+                provider.path()
+            ),
+            Vec::<String>::new(),
+            "the raw identifier's wire name must pass"
+        );
+        assert_eq!(
+            operations_table_row_problems(
+                "fixture-provider",
+                &passing.replacen(&fixture_inputs("init"), stale, 1),
+                provider.path()
+            ),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init holds the Inputs \
+                 cell {stale}, and {provider_paths} names {expected}"
+            )],
+            "the incorrect raw identifier spelling must be refused"
+        );
+    }
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
+    // Unsupported field syntax retains the reader's exact refusal. These
+    // cases exercise each explicit field-attribute and literal refusal.
+    let panic_message = |failure: Box<dyn std::any::Any + Send>| {
+        failure
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| failure.downcast_ref::<&str>().map(|text| text.to_string()))
+            .expect("the reader refusal must carry a string")
+    };
+    for (field, reason) in [
+        (
+            "#serde field: String",
+            "expected a bracketed field attribute",
+        ),
+        (
+            "#[serde(rename = \"wire\") field: String",
+            "unterminated field attribute",
+        ),
+        (
+            "#[serde(rename = \"wire\"] field: String",
+            "unterminated serde attribute",
+        ),
+        (
+            "#[serde(rename(deserialize = \"wire\"))] field: String",
+            "unsupported serde rename syntax; expected rename = <Rust string literal>",
+        ),
+        (
+            "#[serde(rename = \"wire\" extra)] field: String",
+            "unsupported tokens after serde rename string",
+        ),
+        (
+            "#[serde(rename = \"wire\", rename = \"other\")] field: String",
+            "duplicate serde rename",
+        ),
+        (
+            "#[serde(rename = \"wire\", other = 1 << 2)] field: String",
+            "serde attribute: unbalanced parentheses, brackets, braces or angle brackets in the \
+             field list",
+        ),
+    ] {
+        let refusal = std::panic::catch_unwind(|| field_wire_name(field))
+            .expect_err("unsupported field syntax must be refused");
+        assert_eq!(
+            panic_message(refusal),
+            format!("wire field reader: {reason}")
+        );
+    }
+    for (literal, reason) in [
+        ("name", "expected a Rust string literal"),
+        ("r#name", "expected a Rust string literal"),
+        ("r#\"name", "unterminated raw Rust string"),
+        ("\"name", "unterminated Rust string literal"),
+        ("\"name\\", "unterminated Rust string escape"),
+        (r#""\xg0""#, "invalid Rust ASCII escape"),
+        (r#""\x80""#, "Rust ASCII escape exceeds 0x7f"),
+        (r#""\u0""#, "invalid Rust Unicode escape"),
+        ("\"\\u{1", "unterminated Rust Unicode escape"),
+        (r#""\u{}""#, "invalid Rust Unicode escape"),
+        (r#""\u{d800}""#, "invalid Rust Unicode scalar"),
+        ("\"\\\rx\"", "invalid Rust line continuation"),
+        (r#""\q""#, "unsupported Rust string escape"),
+    ] {
+        assert_eq!(rust_string_literal(literal), Err(reason));
+        let field = format!("#[serde(rename = {literal})] field: String");
+        // An unclosed literal also keeps its own reason through the direct
+        // rename reader when its attribute delimiter is reachable.
+        if !reason.starts_with("unterminated") {
+            let refusal = std::panic::catch_unwind(|| field_wire_name(&field))
+                .expect_err("unsupported rename literal must be refused");
+            assert_eq!(
+                panic_message(refusal),
+                format!("wire field reader: serde rename: {reason}")
+            );
+        }
+    }
+    let refusal = std::panic::catch_unwind(|| without_comments("'\\"))
+        .expect_err("an unclosed character escape must be refused");
+    assert_eq!(
+        panic_message(refusal),
+        "wire field reader: unterminated Rust character escape"
+    );
+
+    // Rule 5: the fixture table's other ordinary rows name their own fields, so
+    // a two-field arm and a fieldless arm each keep their own expected cell.
+    for (operation, cell) in [
+        ("echo", "`op`, `retry`, `message`"),
+        ("shutdown", "`op`, `reason`"),
+    ] {
+        let row = passing_fixture_row(operation);
+        let changed = fixture_row(
+            operation,
+            cell,
+            &fixture_outputs(operation),
+            NO_DECLARED_RIGHT,
+            "answers from the in-memory store",
+            "`tests/confine.rs::present_case` shows the answer.",
+            LINUX_STATUS,
+        );
+        let document = passing.replacen(&row, &changed, 1);
+        assert_ne!(document, passing, "{operation} must change the Inputs cell");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {operation} holds the \
+                 Inputs cell {cell}, and {provider_paths} names {}",
+                fixture_inputs(operation)
+            )],
+            "{operation} must name its arm's fields in declaration order"
+        );
+    }
+
+    // Rule 5: an attribute string that holds a copy of the arm without one of
+    // its fields is text, so a cell that follows the copy is still refused.
+    let documented = ROW_FIXTURE_PROVIDER.replacen(
+        "    Init {\n        config: Value,\n",
+        "    #[doc = \"\n    Init { config: Value },\n    \"]\n    Init {\n        config: Value,\n",
+        1,
+    );
+    assert_ne!(documented, ROW_FIXTURE_PROVIDER);
+    fs::write(&provider_source, &documented).expect("documented arm fixture");
+    let stale = "`op`, `config`";
+    assert_eq!(
+        operations_table_row_problems(
+            "fixture-provider",
+            &passing.replacen(&fixture_inputs("init"), stale, 1),
+            provider.path()
+        ),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init holds the Inputs cell \
+             {stale}, and {provider_paths} names `op`, `config`, `wire_name`"
+        )],
+        "an arm spelled inside an attribute string must not hide a declared field"
+    );
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &passing, provider.path()),
+        Vec::<String>::new(),
+        "the real arm's fields must be the ones the passing table names"
+    );
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
+    // Rule 5: a `wallet_contract` row is read. The fixture dispatch declares
+    // the operation enum beside the fixture `class()`, so this cell is checked
+    // against that declaration, through the one `contract_enum_text` reader. A
+    // cell that is not that shape is one problem naming the source.
+    let contract_label = provider_source.display().to_string();
+    let listed = fixture_inputs("wallet_contract list_accounts");
+    let garbage = passing.replacen(
+        &format!("| wallet_contract list_accounts | {listed} |"),
+        "| wallet_contract list_accounts | garbage |",
+        1,
+    );
+    assert_ne!(garbage, passing, "the contract row's cell must change");
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &garbage, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row wallet_contract \
+             list_accounts holds the Inputs cell garbage, and {contract_label} names {listed}"
+        )],
+        "a wallet_contract row's Inputs cell must be read"
+    );
+
+    // The bare word `none` and a field named `none` stay apart. The empty arm
+    // passes on `params` (none) and is refused on `params` (`none`). The
+    // renamed field is refused on the bare word and passes on the backticks.
+    // A `params` list that drops, reorders or adds a name is refused by
+    // `inputs_match`. The enum is fixture source, not the contract crate.
+    let contract_dispatch = "\
+        WalletProviderOperationV2::Empty {} => self.empty(),\n        \
+        WalletProviderOperationV2::NamedNone { field } => self.named(field),\n        \
+        WalletProviderOperationV2::Pair { beta, alpha } => self.pair(beta, alpha),\n";
+    let contract_enum = "\
+enum WalletProviderOperationV2 {
+    Empty {},
+    NamedNone {
+        #[serde(rename = \"none\")]
+        field: String,
+    },
+    Pair {
+        beta: u8,
+        alpha: u8,
+    },
+}
+";
+    let contract_source = ROW_FIXTURE_PROVIDER
+        .replace(
+            "        WalletProviderOperationV2::ListAccounts { include_revoked } => self.accounts(*include_revoked),\n",
+            contract_dispatch,
+        )
+        .replace(
+            "enum WalletProviderOperationV2 {\n    ListAccounts {\n        include_revoked: bool,\n    },\n}",
+            contract_enum.trim_end(),
+        )
+        .replace(
+            "Self::ListAccounts { .. } => WalletOperationClass::Read",
+            "Self::Empty { .. } => WalletOperationClass::Read",
+        );
+    assert_ne!(contract_source, ROW_FIXTURE_PROVIDER);
+    assert!(
+        contract_source.contains("    Empty {},"),
+        "the fixture contract source must declare its own kinds"
+    );
+    fs::write(&provider_source, &contract_source).expect("fixture contract source");
+    write_capsule_manifest_declaring(
+        provider.path(),
+        &[
+            "init",
+            "status",
+            "echo",
+            "shutdown",
+            "wallet_contract empty",
+            "wallet_contract named_none",
+            "wallet_contract pair",
+        ],
+    );
+    let contract_cell = |kind: &str, params: &str| {
+        format!("`op`, `request` (`kind: {kind}`, `params` ({params})), `_runtime_invocation`")
+    };
+    // The fixture `class()` names `Empty` in its `Read` arm and lets the
+    // catch-all arm carry `NamedNone` and `Pair`, so the fixture table
+    // exercises both arms: the `Read` kind answers from memory under no right,
+    // and each `Effectful` kind holds `storage` and names the store it writes.
+    let contract_none_cell = contract_cell("empty", "none");
+    let mut contract_document = fixture_row_document(&["init", "status", "echo", "shutdown"]);
+    contract_document.push_str(&fixture_none_row(
+        "wallet_contract empty",
+        &contract_none_cell,
+        &fixture_outputs("wallet_contract empty"),
+    ));
+    for (kind, params) in [("named_none", "`none`"), ("pair", "`beta`, `alpha`")] {
+        contract_document.push_str(&fixture_storage_row(
+            &format!("wallet_contract {kind}"),
+            &contract_cell(kind, params),
+            &fixture_outputs(&format!("wallet_contract {kind}")),
+        ));
+    }
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &contract_document, provider.path()),
+        Vec::<String>::new(),
+        "the fixture contract rows must pass"
+    );
+    let bare_params = param_field_items(&[]);
+    let named_params = param_field_items(&["none".to_string()]);
+    assert_ne!(
+        bare_params, named_params,
+        "a bare none and a field named none are different items"
+    );
+    for (items, other) in [(&bare_params, &named_params), (&named_params, &bare_params)] {
+        let text = render_inputs(items);
+        let parsed = input_items(&text).expect("the rendered item must parse");
+        assert!(
+            inputs_match(&parsed, items),
+            "render_inputs must parse back to {text}"
+        );
+        assert!(
+            !inputs_match(&parsed, other),
+            "render_inputs of {text} must not parse back to the other item"
+        );
+    }
+    let fixture_label = provider_source.display().to_string();
+    for (case, kind, params) in [
+        (
+            "the bare marker on a field named none",
+            "named_none",
+            "none",
+        ),
+        ("a backticked none on an empty arm", "empty", "`none`"),
+        ("a dropped params name", "pair", "`beta`"),
+        ("a reordered params list", "pair", "`alpha`, `beta`"),
+        ("an added params name", "pair", "`beta`, `alpha`, `extra`"),
+    ] {
+        let good = contract_cell(
+            kind,
+            match kind {
+                "empty" => "none",
+                "named_none" => "`none`",
+                _ => "`beta`, `alpha`",
+            },
+        );
+        let bad = contract_cell(kind, params);
+        assert_ne!(good, bad, "{case} must change the cell");
+        let observed = input_items(&bad).expect("{case} must parse");
+        let fields: Vec<String> = match kind {
+            "empty" => Vec::new(),
+            "named_none" => vec!["none".to_string()],
+            _ => vec!["beta".to_string(), "alpha".to_string()],
+        };
+        let expected = contract_row_inputs(
+            kind,
+            &["request".to_string(), "_runtime_invocation".to_string()],
+            &fields,
+        );
+        assert!(
+            !inputs_match(&observed, &expected),
+            "{case} must fail inputs_match"
+        );
+        let document = contract_document.replacen(
+            &format!("| wallet_contract {kind} | {good} |"),
+            &format!("| wallet_contract {kind} | {bad} |"),
+            1,
+        );
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row wallet_contract {kind} \
+                 holds the Inputs cell {bad}, and {fixture_label} names {good}"
+            )],
+            "{case} must be one refusal"
+        );
+    }
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+    write_capsule_manifest_in(provider.path());
+
+    // Rule 5: every source refusal keeps its own reason that names the file.
+    for (case, anchor, replacement, reason) in [
+        (
+            "a missing enum Request",
+            "enum Request {",
+            "enum OtherRequest {",
+            format!(
+                "Inputs cells cannot be checked because {provider_paths} declares no enum Request"
+            ),
+        ),
+        (
+            "no declared arm for the row",
+            "    Echo {\n        message: String,\n        retry: u64,\n    },\n",
+            "",
+            format!(
+                "row echo holds the Inputs cell `op`, `message`, `retry`, and {provider_paths} \
+                 declares no Echo arm"
+            ),
+        ),
+        (
+            "a longer declaration name than the row's arm",
+            "    Echo {",
+            "    EchoExtra {",
+            format!(
+                "row echo holds the Inputs cell `op`, `message`, `retry`, and {provider_paths} \
+                 declares no Echo arm"
+            ),
+        ),
+    ] {
+        assert_eq!(
+            ROW_FIXTURE_PROVIDER.matches(anchor).count(),
+            1,
+            "{case} has one anchor"
+        );
+        fs::write(
+            &provider_source,
+            ROW_FIXTURE_PROVIDER.replacen(anchor, replacement, 1),
+        )
+        .expect("source refusal fixture");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &passing, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} {reason}"
+            )],
+            "{case} must keep its exact refusal"
+        );
+        fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+    }
+
+    // Rule 5: a declaration file the caller cannot read keeps its own reason
+    // that names the path. Wallet declares `Request` in `src/protocol.rs`, so a
+    // fixture provider folder without that file is refused by name.
+    let wallet_fixture = tempfile::tempdir().expect("temporary wallet fixture folder");
+    fs::create_dir_all(wallet_fixture.path().join("src")).expect("wallet fixture src folder");
+    fs::write(
+        wallet_fixture.path().join("src/main.rs"),
+        ROW_FIXTURE_PROVIDER,
+    )
+    .expect("wallet fixture provider source");
+    write_declared_rights_in(wallet_fixture.path(), "wallet-provider");
+    write_capsule_manifest_in(wallet_fixture.path());
+    let protocol_path = wallet_fixture.path().join("src/protocol.rs");
+    let missing = operations_table_row_problems("wallet-provider", &passing, wallet_fixture.path());
+    assert_eq!(
+        missing.len(),
+        1,
+        "an unreadable declaration file must be one refusal: {missing:?}"
+    );
+    assert!(
+        missing[0].starts_with(&format!(
+            "wallet-provider CONFINEMENT.md: {OPERATIONS_HEADING} Inputs cells cannot be checked \
+             because {} is not readable",
+            protocol_path.display()
+        )),
+        "an unreadable declaration file must keep its own reason: {}",
+        missing[0]
+    );
+    let read_error = fs::read_to_string(&protocol_path).expect_err("missing declaration source");
+    assert_eq!(
+        missing,
+        vec![format!(
+            "wallet-provider CONFINEMENT.md: {OPERATIONS_HEADING} Inputs cells cannot be checked \
+             because {} is not readable: {read_error}",
+            protocol_path.display()
+        )]
+    );
+    fs::write(&protocol_path, ROW_FIXTURE_PROVIDER).expect("wallet fixture declaration source");
+    assert_eq!(
+        operations_table_row_problems("wallet-provider", &passing, wallet_fixture.path()),
+        Vec::<String>::new(),
+        "the declaration file the caller reads must be the one the names come from"
+    );
+
+    // Rule 5: a provider source with no `fn handle` keeps its own reason, and
+    // the row-set rule keeps its own line beside it.
+    let no_handle = ROW_FIXTURE_PROVIDER.replace("fn handle(", "fn answer(");
+    assert_ne!(no_handle, ROW_FIXTURE_PROVIDER);
+    fs::write(&provider_source, &no_handle).expect("no-handle fixture provider source");
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &passing, provider.path()),
+        vec![
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set cannot be checked \
+                 because {provider_paths} holds no fn handle"
+            ),
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} Inputs cells cannot be \
+                 checked because {provider_paths} holds no fn handle"
+            ),
+        ],
+        "a source with no fn handle must keep both reasons"
+    );
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
+    fs::remove_file(&provider_source).expect("remove fixture dispatch source");
+    let read_error = fs::read_to_string(&provider_source).expect_err("missing dispatch source");
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &passing, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set cannot be checked \
+             because {provider_paths} is not readable: {read_error}"
+        )],
+        "an unreadable dispatch file must keep its exact refusal"
+    );
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
+    // Rule 6: the Outputs cell follows the handler. One case per refusal: a key
+    // the literal writes and the cell omits, a key the cell names and the
+    // literal does not write, two `json!` answers in one handler, a wrong error
+    // envelope name, the `empty_ok` text on a `data` row and a `data` side on
+    // the `empty_ok` row.
+    for (case, operation, cell) in [
+        (
+            "a literal key the cell omits",
+            "init",
+            "ok: `status`, `data` (`provider`). error: `status`, `code`, `message`",
+        ),
+        (
+            "a key the cell names and the literal omits",
+            "init",
+            "ok: `status`, `data` (`provider`, `wire_name`, `phantom`). error: `status`, `code`, \
+             `message`",
+        ),
+        (
+            "a wrong error name",
+            "status",
+            "ok: `status`, `data` (`supported_operations`). error: `status`, `error`, `message`",
+        ),
+        (
+            "the empty_ok text on a data row",
+            "status",
+            "ok: `{\"status\":\"ok\"}` only. error: `status`, `code`, `message`",
+        ),
+        (
+            "a data side on the empty_ok row",
+            SHUTDOWN_OPERATION,
+            "ok: `status`, `data` (`message`). error: `status`, `code`, `message`",
+        ),
+    ] {
+        let document = passing.replacen(&fixture_outputs(operation), cell, 1);
+        assert_ne!(document, passing, "{case} must change the Outputs cell");
+        let problems =
+            operations_table_row_problems("fixture-provider", &document, provider.path());
+        assert_eq!(
+            problems.len(),
+            1,
+            "{case} must be one refusal: {problems:?}"
+        );
+        assert!(
+            problems[0].contains(&format!("row {operation} holds the Outputs cell {cell}")),
+            "{case} must name the row and the cell: {}",
+            problems[0]
+        );
+    }
+
+    // Rule 6: two `json!` answers in one handler region are a refusal that names
+    // the region, because the rule cannot tell which one answers the call.
+    let two_literals = ROW_FIXTURE_PROVIDER.replacen(
+        "fn status(&self) -> Response {\n    Response::ok(json!({ \"supported_operations\": [\"status\"] }))\n}",
+        "fn status(&self) -> Response {\n    let _first = json!({ \"supported_operations\": \
+         [\"status\"] });\n    Response::ok(json!({ \"supported_operations\": [\"status\"] }))\n}",
+        1,
+    );
+    assert_ne!(
+        two_literals, ROW_FIXTURE_PROVIDER,
+        "the fixture must change"
+    );
+    fs::write(&provider_source, &two_literals).expect("two-literal fixture provider source");
+    let problems = operations_table_row_problems("fixture-provider", &passing, provider.path());
+    assert_eq!(
+        problems,
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status holds the Outputs \
+             cell {}, and fn status of {provider_paths} writes 2 json! answers, and one handler \
+             writes one",
+            fixture_outputs("status")
+        )],
+        "two json! answers in one handler must be one refusal naming the region"
+    );
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
+    // Rule 6: a renamed serde tag is a refusal, because the expected error side
+    // is the tag the `Response` declaration names.
+    let renamed_tag = ROW_FIXTURE_PROVIDER.replacen(
+        "#[serde(tag = \"status\", rename_all = \"snake_case\")]",
+        "#[serde(tag = \"outcome\", rename_all = \"snake_case\")]",
+        1,
+    );
+    assert_ne!(renamed_tag, ROW_FIXTURE_PROVIDER, "the tag must change");
+    fs::write(&provider_source, &renamed_tag).expect("renamed-tag fixture provider source");
+    let problems = operations_table_row_problems("fixture-provider", &passing, provider.path());
+    assert_eq!(
+        problems.len(),
+        FIXTURE_OPERATIONS.len(),
+        "a renamed tag must be refused on every row: {problems:?}"
+    );
+    for (problem, operation) in problems.iter().zip(FIXTURE_OPERATIONS.iter()) {
+        assert_eq!(
+            problem,
+            &format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {operation} holds the \
+                 Outputs cell {}, and {provider_paths} names the error side `outcome`, `code`, \
+                 `message`",
+                fixture_outputs(operation)
+            ),
+            "the refusal must name the rule, the row and the renamed tag"
+        );
+    }
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
+    // Rule 6: a `wallet_contract` field the struct does not declare is refused,
+    // and the struct's own declaration order is the one expected list.
+    let contract_path = wallet_operation_contract_path();
+    let listed = fixture_outputs("wallet_contract list_accounts");
+    let extra_field = listed.replacen(
+        "`result` from `WalletProviderResponseV2`",
+        "`phantom` from `WalletProviderResponseV2`",
+        1,
+    );
+    assert_ne!(extra_field, listed, "the contract Outputs cell must change");
+    let document = passing.replacen(&listed, &extra_field, 1);
+    assert_ne!(document, passing, "the contract row must change");
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row wallet_contract \
+             list_accounts holds the Outputs cell {extra_field}, and {} names `status`, `data` \
+             (`schema`, `protocol_version`, `request_id`, `operation`, `audit_id`, `lifecycle_id`, \
+             `session_binding`, `account_binding`, `approval_binding`, `result`)",
+            contract_path.display()
+        )],
+        "a wallet_contract field the struct does not declare must be refused"
+    );
+
+    // Rule 8: the Effect cell follows the right and the dispatch class. One
+    // case per refusal: a `none:` row that names a canonical parameter, a
+    // `none:` row that quotes an allow form, a `storage` row that names no
+    // root, a `Read` kind that claims the store write, and an `Effectful` kind
+    // that claims only in-memory work.
+    let effect_cases: Vec<(&str, String, String)> = vec![
+        (
+            "a none: row that names the storage root",
+            passing.replacen(
+                "| answers from the in-memory store |",
+                &format!("| answers from memory under `{STORAGE_ROOT_PARAM}` |"),
+                1,
+            ),
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status is \
+                 {NO_DECLARED_RIGHT} and its Effect cell names {STORAGE_ROOT_PARAM}"
+            ),
+        ),
+        (
+            "a none: row that quotes an allow form",
+            passing.replacen(
+                "| answers from the in-memory store |",
+                &format!("| answers in memory, `{}` |", STARTUP_RULES[1]),
+                1,
+            ),
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status is \
+                 {NO_DECLARED_RIGHT} and quotes the allow form `{}` in its Effect cell",
+                STARTUP_RULES[1]
+            ),
+        ),
+        (
+            "a storage row that names no storage root",
+            passing.replacen(&fixture_storage_effect(), "writes its key file", 1),
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init names the Right \
+                 `storage` and its Effect cell names no {STORAGE_ROOT_PARAM}"
+            ),
+        ),
+    ];
+    for (case, document, reason) in effect_cases {
+        assert_ne!(document, passing, "{case} must change the fixture");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![reason],
+            "{case} must be refused as one problem"
+        );
+    }
+
+    // Rule 8: the `Read` kind that claims the store write, and the `Effectful`
+    // kind that claims only in-memory work, both follow the fixture `class()`.
+    {
+        let operation = "wallet_contract list_accounts";
+        let document = passing.replacen(
+            &passing_fixture_row(operation),
+            &fixture_row(
+                operation,
+                &fixture_inputs(operation),
+                &fixture_outputs(operation),
+                NO_DECLARED_RIGHT,
+                &format!("writes `{STORE_FILE_NAME}`"),
+                "`tests/confine.rs::present_case` shows the answer.",
+                LINUX_STATUS,
+            ),
+            1,
+        );
+        assert_ne!(document, passing, "the Read kind's Effect cell must change");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {operation} names the \
+                 kind list_accounts, which fn class gives {READ_CLASS}, and its Effect cell names \
+                 {STORE_FILE_NAME}"
+            )],
+            "the Read kind that claims the store write must be refused"
+        );
+    }
+
     // Rule 4: a Linux cell that is not `designed, not enforced`, one per row.
     let enforced = passing.replace(LINUX_STATUS, "enforced by Landlock");
     assert_ne!(enforced, passing, "the fixture must name its Linux cells");
@@ -9379,6 +19751,167 @@ fn operations_table_row_check_refuses_each_bad_table() {
             "the refusal must name the rule, the row and the value"
         );
     }
+
+    // Rule 7: the manifest declares only operations the provider answers. One
+    // case per refusal, and the passing table with its manifest present still
+    // returns no problem.
+    let manifest_read = |manifest: Value| -> Vec<String> {
+        fs::write(&manifest_path, manifest.to_string()).expect("fixture capsule manifest");
+        operations_table_row_problems("fixture-provider", &passing, provider.path())
+    };
+    let mut phantom = row_check_capsule_manifest();
+    phantom["authority"]["capabilities"][0][MANIFEST_OPERATIONS_FIELD][1] =
+        json!("phantom_operation");
+    let mut no_operations = row_check_capsule_manifest();
+    no_operations["authority"]["capabilities"][0]
+        .as_object_mut()
+        .expect("the fixture capability is an object")
+        .remove(MANIFEST_OPERATIONS_FIELD);
+    let mut not_a_string = row_check_capsule_manifest();
+    not_a_string["authority"]["capabilities"][0][MANIFEST_OPERATIONS_FIELD][1] = json!(7);
+    let mut renamed_method = row_check_capsule_manifest();
+    renamed_method["interfaces"][0]["methods"][1][MANIFEST_OPERATION_FIELD] =
+        json!("status_renamed");
+    let mut no_method_operation = row_check_capsule_manifest();
+    no_method_operation["interfaces"][0]["methods"][1]
+        .as_object_mut()
+        .expect("the fixture method is an object")
+        .remove(MANIFEST_OPERATION_FIELD);
+    let mut no_method_id = row_check_capsule_manifest();
+    no_method_id["interfaces"][0]["methods"][1]
+        .as_object_mut()
+        .expect("the fixture method is an object")
+        .remove("id");
+    let mut no_capabilities = row_check_capsule_manifest();
+    no_capabilities["authority"]
+        .as_object_mut()
+        .expect("the fixture authority is an object")
+        .remove("capabilities");
+    let mut empty_capabilities = row_check_capsule_manifest();
+    empty_capabilities["authority"]["capabilities"] = json!([]);
+    for (case, manifest, reason) in [
+        (
+            "a declared operation the provider does not answer",
+            phantom,
+            vec![format!(
+                "{OPERATIONS_HEADING} {} declares the operation phantom_operation, and {} does \
+                 not answer it",
+                manifest_path.display(),
+                provider_paths
+            )],
+        ),
+        (
+            "a capability with no operations list",
+            no_operations,
+            vec![format!(
+                "{OPERATIONS_HEADING} capability entry in {} holds no \
+                 {MANIFEST_OPERATIONS_FIELD} list",
+                manifest_path.display()
+            )],
+        ),
+        (
+            "an operations item that is not a string",
+            not_a_string,
+            vec![format!(
+                "{OPERATIONS_HEADING} capability entry in {} holds an item of its \
+                 {MANIFEST_OPERATIONS_FIELD} list that is not a string: 7",
+                manifest_path.display()
+            )],
+        ),
+        (
+            "a method whose operation differs from its id",
+            renamed_method,
+            vec![
+                format!(
+                    "{OPERATIONS_HEADING} interface method in {} names the id status and the \
+                     operation status_renamed, and its operation must be its id",
+                    manifest_path.display()
+                ),
+                format!(
+                    "{OPERATIONS_HEADING} {} declares the operation status_renamed, and {} does \
+                     not answer it",
+                    manifest_path.display(),
+                    provider_paths
+                ),
+            ],
+        ),
+        (
+            "a method with no operation string",
+            no_method_operation,
+            vec![format!(
+                "{OPERATIONS_HEADING} interface method in {} holds an \
+                 {MANIFEST_OPERATION_FIELD} that is not a string: {{\"id\":\"status\"}}",
+                manifest_path.display()
+            )],
+        ),
+        (
+            "a method with no id string",
+            no_method_id,
+            vec![format!(
+                "{OPERATIONS_HEADING} interface method in {} holds no id string beside its \
+                 operation status",
+                manifest_path.display()
+            )],
+        ),
+        (
+            "no authority.capabilities entry",
+            no_capabilities,
+            vec![format!(
+                "{OPERATIONS_HEADING} declared operations cannot be checked because {} holds no \
+                 authority.capabilities entry",
+                manifest_path.display()
+            )],
+        ),
+        (
+            "an empty authority.capabilities",
+            empty_capabilities,
+            vec![format!(
+                "{OPERATIONS_HEADING} declared operations cannot be checked because {} holds no \
+                 authority.capabilities entry",
+                manifest_path.display()
+            )],
+        ),
+    ] {
+        let problems = manifest_read(manifest);
+        let expected: Vec<String> = reason
+            .iter()
+            .map(|reason| format!("fixture-provider CONFINEMENT.md: {reason}"))
+            .collect();
+        assert_eq!(
+            problems, expected,
+            "{case} must keep its exact refusal naming the manifest and the field"
+        );
+    }
+    fs::write(&manifest_path, "not JSON").expect("unparsable fixture capsule manifest");
+    let unparsable = fs::read_to_string(&manifest_path).expect("unparsable manifest text");
+    let json_error = serde_json::from_str::<Value>(&unparsable)
+        .expect_err("the unparsable fixture text must not be JSON");
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &passing, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} declared operations cannot be \
+             checked because {} is not valid JSON: {json_error}",
+            manifest_path.display()
+        )],
+        "a manifest that is not JSON must keep its exact refusal"
+    );
+    fs::remove_file(&manifest_path).expect("remove fixture capsule manifest");
+    let read_error = fs::read_to_string(&manifest_path).expect_err("missing capsule manifest");
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &passing, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} declared operations cannot be \
+             checked because {} is not readable: {read_error}",
+            manifest_path.display()
+        )],
+        "a missing manifest is a refusal, never a skipped provider"
+    );
+    write_capsule_manifest_in(provider.path());
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &passing, provider.path()),
+        Vec::<String>::new(),
+        "the passing table with its manifest present must return no problem"
+    );
 }
 
 /// The one contract check refuses a profile that omits the explicit network
