@@ -1,4 +1,4 @@
-# plan-approval lab: preview, approve, deny or leave a shown step pending
+# plan-approval lab: preview, approve, deny, stop or leave a shown step pending
 
 This crate is the approval half of the agent plan approval slice. It follows
 [`docs/AGENT_ARCHITECTURE.md`](../../docs/AGENT_ARCHITECTURE.md), Request flow
@@ -38,11 +38,27 @@ The design keeps this pending state for every settlement kind:
 > approval requests that remain pending across UI, Agent Host, or Runtime
 > restart until approved, denied, expired, revoked, or cancelled;
 
-`preview`, `plan_sha256`, `approve`, `execute` and `deny_shown_plan` are
-unchanged by this slice. This crate calls `agent_conformance::standin_runtime`
-and does not copy it. There is one stand-in and one hasher. The June planner
-path is an open question with Sash via Flint; this crate names no planner and
-guesses no path.
+`stop_shown_session` is the other settlement the design names:
+
+> an explicit interrupt or cancel operation that reports its settlement
+
+A stop is that cancel. It only calls the stand-in's `delete_capsule` as the
+shell with the reason `stop the shown session`, takes no plan and no approved
+flag, and returns that result; Ok is JSON null. The shown steps come from
+`journeys::request`, and the allowed step comes from `approve`. The stopped
+session's pending step is denied by the runtime with the cause
+`stopped: stop the shown session`, and that session's allow-once grant is
+revoked, so `execute` refuses it with `grant is not live: Revoked`. The
+granted record stays `granted`. The other session's step stays pending and can
+still be allowed once.
+
+`preview`, `plan_sha256`, `approve`, `execute`, `deny_shown_plan` and
+`age_shown_plan` are unchanged by this slice. This crate calls
+`agent_conformance::standin_runtime` and does not copy it. There is one
+stand-in and one hasher. The stand-in keeps one admitted row per lab CID, so
+the one launch journey admits a distinct fixture CID for each session after
+the first; it adds no second launch path. The June planner path is an open
+question with Sash via Flint; this crate names no planner and guesses no path.
 
 A passing run gives the Runtime no A15 credit. Approval binding (step 8, where
 an allow-once decision authorises one exact operation, and principle 16, "A
@@ -52,14 +68,16 @@ RA-5 stay open.
 ## Layout
 
 - `src/lib.rs`: `Preview`, `preview`, `plan_sha256`, `approve`,
-  `age_shown_plan`, `deny_shown_plan`, `execute`, `preview_makes_no_effect`,
-  `plan_sha256_hashes_the_exact_bytes`, `deny_one_shown_step`,
-  `unanswered_shown_step_expires` and the bound-plan journey.
+  `age_shown_plan`, `deny_shown_plan`, `stop_shown_session`, `execute`,
+  `preview_makes_no_effect`, `plan_sha256_hashes_the_exact_bytes`,
+  `deny_one_shown_step`, `unanswered_shown_step_expires`,
+  `stop_settles_that_sessions_shown_steps` and the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib stop_settles_that_sessions_shown_steps -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib unanswered_shown_step_expires -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib deny_one_shown_step -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib preview_makes_no_effect -- --exact
