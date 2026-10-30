@@ -1,0 +1,7 @@
+head 011d01f283a3f4ed4717383ecedf55622d451b4d
+branch cursor/a6-a12-evidence-fix-6e3b
+pr https://github.com/Elacity/elastos-agent-host-spike/pull/343
+dd0b60dfa6950e8d116eb22ee2d23d435d1893b3b93d79785d4fbd76440e670b  /workspace/lab/review-a6-a12-343/subject/a6.rs
+058cb6ecc32d467a426880dd7711cbc25ba2f8f800e73ef0c43cb280b7d081e1  /workspace/lab/review-a6-a12-343/subject/a12.rs
+589b0b163c65fc37f4c94012c472cc775a48cdadb30757ce9a52923dc87d0345  /workspace/lab/review-a6-a12-343/subject/existing.rs
+1691058fbc81409a93ce8bbfb70b1bce8ff144c3156d2726762f044c1a8246cb  /workspace/lab/review-a6-a12-343/subject/lib.rs

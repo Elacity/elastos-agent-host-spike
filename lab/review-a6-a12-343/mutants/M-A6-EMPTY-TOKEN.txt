@@ -1,0 +1,9 @@
+id: M-A6-EMPTY-TOKEN
+file: src/a6.rs
+tests: tests::a6_owner_may_use_own_session_token, tests::a6_sibling_presenting_owner_token_is_refused
+--- old
+    if token_capsule != caller_capsule {
+--- new
+    if !token_capsule.is_empty() && token_capsule != caller_capsule {
+--- end
+# Empty token and empty caller are accepted. Empty token as instance-2 is accepted.
