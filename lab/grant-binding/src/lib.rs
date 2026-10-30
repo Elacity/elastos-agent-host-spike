@@ -60,6 +60,25 @@ pub struct GuestRequest {
     pub forged_child_journal: bool,
 }
 
+/// The grant store's entry for one handle: the binding and the end mark that
+/// refuses every later use (M1 check A7, condition c).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EndedGrant {
+    pub(crate) record: GrantRecord,
+    pub(crate) ended: bool,
+}
+
+/// One ended binding a hold still keeps until its last hold clears.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeldGrant {
+    pub(crate) record: GrantRecord,
+}
+
+/// The record `resolve` compares once the handle is known to be live.
+fn live_record(grant: EndedGrant) -> GrantRecord {
+    grant.record
+}
+
 /// The stored binding that decides a use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GrantRecord {
@@ -124,7 +143,7 @@ struct InstanceRecord {
 #[derive(Debug)]
 pub struct Verifier {
     registry: HashMap<InstanceId, InstanceRecord>,
-    grants: HashMap<Handle, GrantRecord>,
+    grants: HashMap<Handle, EndedGrant>,
     next_instance: u64,
     next_handle: u64,
     #[allow(dead_code)] // later slices fill the ledger
@@ -182,12 +201,15 @@ impl Verifier {
         let handle = Handle(self.next_handle);
         self.grants.insert(
             handle,
-            GrantRecord {
-                identity: record.identity.clone(),
-                session: record.session.clone(),
-                instance,
-                owned_root,
-                rights,
+            EndedGrant {
+                record: GrantRecord {
+                    identity: record.identity.clone(),
+                    session: record.session.clone(),
+                    instance,
+                    owned_root,
+                    rights,
+                },
+                ended: false,
             },
         );
         Ok(handle)
@@ -223,6 +245,11 @@ impl Verifier {
             .get(&handle)
             .cloned()
             .ok_or(Refuse::UnknownHandle)?;
+        if grant.ended {
+            return Err(Refuse::UnknownHandle);
+        }
+        let bound = live_record(grant);
+        let grant = &bound;
         let live = self
             .registry
             .get(&call.instance)
@@ -236,7 +263,34 @@ impl Verifier {
         if call.instance != grant.instance {
             return Err(Refuse::Instance);
         }
-        Ok(grant)
+        Ok(bound)
+    }
+
+    /// The one handle check for a hold that outlived its grant's end: resolves
+    /// the ledger's kept ended binding and compares it with the registry
+    /// record of the call's instance, the same way `resolve` does. A handle
+    /// that did not end has no binding here, so `settle`, `release` and
+    /// `timeout_hold` fall back to `resolve`.
+    pub(crate) fn resolve_kept(&self, call: Call, handle: Handle) -> Result<GrantRecord, Refuse> {
+        let held = {
+            let ledger = self.ledger.lock().expect("ledger lock");
+            ledger.ended.get(&handle).cloned()
+        }
+        .ok_or(Refuse::UnknownHandle)?;
+        let live = self
+            .registry
+            .get(&call.instance)
+            .ok_or(Refuse::UnknownInstance)?;
+        if live.identity != held.record.identity {
+            return Err(Refuse::Identity);
+        }
+        if live.session != held.record.session {
+            return Err(Refuse::Session);
+        }
+        if call.instance != held.record.instance {
+            return Err(Refuse::Instance);
+        }
+        Ok(held.record)
     }
 
     /// Uses a grant for one path. The path must be the stored owned root or a

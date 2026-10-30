@@ -2,7 +2,13 @@ id: F-A7-rlceil
 file: src/ledger.rs
 test: ledger::model_forged_ceiling_does_not_move_the_release
 --- old
+        // A hold that opened before its grant ended resolves through the kept
+        // binding; every other refusal stands as `resolve` made it.
         self.resolve(*call, request.handle)
+            .or_else(|refusal| match refusal {
+                Refuse::UnknownHandle => self.resolve_kept(*call, request.handle),
+                refusal => Err(refusal),
+            })
             .map_err(ReleaseRefuse::Binding)?;
 --- new
         let mut instance = call.instance;
