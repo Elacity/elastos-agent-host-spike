@@ -1256,3 +1256,104 @@ command set (the fmt check and the twenty-two test commands in the task) took 1.
 This lane has no `falsifiers.json`; no id is added.
 
 029: `journeys::request` takes the reason it is given and sends it on the one submit; `shown_request_reason_is_not_the_grant` proves the reason stays on the request, a pending or granted status body and a live grant carry none, and `approved` mints nothing; two hand-run plants caught and restored.
+
+## 030
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md) Non-negotiable boundaries:
+
+> A visible approval card is not the grant authority.
+
+This task proves the rationale the owner states with the grant. `approve` gains
+`rationale: &str` after `plan_sha256`, sends it unchanged as the route's `rationale` key,
+and returns that route's result. It matches no `Caller`, no `duration`, no hash and no
+rationale, contains no `Shell auto-grant` or `owner approved`, and adds no function. Every
+existing call passes `"owner approved"`; no other argument and no assertion changed.
+
+`shown_grant_rationale_is_not_the_grant` drives two sessions through `running_agent`. A
+client approval before any request exists is the shell-only refusal and stores no capsule,
+request or grant. Three requests go through `request`: `request-1` stores `show this
+step`, `request-2` stores `approved`, and `request-3` stores `""` on the write action. A
+client approval, a duration of `standing`, a mismatched plan hash and an unknown request
+id each store nothing and mint nothing. The shell's `once` grant with rationale `show this
+grant` stores that text as `decision_reason` while the reason stays `show this step`; the
+granted status body is `{"status":"granted"}` alone, and the live entries carry no
+rationale. A rationale of `session` with duration `once` gives `decision_reason` `session`
+and grant duration `once`; an empty rationale is stored as `""`. A second approval of a
+granted request is `request is not pending: request-1` and keeps the first
+`decision_reason`. One `execute` spends the once grant while `decision_reason` stays
+`show this grant`; a second use is `grant is not live: Exhausted`.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_grant_rationale_is_not_the_grant -- --exact
+```
+
+### F-stated-rationale-is-owner-approved
+
+Old bytes, 71:
+
+```rust
+) -> Result<Value, (u16, String)> {
+    stand_in.post_capability_grant(
+```
+
+New bytes, 189:
+
+```rust
+) -> Result<Value, (u16, String)> {
+    let rationale = if rationale == "owner approved" {
+        rationale
+    } else {
+        "owner approved"
+    };
+    stand_in.post_capability_grant(
+```
+
+The planted crate compiled. `shown_grant_rationale_is_not_the_grant` failed at
+`src/lib.rs:8460:5` (planted tree) on the shell request list: `assertion left == right
+failed: a shown grant rationale is not the grant: the stated rationale is the decision
+reason`; left held `decision_reason` `owner approved`, right expected `show this grant`.
+The stated rationale was replaced before the route stored it. Restored, the test passes.
+
+### F-approved-rationale-mints
+
+Old bytes, 71:
+
+```rust
+) -> Result<Value, (u16, String)> {
+    stand_in.post_capability_grant(
+```
+
+New bytes, 394:
+
+```rust
+) -> Result<Value, (u16, String)> {
+    if rationale == "approved" {
+        stand_in.seed_grant(
+            "request-plant",
+            "component-1",
+            "localhost://Public/plan-approval/a.txt",
+            "read",
+            "once",
+            0,
+            agent_conformance::standin_runtime::Life::Live,
+            false,
+        );
+    }
+    stand_in.post_capability_grant(
+```
+
+The planted crate compiled. `shown_grant_rationale_is_not_the_grant` failed at
+`src/lib.rs:8248:5` (planted tree) on the shell live list: `assertion left == right failed:
+a shown grant rationale is not the grant: a refused client approval mints no grant`; left
+held the seeded `request-plant` grant, right expected the empty shell body. A rationale of
+`approved` minted a grant. Restored, the test passes.
+
+Neither plant calls `seed_request`; the second plant calls `seed_grant`. After both
+restores, `git diff -- lab/plan-approval/src/lib.rs` holds no `request-plant`, no plant
+`seed_grant` inside `approve` and no rationale replacement. The restored proof command set
+(the fmt check and the twenty-three test commands in the task) took 2.05 s real. This lane
+has no `falsifiers.json`; no id is added.
+
+030: `approve` takes the rationale it is given and sends it on the one grant call; `shown_grant_rationale_is_not_the_grant` proves the rationale is the decision reason on the request, a granted status body and a live grant omit it, four refusals store none, and `""` stays `""`; two hand-run plants caught and restored.

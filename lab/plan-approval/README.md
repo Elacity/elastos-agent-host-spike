@@ -464,6 +464,35 @@ still passes `""`. `preview`, `plan_sha256`, `approve`, `execute`,
 stand-in, and it names no planner. A passing run gives the Runtime no A15
 credit.
 
+A shown grant rationale is text the owner states with the decision, not the
+grant. The Non-negotiable boundaries state:
+
+> A visible approval card is not the grant authority.
+
+`approve` is the only grant call. It passes the rationale it is given unchanged
+as the route's `rationale` key, so the route stores that string on the shown
+request as `decision_reason` with `settled_by` `shell`; the request's own
+reason stays as `request` stored it. A rationale of `show this grant` is the
+decision reason while the request reason stays `show this step`. A rationale of
+`session` with duration `once` stores `decision_reason` `session` and grant
+duration `once`. `""` is stored as `""`. A rationale of `approved` on a client
+caller, on duration `standing`, on a mismatched plan hash and on an unknown
+request id stores nothing and mints nothing. A second approve of a granted
+request is `request is not pending: ` plus that id and leaves the first
+`decision_reason`. A granted status body is the status word alone, and a live
+grant entry has no rationale. One use spends the once grant while
+`decision_reason` stays `show this grant`. `shown_grant_rationale_is_not_the_grant`
+drives two sessions through `running_agent`, submits three requests through
+`request`, grants through `approve`, reads the lists and the status through
+`read_shown_requests`, `read_shown_grants` and `read_shown_request`, and spends
+through `execute`. This crate stores no copy of `grant_body`. Every earlier
+approve still passes `owner approved`. `preview`, `plan_sha256`, `execute`,
+`deny_shown_plan`, `age_shown_plan`, `stop_shown_session`,
+`read_shown_request`, `read_shown_grants`, `read_shown_requests`,
+`running_agent` and `request` are unchanged by this slice. The crate does not
+copy the stand-in, and it names no planner. A passing run gives the Runtime no
+A15 credit.
+
 ## Layout
 
 - `src/lib.rs`: `Preview`, `preview`, `plan_sha256`, `approve`,
@@ -483,12 +512,14 @@ credit.
   `shown_live_list_is_not_another_sessions_grant`,
   `shown_submit_names_a_declared_ask`,
   `shown_request_list_does_not_submit_again`,
-  `shown_request_reason_is_not_the_grant` and the bound-plan journey.
+  `shown_request_reason_is_not_the_grant`,
+  `shown_grant_rationale_is_not_the_grant` and the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_grant_rationale_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_request_reason_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_submit_names_a_declared_ask -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_request_list_does_not_submit_again -- --exact
