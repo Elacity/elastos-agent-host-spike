@@ -45,6 +45,7 @@ dependencies = [
  "ed25519-dalek",
  "elastos-identity",
  "rand",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

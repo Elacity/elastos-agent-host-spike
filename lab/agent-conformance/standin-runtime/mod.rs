@@ -51,6 +51,7 @@ use capsule_identity::{
     checked_bundle, verify_checked_signature, CheckedBundle, LabCid, NameSignature, Refusal,
 };
 use serde_json::{json, Map, Value};
+use std::os::fd::OwnedFd;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
@@ -61,6 +62,23 @@ const REQUEST_TIMEOUT_SECS: u64 = 300;
 const GRANT_LIFETIME_SECS: u64 = 3_600;
 /// The one cause `worker_exited` stores, and the one reason it settles with.
 const WORKER_EXITED: &str = "worker exited";
+
+/// One reason per storage refusal. The stand-in never repairs a file; it
+/// refuses it and names why.
+const LINK_REASON: &str = "storage directory is a symbolic link";
+const ENTRY_REASON: &str = "storage entry stays under the selected Home";
+const DATA_REASON: &str = "storage directory is outside the selected Home";
+const NOT_REGULAR_REASON: &str = "storage file is not a single regular file";
+const NOT_ONE_LINK_REASON: &str = "storage file does not have exactly one link";
+const NOT_CREATED_REASON: &str = "storage file was not created by the stand-in";
+const SWAPPED_REASON: &str = "storage file is not the file the stand-in created";
+const EXISTS_REASON: &str = "storage file already exists";
+const SHELL_STORAGE_REASON: &str = "storage belongs to one agent instance";
+const MISSING_STORAGE_REASON: &str = "storage directory does not exist";
+const NOT_DIR_REASON: &str = "storage directory is not a directory";
+const EXISTING_STORAGE_REASON: &str = "storage directory already exists";
+const DATA_STEP: &str = "storage directory";
+const ENTRY_STEP: &str = "storage file";
 
 /// Authenticated caller. A method argument, not a JSON field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -168,6 +186,18 @@ struct Instance {
     started_cid: LabCid,
 }
 
+/// One storage file the stand-in created. The `(device, inode)` pair is what
+/// every later check compares, so a file swapped at the name is a different
+/// file even when its type and link count match.
+struct Record {
+    home: PathBuf,
+    name: String,
+    /// `fstat`'s device type on this platform: `rustix::fs::Dev` is the libc
+    /// `dev_t`, which is `u64` on Linux and `i32` on macOS.
+    device: rustix::fs::Dev,
+    inode: u64,
+}
+
 /// Four request statuses this slice stores.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RequestStatus {
@@ -193,10 +223,25 @@ struct Request {
 }
 
 pub struct StandIn {
+    /// The Home root this stand-in runs under. Storage routes take the Home
+    /// from this field, never from a caller string or a request body, so one
+    /// stand-in reads and writes only under this Home. `None` until a test or
+    /// a launcher names it through `set_home`.
+    home: Option<PathBuf>,
+    /// The held Home handle `set_home` opened once, from a handle on `/` with
+    /// one `O_NOFOLLOW` step per component. Every storage call walks below
+    /// this handle; no call opens the Home by path again. A failed open is
+    /// kept as its error, so every later storage call answers with it.
+    home_fd: Option<Result<OwnedFd, (u16, String)>>,
     grants: Vec<Grant>,
     requests: Vec<Request>,
     admitted: Vec<Admitted>,
     instances: Vec<Instance>,
+    storage: Vec<Record>,
+    /// A name the next `create_storage` joins to the file it just made,
+    /// between that open call and its `fstat`. Set only by the test seam
+    /// `join_next_create`, so the shared link rule sees two names.
+    join_next: Option<PathBuf>,
     next_id: u64,
     next_request: u64,
     instant: u64,
@@ -205,14 +250,46 @@ pub struct StandIn {
 impl StandIn {
     pub fn new() -> Self {
         Self {
+            home: None,
+            home_fd: None,
             grants: Vec::new(),
             requests: Vec::new(),
             admitted: Vec::new(),
             instances: Vec::new(),
+            storage: Vec::new(),
+            join_next: None,
             next_id: 1,
             next_request: 1,
             instant: 0,
         }
+    }
+
+    /// Lab test seam, not a route.
+    ///
+    /// Names the one Home root this stand-in runs under. The launcher names
+    /// it from the selected Home; the storage routes then take it from this
+    /// value, never from a caller string or a request body. This call opens
+    /// the Home exactly once, at holder creation: its ancestors are resolved
+    /// once by path, and the Home's own final component is taken on that
+    /// parent handle with `O_NOFOLLOW`, so the Home itself must not be a
+    /// link. Every later storage call walks below the stored handle and
+    /// never opens the Home by path again, so an ancestor renamed into the
+    /// Home's place after this call is not followed. A failed open is stored
+    /// as its error and every later storage call answers with it. This call
+    /// creates nothing and reads no clock.
+    pub fn set_home(&mut self, home: &Path) {
+        let opened = open_home(home);
+        self.home = Some(home.to_path_buf());
+        self.home_fd = Some(opened);
+    }
+
+    /// Lab test seam, not a route.
+    ///
+    /// Makes the next `create_storage` join `name` to the file it just made,
+    /// between that open call and its `fstat`, so the one link rule sees a
+    /// second name. It creates nothing itself and reads no file.
+    pub fn join_next_create(&mut self, name: &Path) {
+        self.join_next = Some(name.to_path_buf());
     }
 
     /// Lab test seam, not a route.
@@ -245,53 +322,321 @@ impl StandIn {
         Ok(storage)
     }
 
-    /// Lab test seam, not a route.
+    /// The storage check and the storage use are one operation.
     ///
-    /// The two named storage cases are refused here. A symbolic link at the
-    /// storage directory is refused and not followed. A regular file under it
-    /// whose link count is above 1 is refused and not read. This call creates
-    /// nothing.
-    pub fn confirm_storage(home: &Path, entry: &str) -> Result<PathBuf, (u16, String)> {
-        const LINK_REASON: &str = "storage directory is a symbolic link";
-        const ENTRY_REASON: &str = "storage entry stays under the selected Home";
-
-        let storage = Self::storage_for_home(home)?;
-        if !crate::harness::directories_only(&storage, home) {
-            return Err((400, LINK_REASON.to_owned()));
-        }
-        if entry.is_empty() {
-            return Ok(storage);
-        }
-        let mut parts = Path::new(entry).components();
-        match (parts.next(), parts.next()) {
-            (Some(Component::Normal(_)), None) => {}
+    /// The Home is the one `set_home` named, never a caller argument.
+    /// The Home handle is the one `set_home` opened at holder creation,
+    /// where the Home's ancestors were resolved once and the Home itself
+    /// was opened with `O_NOFOLLOW`. Every step from that handle down to
+    /// the storage directory is opened once from the handle of the step
+    /// above with `O_NOFOLLOW`, `O_DIRECTORY`, `O_NONBLOCK` and
+    /// `O_CLOEXEC`, so a symbolic link below the Home, a parent swapped
+    /// after an earlier call, or a non-directory at any step fails that
+    /// step and nothing is followed. The entry name must be one
+    /// normal component. The stand-in creates every storage file itself with
+    /// `openat` `O_CREAT|O_EXCL|O_NOFOLLOW`, and records `(st_dev, st_ino)`
+    /// in the per-Home record this value keeps. Every later call opens the
+    /// entry on that Home's directory handle with
+    /// `O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC`, then `fstat`s that handle, and
+    /// requires a regular file, `st_nlink == 1` and the recorded pair. A
+    /// file the stand-in did not create, a file with a second name, or a
+    /// file whose recorded inode is gone is refused with a reason and never
+    /// repaired. The handle is what the read or the write then uses, so no
+    /// name is resolved again after the check. This call creates no
+    /// directory and no file.
+    pub fn confirm_storage(&mut self, entry: &str) -> Result<(), (u16, String)> {
+        let home = self.selected_home()?;
+        let named = match Path::new(entry).components().next() {
+            None => false,
+            Some(Component::Normal(_)) if plain_name(entry) => true,
             _ => return Err((400, ENTRY_REASON.to_owned())),
+        };
+        if !named {
+            // An absent storage directory is accepted with no name: only a
+            // named entry needs the directory. A link on any step is still
+            // refused by the walk.
+            let _ = self.storage_directory(&home)?;
+            return Ok(());
         }
-        let file = storage.join(entry);
-        Self::one_link(&file)?;
-        Ok(file)
+        let _ = self.storage_file(&home, entry, false)?;
+        Ok(())
     }
 
-    /// One link-count check. It reads no file bytes and follows no link.
-    fn one_link(path: &Path) -> Result<(), (u16, String)> {
-        use std::os::unix::fs::MetadataExt;
+    /// Lab test seam, not a route.
+    ///
+    /// Creates one storage file for the Home named by `set_home` with
+    /// `O_CREAT|O_EXCL` and records its `(st_dev, st_ino)`. This is the only
+    /// way a file enters the Home's record, so every later `confirm_storage`,
+    /// `read_storage` and `write_storage` for that name checks the recorded
+    /// pair. A name that already has a record is status 400 with the reason
+    /// `storage file already exists`, and this call changes nothing then.
+    /// The storage directory is made, when it is absent, one component at a
+    /// time with `mkdirat` on the handle the walk reached, so creation never
+    /// resolves the data path a second time. This call reads no clock.
+    pub fn create_storage(&mut self, entry: &str) -> Result<(), (u16, String)> {
+        use std::os::fd::AsFd;
 
-        const MANY_REASON: &str = "storage file has more than one link";
-        const REGULAR_REASON: &str = "storage file is not a single regular file";
-
-        match std::fs::symlink_metadata(path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Ok(meta) => {
-                if meta.file_type().is_symlink() || !meta.file_type().is_file() {
-                    return Err((400, REGULAR_REASON.to_owned()));
-                }
-                if meta.nlink() > 1 {
-                    return Err((400, MANY_REASON.to_owned()));
-                }
-                Ok(())
-            }
-            Err(_) => Err((400, REGULAR_REASON.to_owned())),
+        let home = self.selected_home()?;
+        if !plain_name(entry) {
+            return Err((400, ENTRY_REASON.to_owned()));
         }
+        if self.storage_record(&home, entry).is_some() {
+            return Err((400, EXISTS_REASON.to_owned()));
+        }
+        // The walk reports the handle it reached and, when a step is absent,
+        // that step and every step below it by name. Creation makes exactly
+        // those names on that handle, so no path is derived from the Home
+        // again: a Home path re-opened here would follow a swapped ancestor.
+        let handle = match self.storage_directory(&home)? {
+            Walk::Reached(directory) => directory,
+            Walk::Absent { parent, steps } => {
+                let mut made = parent;
+                for part in steps {
+                    made = make_step(&made, &part)?;
+                }
+                made
+            }
+        };
+        let make = rustix::fs::openat(
+            handle.as_fd(),
+            entry,
+            rustix::fs::OFlags::WRONLY
+                | rustix::fs::OFlags::CREATE
+                | rustix::fs::OFlags::EXCL
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::NONBLOCK
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .map_err(|error| {
+            if error == rustix::io::Errno::EXIST {
+                (400, EXISTS_REASON.to_owned())
+            } else {
+                file_failure(&error)
+            }
+        })?;
+        if let Some(name) = self.join_next.take() {
+            // The controlled interleaving: the test's name joins this file
+            // after the open call and before the `fstat`.
+            rustix::fs::linkat(
+                handle.as_fd(),
+                entry,
+                rustix::fs::CWD,
+                &name,
+                rustix::fs::AtFlags::empty(),
+            )
+            .map_err(|error| file_failure(&error))?;
+        }
+        let stat = rustix::fs::fstat(&make).map_err(|error| file_failure(&error))?;
+        check_file(&stat)?;
+        self.storage.push(Record {
+            home,
+            name: entry.to_owned(),
+            device: stat.st_dev,
+            inode: stat.st_ino,
+        });
+        Ok(())
+    }
+
+    /// Lab test seam, not a route.
+    ///
+    /// Reads one storage entry of the Home this stand-in recorded for the
+    /// client's instance. The check and the read share the one handle
+    /// `storage_file` returns, so a name swapped after the check is never
+    /// resolved again.
+    pub fn read_storage(
+        &mut self,
+        caller: Caller<'_>,
+        entry: &str,
+    ) -> Result<Vec<u8>, (u16, String)> {
+        use std::io::Read;
+
+        let home = self.storage_home(caller)?;
+        if !plain_name(entry) {
+            return Err((400, ENTRY_REASON.to_owned()));
+        }
+        let handle = self.storage_file(&home, entry, false)?;
+        let mut bytes = Vec::new();
+        std::fs::File::from(handle)
+            .read_to_end(&mut bytes)
+            .map_err(|error| (400, format!("storage file: {error}")))?;
+        Ok(bytes)
+    }
+
+    /// Lab test seam, not a route.
+    ///
+    /// Writes `bytes` to one storage entry of the Home this stand-in
+    /// recorded for the client's instance. The check and the write share the
+    /// one handle `storage_file` returns, and that handle already passed the
+    /// regular-file, one-link and recorded-`(st_dev, st_ino)` checks, so a
+    /// name moved, linked or replaced after the check cannot reach another
+    /// file.
+    pub fn write_storage(
+        &mut self,
+        caller: Caller<'_>,
+        entry: &str,
+        bytes: &[u8],
+    ) -> Result<(), (u16, String)> {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let home = self.storage_home(caller)?;
+        if !plain_name(entry) {
+            return Err((400, ENTRY_REASON.to_owned()));
+        }
+        let handle = self.storage_file(&home, entry, true)?;
+        let mut file = std::fs::File::from(handle);
+        file.set_len(0)
+            .and_then(|()| file.seek(SeekFrom::Start(0)).map(|_| ()))
+            .and_then(|()| file.write_all(bytes))
+            .map_err(|error| (400, format!("storage file: {error}")))
+    }
+
+    /// The Home this stand-in runs under, once the caller's instance is live.
+    /// An instance of another stand-in has no storage here, so the caller
+    /// must name a live instance of this one.
+    fn storage_home(&self, caller: Caller<'_>) -> Result<PathBuf, (u16, String)> {
+        let Caller::Client { session_id } = caller else {
+            return Err((403, SHELL_STORAGE_REASON.to_owned()));
+        };
+        let Some(instance) = self
+            .instances
+            .iter()
+            .find(|instance| instance.id == session_id)
+        else {
+            return Err(unknown_instance(session_id));
+        };
+        if !matches!(
+            instance.phase,
+            ResidentStatus::Starting | ResidentStatus::Running
+        ) {
+            return Err(not_live(instance.phase));
+        }
+        let Some(home) = self.home.clone() else {
+            return Err((400, "storage needs a selected Home".to_owned()));
+        };
+        Ok(home)
+    }
+
+    fn storage_record(&self, home: &Path, entry: &str) -> Option<(rustix::fs::Dev, u64)> {
+        self.storage
+            .iter()
+            .find(|record| record.home == home && record.name == entry)
+            .map(|record| (record.device, record.inode))
+    }
+
+    /// The Home named by `set_home`, which is the one Home this stand-in
+    /// runs under. A call before `set_home` has no Home to use.
+    fn selected_home(&self) -> Result<PathBuf, (u16, String)> {
+        self.home
+            .clone()
+            .ok_or_else(|| (400, "storage needs a selected Home".to_owned()))
+    }
+
+    /// Walks from the HELD Home handle `set_home` opened once, with one
+    /// `O_NOFOLLOW|O_DIRECTORY` step per component of
+    /// `harness::data_dir(home)` down to the storage directory, so a
+    /// symbolic link at any step below the Home is refused and not followed,
+    /// and an ancestor of the Home swapped after `set_home` cannot reach
+    /// this walk at all: no path is opened here, and no step starts at the
+    /// current directory. The held handle is borrowed for the walk; the
+    /// reachable result holds a step or a `try_clone` of the held handle
+    /// when the storage directory is the Home itself. Nothing is
+    /// canonicalized.
+    ///
+    /// The walk stops on the first absent step and returns the names of that
+    /// step and every step below it, on the handle of the absent step's
+    /// parent. Creation then makes exactly those names with `mkdirat` on the
+    /// handle the walk reached, so it derives no path from the Home again.
+    fn storage_directory(&self, home: &Path) -> Result<Walk, (u16, String)> {
+        use std::os::fd::AsFd;
+
+        let Some(opened) = &self.home_fd else {
+            return Err((400, "storage needs a selected Home".to_owned()));
+        };
+        let held = opened.as_ref().map_err(Clone::clone)?;
+        let storage = Self::storage_for_home(home)?;
+        let to_storage = storage
+            .strip_prefix(home)
+            .map_err(|_| (400, DATA_REASON.to_owned()))?;
+        let mut current = held
+            .try_clone()
+            .map_err(|_| (400, DATA_REASON.to_owned()))?;
+        let mut absent: Vec<std::ffi::OsString> = Vec::new();
+        for part in to_storage.components() {
+            let Component::Normal(part) = part else {
+                return Err((400, DATA_REASON.to_owned()));
+            };
+            if !absent.is_empty() {
+                absent.push(part.to_os_string());
+                continue;
+            }
+            let missing = |error: &rustix::io::Errno| *error == rustix::io::Errno::NOENT;
+            match step(current.as_fd(), &missing, &storage_failure, part)? {
+                Some(next) => current = next,
+                None => absent.push(part.to_os_string()),
+            }
+        }
+        if absent.is_empty() {
+            Ok(Walk::Reached(current))
+        } else {
+            Ok(Walk::Absent {
+                parent: current,
+                steps: absent,
+            })
+        }
+    }
+
+    /// Opens one storage entry on the Home's directory handle and checks
+    /// that handle. The returned handle is the checked file.
+    /// `writable` opens the recorded file for a write that then truncates
+    /// that same handle. The check is the same on both paths.
+    fn storage_file(
+        &self,
+        home: &Path,
+        entry: &str,
+        writable: bool,
+    ) -> Result<OwnedFd, (u16, String)> {
+        use std::os::fd::AsFd;
+
+        // A recorded name needs the storage directory. An absent one is the
+        // directory's own reason, so a missing directory never reads as a
+        // missing file.
+        let Walk::Reached(directory) = self.storage_directory(home)? else {
+            return Err((400, MISSING_STORAGE_REASON.to_owned()));
+        };
+        let Some((device, inode)) = self.storage_record(home, entry) else {
+            return Err((400, NOT_CREATED_REASON.to_owned()));
+        };
+        let access = if writable {
+            rustix::fs::OFlags::WRONLY
+        } else {
+            rustix::fs::OFlags::RDONLY
+        };
+        let handle = rustix::fs::openat(
+            directory.as_fd(),
+            entry,
+            access
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::NONBLOCK
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|error| {
+            if error == rustix::io::Errno::ISDIR {
+                (400, NOT_REGULAR_REASON.to_owned())
+            } else if error == rustix::io::Errno::NOENT {
+                // The record's name is gone: the file it names is not there.
+                (400, NOT_CREATED_REASON.to_owned())
+            } else {
+                file_failure(&error)
+            }
+        })?;
+        let stat = rustix::fs::fstat(&handle).map_err(|error| file_failure(&error))?;
+        check_file(&stat)?;
+        if (stat.st_dev, stat.st_ino) != (device, inode) {
+            return Err((400, SWAPPED_REASON.to_owned()));
+        }
+        Ok(handle)
     }
 
     /// Lab test seam, not a route.
@@ -1203,6 +1548,201 @@ fn request_status_text(status: RequestStatus) -> &'static str {
         RequestStatus::Granted => "granted",
         RequestStatus::Denied => "denied",
         RequestStatus::Expired => "expired",
+    }
+}
+
+/// The one file name a storage entry may name: exactly one normal component.
+/// An empty name, `.`, `..` or a name with a separator fails.
+fn plain_name(entry: &str) -> bool {
+    let mut parts = Path::new(entry).components();
+    matches!(
+        (parts.next(), parts.next()),
+        (Some(Component::Normal(_)), None)
+    )
+}
+
+/// The one regular-file, one-link rule for a storage file. `create_storage`
+/// on the file it just made and `storage_file` on the file it just opened
+/// both call this, so a weaker rule is weaker on both paths.
+fn check_file(stat: &rustix::fs::Stat) -> Result<(), (u16, String)> {
+    if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile {
+        return Err((400, NOT_REGULAR_REASON.to_owned()));
+    }
+    if stat.st_nlink != 1 {
+        return Err((400, NOT_ONE_LINK_REASON.to_owned()));
+    }
+    Ok(())
+}
+
+/// Where the storage walk stopped: on the storage directory itself, or on
+/// the handle of the parent of the first absent step, with that step and
+/// every step below it. Both cases hold a directory handle the walk reached
+/// from the held Home handle, never a path.
+enum Walk {
+    Reached(OwnedFd),
+    Absent {
+        parent: OwnedFd,
+        steps: Vec<std::ffi::OsString>,
+    },
+}
+
+/// Opens the Home once, at holder creation. The Home must be absolute and
+/// hold no `.` or `..` component. Its ancestors are resolved once here: the
+/// Home's parent is opened by path for reading and directory access, so a
+/// symbolic link among the ancestors is followed this one time (system
+/// ancestors such as `/var` on macOS are links). The Home's own name is then
+/// the final component, taken on that parent handle with the existing
+/// `O_DIRECTORY|O_NOFOLLOW` step, so a link at the Home itself is refused
+/// and nothing is followed. This is the only place a Home path is opened;
+/// every later storage call walks below the returned handle. An absent
+/// component is the missing storage directory.
+fn open_home(home: &Path) -> Result<OwnedFd, (u16, String)> {
+    use std::os::fd::AsFd;
+
+    // A relative Home would start at the current directory, which is never
+    // the selected Home, so it is refused before any open.
+    if !home.is_absolute() {
+        return Err((400, DATA_REASON.to_owned()));
+    }
+    let mut parts = home
+        .components()
+        .map(|part| match part {
+            Component::RootDir => Ok(None),
+            Component::Normal(part) => Ok(Some(part)),
+            Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
+                Err((400, DATA_REASON.to_owned()))
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let Some(name) = parts.pop().flatten() else {
+        return Err((400, DATA_REASON.to_owned()));
+    };
+    let Some(parent) = home.parent() else {
+        return Err((400, DATA_REASON.to_owned()));
+    };
+    let opened = rustix::fs::open(
+        parent,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|error| {
+        if error == rustix::io::Errno::NOENT {
+            (400, MISSING_STORAGE_REASON.to_owned())
+        } else {
+            storage_failure(&error)
+        }
+    })?;
+    // The Home must be present: an absent final component is the missing
+    // storage directory, as before.
+    let present = |_: &rustix::io::Errno| false;
+    match step(opened.as_fd(), &present, &storage_failure, name)? {
+        Some(held) => Ok(held),
+        None => Err((400, MISSING_STORAGE_REASON.to_owned())),
+    }
+}
+
+/// One directory step of the storage walk: `name` is opened on the handle of
+/// its parent with `O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC`, so a name is
+/// never a multi-component path and a symbolic link is refused, not followed.
+/// The caller's `missing` predicate says which error is an absent step; every
+/// other error goes through the caller's one reason for its refusal.
+fn step(
+    parent: std::os::fd::BorrowedFd<'_>,
+    missing: &dyn Fn(&rustix::io::Errno) -> bool,
+    refused: &dyn Fn(&rustix::io::Errno) -> (u16, String),
+    name: &std::ffi::OsStr,
+) -> Result<Option<OwnedFd>, (u16, String)> {
+    match rustix::fs::openat(
+        parent,
+        name,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    ) {
+        Ok(next) => Ok(Some(next)),
+        Err(error) if missing(&error) => Ok(None),
+        Err(error) => Err(refused(&error)),
+    }
+}
+
+/// The refusal for an entry that `mkdirat` reported as present. The entry is
+/// opened once here without following a link: a symbolic link is the link
+/// rule, and a real directory is its own reason. Nothing is created.
+fn existing_step(directory: &OwnedFd, name: &std::ffi::OsStr) -> (u16, String) {
+    use std::os::fd::AsFd;
+
+    match rustix::fs::openat(
+        directory.as_fd(),
+        name,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    ) {
+        Ok(_) => (409, EXISTING_STORAGE_REASON.to_owned()),
+        // The entry `mkdirat` saw is not a directory and not a link: it is
+        // the not-a-directory case. Every other error keeps its own reason.
+        Err(error) if error == rustix::io::Errno::NOTDIR => (400, NOT_DIR_REASON.to_owned()),
+        Err(error) => storage_failure(&error),
+    }
+}
+
+/// Makes one directory step on a parent handle and opens it without
+/// following a link. A present step is the link rule, because the walk
+/// reported it absent and the tree changed under the creation.
+fn make_step(parent: &OwnedFd, name: &std::ffi::OsStr) -> Result<OwnedFd, (u16, String)> {
+    use std::os::fd::AsFd;
+
+    rustix::fs::mkdirat(
+        parent,
+        name,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR | rustix::fs::Mode::XUSR,
+    )
+    .map_err(|error| {
+        if error == rustix::io::Errno::EXIST {
+            existing_step(parent, name)
+        } else {
+            storage_failure(&error)
+        }
+    })?;
+    rustix::fs::openat(
+        parent.as_fd(),
+        name,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|error| storage_failure(&error))
+}
+
+/// A storage file open or `fstat` refusal. It names the file step, never the
+/// directory step.
+fn file_failure(error: &rustix::io::Errno) -> (u16, String) {
+    match *error {
+        rustix::io::Errno::LOOP => (400, NOT_REGULAR_REASON.to_owned()),
+        _ => (400, format!("{ENTRY_STEP}: {error}")),
+    }
+}
+
+/// The one storage-directory reason for every open step: the Home and every
+/// step of `harness::data_dir(home)` down to the storage directory. Every
+/// open on that walk asks for `O_NOFOLLOW|O_DIRECTORY`, so ELOOP and ENOTDIR
+/// are the symbolic link the call refused to follow. ENOTDIR on an entry
+/// that is a plain file is the separate not-a-directory case, which
+/// `existing_step` reports itself.
+fn storage_failure(error: &rustix::io::Errno) -> (u16, String) {
+    match *error {
+        rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR => (400, LINK_REASON.to_owned()),
+        rustix::io::Errno::NOENT => (400, MISSING_STORAGE_REASON.to_owned()),
+        _ => (400, format!("{DATA_STEP}: {error}")),
     }
 }
 
@@ -7161,6 +7701,49 @@ mod tests {
         }
     }
 
+    /// Finding 3 of the Cursor review: `create_storage` and
+    /// `confirm_storage` name no Home. Each takes the one Home `set_home`
+    /// named, so after `set_home(A)` no caller can create a file under `B`,
+    /// and the file lands under `A` with `B` left empty.
+    #[test]
+    fn standin_storage_lands_under_the_home_set_home_named() {
+        use crate::harness::ThrowawayHome;
+
+        let home = ThrowawayHome::new().expect("a throwaway Home for the Home binding row");
+        let other = ThrowawayHome::new().expect("a second throwaway Home for the Home binding row");
+        let mut standin = StandIn::new();
+        standin.set_home(home.home());
+        standin
+            .create_storage("notes.txt")
+            .expect("the stand-in creates the file under the selected Home");
+        assert_eq!(
+            standin.confirm_storage("notes.txt"),
+            Ok(()),
+            "the stand-in did the work: the check reads the same selected Home"
+        );
+        let under = StandIn::storage_for_home(home.home())
+            .expect("the stand-in returns the selected Home's storage path");
+        assert!(
+            std::fs::read(under.join("notes.txt")).is_ok(),
+            "the stand-in did the work: the file lands under the Home set_home named"
+        );
+        let elsewhere = StandIn::storage_for_home(other.home())
+            .expect("the stand-in returns the other Home's storage path");
+        assert!(
+            !elsewhere.exists(),
+            "the stand-in did the work: nothing is created under another Home"
+        );
+        // A stand-in with no `set_home` has no Home to use.
+        let mut unset = StandIn::new();
+        assert_eq!(
+            unset.create_storage("notes.txt"),
+            Err((400, "storage needs a selected Home".to_owned())),
+            "the stand-in did the work: a creation without a selected Home is refused"
+        );
+        home.finish().expect("the throwaway Home finishes");
+        other.finish().expect("the second throwaway Home finishes");
+    }
+
     #[test]
     fn standin_storage_follows_the_selected_home() {
         use crate::harness::ThrowawayHome;
@@ -7265,23 +7848,45 @@ mod tests {
         let home = ThrowawayHome::new().expect("a throwaway Home for the root symlink row");
         let storage = StandIn::storage_for_home(home.home())
             .expect("the stand-in returns the selected Home's storage path");
-        let accepted = StandIn::confirm_storage(home.home(), "");
+        let mut standin = StandIn::new();
+        standin.set_home(home.home());
+
+        // The data directory itself is a symbolic link: the walk's first
+        // step fails and nothing under the link is created or read.
+        let elsewhere = home.home().join("swapped-root");
+        std::fs::create_dir(&elsewhere).expect("the test makes another directory");
+        std::fs::remove_dir_all(home.data()).expect("the test removes the empty data directory");
+        symlink(&elsewhere, home.data()).expect("the test makes the data directory a link");
         assert_eq!(
-            accepted,
-            Ok(storage.clone()),
-            "the stand-in did the work: it returns the absent storage directory before a link"
+            standin.confirm_storage(""),
+            Err((400, LINK_REASON.to_owned())),
+            "the stand-in did the work: it refuses a data directory that is a symbolic link"
+        );
+        assert_eq!(
+            std::fs::read_dir(&elsewhere)
+                .expect("the linked directory stays readable")
+                .count(),
+            0,
+            "the stand-in did the work: it creates nothing through the data link"
+        );
+        std::fs::remove_file(home.data()).expect("the test removes the data link");
+        std::fs::create_dir_all(home.data()).expect("the test makes the data directory again");
+
+        assert_eq!(
+            standin.confirm_storage(""),
+            Ok(()),
+            "the stand-in did the work: it accepts the absent storage directory before a link"
         );
         assert!(
             !storage.exists(),
             "the stand-in did the work: it creates no storage directory"
         );
 
-        symlink(home.root().join("swapped-root"), &storage)
-            .expect("the test makes the storage path a symbolic link");
-        let refused = StandIn::confirm_storage(home.home(), "");
-        assert!(
-            matches!(&refused, Err((400, reason)) if reason == "storage directory is a symbolic link"),
-            "the stand-in did the work: it refuses a storage directory that is a symbolic link: {refused:?}"
+        symlink(&elsewhere, &storage).expect("the test makes the storage path a symbolic link");
+        assert_eq!(
+            standin.confirm_storage(""),
+            Err((400, LINK_REASON.to_owned())),
+            "the stand-in did the work: it refuses a storage directory that is a symbolic link"
         );
         let meta =
             std::fs::symlink_metadata(&storage).expect("the storage path is still a symbolic link");
@@ -7289,48 +7894,726 @@ mod tests {
             meta.file_type().is_symlink(),
             "the stand-in did the work: it does not follow the storage link"
         );
+        assert_eq!(
+            std::fs::read_dir(&elsewhere)
+                .expect("the linked directory stays readable")
+                .count(),
+            0,
+            "the stand-in did the work: it creates nothing through the link"
+        );
+        home.finish().expect("the throwaway Home finishes");
+    }
+
+    /// Task 112, M1 check A9: every step from the Home down is opened one
+    /// component at a time with `O_NOFOLLOW`, so a symbolic link at an
+    /// INTERMEDIATE step is refused and not followed. One multi-component
+    /// `openat` on the data path, or a walk that drops `O_NOFOLLOW` on an
+    /// intermediate step, follows `Home/x` into the outside directory and
+    /// turns this test red at the first assertion below.
+    #[test]
+    fn standin_storage_refuses_an_intermediate_symlink_step() {
+        use crate::harness::ThrowawayHome;
+        use std::os::unix::fs::symlink;
+
+        let home = ThrowawayHome::new().expect("a throwaway Home for the intermediate link row");
+        let mut standin = StandIn::new();
+        standin.set_home(home.home());
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let id = launch_finished(&shared, &mut standin);
+        assert!(!id.is_empty(), "the launched instance names its session");
+        let storage = StandIn::storage_for_home(home.home())
+            .expect("the stand-in returns the selected Home's storage path");
+
+        // The first step below the Home is a link to an outside directory
+        // that really exists and really holds a file.
+        let outside = home.root().join("outside");
+        std::fs::create_dir(&outside).expect("the test makes the outside directory");
+        std::fs::write(outside.join("notes.txt"), b"outside bytes")
+            .expect("the test writes the outside file");
+        let step = home
+            .data()
+            .strip_prefix(home.home())
+            .unwrap()
+            .components()
+            .next()
+            .unwrap();
+        let linked = home.home().join(step.as_os_str());
+        std::fs::remove_dir_all(&linked).expect("the test removes the real first step");
+        symlink(&outside, &linked).expect("the test makes the first step a link");
+        let before =
+            std::fs::read(outside.join("notes.txt")).expect("the outside file stays readable");
+
+        assert_eq!(
+            standin.create_storage("notes.txt"),
+            Err((400, LINK_REASON.to_owned())),
+            "the stand-in did the work: it refuses an intermediate link step"
+        );
+        assert_eq!(
+            standin.confirm_storage("notes.txt"),
+            Err((400, LINK_REASON.to_owned())),
+            "the stand-in did the work: the check refuses that link step too"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("notes.txt")).expect("the outside file stays readable"),
+            before,
+            "the stand-in did the work: the outside file is unchanged"
+        );
+        let mut names = std::fs::read_dir(&outside)
+            .expect("the outside directory stays readable")
+            .map(|entry| entry.expect("the outside entry reads").file_name())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![std::ffi::OsString::from("notes.txt")],
+            "the stand-in did the work: it creates nothing outside"
+        );
+
+        // Restore the real step: the route then works, so the refusal above
+        // came from the link step and nothing else.
+        std::fs::remove_file(&linked).expect("the test removes the link");
+        std::fs::create_dir(&linked).expect("the test makes the real first step again");
+        assert_eq!(
+            standin.create_storage("notes.txt"),
+            Ok(()),
+            "the stand-in did the work: the real step accepts the file"
+        );
+        assert!(
+            storage.join("notes.txt").is_file(),
+            "the file lands under the Home"
+        );
+        home.finish().expect("the throwaway Home finishes");
+    }
+
+    /// Task 112, M1 check A9: an absent storage directory is its own case
+    /// with its own reason. A read needs the directory and says so; a read
+    /// never falls back to the "not created" file reason for a missing
+    /// directory.
+    #[test]
+    fn standin_storage_read_refuses_an_absent_storage_directory() {
+        use crate::harness::ThrowawayHome;
+
+        let home = ThrowawayHome::new().expect("a throwaway Home for the absent directory row");
+        let mut standin = StandIn::new();
+        standin.set_home(home.home());
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let id = launch_finished(&shared, &mut standin);
+        let agent = Caller::Client { session_id: &id };
+        let storage = StandIn::storage_for_home(home.home())
+            .expect("the stand-in returns the selected Home's storage path");
+        assert!(
+            !storage.exists(),
+            "the test starts with no storage directory"
+        );
+
+        assert_eq!(
+            standin.read_storage(agent, "notes.txt"),
+            Err((400, MISSING_STORAGE_REASON.to_owned())),
+            "the stand-in did the work: an absent storage directory has its own reason"
+        );
+        assert_eq!(
+            standin.write_storage(agent, "notes.txt", b"bytes"),
+            Err((400, MISSING_STORAGE_REASON.to_owned())),
+            "the stand-in did the work: a write says the directory is absent too"
+        );
+        assert!(
+            !storage.exists(),
+            "the stand-in did the work: the refusal creates no directory"
+        );
         home.finish().expect("the throwaway Home finishes");
     }
 
     #[test]
-    fn standin_storage_refuses_host_hardlink() {
+    fn standin_storage_refuses_parent_symlink_after_selection() {
         use crate::harness::ThrowawayHome;
+        use std::os::unix::fs::symlink;
 
-        let home = ThrowawayHome::new().expect("a throwaway Home for the hard link row");
+        let home = ThrowawayHome::new().expect("a throwaway Home for the parent swap row");
+        let mut standin = StandIn::new();
+        standin.set_home(home.home());
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let id = launch_finished(&shared, &mut standin);
+        let agent = Caller::Client { session_id: &id };
+        standin
+            .create_storage("notes.txt")
+            .expect("the stand-in creates agent 1's file");
+        assert_eq!(
+            standin.write_storage(agent, "notes.txt", b"agent 1 bytes"),
+            Ok(()),
+            "the stand-in did the work: agent 1 writes its own file"
+        );
         let storage = StandIn::storage_for_home(home.home())
             .expect("the stand-in returns the selected Home's storage path");
-        std::fs::create_dir(&storage).expect("the test creates the storage directory");
-        let absent = StandIn::confirm_storage(home.home(), "absent.txt");
+        let saved = home.home().join("saved-storage");
+        std::fs::rename(&storage, &saved).expect("the test moves agent 1's storage aside");
+        let outside = home.home().join("outside");
+        std::fs::create_dir_all(&outside).expect("the test makes an outside directory");
+        std::fs::write(outside.join("notes.txt"), b"outside bytes")
+            .expect("the test writes the outside file");
+        symlink(&outside, &storage).expect("the test makes the storage path a symbolic link");
         assert_eq!(
-            absent,
-            Ok(storage.join("absent.txt")),
-            "the stand-in did the work: it returns a joined path that is absent"
+            standin.read_storage(agent, "notes.txt"),
+            Err((400, LINK_REASON.to_owned())),
+            "the stand-in did the work: the read refuses the swapped parent"
         );
-        let entry = storage.join("entry.txt");
-        std::fs::write(&entry, b"stand-in storage file").expect("the test writes one regular file");
-        let accepted = StandIn::confirm_storage(home.home(), "entry.txt");
         assert_eq!(
-            accepted,
-            Ok(entry.clone()),
-            "the stand-in did the work: it returns one regular file whose link count is 1"
+            standin.write_storage(agent, "notes.txt", b"crossed"),
+            Err((400, LINK_REASON.to_owned())),
+            "the stand-in did the work: the write refuses the swapped parent"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("notes.txt")).expect("the outside file stays readable"),
+            b"outside bytes",
+            "the stand-in did the work: the outside file is unchanged"
+        );
+        assert_eq!(
+            std::fs::read(saved.join("notes.txt")).expect("agent 1's file stays readable"),
+            b"agent 1 bytes",
+            "the stand-in did the work: agent 1's own file is unchanged"
+        );
+        home.finish().expect("the throwaway Home finishes");
+    }
+
+    /// Task 112, M1 check A9: `set_home` opens the Home once and every
+    /// storage call walks from that held handle, so an ancestor swapped AFTER
+    /// startup is not followed: no call opens the Home by path again. Stage 1
+    /// swaps `base` for a link, stage 2 renames the other tree's real `base`
+    /// into its place. In both stages the creation succeeds in the ORIGINAL
+    /// tree (the moved `scratch/real-base`) and the other tree is unchanged.
+    /// Re-opening the Home by a `/` walk inside `storage_directory` turns
+    /// stage 2 red at its `create_storage` assertion, because that walk
+    /// follows the real directory now named `base` and creates the file
+    /// under the other tree.
+    #[test]
+    fn standin_storage_holds_the_home_after_an_ancestor_swap() {
+        use std::os::unix::fs::symlink;
+
+        let scratch = TempDir::new().expect("a scratch directory for the ancestor swap row");
+        let base = scratch.path().join("base");
+        let real_base = scratch.path().join("real-base");
+        let home = base.join("mid").join("holder").join("thehome");
+        std::fs::create_dir_all(&home).expect("the test makes the real Home tree");
+        let storage = StandIn::storage_for_home(&home)
+            .expect("the stand-in returns the selected Home's storage path");
+        let other = scratch.path().join("other");
+        let other_home = other.join("mid").join("holder").join("thehome");
+        let other_storage = StandIn::storage_for_home(&other_home)
+            .expect("the stand-in returns the other Home's storage path");
+
+        let mut standin = StandIn::new();
+        standin.set_home(&home);
+        assert_eq!(
+            standin.create_storage("first.txt"),
+            Ok(()),
+            "the stand-in did the work: the real Home accepts the first file"
+        );
+        assert!(
+            storage.join("first.txt").is_file(),
+            "the first file lands under the Home"
         );
 
-        let second = storage.join("second.txt");
-        std::fs::hard_link(&entry, &second).expect("the test adds a second name for the same file");
-        for name in ["entry.txt", "second.txt"] {
-            let refused = StandIn::confirm_storage(home.home(), name);
-            assert!(
-                matches!(&refused, Err((400, reason)) if reason == "storage file has more than one link"),
-                "the stand-in did the work: it refuses the hard-linked file under name {name:?}: {refused:?}"
-            );
+        // The other tree has the same shape, a real storage directory and a
+        // real file, so the victim exists before the swap.
+        std::fs::create_dir_all(&other_storage).expect("the test makes the other storage");
+        std::fs::write(other_storage.join("notes.txt"), b"outside bytes")
+            .expect("the test writes the other file");
+        // The victim directory is held by handle before either swap, so the
+        // assertions below see the same directory the stand-in could reach.
+        let victim = std::fs::File::open(&other_storage).expect("the other storage stays readable");
+
+        // Stage 1: `base` becomes a symbolic link to the other tree.
+        std::fs::rename(&base, &real_base).expect("the test moves the real base aside");
+        symlink(&other, &base).expect("the test makes the base an ancestor link");
+        assert_eq!(
+            standin.create_storage("second.txt"),
+            Ok(()),
+            "the stand-in did the work: a link on base after startup is not followed"
+        );
+        assert!(
+            real_base
+                .join(
+                    storage
+                        .strip_prefix(&base)
+                        .expect("the storage path is under the base")
+                )
+                .join("second.txt")
+                .is_file(),
+            "the stand-in did the work: the second file lands in the original tree"
+        );
+
+        // Stage 2: the other tree's REAL base is renamed into `base`'s place,
+        // so only a fresh open of the Home path reaches it.
+        std::fs::remove_file(&base).expect("the test removes the base link");
+        std::fs::rename(&other, &base).expect("the test renames the other real base in");
+        assert_eq!(
+            standin.create_storage("third.txt"),
+            Ok(()),
+            "the stand-in did the work: a real base renamed in after startup is not entered"
+        );
+        assert!(
+            real_base
+                .join(
+                    storage
+                        .strip_prefix(&base)
+                        .expect("the storage path is under the base")
+                )
+                .join("third.txt")
+                .is_file(),
+            "the stand-in did the work: the third file lands in the original tree"
+        );
+
+        // The other tree is checked through its own directory handle, opened
+        // once here, so the assertion sees the directory the rename put at
+        // `base`, whatever `base` names now. It holds one name, and the file
+        // read through that handle keeps its bytes.
+        use std::os::fd::AsFd;
+        use std::os::unix::ffi::OsStrExt;
+        // The directory is listed through its handle with rustix, which works
+        // on every Unix target; a `/proc/self/fd` or `/dev/fd` path would need
+        // Linux or would re-open a path.
+        let mut held_dir =
+            rustix::fs::Dir::read_from(victim.as_fd()).expect("the other storage lists");
+        let mut names = Vec::new();
+        while let Some(entry) = held_dir.read() {
+            let entry = entry.expect("the other entry reads");
+            let name = entry.file_name();
+            if name == c"." || name == c".." {
+                continue;
+            }
+            names.push(Path::new(std::ffi::OsStr::from_bytes(name.to_bytes())).to_owned());
         }
+        names.sort();
+        assert_eq!(
+            names,
+            vec![std::ffi::OsString::from("notes.txt")],
+            "the stand-in did the work: it creates nothing in the other tree"
+        );
+        let held = rustix::fs::openat(
+            victim.as_fd(),
+            "notes.txt",
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .expect("the other file opens on the held handle");
+        let mut kept = Vec::new();
+        std::io::Read::read_to_end(&mut std::fs::File::from(held), &mut kept)
+            .expect("the other file reads");
+        assert_eq!(
+            kept, b"outside bytes",
+            "the stand-in did the work: the other file is unchanged"
+        );
+    }
+
+    /// Task 112, M1 check A9, K5 ruling: the Home's ancestors are resolved
+    /// once, at holder creation, so a Home under a linked ancestor (macOS
+    /// `/var -> /private/var`) is accepted. The Home itself must not be a
+    /// link, and no later call opens the Home by path. `scratch/link` points
+    /// at `scratch/real`; the Home is `scratch/link/home` and its storage
+    /// directory is created through it. A walk from `/` with `O_NOFOLLOW`
+    /// per component refuses `link` and turns this red at its first
+    /// `create_storage` assertion.
+    #[test]
+    fn standin_storage_follows_a_linked_ancestor_once_at_set_home() {
+        use std::os::unix::fs::symlink;
+
+        let scratch = TempDir::new().expect("a scratch directory for the linked ancestor row");
+        let real = scratch.path().join("real");
+        let link = scratch.path().join("link");
+        std::fs::create_dir(&real).expect("the test makes the real ancestor");
+        symlink(&real, &link).expect("the test makes the ancestor a symbolic link");
+        let home = link.join("home");
+        std::fs::create_dir(&home).expect("the test makes the Home through the link");
+        let linked_storage = StandIn::storage_for_home(&home)
+            .expect("the stand-in returns the selected Home's storage path");
+        assert!(
+            !linked_storage.exists(),
+            "the test starts with no storage directory"
+        );
+
+        let mut standin = StandIn::new();
+        standin.set_home(&home);
+        assert_eq!(
+            standin.create_storage("a.txt"),
+            Ok(()),
+            "the stand-in did the work: a linked ancestor is resolved once and accepted"
+        );
+        assert!(
+            real.join("home")
+                .join(
+                    linked_storage
+                        .strip_prefix(&home)
+                        .expect("the storage path is under the Home")
+                )
+                .join("a.txt")
+                .is_file(),
+            "the stand-in did the work: the file lands in the real tree through the link"
+        );
+        assert_eq!(
+            std::fs::read_dir(&linked_storage)
+                .expect("the storage directory lists")
+                .map(|entry| entry.expect("the entry reads").file_name())
+                .collect::<Vec<_>>(),
+            vec![std::ffi::OsString::from("a.txt")],
+            "the stand-in did the work: the storage directory holds the one created file"
+        );
+    }
+
+    /// Task 112, M1 check A9, K6 fix: a Home must be absolute. A relative
+    /// Home such as `a/b` would open `a` from the current directory, so it
+    /// is refused with the data reason before any open. Dropping the
+    /// `is_absolute` check turns this red.
+    #[test]
+    fn standin_storage_refuses_a_relative_home() {
+        let scratch = TempDir::new().expect("a scratch directory for the relative Home row");
+        let cwd = std::env::current_dir().expect("the test reads the current directory");
+        assert_ne!(
+            scratch
+                .path()
+                .canonicalize()
+                .expect("the scratch path resolves"),
+            cwd.canonicalize().expect("the current directory resolves"),
+            "the test runs outside its scratch directory"
+        );
+        let relative = Path::new("a/b");
+
+        let mut standin = StandIn::new();
+        standin.set_home(relative);
+        assert_eq!(
+            standin.create_storage("a.txt"),
+            Err((400, DATA_REASON.to_owned())),
+            "the stand-in did the work: a relative Home is refused"
+        );
+        assert_eq!(
+            standin.confirm_storage("a.txt"),
+            Err((400, DATA_REASON.to_owned())),
+            "the stand-in did the work: the check refuses a relative Home too"
+        );
+        assert!(
+            !cwd.join("a").exists(),
+            "the stand-in did the work: nothing is created from the current directory"
+        );
+    }
+
+    /// Task 112, M1 check A9, K5 ruling: the Home ITSELF is still refused
+    /// when it is a symbolic link, even to a real directory. Ancestors are
+    /// resolved once; the Home's own final component is opened with
+    /// `O_NOFOLLOW`. Dropping `O_NOFOLLOW` on that step turns this red.
+    #[test]
+    fn standin_storage_refuses_a_home_that_is_itself_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let scratch = TempDir::new().expect("a scratch directory for the Home link row");
+        let real = scratch.path().join("real-home");
+        let link = scratch.path().join("home-link");
+        std::fs::create_dir(&real).expect("the test makes the real Home");
+        symlink(&real, &link).expect("the test makes the Home a symbolic link");
+        let storage = StandIn::storage_for_home(&link)
+            .expect("the stand-in returns the selected Home's storage path");
+
+        let mut standin = StandIn::new();
+        standin.set_home(&link);
+        assert_eq!(
+            standin.create_storage("a.txt"),
+            Err((400, LINK_REASON.to_owned())),
+            "the stand-in did the work: a Home that is itself a link is refused"
+        );
+        assert!(
+            !storage.exists() && !real.join("storage").exists(),
+            "the stand-in did the work: nothing is created under the linked Home"
+        );
+    }
+
+    #[test]
+    fn standin_storage_refuses_a_file_it_did_not_create() {
+        use crate::harness::ThrowawayHome;
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = ThrowawayHome::new().expect("a throwaway Home for the outsider row");
+        let mut standin = StandIn::new();
+        standin.set_home(home.home());
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let id = launch_finished(&shared, &mut standin);
+        let storage = StandIn::storage_for_home(home.home())
+            .expect("the stand-in returns the selected Home's storage path");
+        std::fs::create_dir_all(&storage).expect("the test creates the storage directory");
+        let entry = storage.join("outsider.txt");
+        std::fs::write(&entry, b"outside bytes")
+            .expect("the test writes one regular file the stand-in did not create");
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o444))
+            .expect("the test makes the outsider file read-only");
+        assert_eq!(
+            standin.confirm_storage("outsider.txt"),
+            Err((400, NOT_CREATED_REASON.to_owned())),
+            "the stand-in did the work: it refuses a file it did not create"
+        );
+        assert_eq!(
+            standin.write_storage(
+                Caller::Client { session_id: &id },
+                "outsider.txt",
+                b"crossed"
+            ),
+            Err((400, NOT_CREATED_REASON.to_owned())),
+            "the stand-in did the work: a write route refuses that file too"
+        );
+        assert_eq!(
+            std::fs::read(&entry).expect("the outsider file stays readable"),
+            b"outside bytes",
+            "the stand-in did the work: it leaves the outsider file unchanged"
+        );
         for name in ["..", "a/b"] {
-            let refused = StandIn::confirm_storage(home.home(), name);
-            assert!(
-                matches!(&refused, Err((400, reason)) if reason == "storage entry stays under the selected Home"),
-                "the stand-in did the work: it refuses entry {name:?} outside one normal component: {refused:?}"
+            assert_eq!(
+                standin.confirm_storage(name),
+                Err((400, ENTRY_REASON.to_owned())),
+                "the stand-in did the work: entry {name:?} keeps its own rule"
             );
         }
+        home.finish().expect("the throwaway Home finishes");
+    }
+
+    /// Falsifier 1 of the A9 ruling, identity form: the recorded name is
+    /// replaced by a different regular file with exactly one link, so only
+    /// the recorded `(st_dev, st_ino)` pair catches the swap. Removing that
+    /// compare turns this test red.
+    #[test]
+    fn standin_storage_refuses_a_replaced_file_at_the_recorded_name() {
+        use crate::harness::ThrowawayHome;
+
+        let home = ThrowawayHome::new().expect("a throwaway Home for the swap row");
+        let mut standin = StandIn::new();
+        standin.set_home(home.home());
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let id = launch_finished(&shared, &mut standin);
+        let agent = Caller::Client { session_id: &id };
+        standin
+            .create_storage("notes.txt")
+            .expect("the stand-in creates agent 1's file");
+        assert_eq!(
+            standin.write_storage(agent, "notes.txt", b"agent 1 bytes"),
+            Ok(()),
+            "the stand-in did the work: agent 1 writes its own file"
+        );
+        let storage = StandIn::storage_for_home(home.home())
+            .expect("the stand-in returns the selected Home's storage path");
+        let entry = storage.join("notes.txt");
+        // A different regular file with exactly one link takes the name, so
+        // the type and link-count checks both pass and only the recorded pair
+        // shows the swap.
+        let outsider = home.home().join("outsider.txt");
+        std::fs::write(&outsider, b"outsider bytes").expect("the test writes a different file");
+        std::fs::rename(&outsider, &entry).expect("the test puts it at the recorded name");
+        let stat = rustix::fs::fstat(
+            std::fs::File::open(&entry).expect("the swapped file stays readable"),
+        )
+        .expect("the swapped file has a status");
+        assert_eq!(
+            stat.st_nlink, 1,
+            "the test did the work: the swapped file has one link"
+        );
+        assert_eq!(
+            standin.read_storage(agent, "notes.txt"),
+            Err((400, SWAPPED_REASON.to_owned())),
+            "the stand-in did the work: the recorded pair is the file it created"
+        );
+        assert_eq!(
+            std::fs::read(&entry).expect("the swapped file stays readable"),
+            b"outsider bytes",
+            "the stand-in did the work: it reads neither file and repairs nothing"
+        );
+        home.finish().expect("the throwaway Home finishes");
+    }
+
+    /// Falsifier 2 of the A9 ruling, link form: a file whose only name is
+    /// gone, so its link count is 0, was refused by the `st_nlink` check at
+    /// 0cca42a3 only when the name was still present (a file it did not
+    /// create, or a file whose pair was still recorded). This test now
+    /// proves the recorded-input refusal it can reach here, and the link
+    /// rule itself is proven on both paths by
+    /// `standin_storage_refuses_a_second_link` (read) and
+    /// `standin_storage_create_refuses_a_second_link` (create). A host that
+    /// allows `open_by_handle_at` reaches the no-link inode itself and gets
+    /// `NOT_ONE_LINK_REASON`; this host refuses that call, so it reports
+    /// SKIP for that part and gives the `st_nlink` rule no credit there.
+    #[test]
+    fn standin_storage_refuses_a_file_with_no_link_left() {
+        use crate::harness::ThrowawayHome;
+
+        let home = ThrowawayHome::new().expect("a throwaway Home for the no-link row");
+        let mut standin = StandIn::new();
+        standin.set_home(home.home());
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let id = launch_finished(&shared, &mut standin);
+        let agent = Caller::Client { session_id: &id };
+        standin
+            .create_storage("notes.txt")
+            .expect("the stand-in creates agent 1's file");
+        assert_eq!(
+            standin.write_storage(agent, "notes.txt", b"agent 1 bytes"),
+            Ok(()),
+            "the stand-in did the work: agent 1 writes its own file"
+        );
+        let storage = StandIn::storage_for_home(home.home())
+            .expect("the stand-in returns the selected Home's storage path");
+        let entry = storage.join("notes.txt");
+        // The test takes the recorded file's only name away. The bytes stay
+        // on the test's own open handle and the inode has no link left.
+        let held = std::fs::File::open(&entry).expect("the test opens the file first");
+        std::fs::remove_file(&entry).expect("the test unlinks the only name");
+        assert_eq!(
+            rustix::fs::fstat(&held)
+                .expect("the held handle has a status")
+                .st_nlink,
+            0,
+            "the test did the work: the file kept open has no link left"
+        );
+        assert_eq!(
+            standin.read_storage(agent, "notes.txt"),
+            Err((400, NOT_CREATED_REASON.to_owned())),
+            "the stand-in did the work: the recorded name is gone, so the record refuses first"
+        );
+        assert_eq!(
+            rustix::fs::fstat(&held)
+                .expect("the held handle has a status")
+                .st_nlink,
+            0,
+            "the stand-in did the work: it restores no name for the refused file"
+        );
+        // A fresh file takes the name. It is regular with one link, so only
+        // the recorded pair refuses it, and the stand-in reads neither file.
+        std::fs::write(&entry, b"successor bytes").expect("the test puts a new file there");
+        assert_eq!(
+            standin.read_storage(agent, "notes.txt"),
+            Err((400, SWAPPED_REASON.to_owned())),
+            "the stand-in did the work: the record refuses the successor file"
+        );
+        assert_eq!(
+            std::fs::read(&entry).expect("the successor file stays readable"),
+            b"successor bytes",
+            "the stand-in did the work: it reads neither file and repairs nothing"
+        );
+        // The file with no link keeps its own bytes: the stand-in repaired
+        // nothing and wrote nothing.
+        assert_eq!(
+            rustix::fs::fstat(&held)
+                .expect("the held handle has a status")
+                .st_size,
+            "agent 1 bytes".len() as i64,
+            "the stand-in did the work: the file with no link keeps its bytes"
+        );
+        home.finish().expect("the throwaway Home finishes");
+    }
+
+    /// Falsifier 3 of the A9 ruling: a second name for the recorded file is
+    /// refused by the `st_nlink == 1` check, not by the recorded pair (both
+    /// names name the recorded inode), the link is not read through, and the
+    /// recorded file keeps its bytes. Weakening that check to `> 1` turns
+    /// this test red on this read path.
+    #[test]
+    fn standin_storage_refuses_a_second_link() {
+        use crate::harness::ThrowawayHome;
+
+        let home = ThrowawayHome::new().expect("a throwaway Home for the second link row");
+        let mut standin = StandIn::new();
+        standin.set_home(home.home());
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let id = launch_finished(&shared, &mut standin);
+        let agent = Caller::Client { session_id: &id };
+        standin
+            .create_storage("notes.txt")
+            .expect("the stand-in creates agent 1's file");
+        assert_eq!(
+            standin.write_storage(agent, "notes.txt", b"agent 1 bytes"),
+            Ok(()),
+            "the stand-in did the work: agent 1 writes its own file"
+        );
+        let storage = StandIn::storage_for_home(home.home())
+            .expect("the stand-in returns the selected Home's storage path");
+        let entry = storage.join("notes.txt");
+        let second = home.home().join("second-name.txt");
+        std::fs::hard_link(&entry, &second).expect("the test makes a second name");
+        assert_eq!(
+            standin.read_storage(agent, "notes.txt"),
+            Err((400, NOT_ONE_LINK_REASON.to_owned())),
+            "the stand-in did the work: it refuses a recorded file with a second name"
+        );
+        assert_eq!(
+            standin.write_storage(agent, "notes.txt", b"crossed"),
+            Err((400, NOT_ONE_LINK_REASON.to_owned())),
+            "the stand-in did the work: the write refuses it too"
+        );
+        assert_eq!(
+            std::fs::read(&entry).expect("the recorded file stays readable"),
+            b"agent 1 bytes",
+            "the stand-in did the work: the recorded file keeps its bytes"
+        );
+        assert_eq!(
+            std::fs::read(&second).expect("the second name stays readable"),
+            b"agent 1 bytes",
+            "the stand-in did the work: the second name keeps its bytes"
+        );
+        home.finish().expect("the throwaway Home finishes");
+    }
+
+    /// Falsifier 3 of the A9 ruling on the create path: the file this call
+    /// made is refused by the same `st_nlink == 1` rule that `storage_file`
+    /// uses, because a second name joined it between the open call and the
+    /// `fstat`. The record stays empty, so a later read refuses the name as
+    /// not created, and both names keep their empty bytes.
+    ///
+    /// Disabling the `st_nlink` rule turns this test red at its first
+    /// assertion. The measured form is: delete this rule, because a rule
+    /// written `stat.st_nlink > 1` left both second-name tests green at
+    /// this head and is therefore not the `st_nlink == 1` rule.
+    #[test]
+    fn standin_storage_create_refuses_a_second_link() {
+        use crate::harness::ThrowawayHome;
+
+        let home = ThrowawayHome::new().expect("a throwaway Home for the create second link row");
+        let mut standin = StandIn::new();
+        standin.set_home(home.home());
+        standin
+            .create_storage("notes.txt")
+            .expect("the stand-in creates its first file");
+        // The test makes this name after that creation, so the next created
+        // file joins it between the open call and the `fstat`.
+        let joined = home.home().join("joined.txt");
+        standin.join_next_create(&joined);
+        assert_eq!(
+            standin.create_storage("moved.txt"),
+            Err((400, NOT_ONE_LINK_REASON.to_owned())),
+            "the stand-in did the work: the file it just made is refused at the shared link rule"
+        );
+        let storage = StandIn::storage_for_home(home.home())
+            .expect("the stand-in returns the selected Home's storage path");
+        let made = storage.join("moved.txt");
+        assert_eq!(
+            rustix::fs::fstat(std::fs::File::open(&made).expect("the refused file stays readable"))
+                .expect("the refused file has a status")
+                .st_nlink,
+            2,
+            "the stand-in did the work: the refused file keeps both names"
+        );
+        for path in [&made, &joined] {
+            assert_eq!(
+                std::fs::read(path).expect("the refused file stays readable"),
+                Vec::<u8>::new(),
+                "the stand-in did the work: the refused file keeps its empty bytes"
+            );
+        }
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let id = launch_finished(&shared, &mut standin);
+        assert_eq!(
+            standin.read_storage(Caller::Client { session_id: &id }, "moved.txt"),
+            Err((400, NOT_CREATED_REASON.to_owned())),
+            "the stand-in did the work: a refused creation leaves no record"
+        );
         home.finish().expect("the throwaway Home finishes");
     }
 
