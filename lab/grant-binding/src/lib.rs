@@ -79,12 +79,6 @@ pub struct Decision {
     pub rights: Rights,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Asker {
-    Home,
-    App,
-}
-
 /// A refusal with one clear reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refuse {
@@ -196,17 +190,6 @@ impl Verifier {
             },
         );
         Ok(handle)
-    }
-
-    pub fn ask_capability(
-        &mut self,
-        instance: InstanceId,
-        resource: &str,
-        rights: Rights,
-        claimed: Asker,
-    ) -> Result<Handle, Refuse> {
-        let _claimed = claimed;
-        self.bind_grant(instance, resource, rights)
     }
 
     /// Changes the registry identity for a live instance.
@@ -1735,8 +1718,8 @@ fn model_registered_home_ask_is_refused() {
     let home = verifier.register_instance("home", "session-a");
     let photo = verifier.register_instance("photo", "session-a");
     let handle = verifier
-        .ask_capability(photo, "UsersAI/photo/library", rights(), Asker::Home)
-        .expect("photo ask claimed as home");
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("photo ask");
     let call = verifier.open_call(photo);
     let decision = verifier
         .use_grant(call, &guest(handle))
@@ -1744,8 +1727,8 @@ fn model_registered_home_ask_is_refused() {
     assert_eq!(decision.identity, "photo");
     assert_eq!(decision.owned_root, "UsersAI/photo/library");
     let refusal = verifier
-        .ask_capability(home, "UsersAI/home/desk", rights(), Asker::App)
-        .expect_err("home ask claimed as app");
+        .bind_grant(home, "UsersAI/home/desk", rights())
+        .expect_err("home ask");
     assert_eq!(refusal, Refuse::HomeMint);
     assert_eq!(refusal.to_string(), "home does not mint an app capability");
     let again = verifier
@@ -1753,7 +1736,7 @@ fn model_registered_home_ask_is_refused() {
         .expect("photo effect remains");
     assert_eq!(again.owned_root, "UsersAI/photo/library");
     let for_home = verifier
-        .ask_capability(photo, "UsersAI/home/desk", rights(), Asker::Home)
+        .bind_grant(photo, "UsersAI/home/desk", rights())
         .expect_err("photo ask for a home root");
     assert_eq!(for_home, Refuse::OutsidePrincipal);
     assert_eq!(
