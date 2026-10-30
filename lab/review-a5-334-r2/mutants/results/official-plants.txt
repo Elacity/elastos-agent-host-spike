@@ -1,0 +1,34 @@
+harness=/tmp/a5-review-r2-copy/lab/a5-binding-harness
+F-A5-FAKE-REFUSAL CAUGHT
+  fake_refusal_is_rejected FAILED exit=101 ASSERT 0.74s thread 'fake_refusal_is_rejected' (5391) panicked at tests/journeys.rs:22:5:
+  fixture_refusal_is_not_runtime_evidence FAILED exit=101 ASSERT 0.04s thread 'contract::tests::fixture_refusal_is_not_runtime_evidence' (5399) panicked at src/contract.rs:462:9:
+  restore src/contract.rs IDENTICAL f3a1fb29d9cfec589fca9795da001980c53db8aa34535f300eebdfbf5310d5c3
+F-A5-SKIP-AS-PASS CAUGHT
+  skipped_is_never_accepted FAILED exit=101 ASSERT 0.70s thread 'skipped_is_never_accepted' (5543) panicked at tests/gates.rs:127:5:
+  restore src/lib.rs IDENTICAL 8f6c93eebef5a1c480371b75a463b47da05d918f58b2fba08f534c072d1fbbef
+F-A5-PUBLIC-AS-BIND CAUGHT
+  public_read_as_binding_is_rejected FAILED exit=101 ASSERT 0.80s thread 'public_read_as_binding_is_rejected' (5688) panicked at tests/journeys.rs:21:38:
+  restore src/journey.rs IDENTICAL 27483169afd246c064eef4940c8649d2139e440ee00513ab0bd0ae8f6f82b19a
+F-A5-SIBLING CAUGHT
+  sibling_allowed_is_rejected FAILED exit=101 ASSERT 0.80s thread 'sibling_allowed_is_rejected' (5833) panicked at tests/journeys.rs:21:38:
+  restore src/journey.rs IDENTICAL 27483169afd246c064eef4940c8649d2139e440ee00513ab0bd0ae8f6f82b19a
+F-A5-SESSION-END CAUGHT
+  session_survives_end_is_rejected FAILED exit=101 ASSERT 0.71s thread 'session_survives_end_is_rejected' (5978) panicked at tests/journeys.rs:22:5:
+  restore src/journey.rs IDENTICAL 27483169afd246c064eef4940c8649d2139e440ee00513ab0bd0ae8f6f82b19a
+F-A5-THEATRE CAUGHT
+  theatre_without_guest_handle_is_not_accepted FAILED exit=101 ASSERT 0.68s thread 'contract::tests::theatre_without_guest_handle_is_not_accepted' (6119) panicked at src/contract.rs:520:34:
+  restore src/contract.rs IDENTICAL f3a1fb29d9cfec589fca9795da001980c53db8aa34535f300eebdfbf5310d5c3
+F-A5-EMPTY-ID CAUGHT
+  empty_grant_id_is_rejected FAILED exit=101 ASSERT 0.72s thread 'contract::tests::empty_grant_id_is_rejected' (6260) panicked at src/contract.rs:547:34:
+  empty_grant_id_is_rejected_on_the_journey FAILED exit=101 ASSERT 0.04s thread 'empty_grant_id_is_rejected_on_the_journey' (6272) panicked at tests/journeys.rs:21:38:
+  restore src/contract.rs IDENTICAL f3a1fb29d9cfec589fca9795da001980c53db8aa34535f300eebdfbf5310d5c3
+F-A5-REASON-SUB CAUGHT
+  reason_substring_is_not_a_match FAILED exit=101 ASSERT 0.67s thread 'contract::tests::reason_substring_is_not_a_match' (6412) panicked at src/contract.rs:564:9:
+  restore src/contract.rs IDENTICAL f3a1fb29d9cfec589fca9795da001980c53db8aa34535f300eebdfbf5310d5c3
+F-A5-PUB-HARDCODE CAUGHT
+  public_read_bound_is_not_hardcoded FAILED exit=101 ASSERT 0.74s thread 'http::tests::public_read_bound_is_not_hardcoded' (6553) panicked at src/http.rs:548:9:
+  restore src/http.rs IDENTICAL b5085b2879fb3d22644094691ad01fa3e5a162f23ba27f26a353c3255e19f0e8
+F-A5-GAP-CLEAR CAUGHT
+  gap_cleared_without_guest_keeps_rows_blocked FAILED exit=101 ASSERT 0.69s thread 'capability::tests::gap_cleared_without_guest_keeps_rows_blocked' (6694) panicked at src/capability.rs:451:13:
+  restore src/capability.rs IDENTICAL 3bfd4dab054ff69333ab8c293a3f5ef5eecc9d65c6412faf8f2439a202c683a5
+official 10 CAUGHT of 10

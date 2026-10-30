@@ -1,0 +1,28 @@
+A5 r2 attack summary. Reviewed head 2a6892ff. Copy /tmp/a5-review-r2-copy.
+Sources restored IDENTICAL after every plant and attack.
+
+official plants: 10 CAUGHT of 10 at assertions, not timeouts.
+
+#372 replays (accepted / failed / blocked / skipped):
+M-FORGE-TODAY              0 / 0 / 9 / 0   BLOCKED (guest_measured still None)
+M-372-GAP-NONE             0 / 0 / 9 / 0   BLOCKED (gap()=None does not unblock)
+M-372-GAP-NONE-STUB        0 / 0 / 9 / 0   BLOCKED (same + theatre stub)
+
+New ways to reach ACCEPTED:
+M-FORGE-MEASUREMENT        0 / 0 / 9 / 0   files + env ignored
+M-REPLAY-TRANSCRIPT        0 / 0 / 9 / 0   transcript + spoofed host ignored
+M-FLIP-GUEST-TRUE          0 / 0 / 0 / 9   SKIPPED, not ACCEPTED
+M-FLIP-GUEST-TRUE-STUB     0 / 9 / 0 / 0   FAIL: launch handle empty
+M-FLIP-GUEST-TRUE-MEASURED 0 / 9 / 0 / 0   FAIL: host_record hardcoded missing
+M-FROM-OPERATOR-SOME       0 / 0 / 0 / 9   SKIPPED
+M-FROM-OPERATOR-SOME-STUB  0 / 9 / 0 / 0   FAIL: host_record
+M-DELETE-PUB-NEEDS         0 / 0 / 8 / 1   A5-PUB SKIPPED
+M-DELETE-PUB-NEEDS-STUB    0 / 1 / 8 / 0   A5-PUB FAIL: host_record
+M-DELETE-ALL-NEEDS         0 / 0 / 0 / 9   SKIPPED
+M-DELETE-ALL-NEEDS-STUB    0 / 9 / 0 / 0   FAIL: host_record
+M-FLIP-BLOCKED-EMPTY       0 / 9 / 0 / 0   FAIL: host_record
+M-ACCEPT-WITHOUT-EVIDENCE  0 / 9 / 0 / 0   FAIL: journeys still hit host_record
+
+Theatre test in the harness (blockers skipped, check.run on stub): accepted 0 of 9; failed 9.
+
+No attack produced ACCEPTED/PASS.

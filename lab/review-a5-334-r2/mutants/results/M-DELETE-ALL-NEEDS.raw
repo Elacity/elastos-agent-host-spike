@@ -1,0 +1,22 @@
+warning: unused import: `Capability::*`
+   --> src/capability.rs:282:13
+    |
+282 |         use Capability::*;
+    |             ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+check | test | grade
+A5-ID-POS | acceptance_a5_identity_grant_used_by_bound_agent | SKIPPED (A5_RUNTIME_COORDS is not set)
+A5-ID-REPLAY | acceptance_a5_identity_grant_replayed_by_other_agent | SKIPPED (A5_RUNTIME_COORDS is not set)
+A5-SESS-POS | acceptance_a5_session_grant_used_in_bound_session | SKIPPED (A5_RUNTIME_COORDS is not set)
+A5-SESS-END | acceptance_a5_session_grant_reused_after_session_end | SKIPPED (A5_RUNTIME_COORDS is not set)
+A5-INST-POS | acceptance_a5_instance_grant_used_by_bound_instance | SKIPPED (A5_RUNTIME_COORDS is not set)
+A5-INST-SIB | acceptance_a5_instance_grant_used_by_sibling | SKIPPED (A5_RUNTIME_COORDS is not set)
+A5-STOR-POS | acceptance_a5_owned_storage_grant_used_on_bound_root | SKIPPED (A5_RUNTIME_COORDS is not set)
+A5-STOR-OTHER | acceptance_a5_owned_storage_grant_pointed_at_other_root | SKIPPED (A5_RUNTIME_COORDS is not set)
+A5-PUB | acceptance_a5_public_storage_read_is_not_binding | SKIPPED (A5_RUNTIME_COORDS is not set)
+
+A5 binding: accepted 0 of 9; failed 0; blocked 0; skipped 9
+
+exit=4
