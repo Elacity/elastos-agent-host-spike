@@ -25,6 +25,10 @@ sha2 = "=0.10.9"
 # Lab only: the stand-in opens and checks each storage file by handle. The
 # Runtime core never takes this dependency.
 rustix = { version = "=1.1.4", features = ["fs"] }
+# The one grant ledger the stand-in shares with the reference model (M1 check
+# A7). Lab only: the Runtime core never names this crate. It is a normal
+# dependency because the stand-in module is part of this crate's library.
+grant-binding = { path = "../grant-binding" }
 
 [dev-dependencies]
 ed25519-dalek = "2.1"

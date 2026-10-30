@@ -763,7 +763,7 @@ fn runtime_hosted_access_denial(state: &str) -> Vec<u8> {
 const SHELL_LIVE_GRANT_SCOPE: &str = "all_sessions_live";
 
 /// The session id every fixture hosted run carries in its runtime binding.
-/// It is the session of the one grant the test seeds.
+/// It is the session of the one grant the routes mint for the test.
 const HOSTED_FIXTURE_SESSION_ID: &str = "session:test";
 
 /// The two backend stream events the source test sends
@@ -3471,11 +3471,13 @@ fn a_hosted_tool_call_or_reasoning_never_reaches_the_caller() {
 /// (`lab/agent-conformance/standin-runtime/mod.rs:128-139`), and a granting
 /// stand-in answers only an effect whose request id matches a live entry, so no
 /// route runs over a socket here (`MP35`). Run A carries a non-empty
-/// `grant_id` but has no seeded grant, so the stand-in refuses it with the
+/// `grant_id` but holds no grant, so the stand-in refuses it with the
 /// Runtime's `403` and `X-Elastos-Hosted-Access: refused` before any backend
 /// call, and the run settles `failed` with `hosted_effect_refused` and class
-/// `access_refused`. One `Live` grant for run B's request id is then listed
-/// with every entry field, and run B completes with `ready` and reported
+/// `access_refused`. The shell then stores one *bound* `Live` grant for run B's
+/// request id through `seed_bound_grant`, which binds on the ledger as the
+/// grant route does, and lists it with every entry field; run B completes with
+/// `ready` and reported
 /// usage. The loopback backend counts exactly one request, so only B reached
 /// the model (`MP36`). The granting stand-in admits run B through the shared
 /// stand-in's `authorise`, which spends a `once` grant on that one use
@@ -3505,14 +3507,14 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
     assert_eq!(
         shell_live_grant_view(&grants),
         json!({"scope": SHELL_LIVE_GRANT_SCOPE, "capabilities": []}),
-        "the shared stand-in shell view must list no grant before one is seeded"
+        "the shared stand-in shell view must list no grant before one is minted"
     );
 
-    // Run A names a grant id, but no grant was seeded for its request id, so
-    // the effect has no live entry to be reached through.
+    // Run A names a grant id, but the resident holds no grant, so the effect
+    // has no live entry to be reached through.
     let prompt_a = "a turn with no live grant";
-    let request_a = granted_model_turn_request_id(HOSTED_FIXTURE_SESSION_ID, prompt_a);
     let denied = granted_model_turn(Arc::clone(&grants), HOSTED_FIXTURE_SESSION_ID, prompt_a);
+    let request_a = denied.request_id.clone();
     let settled_a = denied.settled;
     assert_eq!(
         settled_a["data"]["status"],
@@ -3538,45 +3540,30 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
         "the stand-in must record why it refused run A"
     );
 
-    // The shell seeds one `Live` grant for run B's request id. The shared
-    // stand-in's `seed_grant` is its lab seam
-    // (`lab/agent-conformance/standin-runtime/mod.rs:104-124`); the values are
+    // The shell stores one `Live` grant for run B's request id, through the
+    // shared stand-in's `seed_bound_grant` seam (`standin-runtime/mod.rs:743`),
+    // which binds on the ledger exactly as the grant route does. The values are
     // this test's fixture, and the shared stand-in decides liveness.
     let prompt_b = "a turn reached only through a live grant";
     let request_b = granted_model_turn_request_id(HOSTED_FIXTURE_SESSION_ID, prompt_b);
-    let resource = "model:fixture/text";
-    let action = "text.generate";
-    let duration = "once";
-    let granted_at: u64 = 1_790_000_000;
-    grants.lock().unwrap().seed_grant(
-        &request_b,
-        HOSTED_FIXTURE_SESSION_ID,
-        resource,
-        action,
-        duration,
-        granted_at,
-        Life::Live,
-        false,
-    );
+    seed_live_model_grant(&grants, &request_b, HOSTED_FIXTURE_SESSION_ID);
     let expected_entry = json!({
         "request_id": request_b,
         "session_id": HOSTED_FIXTURE_SESSION_ID,
-        "resource": resource,
-        "action": action,
-        "duration": duration,
-        "granted_at": granted_at,
+        "resource": GRANTED_MODEL_TURN_RESOURCE,
+        "action": GRANTED_MODEL_TURN_ACTION,
+        "duration": "once",
+        "granted_at": GRANTED_MODEL_TURN_SEEDED_AT,
     });
+    let view = shell_live_grant_view(&grants);
     assert_eq!(
-        shell_live_grant_view(&grants),
-        json!({
-            "scope": SHELL_LIVE_GRANT_SCOPE,
-            "capabilities": [expected_entry.clone()],
-        }),
+        view["capabilities"],
+        json!([expected_entry.clone()]),
         "the shared stand-in shell view must list the one live grant with every field"
     );
 
-    // Run B carries a new request id, and the one live grant reaches the model
-    // through `granted_model_turn`.
+    // Run B carries that request id, and the one live grant is the one entry
+    // its effect reaches through `granted_model_turn`.
     let granted = granted_model_turn(Arc::clone(&grants), HOSTED_FIXTURE_SESSION_ID, prompt_b);
     let settled_b = granted.settled;
     assert_eq!(
@@ -3671,14 +3658,14 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
 
 /// A hosted model turn is reached only through a live grant for the session the
 /// run's runtime binding names. 058's test shows the refusal with no grant and
-/// the control whose live entry matches; this one seeds one `Live` entry for run
-/// C's request id under `session:other`, so the shared stand-in's `authorise`
-/// refuses C with its one reason that names both sessions
-/// (`wrong capsule: expected session:other, got session:test`) and the granting
-/// stand-in reaches no backend (`MP38`), then
-/// seeds run D's entry under the binding's `session:test`, so D completes with
-/// `ready`. The loopback backend counts exactly one request at the model
-/// endpoint, so only D reached the model. The effect carries no session id
+/// the control whose live entry matches; this one stores one `Live` grant for
+/// run C's request id for a second session, `session:other`, so the shared
+/// stand-in's `authorise` refuses C with its one reason that names both
+/// sessions (`wrong capsule: expected session:other, got session:test`) and the
+/// granting stand-in reaches no backend (`MP38`), then stores run D's entry for
+/// the binding's `session:test`, so D completes with `ready`. The loopback
+/// backend counts exactly one request at the model endpoint, so only D reached
+/// the model. The effect carries no session id
 /// (`src/adapters.rs:61-66`), so the stand-in applies the session of the hosted
 /// run it serves; that is the stand-in's rule, not a claim about how the Runtime
 /// finds an effect's session.
@@ -3700,32 +3687,21 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
     }
     let grants = Arc::new(Mutex::new(StandIn::new()));
 
-    // The shell seeds one `Live` grant for run C's request id, and it belongs
+    // The shell stores one `Live` grant for run C's request id, and it belongs
     // to another session than the one the stand-in serves. The values are this
-    // test's fixture, and the shared stand-in decides liveness.
+    // test's fixture, and the shared stand-in decides liveness. Only the
+    // session tie decides this refusal, so the grant is bound like the others.
     let prompt_c = "a turn whose grant belongs to another session";
     let request_c = granted_model_turn_request_id(HOSTED_FIXTURE_SESSION_ID, prompt_c);
     let other_session = "session:other";
-    let resource = "model:fixture/text";
-    let action = "text.generate";
-    let duration = "once";
-    let granted_at: u64 = 1_790_000_000;
-    grants.lock().unwrap().seed_grant(
-        &request_c,
-        other_session,
-        resource,
-        action,
-        duration,
-        granted_at,
-        Life::Live,
-        false,
-    );
+    let granted_at: u64 = GRANTED_MODEL_TURN_SEEDED_AT;
+    seed_live_model_grant(&grants, &request_c, other_session);
     let expected_c = json!({
         "request_id": request_c,
         "session_id": other_session,
-        "resource": resource,
-        "action": action,
-        "duration": duration,
+        "resource": GRANTED_MODEL_TURN_RESOURCE,
+        "action": GRANTED_MODEL_TURN_ACTION,
+        "duration": "once",
         "granted_at": granted_at,
     });
     assert_eq!(
@@ -3771,16 +3747,10 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
     // Run D's live entry is for the session the stand-in serves, so D reaches
     // the model. Its request id is not run C's, so C's grant does not hide it.
     let prompt_d = "a turn whose grant belongs to the served session";
-    let request_d = granted_model_turn_request_id(HOSTED_FIXTURE_SESSION_ID, prompt_d);
-    grants.lock().unwrap().seed_grant(
-        &request_d,
+    seed_live_model_grant(
+        &grants,
+        &granted_model_turn_request_id(HOSTED_FIXTURE_SESSION_ID, prompt_d),
         HOSTED_FIXTURE_SESSION_ID,
-        resource,
-        action,
-        duration,
-        granted_at,
-        Life::Live,
-        false,
     );
     let served = granted_model_turn(Arc::clone(&grants), HOSTED_FIXTURE_SESSION_ID, prompt_d);
     let settled_d = served.settled;
@@ -3840,16 +3810,29 @@ const GRANTED_MODEL_TURN_GRANT_ID: &str = "grant:granted-model-turn";
 static GRANTED_MODEL_TURN_LABEL: AtomicUsize = AtomicUsize::new(0);
 
 /// The request id `granted_model_turn` sends for this session and prompt.
-/// A caller seeds a grant for this id before the call.
+/// A caller grants this id through the routes before the call.
 fn granted_model_turn_request_id(session_id: &str, prompt: &str) -> String {
     test_support::fixture_model_request_id(&format!(
         "request:granted-model-turn:{session_id}:{prompt}"
     ))
 }
 
-fn granted_model_turn_binding(session_id: &str, prompt: &str) -> RuntimeCreateBinding {
+/// The resource and action a model grant names, and the ones the provider's
+/// hosted effect presents. Both come from the same request id, so the effect
+/// and its grant carry one pair.
+const GRANTED_MODEL_TURN_RESOURCE: &str = "model:fixture/text";
+const GRANTED_MODEL_TURN_ACTION: &str = "text.generate";
+/// The instant `seed_live_model_grant` stores, and the one its shell live
+/// entry lists.
+const GRANTED_MODEL_TURN_SEEDED_AT: u64 = 1_800_000_000;
+
+fn granted_model_turn_binding(
+    request_id: &str,
+    session_id: &str,
+    prompt: &str,
+) -> RuntimeCreateBinding {
     let request = hosted_text_create_request_for_session(
-        &granted_model_turn_request_id(session_id, prompt),
+        request_id,
         GRANTED_MODEL_TURN_GRANT_ID,
         session_id,
         prompt,
@@ -3858,27 +3841,35 @@ fn granted_model_turn_binding(session_id: &str, prompt: &str) -> RuntimeCreateBi
 }
 
 /// The shell's one `Live` grant for a model turn, stored through the shared
-/// stand-in's `seed_grant` seam
-/// (`lab/agent-conformance/standin-runtime/mod.rs:270`). No journey in this
-/// file depends on a plan binding (M1 check A15b): `seed_grant` stores a grant
-/// with no plan (`plan: None`, `lab/agent-conformance/standin-runtime/mod.rs:291`),
-/// the provider's hosted effect names no `plan_sha256`, and `plan_accepts`
-/// accepts every use of an unbound grant
-/// (`lab/agent-conformance/standin-runtime/mod.rs:1130-1135`). A `StandIn::new()`
-/// here therefore reaches "ready" over an unbound grant, and the plan-bound
-/// path is proven in `lab/agent-conformance/tests/standin_plan.rs` and in
-/// `lab/plan-approval/src/lib.rs`.
+/// stand-in's `seed_bound_grant` seam (`standin-runtime/mod.rs:743`). That seam
+/// stores the grant and binds it through `bind_on_ledger`, the same step
+/// `post_capability_grant` runs after its request checks, so the stand-in's
+/// use route admits this grant at a hosted use exactly like a route-minted
+/// one. The journey cannot use the request and grant routes: they need an
+/// admitted, live resident and refuse the `model:fixture/text` ask, and the
+/// provider presents the binding's own request id. A plain `seed_grant` stays unbound
+/// and a use of it is refused: the hosted route answers status `403` with the
+/// pair reason `effect run {run_id} is not bound to request {request_id}`,
+/// and `admit_effect` would refuse the missing handle with `unknown handle`
+/// (`standin-runtime/mod.rs:1649-1676`). `lab/agent-conformance/tests/
+/// standin_grants.rs` asserts both halves.
 fn seed_live_model_grant(grants: &Arc<Mutex<StandIn>>, request_id: &str, session_id: &str) {
-    grants.lock().unwrap().seed_grant(
-        request_id,
-        session_id,
-        "model:fixture/text",
-        "text.generate",
-        "once",
-        1_790_000_000,
-        Life::Live,
-        false,
-    );
+    // The ledger bind cannot refuse here: the seam registers the session's own
+    // instance and binds the session's own effect root (`bind_on_ledger`).
+    grants
+        .lock()
+        .unwrap()
+        .seed_bound_grant(
+            request_id,
+            session_id,
+            GRANTED_MODEL_TURN_RESOURCE,
+            GRANTED_MODEL_TURN_ACTION,
+            "once",
+            GRANTED_MODEL_TURN_SEEDED_AT,
+            Life::Live,
+            false,
+        )
+        .expect("the lab seam binds the session's own effect root");
 }
 
 /// The one run file under `<fixture-root>/journal/runs`. `hosted_effect_init`
@@ -3920,6 +3911,9 @@ fn read_provider_run_journal(root: &Path) -> Value {
 /// provider journal when the turn completed. A refusal carries the stand-in's
 /// reason and no loopback request.
 struct GrantedModelTurn {
+    /// The request id this turn's runtime binding carried, and the one its
+    /// hosted effect presented.
+    request_id: String,
     answer: Option<String>,
     effect_id: String,
     journal: Option<Value>,
@@ -3953,7 +3947,7 @@ fn granted_model_turn(
     prompt: &str,
 ) -> GrantedModelTurn {
     let request_id = granted_model_turn_request_id(session_id, prompt);
-    let binding = granted_model_turn_binding(session_id, prompt);
+    let binding = granted_model_turn_binding(&request_id, session_id, prompt);
     let label = format!(
         "gmt-{}",
         GRANTED_MODEL_TURN_LABEL.fetch_add(1, Ordering::Relaxed)
@@ -4017,6 +4011,7 @@ fn granted_model_turn(
     provider.shutdown();
     let journal = completed.then(|| read_provider_run_journal(&root));
     GrantedModelTurn {
+        request_id,
         answer,
         effect_id,
         journal,

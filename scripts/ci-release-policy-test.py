@@ -2914,6 +2914,16 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                     self.assertEqual(self.journey["pidfd_exited"](45), exited)
                 poll.register.assert_called_once_with(45, selector.POLLIN)
                 poll.poll.assert_called_once_with(0)
+            poll = mock.Mock()
+            poll.poll.return_value = [(45, selector.POLLIN)]
+            selector.poll.return_value = poll
+            with mock.patch.dict(self.globals, {"select": selector}):
+                self.assertTrue(self.journey["pidfd_exited"](45, timeout=250))
+            poll.poll.assert_called_once_with(250)
+            for timeout in (251, -1, True):
+                with mock.patch.dict(self.globals, {"select": selector}), \
+                        self.assertRaisesRegex(RuntimeError, "process wait is unavailable"):
+                    self.journey["pidfd_exited"](45, timeout=timeout)
             for events in ([(45, selector.POLLHUP)], [(45, selector.POLLERR)], [(45, selector.POLLNVAL)],
                            [(45, 2)], [(45, selector.POLLIN | selector.POLLERR)],
                            [(45, selector.POLLIN | selector.POLLHUP | selector.POLLERR)],
@@ -3038,6 +3048,43 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                 self.globals["pidfd_exited"] = lambda fd: fd == owner.fds[103]
                 self.assertNotIn(103, owner.observe_once())
                 self.assertEqual(opened.call_count, len(rows))
+
+    def test_finite_census_waits_out_exit_race_and_still_refuses_a_quiet_pidfd(self):
+        for readable in (True, False):
+            with self.subTest(readable=readable), tempfile.TemporaryDirectory() as temp:
+                owner, _ = self.finite_owner(Path(temp))
+                row, reads = self.process_rows(owner)[100], []
+                outer = self.globals["bounded_text"]
+                child = owner.binding["ControlGroup"]
+
+                def census(path, *rest):
+                    # The cgroup still lists the new pid after its exe vanished.
+                    return ("100" if Path(path).name == "cgroup.procs" else
+                            "0::" + (child if path.parent.name == "100" else "/outside"))
+
+                def exited(fd, timeout=0):
+                    # Its pidfd stays quiet until the bounded whole-group wait.
+                    reads.append((fd, timeout))
+                    return readable and timeout == 250
+
+                def identity(pid, **_):
+                    if pid == 100:
+                        raise FileNotFoundError("fixture child exited")
+                    return dict(row)
+
+                with mock.patch.dict(self.globals, {"bounded_text": census, "pidfd_exited": exited,
+                                                    "linux_process_identity": identity}), \
+                        mock.patch.object(os, "getuid", return_value=1001), \
+                        mock.patch.object(os, "pidfd_open", return_value=1100, create=True), \
+                        mock.patch.object(os, "close") as closed:
+                    if readable:
+                        self.assertEqual(owner.observe_once(require_runtime=False), {})
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "live child identity is unavailable"):
+                            owner.observe_once(require_runtime=False)
+                self.assertEqual(reads, [(1100, 250)])
+                closed.assert_called_once_with(1100)
+                self.assertEqual((owner.known, owner.fds), ({}, {}))
 
     def test_finite_pidfd_binding_closes_on_identity_race_or_unreadable_child(self):
         for fault in ("reused", "disappeared", "denied"):
