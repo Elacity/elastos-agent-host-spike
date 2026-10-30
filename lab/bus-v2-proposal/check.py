@@ -432,6 +432,26 @@ def _span_target(span):
     return rel, int(number)
 
 
+def cited_line(span, lines):
+    """Return the 1-based line SPAN cites.
+
+    A line span is the number ``_span_target`` reads. A function span is the
+    first line of LINES that declares that function, using the same ``fn`` or
+    ``def`` pattern as ``has_function``.
+    """
+    match = CITATION.fullmatch(span)
+    func = None if match is None else match.group("func")
+    if func is not None:
+        if not lines:
+            return None
+        pattern = r"(?:^|\s)(?:fn|def) " + re.escape(func) + r"\("
+        for number, line in enumerate(lines, 1):
+            if re.search(pattern, line):
+                return number
+        return None
+    return _span_target(span)[1]
+
+
 def _remainders(text, marker):
     """Return the indented remainders after MARKER, in order."""
     lines = text.splitlines()
@@ -507,19 +527,22 @@ def _pinned_quote(text, span, marker, root=None, sha=None, pinned=None):
 
     PINNED is the pinned file's lines when the caller already read them.
     Otherwise this reads them through ``_pinned_lines`` at the draft pin, or at
-    the worktree draft pin when TEXT carries none.
+    the worktree draft pin when TEXT carries none. ``cited_line`` then names
+    the line: the numbered line of a line span, or the declaring line of a
+    function span.
     """
     remainders = _remainders(text, marker)
     if not remainders:
         return None
-    rel, number = _span_target(span)
     if pinned is None:
         if root is None:
             root = worktree_root()
         if sha is None:
             sha = _pin_of(text, root)
+        match = CITATION.fullmatch(span)
+        rel = match.group("path")
         pinned = _pinned_lines(root, sha, rel)
-    return quote_for(remainders, pinned, number)
+    return quote_for(remainders, pinned, cited_line(span, pinned))
 
 
 def owned_quote(text, root=None, sha=None, pinned=None):
@@ -817,9 +840,61 @@ def resident_export_quote(text, root=None, sha=None, pinned=None):
     return _pinned_quote(text, RESIDENT_EXPORT_SPAN, RESIDENT_EXPORT_MARKER, root, sha, pinned)
 
 
-# The only target list: one entry per line decision, in source order. A range's
-# two endpoints share one marker. The quoter name is looked up at call time so a
-# test can plant a neighbouring remainder through the production path.
+# Function spans whose indented block already equals the declaring line, in
+# draft order. Each one is spliced into QUOTE_TARGETS with a None quoter, so
+# the tuple and the list cannot drift. A None quoter is the only selector.
+FUNCTION_QUOTE_SPANS = (
+    "elastos/crates/elastos-server/src/auth.rs::local_person_principal_id",
+    "elastos/crates/elastos-server/src/auth.rs::principal_localhost_root",
+    "elastos/crates/elastos-server/src/resource_bridge.rs::scope_current_user_alias",
+    "examples/agent-host/src/lib.rs::journal_resource",
+    "lab/capsule-identity/src/lib.rs::name_signature_message",
+    "lab/capsule-identity/src/lib.rs::sign_bundle",
+    "lab/capsule-identity/src/lib.rs::verify_checked_signature",
+    "examples/agent-host/src/lib.rs::authorize",
+    "examples/agent-host/src/lib.rs::propose_hosted",
+    "capsules/model-provider/src/adapters.rs::effect_request",
+    "elastos/crates/elastos-server/src/api/model_provider_egress.rs::handle",
+    "examples/agent-host/src/lib.rs::step_payload",
+    "capsules/model-provider/src/journal.rs::journal_budget_fault",
+    "capsules/model-provider/src/journal.rs::active_run_count",
+    "capsules/model-provider/src/contract.rs::is_terminal",
+    "elastos/crates/elastos-server/src/api/gateway_model_service.rs::reserve_run_slot",
+    "capsules/model-provider/src/journal.rs::validate_backend_usage",
+    "examples/agent-host/src/lib.rs::ask_kind_name",
+    "examples/agent-host/src/lib.rs::declared_ask",
+    "examples/agent-host/src/lib.rs::propose_read",
+    "examples/agent-host/src/lib.rs::observe",
+    "examples/agent-host/src/lib.rs::propose_edit",
+    "examples/agent-host/src/lib.rs::propose_restore",
+    "examples/agent-host/src/lib.rs::is_write",
+    "examples/agent-host/src/lib.rs::edit_request",
+    "examples/agent-host/src/lib.rs::request_body",
+    "elastos/crates/elastos-server/src/provider_resource.rs::provider_operation_action",
+    "elastos/crates/elastos-server/src/provider_resource.rs::localhost_op_required_action",
+    "examples/agent-host/src/lib.rs::propose_run",
+    "elastos/crates/elastos-compute/src/exec_vm.rs::decide_exec",
+    "elastos/crates/elastos-compute/src/exec_vm.rs::admit_project_files",
+    "examples/agent-host/src/lib.rs::propose_child",
+    "examples/agent-host/src/lib.rs::authorize_child",
+    "examples/agent-host/src/lib.rs::open_child_host",
+    "examples/agent-host/src/lib.rs::grant_child_host",
+    "examples/agent-host/src/lib.rs::propose_init",
+    "examples/agent-host/src/lib.rs::journal_write_body",
+    "examples/agent-host/src/lib.rs::append_journal",
+    "examples/agent-host/src/lib.rs::propose_journal_append",
+    "elastos/crates/elastos-server/src/provider_resource.rs::agents_area_refusal",
+    "elastos/crates/elastos-server/src/resource_bridge.rs::write_precondition",
+    "lab/grant-binding/src/ops.rs::model_overwrite_grant_does_not_permit_append",
+    "lab/grant-binding/src/lib.rs::resource_name",
+    "lab/grant-binding/src/ledger.rs::model_reserve_over_the_ceiling_is_refused",
+    "lab/grant-binding/src/ledger.rs::model_reported_usage_does_not_lower_the_hold",
+)
+
+# The only target list: one entry per line decision, in source order, then one
+# None-quoter entry per FUNCTION_QUOTE_SPANS entry. A range's two endpoints
+# share one marker. The quoter name is looked up at call time so a test can
+# plant a neighbouring remainder through the production path.
 QUOTE_TARGETS = (
     (OBSERVE_SPAN, OBSERVE_MARKER, "observe_quote"),
     (EDIT_START_SPAN, EDIT_RANGE_MARKER, "edit_start_quote"),
@@ -939,6 +1014,8 @@ QUOTE_TARGETS = (
     ("lab/grant-binding/src/lib.rs:280", "`lab/grant-binding/src/lib.rs:280`", None),
     ("lab/grant-binding/src/lib.rs:23", "`lab/grant-binding/src/lib.rs:23`", None),
     ("lab/grant-binding/src/lib.rs:25", "`lab/grant-binding/src/lib.rs:25`", None),
+) + tuple(
+    (span, "`" + span + "`", None) for span in FUNCTION_QUOTE_SPANS
 )
 
 
@@ -966,8 +1043,10 @@ def _quote_refusal(root, text, sha, target, refused_spans=frozenset()):
     The pin already refused this citation, or the marker it reads, with a
     structural reason: one citation has one reason, so no quote refusal runs.
     The walk has no remainder for MARKER: no refusal, and the next target runs.
-    The marker is not one line: refused before the line read. The pinned line is
-    absent, or no window holds the cited line: the quotation is not in the pin.
+    The marker is not one line: refused before the line read. ``cited_line``
+    names the line after the pinned file is read: the numbered line of a line
+    span, or the declaring line of a function span. The pinned line is absent,
+    or no window holds the cited line: the quotation is not in the pin.
     The comparison fails, including a zero score: the quotation does not match.
     """
     span, marker, quoter = target
@@ -977,8 +1056,10 @@ def _quote_refusal(root, text, sha, target, refused_spans=frozenset()):
         return "refuse: quoted line is not one line: " + marker.strip("`")
     if not _remainders(text, marker):
         return None
-    rel, number = _span_target(span)
-    source = pinned_line(root, sha, rel, number)
+    rel = CITATION.fullmatch(span).group("path")
+    lines = _pinned_lines(root, sha, rel)
+    number = cited_line(span, lines)
+    source = None if number is None else pinned_line(root, sha, rel, number)
     quoted = _target_quotation(text, target, root, sha)
     if quoted is None or source is None:
         return "refuse: quoted line is not in the pinned commit: " + span

@@ -6,6 +6,7 @@ The tests call ``check.problems``. They do not compile a citation expression.
 import contextlib
 import io
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -10142,13 +10143,17 @@ class CitationCheckTests(unittest.TestCase):
 
     def test_aligned_span_set_is_the_65_this_task_decides(self):
         # The 65 spans make 68 endpoint decisions, and 12 of those were already
-        # targets, so this task adds 56 entries. A missing span, an extra span
-        # and a duplicated span each fail here.
+        # targets, so that task adds 56 entries. The function spans sit after
+        # those 115. A missing span, an extra span and a duplicated span each
+        # fail here.
         self.assertEqual(len(ALIGNED_SPANS_DECIDED), 65)
         self.assertEqual(len(ALIGNED_ENDPOINTS), 68)
         self.assertEqual(len(ALIGNED_ALREADY_DECIDED), 12)
         self.assertEqual(len(ALIGNED_NEW_ENDPOINTS), 56)
-        self.assertEqual(len(check.QUOTE_TARGETS), 115)
+        self.assertEqual(
+            len(check.QUOTE_TARGETS),
+            115 + len(check.FUNCTION_QUOTE_SPANS),
+        )
         self.assertEqual(set(ALIGNED_ALREADY_DECIDED) - ALIGNED_ENDPOINT_SET, set())
 
     def test_live_draft_aligned_quotes_match_their_pinned_lines(self):
@@ -10185,7 +10190,12 @@ class CitationCheckTests(unittest.TestCase):
             self.assertEqual(entries.count(endpoint), 1, endpoint)
         for endpoint in BASELINE_TARGETS:
             self.assertEqual(entries.count(endpoint), 1, endpoint)
-        self.assertEqual(len(entries), len(BASELINE_TARGETS) + len(ALIGNED_NEW_ENDPOINTS))
+        self.assertEqual(
+            len(entries),
+            len(BASELINE_TARGETS)
+            + len(ALIGNED_NEW_ENDPOINTS)
+            + len(check.FUNCTION_QUOTE_SPANS),
+        )
         # The spans this task adds, read back from the target list as spans, are
         # exactly the 65 names above minus the 12 that already had entries. A
         # missing span leaves its name out here, an extra span makes the entry
@@ -10197,7 +10207,12 @@ class CitationCheckTests(unittest.TestCase):
         ]
         self.assertEqual(len(needed), 53)
         self.assertEqual(len(ALIGNED_SPANS_DECIDED), len(set(ALIGNED_SPANS_DECIDED)))
-        added = [endpoint for endpoint in entries if endpoint not in BASELINE_TARGETS]
+        added = [
+            endpoint
+            for endpoint in entries
+            if endpoint not in BASELINE_TARGETS
+            and endpoint not in check.FUNCTION_QUOTE_SPANS
+        ]
         self.assertEqual(len(added), len(ALIGNED_NEW_ENDPOINTS))
         added_spans = {
             span
@@ -10355,3 +10370,346 @@ class CitationCheckTests(unittest.TestCase):
             self.test_range_second_endpoint_is_decided,
             "CAUGHT range-endpoint-dropped",
         )
+
+    def _problems_for(self, body):
+        """problems() for an in-memory draft judged at this worktree's pin."""
+        root = check.worktree_root()
+        original = check.load_draft
+
+        def load(_root):
+            return body
+
+        check.load_draft = load
+        try:
+            return check.problems(root)
+        finally:
+            check.load_draft = original
+
+    def test_cited_line_reads_a_line_span_as_its_number(self):
+        # A line span does not search the file. The number is _span_target's.
+        span = "examples/agent-host/src/lib.rs:3754"
+        self.assertEqual(check.cited_line(span, None), check._span_target(span)[1])
+        self.assertEqual(check.cited_line(span, ["fn other("]), 3754)
+
+    def test_cited_line_reads_the_first_declaration(self):
+        # The same fn/def pattern as has_function, the first matching line.
+        span = "pkg/kept.rs::kept"
+        lines = ["// kept is below", "pub fn other(", "    fn kept("]
+        self.assertEqual(check.cited_line(span, lines), 3)
+        self.assertIsNone(check.cited_line(span, None))
+        self.assertIsNone(check.cited_line(span, ["fn other("]))
+
+    def test_quote_targets_are_the_base_list_plus_function_spans(self):
+        # Walk order is the base list, then one None quoter per function span.
+        # A missing, extra, or duplicated entry fails this ordered comparison.
+        expected = BASE_QUOTE_TARGETS + tuple(
+            (span, "`" + span + "`", None) for span in FUNCTION_QUOTE_SPAN_ORDER
+        )
+        self.assertEqual(check.QUOTE_TARGETS, expected)
+        self.assertEqual(check.FUNCTION_QUOTE_SPANS, FUNCTION_QUOTE_SPAN_ORDER)
+        self.assertEqual(len(FUNCTION_QUOTE_SPAN_ORDER), 45)
+        self.assertEqual(len(expected), 160)
+        self.assertEqual(
+            len(check.QUOTE_TARGETS),
+            len({target[0] for target in check.QUOTE_TARGETS}),
+        )
+        for span in UNMATCHED_FUNCTION_SPANS:
+            self.assertNotIn(span, check.FUNCTION_QUOTE_SPANS, span)
+
+    def test_changed_function_remainder_does_not_match(self):
+        # One changed character of the remainder that stands for the declaring
+        # line refuses that function span and no other reason.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        sha = check.pin_sha(text)
+        self.assertEqual(len(check.FUNCTION_QUOTE_SPANS), 45)
+        for span in check.FUNCTION_QUOTE_SPANS:
+            remainders = check._remainders(text, "`" + span + "`")
+            rel = check.CITATION.fullmatch(span).group("path")
+            pinned = check._pinned_lines(root, sha, rel)
+            number = check.cited_line(span, pinned)
+            index = check._quote_window(remainders, pinned, number)
+            changed = list(remainders)
+            line = changed[index]
+            changed[index] = line[:-1] + ("x" if line[-1] != "x" else "y")
+            block = "".join("    " + row + "\n" for row in changed)
+            body = "Pinned commit: " + sha + "\n`" + span + "`\n\n" + block
+            self.assertEqual(
+                self._problems_for(body),
+                ["refuse: quoted line does not match " + span],
+                span,
+            )
+
+    def test_repeated_function_marker_is_not_one_line(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        sha = check.pin_sha(text)
+        span = check.FUNCTION_QUOTE_SPANS[0]
+        body = (
+            "Pinned commit: " + sha + "\n"
+            "`" + span + "`\n"
+            "`" + span + "`\n"
+            "    fn local_person_principal_id(\n"
+        )
+        self.assertEqual(
+            self._problems_for(body),
+            ["refuse: quoted line is not one line: " + span],
+        )
+
+    def test_function_span_outside_the_tuple_adds_no_refusal(self):
+        # A function span the tuple does not name is not a quote target, so a
+        # block under it adds no refusal. 129 function spans stay unchecked:
+        # 117 with no block and these 12 whose block does not equal the line.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        cited = []
+        for span in check._spans(text):
+            match = check.CITATION.fullmatch(span)
+            if match is not None and match.group("func") is not None:
+                cited.append(span)
+        self.assertEqual(len(cited), 174)
+        self.assertEqual(len(set(cited)), 174)
+        unchecked = [
+            span for span in cited if span not in check.FUNCTION_QUOTE_SPANS
+        ]
+        self.assertEqual(len(unchecked), 129)
+        self.assertEqual(len(UNMATCHED_FUNCTION_SPANS), 12)
+        span = UNMATCHED_FUNCTION_SPANS[0]
+        sha = check.pin_sha(text)
+        body = (
+            "Pinned commit: " + sha + "\n`" + span + "`\n\n"
+            "    this is not the declaring line\n"
+        )
+        self.assertEqual(self._problems_for(body), [])
+        self.assertEqual(check.problems(root), [])
+
+    def test_span_target_is_not_called_for_a_function_span(self):
+        original = check._span_target
+
+        def planted(span):
+            if "::" in span:
+                raise AssertionError("span target saw " + span)
+            return original(span)
+
+        check._span_target = planted
+        try:
+            self.assertEqual(check.problems(check.worktree_root()), [])
+        finally:
+            check._span_target = original
+
+    def test_added_function_span_cites_its_own_declaration(self):
+        # This function is not the first one in its file. The real helper
+        # quotes its own declaring line.
+        span = "elastos/crates/elastos-server/src/auth.rs::local_person_principal_id"
+        self.assertIn(span, check.FUNCTION_QUOTE_SPANS)
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        sha = check.pin_sha(text)
+        rel = "elastos/crates/elastos-server/src/auth.rs"
+        lines = check._pinned_lines(root, sha, rel)
+        number = check.cited_line(span, lines)
+        self.assertIn("fn local_person_principal_id(", lines[number - 1], span)
+        target = (span, "`" + span + "`", None)
+        self.assertIsNone(check._quote_refusal(root, text, sha, target), span)
+
+    def test_falsifier_func_decl_line(self):
+        # A helper that returns the first declared function in the file quotes
+        # the wrong line for a later function, and this test fails.
+        def planted(span, lines):
+            pattern = r"(?:^|\s)(?:fn|def) [A-Za-z_][A-Za-z0-9_]*\("
+            for number, line in enumerate(lines or [], 1):
+                if re.search(pattern, line):
+                    return number
+            return None
+
+        self._caught(
+            "cited_line",
+            planted,
+            self.test_added_function_span_cites_its_own_declaration,
+            "local_person_principal_id",
+            "CAUGHT func-decl-line",
+        )
+
+# The quote-target walk before function spans, in list order.
+BASE_QUOTE_TARGETS = (
+    ('examples/agent-host/src/lib.rs:2067', '`examples/agent-host/src/lib.rs:2067`', 'observe_quote'),
+    ('examples/agent-host/src/lib.rs:2421', '`examples/agent-host/src/lib.rs:2421-2422`', 'edit_start_quote'),
+    ('examples/agent-host/src/lib.rs:2422', '`examples/agent-host/src/lib.rs:2421-2422`', 'edit_end_quote'),
+    ('examples/agent-host/src/lib.rs:2720', '`examples/agent-host/src/lib.rs:2720`', 'request_quote'),
+    ('examples/agent-host/src/lib.rs:2741', '`examples/agent-host/src/lib.rs:2741`', 'revision_quote'),
+    ('examples/agent-host/src/lib.rs:2749', '`examples/agent-host/src/lib.rs:2749`', 'op_quote'),
+    ('examples/agent-host/src/lib.rs:2958', '`examples/agent-host/src/lib.rs:2958`', 'no_process_quote'),
+    ('examples/agent-host/src/lib.rs:2981', '`examples/agent-host/src/lib.rs:2981`', 'seat_quote'),
+    ('examples/agent-host/src/lib.rs:3290', '`examples/agent-host/src/lib.rs:3290`', 'is_write_quote'),
+    ('examples/agent-host/src/lib.rs:3308', '`examples/agent-host/src/lib.rs:3308`', 'no_write_quote'),
+    ('examples/agent-host/src/lib.rs:3339', '`examples/agent-host/src/lib.rs:3339`', 'no_provider_quote'),
+    ('examples/agent-host/src/lib.rs:3360', '`examples/agent-host/src/lib.rs:3360`', 'parent_grant_doc_quote'),
+    ('examples/agent-host/src/lib.rs:3370', '`examples/agent-host/src/lib.rs:3370`', 'narrower_quote'),
+    ('examples/agent-host/src/lib.rs:3382', '`examples/agent-host/src/lib.rs:3382`', 'child_grant_none_quote'),
+    ('examples/agent-host/src/lib.rs:3387', '`examples/agent-host/src/lib.rs:3387`', 'init_guard_quote'),
+    ('examples/agent-host/src/lib.rs:3403', '`examples/agent-host/src/lib.rs:3403`', 'project_resource_quote'),
+    ('examples/agent-host/src/lib.rs:3449', '`examples/agent-host/src/lib.rs:3449`', 'parent_compare_quote'),
+    ('examples/agent-host/src/lib.rs:3455', '`examples/agent-host/src/lib.rs:3455`', 'child_host_doc_quote'),
+    ('examples/agent-host/src/lib.rs:3470', '`examples/agent-host/src/lib.rs:3470`', 'empty_journal_quote'),
+    ('examples/agent-host/src/lib.rs:3471', '`examples/agent-host/src/lib.rs:3471`', 'admit_system_quote'),
+    ('examples/agent-host/src/lib.rs:3474', '`examples/agent-host/src/lib.rs:3474`', 'inherited_err_quote'),
+    ('examples/agent-host/src/lib.rs:3482', '`examples/agent-host/src/lib.rs:3482`', 'grant_parent_quote'),
+    ('examples/agent-host/src/lib.rs:3526', '`examples/agent-host/src/lib.rs:3526`', 'deny_quote'),
+    ('examples/agent-host/src/lib.rs:3549', '`examples/agent-host/src/lib.rs:3549`', 'mint_quote'),
+    ('examples/agent-host/src/lib.rs:3754', '`examples/agent-host/src/lib.rs:3754`', 'owned_quote'),
+    ('examples/agent-host/src/lib.rs:3755', '`examples/agent-host/src/lib.rs:3754`', 'next_owned_quote'),
+    ('examples/agent-host/src/lib.rs:3757', '`examples/agent-host/src/lib.rs:3757`', 'journal_quote'),
+    ('examples/agent-host/src/lib.rs:3767', '`examples/agent-host/src/lib.rs:3767`', 'grant_quote'),
+    ('examples/agent-host/src/lib.rs:3849', '`examples/agent-host/src/lib.rs:3849`', 'write_quote'),
+    ('examples/agent-host/src/lib.rs:3850', '`examples/agent-host/src/lib.rs:3850`', 'read_quote'),
+    ('examples/agent-host/src/lib.rs:3935', '`examples/agent-host/src/lib.rs:3935`', 'append_condition_quote'),
+    ('examples/agent-host/src/lib.rs:3936', '`examples/agent-host/src/lib.rs:3936`', 'host_path_err_quote'),
+    ('examples/agent-host/src/lib.rs:3947', '`examples/agent-host/src/lib.rs:3947`', 'held_err_quote'),
+    ('examples/agent-host/src/lib.rs:3961', '`examples/agent-host/src/lib.rs:3961`', 'body_doc_quote'),
+    ('examples/agent-host/src/lib.rs:3966', '`examples/agent-host/src/lib.rs:3966`', 'create_only_quote'),
+    ('examples/agent-host/src/lib.rs:3967', '`examples/agent-host/src/lib.rs:3967`', 'present_revision_quote'),
+    ('examples/agent-host/src/lib.rs:4023', '`examples/agent-host/src/lib.rs:4023`', 'append_cap_quote'),
+    ('examples/agent-host/src/lib.rs:4032', '`examples/agent-host/src/lib.rs:4032-4033`', 'append_call_quote'),
+    ('examples/agent-host/src/lib.rs:4033', '`examples/agent-host/src/lib.rs:4032-4033`', 'outcome_held_quote'),
+    ('examples/agent-host/src/lib.rs:4061', '`examples/agent-host/src/lib.rs:4061`', 'write_invoke_quote'),
+    ('examples/agent-host/src/lib.rs:8149', '`examples/agent-host/src/lib.rs:8149`', 'asks_quote'),
+    ('examples/agent-host/src/lib.rs:8162', '`examples/agent-host/src/lib.rs:8162`', 'marker_quote'),
+    ('examples/agent-host/src/lib.rs:8168', '`examples/agent-host/src/lib.rs:8168`', 'launching_quote'),
+    ('examples/agent-host/src/lib.rs:8187', '`examples/agent-host/src/lib.rs:8187`', 'kind_read_quote'),
+    ('examples/agent-host/src/lib.rs:8188', '`examples/agent-host/src/lib.rs:8188`', 'kind_edit_quote'),
+    ('examples/agent-host/src/lib.rs:8189', '`examples/agent-host/src/lib.rs:8189`', 'kind_run_quote'),
+    ('examples/agent-host/src/lib.rs:8190', '`examples/agent-host/src/lib.rs:8190`', 'kind_restore_quote'),
+    ('examples/agent-host/src/lib.rs:8191', '`examples/agent-host/src/lib.rs:8191`', 'kind_hosted_quote'),
+    ('examples/agent-host/src/lib.rs:8192', '`examples/agent-host/src/lib.rs:8192`', 'kind_child_quote'),
+    ('examples/agent-host/src/lib.rs:8193', '`examples/agent-host/src/lib.rs:8193`', 'kind_init_quote'),
+    ('examples/agent-host/src/lib.rs:8194', '`examples/agent-host/src/lib.rs:8194`', 'kind_append_quote'),
+    ('examples/agent-host/src/lib.rs:8488', '`examples/agent-host/src/lib.rs:8488`', 'cover_quote'),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:123', '`elastos/crates/elastos-server/src/provider_resource.rs:123`', 'scheme_quote'),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:189', '`elastos/crates/elastos-server/src/provider_resource.rs:189`', 'read_action_quote'),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:190', '`elastos/crates/elastos-server/src/provider_resource.rs:190`', 'write_action_quote'),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:192', '`elastos/crates/elastos-server/src/provider_resource.rs:192`', 'default_action_quote'),
+    ('elastos/crates/elastos-compute/src/providers/component.rs:218', '`elastos/crates/elastos-compute/src/providers/component.rs:218`', 'resident_run_quote'),
+    ('elastos/crates/elastos-compute/src/providers/component.rs:232', '`elastos/crates/elastos-compute/src/providers/component.rs:232`', 'resident_stop_quote'),
+    ('elastos/wit/elastos-bus-v1.wit:87', '`elastos/wit/elastos-bus-v1.wit:87`', 'resident_export_quote'),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:814', '`elastos/crates/elastos-server/src/resource_bridge.rs:814`', None),
+    ('lab/capsule-identity/src/lib.rs:1425', '`lab/capsule-identity/src/lib.rs:1425`', None),
+    ('lab/capsule-identity/README.md:946', '`lab/capsule-identity/README.md:946`', None),
+    ('elastos/crates/elastos-compute/src/providers/component.rs:350', '`elastos/crates/elastos-compute/src/providers/component.rs:350`', None),
+    ('capsules/model-provider/src/adapters.rs:58', '`capsules/model-provider/src/adapters.rs:58`', None),
+    ('elastos/crates/elastos-server/src/api/gateway_model_service.rs:1', '`elastos/crates/elastos-server/src/api/gateway_model_service.rs:1`', None),
+    ('elastos/crates/elastos-server/src/api/gateway_model_service.rs:4', '`elastos/crates/elastos-server/src/api/gateway_model_service.rs:4`', None),
+    ('examples/agent-host/src/lib.rs:471', '`examples/agent-host/src/lib.rs:471-476`', None),
+    ('examples/agent-host/src/lib.rs:476', '`examples/agent-host/src/lib.rs:471-476`', None),
+    ('examples/agent-host/src/lib.rs:532', '`examples/agent-host/src/lib.rs:532`', None),
+    ('examples/agent-host/src/lib.rs:754', '`examples/agent-host/src/lib.rs:754`', None),
+    ('capsules/model-provider/src/journal.rs:391', '`capsules/model-provider/src/journal.rs:391-397`', None),
+    ('capsules/model-provider/src/journal.rs:397', '`capsules/model-provider/src/journal.rs:391-397`', None),
+    ('capsules/model-provider/src/journal.rs:921', '`capsules/model-provider/src/journal.rs:921`', None),
+    ('capsules/model-provider/src/state.rs:530', '`capsules/model-provider/src/state.rs:530`', None),
+    ('capsules/model-provider/src/state.rs:609', '`capsules/model-provider/src/state.rs:609`', None),
+    ('capsules/model-provider/src/contract.rs:134', '`capsules/model-provider/src/contract.rs:134`', None),
+    ('elastos/crates/elastos-server/src/api/gateway_model_service.rs:355', '`elastos/crates/elastos-server/src/api/gateway_model_service.rs:355`', None),
+    ('elastos/crates/elastos-server/src/api/gateway_model_service.rs:1452', '`elastos/crates/elastos-server/src/api/gateway_model_service.rs:1452-1454`', None),
+    ('elastos/crates/elastos-server/src/api/gateway_model_service.rs:1454', '`elastos/crates/elastos-server/src/api/gateway_model_service.rs:1452-1454`', None),
+    ('examples/agent-host/asks.json:4', '`examples/agent-host/asks.json:4`', None),
+    ('examples/agent-host/asks.json:5', '`examples/agent-host/asks.json:5`', None),
+    ('examples/agent-host/asks.json:6', '`examples/agent-host/asks.json:6`', None),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:422', '`elastos/crates/elastos-server/src/provider_resource.rs:422`', None),
+    ('examples/agent-host/asks.json:7', '`examples/agent-host/asks.json:7`', None),
+    ('examples/agent-host/asks.json:8', '`examples/agent-host/asks.json:8`', None),
+    ('examples/agent-host/asks.json:9', '`examples/agent-host/asks.json:9`', None),
+    ('elastos/crates/elastos-compute/src/exec_vm.rs:43', '`elastos/crates/elastos-compute/src/exec_vm.rs:43`', None),
+    ('elastos/crates/elastos-compute/src/exec_vm.rs:49', '`elastos/crates/elastos-compute/src/exec_vm.rs:49`', None),
+    ('elastos/crates/elastos-compute/src/exec_vm.rs:130', '`elastos/crates/elastos-compute/src/exec_vm.rs:130`', None),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:174', '`elastos/crates/elastos-server/src/provider_resource.rs:174`', None),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:176', '`elastos/crates/elastos-server/src/provider_resource.rs:176`', None),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:163', '`elastos/crates/elastos-server/src/provider_resource.rs:163`', None),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:164', '`elastos/crates/elastos-server/src/provider_resource.rs:164`', None),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:165', '`elastos/crates/elastos-server/src/provider_resource.rs:165`', None),
+    ('examples/agent-host/asks.json:12', '`examples/agent-host/asks.json:12`', None),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:379', '`elastos/crates/elastos-server/src/provider_resource.rs:379`', None),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:382', '`elastos/crates/elastos-server/src/provider_resource.rs:382`', None),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:696', '`elastos/crates/elastos-server/src/resource_bridge.rs:696`', None),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:697', '`elastos/crates/elastos-server/src/resource_bridge.rs:697`', None),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:698', '`elastos/crates/elastos-server/src/resource_bridge.rs:698`', None),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:699', '`elastos/crates/elastos-server/src/resource_bridge.rs:699`', None),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:570', '`elastos/crates/elastos-server/src/resource_bridge.rs:570`', None),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:571', '`elastos/crates/elastos-server/src/resource_bridge.rs:571`', None),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:582', '`elastos/crates/elastos-server/src/resource_bridge.rs:582`', None),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:583', '`elastos/crates/elastos-server/src/resource_bridge.rs:583`', None),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:603', '`elastos/crates/elastos-server/src/resource_bridge.rs:603`', None),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:606', '`elastos/crates/elastos-server/src/resource_bridge.rs:606`', None),
+    ('lab/grant-binding/README.md:12', '`lab/grant-binding/README.md:12`', None),
+    ('docs/AGENT_ARCHITECTURE.md:19', '`docs/AGENT_ARCHITECTURE.md:19`', None),
+    ('docs/AGENT_ARCHITECTURE.md:21', '`docs/AGENT_ARCHITECTURE.md:21`', None),
+    ('docs/AGENT_ARCHITECTURE.md:24', '`docs/AGENT_ARCHITECTURE.md:24`', None),
+    ('docs/AGENT_ARCHITECTURE.md:332', '`docs/AGENT_ARCHITECTURE.md:332`', None),
+    ('lab/grant-binding/src/lib.rs:280', '`lab/grant-binding/src/lib.rs:280`', None),
+    ('lab/grant-binding/src/lib.rs:23', '`lab/grant-binding/src/lib.rs:23`', None),
+    ('lab/grant-binding/src/lib.rs:25', '`lab/grant-binding/src/lib.rs:25`', None),
+)
+
+# The 45 function spans spliced after that base, in draft order.
+FUNCTION_QUOTE_SPAN_ORDER = (
+    'elastos/crates/elastos-server/src/auth.rs::local_person_principal_id',
+    'elastos/crates/elastos-server/src/auth.rs::principal_localhost_root',
+    'elastos/crates/elastos-server/src/resource_bridge.rs::scope_current_user_alias',
+    'examples/agent-host/src/lib.rs::journal_resource',
+    'lab/capsule-identity/src/lib.rs::name_signature_message',
+    'lab/capsule-identity/src/lib.rs::sign_bundle',
+    'lab/capsule-identity/src/lib.rs::verify_checked_signature',
+    'examples/agent-host/src/lib.rs::authorize',
+    'examples/agent-host/src/lib.rs::propose_hosted',
+    'capsules/model-provider/src/adapters.rs::effect_request',
+    'elastos/crates/elastos-server/src/api/model_provider_egress.rs::handle',
+    'examples/agent-host/src/lib.rs::step_payload',
+    'capsules/model-provider/src/journal.rs::journal_budget_fault',
+    'capsules/model-provider/src/journal.rs::active_run_count',
+    'capsules/model-provider/src/contract.rs::is_terminal',
+    'elastos/crates/elastos-server/src/api/gateway_model_service.rs::reserve_run_slot',
+    'capsules/model-provider/src/journal.rs::validate_backend_usage',
+    'examples/agent-host/src/lib.rs::ask_kind_name',
+    'examples/agent-host/src/lib.rs::declared_ask',
+    'examples/agent-host/src/lib.rs::propose_read',
+    'examples/agent-host/src/lib.rs::observe',
+    'examples/agent-host/src/lib.rs::propose_edit',
+    'examples/agent-host/src/lib.rs::propose_restore',
+    'examples/agent-host/src/lib.rs::is_write',
+    'examples/agent-host/src/lib.rs::edit_request',
+    'examples/agent-host/src/lib.rs::request_body',
+    'elastos/crates/elastos-server/src/provider_resource.rs::provider_operation_action',
+    'elastos/crates/elastos-server/src/provider_resource.rs::localhost_op_required_action',
+    'examples/agent-host/src/lib.rs::propose_run',
+    'elastos/crates/elastos-compute/src/exec_vm.rs::decide_exec',
+    'elastos/crates/elastos-compute/src/exec_vm.rs::admit_project_files',
+    'examples/agent-host/src/lib.rs::propose_child',
+    'examples/agent-host/src/lib.rs::authorize_child',
+    'examples/agent-host/src/lib.rs::open_child_host',
+    'examples/agent-host/src/lib.rs::grant_child_host',
+    'examples/agent-host/src/lib.rs::propose_init',
+    'examples/agent-host/src/lib.rs::journal_write_body',
+    'examples/agent-host/src/lib.rs::append_journal',
+    'examples/agent-host/src/lib.rs::propose_journal_append',
+    'elastos/crates/elastos-server/src/provider_resource.rs::agents_area_refusal',
+    'elastos/crates/elastos-server/src/resource_bridge.rs::write_precondition',
+    'lab/grant-binding/src/ops.rs::model_overwrite_grant_does_not_permit_append',
+    'lab/grant-binding/src/lib.rs::resource_name',
+    'lab/grant-binding/src/ledger.rs::model_reserve_over_the_ceiling_is_refused',
+    'lab/grant-binding/src/ledger.rs::model_reported_usage_does_not_lower_the_hold',
+)
+
+# Blocks that do not equal the declaring line. They stay out of the walk.
+UNMATCHED_FUNCTION_SPANS = (
+    'elastos/crates/elastos-server/src/resource_bridge.rs::manifest_bound_users_self_matches_active_principal_root_only_with_context',
+    'elastos/crates/elastos-compute/src/providers/component.rs::stop',
+    'elastos/crates/elastos-runtime/src/capability/manager.rs::test_wrong_capsule',
+    'examples/agent-host/src/lib.rs::encode_journal',
+    'examples/agent-host/src/lib.rs::decode_step',
+    'capsules/model-provider/src/journal.rs::store_run',
+    'capsules/model-provider/src/state.rs::handle_runs_create',
+    'lab/grant-binding/src/lib.rs::register_instance',
+    'lab/grant-binding/src/lib.rs::bind_grant',
+    'lab/grant-binding/src/lib.rs::use_grant',
+    'lab/grant-binding/src/ledger.rs::reserve',
+    'lab/grant-binding/src/ops.rs::operate',
+)
