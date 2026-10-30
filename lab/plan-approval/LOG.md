@@ -832,3 +832,106 @@ cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_req
 Neither plant calls `seed_request`. After both restores, `git diff -- lab/plan-approval/src/lib.rs`
 shows no plant. The restored proof command set (the fmt check and the eighteen test commands in the
 task) took 2.178 s real. This lane has no `falsifiers.json`; no id is added.
+
+## 026
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md), Request flow step 10:
+
+> The result returns to the Agent Host and Home without exposing provider credentials or broader authority
+
+This task proves that sentence for the live grant list: the list returns the caller's own live entries,
+a client does not receive another session's grant, and reading it stores nothing and spends nothing.
+`read_shown_grants` is the one new function and the only product read of the live list; it takes
+`&StandIn`, passes the caller and the scope through, and returns that result. It contains no match on
+`Caller` and no copy of the scope check, the shell check, `render`, `visible`, `entry` or `body`. The
+shell request list stays `get_capability_requests`, the presentation read the existing tests already
+use.
+
+`shown_live_list_is_not_another_sessions_grant` reads the list only through `read_shown_grants`. On a
+fresh stand-in, the no-scope read for `component-1`, `component-2`, `component-absent` and the empty
+session id is `{"capabilities":[]}` with no `scope` key and not the shell body, while the shell's
+no-scope read and its `all_sessions_live` read are the same `{"scope":"all_sessions_live",
+"capabilities":[]}`; each of those reads leaves the shell live list empty and the capsule list empty.
+The scope `session`, for `component-1`, the empty id and the shell, is `Err((400, "unknown capability
+list scope: session"))`; the empty scope, for `component-1` and the shell, is `Err((400, "unknown
+capability list scope: "))`; none is the shell refusal or an Ok body, and each leaves the shell live
+list and the capsule list empty. A client ask for `all_sessions_live`, for `component-1`,
+`component-absent` and the empty id, is `Err((403, "This endpoint requires shell privileges"))` with
+no body that names `request-1`, and each leaves the shell live list and the capsule list empty. Two
+`running_agent` shell calls then start `component-1` and `component-2`, both `running` with cause
+`""`; the first session's list stays empty and its ask for every session stays refused. The first
+session submits `PLAN_A` for `request-1` and the second submits `PLAN_B` for `request-2`; both stay
+pending in the shell request view with their 64-character hashes, and both live lists stay empty. The
+shell's `approve` of `request-1` once makes the shell live list, for no scope and for the live scope,
+that one `once` entry with `session_id` and no `plan` or `token`, and makes the first session's list
+that entry without `session_id`, `plan`, `token` or a `scope` key; the second session, an empty id and
+an unknown id see `{"capabilities":[]}`, and a client ask for every session is still the shell
+refusal. The shell's `approve` of `request-2` for the session makes both shell reads the two entries,
+one `once` and one `session`, while the first session's list stays its one entry and the second
+session's list is its one entry without `session_id`, `plan`, `scope` or `request-1`. The first
+session's `execute` of `request-2` is `Err((403, "wrong capsule: expected component-2, got
+component-1"))` and leaves both grants; its `execute` of `request-1` spends the once grant, so the
+shell list and the first session's list drop it while the second session's grant stays, and a second
+use is `Err((400, "grant is not live: Exhausted"))` with both lists unchanged. The second session's
+`execute` twice is `{"valid":true}` each time and its session grant stays listed after both uses. The
+shell's `stop_shown_session` of `component-2` is JSON null, the capsule is `stopped` with cause
+`stopped: stop the shown session`, `component-1` stays `running` with cause `""`, the shell live list
+is the empty shell body, both client lists are empty, and the next `execute` is `Err((400, "grant is
+not live: Revoked"))`. Both request records stay `granted` under `shell` with `owner approved`. The
+test calls no `get_capability_list`, `get_capability_request`, `seed_request`, `seed_grant`,
+`post_capability_*` method, `admit_resident`, `post_capsules`, `finish_start`, `set_instant`,
+`delete_capsule` or `worker_exited`. This crate stores no copy of the list renderer, does not copy
+the stand-in and names no planner. A passing run gives the Runtime no A15 credit.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_live_list_is_not_another_sessions_grant -- --exact
+```
+
+### F-client-sees-shell
+
+- old bytes, line 215: `    stand_in.get_capability_list(caller, scope)`
+- new bytes, lines 215 to 221:
+  ```
+      let read = stand_in.get_capability_list(caller, scope);
+      match read {
+          Ok(_) if matches!(caller, Caller::Client { .. }) => {
+              stand_in.get_capability_list(Caller::Shell, Some("all_sessions_live"))
+          }
+          read => read,
+      }
+  ```
+- planted crate compiled; `shown_live_list_is_not_another_sessions_grant` failed at `src/lib.rs:5330:9`
+  (planted tree) on the first fresh client read: `assertion left == right failed: a shown live list is
+  not another session's grant: the no-scope read for component-1 on a fresh stand-in is the empty
+  client list`; left held `Ok(Object {"capabilities": Array [], "scope":
+  String("all_sessions_live")})`, right expected `Ok(Object {"capabilities": Array []})`. A client read
+  returned the shell's body.
+- restored, the test passes.
+
+### F-global-scope-is-shell
+
+- old bytes, line 215: `    stand_in.get_capability_list(caller, scope)`
+- new bytes, lines 215 to 219:
+  ```
+      let caller = if scope == Some("all_sessions_live") {
+          Caller::Shell
+      } else {
+          caller
+      };
+  ```
+- planted crate compiled; `shown_live_list_is_not_another_sessions_grant` failed at `src/lib.rs:5443:9`
+  (planted tree) on the first fresh client ask for every session: `assertion left == right failed: a
+  shown live list is not another session's grant: a client ask for every session is the shell refusal
+  for component-1`; left held `Ok(Object {"capabilities": Array [], "scope":
+  String("all_sessions_live")})`, right expected `Err((403, "This endpoint requires shell
+  privileges"))`. A client ask for every session ran as the shell.
+- restored, the test passes.
+
+Neither plant calls `seed_grant` or `seed_request`. After both restores, no plant line remains:
+`sed -n '210,216p' lab/plan-approval/src/lib.rs` shows the signature and the single
+`stand_in.get_capability_list(caller, scope)` line, and `git diff -- lab/plan-approval/src/lib.rs`
+holds no `match read`, no shadowed `caller` and no `Caller::Client { .. }` guard. The restored proof
+command set (the fmt check and the nineteen test commands in the task) took 2.09 s real. This lane
+has no `falsifiers.json`; no id is added.

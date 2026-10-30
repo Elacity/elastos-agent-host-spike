@@ -190,6 +190,31 @@ pub fn read_shown_request(
     stand_in.get_capability_request(caller, request_id)
 }
 
+/// One live-list read through `GET /api/capability/list`.
+///
+/// `caller` is the authenticated caller and `scope` is the query scope, both
+/// method arguments. This helper passes them to the list route unchanged and
+/// does not judge either, so the route's own scope check and its own shell
+/// check decide the answer. No scope is the plain route; the one live scope
+/// lists every live grant, and the route returns the same body for both.
+///
+/// A scope the route does not know, the empty string included, is the route's
+/// status 400 with its scope reason, for the shell and for a client alike,
+/// because the scope check runs before the caller check. The live scope then
+/// requires the shell: a client is refused with the shell-only reason. A
+/// client on the plain route receives only its own live grants; each entry
+/// omits the session id and the plan, and the body carries no scope. A pending
+/// request is not a live grant, so it stays out of this list. A read stores
+/// nothing and spends nothing: the stored requests and the live grants stay as
+/// they were, so a `session` grant stays listed until its session stops.
+pub fn read_shown_grants(
+    stand_in: &StandIn,
+    caller: Caller<'_>,
+    scope: Option<&str>,
+) -> Result<Value, (u16, String)> {
+    stand_in.get_capability_list(caller, scope)
+}
+
 #[cfg(test)]
 mod fixtures {
     pub const PLAN_A: &[u8] =
@@ -5233,5 +5258,771 @@ fn shown_request_status_is_not_the_grant() {
         ),
         Ok(json!({ "status": "denied", "reason": "deny the shown plan" })),
         "a shown request status is not the grant: the earlier denied status still reads its decision reason"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn shown_live_list_is_not_another_sessions_grant() {
+    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use fixtures::{PLAN_A, PLAN_B};
+    use journeys::{request, running_agent};
+    use serde_json::{json, Value};
+
+    fn shell_live(stand_in: &StandIn, scope: Option<&str>) -> Value {
+        read_shown_grants(stand_in, Caller::Shell, scope).expect("the shell reads the live list")
+    }
+
+    fn client_live(stand_in: &StandIn, session_id: &str) -> Value {
+        read_shown_grants(stand_in, Caller::Client { session_id }, None)
+            .expect("the client reads its own live list")
+    }
+
+    fn shell_capsules(stand_in: &StandIn) -> Vec<Value> {
+        stand_in
+            .get_capsules(Caller::Shell)
+            .expect("shell capsules")["capsules"]
+            .as_array()
+            .cloned()
+            .expect("the shell capsule list holds a capsules array")
+    }
+
+    fn capsule(stand_in: &StandIn, id: &str) -> Value {
+        shell_capsules(stand_in)
+            .into_iter()
+            .find(|entry| entry["id"] == id)
+            .expect("the shell capsule list holds that id")
+    }
+
+    fn record(stand_in: &StandIn, session: &str, request_id: &str) -> Value {
+        stand_in
+            .get_capability_requests(Caller::Shell, Some(session))
+            .expect("the shell reads the session's requests")["requests"]
+            .as_array()
+            .cloned()
+            .expect("the shell request view holds a requests array")
+            .into_iter()
+            .find(|entry| entry["request_id"] == request_id)
+            .expect("the session's request view holds that id")
+    }
+
+    let empty_client: Value = json!({ "capabilities": [] });
+    let empty_shell: Value = json!({ "scope": "all_sessions_live", "capabilities": [] });
+    let unknown_session: Result<Value, (u16, String)> =
+        Err((400, "unknown capability list scope: session".to_owned()));
+    let unknown_empty: Result<Value, (u16, String)> =
+        Err((400, "unknown capability list scope: ".to_owned()));
+    let shell_only: Result<Value, (u16, String)> =
+        Err((403, "This endpoint requires shell privileges".to_owned()));
+
+    let mut stand_in = StandIn::new();
+
+    // On a fresh stand-in the client list is empty for every session id and for
+    // the shell. Neither list mints anything.
+    for session_id in ["component-1", "component-2", "component-absent", ""] {
+        let read = read_shown_grants(&stand_in, Caller::Client { session_id }, None);
+        assert_eq!(
+            read,
+            Ok(empty_client.clone()),
+            "a shown live list is not another session's grant: the no-scope read for {session_id} on a fresh stand-in is the empty client list"
+        );
+        let value = read
+            .as_ref()
+            .expect("the client reads its own live list on a fresh stand-in");
+        assert!(
+            value.get("scope").is_none(),
+            "a shown live list is not another session's grant: the no-scope body for {session_id} carries no scope"
+        );
+        assert_ne!(
+            value, &empty_shell,
+            "a shown live list is not another session's grant: the no-scope body for {session_id} is not the shell body"
+        );
+        assert_eq!(
+            shell_live(&stand_in, None),
+            empty_shell,
+            "a shown live list is not another session's grant: the read by {session_id} leaves the shell live list empty"
+        );
+        assert_eq!(
+            shell_capsules(&stand_in),
+            Vec::<Value>::new(),
+            "a shown live list is not another session's grant: the read by {session_id} leaves the capsule list empty"
+        );
+    }
+
+    // The shell's no-scope read is the shell body with the live scope, and its
+    // explicit live-scope read is the same value.
+    let shell_plain = read_shown_grants(&stand_in, Caller::Shell, None);
+    assert_eq!(
+        shell_plain,
+        Ok(empty_shell.clone()),
+        "a shown live list is not another session's grant: the shell's no-scope read on a fresh stand-in is the empty shell body"
+    );
+    assert_eq!(
+        shell_plain,
+        read_shown_grants(&stand_in, Caller::Shell, Some("all_sessions_live")),
+        "a shown live list is not another session's grant: the shell's no-scope read and its live-scope read are the same body"
+    );
+
+    // A scope other than the live scope is the route's scope refusal, for the
+    // shell and for a client alike, because the scope check runs first.
+    for caller in [
+        Caller::Client {
+            session_id: "component-1",
+        },
+        Caller::Client { session_id: "" },
+        Caller::Shell,
+    ] {
+        let read = read_shown_grants(&stand_in, caller, Some("session"));
+        assert_eq!(
+            read, unknown_session,
+            "a shown live list is not another session's grant: the scope session is unknown for {caller:?}"
+        );
+        assert_ne!(
+            read, shell_only,
+            "a shown live list is not another session's grant: the unknown scope is not the shell refusal for {caller:?}"
+        );
+        assert!(
+            read.is_err(),
+            "a shown live list is not another session's grant: the unknown scope returns no body for {caller:?}"
+        );
+        assert_eq!(
+            shell_live(&stand_in, None),
+            empty_shell,
+            "a shown live list is not another session's grant: the unknown-scope read by {caller:?} leaves the shell live list empty"
+        );
+        assert_eq!(
+            shell_capsules(&stand_in),
+            Vec::<Value>::new(),
+            "a shown live list is not another session's grant: the unknown-scope read by {caller:?} leaves the capsule list empty"
+        );
+    }
+    for caller in [
+        Caller::Client {
+            session_id: "component-1",
+        },
+        Caller::Shell,
+    ] {
+        let read = read_shown_grants(&stand_in, caller, Some(""));
+        assert_eq!(
+            read, unknown_empty,
+            "a shown live list is not another session's grant: the empty scope is unknown for {caller:?}"
+        );
+        assert_ne!(
+            read, shell_only,
+            "a shown live list is not another session's grant: the empty scope is not the shell refusal for {caller:?}"
+        );
+        assert!(
+            read.is_err(),
+            "a shown live list is not another session's grant: the empty scope returns no body for {caller:?}"
+        );
+        assert_eq!(
+            shell_live(&stand_in, None),
+            empty_shell,
+            "a shown live list is not another session's grant: the empty-scope read by {caller:?} leaves the shell live list empty"
+        );
+        assert_eq!(
+            shell_capsules(&stand_in),
+            Vec::<Value>::new(),
+            "a shown live list is not another session's grant: the empty-scope read by {caller:?} leaves the capsule list empty"
+        );
+    }
+
+    // A client ask for every session is the shell refusal, and it returns no
+    // body of another session's grants.
+    for session_id in ["component-1", "component-absent", ""] {
+        let read = read_shown_grants(
+            &stand_in,
+            Caller::Client { session_id },
+            Some("all_sessions_live"),
+        );
+        assert_eq!(
+            read, shell_only,
+            "a shown live list is not another session's grant: a client ask for every session is the shell refusal for {session_id}"
+        );
+        assert_ne!(
+            read,
+            Err((
+                400,
+                "unknown capability list scope: all_sessions_live".to_owned()
+            )),
+            "a shown live list is not another session's grant: the live scope is a known scope for {session_id}"
+        );
+        assert!(
+            !matches!(&read, Ok(value) if value.to_string().contains("request-1")),
+            "a shown live list is not another session's grant: the refused client ask for every session returns no body that names request-1 for {session_id}"
+        );
+        assert_eq!(
+            shell_live(&stand_in, None),
+            empty_shell,
+            "a shown live list is not another session's grant: the refused ask by {session_id} leaves the shell live list empty"
+        );
+        assert_eq!(
+            shell_capsules(&stand_in),
+            Vec::<Value>::new(),
+            "a shown live list is not another session's grant: the refused ask by {session_id} leaves the capsule list empty"
+        );
+    }
+
+    // Two running sessions come from the one launch journey.
+    let first = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    assert_eq!(
+        first, "component-1",
+        "a shown live list is not another session's grant: the fresh stand-in names the first running session component-1"
+    );
+    let second = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    assert_eq!(
+        second, "component-2",
+        "a shown live list is not another session's grant: the second running session is the stand-in's next component"
+    );
+    let listed = shell_capsules(&stand_in);
+    assert_eq!(
+        listed.len(),
+        2,
+        "a shown live list is not another session's grant: both shell launches stay on the capsule list"
+    );
+    for entry in &listed {
+        assert_eq!(
+            json!({
+                "id": entry["id"],
+                "status": entry["status"],
+                "cause": entry["cause"],
+            }),
+            json!({
+                "id": entry["id"],
+                "status": "running",
+                "cause": "",
+            }),
+            "a shown live list is not another session's grant: each launched session is running with no cause"
+        );
+    }
+
+    // The launch mints no grant, so the client list and the shell list stay
+    // empty and the client ask for every session stays refused.
+    assert_eq!(
+        read_shown_grants(&stand_in, Caller::Client { session_id: &first }, None),
+        Ok(empty_client.clone()),
+        "a shown live list is not another session's grant: the first session's no-scope live list stays empty after its launch"
+    );
+    assert_eq!(
+        read_shown_grants(
+            &stand_in,
+            Caller::Client { session_id: &first },
+            Some("all_sessions_live"),
+        ),
+        shell_only,
+        "a shown live list is not another session's grant: the first session's ask for every session stays the shell refusal after its launch"
+    );
+    assert_eq!(
+        shell_live(&stand_in, None),
+        empty_shell,
+        "a shown live list is not another session's grant: the launch mints no live grant"
+    );
+
+    let plan_a = plan_sha256(PLAN_A);
+    assert_eq!(
+        plan_a.len(),
+        64,
+        "a shown live list is not another session's grant: the shown hash of plan A is 64 characters"
+    );
+    let first_step = request(&mut stand_in, Caller::Client { session_id: &first }, PLAN_A)
+        .expect("the agent's submit stores the first shown plan");
+    assert_eq!(
+        first_step, "request-1",
+        "a shown live list is not another session's grant: the first session's shown plan is the stand-in's first request"
+    );
+    let pending_a = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "pending",
+        "decision_reason": "",
+        "settled_by": null,
+        "plan": plan_a,
+    });
+    assert_eq!(
+        record(&stand_in, &first, &first_step),
+        pending_a,
+        "a shown live list is not another session's grant: the shell request view shows the pending step with its hash"
+    );
+    assert_eq!(
+        client_live(&stand_in, &first),
+        empty_client,
+        "a shown live list is not another session's grant: the pending request is not in the first session's live list"
+    );
+    assert_eq!(
+        shell_live(&stand_in, None),
+        empty_shell,
+        "a shown live list is not another session's grant: the pending request is not in the shell live list"
+    );
+
+    let plan_b = plan_sha256(PLAN_B);
+    assert_eq!(
+        plan_b.len(),
+        64,
+        "a shown live list is not another session's grant: the shown hash of plan B is 64 characters"
+    );
+    let second_step = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: &second,
+        },
+        PLAN_B,
+    )
+    .expect("the other session's submit stores the second shown plan");
+    assert_eq!(
+        second_step, "request-2",
+        "a shown live list is not another session's grant: the other session's shown plan is the stand-in's second request"
+    );
+    let pending_b = json!({
+        "request_id": "request-2",
+        "session_id": "component-2",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "pending",
+        "decision_reason": "",
+        "settled_by": null,
+        "plan": plan_b,
+    });
+    assert_eq!(
+        record(&stand_in, &second, &second_step),
+        pending_b,
+        "a shown live list is not another session's grant: the shell request view shows the other pending step with its hash"
+    );
+    assert_eq!(
+        client_live(&stand_in, &first),
+        empty_client,
+        "a shown live list is not another session's grant: the other session's pending request is not in the first session's live list"
+    );
+    assert_eq!(
+        shell_live(&stand_in, None),
+        empty_shell,
+        "a shown live list is not another session's grant: both pending requests stay out of the shell live list"
+    );
+
+    // The owner's grant is the only thing these lists ever show.
+    assert_eq!(
+        approve(&mut stand_in, Caller::Shell, &first_step, "once", &plan_a),
+        Ok(json!({ "success": true })),
+        "a shown live list is not another session's grant: the owner allows the first pending step once with the hash it saw"
+    );
+    let one_grant = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "duration": "once",
+        "granted_at": 0,
+    });
+    let shell_one = json!({ "scope": "all_sessions_live", "capabilities": [one_grant.clone()] });
+    let read_shell = shell_live(&stand_in, None);
+    assert_eq!(
+        read_shell, shell_one,
+        "a shown live list is not another session's grant: the shell's no-scope read shows the one live grant"
+    );
+    assert_eq!(
+        shell_live(&stand_in, Some("all_sessions_live")),
+        shell_one,
+        "a shown live list is not another session's grant: the shell's live-scope read is the same body"
+    );
+    for entry in read_shell["capabilities"]
+        .as_array()
+        .expect("the shell live list holds a capabilities array")
+    {
+        for key in ["plan", "token"] {
+            assert!(
+                entry.get(key).is_none(),
+                "a shown live list is not another session's grant: the shell live entry carries no {key}"
+            );
+        }
+    }
+
+    let one_client = json!({
+        "capabilities": [{
+            "request_id": "request-1",
+            "resource": "localhost://Public/plan-approval/a.txt",
+            "action": "read",
+            "duration": "once",
+            "granted_at": 0,
+        }]
+    });
+    let read_first = client_live(&stand_in, &first);
+    assert_eq!(
+        read_first, one_client,
+        "a shown live list is not another session's grant: the first session's no-scope list holds only its own live grant"
+    );
+    assert!(
+        read_first.get("scope").is_none(),
+        "a shown live list is not another session's grant: the client list carries no scope"
+    );
+    for entry in read_first["capabilities"]
+        .as_array()
+        .expect("the client live list holds a capabilities array")
+    {
+        for key in ["session_id", "plan", "token"] {
+            assert!(
+                entry.get(key).is_none(),
+                "a shown live list is not another session's grant: the client live entry carries no {key}"
+            );
+        }
+    }
+
+    // Every other client sees no grant at all, and no client may ask for the
+    // whole list.
+    for session_id in [second.as_str(), "", "component-absent"] {
+        assert_eq!(
+            client_live(&stand_in, session_id),
+            empty_client,
+            "a shown live list is not another session's grant: the first session's grant is not in the live list for {session_id}"
+        );
+    }
+    for session_id in [second.as_str(), first.as_str()] {
+        let read = read_shown_grants(
+            &stand_in,
+            Caller::Client { session_id },
+            Some("all_sessions_live"),
+        );
+        assert_eq!(
+            read, shell_only,
+            "a shown live list is not another session's grant: a client ask for every session is the shell refusal for {session_id}"
+        );
+        assert!(
+            !matches!(&read, Ok(value) if value.to_string().contains("request-1")),
+            "a shown live list is not another session's grant: the refusal returns no body that names request-1 for {session_id}"
+        );
+    }
+
+    // A read leaves the list as it was.
+    assert_eq!(
+        client_live(&stand_in, &first),
+        one_client,
+        "a shown live list is not another session's grant: a second client read is still that one entry"
+    );
+    assert_eq!(
+        shell_live(&stand_in, None),
+        shell_one,
+        "a shown live list is not another session's grant: the shell live list is still that one entry"
+    );
+    let granted_a = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "granted",
+        "decision_reason": "owner approved",
+        "settled_by": "shell",
+        "plan": plan_a,
+    });
+    assert_eq!(
+        record(&stand_in, &first, &first_step),
+        granted_a,
+        "a shown live list is not another session's grant: the shell request view shows the owner's settlement"
+    );
+
+    // A session grant lasts until that session stops.
+    assert_eq!(
+        approve(&mut stand_in, Caller::Shell, &second_step, "session", &plan_b),
+        Ok(json!({ "success": true })),
+        "a shown live list is not another session's grant: the owner allows the second pending step for that session"
+    );
+    let both = json!({
+        "scope": "all_sessions_live",
+        "capabilities": [
+            one_grant,
+            {
+                "request_id": "request-2",
+                "session_id": "component-2",
+                "resource": "localhost://Public/plan-approval/a.txt",
+                "action": "read",
+                "duration": "session",
+                "granted_at": 0,
+            },
+        ],
+    });
+    assert_eq!(
+        shell_live(&stand_in, None),
+        both,
+        "a shown live list is not another session's grant: the shell's no-scope read shows both live grants"
+    );
+    assert_eq!(
+        shell_live(&stand_in, Some("all_sessions_live")),
+        both,
+        "a shown live list is not another session's grant: the shell's live-scope read shows both live grants"
+    );
+    for entry in both["capabilities"]
+        .as_array()
+        .expect("the shell live list holds a capabilities array")
+    {
+        assert!(
+            entry.get("plan").is_none(),
+            "a shown live list is not another session's grant: neither shell live entry carries a plan"
+        );
+    }
+
+    let read_first = client_live(&stand_in, &first);
+    assert_eq!(
+        read_first, one_client,
+        "a shown live list is not another session's grant: the first session's list is still only its own once grant"
+    );
+    assert!(
+        read_first["capabilities"]
+            .as_array()
+            .expect("the first session's live list holds a capabilities array")
+            .iter()
+            .all(|entry| entry.get("session_id").is_none()),
+        "a shown live list is not another session's grant: the first session's entry carries no session id"
+    );
+    assert!(
+        !read_first.to_string().contains("request-2"),
+        "a shown live list is not another session's grant: the first session's list does not hold the other session's grant"
+    );
+
+    let one_session = json!({
+        "capabilities": [{
+            "request_id": "request-2",
+            "resource": "localhost://Public/plan-approval/a.txt",
+            "action": "read",
+            "duration": "session",
+            "granted_at": 0,
+        }]
+    });
+    let read_second = client_live(&stand_in, &second);
+    assert_eq!(
+        read_second, one_session,
+        "a shown live list is not another session's grant: the second session's list holds its own session grant"
+    );
+    assert!(
+        read_second.get("scope").is_none(),
+        "a shown live list is not another session's grant: the second session's list carries no scope"
+    );
+    assert!(
+        !read_second.to_string().contains("request-1"),
+        "a shown live list is not another session's grant: the second session's list does not hold the first session's grant"
+    );
+    for entry in read_second["capabilities"]
+        .as_array()
+        .expect("the second session's live list holds a capabilities array")
+    {
+        for key in ["session_id", "plan"] {
+            assert!(
+                entry.get(key).is_none(),
+                "a shown live list is not another session's grant: the second session's entry carries no {key}"
+            );
+        }
+    }
+
+    // Another session's use is refused and leaves both grants live.
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client { session_id: &first },
+            &second_step,
+            PLAN_B,
+        ),
+        Err((
+            403,
+            "wrong capsule: expected component-2, got component-1".to_owned()
+        )),
+        "a shown live list is not another session's grant: the first session does not spend the other session's grant"
+    );
+    assert_eq!(
+        shell_live(&stand_in, None),
+        both,
+        "a shown live list is not another session's grant: the refused use leaves both live grants"
+    );
+
+    // A spent once grant leaves the list; the session grant stays.
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client { session_id: &first },
+            &first_step,
+            PLAN_A,
+        ),
+        Ok(json!({ "valid": true })),
+        "a shown live list is not another session's grant: the once grant authorises its one use"
+    );
+    let spent =
+        json!({ "scope": "all_sessions_live", "capabilities": [both["capabilities"][1].clone()] });
+    assert_eq!(
+        shell_live(&stand_in, None),
+        spent,
+        "a shown live list is not another session's grant: the spent once grant leaves the shell live list"
+    );
+    assert_eq!(
+        client_live(&stand_in, &first),
+        empty_client,
+        "a shown live list is not another session's grant: the spent once grant leaves the first session's live list"
+    );
+    assert_eq!(
+        client_live(&stand_in, &second),
+        one_session,
+        "a shown live list is not another session's grant: the other session's session grant stays listed"
+    );
+
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client { session_id: &first },
+            &first_step,
+            PLAN_A,
+        ),
+        Err((400, "grant is not live: Exhausted".to_owned())),
+        "a shown live list is not another session's grant: the spent once grant is no longer live"
+    );
+    assert_eq!(
+        shell_live(&stand_in, None),
+        spent,
+        "a shown live list is not another session's grant: the refused second use leaves the shell live list"
+    );
+    assert_eq!(
+        client_live(&stand_in, &second),
+        one_session,
+        "a shown live list is not another session's grant: the refused second use leaves the session grant"
+    );
+    assert_eq!(
+        client_live(&stand_in, &first),
+        empty_client,
+        "a shown live list is not another session's grant: the first session's live list stays empty"
+    );
+
+    // The session grant authorises its own session after one use and after two.
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &second,
+            },
+            &second_step,
+            PLAN_B,
+        ),
+        Ok(json!({ "valid": true })),
+        "a shown live list is not another session's grant: the session grant authorises its session's use"
+    );
+    assert_eq!(
+        shell_live(&stand_in, None),
+        spent,
+        "a shown live list is not another session's grant: the session grant stays listed after one use"
+    );
+    assert_eq!(
+        client_live(&stand_in, &second),
+        one_session,
+        "a shown live list is not another session's grant: the second session's list stays that one grant after one use"
+    );
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &second,
+            },
+            &second_step,
+            PLAN_B,
+        ),
+        Ok(json!({ "valid": true })),
+        "a shown live list is not another session's grant: the session grant authorises a second use"
+    );
+    assert_eq!(
+        shell_live(&stand_in, None),
+        spent,
+        "a shown live list is not another session's grant: the session grant stays listed after two uses"
+    );
+    assert_eq!(
+        client_live(&stand_in, &second),
+        one_session,
+        "a shown live list is not another session's grant: the second session's list stays that one grant after two uses"
+    );
+
+    // The stop drops that session's live grant and leaves the other session.
+    assert_eq!(
+        stop_shown_session(&mut stand_in, Caller::Shell, &second),
+        Ok(Value::Null),
+        "a shown live list is not another session's grant: the shell stops the shown session"
+    );
+    let stopped = capsule(&stand_in, &second);
+    assert_eq!(
+        json!({
+            "id": stopped["id"],
+            "status": stopped["status"],
+            "cause": stopped["cause"],
+        }),
+        json!({
+            "id": "component-2",
+            "status": "stopped",
+            "cause": "stopped: stop the shown session",
+        }),
+        "a shown live list is not another session's grant: the stopped session records the stop cause"
+    );
+    let still_running = capsule(&stand_in, &first);
+    assert_eq!(
+        json!({
+            "id": still_running["id"],
+            "status": still_running["status"],
+            "cause": still_running["cause"],
+        }),
+        json!({
+            "id": "component-1",
+            "status": "running",
+            "cause": "",
+        }),
+        "a shown live list is not another session's grant: the other session stays running"
+    );
+    assert_eq!(
+        shell_live(&stand_in, None),
+        empty_shell,
+        "a shown live list is not another session's grant: the stop drops that session's live grant from the shell list"
+    );
+    assert_eq!(
+        client_live(&stand_in, &first),
+        empty_client,
+        "a shown live list is not another session's grant: the first session's live list stays empty after the stop"
+    );
+    assert_eq!(
+        client_live(&stand_in, &second),
+        empty_client,
+        "a shown live list is not another session's grant: the stopped session's live list is empty"
+    );
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &second,
+            },
+            &second_step,
+            PLAN_B,
+        ),
+        Err((400, "grant is not live: Revoked".to_owned())),
+        "a shown live list is not another session's grant: the stopped session's grant is revoked"
+    );
+
+    let granted_b = json!({
+        "request_id": "request-2",
+        "session_id": "component-2",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "granted",
+        "decision_reason": "owner approved",
+        "settled_by": "shell",
+        "plan": plan_b,
+    });
+    assert_eq!(
+        record(&stand_in, &second, &second_step),
+        granted_b,
+        "a shown live list is not another session's grant: the stopped session's request record stays granted under the owner"
+    );
+    assert_eq!(
+        record(&stand_in, &first, &first_step),
+        granted_a,
+        "a shown live list is not another session's grant: the first request record stays granted under the owner"
+    );
+    assert_eq!(
+        shell_live(&stand_in, None),
+        empty_shell,
+        "a shown live list is not another session's grant: the shell live list stays empty after the stop"
     );
 }

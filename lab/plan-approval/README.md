@@ -329,11 +329,42 @@ check; the stand-in's status route makes it. `preview`, `plan_sha256`,
 copy the stand-in, and it names no planner. A passing run gives the Runtime no
 A15 credit.
 
+A read of the live grant list is not a grant. The design states the result
+boundary at Request flow step 10:
+
+> The result returns to the Agent Host and Home without exposing provider
+> credentials or broader authority
+
+`read_shown_grants` is the only product read of the live list, and it passes
+the caller and the scope it is given to the stand-in's own list route. A scope
+other than `all_sessions_live` returns status 400 with `unknown capability
+list scope: ` plus that scope, for the shell and for a client, because the
+scope check runs before the caller check. A client with scope
+`all_sessions_live` returns status 403 with `This endpoint requires shell
+privileges`. The shell with no scope and the shell with that scope return the
+same body: `scope` `all_sessions_live` and every live entry, each with
+`request_id`, `session_id`, `resource`, `action`, `duration` and `granted_at`.
+A client with no scope receives `capabilities` only, and its entries carry
+those fields except `session_id`; the client list keeps a grant only when its
+`session_id` is the caller's. A pending request stays out of the list, and a
+read leaves the list unchanged. A spent `once` grant leaves the list, a
+`session` grant stays listed after two uses, and a stop drops that session's
+live grant. `shown_live_list_is_not_another_sessions_grant` drives the two
+sessions through `running_agent`, submits and grants both plans through
+`request` and `approve`, and spends them through `execute`; it calls
+`read_shown_grants` for every list read and no `get_capability_list` of its
+own. This crate stores no copy of the list renderer, and the shell request
+list stays `get_capability_requests`. `preview`, `plan_sha256`, `approve`,
+`execute`, `deny_shown_plan`, `age_shown_plan`, `stop_shown_session`,
+`read_shown_request`, `running_agent` and `request` are unchanged by this
+slice. The crate does not copy the stand-in, and it names no planner. A
+passing run gives the Runtime no A15 credit.
+
 ## Layout
 
 - `src/lib.rs`: `Preview`, `preview`, `plan_sha256`, `approve`,
   `age_shown_plan`, `deny_shown_plan`, `stop_shown_session`,
-  `read_shown_request`, `execute`,
+  `read_shown_request`, `read_shown_grants`, `execute`,
   `preview_makes_no_effect`, `plan_sha256_hashes_the_exact_bytes`,
   `deny_one_shown_step`, `unanswered_shown_step_expires`,
   `stop_settles_that_sessions_shown_steps`, `shown_allow_once_expires`,
@@ -344,12 +375,14 @@ A15 credit.
   `shell_cannot_spend_a_shown_grant`, `shell_cannot_submit_a_shown_plan`,
   `only_a_live_session_submits_a_shown_plan`,
   `agent_cannot_stop_a_shown_session`, `agent_cannot_launch_a_shown_session`,
-  `shown_request_status_is_not_the_grant` and the bound-plan journey.
+  `shown_request_status_is_not_the_grant`,
+  `shown_live_list_is_not_another_sessions_grant` and the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_live_list_is_not_another_sessions_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_request_status_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_cannot_launch_a_shown_session -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_cannot_stop_a_shown_session -- --exact
