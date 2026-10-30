@@ -1,0 +1,15 @@
+[package]
+name = "elastos-desktop-host"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# This crate is one workspace of its own; the repository root workspace stays
+# unchanged. Prototype P1 of ELASTOS-DESKTOP-APP: a menu-bar app around Home.
+[workspace]
+
+[dependencies]
+fs4 = "1.1.0"
+rfd = "0.17.2"
+tao = "0.37.2"
+tray-icon = "0.26.1"
