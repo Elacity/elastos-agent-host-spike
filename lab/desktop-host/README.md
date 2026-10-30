@@ -10,6 +10,9 @@ P1 shows whether Home answers, opens Home and quits. It runs no Runtime command,
 no file, and registers nothing with launchd. `src/runtime.rs` is the only file that knows
 about ElastOS.
 
+Opening the app opens Home when Home is running, and so does double-clicking the app
+again while it runs (the macOS reopen event).
+
 ## Menu
 
 - Status line: "Home is running" or "Home is not running", refreshed every 3 seconds.
@@ -30,6 +33,8 @@ On start the app refuses anything other than an Apple silicon Mac, and says so w
 - Any Home on port 8090 counts as running. P2 asks the Runtime instead, which only
   reports this data folder's Home.
 - No signing beyond ad-hoc, no notarization, no DMG, no installer.
+- Browser app mode opens a new Home window each time; it does not bring an open one
+  forward.
 
 ## Build and run
 

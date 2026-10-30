@@ -62,6 +62,7 @@ fn main() {
 
     let mut menu = Some(menu);
     let mut tray: Option<TrayIcon> = None;
+    let mut home_up: Option<bool> = None;
     let home_proxy = event_loop.create_proxy();
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -91,17 +92,26 @@ fn main() {
                 });
             }
             Event::UserEvent(UserEvent::Home(up)) => {
+                // Opening the app opens Home, like any app opens its window.
+                if home_up.is_none() && up {
+                    open_home();
+                }
+                home_up = Some(up);
                 status.set_text(if up {
                     "Home is running"
                 } else {
                     "Home is not running"
                 });
             }
+            // Double-clicking the app while it runs.
+            Event::Reopen { .. } => {
+                if home_up == Some(true) {
+                    open_home();
+                }
+            }
             Event::UserEvent(UserEvent::Menu(event)) => {
                 if event.id == *open.id() || event.id == *updates.id() {
-                    if let Err(error) = runtime::open_home() {
-                        alert(&format!("Could not open {}: {error}", runtime::HOME_URL));
-                    }
+                    open_home();
                 } else if event.id == *quit.id() {
                     tray.take();
                     *control_flow = ControlFlow::Exit;
@@ -110,6 +120,12 @@ fn main() {
             _ => {}
         }
     });
+}
+
+fn open_home() {
+    if let Err(error) = runtime::open_home() {
+        alert(&format!("Could not open {}: {error}", runtime::HOME_URL));
+    }
 }
 
 fn alert(message: &str) {
