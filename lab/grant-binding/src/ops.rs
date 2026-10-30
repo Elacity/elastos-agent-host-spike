@@ -64,6 +64,16 @@ impl Verifier {
             _ => {
                 #[allow(unused_mut)]
                 let mut counted = request.handle;
+                let mut grant = grant;
+                while let Some(handle) = grant.parent {
+                    let ancestor = self
+                        .resolve(*call, handle)
+                        .map_err(OperateRefuse::Binding)?;
+                    grant.effect_limit = ancestor.effect_limit;
+                    grant.effects = ancestor.effects;
+                    counted = handle;
+                    grant.parent = ancestor.parent;
+                }
                 if operation != Operation::ChildJournal {
                     if let Some(limit) = grant.effect_limit {
                         if grant.effects >= limit {
@@ -93,10 +103,17 @@ impl Verifier {
         self.operate(call, request, Operation::ChildJournal)?;
         #[rustfmt::skip]
         let grant = self.resolve(*call, request.handle).map_err(OperateRefuse::Binding)?;
+        self.pending_parent = Some(request.handle);
+        let child = (|| {
         super::resource_name(&grant.identity, path, Some(&grant.owned_root))
             .map_err(OperateRefuse::Binding)?;
         self.bind_grant(grant.instance, path, grant.rights)
             .map_err(OperateRefuse::Binding)
+        })();
+        if child.is_err() {
+            self.pending_parent = None;
+        }
+        child
     }
 }
 
@@ -1156,4 +1173,88 @@ fn model_unset_effect_limit_does_not_stop() {
     verifier
         .use_grant(call, &guest(frames))
         .expect("a refused effect leaves the grant");
+}
+
+#[test]
+fn model_child_effect_spends_the_issuing_limit() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_grant(
+            photo,
+            "UsersAI/photo/library",
+            Rights {
+                append: true,
+                overwrite: false,
+                child_journal: true,
+            },
+        )
+        .expect("library ask");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal does not spend the limit");
+    let other = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/other")
+        .expect("sibling journal does not spend the limit");
+    let refused = verifier
+        .set_effect_limit(roll, 0)
+        .expect_err("a derived journal keeps no limit of its own");
+    assert_eq!(refused, Refuse::IssuingLimit);
+    assert_eq!(
+        refused.to_string(),
+        "effect limit stays on the issuing grant"
+    );
+    verifier
+        .set_effect_limit(library, 1)
+        .expect("issuing limit");
+    let wrong = verifier
+        .operate(&call, &guest(roll), Operation::Overwrite)
+        .expect_err("a refused right does not spend the issuing limit");
+    assert_eq!(wrong, OperateRefuse::OverwriteNotGranted);
+    verifier
+        .operate(&call, &guest(roll), Operation::Append)
+        .expect("one child effect spends the issuing limit");
+    let sibling = verifier
+        .operate(&call, &guest(other), Operation::Append)
+        .expect_err("the sibling spends the same issuing limit");
+    assert_eq!(sibling, OperateRefuse::Binding(Refuse::EffectLimit));
+    assert_eq!(sibling.to_string(), "effect limit is reached");
+    let parent = verifier
+        .operate(&call, &guest(library), Operation::Append)
+        .expect_err("the issuing grant has spent its limit");
+    assert_eq!(parent, OperateRefuse::Binding(Refuse::EffectLimit));
+    verifier
+        .use_grant(verifier.open_call(photo), &guest(library))
+        .expect("the issuing grant stays in the store");
+    verifier
+        .use_grant(verifier.open_call(photo), &guest(roll))
+        .expect("the child journal stays in the store");
+}
+
+#[test]
+fn model_unset_issuing_limit_allows_a_child_effect() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_grant(
+            photo,
+            "UsersAI/photo/library",
+            Rights {
+                append: true,
+                overwrite: true,
+                child_journal: true,
+            },
+        )
+        .expect("library ask");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    verifier
+        .operate(&call, &guest(roll), Operation::Append)
+        .expect("an unset issuing limit allows the child effect");
+    verifier
+        .operate(&call, &guest(library), Operation::Append)
+        .expect("an unset issuing limit allows the parent effect");
 }
