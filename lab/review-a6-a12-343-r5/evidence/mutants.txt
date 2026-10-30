@@ -1,0 +1,10 @@
+r5 mutants at 9d55f8fbd670bbaef9cd329fd795b5fb5cb9c04e
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351 cargo_exit=101
+MUTANT M-R4-GUARD-NO-ISOLATION CAUGHT by tests::a12_outside_isolation_tmp_root_is_refused
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351 cargo_exit=0
+MUTANT M-R4-GUARD-NO-ISOLATION-SLASH SURVIVED against tests::a12_slash_tmp_root_is_refused
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351 cargo_exit=101
+MUTANT M-R4-SNAP-IGNORE-LIVE CAUGHT by tests::a12_snapshot_before_runtime_fails_if_live_tmp_elastos_wrote
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351 cargo_exit=0
+MUTANT M-R4-SNAP-IGNORE-LIVE-WATCH SURVIVED against tests::a12_snapshot_before_runtime_fails_if_already_wrote
+mutants finished; a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351

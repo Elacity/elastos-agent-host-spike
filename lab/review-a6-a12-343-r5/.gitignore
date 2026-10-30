@@ -1,0 +1,3 @@
+/target/
+*.r5bak
+evidence/*.tmp

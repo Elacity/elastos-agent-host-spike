@@ -1,0 +1,81 @@
+r5 hunt summary
+
+== author suite ==
+49 passed; 0 failed; manager.rs cd4772f1...066b2a before and after
+
+== independent replant ==
+CAUGHT F-A12-DROP-ROOTS by tests::a12_census_lists_runtime_storage
+CAUGHT F-A12-DROP-ROOTS by tests::a12_planted_storage_file_is_caught
+CAUGHT F-A6-NO-TOKEN-CHECK by tests::a6_sibling_presenting_owner_token_is_refused
+CAUGHT M-A12-HARDCODE-FAIL by tests::a12_clean_isolated_root_passes
+CAUGHT M-A12-HASH-MTIME by tests::a12_large_file_inplace_rewrite_mtime_restored_is_found
+CAUGHT M-A12-INODE-REUSE by tests::a12_inode_reuse_same_path_is_found
+CAUGHT M-A12-NO-HANDLE by tests::a12_same_bytes_inode_reuse_is_found
+CAUGHT M-A12-NO-ISOLATION by tests::a12_outside_isolation_tmp_root_is_refused
+CAUGHT M-A12-NO-MARKER by tests::a12_leftover_without_marker_is_found
+CAUGHT M-A12-RENAME-ROOT by tests::a12_renamed_root_is_found_by_created_set
+CAUGHT M-A12-RENAME-UNRELATED by tests::a12_renamed_to_unrelated_name_is_found
+CAUGHT M-A12-SIBLING-WATCH by tests::a12_run_window_watches_tmpdir_xdg_library
+CAUGHT M-A12-SNAP-AFTER-WRITE by tests::a12_snapshot_before_runtime_fails_if_already_wrote
+CAUGHT M-A12-SNAP-IGNORE-LIVE by tests::a12_snapshot_before_runtime_fails_if_live_tmp_elastos_wrote
+CAUGHT M-A12-SYMLINK-ROOT by tests::a12_symlink_root_is_scanned_through
+CAUGHT M-A12-TMP-DOTDOT by tests::a12_isolation_parent_tmp_root_is_refused
+CAUGHT M-A12-TMP-DOTDOT by tests::a12_nested_dotdot_tmp_root_is_refused
+CAUGHT M-A12-TMP-LIVE-SYMLINK by tests::a12_symlink_to_live_home_tmp_root_is_refused
+CAUGHT M-A12-TMP-SLASH by tests::a12_slash_tmp_root_is_refused
+CAUGHT M-A12-TMP-UNSET by tests::a12_unset_tmp_root_is_refused
+CAUGHT M-A12-TOCTOU-FOLLOW by tests::a12_tmp_root_symlink_swap_after_check_cannot_write_outside
+CAUGHT M-A6-CLAIM-RESIDENT by tests::a6_resident_two_instances_is_blocked
+CAUGHT M-A6-COMMENT-STEP4 by tests::a6_sibling_presenting_owner_token_is_refused
+CAUGHT M-A6-COMMENT-STEP4 by tests::a6_resident_two_instances_is_blocked
+CAUGHT M-A6-EMPTY-TOKEN by tests::a6_empty_token_capsule_is_refused
+CAUGHT M-A6-LIVE-PIDS by tests::a6_this_process_and_pid1_cannot_pass
+CAUGHT M-A6-PREFIX-BIND by tests::a6_prefix_capsule_id_is_refused
+CAUGHT M-A6-STUB-OK by tests::a6_resident_two_instances_is_blocked
+replant summary: 25 plants, 28 CAUGHT lines
+
+== mutants ==
+MUTANT M-R4-GUARD-NO-ISOLATION CAUGHT by tests::a12_outside_isolation_tmp_root_is_refused
+MUTANT M-R4-GUARD-NO-ISOLATION-SLASH SURVIVED against tests::a12_slash_tmp_root_is_refused
+MUTANT M-R4-SNAP-IGNORE-LIVE CAUGHT by tests::a12_snapshot_before_runtime_fails_if_live_tmp_elastos_wrote
+MUTANT M-R4-SNAP-IGNORE-LIVE-WATCH SURVIVED against tests::a12_snapshot_before_runtime_fails_if_already_wrote
+
+== r5 hunts ==
+HUNT r5-growing-file: CAUGHT | append after snapshot must move FileId via size+full-content hash
+HUNT r5-child-pid: CAUGHT | pid 20599 is this lab process, not a resident capsule instance hosted by this Runtime
+HUNT r5-handle-tmpfs: CAUGHT | tmpfs handle bytes=20
+HUNT r5-last-byte: CAUGHT | 65 KiB file, only the last byte changed
+HUNT r5-handle-tmpfs-reuse: INCONCLUSIVE | tmpfs same-bytes inode reuse reused=false found=true handle_empty=false
+HUNT r5-parent-swap: CAUGHT | write refused after parent swap: Err("ELASTOS_TMP_ROOT refuses symlink /tmp/a6-a12-r5-hunts.1NfjtH/r5-parent-20599 in /tmp/a6-a12-r5-hunts.1NfjtH/r5-parent-20599/checked")
+HUNT r5-prove-child: CAUGHT | pid 20608 is not positively proven a resident capsule instance hosted by this Runtime (instance instance-1)
+HUNT r5-ra6-current: BLOCKED | ask=RA-6 reason=RA-6: Runtime does not host two resident capsule instances in one process. Bus v2 / RT4 still owns resident lifecycle. Owner A6 rows use fixture deny across Homes, not validate step 4. See lab/a6-a12-evidence-fix/RA-6.md.
+HUNT r5-sparse-hash: SURVIVED | zero-fill of a 1MiB hole; hash_same=true before=Some(1873913666579263196) after=Some(1873913666579263196)
+HUNT r5-sparse-identity: CAUGHT | FileId still moves (ctime/handle) even when fs::read of holes equals zeros
+HUNT r5-two-other-pids: CAUGHT | pid 20615 is not positively proven a resident capsule instance hosted by this Runtime (instance instance-1)
+HUNT r5-two-threads: CAUGHT | Runtime instance pids must be two distinct live pids
+HUNT r5-pid-reuse: INCONCLUSIVE | pid 20609 was not recycled in 400 spawns
+HUNT r5-write-then-delete: SURVIVED | file created and deleted between the two snapshots
+HUNT r5-var-tmp: SURVIVED | /var/tmp leftover in leftovers_in_run_window
+HUNT r5-dev-shm: SURVIVED | /dev/shm leftover in leftovers_in_run_window
+HUNT R5-PROVE-ALWAYS-OK CAUGHT by tests::a6_this_process_and_pid1_cannot_pass
+HUNT R5-PROVE-ALWAYS-OK-JOURNEY SURVIVED against tests::a6_resident_two_instances_is_blocked (named test stayed green)
+HUNT r5-two-other-pids: SURVIVED | PASS with two live non-self pids and no RA-6 host: A6 resident: Runtime hosted instance-1 pid 21160 and instance-2 pid 21161; sibling refused WrongCapsule { expected:instance-1 got:instance-2 }
+HUNT R5-PROVE-ALWAYS-OK-OTHER-PIDS SURVIVED against review_probes::r5_two_other_live_pids_claimed (named test stayed green)
+HUNT r5-two-other-pids: SURVIVED | PASS with two live non-self pids and no RA-6 host: A6 resident: Runtime hosted instance-1 pid 21160 and instance-2 pid 21161; sibling refused WrongCapsule { expected:instance-1 got:instance-2 }
+HUNT R5-INSPECT-ALWAYS-SOME SURVIVED against tests::a6_this_process_and_pid1_cannot_pass (named test stayed green)
+HUNT R5-INSPECT-ALWAYS-SOME-JOURNEY SURVIVED against tests::a6_resident_two_instances_is_blocked (named test stayed green)
+HUNT r5-two-other-pids: SURVIVED | PASS with two live non-self pids and no RA-6 host: A6 resident: Runtime hosted instance-1 pid 21312 and instance-2 pid 21313; sibling refused WrongCapsule { expected:instance-1 got:instance-2 }
+HUNT R5-INSPECT-ALWAYS-SOME-OTHER-PIDS SURVIVED against review_probes::r5_two_other_live_pids_claimed (named test stayed green)
+HUNT r5-two-other-pids: SURVIVED | PASS with two live non-self pids and no RA-6 host: A6 resident: Runtime hosted instance-1 pid 21312 and instance-2 pid 21313; sibling refused WrongCapsule { expected:instance-1 got:instance-2 }
+HUNT r5-parent-swap: SURVIVED | write landed outside after parent swap: write=Ok("/tmp/a6-a12-r5-hunts.1NfjtH/r5-parent-21362/checked/storage/escaped.txt")
+HUNT R5-NO-RECHECK-PARENT-SWAP SURVIVED against review_probes::r5_parent_dir_swap_above_checked_root (named test stayed green)
+HUNT r5-parent-swap: SURVIVED | write landed outside after parent swap: write=Ok("/tmp/a6-a12-r5-hunts.1NfjtH/r5-parent-21362/checked/storage/escaped.txt")
+HUNT r5-last-byte: SURVIVED | 65 KiB file, only the last byte changed
+HUNT R5-HASH-CAP-64K SURVIVED against review_probes::r5_last_byte_of_large_file (named test stayed green)
+HUNT r5-last-byte: SURVIVED | 65 KiB file, only the last byte changed
+HUNT R5-HASH-CAP-64K-NAMED SURVIVED against tests::a12_large_file_inplace_rewrite_mtime_restored_is_found (named test stayed green)
+HUNT r5-handle-tmpfs: SURVIVED | name_to_handle_at returned empty on tmpfs; FileId handle is silently weaker
+HUNT r5-handle-tmpfs-reuse: INCONCLUSIVE | tmpfs same-bytes inode reuse reused=false found=true handle_empty=true
+HUNT R5-HANDLE-EMPTY SURVIVED against review_probes::r5_name_to_handle_at_on_tmpfs (named test stayed green)
+HUNT r5-handle-tmpfs: SURVIVED | name_to_handle_at returned empty on tmpfs; FileId handle is silently weaker
+HUNT r5-handle-tmpfs-reuse: INCONCLUSIVE | tmpfs same-bytes inode reuse reused=false found=true handle_empty=true

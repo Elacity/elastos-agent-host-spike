@@ -1,0 +1,242 @@
+r5 hunts at 9d55f8fbd670bbaef9cd329fd795b5fb5cb9c04e
+   Compiling a6-a12-evidence-fix v0.0.0 (/tmp/pr343-r5/lab/a6-a12-evidence-fix)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.13s
+     Running unittests src/lib.rs (target-build/debug/deps/a6_a12_evidence_fix-95d81241091d22be)
+
+running 13 tests
+HUNT r5-growing-file: CAUGHT | append after snapshot must move FileId via size+full-content hash
+test review_probes::r5_growing_file_after_snapshot ... ok
+HUNT r5-child-pid: CAUGHT | pid 20599 is this lab process, not a resident capsule instance hosted by this Runtime
+test review_probes::r5_child_pid_of_this_process_is_not_a_capsule ... ok
+HUNT r5-handle-tmpfs: CAUGHT | tmpfs handle bytes=20
+HUNT r5-last-byte: CAUGHT | 65 KiB file, only the last byte changed
+test review_probes::r5_last_byte_of_large_file ... ok
+HUNT r5-handle-tmpfs-reuse: INCONCLUSIVE | tmpfs same-bytes inode reuse reused=false found=true handle_empty=false
+HUNT r5-parent-swap: CAUGHT | write refused after parent swap: Err("ELASTOS_TMP_ROOT refuses symlink /tmp/a6-a12-r5-hunts.1NfjtH/r5-parent-20599 in /tmp/a6-a12-r5-hunts.1NfjtH/r5-parent-20599/checked")
+test review_probes::r5_name_to_handle_at_on_tmpfs ... ok
+test review_probes::r5_parent_dir_swap_above_checked_root ... ok
+HUNT r5-prove-child: CAUGHT | pid 20608 is not positively proven a resident capsule instance hosted by this Runtime (instance instance-1)
+test review_probes::r5_prove_direct_on_child ... ok
+HUNT r5-ra6-current: BLOCKED | ask=RA-6 reason=RA-6: Runtime does not host two resident capsule instances in one process. Bus v2 / RT4 still owns resident lifecycle. Owner A6 rows use fixture deny across Homes, not validate step 4. See lab/a6-a12-evidence-fix/RA-6.md.
+test review_probes::r5_ready_journey_still_blocked ... ok
+HUNT r5-sparse-hash: SURVIVED | zero-fill of a 1MiB hole; hash_same=true before=Some(1873913666579263196) after=Some(1873913666579263196)
+HUNT r5-sparse-identity: CAUGHT | FileId still moves (ctime/handle) even when fs::read of holes equals zeros
+test review_probes::r5_sparse_file_zero_fill ... ok
+HUNT r5-two-other-pids: CAUGHT | pid 20615 is not positively proven a resident capsule instance hosted by this Runtime (instance instance-1)
+test review_probes::r5_two_other_live_pids_claimed ... ok
+HUNT r5-two-threads: CAUGHT | Runtime instance pids must be two distinct live pids
+test review_probes::r5_two_threads_share_one_pid ... ok
+HUNT r5-pid-reuse: INCONCLUSIVE | pid 20609 was not recycled in 400 spawns
+test review_probes::r5_pid_reuse_between_proof_and_use ... ok
+HUNT r5-write-then-delete: SURVIVED | file created and deleted between the two snapshots
+test review_probes::r5_write_then_delete_between_snapshots ... ok
+HUNT r5-var-tmp: SURVIVED | /var/tmp leftover in leftovers_in_run_window
+HUNT r5-dev-shm: SURVIVED | /dev/shm leftover in leftovers_in_run_window
+test review_probes::r5_var_tmp_and_dev_shm_leftovers ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 49 filtered out; finished in 49.81s
+
+new-hunts cargo r5_ exit=0
+
+== R5-PROVE-ALWAYS-OK: prove_resident_capsule_instance returns Ok ==
+
+== plant R5-PROVE-ALWAYS-OK against tests::a6_this_process_and_pid1_cannot_pass cargo_exit=101 ==
+   Compiling a6-a12-evidence-fix v0.0.0 (/tmp/pr343-r5/lab/a6-a12-evidence-fix)
+warning: unreachable statement
+   --> src/a6.rs:354:5
+    |
+353 |       return Ok(());
+    |       ------------- any code following this expression is unreachable
+354 | /     if instance_id.is_empty() {
+355 | |         return Err("resident instance id is empty".into());
+356 | |     }
+    | |_____^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `a6-a12-evidence-fix` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.63s
+     Running unittests src/lib.rs (target-build/debug/deps/a6_a12_evidence_fix-95d81241091d22be)
+
+running 1 test
+
+thread 'tests::a6_this_process_and_pid1_cannot_pass' (21061) panicked at src/lib.rs:156:17:
+this process plus pid 1 must FAIL, not PASS: A6 resident: Runtime hosted instance-1 pid 21060 and instance-2 pid 1; sibling refused WrongCapsule { expected:instance-1 got:instance-2 }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test tests::a6_this_process_and_pid1_cannot_pass ... FAILED
+
+failures:
+
+failures:
+    tests::a6_this_process_and_pid1_cannot_pass
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--lib`
+HUNT R5-PROVE-ALWAYS-OK CAUGHT by tests::a6_this_process_and_pid1_cannot_pass
+
+== plant R5-PROVE-ALWAYS-OK-JOURNEY against tests::a6_resident_two_instances_is_blocked cargo_exit=0 ==
+   Compiling a6-a12-evidence-fix v0.0.0 (/tmp/pr343-r5/lab/a6-a12-evidence-fix)
+warning: unreachable statement
+   --> src/a6.rs:354:5
+    |
+353 |       return Ok(());
+    |       ------------- any code following this expression is unreachable
+354 | /     if instance_id.is_empty() {
+355 | |         return Err("resident instance id is empty".into());
+356 | |     }
+    | |_____^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `a6-a12-evidence-fix` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.47s
+     Running unittests src/lib.rs (target-build/debug/deps/a6_a12_evidence_fix-95d81241091d22be)
+
+running 1 test
+BLOCKED (RA-6): RA-6: Runtime does not host two resident capsule instances in one process. Bus v2 / RT4 still owns resident lifecycle. Owner A6 rows use fixture deny across Homes, not validate step 4. See lab/a6-a12-evidence-fix/RA-6.md.
+test tests::a6_resident_two_instances_is_blocked ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.01s
+HUNT R5-PROVE-ALWAYS-OK-JOURNEY SURVIVED against tests::a6_resident_two_instances_is_blocked (named test stayed green)
+
+== plant R5-PROVE-ALWAYS-OK-OTHER-PIDS against review_probes::r5_two_other_live_pids_claimed cargo_exit=0 ==
+   Compiling a6-a12-evidence-fix v0.0.0 (/tmp/pr343-r5/lab/a6-a12-evidence-fix)
+warning: unreachable statement
+   --> src/a6.rs:354:5
+    |
+353 |       return Ok(());
+    |       ------------- any code following this expression is unreachable
+354 | /     if instance_id.is_empty() {
+355 | |         return Err("resident instance id is empty".into());
+356 | |     }
+    | |_____^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `a6-a12-evidence-fix` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.51s
+     Running unittests src/lib.rs (target-build/debug/deps/a6_a12_evidence_fix-95d81241091d22be)
+
+running 1 test
+HUNT r5-two-other-pids: SURVIVED | PASS with two live non-self pids and no RA-6 host: A6 resident: Runtime hosted instance-1 pid 21160 and instance-2 pid 21161; sibling refused WrongCapsule { expected:instance-1 got:instance-2 }
+test review_probes::r5_two_other_live_pids_claimed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.01s
+HUNT R5-PROVE-ALWAYS-OK-OTHER-PIDS SURVIVED against review_probes::r5_two_other_live_pids_claimed (named test stayed green)
+HUNT r5-two-other-pids: SURVIVED | PASS with two live non-self pids and no RA-6 host: A6 resident: Runtime hosted instance-1 pid 21160 and instance-2 pid 21161; sibling refused WrongCapsule { expected:instance-1 got:instance-2 }
+
+== R5-INSPECT-ALWAYS-SOME: inspect_runtime_hosted_resident returns Some(()) ==
+
+== plant R5-INSPECT-ALWAYS-SOME against tests::a6_this_process_and_pid1_cannot_pass cargo_exit=0 ==
+   Compiling a6-a12-evidence-fix v0.0.0 (/tmp/pr343-r5/lab/a6-a12-evidence-fix)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.58s
+     Running unittests src/lib.rs (target-build/debug/deps/a6_a12_evidence_fix-95d81241091d22be)
+
+running 1 test
+this pid + pid 1 FAIL: pid 21210 is this lab process, not a resident capsule instance hosted by this Runtime
+test tests::a6_this_process_and_pid1_cannot_pass ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.00s
+HUNT R5-INSPECT-ALWAYS-SOME SURVIVED against tests::a6_this_process_and_pid1_cannot_pass (named test stayed green)
+
+== plant R5-INSPECT-ALWAYS-SOME-JOURNEY against tests::a6_resident_two_instances_is_blocked cargo_exit=0 ==
+   Compiling a6-a12-evidence-fix v0.0.0 (/tmp/pr343-r5/lab/a6-a12-evidence-fix)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.61s
+     Running unittests src/lib.rs (target-build/debug/deps/a6_a12_evidence_fix-95d81241091d22be)
+
+running 1 test
+BLOCKED (RA-6): RA-6: Runtime does not host two resident capsule instances in one process. Bus v2 / RT4 still owns resident lifecycle. Owner A6 rows use fixture deny across Homes, not validate step 4. See lab/a6-a12-evidence-fix/RA-6.md.
+test tests::a6_resident_two_instances_is_blocked ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.01s
+HUNT R5-INSPECT-ALWAYS-SOME-JOURNEY SURVIVED against tests::a6_resident_two_instances_is_blocked (named test stayed green)
+
+== plant R5-INSPECT-ALWAYS-SOME-OTHER-PIDS against review_probes::r5_two_other_live_pids_claimed cargo_exit=0 ==
+   Compiling a6-a12-evidence-fix v0.0.0 (/tmp/pr343-r5/lab/a6-a12-evidence-fix)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.45s
+     Running unittests src/lib.rs (target-build/debug/deps/a6_a12_evidence_fix-95d81241091d22be)
+
+running 1 test
+HUNT r5-two-other-pids: SURVIVED | PASS with two live non-self pids and no RA-6 host: A6 resident: Runtime hosted instance-1 pid 21312 and instance-2 pid 21313; sibling refused WrongCapsule { expected:instance-1 got:instance-2 }
+test review_probes::r5_two_other_live_pids_claimed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.01s
+HUNT R5-INSPECT-ALWAYS-SOME-OTHER-PIDS SURVIVED against review_probes::r5_two_other_live_pids_claimed (named test stayed green)
+HUNT r5-two-other-pids: SURVIVED | PASS with two live non-self pids and no RA-6 host: A6 resident: Runtime hosted instance-1 pid 21312 and instance-2 pid 21313; sibling refused WrongCapsule { expected:instance-1 got:instance-2 }
+
+== R5-NO-RECHECK: skip check_tmp_root in write, then parent swap ==
+
+== plant R5-NO-RECHECK-PARENT-SWAP against review_probes::r5_parent_dir_swap_above_checked_root cargo_exit=0 ==
+   Compiling a6-a12-evidence-fix v0.0.0 (/tmp/pr343-r5/lab/a6-a12-evidence-fix)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.39s
+     Running unittests src/lib.rs (target-build/debug/deps/a6_a12_evidence_fix-95d81241091d22be)
+
+running 1 test
+HUNT r5-parent-swap: SURVIVED | write landed outside after parent swap: write=Ok("/tmp/a6-a12-r5-hunts.1NfjtH/r5-parent-21362/checked/storage/escaped.txt")
+test review_probes::r5_parent_dir_swap_above_checked_root ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.00s
+HUNT R5-NO-RECHECK-PARENT-SWAP SURVIVED against review_probes::r5_parent_dir_swap_above_checked_root (named test stayed green)
+HUNT r5-parent-swap: SURVIVED | write landed outside after parent swap: write=Ok("/tmp/a6-a12-r5-hunts.1NfjtH/r5-parent-21362/checked/storage/escaped.txt")
+
+== R5-HASH-CAP-64K: hash only the first 64 KiB ==
+
+== plant R5-HASH-CAP-64K against review_probes::r5_last_byte_of_large_file cargo_exit=0 ==
+   Compiling a6-a12-evidence-fix v0.0.0 (/tmp/pr343-r5/lab/a6-a12-evidence-fix)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.33s
+     Running unittests src/lib.rs (target-build/debug/deps/a6_a12_evidence_fix-95d81241091d22be)
+
+running 1 test
+HUNT r5-last-byte: SURVIVED | 65 KiB file, only the last byte changed
+test review_probes::r5_last_byte_of_large_file ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.00s
+HUNT R5-HASH-CAP-64K SURVIVED against review_probes::r5_last_byte_of_large_file (named test stayed green)
+HUNT r5-last-byte: SURVIVED | 65 KiB file, only the last byte changed
+
+== plant R5-HASH-CAP-64K-NAMED against tests::a12_large_file_inplace_rewrite_mtime_restored_is_found cargo_exit=0 ==
+   Compiling a6-a12-evidence-fix v0.0.0 (/tmp/pr343-r5/lab/a6-a12-evidence-fix)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.35s
+     Running unittests src/lib.rs (target-build/debug/deps/a6_a12_evidence_fix-95d81241091d22be)
+
+running 1 test
+A12 large-file in-place rewrite leftover found at /tmp/a6-a12-r5-hunts.1NfjtH/large-rewrite-21462-1793059634776373207-0/big.bin
+test tests::a12_large_file_inplace_rewrite_mtime_restored_is_found ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.00s
+HUNT R5-HASH-CAP-64K-NAMED SURVIVED against tests::a12_large_file_inplace_rewrite_mtime_restored_is_found (named test stayed green)
+
+== R5-HANDLE-EMPTY: force name_to_handle_at fallback ==
+
+== plant R5-HANDLE-EMPTY against review_probes::r5_name_to_handle_at_on_tmpfs cargo_exit=0 ==
+   Compiling a6-a12-evidence-fix v0.0.0 (/tmp/pr343-r5/lab/a6-a12-evidence-fix)
+warning: struct `RawFileHandle` is never constructed
+   --> src/a12.rs:470:8
+    |
+470 | struct RawFileHandle {
+    |        ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `file_handle_bytes` is never used
+   --> src/a12.rs:476:4
+    |
+476 | fn file_handle_bytes(path: &Path) -> Vec<u8> {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: `a6-a12-evidence-fix` (lib test) generated 2 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.36s
+     Running unittests src/lib.rs (target-build/debug/deps/a6_a12_evidence_fix-95d81241091d22be)
+
+running 1 test
+HUNT r5-handle-tmpfs: SURVIVED | name_to_handle_at returned empty on tmpfs; FileId handle is silently weaker
+HUNT r5-handle-tmpfs-reuse: INCONCLUSIVE | tmpfs same-bytes inode reuse reused=false found=true handle_empty=true
+test review_probes::r5_name_to_handle_at_on_tmpfs ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.00s
+HUNT R5-HANDLE-EMPTY SURVIVED against review_probes::r5_name_to_handle_at_on_tmpfs (named test stayed green)
+HUNT r5-handle-tmpfs: SURVIVED | name_to_handle_at returned empty on tmpfs; FileId handle is silently weaker
+HUNT r5-handle-tmpfs-reuse: INCONCLUSIVE | tmpfs same-bytes inode reuse reused=false found=true handle_empty=true
+new-hunts finished; a6.rs sha256=8ffd8dca62fee8a40fe9e24ea61d9e9a45ab67440d3e7751d59f6cf4ec86aef6
+a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351
