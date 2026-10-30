@@ -1,0 +1,33 @@
+{
+  "about": "Held judge plants. The lane gate does not run this file. F-UT1 and F-UT3 move back into falsifiers.json only after PROVIDER_TARGETS includes lab/useful-task/src/lib.rs.",
+  "falsifiers": [
+    {
+      "id": "F-UT1",
+      "title": "accept every answer before the judge reads it",
+      "command": "useful-task",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/useful-task/src/lib.rs",
+          "old": "    let trimmed = trim_json_whitespace(answer);\n",
+          "new": "    return Verdict::Accept { answer_sha256: sha256_hex(answer.trim()) };\n    let trimmed = trim_json_whitespace(answer);\n"
+        }
+      ],
+      "tests": ["checker_accepts_recorded_answer_and_refuses_stubs"]
+    },
+    {
+      "id": "F-UT3",
+      "title": "skip the duplicate-key check",
+      "command": "useful-task",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/useful-task/src/lib.rs",
+          "old": "            Reason::Duplicate => matches!(parsed, AnswerParse::Duplicate),\n",
+          "new": "            Reason::Duplicate => false,\n"
+        }
+      ],
+      "tests": ["checker_accepts_recorded_answer_and_refuses_stubs"]
+    }
+  ]
+}

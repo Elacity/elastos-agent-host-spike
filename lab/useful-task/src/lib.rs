@@ -4,15 +4,23 @@
 //! grants nothing. It reads no file and opens no socket; the caller supplies
 //! the spec, input and recorded value.
 
+use std::cell::Cell;
+use std::fmt;
+
+use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 /// The canonical refusal checks, in the order every spec must name them.
-const CHECK_ORDER: [Reason; 5] = [
+const CHECK_ORDER: [Reason; 9] = [
+    Reason::Task,
+    Reason::Input,
+    Reason::Recorded,
     Reason::Empty,
     Reason::Echo,
     Reason::FixedString,
     Reason::Shape,
+    Reason::Duplicate,
     Reason::Mismatch,
 ];
 
@@ -61,6 +69,7 @@ const CHECK_ORDER: [Reason; 5] = [
 ///     task_id: String::new(),
 ///     m1: String::new(),
 ///     input_sha256: String::new(),
+///     recorded_sha256: String::new(),
 ///     fixed_strings: Vec::new(),
 ///     reasons: Vec::new(),
 ///     schema: useful_task::Schema::Fields(Vec::new()),
@@ -71,6 +80,7 @@ pub struct Spec {
     task_id: String,
     m1: String,
     input_sha256: String,
+    recorded_sha256: String,
     fixed_strings: Vec<String>,
     reasons: Vec<Reason>,
     schema: Schema,
@@ -89,6 +99,10 @@ impl Spec {
         &self.input_sha256
     }
 
+    pub fn recorded_sha256(&self) -> &str {
+        &self.recorded_sha256
+    }
+
     pub fn fixed_strings(&self) -> &[String] {
         &self.fixed_strings
     }
@@ -105,10 +119,16 @@ impl Spec {
 /// One reason an answer is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reason {
+    /// The spec is not one of the two named task specs.
+    Task,
+    Input,
+    Recorded,
     Empty,
     Echo,
     FixedString,
     Shape,
+    /// The answer repeats an object key, so no one value is its proposal.
+    Duplicate,
     Mismatch,
 }
 
@@ -116,10 +136,14 @@ impl Reason {
     /// The spec label and the verdict reason for this check.
     pub fn label(self) -> &'static str {
         match self {
+            Reason::Task => "task",
+            Reason::Input => "input",
+            Reason::Recorded => "recorded",
             Reason::Empty => "empty",
             Reason::Echo => "echo",
             Reason::FixedString => "fixed-string",
             Reason::Shape => "shape",
+            Reason::Duplicate => "duplicate",
             Reason::Mismatch => "mismatch",
         }
     }
@@ -180,9 +204,20 @@ pub enum Verdict {
 }
 
 /// Parse one acceptance spec from its bytes.
+///
+/// The spec text uses the same unique-key parser as the answer, so a spec that
+/// repeats an object key is refused instead of collapsing to its last value.
 pub fn load_spec(bytes: &str) -> Result<Spec, String> {
-    let value: Value =
-        serde_json::from_str(bytes).map_err(|error| format!("spec is not JSON: {error}"))?;
+    let value = match parse_answer(bytes) {
+        AnswerParse::Value(value) => value,
+        AnswerParse::Duplicate => return Err("spec repeats a key".to_owned()),
+        AnswerParse::Invalid => {
+            return match serde_json::from_str::<Value>(bytes) {
+                Ok(_) => Err("spec is not JSON".to_owned()),
+                Err(error) => Err(format!("spec is not JSON: {error}")),
+            }
+        }
+    };
     let object = value
         .as_object()
         .ok_or_else(|| "spec is not an object".to_owned())?;
@@ -203,7 +238,13 @@ pub fn load_spec(bytes: &str) -> Result<Spec, String> {
     for key in object.keys() {
         let known = matches!(
             key.as_str(),
-            "task_id" | "m1" | "reasons" | "fixed_strings" | "input_sha256" | "kind"
+            "task_id"
+                | "m1"
+                | "reasons"
+                | "fixed_strings"
+                | "input_sha256"
+                | "recorded_sha256"
+                | "kind"
         ) || key == kind_key;
         if !known {
             return Err(format!("spec has unexpected key {key}"));
@@ -224,29 +265,39 @@ pub fn load_spec(bytes: &str) -> Result<Spec, String> {
     Ok(Spec {
         task_id: string_field(object, "task_id")?,
         m1: string_field(object, "m1")?,
-        input_sha256: string_field(object, "input_sha256")?,
+        input_sha256: sha256_field(object, "input_sha256")?,
+        recorded_sha256: sha256_field(object, "recorded_sha256")?,
         fixed_strings: strings(object, "fixed_strings")?,
         reasons,
         schema,
     })
 }
 
-/// Judge `answer` against `spec` and the already-parsed `expected` value.
-pub fn judge(spec: &Spec, input: &str, expected: &Value, answer: &str) -> Verdict {
-    let trimmed = answer.trim();
-    let parsed = serde_json::from_str::<Value>(trimmed).ok();
+/// Judge `answer` against `spec`, the input bytes and the expected bytes.
+pub fn judge(spec: &Spec, input: &str, expected: &str, answer: &str) -> Verdict {
+    let trimmed = trim_json_whitespace(answer);
+    let parsed = parse_answer(trimmed);
+    let expected_value = serde_json::from_str::<Value>(expected).ok();
 
     for reason in &spec.reasons {
         let refused = match reason {
+            Reason::Task => !is_named_task(spec),
+            Reason::Input => sha256_hex(input) != spec.input_sha256(),
+            Reason::Recorded => sha256_hex(expected) != spec.recorded_sha256(),
             Reason::Empty => trimmed.is_empty(),
-            Reason::Echo => trimmed == input.trim(),
+            Reason::Echo => trimmed == trim_json_whitespace(input),
             Reason::FixedString => spec.fixed_strings.iter().any(|fixed| fixed == trimmed),
-            Reason::Shape => !parsed
-                .as_ref()
-                .is_some_and(|value| spec.schema.matches(value)),
-            Reason::Mismatch => parsed
-                .as_ref()
-                .is_none_or(|value| spec.schema.matches(value) && value != expected),
+            Reason::Shape => match &parsed {
+                AnswerParse::Value(value) => !spec.schema.matches(value),
+                AnswerParse::Invalid => true,
+                AnswerParse::Duplicate => false,
+            },
+            Reason::Duplicate => matches!(parsed, AnswerParse::Duplicate),
+            Reason::Mismatch => matches!(
+                &parsed,
+                AnswerParse::Value(value)
+                    if spec.schema.matches(value) && Some(value) != expected_value.as_ref()
+            ),
         };
         if refused {
             return Verdict::Refuse {
@@ -258,6 +309,149 @@ pub fn judge(spec: &Spec, input: &str, expected: &Value, answer: &str) -> Verdic
     Verdict::Accept {
         answer_sha256: sha256_hex(trimmed),
     }
+}
+
+/// Remove only the four JSON whitespace characters from both ends of `text`.
+///
+/// JSON whitespace is space, tab, line feed and carriage return. `str::trim`
+/// also removes other characters such as U+00A0, so an answer wrapped in one
+/// of those would parse as the recorded value and be accepted.
+fn trim_json_whitespace(text: &str) -> &str {
+    text.trim_matches(&[' ', '\t', '\n', '\r'][..])
+}
+
+/// What one parse of the answer text found.
+enum AnswerParse {
+    /// One JSON value whose object keys are all unique.
+    Value(Value),
+    /// JSON that repeats an object key, so no single value is kept.
+    Duplicate,
+    /// Text that is not one JSON value, or has trailing non-whitespace.
+    Invalid,
+}
+
+/// Deserialize one JSON value and report a repeated object key.
+///
+/// `serde_json::Value::deserialize` keeps the last value of a repeated key, so
+/// the earlier value disappears. This visitor records that second occurrence
+/// instead and keeps the first, which stops one answer from carrying two
+/// different proposals for the same field.
+struct UniqueValue<'a> {
+    repeated: &'a Cell<bool>,
+}
+
+impl<'de, 'a> Visitor<'de> for UniqueValue<'a> {
+    type Value = Value;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("one JSON value with unique object keys")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Value, E> {
+        Ok(Value::Bool(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Value, E> {
+        Ok(Value::from(value))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Value, E> {
+        Ok(Value::from(value))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Value, E> {
+        Ok(Value::from(value))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Value, E> {
+        Ok(Value::String(value.to_owned()))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Value, E> {
+        Ok(Value::String(value))
+    }
+
+    fn visit_unit<E>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_seq<A>(self, mut access: A) -> Result<Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut items = Vec::new();
+        while let Some(item) = access.next_element_seed(UniqueValue {
+            repeated: self.repeated,
+        })? {
+            items.push(item);
+        }
+        Ok(Value::Array(items))
+    }
+
+    fn visit_map<A>(self, mut access: A) -> Result<Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut object = Map::new();
+        while let Some(key) = access.next_key::<String>()? {
+            let value = access.next_value_seed(UniqueValue {
+                repeated: self.repeated,
+            })?;
+            if object.insert(key, value).is_some() {
+                self.repeated.set(true);
+                return Err(de::Error::custom("duplicate key"));
+            }
+        }
+        Ok(Value::Object(object))
+    }
+}
+
+impl<'de, 'a> DeserializeSeed<'de> for UniqueValue<'a> {
+    type Value = Value;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Value, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(self)
+    }
+}
+
+/// Parse the answer text once, refusing a repeated object key anywhere.
+///
+/// The one deserializer reads one value, then `end` requires only trailing
+/// whitespace. A unique-key value is [`AnswerParse::Value`]; a repeated key is
+/// [`AnswerParse::Duplicate`]; any other parse error is [`AnswerParse::Invalid`].
+fn parse_answer(text: &str) -> AnswerParse {
+    let repeated = Cell::new(false);
+    let visitor = UniqueValue {
+        repeated: &repeated,
+    };
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    match visitor.deserialize(&mut deserializer) {
+        Ok(value) => match deserializer.end() {
+            Ok(()) => AnswerParse::Value(value),
+            Err(_) => AnswerParse::Invalid,
+        },
+        Err(_) if repeated.get() => AnswerParse::Duplicate,
+        Err(_) => AnswerParse::Invalid,
+    }
+}
+
+/// True only when `spec` is the `Spec` loaded from one of the two named tasks.
+fn is_named_task(spec: &Spec) -> bool {
+    let mut named = false;
+    for bytes in [
+        include_str!("../tasks/agent-a/accept.json"),
+        include_str!("../tasks/agent-b/accept.json"),
+    ] {
+        match load_spec(bytes) {
+            Ok(task) if &task == spec => named = true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+    named
 }
 
 /// Lower-case SHA-256 hex of exactly these bytes.
@@ -283,6 +477,18 @@ fn string_field(object: &Map<String, Value>, key: &str) -> Result<String, String
         .as_str()
         .map(str::to_owned)
         .ok_or_else(|| format!("spec {key} is not a string"))
+}
+
+fn sha256_field(object: &Map<String, Value>, key: &str) -> Result<String, String> {
+    let value = string_field(object, key)?;
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(format!("spec {key} is not a sha256 hex"));
+    }
+    Ok(value)
 }
 
 fn strings(object: &Map<String, Value>, key: &str) -> Result<Vec<String>, String> {
