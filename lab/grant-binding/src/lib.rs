@@ -249,21 +249,29 @@ impl Verifier {
             return Err(Refuse::UnknownHandle);
         }
         let bound = live_record(grant);
-        let grant = &bound;
+        self.check_call(call, &bound)?;
+        Ok(bound)
+    }
+
+    /// The compares every resolved binding shares: the call's instance must be
+    /// registered, and the registry record must match the binding's identity,
+    /// session and instance, in that order. `resolve` and `resolve_kept` both
+    /// call it, so one place decides what a call may reach.
+    fn check_call(&self, call: Call, record: &GrantRecord) -> Result<(), Refuse> {
         let live = self
             .registry
             .get(&call.instance)
             .ok_or(Refuse::UnknownInstance)?;
-        if live.identity != grant.identity {
+        if live.identity != record.identity {
             return Err(Refuse::Identity);
         }
-        if live.session != grant.session {
+        if live.session != record.session {
             return Err(Refuse::Session);
         }
-        if call.instance != grant.instance {
+        if call.instance != record.instance {
             return Err(Refuse::Instance);
         }
-        Ok(bound)
+        Ok(())
     }
 
     /// The one handle check for a hold that outlived its grant's end: resolves
@@ -277,20 +285,20 @@ impl Verifier {
             ledger.ended.get(&handle).cloned()
         }
         .ok_or(Refuse::UnknownHandle)?;
-        let live = self
-            .registry
-            .get(&call.instance)
-            .ok_or(Refuse::UnknownInstance)?;
-        if live.identity != held.record.identity {
-            return Err(Refuse::Identity);
-        }
-        if live.session != held.record.session {
-            return Err(Refuse::Session);
-        }
-        if call.instance != held.record.instance {
-            return Err(Refuse::Instance);
-        }
+        self.check_call(call, &held.record)?;
         Ok(held.record)
+    }
+
+    /// Resolves a hold's handle: the live binding first, then the ledger's kept
+    /// ended binding only when the handle is unknown, which is what `resolve`
+    /// returns for an ended handle. `settle`, `release` and `timeout_hold` use
+    /// it so a hold opened before its grant's end still closes. `reserve` and
+    /// `admit_ask` call `resolve` and open nothing new on an ended grant.
+    fn resolve_for_hold(&self, call: Call, handle: Handle) -> Result<GrantRecord, Refuse> {
+        self.resolve(call, handle).or_else(|refusal| match refusal {
+            Refuse::UnknownHandle => self.resolve_kept(call, handle),
+            refusal => Err(refusal),
+        })
     }
 
     /// Uses a grant for one path. The path must be the stored owned root or a

@@ -145,8 +145,9 @@ struct Grant {
     plan: Option<PlanBinding>,
     /// The grant ledger's own handle for this grant (M1 check A7). Only
     /// `Verifier::bind_grant` mints one, on the stand-in's shared ledger, and
-    /// the grant route stores it here. Callers never present a handle and
-    /// never choose it; the admission path passes this stored value back.
+    /// the grant route and `seed_bound_grant` store it here. Callers never
+    /// present a handle and never choose it; the admission path passes this
+    /// stored value back.
     binding: Option<Handle>,
     /// The hosted run this grant was minted for (M1 check A6). The grant route
     /// mints it from the request's session; the request read returns it; the
@@ -1703,9 +1704,9 @@ impl StandIn {
     /// same binding that minted it. An over-budget ask or a binding refusal
     /// is status 403 with `AdmitRefuse`'s own text, and the ledger keeps the
     /// grant bound and stores no ceiling. An ask at the cap is admitted.
-    /// The grant route is the one bind site, so a grant with no stored handle
-    /// (a seeded grant, or one whose route binding refused) is refused here
-    /// with status 403 and the ledger's `unknown handle` text. The
+    /// The grant route's binding and `seed_bound_grant` are the two bind sites,
+    /// so a grant with no stored handle (one whose binding refused) is refused
+    /// here with status 403 and the ledger's `unknown handle` text. The
     /// ledger binds nothing on this path.
     fn admit_effect(
         &mut self,
@@ -3299,7 +3300,8 @@ mod tests {
 
     /// Binds a seeded grant the way the grant route does, so the admission
     /// path has the ledger handle it stores. Setup for the rows below uses the
-    /// grant route's own `bind_on_ledger` and no other bind site.
+    /// `bind_on_ledger` step that `post_capability_grant` and
+    /// `seed_bound_grant` share.
     fn bind_seeded(standin: &mut StandIn, request_id: &str, session_id: &str) {
         let instance = standin.instance_on_ledger(session_id);
         let bound = standin

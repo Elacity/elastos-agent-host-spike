@@ -11,7 +11,7 @@ every use.
 
 reference model, not the Runtime; counts toward no M1 check; the Runtime half is Anders's (#464, #463, #181)
 
-`Verifier::bind_grant` is the stand-in entry for a capability ask. The asker is the registered instance principal. A Home principal is refused and does not mint. An app principal stores the binding. A caller claim is not the principal and no caller names the asker. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+`Verifier::bind_grant` is the stand-in entry for a capability ask, and the stand-in's `seed_bound_grant` calls it too. The asker is the registered instance principal. A Home principal is refused and does not mint. An app principal stores the binding. A caller claim is not the principal and no caller names the asker. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
 
 `Verifier::admit_ask` caps one agent's budget ask and stores the granted amount through the one `admit`. This is a lab stand-in for that admission. It is not the Runtime. It does not count toward A7 or M1-R.
 
@@ -28,8 +28,8 @@ verifier, no second name parser and no second plant runner.
 ## Layout
 
 - `src/lib.rs`: the verifier, the registry, the grant store and the decisions.
-- `src/ledger.rs`: the ledger stub (`Ledger::new()`), so later slices fill one
-  store instead of a second record.
+- `src/ledger.rs`: the ledger (`Ledger::new()`), one store for holds, ceilings
+  and ended bindings.
 - `src/ops.rs`: operation checks; this stub holds none yet.
 - `src/link.rs`: the one detector for a path dependency on this crate.
 - `src/plant.rs`: the plant grammar and the one falsifier runner.
