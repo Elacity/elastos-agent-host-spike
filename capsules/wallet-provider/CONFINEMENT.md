@@ -496,9 +496,11 @@ row to four rules: the row set follows the provider's own dispatch, a Right
 cell names a declared id or `none: needs no declared right`, a right row cites
 both sides, and every Linux cell stays `designed, not enforced`. The same check
 reads each ordinary row's Inputs cell against the fields its `Request` arm
-declares, in declaration order, and does not yet read a `wallet_contract` row's
-Inputs cell. A refusal under `(deny default)` is a denial, not a grant, and no
-row writes it as a right. A refusal from a `kind` comes back as an outer
+declares, in declaration order, and reads a `wallet_contract` row's Inputs cell
+against that operation's declared `params`.
+`operations_table_row_check_refuses_each_bad_table` refuses a bad
+`wallet_contract` Inputs cell. A refusal under `(deny default)` is a denial,
+not a grant, and no row writes it as a right. A refusal from a `kind` comes back as an outer
 `status` `ok` whose `data.result` holds `status` `error`, `code` and `message`;
 the outer `status`/`code`/`message` error covers envelope failures only. A
 `storage` row cites both sides of its right: `permitted:` names the test that
@@ -1480,6 +1482,12 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `landlock_ruleset_names_each_measured_loader_entry` checks this rule.
 - WP213: The file-row label claims a Linux host off Linux.
   `linux_landlock_journey_is_not_applicable_off_linux` checks this rule.
+- WP214: The expected item for an empty arm and for a field named `none` is
+  the same item, so the bare marker passes for the renamed field.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP215: `inputs_match` ignores the children of `params`, so a `params` list
+  that names a field the arm does not declare passes.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

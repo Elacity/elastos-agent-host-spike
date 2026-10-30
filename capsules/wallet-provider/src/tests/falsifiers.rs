@@ -266,8 +266,11 @@ use std::process::Command;
 /// adds a loader rule without `READ_FILE`; and WP213, which labels the file
 /// row as a Linux host off Linux. All three are CAUGHT on the Mac. Its two
 /// Linux-only plants are named in `CONFINEMENT-LINUX.md` and are not registered
-/// here.
-const EXPECTED_FALSIFIERS: usize = 193;
+/// here. Task 155 adds WP214, which treats an empty arm and a field named
+/// `none` as the same item, and WP215, which makes `inputs_match` ignore the
+/// children of `params`. Both are CAUGHT on the Mac by
+/// `operations_table_row_check_refuses_each_bad_table`.
+const EXPECTED_FALSIFIERS: usize = 195;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

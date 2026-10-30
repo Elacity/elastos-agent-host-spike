@@ -117,8 +117,8 @@ row to four rules: the row set follows the provider's own dispatch, a Right
 cell names a declared id or `none: needs no declared right`, a right row cites
 both sides, and every Linux cell stays `designed, not enforced`. The same check
 reads each ordinary row's Inputs cell against the fields its `Request` arm
-declares, in declaration order, and does not yet read a `wallet_contract` row's
-Inputs cell. A refusal under `(deny default)` is a denial, not a grant, and no
+declares, in declaration order, and reads a `wallet_contract` row. This table
+has none. A refusal under `(deny default)` is a denial, not a grant, and no
 row writes it as a right. The
 startup grants stay in "What the profile allows". A `storage` row cites both
 sides of its right: `permitted:` names the test that shows the operation under

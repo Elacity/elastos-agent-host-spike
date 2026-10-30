@@ -13254,24 +13254,46 @@ fn row_set_order_problems(
     problems
 }
 
-/// One item of an Inputs cell: its name, and whether the cell wrote that name
-/// as a backticked span (`true`) or as a bare word (`false`).
-#[derive(Debug, PartialEq)]
+/// One item of an Inputs cell: its name, whether the cell wrote that name as a
+/// backticked span (`true`) or as a bare word (`false`), and the child list a
+/// balanced parenthesised group on that item holds.
+///
+/// `quoted` is part of the item. The bare word `none` and a backticked field
+/// whose wire name is `none` are different items. Children are not: the one
+/// compare is `inputs_match`.
+#[derive(Debug)]
 struct InputsItem {
     name: String,
     quoted: bool,
+    children: Vec<InputsItem>,
 }
 
-/// The items of one Inputs cell, or `None` when the cell is not a
-/// comma-separated list of names.
+impl PartialEq for InputsItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.quoted == other.quoted
+    }
+}
+
+/// One leaf item, with the quoting the cell writes and no children.
+fn input_leaf(name: &str, quoted: bool) -> InputsItem {
+    InputsItem {
+        name: name.to_string(),
+        quoted,
+        children: Vec::new(),
+    }
+}
+
+/// The items of one Inputs cell, or `None` when the cell is not a list of
+/// names the reader can take apart.
 ///
 /// An item is one backticked span or one bare word, and each item records
-/// which of the two the cell wrote. A cell holding `(` or `)`, an empty item
-/// and an unterminated backtick span each return `None`, and the rule turns
-/// every `None` into a named refusal, never a pass.
+/// which of the two the cell wrote. A balanced `(...)` group after the name is
+/// that item's child list, read by this same function. An unbalanced or stray
+/// parenthesis, an empty item and an unterminated backtick span each return
+/// `None`, and the rule turns every `None` into a named refusal, never a pass.
 fn input_items(cell: &str) -> Option<Vec<InputsItem>> {
     if cell.contains(['(', ')']) {
-        return None;
+        return grouped_input_items(cell);
     }
     let mut items = Vec::new();
     for item in cell.split(',') {
@@ -13288,43 +13310,257 @@ fn input_items(cell: &str) -> Option<Vec<InputsItem>> {
         items.push(InputsItem {
             name: name.to_string(),
             quoted,
+            children: Vec::new(),
         });
     }
     Some(items)
 }
 
+/// The items of a cell that holds parentheses. A group is children of the item
+/// it follows. A parenthesis inside a name, a group that does not close on the
+/// item, and a cell whose groups do not balance each return `None`.
+fn grouped_input_items(cell: &str) -> Option<Vec<InputsItem>> {
+    let mut items = Vec::new();
+    for part in split_input_list(cell)? {
+        items.push(parse_input_item(part)?);
+    }
+    Some(items)
+}
+
+/// The comma-separated pieces of one Inputs list, split only at commas outside
+/// backticks and outside parentheses, or `None` when a parenthesis has no pair.
+fn split_input_list(cell: &str) -> Option<Vec<&str>> {
+    let mut items = Vec::new();
+    let mut start = 0;
+    let mut depth = 0usize;
+    let mut in_ticks = false;
+    for (index, character) in cell.char_indices() {
+        match character {
+            '`' => in_ticks = !in_ticks,
+            '(' if !in_ticks => depth += 1,
+            ')' if !in_ticks => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+            }
+            ',' if depth == 0 && !in_ticks => {
+                items.push(&cell[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 || in_ticks {
+        return None;
+    }
+    items.push(&cell[start..]);
+    Some(items)
+}
+
+/// One Inputs item. The name ends at the group that follows it, and a
+/// parenthesis inside the name is a stray parenthesis.
+fn parse_input_item(raw: &str) -> Option<InputsItem> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let (name, quoted, rest) = if let Some(after) = raw.strip_prefix('`') {
+        let end = after.find('`')?;
+        let name = &after[..end];
+        if name.is_empty() || name.contains(['`', '(', ')']) {
+            return None;
+        }
+        (name, true, after[end + 1..].trim())
+    } else if raw.contains('`') {
+        return None;
+    } else {
+        let (name, rest) = match raw.find('(') {
+            Some(index) => (raw[..index].trim(), raw[index..].trim()),
+            None => (raw, ""),
+        };
+        if name.is_empty() || name.contains(['(', ')']) {
+            return None;
+        }
+        (name, false, rest)
+    };
+    let children = if rest.is_empty() {
+        Vec::new()
+    } else {
+        input_items(input_group(rest)?)?
+    };
+    Some(InputsItem {
+        name: name.to_string(),
+        quoted,
+        children,
+    })
+}
+
+/// The text inside one `(...)` group that ends `text`, or `None` when the
+/// parentheses do not form that one group.
+fn input_group(text: &str) -> Option<&str> {
+    let text = text.trim();
+    let inner = text.strip_prefix('(')?;
+    let mut depth = 1usize;
+    let mut in_ticks = false;
+    for (index, character) in inner.char_indices() {
+        match character {
+            '`' => in_ticks = !in_ticks,
+            '(' if !in_ticks => depth += 1,
+            ')' if !in_ticks => {
+                depth -= 1;
+                if depth == 0 {
+                    if inner[index + 1..].trim().is_empty() {
+                        return Some(inner[..index].trim());
+                    }
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Whether one observed Inputs cell is exactly the expected item list: the same
 /// names in the same order, each written the way the expected item is written,
-/// so a cell that stops before a declared field, names another order, adds a
-/// name or writes a bare word where the table writes a backticked name is a
-/// different cell.
+/// and the same children under each item. A cell that stops before a declared
+/// field, names another order, adds a name, writes a bare word where the table
+/// writes a backticked name, or names a different child list is a different cell.
+///
+/// Equality of two items sees the name and the quoting. This function is the
+/// one compare that also sees the children, including the names inside `params`.
 fn inputs_match(observed: &[InputsItem], expected: &[InputsItem]) -> bool {
     observed.len() == expected.len()
         && observed
             .iter()
             .zip(expected)
             .all(|(observed, expected)| observed == expected)
+        && observed
+            .iter()
+            .zip(expected)
+            .all(|(observed, expected)| inputs_match(&observed.children, &expected.children))
 }
 
 /// One item list as an Inputs cell writes it, for a refusal's expected side.
+/// A backticked name keeps its backticks, a bare word keeps none, and a child
+/// list is the parenthesised group the cell writes after the name.
 fn render_inputs(items: &[InputsItem]) -> String {
     items
         .iter()
-        .map(|item| format!("`{}`", item.name))
+        .map(render_input_item)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn render_input_item(item: &InputsItem) -> String {
+    let mut text = if item.quoted {
+        format!("`{}`", item.name)
+    } else {
+        item.name.clone()
+    };
+    if !item.children.is_empty() {
+        text.push_str(" (");
+        text.push_str(&render_inputs(&item.children));
+        text.push(')');
+    }
+    text
 }
 
 /// The Inputs items an ordinary row must hold: the backticked `op`, then the
 /// arm's wire field names in declaration order.
 fn ordinary_row_inputs(fields: &[String]) -> Vec<InputsItem> {
-    std::iter::once("op")
-        .chain(fields.iter().map(String::as_str))
-        .map(|name| InputsItem {
-            name: name.to_string(),
-            quoted: true,
+    let mut items = Vec::with_capacity(fields.len() + 1);
+    items.push(input_leaf("op", true));
+    for name in fields {
+        items.push(input_leaf(name, true));
+    }
+    items
+}
+
+/// The children of one `params` group. An empty field list is the one bare
+/// word `none`. A declared field is one backticked name, including a field
+/// whose wire name is `none`. The bare word and the backticked name are
+/// different items.
+fn param_field_items(fields: &[String]) -> Vec<InputsItem> {
+    if fields.is_empty() {
+        return vec![input_leaf("none", false)];
+    }
+    fields.iter().map(|name| input_leaf(name, true)).collect()
+}
+
+/// The Inputs items one `wallet_contract <kind>` row must hold.
+///
+/// The cell starts with the backticked `op`. Each envelope field is a
+/// backticked leaf, except the field whose wire name is `request`: that item's
+/// children are the backticked token `kind: <kind>` and the backticked `params`
+/// group. `params` holds the arm's wire field names, in declaration order.
+/// The empty arm's only `params` child is the bare word `none`.
+fn contract_row_inputs(kind: &str, envelope: &[String], params: &[String]) -> Vec<InputsItem> {
+    let mut items = vec![input_leaf("op", true)];
+    for name in envelope {
+        if name == "request" {
+            items.push(InputsItem {
+                name: "request".to_string(),
+                quoted: true,
+                children: vec![
+                    input_leaf(&format!("kind: {kind}"), true),
+                    InputsItem {
+                        name: "params".to_string(),
+                        quoted: true,
+                        children: param_field_items(params),
+                    },
+                ],
+            });
+        } else {
+            items.push(input_leaf(name, true));
+        }
+    }
+    items
+}
+
+/// The contract enum's source file. A provider source that declares the enum
+/// is that source instead, so a fixture does not read this file.
+fn wallet_operation_contract_path() -> PathBuf {
+    let relative = Path::new("elastos/crates/elastos-wallet-contract/src/lib.rs");
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .find(|dir| dir.join(relative).is_file())
+        .map(|dir| dir.join(relative))
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(relative)
         })
-        .collect()
+}
+
+/// The path a refusal names for the contract enum, and the text that holds it.
+/// The provider dispatch is the text when it declares the enum. Otherwise this
+/// opens the contract file.
+fn contract_enum_text(sources: &WireSources<'_>) -> Result<(PathBuf, String), String> {
+    if item_body(sources.dispatch, "WalletProviderOperationV2", "enum").is_some() {
+        return Ok((
+            sources.dispatch_path.to_path_buf(),
+            sources.dispatch.to_string(),
+        ));
+    }
+    let path = wallet_operation_contract_path();
+    match fs::read_to_string(&path) {
+        Ok(text) => Ok((path, text)),
+        Err(err) => Err(format!(
+            "Inputs cells cannot be checked because {} is not readable: {err}",
+            path.display()
+        )),
+    }
+}
+
+/// The declaration path and the contract path, once when they are the same file.
+fn inputs_source_label(declaration: &Path, contract: &Path) -> String {
+    if declaration == contract {
+        declaration.display().to_string()
+    } else {
+        format!("{} and {}", declaration.display(), contract.display())
+    }
 }
 
 /// The file, relative to a provider directory, that declares the `Request`
@@ -13361,17 +13597,20 @@ struct WireSources<'a> {
 /// with no `fn handle` and one with no `enum Request` each keep their own
 /// reason naming the file.
 ///
-/// A row whose operation starts `wallet_contract ` is left exactly as
-/// `row_set_problems` leaves it: this rule returns no problem and no reason for
-/// it.
+/// A row whose operation starts `wallet_contract ` names the backticked `op`,
+/// the `WalletContract` envelope, and that kind's `params`. The kind is
+/// `variant_snake_case` of the `WalletProviderOperationV2` arm. The field
+/// whose wire name is `request` holds the backticked `kind: <kind>` token and
+/// the backticked `params` group. An empty arm's `params` holds the bare word
+/// `none`. The contract file is opened only when the table has such a row. An
+/// unreadable contract file is one refusal that names the path. A row with no
+/// matching dispatch arm stays with `row_set_problems`.
 ///
 /// Honesty limits: the rule reads declarations, not serde's output, so a field
 /// carrying `#[serde(skip)]` would be required here and would need the rule
 /// widened when one is added, while `#[serde(default)]` and
 /// `#[serde(skip_serializing_if = ...)]` fields are real wire names and are
-/// required. It checks the names and their order, not a value's type. It reads
-/// no `wallet_contract` row, so the tables' claim about those rows' `params`
-/// names is unchecked and BACKLOG item 57 holds the slice that checks it.
+/// required. It checks the names and their order, not a value's type.
 ///
 /// Falsifier: WP181 makes `field_wire_name` honour no `serde` attribute, so a
 /// renamed field reads as its Rust name; WP182 makes `inputs_match` tolerate a
@@ -13379,8 +13618,10 @@ struct WireSources<'a> {
 /// WP183 and WP184 change character-literal and raw-identifier handling.
 /// WP185 through WP197 change quoting, order, cell syntax, or source refusals.
 /// WP198 makes the field-list reader read a list whose delimiters do not
-/// balance as a shorter list. `operations_table_row_check_refuses_each_bad_table`
-/// fails on each.
+/// balance as a shorter list. WP214 makes an empty arm and a field named
+/// `none` the same item. WP215 makes `inputs_match` ignore children, so a
+/// `params` list can name a field the arm does not declare.
+/// `operations_table_row_check_refuses_each_bad_table` fails on each.
 fn inputs_cell_problems(
     document_name: &str,
     rows: &[OperationsRow],
@@ -13403,42 +13644,115 @@ fn inputs_cell_problems(
     };
     let contract_prefix = format!("{WALLET_CONTRACT_ARM} ");
     let mut problems = Vec::new();
-    for row in rows {
-        if row.operation.starts_with(&contract_prefix) {
-            continue;
+    let has_contract_row = rows
+        .iter()
+        .any(|row| row.operation.starts_with(&contract_prefix));
+    // Open the contract file only when a row names a contract kind. did's table
+    // has no such row, so it does not depend on that file.
+    let mut loaded_contract: Option<LoadedContract> = None;
+    let mut contract_blocked = false;
+    if has_contract_row {
+        match contract_enum_text(sources) {
+            Err(reason) => {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} {reason}"
+                ));
+                contract_blocked = true;
+            }
+            Ok((path, text)) => {
+                match prepare_contract_inputs(sources, &request_body, &path, &text) {
+                    Ok(loaded) => loaded_contract = Some(loaded),
+                    Err(reason) => {
+                        problems.push(format!(
+                            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} {reason}"
+                        ));
+                        contract_blocked = true;
+                    }
+                }
+            }
         }
-        let Some(variant) = handle_arms
-            .iter()
-            .find(|arm| variant_snake_case(arm) == row.operation)
-        else {
-            // A row with no dispatch arm is `row_set_problems`'s to refuse; this
-            // rule names no second reason for it.
-            continue;
-        };
-        let fields = match wire_field_names(&request_body, variant) {
-            WireFieldNames::Names(fields) => fields,
-            WireFieldNames::NoDeclaration => {
-                problems.push(format!(
-                    "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the Inputs \
-                     cell {}, and {} declares no {variant} arm",
-                    row.operation,
-                    row.inputs,
-                    sources.declarations_path.display()
-                ));
+    }
+    for row in rows {
+        let (expected, source_label) = if row.operation.starts_with(&contract_prefix) {
+            if contract_blocked {
                 continue;
             }
-            WireFieldNames::Unsupported(reason) => {
-                problems.push(format!(
-                    "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the Inputs \
-                     cell {}, and the {variant} arm of {} cannot be read: {reason}",
-                    row.operation,
-                    row.inputs,
-                    sources.declarations_path.display()
-                ));
+            let loaded = loaded_contract
+                .as_ref()
+                .expect("a contract row is checked only after its enum loads");
+            let kind = &row.operation[contract_prefix.len()..];
+            let Some(variant) = loaded
+                .kinds
+                .iter()
+                .find(|arm| variant_snake_case(arm) == kind)
+            else {
+                // A row with no dispatch arm is `row_set_problems`'s to refuse.
                 continue;
-            }
+            };
+            let params = match wire_field_names(&loaded.body, variant) {
+                WireFieldNames::Names(fields) => fields,
+                WireFieldNames::NoDeclaration => {
+                    problems.push(format!(
+                        "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the \
+                         Inputs cell {}, and {} declares no {variant} arm",
+                        row.operation,
+                        row.inputs,
+                        loaded.path.display()
+                    ));
+                    continue;
+                }
+                WireFieldNames::Unsupported(reason) => {
+                    problems.push(format!(
+                        "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the \
+                         Inputs cell {}, and the {variant} arm of {} cannot be read: {reason}",
+                        row.operation,
+                        row.inputs,
+                        loaded.path.display()
+                    ));
+                    continue;
+                }
+            };
+            (
+                contract_row_inputs(kind, &loaded.envelope, &params),
+                loaded.label.clone(),
+            )
+        } else {
+            let Some(variant) = handle_arms
+                .iter()
+                .find(|arm| variant_snake_case(arm) == row.operation)
+            else {
+                // A row with no dispatch arm is `row_set_problems`'s to refuse; this
+                // rule names no second reason for it.
+                continue;
+            };
+            let fields = match wire_field_names(&request_body, variant) {
+                WireFieldNames::Names(fields) => fields,
+                WireFieldNames::NoDeclaration => {
+                    problems.push(format!(
+                        "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the Inputs \
+                         cell {}, and {} declares no {variant} arm",
+                        row.operation,
+                        row.inputs,
+                        sources.declarations_path.display()
+                    ));
+                    continue;
+                }
+                WireFieldNames::Unsupported(reason) => {
+                    problems.push(format!(
+                        "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the Inputs \
+                         cell {}, and the {variant} arm of {} cannot be read: {reason}",
+                        row.operation,
+                        row.inputs,
+                        sources.declarations_path.display()
+                    ));
+                    continue;
+                }
+            };
+            (
+                ordinary_row_inputs(&fields),
+                sources.declarations_path.display().to_string(),
+            )
         };
-        let expected = ordinary_row_inputs(&fields);
         let matched =
             input_items(&row.inputs).is_some_and(|observed| inputs_match(&observed, &expected));
         if !matched {
@@ -13447,12 +13761,72 @@ fn inputs_cell_problems(
                  {}, and {} names {}",
                 row.operation,
                 row.inputs,
-                sources.declarations_path.display(),
+                source_label,
                 render_inputs(&expected)
             ));
         }
     }
     problems
+}
+
+/// One loaded contract enum: its path, the enum body, the dispatch kinds, the
+/// `WalletContract` envelope fields, and the source label a refusal names.
+struct LoadedContract {
+    path: PathBuf,
+    body: String,
+    kinds: Vec<String>,
+    envelope: Vec<String>,
+    label: String,
+}
+
+/// The contract enum, the dispatch kinds and the `WalletContract` envelope, or
+/// one reason the cells cannot be checked.
+fn prepare_contract_inputs(
+    sources: &WireSources<'_>,
+    request_body: &str,
+    path: &Path,
+    text: &str,
+) -> Result<LoadedContract, String> {
+    let Some(kinds) = dispatch_arm_variants(
+        sources.dispatch,
+        "fn dispatch_wallet_operation(",
+        WALLET_OPERATION_ARM,
+    ) else {
+        return Err(format!(
+            "Inputs cells cannot be checked because {} answers {WALLET_CONTRACT_ARM} and holds \
+             no fn dispatch_wallet_operation",
+            sources.dispatch_path.display()
+        ));
+    };
+    let Some(body) = item_body(text, "WalletProviderOperationV2", "enum") else {
+        return Err(format!(
+            "Inputs cells cannot be checked because {} declares no enum WalletProviderOperationV2",
+            path.display()
+        ));
+    };
+    let envelope = match wire_field_names(request_body, "WalletContract") {
+        WireFieldNames::Names(fields) => fields,
+        WireFieldNames::NoDeclaration => {
+            return Err(format!(
+                "Inputs cells cannot be checked because {} declares no WalletContract arm",
+                sources.declarations_path.display()
+            ));
+        }
+        WireFieldNames::Unsupported(reason) => {
+            return Err(format!(
+                "Inputs cells cannot be checked because the WalletContract arm of {} cannot be \
+                 read: {reason}",
+                sources.declarations_path.display()
+            ));
+        }
+    };
+    Ok(LoadedContract {
+        path: path.to_path_buf(),
+        body,
+        kinds,
+        envelope,
+        label: inputs_source_label(sources.declarations_path, path),
+    })
 }
 
 /// Whether `right` is exactly `NO_DECLARED_RIGHT` or one backtick span holding
@@ -13547,9 +13921,10 @@ fn linux_status_problems(document_name: &str, row: &OperationsRow) -> Vec<String
 /// Linux cell must be `LINUX_STATUS`.
 ///
 /// Honesty limits: rule 1 reads the dispatch arms as text, so it shows the row
-/// set matches the arms, not that every arm is reachable; rule 2 reads no
-/// `wallet_contract` row; and the check says nothing about the Outputs keys,
-/// which stay held in BACKLOG item 21.
+/// set matches the arms, not that every arm is reachable; rule 2 reads a
+/// `wallet_contract` row's Inputs cell against that kind's declared `params`;
+/// and the check says nothing about the Outputs keys, which stay held in
+/// BACKLOG item 21.
 fn operations_table_row_problems(
     document_name: &str,
     document: &str,
@@ -14597,7 +14972,8 @@ fn every_operations_table_cites_existing_tests() {
 /// operations `capsules/<name>/src/main.rs` answers through `fn handle`, with a
 /// `wallet_contract` arm expanded to one row per `fn dispatch_wallet_operation`
 /// arm; an ordinary row's Inputs cell names the backticked `op` and then its
-/// `Request` arm's wire field names in declaration order; the Right cell is
+/// `Request` arm's wire field names in declaration order; a `wallet_contract`
+/// row's Inputs cell names that kind's `params`; the Right cell is
 /// exactly `none: needs no declared right` or one
 /// declared id in a backtick span; a row whose Right is a declared right cites
 /// both `permitted:` and `nearest outside refused:`, and a `none:` row cites
@@ -15405,12 +15781,18 @@ fn dispatch_wallet_operation(&mut self, request: &WalletProviderRequestV2) -> Re
 
 /// The Inputs cell of one fixture operation's row: the backticked `op` and then
 /// the wire names the fixture `Request` arm declares, in declaration order. The
-/// `wallet_contract` row is left as the row-set rule reads it, because the
-/// Inputs rule reads no such row.
+/// `wallet_contract list_accounts` cell names the real `ListAccounts` params,
+/// because the fixture dispatch does not declare that enum.
 fn fixture_inputs(operation: &str) -> String {
     match operation {
         "init" => "`op`, `config`, `wire_name`".to_string(),
         "echo" => "`op`, `message`, `retry`".to_string(),
+        "wallet_contract list_accounts" => "`op`, `request` (`kind: list_accounts`, `params` \
+                                            (`include_revoked`)), `_runtime_invocation`"
+            .to_string(),
+        "wallet_contract get_d_i_d" => "`op`, `request` (`kind: get_d_i_d`, `params` (none)), \
+                                       `_runtime_invocation`"
+            .to_string(),
         _ => "`op`".to_string(),
     }
 }
@@ -15502,7 +15884,10 @@ const FIXTURE_OPERATIONS: [&str; 5] = [
 /// Character and byte-character literals retain the field after their type;
 /// raw identifiers use their wire spelling, and explicit renames keep their
 /// literal value. Unsupported field attributes and literals keep exact reasons.
-/// A `wallet_contract` row's Inputs cell is not read. A source with no
+/// A `wallet_contract` row's Inputs cell is read against that kind's `params`.
+/// A fixture enum keeps the bare word `none` apart from a field named `none`,
+/// and a `params` list that drops, reorders or adds a name is refused.
+/// A source with no
 /// `enum Request`, an arm the declaration omits, a declaration file the caller
 /// cannot read and a source with no `fn handle` each keep their own reason. The
 /// four `snake_case` names the
@@ -15519,7 +15904,10 @@ const FIXTURE_OPERATIONS: [&str; 5] = [
 /// WP183 through WP197 cover literal boundaries, raw identifiers, quoting,
 /// order, malformed cells and missing source or arm refusals. WP198 removes
 /// the field-list reader's balance refusal, so a shift expression hides the
-/// field after it.
+/// field after it. WP214 makes an empty arm and a field named `none` the same
+/// item, so the bare marker passes for the renamed field. WP215 makes
+/// `inputs_match` ignore children, so a `params` list can name an undeclared
+/// field.
 #[test]
 fn operations_table_row_check_refuses_each_bad_table() {
     let provider = tempfile::tempdir().expect("temporary provider folder");
@@ -15857,7 +16245,14 @@ fn operations_table_row_check_refuses_each_bad_table() {
         "        WalletProviderOperationV2::ListAccounts",
         "        WalletProviderOperationV2::GetDID {} => self.get_did(),\n\
                 WalletProviderOperationV2::ListAccounts",
-    );
+    ) + "
+enum WalletProviderOperationV2 {
+    GetDID {},
+    ListAccounts {
+        include_revoked: bool,
+    },
+}
+";
     assert_ne!(two_kind_source, ROW_FIXTURE_PROVIDER);
     fs::write(&provider_source, &two_kind_source).expect("two-kind fixture provider source");
     let two_kind_operations = [
@@ -16377,19 +16772,147 @@ fn operations_table_row_check_refuses_each_bad_table() {
     );
     fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
 
-    // Rule 5: a `wallet_contract` row is left as the row-set rule leaves it, so
-    // its Inputs cell is not read.
-    let ignored = passing.replacen(
-        "| wallet_contract list_accounts | `op` |",
+    // Rule 5: a `wallet_contract` row is read. The fixture dispatch does not
+    // declare the operation enum, so this cell is checked against the contract
+    // file. A cell that is not that shape is one problem naming the source.
+    let contract_path = wallet_operation_contract_path();
+    let contract_label = inputs_source_label(provider_source.as_path(), &contract_path);
+    let listed = fixture_inputs("wallet_contract list_accounts");
+    let garbage = passing.replacen(
+        &format!("| wallet_contract list_accounts | {listed} |"),
         "| wallet_contract list_accounts | garbage |",
         1,
     );
-    assert_ne!(ignored, passing, "the contract row's cell must change");
+    assert_ne!(garbage, passing, "the contract row's cell must change");
     assert_eq!(
-        operations_table_row_problems("fixture-provider", &ignored, provider.path()),
-        Vec::<String>::new(),
-        "a wallet_contract row's Inputs cell must not be read"
+        operations_table_row_problems("fixture-provider", &garbage, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row wallet_contract \
+             list_accounts holds the Inputs cell garbage, and {contract_label} names {listed}"
+        )],
+        "a wallet_contract row's Inputs cell must be read"
     );
+
+    // The bare word `none` and a field named `none` stay apart. The empty arm
+    // passes on `params` (none) and is refused on `params` (`none`). The
+    // renamed field is refused on the bare word and passes on the backticks.
+    // A `params` list that drops, reorders or adds a name is refused by
+    // `inputs_match`. The enum is fixture source, not the contract crate.
+    let contract_dispatch = "\
+        WalletProviderOperationV2::Empty {} => self.empty(),\n        \
+        WalletProviderOperationV2::NamedNone { field } => self.named(field),\n        \
+        WalletProviderOperationV2::Pair { beta, alpha } => self.pair(beta, alpha),\n";
+    let contract_enum = "
+enum WalletProviderOperationV2 {
+    Empty {},
+    NamedNone {
+        #[serde(rename = \"none\")]
+        field: String,
+    },
+    Pair {
+        beta: u8,
+        alpha: u8,
+    },
+}
+";
+    let contract_source = ROW_FIXTURE_PROVIDER.replace(
+        "        WalletProviderOperationV2::ListAccounts { include_revoked } => self.accounts(*include_revoked),\n",
+        contract_dispatch,
+    ) + contract_enum;
+    assert_ne!(contract_source, ROW_FIXTURE_PROVIDER);
+    fs::write(&provider_source, &contract_source).expect("fixture contract source");
+    let contract_cell = |kind: &str, params: &str| {
+        format!("`op`, `request` (`kind: {kind}`, `params` ({params})), `_runtime_invocation`")
+    };
+    let mut contract_document = fixture_row_document(&["init", "status", "echo", "shutdown"]);
+    for (kind, params) in [
+        ("empty", "none"),
+        ("named_none", "`none`"),
+        ("pair", "`beta`, `alpha`"),
+    ] {
+        contract_document.push_str(&fixture_row(
+            &format!("wallet_contract {kind}"),
+            &contract_cell(kind, params),
+            NO_DECLARED_RIGHT,
+            "`tests/confine.rs::present_case` shows the answer.",
+            LINUX_STATUS,
+        ));
+    }
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &contract_document, provider.path()),
+        Vec::<String>::new(),
+        "the fixture contract rows must pass"
+    );
+    let bare_params = param_field_items(&[]);
+    let named_params = param_field_items(&["none".to_string()]);
+    assert_ne!(
+        bare_params, named_params,
+        "a bare none and a field named none are different items"
+    );
+    for (items, other) in [(&bare_params, &named_params), (&named_params, &bare_params)] {
+        let text = render_inputs(items);
+        let parsed = input_items(&text).expect("the rendered item must parse");
+        assert!(
+            inputs_match(&parsed, items),
+            "render_inputs must parse back to {text}"
+        );
+        assert!(
+            !inputs_match(&parsed, other),
+            "render_inputs of {text} must not parse back to the other item"
+        );
+    }
+    let fixture_label = provider_source.display().to_string();
+    for (case, kind, params) in [
+        (
+            "the bare marker on a field named none",
+            "named_none",
+            "none",
+        ),
+        ("a backticked none on an empty arm", "empty", "`none`"),
+        ("a dropped params name", "pair", "`beta`"),
+        ("a reordered params list", "pair", "`alpha`, `beta`"),
+        ("an added params name", "pair", "`beta`, `alpha`, `extra`"),
+    ] {
+        let good = contract_cell(
+            kind,
+            match kind {
+                "empty" => "none",
+                "named_none" => "`none`",
+                _ => "`beta`, `alpha`",
+            },
+        );
+        let bad = contract_cell(kind, params);
+        assert_ne!(good, bad, "{case} must change the cell");
+        let observed = input_items(&bad).expect("{case} must parse");
+        let fields: Vec<String> = match kind {
+            "empty" => Vec::new(),
+            "named_none" => vec!["none".to_string()],
+            _ => vec!["beta".to_string(), "alpha".to_string()],
+        };
+        let expected = contract_row_inputs(
+            kind,
+            &["request".to_string(), "_runtime_invocation".to_string()],
+            &fields,
+        );
+        assert!(
+            !inputs_match(&observed, &expected),
+            "{case} must fail inputs_match"
+        );
+        let document = contract_document.replacen(
+            &format!("| wallet_contract {kind} | {good} |"),
+            &format!("| wallet_contract {kind} | {bad} |"),
+            1,
+        );
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row wallet_contract {kind} \
+                 holds the Inputs cell {bad}, and {fixture_label} names {good}"
+            )],
+            "{case} must be one refusal"
+        );
+    }
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
 
     // Rule 5: every source refusal keeps its own reason that names the file.
     for (case, anchor, replacement, reason) in [
