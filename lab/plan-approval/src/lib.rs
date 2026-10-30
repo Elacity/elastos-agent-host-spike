@@ -208,6 +208,29 @@ pub fn shown_worker_exited(stand_in: &mut StandIn, session_id: &str) -> Result<(
     stand_in.worker_exited(session_id)
 }
 
+/// One applied start through the stand-in's own finish seam.
+///
+/// `session_id` is the instance id, a method argument. This helper passes it to
+/// that seam unchanged and returns its result, so the stand-in's own lookup,
+/// live check and one-time check decide the answer. An unknown id is status 400
+/// with the reason that names it and stores nothing. An instance that is
+/// `stopped` or `stopping` is status 400 with the not-live reason. An instance
+/// that is not `starting` is status 400 `start already returned`, and the
+/// stored cause stays. A `starting` instance applies the `Start` its launch row
+/// stored: `Ok` becomes `running` with no cause and leaves its pending requests
+/// pending, while `Error` and `Trap` become `failed` with the text those
+/// variants hold. A failed finish revokes that session's `Live` grants and
+/// denies its pending requests with that same cause and `runtime` as settler. A
+/// granted record stays `granted` with the owner's rationale, and another
+/// session stays as it was. Ok is `()`.
+///
+/// The helper takes no caller and no reason, so the cause is never text this
+/// crate states. This crate stores no copy of the stand-in's start, settle or
+/// revoke steps, does not match on the id, and does not watch the worker.
+pub fn shown_finish_start(stand_in: &mut StandIn, id: &str) -> Result<(), (u16, String)> {
+    stand_in.finish_start(id)
+}
+
 /// One status read of a shown request through
 /// `GET /api/capability/request/:id`.
 ///
@@ -519,9 +542,17 @@ mod journeys {
     use agent_conformance::standin_runtime::{Caller, StandIn, Start};
     use serde_json::json;
 
-    /// One session reaches `Running` through the stand-in's own routes:
-    /// `get_capsules` for the count, `admit_resident` for the signed fixture,
-    /// `post_capsules` for its CID and `finish_start`. This mints no grant.
+    /// One session reaches `Starting` through the stand-in's own routes:
+    /// `get_capsules` for the count, `admit_resident` for the signed fixture
+    /// and `post_capsules` for its CID. This mints no grant and calls no
+    /// finish: the start outcome this journey is given is the one the launch
+    /// row stores, and `shown_finish_start` is the one finish call.
+    ///
+    /// `start` is the outcome the Runtime would apply once, a method
+    /// argument. This journey passes it to `admit_resident` unchanged and
+    /// does not match on it, so `Ok`, `Error` and `Trap` reach the stand-in's
+    /// own admission. A stored `Error` or `Trap` is not applied here; the
+    /// session stays `Starting` with no cause until its one finish.
     ///
     /// `caller` is the authenticated caller, a method argument. This journey
     /// passes it to the list route and the launch route unchanged and does not
@@ -538,6 +569,7 @@ mod journeys {
     pub fn running_agent(
         stand_in: &mut StandIn,
         caller: Caller<'_>,
+        start: Start,
     ) -> Result<String, (u16, String)> {
         let sessions = stand_in.get_capsules(caller)?["capsules"]
             .as_array()
@@ -548,19 +580,12 @@ mod journeys {
         } else {
             SignedBundle::distinct(&format!("agent-host-{sessions}"))
         };
-        stand_in.admit_resident(
-            bundle.path(),
-            &bundle.signature(),
-            bundle.accepted(),
-            Start::Ok,
-        )?;
+        stand_in.admit_resident(bundle.path(), &bundle.signature(), bundle.accepted(), start)?;
         let launched = stand_in.post_capsules(caller, &bundle.launch_body())?;
-        let id = launched["id"]
+        Ok(launched["id"]
             .as_str()
             .expect("the stand-in names the launch")
-            .to_owned();
-        stand_in.finish_start(&id)?;
-        Ok(id)
+            .to_owned())
     }
 
     /// The agent asks for one plan through `post_capability_request`. The
@@ -610,13 +635,14 @@ mod journeys {
 #[cfg(test)]
 #[test]
 fn a_grant_bound_to_one_plan_is_refused_for_another_plan() {
-    use agent_conformance::standin_runtime::Caller;
+    use agent_conformance::standin_runtime::{Caller, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
 
     let mut stand_in = StandIn::new();
-    let session = running_agent(&mut stand_in, Caller::Shell)
+    let session = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &session).expect("the shell finishes that start");
 
     let request_a = request(
         &mut stand_in,
@@ -757,7 +783,7 @@ fn a_grant_bound_to_one_plan_is_refused_for_another_plan() {
 #[cfg(test)]
 #[test]
 fn deny_one_shown_step() {
-    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use agent_conformance::standin_runtime::{Caller, StandIn, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -830,8 +856,9 @@ fn deny_one_shown_step() {
 
     // The one launch journey makes the running session the shown steps come
     // from. It mints no grant.
-    let session = running_agent(&mut stand_in, Caller::Shell)
+    let session = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &session).expect("the shell finishes that start");
     assert_eq!(
         session, "component-1",
         "the fresh stand-in names the one running session component-1"
@@ -1062,7 +1089,7 @@ fn deny_one_shown_step() {
 #[cfg(test)]
 #[test]
 fn agent_cannot_deny_its_own_shown_plan() {
-    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use agent_conformance::standin_runtime::{Caller, StandIn, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -1131,14 +1158,16 @@ fn agent_cannot_deny_its_own_shown_plan() {
 
     // Two running sessions: the agent that posts the plans and the other
     // session that must not settle them.
-    let first = running_agent(&mut stand_in, Caller::Shell)
+    let first = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &first).expect("the shell finishes that start");
     assert_eq!(
         first, "component-1",
         "the fresh stand-in names the first running session component-1"
     );
-    let second = running_agent(&mut stand_in, Caller::Shell)
+    let second = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &second).expect("the shell finishes that start");
     assert_eq!(
         second, "component-2",
         "the second running session is the stand-in's next component"
@@ -1402,7 +1431,7 @@ fn agent_cannot_deny_its_own_shown_plan() {
 #[cfg(test)]
 #[test]
 fn unanswered_shown_step_expires() {
-    use agent_conformance::standin_runtime::Caller;
+    use agent_conformance::standin_runtime::{Caller, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::Value;
@@ -1426,8 +1455,9 @@ fn unanswered_shown_step_expires() {
     }
 
     let mut stand_in = StandIn::new();
-    let session = running_agent(&mut stand_in, Caller::Shell)
+    let session = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &session).expect("the shell finishes that start");
     assert_eq!(
         session, "component-1",
         "the fresh stand-in names the one session component-1"
@@ -1650,7 +1680,7 @@ fn unanswered_shown_step_expires() {
 #[cfg(test)]
 #[test]
 fn stop_settles_that_sessions_shown_steps() {
-    use agent_conformance::standin_runtime::Caller;
+    use agent_conformance::standin_runtime::{Caller, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -1707,10 +1737,12 @@ fn stop_settles_that_sessions_shown_steps() {
     );
 
     // Two sessions come from the one launch journey.
-    let first = running_agent(&mut stand_in, Caller::Shell)
+    let first = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
-    let second = running_agent(&mut stand_in, Caller::Shell)
+    shown_finish_start(&mut stand_in, &first).expect("the shell finishes that start");
+    let second = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &second).expect("the shell finishes that start");
     assert_eq!(first, "component-1", "the first launch is component-1");
     assert_eq!(second, "component-2", "the second launch is component-2");
     assert_eq!(
@@ -1974,7 +2006,7 @@ fn stop_settles_that_sessions_shown_steps() {
 #[cfg(test)]
 #[test]
 fn shown_allow_once_expires() {
-    use agent_conformance::standin_runtime::Caller;
+    use agent_conformance::standin_runtime::{Caller, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -2004,8 +2036,9 @@ fn shown_allow_once_expires() {
     }
 
     let mut stand_in = StandIn::new();
-    let session = running_agent(&mut stand_in, Caller::Shell)
+    let session = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &session).expect("the shell finishes that start");
     assert_eq!(
         session, "component-1",
         "the fresh stand-in names the one session component-1"
@@ -2238,7 +2271,7 @@ fn shown_allow_once_expires() {
 #[cfg(test)]
 #[test]
 fn shown_session_lasts_until_stop() {
-    use agent_conformance::standin_runtime::Caller;
+    use agent_conformance::standin_runtime::{Caller, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -2269,8 +2302,9 @@ fn shown_session_lasts_until_stop() {
     };
 
     let mut stand_in = StandIn::new();
-    let session = running_agent(&mut stand_in, Caller::Shell)
+    let session = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &session).expect("the shell finishes that start");
     assert_eq!(
         session, "component-1",
         "the fresh stand-in names the one session component-1"
@@ -2620,7 +2654,7 @@ fn shown_session_lasts_until_stop() {
 #[cfg(test)]
 #[test]
 fn shown_grant_authorises_only_its_session() {
-    use agent_conformance::standin_runtime::Caller;
+    use agent_conformance::standin_runtime::{Caller, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -2658,10 +2692,12 @@ fn shown_grant_authorises_only_its_session() {
     }
 
     let mut stand_in = StandIn::new();
-    let first_session = running_agent(&mut stand_in, Caller::Shell)
+    let first_session = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
-    let second_session = running_agent(&mut stand_in, Caller::Shell)
+    shown_finish_start(&mut stand_in, &first_session).expect("the shell finishes that start");
+    let second_session = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &second_session).expect("the shell finishes that start");
     assert_eq!(
         first_session, "component-1",
         "a shown grant authorises only its session: the fresh stand-in names its first session component-1"
@@ -2890,7 +2926,7 @@ fn shown_grant_authorises_only_its_session() {
 #[cfg(test)]
 #[test]
 fn owner_approves_only_the_shown_hash() {
-    use agent_conformance::standin_runtime::Caller;
+    use agent_conformance::standin_runtime::{Caller, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -2917,8 +2953,9 @@ fn owner_approves_only_the_shown_hash() {
     }
 
     let mut stand_in = StandIn::new();
-    let session = running_agent(&mut stand_in, Caller::Shell)
+    let session = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &session).expect("the shell finishes that start");
     assert_eq!(
         session, "component-1",
         "the owner grant mints only the hash the shown request stored: the fresh stand-in names its session component-1"
@@ -3073,7 +3110,7 @@ fn owner_approves_only_the_shown_hash() {
 #[cfg(test)]
 #[test]
 fn agent_cannot_approve_its_own_shown_plan() {
-    use agent_conformance::standin_runtime::Caller;
+    use agent_conformance::standin_runtime::{Caller, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -3100,10 +3137,12 @@ fn agent_cannot_approve_its_own_shown_plan() {
     }
 
     let mut stand_in = StandIn::new();
-    let poster = running_agent(&mut stand_in, Caller::Shell)
+    let poster = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
-    let other = running_agent(&mut stand_in, Caller::Shell)
+    shown_finish_start(&mut stand_in, &poster).expect("the shell finishes that start");
+    let other = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &other).expect("the shell finishes that start");
     assert_eq!(
         poster, "component-1",
         "the agent that showed the plan cannot mint its grant: the fresh stand-in names the session that posts the plan component-1"
@@ -3332,7 +3371,7 @@ fn agent_cannot_approve_its_own_shown_plan() {
 #[cfg(test)]
 #[test]
 fn shell_cannot_spend_a_shown_grant() {
-    use agent_conformance::standin_runtime::Caller;
+    use agent_conformance::standin_runtime::{Caller, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -3359,10 +3398,12 @@ fn shell_cannot_spend_a_shown_grant() {
     }
 
     let mut stand_in = StandIn::new();
-    let owner_session = running_agent(&mut stand_in, Caller::Shell)
+    let owner_session = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
-    let other_session = running_agent(&mut stand_in, Caller::Shell)
+    shown_finish_start(&mut stand_in, &owner_session).expect("the shell finishes that start");
+    let other_session = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &other_session).expect("the shell finishes that start");
     assert_eq!(
         owner_session, "component-1",
         "the shell cannot spend a shown grant: the fresh stand-in names its first session component-1"
@@ -3570,7 +3611,7 @@ fn shell_cannot_spend_a_shown_grant() {
 #[cfg(test)]
 #[test]
 fn shell_cannot_submit_a_shown_plan() {
-    use agent_conformance::standin_runtime::Caller;
+    use agent_conformance::standin_runtime::{Caller, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -3666,10 +3707,12 @@ fn shell_cannot_submit_a_shown_plan() {
     );
 
     // Two sessions come from the one launch journey and stay running.
-    let first = running_agent(&mut stand_in, Caller::Shell)
+    let first = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
-    let second = running_agent(&mut stand_in, Caller::Shell)
+    shown_finish_start(&mut stand_in, &first).expect("the shell finishes that start");
+    let second = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &second).expect("the shell finishes that start");
     assert_eq!(
         first, "component-1",
         "the shell cannot submit a shown plan: the fresh stand-in names its first session component-1"
@@ -3904,7 +3947,7 @@ fn shell_cannot_submit_a_shown_plan() {
 
 #[test]
 fn only_a_live_session_submits_a_shown_plan() {
-    use agent_conformance::standin_runtime::Caller;
+    use agent_conformance::standin_runtime::{Caller, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -4036,10 +4079,12 @@ fn only_a_live_session_submits_a_shown_plan() {
     }
 
     // Two live sessions come from the one launch journey.
-    let first = running_agent(&mut stand_in, Caller::Shell)
+    let first = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
-    let second = running_agent(&mut stand_in, Caller::Shell)
+    shown_finish_start(&mut stand_in, &first).expect("the shell finishes that start");
+    let second = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &second).expect("the shell finishes that start");
     assert_eq!(
         first, "component-1",
         "only a live session submits a shown plan: the fresh stand-in names its first session component-1"
@@ -4320,7 +4365,7 @@ fn only_a_live_session_submits_a_shown_plan() {
 #[cfg(test)]
 #[test]
 fn agent_cannot_stop_a_shown_session() {
-    use agent_conformance::standin_runtime::Caller;
+    use agent_conformance::standin_runtime::{Caller, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -4425,10 +4470,12 @@ fn agent_cannot_stop_a_shown_session() {
     );
 
     // Two sessions come from the one launch journey.
-    let first = running_agent(&mut stand_in, Caller::Shell)
+    let first = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
-    let second = running_agent(&mut stand_in, Caller::Shell)
+    shown_finish_start(&mut stand_in, &first).expect("the shell finishes that start");
+    let second = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &second).expect("the shell finishes that start");
     assert_eq!(first, "component-1", "the first launch is component-1");
     assert_eq!(second, "component-2", "the second launch is component-2");
     for id in [&first, &second] {
@@ -4744,7 +4791,7 @@ fn agent_cannot_stop_a_shown_session() {
 #[cfg(test)]
 #[test]
 fn agent_cannot_launch_a_shown_session() {
-    use agent_conformance::standin_runtime::Caller;
+    use agent_conformance::standin_runtime::{Caller, Start};
     use fixtures::PLAN_A;
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -4834,7 +4881,7 @@ fn agent_cannot_launch_a_shown_session() {
         (Caller::Client { session_id: "" }, "an empty id"),
     ];
     for (caller, label) in fresh_launches {
-        let refused = running_agent(&mut stand_in, caller);
+        let refused = running_agent(&mut stand_in, caller, Start::Ok);
         assert_eq!(
             refused,
             shell_refusal(),
@@ -4893,8 +4940,9 @@ fn agent_cannot_launch_a_shown_session() {
     }
 
     // The shell's own launch is the existing journey and starts component-1.
-    let first = running_agent(&mut stand_in, Caller::Shell)
+    let first = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &first).expect("the shell finishes that start");
     assert_eq!(
         first, "component-1",
         "the agent cannot launch a shown session: the shell's first launch is component-1"
@@ -4936,7 +4984,7 @@ fn agent_cannot_launch_a_shown_session() {
         (Caller::Client { session_id: "" }, "an empty id"),
     ];
     for (caller, label) in launched_launches {
-        let refused = running_agent(&mut stand_in, caller);
+        let refused = running_agent(&mut stand_in, caller, Start::Ok);
         assert_eq!(
             refused,
             shell_refusal(),
@@ -4977,8 +5025,9 @@ fn agent_cannot_launch_a_shown_session() {
     }
 
     // The shell's second launch is component-2, and component-1 stays running.
-    let second = running_agent(&mut stand_in, Caller::Shell)
+    let second = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &second).expect("the shell finishes that start");
     assert_eq!(
         second, "component-2",
         "the agent cannot launch a shown session: the shell's second launch is component-2"
@@ -5092,7 +5141,7 @@ fn agent_cannot_launch_a_shown_session() {
 
     // A client launch after both shell sessions is still the shell refusal and
     // mints no component-3; the granted step stays granted.
-    let after_two = running_agent(&mut stand_in, client_session);
+    let after_two = running_agent(&mut stand_in, client_session, Start::Ok);
     assert_eq!(
         after_two,
         shell_refusal(),
@@ -5165,7 +5214,7 @@ fn agent_cannot_launch_a_shown_session() {
 #[cfg(test)]
 #[test]
 fn shown_request_status_is_not_the_grant() {
-    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use agent_conformance::standin_runtime::{Caller, StandIn, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -5271,14 +5320,16 @@ fn shown_request_status_is_not_the_grant() {
     );
 
     // Two running sessions come from the one launch journey.
-    let first = running_agent(&mut stand_in, Caller::Shell)
+    let first = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &first).expect("the shell finishes that start");
     assert_eq!(
         first, "component-1",
         "a shown request status is not the grant: the fresh stand-in names the first running session component-1"
     );
-    let second = running_agent(&mut stand_in, Caller::Shell)
+    let second = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &second).expect("the shell finishes that start");
     assert_eq!(
         second, "component-2",
         "a shown request status is not the grant: the second running session is the stand-in's next component"
@@ -5737,7 +5788,7 @@ fn shown_request_status_is_not_the_grant() {
 #[cfg(test)]
 #[test]
 fn shown_live_list_is_not_another_sessions_grant() {
-    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use agent_conformance::standin_runtime::{Caller, StandIn, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -5937,14 +5988,16 @@ fn shown_live_list_is_not_another_sessions_grant() {
     }
 
     // Two running sessions come from the one launch journey.
-    let first = running_agent(&mut stand_in, Caller::Shell)
+    let first = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &first).expect("the shell finishes that start");
     assert_eq!(
         first, "component-1",
         "a shown live list is not another session's grant: the fresh stand-in names the first running session component-1"
     );
-    let second = running_agent(&mut stand_in, Caller::Shell)
+    let second = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &second).expect("the shell finishes that start");
     assert_eq!(
         second, "component-2",
         "a shown live list is not another session's grant: the second running session is the stand-in's next component"
@@ -6518,7 +6571,7 @@ fn shown_live_list_is_not_another_sessions_grant() {
 #[cfg(test)]
 #[test]
 fn shown_request_list_does_not_submit_again() {
-    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use agent_conformance::standin_runtime::{Caller, StandIn, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -6664,14 +6717,16 @@ fn shown_request_list_does_not_submit_again() {
     }
 
     // Two running sessions come from the one launch journey.
-    let first = running_agent(&mut stand_in, Caller::Shell)
+    let first = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &first).expect("the shell finishes that start");
     assert_eq!(
         first, "component-1",
         "a shown request list does not submit again: the fresh stand-in names the first running session component-1"
     );
-    let second = running_agent(&mut stand_in, Caller::Shell)
+    let second = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &second).expect("the shell finishes that start");
     assert_eq!(
         second, "component-2",
         "a shown request list does not submit again: the second running session is the stand-in's next component"
@@ -7090,7 +7145,7 @@ fn shown_request_list_does_not_submit_again() {
 #[cfg(test)]
 #[test]
 fn shown_submit_names_a_declared_ask() {
-    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use agent_conformance::standin_runtime::{Caller, StandIn, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -7223,14 +7278,16 @@ fn shown_submit_names_a_declared_ask() {
     );
 
     // Two running sessions come from the one launch journey.
-    let first = running_agent(&mut stand_in, Caller::Shell)
+    let first = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &first).expect("the shell finishes that start");
     assert_eq!(
         first, "component-1",
         "a shown submit names a declared ask: the fresh stand-in names the first running session component-1"
     );
-    let second = running_agent(&mut stand_in, Caller::Shell)
+    let second = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &second).expect("the shell finishes that start");
     assert_eq!(
         second, "component-2",
         "a shown submit names a declared ask: the second running session is the stand-in's next component"
@@ -7680,7 +7737,7 @@ fn shown_submit_names_a_declared_ask() {
 #[cfg(test)]
 #[test]
 fn shown_request_reason_is_not_the_grant() {
-    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use agent_conformance::standin_runtime::{Caller, StandIn, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -7769,14 +7826,16 @@ fn shown_request_reason_is_not_the_grant() {
         "a shown request reason is not the grant: the shell refusal mints no grant"
     );
 
-    let first = running_agent(&mut stand_in, Caller::Shell)
+    let first = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &first).expect("the shell finishes that start");
     assert_eq!(
         first, "component-1",
         "a shown request reason is not the grant: the fresh stand-in names the first running session component-1"
     );
-    let second = running_agent(&mut stand_in, Caller::Shell)
+    let second = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &second).expect("the shell finishes that start");
     assert_eq!(
         second, "component-2",
         "a shown request reason is not the grant: the second running session is the stand-in's next component"
@@ -8309,7 +8368,7 @@ fn shown_request_reason_is_not_the_grant() {
 #[cfg(test)]
 #[test]
 fn shown_grant_rationale_is_not_the_grant() {
-    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use agent_conformance::standin_runtime::{Caller, StandIn, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -8403,10 +8462,12 @@ fn shown_grant_rationale_is_not_the_grant() {
     );
 
     // Two sessions run, and the first posts the plan the owner will see.
-    let first = running_agent(&mut stand_in, Caller::Shell)
+    let first = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
-    let second = running_agent(&mut stand_in, Caller::Shell)
+    shown_finish_start(&mut stand_in, &first).expect("the shell finishes that start");
+    let second = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &second).expect("the shell finishes that start");
     assert_eq!(
         first, "component-1",
         "a shown grant rationale is not the grant: the fresh stand-in names the first session component-1"
@@ -9040,7 +9101,7 @@ fn shown_grant_rationale_is_not_the_grant() {
 #[cfg(test)]
 #[test]
 fn shown_deny_reason_is_not_the_grant() {
-    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use agent_conformance::standin_runtime::{Caller, StandIn, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -9133,10 +9194,12 @@ fn shown_deny_reason_is_not_the_grant() {
     );
 
     // Two sessions run, and the first posts the plans the owner will see.
-    let first = running_agent(&mut stand_in, Caller::Shell)
+    let first = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
-    let second = running_agent(&mut stand_in, Caller::Shell)
+    shown_finish_start(&mut stand_in, &first).expect("the shell finishes that start");
+    let second = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &second).expect("the shell finishes that start");
     assert_eq!(
         first, "component-1",
         "a shown deny reason is not the grant: the fresh stand-in names the first session component-1"
@@ -9891,7 +9954,7 @@ fn shown_deny_reason_is_not_the_grant() {
 #[cfg(test)]
 #[test]
 fn shown_stop_reason_is_not_the_grant() {
-    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use agent_conformance::standin_runtime::{Caller, StandIn, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -9995,10 +10058,12 @@ fn shown_stop_reason_is_not_the_grant() {
     );
 
     // Two sessions run, and the first posts the plans the owner will see.
-    let first = running_agent(&mut stand_in, Caller::Shell)
+    let first = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
-    let second = running_agent(&mut stand_in, Caller::Shell)
+    shown_finish_start(&mut stand_in, &first).expect("the shell finishes that start");
+    let second = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &second).expect("the shell finishes that start");
     assert_eq!(
         first, "component-1",
         "a shown stop reason is not the grant: the fresh stand-in names the first session component-1"
@@ -10631,7 +10696,7 @@ fn shown_stop_reason_is_not_the_grant() {
 #[cfg(test)]
 #[test]
 fn shown_worker_exit_is_not_the_grant() {
-    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use agent_conformance::standin_runtime::{Caller, StandIn, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -10699,10 +10764,12 @@ fn shown_worker_exit_is_not_the_grant() {
     );
 
     // Two sessions run, and both keep no cause.
-    let first = running_agent(&mut stand_in, Caller::Shell)
+    let first = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
-    let second = running_agent(&mut stand_in, Caller::Shell)
+    shown_finish_start(&mut stand_in, &first).expect("the shell finishes that start");
+    let second = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &second).expect("the shell finishes that start");
     assert_eq!(
         first, "component-1",
         "a shown worker exit is not the grant: the fresh stand-in names the first session component-1"
@@ -11293,7 +11360,7 @@ fn shown_worker_exit_is_not_the_grant() {
 #[cfg(test)]
 #[test]
 fn shown_run_pair_is_not_the_grant() {
-    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use agent_conformance::standin_runtime::{Caller, StandIn, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -11391,10 +11458,12 @@ fn shown_run_pair_is_not_the_grant() {
     );
 
     // Two sessions run with no cause.
-    let first = running_agent(&mut stand_in, Caller::Shell)
+    let first = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
-    let second = running_agent(&mut stand_in, Caller::Shell)
+    shown_finish_start(&mut stand_in, &first).expect("the shell finishes that start");
+    let second = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &second).expect("the shell finishes that start");
     assert_eq!(
         first, "component-1",
         "a shown run pair is not the grant: the fresh stand-in names the first session component-1"
@@ -11753,7 +11822,7 @@ fn shown_run_pair_is_not_the_grant() {
 
 #[test]
 fn shown_use_names_the_minted_run() {
-    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use agent_conformance::standin_runtime::{Caller, StandIn, Start};
     use fixtures::{PLAN_A, PLAN_B};
     use journeys::{request, running_agent};
     use serde_json::{json, Value};
@@ -11867,10 +11936,12 @@ fn shown_use_names_the_minted_run() {
     );
 
     // Two sessions run with no cause.
-    let first = running_agent(&mut stand_in, Caller::Shell)
+    let first = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
-    let second = running_agent(&mut stand_in, Caller::Shell)
+    shown_finish_start(&mut stand_in, &first).expect("the shell finishes that start");
+    let second = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
         .expect("the shell launches one running session");
+    shown_finish_start(&mut stand_in, &second).expect("the shell finishes that start");
     assert_eq!(
         first, "component-1",
         "a shown use names the minted run pair: the fresh stand-in names the first session component-1"
@@ -12433,5 +12504,713 @@ fn shown_use_names_the_minted_run() {
         shell_live(&stand_in),
         empty_shell,
         "a shown use names the minted run pair: the stop leaves the empty live list"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn shown_failed_start_is_not_the_grant() {
+    use agent_conformance::standin_runtime::{Caller, StandIn, Start};
+    use fixtures::{PLAN_A, PLAN_B};
+    use journeys::{request, running_agent};
+    use serde_json::{json, Value};
+
+    fn capsule_state(stand_in: &StandIn, id: &str) -> Value {
+        let listed = stand_in
+            .get_capsules(Caller::Shell)
+            .expect("shell capsules");
+        let entry = listed["capsules"]
+            .as_array()
+            .and_then(|capsules| capsules.iter().find(|entry| entry["id"] == id))
+            .cloned()
+            .unwrap_or_else(|| panic!("the capsule list names {id}: {listed}"));
+        json!({
+            "id": entry["id"],
+            "status": entry["status"],
+            "cause": entry["cause"],
+        })
+    }
+
+    fn shell_live(stand_in: &StandIn) -> Value {
+        read_shown_grants(stand_in, Caller::Shell, None).expect("shell live list")
+    }
+
+    fn shown(stand_in: &StandIn, session: &str) -> Value {
+        read_shown_requests(stand_in, Caller::Shell, Some(session)).expect("shell request list")
+    }
+
+    let empty_shell = json!({ "scope": "all_sessions_live", "capabilities": [] });
+    let revoked = Err((400, "grant is not live: Revoked".to_owned()));
+    let not_live = Err((400, "instance is not live: failed".to_owned()));
+    let mut stand_in = StandIn::new();
+
+    // A finish of an instance that was never launched is unknown and stores
+    // nothing.
+    let absent = shown_finish_start(&mut stand_in, "component-1");
+    assert_eq!(
+        absent,
+        Err((400, "unknown instance: component-1".to_owned())),
+        "a shown failed start is not the grant: a finish of the unlaunched component-1 names it and stores nothing"
+    );
+    assert_ne!(
+        absent,
+        Err((400, "start already returned".to_owned())),
+        "a shown failed start is not the grant: the unknown-instance refusal is not the already-returned refusal"
+    );
+    assert_eq!(
+        stand_in
+            .get_capsules(Caller::Shell)
+            .expect("shell capsules"),
+        json!({ "capsules": [] }),
+        "a shown failed start is not the grant: the unknown finish leaves the capsule list empty"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown failed start is not the grant: the unknown finish leaves the live list empty"
+    );
+
+    // The launch stores the failed start and applies nothing.
+    let failed_start = running_agent(
+        &mut stand_in,
+        Caller::Shell,
+        Start::Error("start refused".to_owned()),
+    )
+    .expect("the shell launches the failed-start session");
+    assert_eq!(
+        failed_start, "component-1",
+        "a shown failed start is not the grant: the fresh stand-in names the failed-start session component-1"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-1"),
+        json!({ "id": "component-1", "status": "starting", "cause": "" }),
+        "a shown failed start is not the grant: the stored failed start is not applied at launch"
+    );
+    assert_ne!(
+        capsule_state(&stand_in, "component-1")["cause"],
+        json!("start refused"),
+        "a shown failed start is not the grant: the starting session has no cause yet"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown failed start is not the grant: a starting session mints no grant"
+    );
+
+    // A starting session submits and can be granted before its one finish.
+    let shown_a = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        PLAN_A,
+        "localhost://Public/plan-approval/a.txt",
+        "read",
+        "show this step",
+    )
+    .expect("the starting session submits its first shown step");
+    assert_eq!(
+        shown_a, "request-1",
+        "a shown failed start is not the grant: the first stored request is request-1"
+    );
+    let hash_a = plan_sha256(PLAN_A);
+    assert_eq!(
+        hash_a.len(),
+        64,
+        "a shown failed start is not the grant: the shown plan hash is 64 hex characters"
+    );
+    assert_eq!(
+        approve(
+            &mut stand_in,
+            Caller::Shell,
+            &shown_a,
+            "once",
+            &hash_a,
+            "show this grant"
+        ),
+        Ok(json!({ "success": true })),
+        "a shown failed start is not the grant: the owner approves request-1 with the shown hash"
+    );
+    let shown_b = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        PLAN_B,
+        "localhost://Public/plan-approval/a.txt",
+        "read",
+        "approved",
+    )
+    .expect("the starting session submits its second shown step");
+    assert_eq!(
+        shown_b, "request-2",
+        "a shown failed start is not the grant: the second stored request is request-2"
+    );
+    let hash_b = plan_sha256(PLAN_B);
+    assert_eq!(
+        hash_b.len(),
+        64,
+        "a shown failed start is not the grant: the second shown plan hash is 64 hex characters"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-1"),
+        json!({ "id": "component-1", "status": "starting", "cause": "" }),
+        "a shown failed start is not the grant: the pending steps leave the start unapplied"
+    );
+    let granted_once = json!({
+        "scope": "all_sessions_live",
+        "capabilities": [{
+            "request_id": "request-1",
+            "session_id": "component-1",
+            "resource": "localhost://Public/plan-approval/a.txt",
+            "action": "read",
+            "duration": "once",
+            "granted_at": 0,
+        }],
+    });
+    assert_eq!(
+        shell_live(&stand_in),
+        granted_once,
+        "a shown failed start is not the grant: the granted once step is the only live entry"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-1",
+            },
+            &shown_b,
+        ),
+        Ok(json!({ "status": "pending" })),
+        "a shown failed start is not the grant: the second step waits pending before the finish"
+    );
+
+    // The one finish applies the stored cause.
+    assert_eq!(
+        shown_finish_start(&mut stand_in, &failed_start),
+        Ok(()),
+        "a shown failed start is not the grant: the shell's one finish applies the stored start"
+    );
+    let failed = capsule_state(&stand_in, "component-1");
+    assert_eq!(
+        failed,
+        json!({ "id": "component-1", "status": "failed", "cause": "start refused" }),
+        "a shown failed start is not the grant: the finish stores the start's own cause"
+    );
+    assert_ne!(
+        failed["cause"],
+        json!("stopped: start refused"),
+        "a shown failed start is not the grant: the start cause is not a stop reason"
+    );
+    assert_ne!(
+        failed["cause"],
+        json!("worker exited"),
+        "a shown failed start is not the grant: the start cause is not the worker-exit cause"
+    );
+
+    let component_one = shown(&stand_in, "component-1");
+    assert_eq!(
+        component_one,
+        json!({
+            "requests": [
+                {
+                    "request_id": "request-1",
+                    "session_id": "component-1",
+                    "resource": "localhost://Public/plan-approval/a.txt",
+                    "action": "read",
+                    "reason": "show this step",
+                    "status": "granted",
+                    "decision_reason": "show this grant",
+                    "settled_by": "shell",
+                    "plan": hash_a,
+                },
+                {
+                    "request_id": "request-2",
+                    "session_id": "component-1",
+                    "resource": "localhost://Public/plan-approval/a.txt",
+                    "action": "read",
+                    "reason": "approved",
+                    "status": "denied",
+                    "decision_reason": "start refused",
+                    "settled_by": "runtime",
+                    "plan": hash_b,
+                },
+            ],
+        }),
+        "a shown failed start is not the grant: the granted step stays granted and the pending step is denied with the start cause"
+    );
+
+    let denied_b = read_shown_request(
+        &stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        &shown_b,
+    );
+    assert_eq!(
+        denied_b,
+        Ok(json!({ "status": "denied", "reason": "start refused" })),
+        "a shown failed start is not the grant: the client reads the start's own cause"
+    );
+    assert_ne!(
+        denied_b,
+        Ok(json!({ "status": "granted" })),
+        "a shown failed start is not the grant: the denied step is not a grant"
+    );
+    assert_ne!(
+        denied_b,
+        Ok(json!({ "status": "denied", "reason": "approved" })),
+        "a shown failed start is not the grant: the start cause is not the caller's reason"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-1",
+            },
+            &shown_a,
+        ),
+        Ok(json!({ "status": "granted" })),
+        "a shown failed start is not the grant: the granted step keeps its status"
+    );
+
+    // The failed start revokes the live once grant, not spends it.
+    let spent_a = execute(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        &shown_a,
+        PLAN_A,
+        None,
+    );
+    assert_eq!(
+        spent_a, revoked,
+        "a shown failed start is not the grant: the once grant is revoked, not live"
+    );
+    assert_ne!(
+        spent_a,
+        Err((400, "grant is not live: Exhausted".to_owned())),
+        "a shown failed start is not the grant: the revoked grant is not an exhausted grant"
+    );
+    assert_ne!(
+        spent_a,
+        Ok(json!({ "valid": true })),
+        "a shown failed start is not the grant: the shown step does not execute"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown failed start is not the grant: the revoked once grant leaves the live list empty"
+    );
+
+    // A second finish is the already-returned refusal and leaves the cause.
+    let twice = shown_finish_start(&mut stand_in, &failed_start);
+    assert_eq!(
+        twice,
+        Err((400, "start already returned".to_owned())),
+        "a shown failed start is not the grant: the second finish is the already-returned refusal"
+    );
+    assert_ne!(
+        twice,
+        Err((400, "instance is not live: failed".to_owned())),
+        "a shown failed start is not the grant: the second finish is not the not-live refusal"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-1"),
+        failed,
+        "a shown failed start is not the grant: the second finish leaves the cause"
+    );
+    assert_eq!(
+        shown(&stand_in, "component-1"),
+        component_one,
+        "a shown failed start is not the grant: the second finish leaves the request rows"
+    );
+
+    // A sibling session launches after the failed start and is finished Ok.
+    let sibling = running_agent(&mut stand_in, Caller::Shell, Start::Ok)
+        .expect("the shell launches the sibling session");
+    assert_eq!(
+        sibling, "component-2",
+        "a shown failed start is not the grant: the failed session does not stop the next launch"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-2"),
+        json!({ "id": "component-2", "status": "starting", "cause": "" }),
+        "a shown failed start is not the grant: the sibling launch applies nothing yet"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-1"),
+        failed,
+        "a shown failed start is not the grant: the sibling launch leaves the failed cause"
+    );
+
+    let sibling_a = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-2",
+        },
+        PLAN_A,
+        "localhost://Public/plan-approval/a.txt",
+        "write",
+        "",
+    )
+    .expect("the sibling session submits its write step");
+    assert_eq!(
+        sibling_a, "request-3",
+        "a shown failed start is not the grant: the sibling's write step is request-3"
+    );
+    assert_eq!(
+        approve(
+            &mut stand_in,
+            Caller::Shell,
+            &sibling_a,
+            "session",
+            &hash_a,
+            "keep the other"
+        ),
+        Ok(json!({ "success": true })),
+        "a shown failed start is not the grant: the owner grants the sibling's write step for its session"
+    );
+    let sibling_b = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-2",
+        },
+        PLAN_B,
+        "localhost://Public/plan-approval/a.txt",
+        "read",
+        "show this step",
+    )
+    .expect("the sibling session submits its pending step");
+    assert_eq!(
+        sibling_b, "request-4",
+        "a shown failed start is not the grant: the sibling's pending step is request-4"
+    );
+
+    assert_eq!(
+        shown_finish_start(&mut stand_in, &sibling),
+        Ok(()),
+        "a shown failed start is not the grant: the sibling's Ok start is applied by the one finish"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-2"),
+        json!({ "id": "component-2", "status": "running", "cause": "" }),
+        "a shown failed start is not the grant: the Ok start runs the sibling with no cause"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-2",
+            },
+            &sibling_b,
+        ),
+        Ok(json!({ "status": "pending" })),
+        "a shown failed start is not the grant: the Ok start leaves the sibling's pending step pending"
+    );
+    let sibling_live = json!({
+        "scope": "all_sessions_live",
+        "capabilities": [{
+            "request_id": "request-3",
+            "session_id": "component-2",
+            "resource": "localhost://Public/plan-approval/a.txt",
+            "action": "write",
+            "duration": "session",
+            "granted_at": 0,
+        }],
+    });
+    assert_eq!(
+        shell_live(&stand_in),
+        sibling_live,
+        "a shown failed start is not the grant: the sibling's session grant is the only live entry"
+    );
+
+    // A trapped start stores its own cause and revokes its session's grant.
+    let trapped_start = running_agent(
+        &mut stand_in,
+        Caller::Shell,
+        Start::Trap("start trapped".to_owned()),
+    )
+    .expect("the shell launches the trapped-start session");
+    assert_eq!(
+        trapped_start, "component-3",
+        "a shown failed start is not the grant: the trapped-start session is component-3"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-3"),
+        json!({ "id": "component-3", "status": "starting", "cause": "" }),
+        "a shown failed start is not the grant: the trapped start is stored and not applied"
+    );
+
+    let trapped_a = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-3",
+        },
+        PLAN_A,
+        "localhost://Public/plan-approval/a.txt",
+        "read",
+        "show this step",
+    )
+    .expect("the trapped-start session submits its once step");
+    assert_eq!(
+        trapped_a, "request-5",
+        "a shown failed start is not the grant: the trapped-start session's once step is request-5"
+    );
+    assert_eq!(
+        approve(
+            &mut stand_in,
+            Caller::Shell,
+            &trapped_a,
+            "once",
+            &hash_a,
+            "show this grant"
+        ),
+        Ok(json!({ "success": true })),
+        "a shown failed start is not the grant: the owner grants the trapped-start session's once step"
+    );
+    let trapped_b = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-3",
+        },
+        PLAN_B,
+        "localhost://Public/plan-approval/a.txt",
+        "read",
+        "show this step",
+    )
+    .expect("the trapped-start session submits its pending step");
+    assert_eq!(
+        trapped_b, "request-6",
+        "a shown failed start is not the grant: the trapped-start session's pending step is request-6"
+    );
+
+    assert_eq!(
+        shown_finish_start(&mut stand_in, &trapped_start),
+        Ok(()),
+        "a shown failed start is not the grant: the one finish applies the trapped start"
+    );
+    let trapped = capsule_state(&stand_in, "component-3");
+    assert_eq!(
+        trapped,
+        json!({ "id": "component-3", "status": "failed", "cause": "start trapped" }),
+        "a shown failed start is not the grant: the trap stores its own text"
+    );
+    assert_ne!(
+        trapped["cause"],
+        json!("stopped: start trapped"),
+        "a shown failed start is not the grant: the trap cause is not a stop reason"
+    );
+    assert_ne!(
+        trapped["cause"],
+        json!("start refused"),
+        "a shown failed start is not the grant: the trap cause is not the other session's cause"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-3",
+            },
+            &trapped_b,
+        ),
+        Ok(json!({ "status": "denied", "reason": "start trapped" })),
+        "a shown failed start is not the grant: the trapped start denies the pending step with its cause"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-3",
+            },
+            &trapped_a,
+        ),
+        Ok(json!({ "status": "granted" })),
+        "a shown failed start is not the grant: the trapped start leaves the granted step granted"
+    );
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: "component-3",
+            },
+            &trapped_a,
+            PLAN_A,
+            None,
+        ),
+        revoked,
+        "a shown failed start is not the grant: the trapped start revokes the once grant"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        sibling_live,
+        "a shown failed start is not the grant: the trap leaves the sibling's session grant live"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-2"),
+        json!({ "id": "component-2", "status": "running", "cause": "" }),
+        "a shown failed start is not the grant: the trap leaves the sibling running"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-2",
+            },
+            &sibling_b,
+        ),
+        Ok(json!({ "status": "pending" })),
+        "a shown failed start is not the grant: the trap leaves the sibling's pending step pending"
+    );
+
+    // An allow word as the start cause denies the pending step and mints
+    // nothing.
+    let allowed_start = running_agent(
+        &mut stand_in,
+        Caller::Shell,
+        Start::Error("granted".to_owned()),
+    )
+    .expect("the shell launches the allow-word start session");
+    assert_eq!(
+        allowed_start, "component-4",
+        "a shown failed start is not the grant: the allow-word start session is component-4"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-4"),
+        json!({ "id": "component-4", "status": "starting", "cause": "" }),
+        "a shown failed start is not the grant: the allow-word start is stored and not applied"
+    );
+    let allowed_a = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-4",
+        },
+        PLAN_A,
+        "localhost://Public/plan-approval/a.txt",
+        "read",
+        "granted",
+    )
+    .expect("the allow-word start session submits its pending step");
+    assert_eq!(
+        allowed_a, "request-7",
+        "a shown failed start is not the grant: the allow-word start session's step is request-7"
+    );
+    assert_eq!(
+        shown_finish_start(&mut stand_in, &allowed_start),
+        Ok(()),
+        "a shown failed start is not the grant: the one finish applies the allow-word start"
+    );
+    let allowed = capsule_state(&stand_in, "component-4");
+    assert_eq!(
+        allowed,
+        json!({ "id": "component-4", "status": "failed", "cause": "granted" }),
+        "a shown failed start is not the grant: the allow word is the stored cause"
+    );
+    assert_ne!(
+        allowed["cause"],
+        json!("stopped: granted"),
+        "a shown failed start is not the grant: the allow word is not a stop reason"
+    );
+    assert_eq!(
+        shown(&stand_in, "component-4"),
+        json!({
+            "requests": [{
+                "request_id": "request-7",
+                "session_id": "component-4",
+                "resource": "localhost://Public/plan-approval/a.txt",
+                "action": "read",
+                "reason": "granted",
+                "status": "denied",
+                "decision_reason": "granted",
+                "settled_by": "runtime",
+                "plan": hash_a,
+            }],
+        }),
+        "a shown failed start is not the grant: the allow word denies the step and records itself"
+    );
+    let denied_granted = read_shown_request(
+        &stand_in,
+        Caller::Client {
+            session_id: "component-4",
+        },
+        &allowed_a,
+    );
+    assert_eq!(
+        denied_granted,
+        Ok(json!({ "status": "denied", "reason": "granted" })),
+        "a shown failed start is not the grant: the client reads the allow word as a denial reason"
+    );
+    assert_ne!(
+        denied_granted,
+        Ok(json!({ "status": "granted" })),
+        "a shown failed start is not the grant: the allow word does not make the step a grant"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        sibling_live,
+        "a shown failed start is not the grant: the allow word mints nothing"
+    );
+
+    // A later submit and a later stop of the failed session are the not-live
+    // refusal and store no stop reason.
+    let resubmit = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        PLAN_A,
+        "localhost://Public/plan-approval/a.txt",
+        "read",
+        "granted",
+    );
+    assert_eq!(
+        resubmit, not_live,
+        "a shown failed start is not the grant: the failed session submits nothing"
+    );
+    assert_ne!(
+        resubmit,
+        Err((400, "unknown instance: component-1".to_owned())),
+        "a shown failed start is not the grant: the failed session is known and not live"
+    );
+    assert_eq!(
+        shown(&stand_in, "component-1"),
+        component_one,
+        "a shown failed start is not the grant: the failed session's rows stay"
+    );
+    assert_eq!(
+        stop_shown_session(&mut stand_in, Caller::Shell, "component-1", "granted"),
+        Err((400, "instance is not live: failed".to_owned())),
+        "a shown failed start is not the grant: a later stop is the not-live refusal"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-1"),
+        failed,
+        "a shown failed start is not the grant: the later stop leaves the start cause"
+    );
+    assert_ne!(
+        capsule_state(&stand_in, "component-1")["cause"],
+        json!("stopped: granted"),
+        "a shown failed start is not the grant: the later stop stores no stop reason"
+    );
+
+    // The sibling's granted step still validates after the failures.
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: "component-2",
+            },
+            &sibling_a,
+            PLAN_A,
+            None,
+        ),
+        Ok(json!({ "valid": true })),
+        "a shown failed start is not the grant: the sibling's granted step still validates"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        sibling_live,
+        "a shown failed start is not the grant: the sibling's session grant stays live after its use"
     );
 }

@@ -660,12 +660,63 @@ call `post_hosted_effect`. `preview`, `plan_sha256`, `approve`,
 crate does not copy the stand-in, and it names no planner. A passing run gives
 the Runtime no A15 credit.
 
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md), Request flow step 3:
+
+> Runtime launches the isolated Agent Host instance with only its initial scoped resources
+
+Step 3 gives the Runtime the launch and its start outcome. `running_agent` is
+the only launch: it passes the `Start` it is given to `admit_resident` unchanged
+and calls no finish. `shown_finish_start(stand_in, id)` is the only finish call:
+it passes the id alone to the stand-in's own `finish_start` and returns that
+result. A launched session is `starting` with cause `""` until that finish.
+
+`shown_failed_start_is_not_the_grant` proves the stored start outcome settles
+the shown session. A finish of `component-1` before any launch is `unknown
+instance: component-1`, not `start already returned`, and stores nothing. The
+shell launches `component-1` with `Start::Error("start refused")`; the capsule
+is `starting` with cause `""`, which is not `start refused`, and the live list
+stays empty. The starting session submits `request-1` (read of `PLAN_A`, reason
+`show this step`) and `request-2` (read of `PLAN_B`, reason `approved`); the
+owner grants `request-1` once with rationale `show this grant`. The one finish
+stores `failed` with cause `start refused`, which is not `stopped: start
+refused` and not `worker exited`; it revokes the live once grant and denies
+`request-2` with `decision_reason` `start refused` and `settled_by` `runtime`.
+`request-1` stays `granted` with `decision_reason` `show this grant`, and its
+once use is `grant is not live: Revoked`, not `grant is not live: Exhausted`. A
+second finish is `start already returned`, not `instance is not live: failed`,
+and leaves the cause and the request rows.
+
+The shell then launches `component-2` with `Start::Ok`; it stays `starting` with
+cause `""` until its finish, and `component-1` stays failed. `component-2`
+submits `request-3` (write of `PLAN_A`) and the owner grants it for the
+session; it submits `request-4` (read of `PLAN_B`, reason `show this step`). The
+one finish stores `running` with cause `""` and leaves `request-4` pending. The
+shell launches `component-3` with `Start::Trap("start trapped")`, and the owner
+grants its `request-5` once; the finish stores cause `start trapped`, denies
+`request-6` with that cause, and makes the once use `grant is not live: Revoked`.
+The shell launches `component-4` with `Start::Error("granted")`; the finish
+denies `request-7` with `decision_reason` `granted` and mints nothing, so its
+status is `denied` with reason `granted`, not `{"status":"granted"}`.
+
+A later submit and a later shell stop of the failed `component-1` are each
+`instance is not live: failed`; neither stores `stopped: granted`, and the
+capsule keeps cause `start refused`. The sibling session's grant for `request-3`
+stays live, and its `PLAN_A` use still returns `{"valid": true}`.
+
+This crate stores no copy of `apply_start`: the one start application is the
+stand-in's own `finish_start`, reached only through `shown_finish_start`.
+`preview`, `plan_sha256`, `approve`, `execute`, `deny_shown_plan`,
+`age_shown_plan`, `stop_shown_session`, `read_shown_request`, `read_shown_grants`,
+`read_shown_requests`, `shown_worker_exited`, `read_shown_run` and `request` are
+unchanged. This crate does not copy the stand-in and it names no planner. A
+passing run gives the Runtime no A15 credit.
+
 ## Layout
 
 - `src/lib.rs`: `Preview`, `preview`, `plan_sha256`, `approve`,
   `age_shown_plan`, `deny_shown_plan`, `stop_shown_session`,
-  `shown_worker_exited`, `read_shown_request`, `read_shown_grants`,
-  `read_shown_requests`, `read_shown_run`, `execute`,
+  `shown_worker_exited`, `shown_finish_start`, `read_shown_request`,
+  `read_shown_grants`, `read_shown_requests`, `read_shown_run`, `execute`,
   `preview_makes_no_effect`, `plan_sha256_hashes_the_exact_bytes`,
   `deny_one_shown_step`, `unanswered_shown_step_expires`,
   `stop_settles_that_sessions_shown_steps`, `shown_allow_once_expires`,
@@ -686,12 +737,14 @@ the Runtime no A15 credit.
   `shown_stop_reason_is_not_the_grant`,
   `shown_worker_exit_is_not_the_grant`,
   `shown_run_pair_is_not_the_grant`,
+  `shown_failed_start_is_not_the_grant`,
   `shown_use_names_the_minted_run` and the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_failed_start_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_use_names_the_minted_run -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_run_pair_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_worker_exit_is_not_the_grant -- --exact

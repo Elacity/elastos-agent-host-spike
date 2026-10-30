@@ -1966,3 +1966,147 @@ restored proof command set (the fmt check and the twenty-eight test commands in
 the task) took 3.91 s real. This lane has no `falsifiers.json`; no id is added.
 
 035: `execute(stand_in, caller, request_id, plan, run_id)` is the only use call and passes a run id only when one is given; `shown_use_names_the_minted_run` proves an absent grant is `unknown grant` even with a run id, the shell is `capability validate needs an instance session`, a different or empty run id is `effect run ... is not bound to request ...`, the minted pair from another session is `wrong capsule`, the minted pair with another plan is `grant is not bound to this plan`, the minted pair runs a once grant once and then reads `Exhausted`, an omitted run id and the minted pair each keep a session grant live, and a presented run id after a stop is `Revoked`; two hand-run plants caught and restored.
+
+## 036
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md), Request flow step 3:
+
+> Runtime launches the isolated Agent Host instance with only its initial scoped resources
+
+This task proves the start outcome stored at admission settles the shown
+session. `running_agent(stand_in, caller, start)` still calls `get_capsules`
+first, chooses the bundle by the list length, and passes `start` to
+`admit_resident` unchanged; it calls `post_capsules` and returns the launch id,
+and it calls no finish. `shown_finish_start(stand_in, id)` calls the stand-in's
+own `finish_start` with the id alone and returns that result; it takes no caller
+and no reason. A launched session stays `starting` with cause `""` until that
+one finish. Every earlier shell launch passes `Start::Ok` and now calls
+`shown_finish_start` on that id immediately after its existing expect; every
+earlier client launch passes `Start::Ok` and is followed by no finish. No
+existing helper and no existing assertion changed.
+
+`shown_failed_start_is_not_the_grant` proves a shown failed start is not the
+grant. A finish of `component-1` before any launch is `unknown instance:
+component-1`, not `start already returned`, and stores nothing. The shell
+launches `component-1` with `Start::Error("start refused")`; the capsule is
+`starting` with cause `""`, which is not `start refused`, and the live list
+stays the empty shell body. The starting session submits `request-1` (read of
+`PLAN_A`, reason `show this step`) and the owner grants it once with rationale
+`show this grant`; it submits `request-2` (read of `PLAN_B`, reason `approved`)
+and stays `starting`. The one finish stores `failed` with cause `start refused`,
+which is not `stopped: start refused` and not `worker exited`; it revokes the
+live once grant and denies `request-2` with `decision_reason` `start refused`
+and `settled_by` `runtime`. `request-1` stays `granted` with `decision_reason`
+`show this grant`, and its once use is `grant is not live: Revoked`, not
+`grant is not live: Exhausted`. A second finish is `start already returned`, not
+`instance is not live: failed`, and leaves the cause and the two request rows.
+
+The shell launches `component-2` with `Start::Ok`; it stays `starting` with
+cause `""` until its finish, and `component-1` stays failed. `component-2`
+submits `request-3` (write of `PLAN_A`) and the owner grants it for the session;
+it submits `request-4` (read of `PLAN_B`, reason `show this step`). The one
+finish stores `running` with cause `""` and leaves `request-4` pending, with
+`request-3` the only live entry. The shell launches `component-3` with
+`Start::Trap("start trapped")`; the owner grants its `request-5` once and it
+submits `request-6` (read of `PLAN_B`, reason `show this step`). The finish
+stores cause `start trapped`, which is not `stopped: start trapped` and not
+`start refused`; it denies `request-6` with that cause and makes the once use
+`grant is not live: Revoked`, while `request-5` stays `granted` and
+`component-2` stays running with `request-4` pending.
+
+The shell launches `component-4` with `Start::Error("granted")` and it submits
+`request-7` (read of `PLAN_A`, reason `granted`). The finish stores cause
+`granted`, which is not `stopped: granted`; it denies `request-7` with
+`decision_reason` `granted` and `settled_by` `runtime` and mints nothing, so its
+status is `denied` with reason `granted`, not `{"status":"granted"}`. A later
+submit and a later shell stop of the failed `component-1` are each `instance is
+not live: failed`; the capsule keeps cause `start refused` and stores no
+`stopped: granted`, and the two `component-1` rows stay. The sibling session's
+grant for `request-3` stays the one live entry and its `PLAN_A` use returns
+`{"valid": true}`.
+
+This crate stores no copy of `apply_start`, `settle_pending` or `revoke_live`.
+`preview`, `plan_sha256`, `approve`, `execute`, `deny_shown_plan`,
+`age_shown_plan`, `stop_shown_session`, `read_shown_request`, `read_shown_grants`,
+`read_shown_requests`, `shown_worker_exited`, `read_shown_run` and `request` are
+unchanged, and neither plant calls `seed_request`.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_failed_start_is_not_the_grant -- --exact
+```
+
+### F-failed-start-is-a-stop
+
+Old body bytes, 122:
+
+```rust
+pub fn shown_finish_start(stand_in: &mut StandIn, id: &str) -> Result<(), (u16, String)> {
+    stand_in.finish_start(id)
+}
+```
+
+New body bytes, 208:
+
+```rust
+pub fn shown_finish_start(stand_in: &mut StandIn, id: &str) -> Result<(), (u16, String)> {
+    stand_in
+        .delete_capsule(Caller::Shell, id, &json!({ "reason": "start refused" }))
+        .map(|_| ())
+}
+```
+
+The planted crate compiled. `shown_failed_start_is_not_the_grant` failed at
+`src/lib.rs:12697:5` (planted tree) on the finished capsule:
+`assertion `left == right` failed: a shown failed start is not the grant: the
+finish stores the start's own cause`; left held `{"cause":"stopped: start
+refused","id":"component-1","status":"stopped"}`, right expected
+`{"cause":"start refused","id":"component-1","status":"failed"}`. The stop route
+stored a stop cause instead of the stored start. Restored, the test passes.
+
+### F-failed-start-mints
+
+Old body bytes, 122:
+
+```rust
+pub fn shown_finish_start(stand_in: &mut StandIn, id: &str) -> Result<(), (u16, String)> {
+    stand_in.finish_start(id)
+}
+```
+
+New body bytes, 461:
+
+```rust
+pub fn shown_finish_start(stand_in: &mut StandIn, id: &str) -> Result<(), (u16, String)> {
+    let result = stand_in.finish_start(id);
+    if result.is_ok() {
+        stand_in.seed_grant(
+            "request-plant",
+            "component-2",
+            "localhost://Public/plan-approval/a.txt",
+            "read",
+            "once",
+            0,
+            agent_conformance::standin_runtime::Life::Live,
+            false,
+        );
+    }
+    result
+}
+```
+
+The planted crate compiled. `shown_failed_start_is_not_the_grant` failed at
+`src/lib.rs:12814:5` (planted tree) on the live list after the failed start:
+`assertion `left == right` failed: a shown failed start is not the grant: the
+revoked once grant leaves the live list empty`; left held the empty shell body
+plus the `request-plant` entry, right expected the empty shell body. The finish
+minted a grant after its own revoke. Restored, the test passes.
+
+Neither plant calls `seed_request`; the first plant calls `delete_capsule` and
+the second plant calls `seed_grant`. After both restores, `git diff -- lab/plan-approval/src/lib.rs`
+holds no `request-plant` and no plant call inside `shown_finish_start`. The
+restored proof command set (the fmt check and the twenty-nine test commands in
+the task) took 5.10 s real. This lane has no `falsifiers.json`; no id is added.
+
+036: `running_agent(stand_in, caller, start)` is the only launch and passes the stored start to `admit_resident` without finishing; `shown_finish_start(stand_in, id)` is the only finish call and passes only the id; `shown_failed_start_is_not_the_grant` proves a failed start stores its own cause, denies the pending step with that cause and `runtime`, revokes the live once grant, leaves the granted step and the sibling session alone, refuses a second finish and a later submit or stop with the not-live reason, and stores no stop reason; two hand-run plants caught and restored.
