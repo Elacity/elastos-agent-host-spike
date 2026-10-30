@@ -367,3 +367,33 @@ cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shell_can
 - restored, the test passes.
 
 After both restores, `git diff -- lab/plan-approval/src/lib.rs` shows no plant. The restored proof command set (the fmt check and the thirteen test commands in the task) took 1.52 s real. This lane has no `falsifiers.json`; no id is added.
+
+## 019
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md), Request flow step 6:
+
+> The Agent Host submits the proposed operation to Runtime as the active agent principal and session
+
+018 proved the shell is not that session; this task proves the session is a live instance. No function is added: `request` already passes the caller it is given, and the stand-in's request route holds the instance lookup after the body checks. The new test `only_a_live_session_submits_a_shown_plan` drives `journeys::running_agent`, `journeys::request`, `stop_shown_session`, `approve` and `execute`, and reads the shell's capsule, request and live views. A session the stand-in never launched, `component-absent`, is refused with status 400 and `unknown instance: component-absent` for `PLAN_A`, `PLAN_B` and empty plan bytes; a stopped `component-1` is refused with status 400 and `instance is not live: stopped` for the same three bodies. Each refusal stores nothing: the capsule list, all three request arrays and the live list stay empty, and the capsules keep their status and cause. `component-2` then submits one pending request with the shown hash, the shell grants it with `once`, and `component-2`'s `execute` spends it. A submit from the stopped session after that spend is still the not-live refusal. The helper, the routes and the existing tests are unchanged; this crate stores no copy of the instance lookup, and `preview`, `plan_sha256`, `approve`, `execute`, `deny_shown_plan`, `age_shown_plan`, `stop_shown_session`, `running_agent` and `request` are unchanged by this slice.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib only_a_live_session_submits_a_shown_plan -- --exact
+```
+
+### F-not-live-returns-ok
+
+- old bytes, 90: `                "plan": hash,\n            }),\n        )?;\n        Ok(stored["request_id"]\n`
+- new bytes, 301: `                "plan": hash,\n            }),\n        );\n        if let Err((400, reason)) = &stored {\n            if reason.starts_with("instance is not live:") {\n                return Ok("request-1".to_owned());\n            }\n        }\n        let stored = stored?;\n        Ok(stored["request_id"]\n`
+- planted crate compiled; `only_a_live_session_submits_a_shown_plan` failed at `src/lib.rs:3311:9` (planted tree) on the first stopped-session assertion: `assertion left == right failed: only a live session submits a shown plan: the stopped session is refused as not live for plan bytes [123, 34, 115, 116, 101, 112, 115, ...]`; left held `Ok("request-1")`, right expected `Err((400, "instance is not live: stopped"))`. A stopped session's submit answered an Ok id instead of the not-live refusal.
+- restored, the test passes.
+
+### F-unknown-stores
+
+- old bytes, 90: `                "plan": hash,\n            }),\n        )?;\n        Ok(stored["request_id"]\n`
+- new bytes, 543: `                "plan": hash,\n            }),\n        );\n        if let Err((400, reason)) = &stored {\n            if reason.starts_with("unknown instance:") {\n                stand_in.seed_request(\n                    "request-1",\n                    "component-absent",\n                    "localhost://Public/plan-approval/a.txt",\n                    "read",\n                    "",\n                )?;\n                return Ok("request-1".to_owned());\n            }\n        }\n        let stored = stored?;\n        Ok(stored["request_id"]\n`
+- planted crate compiled; `only_a_live_session_submits_a_shown_plan` failed at `src/lib.rs:3187:9` (planted tree) on the first absent-session assertion: `assertion left == right failed: only a live session submits a shown plan: a session with no instance is refused as unknown for plan bytes [123, 34, 115, 116, 101, 112, 115, ...]`; left held `Ok("request-1")`, right expected `Err((400, "unknown instance: component-absent"))`. The planted helper stored one request and answered Ok, so the unknown-instance refusal never reached the caller.
+- restored, the test passes.
+
+After both restores, `git diff -- lab/plan-approval/src/lib.rs` shows no plant; its only change is the appended test, one hunk with no removed line. The restored proof command set (the fmt check and the fourteen test commands in the task) took 8.05 s real. This lane has no `falsifiers.json`; no id is added.
