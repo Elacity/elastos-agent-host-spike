@@ -2435,6 +2435,22 @@
       ]
     },
     {
+      "id": "PV128",
+      "title": "startup recovery skips the useful-task judge file",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"lab/agent-conformance/tests/effects.rs\",\n    \"lab/useful-task/src/lib.rs\",",
+          "new": "    \"lab/agent-conformance/tests/effects.rs\","
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
       "id": "MP24",
       "title": "a Runtime-forwarded answer is read as a failure",
       "command": "provider",
