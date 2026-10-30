@@ -10155,7 +10155,8 @@ class CitationCheckTests(unittest.TestCase):
             115
             + len(check.FUNCTION_QUOTE_SPANS)
             + len(check.INDENT_LINE_SPANS)
-            + len(check.EGRESS_LINE_SPANS),
+            + len(check.EGRESS_LINE_SPANS)
+            + len(check.RESTATED_LINE_SPANS),
         )
         self.assertEqual(set(ALIGNED_ALREADY_DECIDED) - ALIGNED_ENDPOINT_SET, set())
 
@@ -10199,7 +10200,8 @@ class CitationCheckTests(unittest.TestCase):
             + len(ALIGNED_NEW_ENDPOINTS)
             + len(check.FUNCTION_QUOTE_SPANS)
             + len(check.INDENT_LINE_SPANS)
-            + len(check.EGRESS_LINE_SPANS),
+            + len(check.EGRESS_LINE_SPANS)
+            + len(check.RESTATED_LINE_SPANS),
         )
         # The spans this task adds, read back from the target list as spans, are
         # exactly the 65 names above minus the 12 that already had entries. A
@@ -10219,6 +10221,7 @@ class CitationCheckTests(unittest.TestCase):
             and endpoint not in check.FUNCTION_QUOTE_SPANS
             and endpoint not in check.INDENT_LINE_SPANS
             and endpoint not in check.EGRESS_LINE_SPANS
+            and endpoint not in check.RESTATED_LINE_SPANS
         ]
         self.assertEqual(len(added), len(ALIGNED_NEW_ENDPOINTS))
         added_spans = {
@@ -10409,34 +10412,42 @@ class CitationCheckTests(unittest.TestCase):
     def test_quote_targets_are_the_base_list_plus_function_spans(self):
         # Walk order is the base list, then one None quoter per function span,
         # then one None quoter per indent line span, then one None quoter per
-        # egress line span. A missing, extra, or duplicated entry fails this
-        # ordered comparison.
+        # egress line span, then one None quoter per retargeted line span. A
+        # missing, extra, or duplicated entry fails this ordered comparison.
         expected = BASE_QUOTE_TARGETS + tuple(
             (span, "`" + span + "`", None) for span in FUNCTION_QUOTE_SPAN_ORDER
         ) + tuple(
             (span, "`" + span + "`", None) for span in INDENT_LINE_SPAN_ORDER
         ) + tuple(
             (span, "`" + span + "`", None) for span in EGRESS_LINE_SPAN_ORDER
+        ) + tuple(
+            (span, "`" + span + "`", None) for span in RESTATED_LINE_SPAN_ORDER
         )
         self.assertEqual(check.QUOTE_TARGETS, expected)
         self.assertEqual(check.FUNCTION_QUOTE_SPANS, FUNCTION_QUOTE_SPAN_ORDER)
         self.assertEqual(check.INDENT_LINE_SPANS, INDENT_LINE_SPAN_ORDER)
         self.assertEqual(check.EGRESS_LINE_SPANS, EGRESS_LINE_SPAN_ORDER)
+        self.assertEqual(check.RESTATED_LINE_SPANS, RESTATED_LINE_SPAN_ORDER)
         self.assertEqual(len(FUNCTION_QUOTE_SPAN_ORDER), 51)
         self.assertEqual(len(INDENT_LINE_SPAN_ORDER), 18)
         self.assertEqual(len(EGRESS_LINE_SPAN_ORDER), 2)
-        self.assertEqual(len(expected), 186)
+        self.assertEqual(len(RESTATED_LINE_SPAN_ORDER), 2)
+        self.assertEqual(len(expected), 188)
         self.assertEqual(
             len(check.QUOTE_TARGETS),
             len({target[0] for target in check.QUOTE_TARGETS}),
         )
         self.assertEqual(
-            tuple(target[0] for target in check.QUOTE_TARGETS[-20:-2]),
+            tuple(target[0] for target in check.QUOTE_TARGETS[-22:-4]),
             INDENT_LINE_SPAN_ORDER,
         )
         self.assertEqual(
-            tuple(target[0] for target in check.QUOTE_TARGETS[-2:]),
+            tuple(target[0] for target in check.QUOTE_TARGETS[-4:-2]),
             EGRESS_LINE_SPAN_ORDER,
+        )
+        self.assertEqual(
+            tuple(target[0] for target in check.QUOTE_TARGETS[-2:]),
+            RESTATED_LINE_SPAN_ORDER,
         )
         for span in UNMATCHED_FUNCTION_SPANS:
             self.assertNotIn(span, check.FUNCTION_QUOTE_SPANS, span)
@@ -10451,6 +10462,8 @@ class CitationCheckTests(unittest.TestCase):
                 (span, "`" + span + "`", None) for span in FUNCTION_QUOTE_SPAN_ORDER
             ) + tuple(
                 (span, "`" + span + "`", None) for span in EGRESS_LINE_SPAN_ORDER
+            ) + tuple(
+                (span, "`" + span + "`", None) for span in RESTATED_LINE_SPAN_ORDER
             )
             self.assertEqual(check.QUOTE_TARGETS, expected)
             self.assertNotIn(
@@ -10674,6 +10687,34 @@ class CitationCheckTests(unittest.TestCase):
             ["refuse: quoted line does not match " + span],
         )
 
+    def test_resource_bridge_931_short_indent_is_refused(self):
+        # Removing the four repaired spaces from this block refuses that line.
+        span = "elastos/crates/elastos-server/src/resource_bridge.rs:931"
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        lines = text.splitlines()
+        marker = "`" + span + "`"
+        index = next(i for i, line in enumerate(lines) if marker in line)
+        changed = False
+        for j in range(index + 1, len(lines)):
+            following = lines[j]
+            if not following:
+                continue
+            if not following.startswith(check.DRAFT_INDENT):
+                break
+            self.assertTrue(
+                following.startswith(check.DRAFT_INDENT + check.DRAFT_INDENT),
+                span,
+            )
+            lines[j] = following[len(check.DRAFT_INDENT):]
+            changed = True
+        self.assertTrue(changed, span)
+        body = "\n".join(lines) + "\n"
+        self.assertEqual(
+            self._problems_for(body),
+            ["refuse: quoted line does not match " + span],
+        )
+
     def test_falsifier_indent_line_spans(self):
         # An empty INDENT_LINE_SPANS drops the span, so the short line is not
         # refused and this test fails.
@@ -10694,6 +10735,17 @@ class CitationCheckTests(unittest.TestCase):
             self.test_changed_egress_remainder_does_not_match,
             EGRESS_LINE_SPAN_ORDER[0],
             "CAUGHT egress-line-spans",
+        )
+
+    def test_falsifier_restated_line_spans(self):
+        # An empty RESTATED_LINE_SPANS drops the span, so the short block is not
+        # refused and this test fails.
+        self._caught(
+            "RESTATED_LINE_SPANS",
+            (),
+            self.test_resource_bridge_931_short_indent_is_refused,
+            "resource_bridge.rs:931",
+            "CAUGHT restated-line-spans",
         )
 
 # The quote-target walk before function spans, in list order.
@@ -10907,4 +10959,10 @@ INDENT_LINE_SPAN_ORDER = (
 EGRESS_LINE_SPAN_ORDER = (
     'elastos/crates/elastos-server/src/api/model_provider_egress.rs:504',
     'elastos/crates/elastos-server/src/api/model_provider_egress.rs:509',
+)
+
+# The 2 retargeted line spans spliced after the egress line spans, in draft order.
+RESTATED_LINE_SPAN_ORDER = (
+    'elastos/crates/elastos-server/src/resource_bridge.rs:931',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:398',
 )

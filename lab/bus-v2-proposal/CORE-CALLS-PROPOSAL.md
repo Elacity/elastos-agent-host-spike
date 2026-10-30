@@ -319,23 +319,23 @@ For the agent identity, a capability request calls `scope_current_user_alias` wi
         /// Runtime principal used to resolve capsule-facing `Users/self` aliases.
         pub principal_id: Option<String>,
 
-`elastos/crates/elastos-server/src/resource_bridge.rs:925` is the call in `handle_request`. The body handles a `request_capability` request. It calls `scope_current_user_alias` with the requested resource and `ctx.principal_id.as_deref()`. When the call returns an error, the body returns `principal_context_required` before it stores a pending request. When the call returns a name, the body runs `agents_area_capability_refusal`, parses the action, runs the wallet check, and runs the manifest check on that name. The body stores a pending request only after those checks pass, and the stored resource is the returned name.
+`elastos/crates/elastos-server/src/resource_bridge.rs:931` is the call in `handle_request`. The body handles a `request_capability` request. It calls `scope_current_user_alias` with the requested resource and `ctx.principal_id.as_deref()`. When the call returns an error, the body returns `principal_context_required` before it stores a pending request. When the call returns a name, the body runs `agents_area_capability_refusal`, parses the action, runs the wallet check, and runs the manifest check on that name. The body stores a pending request only after those checks pass, and the stored resource is the returned name.
 
-                let scoped_resource =
-                    match scope_current_user_alias(resource, ctx.principal_id.as_deref()) {
-                        Ok(resource) => resource,
-                        Err(message) => {
-                            return Ok(serde_json::json!({
-                                "id": id,
-                                "response": {
-                                    "type": "error",
-                                    "code": "principal_context_required",
-                                    "message": message,
-                                },
-                            }));
-                        }
-                    };
-                let resource = scoped_resource.as_str();
+                    let scoped_resource =
+                        match scope_current_user_alias(resource, ctx.principal_id.as_deref()) {
+                            Ok(resource) => resource,
+                            Err(message) => {
+                                return Ok(serde_json::json!({
+                                    "id": id,
+                                    "response": {
+                                        "type": "error",
+                                        "code": "principal_context_required",
+                                        "message": message,
+                                    },
+                                }));
+                            }
+                        };
+                    let resource = scoped_resource.as_str();
 
 `elastos/crates/elastos-compute/src/providers/component.rs:350` is the identity host `context`. The body returns an `IdentityContext` whose `principal` is `self.principal_id.clone()`.
 
@@ -512,28 +512,28 @@ For the capsule instance, `grant` stores its capsule id argument on the token. `
             assert!(matches!(result, Err(ValidationError::WrongCapsule { .. })));
         }
 
-`elastos/crates/elastos-server/src/resource_bridge.rs:394` is the caller in `authorize_and_dispatch_resource_invoke`. The body decodes the presented token and calls `validate` with `&bridge_ctx.capsule_id`. When `validate` returns an error, the body denies the invoke with `capability_denied`.
+`elastos/crates/elastos-server/src/resource_bridge.rs:398` is the caller in `authorize_and_dispatch_resource_invoke`. The body decodes the presented token and calls `validate` with `&bridge_ctx.capsule_id`. When `validate` returns an error, the body denies the invoke with `capability_denied`.
 
-    if bridge_ctx
-        .capability_manager
-        .validate(
-            &token,
-            &bridge_ctx.capsule_id,
-            dispatch.required_action,
-            &resource_id,
-            None,
-        )
-        .await
-        .is_err()
-    {
-        return finish_component_invoke(
-            bridge_ctx,
-            &audit_id,
-            &dispatch,
-            "denied",
-            resource_error_response("capability_denied", "Capability validation failed"),
-        );
-    }
+        if bridge_ctx
+            .capability_manager
+            .validate(
+                &token,
+                &bridge_ctx.capsule_id,
+                dispatch.required_action,
+                &resource_id,
+                None,
+            )
+            .await
+            .is_err()
+        {
+            return finish_component_invoke(
+                bridge_ctx,
+                &audit_id,
+                &dispatch,
+                "denied",
+                resource_error_response("capability_denied", "Capability validation failed"),
+            );
+        }
 
 For the owned storage root, the same scope call rewrites `Users/self` onto the principal root before the request is stored, so the resource on the grant is that scoped name. The guest's `JournalGrant` is one id, held in memory, for its own journal. `request_journal_grants` asks write, then read, on that resource.
 
