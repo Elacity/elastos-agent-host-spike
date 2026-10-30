@@ -236,8 +236,22 @@ use std::process::Command;
 /// in the `Request::Shutdown` arm of `fn handle` before it answers
 /// `Response::empty_ok()`, so the final wallet directory compare in
 /// `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged`
-/// fails because it finds a name the setup did not leave.
-const EXPECTED_FALSIFIERS: usize = 143;
+/// fails because it finds a name the setup did not leave. Task 148 adds WP162 to
+/// WP165, all CAUGHT on the Mac: the off-Linux journey label, the record
+/// reader's length case and unknown-step case, and the launcher's list-provider
+/// check. Its two Linux-only plants are named in `CONFINEMENT-LINUX.md` and are
+/// not registered here, because a Linux-only test cannot produce a CAUGHT line
+/// on the Mac. Task 149 adds WP178, CAUGHT on the Mac: the one file-to-list
+/// helper ignoring its provider and reading wallet's declared-rights file, which
+/// `seccomp_allow_list_names_the_provider_it_was_built_for` catches. Its two
+/// Linux-only plants are the same two 148 registered for the wallet journey, on
+/// the did caller, and are named in `CONFINEMENT-LINUX.md` too. Task 150 adds
+/// WP179, which publishes the wallet directory's parent entry at the
+/// `src/main.rs` call after `create_wallet_dir_durable` answers, and WP180,
+/// which canonicalizes the wallet directory there so a symlinked parent passes
+/// the inspection; both are CAUGHT on the Mac by the two storage-root tests
+/// task 150 adds.
+const EXPECTED_FALSIFIERS: usize = 168;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
