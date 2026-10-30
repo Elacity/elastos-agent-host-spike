@@ -1610,7 +1610,8 @@ fn not_live(status: ResidentStatus) -> (u16, String) {
 
 /// The deny body's only keys are `request_id` and an optional string `reason`.
 ///
-/// A missing reason is `Denied by user`.
+/// A missing reason is `Denied by user`. A present reason whose trim is empty
+/// is refused before anything is stored.
 fn deny_body(body: &Value) -> Result<(&str, &str), (u16, String)> {
     const NEEDS_ID: &str = "deny body needs request_id";
     const DEFAULT_REASON: &str = "Denied by user";
@@ -1642,6 +1643,11 @@ fn deny_body(body: &Value) -> Result<(&str, &str), (u16, String)> {
         return Err((400, "deny reason must be a string".to_owned()));
     }
     let request_id = request_id.ok_or_else(|| (400, NEEDS_ID.to_owned()))?;
+    if let Some(text) = reason {
+        if text.trim().is_empty() {
+            return Err((400, "deny reason must not be blank".to_owned()));
+        }
+    }
     Ok((request_id, reason.unwrap_or(DEFAULT_REASON)))
 }
 
@@ -4838,6 +4844,72 @@ mod tests {
             "failed",
             "Denied by user",
             "the stand-in ends the starting instance failed with the default reason",
+        );
+    }
+
+    #[test]
+    fn standin_blank_deny_reason_is_rejected() {
+        let mut standin = StandIn::new();
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let id = launch_starting(&shared, &mut standin);
+        assert_eq!(
+            id, "component-1",
+            "the stand-in did the work: the first launch is component-1"
+        );
+        seed_shared_request(&mut standin, "req-a", &id);
+        seed_shared_request(&mut standin, "req-b", &id);
+        let pending = vec![
+            pending_request("req-a", "component-1"),
+            pending_request("req-b", "component-1"),
+        ];
+
+        for body in [
+            json!({ "request_id": "req-a", "reason": "" }),
+            json!({ "request_id": "req-a", "reason": " " }),
+            json!({ "request_id": "req-a", "reason": "\n" }),
+        ] {
+            let refused = standin.post_capability_deny(Caller::Shell, &body);
+            let stored = request_entries(&standin, &id);
+            assert!(
+                matches!(&refused, Err((400, reason)) if reason == "deny reason must not be blank")
+                    && stored == pending,
+                "the stand-in did the work: a blank deny is refused and req-a stays pending: {refused:?} {stored:?}"
+            );
+            assert_capsule(
+                &standin,
+                &id,
+                "starting",
+                "",
+                "the stand-in did the work: a blank deny leaves the instance starting",
+            );
+        }
+
+        let denied = standin
+            .post_capability_deny(
+                Caller::Shell,
+                &json!({ "request_id": "req-a", "reason": " x " }),
+            )
+            .expect("the stand-in did the work: a deny reason that is not blank is accepted");
+        assert_eq!(
+            denied,
+            json!({ "success": true }),
+            "the stand-in did the work: the accepted deny answers success true"
+        );
+        assert_eq!(
+            request_entries(&standin, &id),
+            vec![
+                shell_denied_request("req-a", "component-1", " x "),
+                denied_request("req-b", "component-1", " x "),
+            ],
+            "the stand-in did the work: req-a is denied by the shell and req-b by the runtime, both with the given reason"
+        );
+        assert_capsule(
+            &standin,
+            &id,
+            "failed",
+            " x ",
+            "the stand-in did the work: the starting instance fails with the given reason",
         );
     }
 

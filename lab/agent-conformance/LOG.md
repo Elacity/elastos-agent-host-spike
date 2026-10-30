@@ -9961,3 +9961,86 @@ The acceptance proof filter `--exact standin_unlisted_pending` matches neither f
 
 A passing row gives the real Runtime no A12 credit.
 
+## 107 — A6: reject a blank deny reason
+
+107: `deny_body` refuses a present reason whose trim is empty with `deny reason must not be blank` and stores nothing. A missing reason stays `Denied by user`.
+
+Checkout before the first edit: `git rev-parse HEAD` is `dfb6333771ea45d87ff7435ee5f61b2bba6074e0`. `git merge-base --is-ancestor b2eccab68f03ce9a0ced0c8afea96b496dbfd15f HEAD` is true. `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false. `fn deny_body` is present and, before this edit, stores a present blank reason. HEAD did not move.
+
+### Quote from the architecture (read only)
+
+`docs/AGENT_ARCHITECTURE.md`, section "Request flow", step 8:
+
+```text
+If additional consent is required, Runtime records a pending request and
+Home or Inbox presents it. The UI does not mint the grant itself.
+```
+
+This task is the reason stored on the shell's denial of that request. It does not mint a grant.
+
+### Code
+
+`deny_body` at `standin-runtime/mod.rs:1646` checks a present reason after the key and type checks and before the `Ok`. A present reason whose `trim` is empty returns status 400 and `deny reason must not be blank` at `:1648`. A missing reason still uses `Denied by user` at `:1651`. A present reason that contains a non-blank character is returned as given, with no trim. `post_capability_deny` still calls `deny_body` once at `:610`. `post_capability_grant`, `settle_pending`, `settle_record` and `grant_body` are unchanged.
+
+### Test
+
+`standin_blank_deny_reason_is_rejected` at `standin-runtime/mod.rs:4851`, in the module's `#[cfg(test)]`. It passes with no operator and no probe build. Assertion text says the stand-in did the work. One `Shared`, `Start::Ok`, `launch_starting` once, no `finish_start`. The id is `component-1`, status `starting`, cause `""`. It seeds `req-a` and `req-b`. Bodies `""`, `" "` and `"\n"` are each status 400 and `deny reason must not be blank`, both requests stay `pending`, and the instance stays `starting` with cause `""`. The body `" x "` is Ok `{"success": true}`. `req-a` is `denied`, `settled_by` `shell`, `decision_reason` ` x `. `req-b` is `denied`, `settled_by` `runtime`, `decision_reason` ` x `. The instance is `failed` with cause ` x `. `standin_shell_deny_refuses_a_bad_request` still accepts a body with no `reason` and still stores `Denied by user`.
+
+### Hand-run falsifier
+
+The plant ran by hand and was restored. The planted crate compiled (`Finished`, then the test). No `falsifiers.json` id was added. After the restore, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` shows the candidate only, and no plant remains.
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_blank_deny_reason_is_rejected -- --exact`. `RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`.
+
+F-standin-blank-reason. `deny_body` treats a present blank `reason` as `Denied by user`. Planted exit 101 in 2.16 s. Restored exit 0 in 1.28 s. Assertion: `src/../standin-runtime/mod.rs:4874:13`. The failure is `the stand-in did the work: a blank deny is refused and req-a stays pending`, with `Ok(Object {"success": Bool(true)})` and `req-a` `status` `denied` (no longer pending).
+
+Old:
+
+```text
+        if text.trim().is_empty() {
+            return Err((400, "deny reason must not be blank".to_owned()));
+        }
+```
+
+New:
+
+```text
+        if text.trim().is_empty() {
+            return Ok((request_id, DEFAULT_REASON));
+        }
+```
+
+### Docs
+
+`standin-runtime/README.md` keeps the deny paragraph. One sentence is added to it: a present `reason` whose trim is empty is `deny reason must not be blank`, and the store is unchanged, a missing reason stays `Denied by user`, and a PASS gives the Runtime no A6 credit. `RUNBOOK.md:745` adds one paragraph after the last stand-in paragraph: `standin_blank_deny_reason_is_rejected` is this stand-in, and a PASS there gives the Runtime no A6 credit. Every other paragraph keeps its bytes, including the paragraphs 105 and 106 added.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged. `git diff` for `src/harness.rs`, `src/census.rs`, `src/report.rs`, `tests/effects.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. The changed files are `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.32 seconds.
+- First `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101, real 404.10 seconds. Lib 81 passed, including `standin_blank_deny_reason_is_rejected`. The only failure was `cleanup_census_refuses_each_leftover` at `tests/runtime.rs:396`. The census line was `cleanup census: FAIL retained:target/home-35956-1793335391468211000-0; child exceeded its time bound`. That line is not a process leftover, it does not include `host-process.lock`, it does not contain `config.toml`, and it is not a denied request whose `decision_reason` is blank. No source changed. The same command was run again.
+- Second `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101, real 357.67 seconds. The only failure was `cleanup_census_refuses_each_leftover` at `tests/runtime.rs:403`. The census line was a process leftover, `processes:1`, whose only path ends in `enum.cpython-39.pyc` under `Library/Caches/com.apple.python`. That is the allowed one rerun. No source changed. The same command was run again.
+- Rerun `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 282.57 seconds, inside the 600-second bound. Targets in order: lib 81 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; content_cid 2 passed; effects 63 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 13 passed; standin_plan 8 passed; standin_residents 2 passed; probe 3 passed; doc-tests 0 and 0. `cleanup_census_refuses_each_leftover` passed in that runtime target.
+
+### Proof
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.32 seconds, after the plant was restored.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_blank_deny_reason_is_rejected -- --exact`: exit 0, 1 passed and 0 failed, real 1.28 seconds, after the plant was restored.
+- `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false. HEAD is still `dfb6333771ea45d87ff7435ee5f61b2bba6074e0`.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `deny_body` at `standin-runtime/mod.rs:1646` checks the reason text. It names no code or content. |
+| 2. Capsule, Home or UI gains ungranted access? | No | The refusal returns at `:1648` before `post_capability_deny` stores at `:622`. The call mints no grant. |
+| 3. A second path or a second copy of one rule? | No | The blank check is the one `if` at `:1646-1649`. `post_capability_deny` still calls `deny_body` once at `:610`. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`. `elastos/` is untouched. |
+| 5. Refusals deny by default with a clear reason? | Yes | A present blank reason is status 400 and `deny reason must not be blank` at `:1648`, and the store is unchanged. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The check is in the stand-in. No capsule code, import or world changes. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `:4851`. The blank-as-default plant fails that test at `:4874`, and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | The check runs after the key and type checks at `:1645`. It does not admit a bundle and it does not mint a grant. `started_cid` stays the instance identity at `:177`. |
+
+A passing row gives the real Runtime no A6 credit.
+
