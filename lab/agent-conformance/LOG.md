@@ -10071,3 +10071,62 @@ Rerun, same environment (`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFL
 
 A passing row gives the real Runtime no A3 credit. Two-capsule-run owns the real component bytes.
 
+## 118 — A6: a blank deny reason is rejected
+
+118: `deny_body` rejects a present `reason` whose trim is empty with status 400 and `deny reason must not be blank`, and that call stores nothing. A missing reason stays `Denied by user`. A present reason that contains a non-blank character is stored as given, with no trim. This is the reason stored on the shell's denial of a pending request. It does not mint a grant. A PASS gives the Runtime no A6 credit. Comparison base, recorded before the first edit: `80a2405624121eef3404fe3b3814a558be4b7cb5`. `b2eccab68f03ce9a0ced0c8afea96b496dbfd15f` is an ancestor. `fff8f1761eb851f642f8e9b680ea1c6747974060` is not.
+
+### Quote from the request flow (read only)
+
+`docs/AGENT_ARCHITECTURE.md` section "Request flow", step 8:
+
+> If additional consent is required, Runtime records a pending request and Home or Inbox presents it. The UI does not mint the grant itself.
+
+This task is the reason stored on the shell's denial of that request. It does not mint a grant.
+
+### Plant
+
+F-standin-blank-reason. Hand-run. No `falsifiers.json` id. The planted crate compiled. `standin_blank_deny_reason_is_rejected` failed because the blank deny was Ok and `req-a` was no longer pending. Restored, it passes. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_blank_deny_reason_is_rejected -- --exact`. Real 3.16 seconds. Assertion `src/../standin-runtime/mod.rs:5473:13` (restored `:5475`). The failure was `Ok(Object {"success": Bool(true)})` and `req-a` had `status` `denied` with `decision_reason` `Denied by user`.
+
+`deny_body` treated a present blank `reason` as `Denied by user`. `DEFAULT_REASON` is that string.
+
+Old:
+
+```text
+        Some(text) if text.trim().is_empty() => {
+            return Err((400, "deny reason must not be blank".to_owned()));
+        }
+```
+
+New:
+
+```text
+        Some(text) if text.trim().is_empty() => DEFAULT_REASON,
+```
+
+### Docs
+
+`standin-runtime/README.md` keeps the deny paragraph and adds one sentence: a present `reason` whose trim is empty is `deny reason must not be blank`, and the store is unchanged. A missing reason stays `Denied by user`. A PASS gives the Runtime no A6 credit. `RUNBOOK.md` adds one paragraph after the last stand-in paragraph: `standin_blank_deny_reason_is_rejected` is this stand-in, and a PASS there gives the Runtime no A6 credit. Every other paragraph stays.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. `Cargo.toml` and `Cargo.lock` are unchanged. `git diff` for `src/harness.rs`, `src/census.rs`, `src/report.rs`, `tests/effects.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. `post_capability_deny`, `post_capability_grant`, `settle_pending`, `settle_record` and `grant_body` are unchanged. After the plant was restored, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` shows the blank check and the new test, and it shows no plant.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.17 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 309.77 seconds, inside the 600-second bound. Targets: lib 91 passed (including `standin_blank_deny_reason_is_rejected` and `standin_shell_deny_refuses_a_bad_request`); bin/report 1 passed; artifact 7 passed; build 1 passed; content_cid 2 passed; effects 63 passed and 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed and 2 ignored; standin_contract 13 passed; standin_plan 8 passed; standin_residents 2 passed; probe 3 passed; doc-tests 0. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+- Proof after the plant was restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.17 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_blank_deny_reason_is_rejected -- --exact` exit 0, 1 passed and 0 failed, real 2.23 seconds. `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `deny_body` returns the given reason string at `standin-runtime/mod.rs:2244`. It adds no code or content identity. |
+| 2. Capsule, Home or UI gains ungranted access? | No | A blank reason returns at `:2242`, before `post_capability_deny` stores anything after `:915`. The call mints no grant. |
+| 3. A second path or a second copy of one rule? | No | The trim check is the one match in `deny_body` at `:2240`. `post_capability_deny` still calls that function once at `:915`. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`. `elastos/` is untouched. |
+| 5. Refusals deny by default with a clear reason? | Yes | A present blank reason is status 400 with `deny reason must not be blank` at `:2242`. A missing reason stays `Denied by user` at `:2245`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The refusal is inside the stand-in at `:2242`. This lane adds no capsule import and mints no grant. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_blank_deny_reason_is_rejected` at `:5447`. The plant fails that test on the assertion at `:5475`, and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | The blank refusal at `:2242` settles nothing and grants nothing. A stored reason is the shell denial, not an admission or an allowance. |
+
+A passing row gives the real Runtime no A6 credit.
+

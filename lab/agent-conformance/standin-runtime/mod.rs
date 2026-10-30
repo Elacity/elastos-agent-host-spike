@@ -2203,7 +2203,9 @@ fn not_live(status: ResidentStatus) -> (u16, String) {
 
 /// The deny body's only keys are `request_id` and an optional string `reason`.
 ///
-/// A missing reason is `Denied by user`.
+/// A missing reason is `Denied by user`. A present reason whose trim is empty
+/// is `deny reason must not be blank`. A present reason that contains a
+/// non-blank character is stored as given, with no trim.
 fn deny_body(body: &Value) -> Result<(&str, &str), (u16, String)> {
     const NEEDS_ID: &str = "deny body needs request_id";
     const DEFAULT_REASON: &str = "Denied by user";
@@ -2235,7 +2237,14 @@ fn deny_body(body: &Value) -> Result<(&str, &str), (u16, String)> {
         return Err((400, "deny reason must be a string".to_owned()));
     }
     let request_id = request_id.ok_or_else(|| (400, NEEDS_ID.to_owned()))?;
-    Ok((request_id, reason.unwrap_or(DEFAULT_REASON)))
+    let reason = match reason {
+        Some(text) if text.trim().is_empty() => {
+            return Err((400, "deny reason must not be blank".to_owned()));
+        }
+        Some(text) => text,
+        None => DEFAULT_REASON,
+    };
+    Ok((request_id, reason))
 }
 
 /// The grant body's keys are `request_id`, `duration`, `rationale` and an
@@ -5431,6 +5440,80 @@ mod tests {
             "failed",
             "Denied by user",
             "the stand-in ends the starting instance failed with the default reason",
+        );
+    }
+
+    #[test]
+    fn standin_blank_deny_reason_is_rejected() {
+        let mut standin = StandIn::new();
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let id = launch_starting(&shared, &mut standin);
+        assert_eq!(
+            id, "component-1",
+            "the stand-in did the work: the one launch is component-1"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "starting",
+            "",
+            "the stand-in did the work: the instance is starting with an empty cause",
+        );
+        seed_shared_request(&mut standin, "req-a", &id);
+        seed_shared_request(&mut standin, "req-b", &id);
+        let pending = vec![
+            pending_request("req-a", "component-1"),
+            pending_request("req-b", "component-1"),
+        ];
+        for reason in ["", " ", "\n"] {
+            let refused = standin.post_capability_deny(
+                Caller::Shell,
+                &json!({ "request_id": "req-a", "reason": reason }),
+            );
+            let entries = request_entries(&standin, "component-1");
+            assert!(
+                matches!(&refused, Err((400, got)) if got == "deny reason must not be blank")
+                    && entries == pending,
+                "the stand-in did the work: the blank deny is rejected and req-a stays pending: {refused:?} {entries:?}"
+            );
+            assert_capsule(
+                &standin,
+                "component-1",
+                "starting",
+                "",
+                "the stand-in did the work: a blank deny leaves the instance starting",
+            );
+        }
+
+        let denied = standin
+            .post_capability_deny(
+                Caller::Shell,
+                &json!({ "request_id": "req-a", "reason": " x " }),
+            )
+            .expect("the stand-in did the work: a reason with a non-blank character is stored");
+        assert_eq!(
+            denied,
+            json!({ "success": true }),
+            "the stand-in did the work: the shell deny answers success true"
+        );
+        let records = request_entries(&standin, "component-1");
+        assert_eq!(
+            records.first(),
+            Some(&shell_denied_request("req-a", "component-1", " x ")),
+            "the stand-in did the work: the shell record for req-a stores the given reason"
+        );
+        assert_eq!(
+            records.get(1),
+            Some(&denied_request("req-b", "component-1", " x ")),
+            "the stand-in did the work: the shell record for req-b is denied with that reason"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "failed",
+            " x ",
+            "the stand-in did the work: the starting instance fails with the given reason",
         );
     }
 
