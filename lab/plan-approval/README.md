@@ -439,6 +439,31 @@ still passes `localhost://Public/plan-approval/a.txt` and `read`. `preview`,
 crate does not copy the stand-in, and it names no planner. A passing run gives
 the Runtime no A15 credit.
 
+A shown request reason is text on the request, not the grant. The Request flow
+states the recorded step at step 8:
+
+> Runtime records a pending request and Home or Inbox presents it.
+
+`journeys::request` is the only submit, and it passes the reason it is given
+unchanged as the route's `reason` key. The route stores that string as given,
+so `""` is stored as `""` and `show this step` is stored as that text; it
+stays on the request after the owner grants it. A reason of `approved` is
+stored as a pending request and mints nothing, and an undeclared ask with
+reason `approved` stores nothing. A pending or granted status body is the
+status word alone, and a live grant entry has no `reason`. The once grant of
+the read request is spent by one use while the request reason stays
+`show this step`. `shown_request_reason_is_not_the_grant` drives two sessions
+through `running_agent`, submits three reasons through `request`, reads the
+lists through `read_shown_requests` and `read_shown_grants`, reads the status
+through `read_shown_request`, and grants and spends through `approve` and
+`execute`. This crate stores no copy of `request_body`. Every earlier submit
+still passes `""`. `preview`, `plan_sha256`, `approve`, `execute`,
+`deny_shown_plan`, `age_shown_plan`, `stop_shown_session`,
+`read_shown_request`, `read_shown_grants`, `read_shown_requests` and
+`running_agent` are unchanged by this slice. The crate does not copy the
+stand-in, and it names no planner. A passing run gives the Runtime no A15
+credit.
+
 ## Layout
 
 - `src/lib.rs`: `Preview`, `preview`, `plan_sha256`, `approve`,
@@ -457,12 +482,14 @@ the Runtime no A15 credit.
   `shown_request_status_is_not_the_grant`,
   `shown_live_list_is_not_another_sessions_grant`,
   `shown_submit_names_a_declared_ask`,
-  `shown_request_list_does_not_submit_again` and the bound-plan journey.
+  `shown_request_list_does_not_submit_again`,
+  `shown_request_reason_is_not_the_grant` and the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_request_reason_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_submit_names_a_declared_ask -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_request_list_does_not_submit_again -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_live_list_is_not_another_sessions_grant -- --exact

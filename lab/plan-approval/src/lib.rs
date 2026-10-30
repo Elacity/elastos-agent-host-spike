@@ -501,20 +501,23 @@ mod journeys {
     /// refused and stores nothing, whether the plan is `PLAN_A`, `PLAN_B` or
     /// empty bytes.
     ///
-    /// `resource` and `action` are the ask the agent names, method arguments
-    /// too. This helper sends both unchanged as the route's `resource` and
-    /// `action` keys and passes them through, so the route's own scheme,
-    /// action and declared-ask checks decide the answer: a resource without
-    /// `elastos://` or `localhost://`, an action outside the route's list, and
-    /// a pair the signed bundle did not declare are each refused and store
-    /// nothing. The `plan` key is `preview` of those bytes. Ok is the route's
-    /// `request_id`.
+    /// `resource`, `action` and `reason` are the ask the agent names, method
+    /// arguments too. This helper sends all three unchanged as the route's
+    /// `resource`, `action` and `reason` keys and passes them through, so the
+    /// route's own scheme, action and declared-ask checks decide the answer: a
+    /// resource without `elastos://` or `localhost://`, an action outside the
+    /// route's list, and a pair the signed bundle did not declare are each
+    /// refused and store nothing. The `plan` key is `preview` of those bytes.
+    /// Ok is the route's `request_id`. The reason is text on the request; the
+    /// route stores it as given and mints no grant from it. An empty reason is
+    /// stored as `""`.
     pub fn request(
         stand_in: &mut StandIn,
         caller: Caller<'_>,
         plan: &[u8],
         resource: &str,
         action: &str,
+        reason: &str,
     ) -> Result<String, (u16, String)> {
         let hash = preview(stand_in, plan).sha256;
         let stored = stand_in.post_capability_request(
@@ -522,6 +525,7 @@ mod journeys {
             &json!({
                 "resource": resource,
                 "action": action,
+                "reason": reason,
                 "plan": hash,
             }),
         )?;
@@ -551,6 +555,7 @@ fn a_grant_bound_to_one_plan_is_refused_for_another_plan() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's request route stores one pending request");
     let request_b = request(
@@ -561,6 +566,7 @@ fn a_grant_bound_to_one_plan_is_refused_for_another_plan() {
         PLAN_B,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's request route stores one pending request");
     assert_ne!(
@@ -777,6 +783,7 @@ fn deny_one_shown_step() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's submit stores the first pending request");
     assert_eq!(
@@ -791,6 +798,7 @@ fn deny_one_shown_step() {
         PLAN_B,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's submit stores the second pending request");
     assert_eq!(
@@ -1056,6 +1064,7 @@ fn agent_cannot_deny_its_own_shown_plan() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's submit stores the first shown plan");
     assert_eq!(
@@ -1068,6 +1077,7 @@ fn agent_cannot_deny_its_own_shown_plan() {
         PLAN_B,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's submit stores the second shown plan");
     assert_eq!(
@@ -1312,6 +1322,7 @@ fn unanswered_shown_step_expires() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's request route stores one pending request");
     assert_eq!(
@@ -1326,6 +1337,7 @@ fn unanswered_shown_step_expires() {
         PLAN_B,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's request route stores one pending request");
     assert_eq!(
@@ -1585,6 +1597,7 @@ fn stop_settles_that_sessions_shown_steps() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's request route stores one pending request");
     let allowed_step = request(
@@ -1593,6 +1606,7 @@ fn stop_settles_that_sessions_shown_steps() {
         PLAN_B,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's request route stores one pending request");
     let other_step = request(
@@ -1603,6 +1617,7 @@ fn stop_settles_that_sessions_shown_steps() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's request route stores one pending request");
     assert_eq!(
@@ -1838,6 +1853,7 @@ fn shown_allow_once_expires() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's request route stores one pending request");
     let unspent_step = request(
@@ -1848,6 +1864,7 @@ fn shown_allow_once_expires() {
         PLAN_B,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's request route stores one pending request");
     assert_eq!(
@@ -2085,6 +2102,7 @@ fn shown_session_lasts_until_stop() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's request route stores one pending request");
     let once_step = request(
@@ -2095,6 +2113,7 @@ fn shown_session_lasts_until_stop() {
         PLAN_B,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's request route stores one pending request");
     let refused_word = request(
@@ -2105,6 +2124,7 @@ fn shown_session_lasts_until_stop() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's request route stores one pending request");
     assert_eq!(
@@ -2461,6 +2481,7 @@ fn shown_grant_authorises_only_its_session() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's request route stores one pending request");
     let second_step = request(
@@ -2471,6 +2492,7 @@ fn shown_grant_authorises_only_its_session() {
         PLAN_B,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's request route stores one pending request");
     assert_eq!(
@@ -2703,6 +2725,7 @@ fn owner_approves_only_the_shown_hash() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's request route stores one pending request");
     assert_eq!(
@@ -2890,6 +2913,7 @@ fn agent_cannot_approve_its_own_shown_plan() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's request route stores one pending request");
     assert_eq!(
@@ -3139,6 +3163,7 @@ fn shell_cannot_spend_a_shown_grant() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's request route stores one pending request");
     assert_eq!(
@@ -3390,6 +3415,7 @@ fn shell_cannot_submit_a_shown_plan() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     );
     assert_eq!(
         fresh, refused,
@@ -3458,6 +3484,7 @@ fn shell_cannot_submit_a_shown_plan() {
             plan,
             "localhost://Public/plan-approval/a.txt",
             "read",
+            "",
         );
         assert_eq!(
             result, refused,
@@ -3529,7 +3556,8 @@ fn shell_cannot_submit_a_shown_plan() {
             },
             PLAN_A,
             "localhost://Public/plan-approval/a.txt",
-            "read"
+            "read",
+            "",
         ),
         Ok("request-1".to_owned()),
         "the shell cannot submit a shown plan: the instance session's own submit stores the stand-in's first request"
@@ -3629,6 +3657,7 @@ fn shell_cannot_submit_a_shown_plan() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     );
     assert_eq!(
         after_spend, refused,
@@ -3718,6 +3747,7 @@ fn only_a_live_session_submits_a_shown_plan() {
             plan,
             "localhost://Public/plan-approval/a.txt",
             "read",
+            "",
         );
         assert_eq!(
             result,
@@ -3859,6 +3889,7 @@ fn only_a_live_session_submits_a_shown_plan() {
             plan,
             "localhost://Public/plan-approval/a.txt",
             "read",
+            "",
         );
         assert_eq!(
             result,
@@ -3923,7 +3954,8 @@ fn only_a_live_session_submits_a_shown_plan() {
             },
             PLAN_A,
             "localhost://Public/plan-approval/a.txt",
-            "read"
+            "read",
+            "",
         ),
         Ok("request-1".to_owned()),
         "only a live session submits a shown plan: the live session's own submit stores the stand-in's first request"
@@ -4028,6 +4060,7 @@ fn only_a_live_session_submits_a_shown_plan() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     );
     assert_eq!(
         after_spend,
@@ -4187,6 +4220,7 @@ fn agent_cannot_stop_a_shown_session() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's request route stores the shown plan");
     assert_eq!(
@@ -4225,6 +4259,7 @@ fn agent_cannot_stop_a_shown_session() {
         PLAN_B,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's request route stores the next pending step");
     assert_eq!(
@@ -4416,6 +4451,7 @@ fn agent_cannot_stop_a_shown_session() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the other session's request route stores its plan");
     assert_eq!(
@@ -4715,6 +4751,7 @@ fn agent_cannot_launch_a_shown_session() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's request route stores the shown plan");
     assert_eq!(
@@ -4848,6 +4885,7 @@ fn agent_cannot_launch_a_shown_session() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the other session's request route stores its plan");
     assert_eq!(
@@ -5039,6 +5077,7 @@ fn shown_request_status_is_not_the_grant() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's submit stores the first shown plan");
     assert_eq!(
@@ -5151,6 +5190,7 @@ fn shown_request_status_is_not_the_grant() {
         PLAN_B,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the other session's submit stores the second shown plan");
     assert_eq!(
@@ -5353,6 +5393,7 @@ fn shown_request_status_is_not_the_grant() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's later submit stores the third shown plan");
     assert_eq!(
@@ -5706,6 +5747,7 @@ fn shown_live_list_is_not_another_sessions_grant() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's submit stores the first shown plan");
     assert_eq!(
@@ -5753,6 +5795,7 @@ fn shown_live_list_is_not_another_sessions_grant() {
         PLAN_B,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the other session's submit stores the second shown plan");
     assert_eq!(
@@ -6420,6 +6463,7 @@ fn shown_request_list_does_not_submit_again() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the agent's submit stores the first shown plan");
     assert_eq!(
@@ -6502,6 +6546,7 @@ fn shown_request_list_does_not_submit_again() {
         PLAN_B,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the other session's submit stores the second shown plan");
     assert_eq!(
@@ -6700,6 +6745,7 @@ fn shown_request_list_does_not_submit_again() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     )
     .expect("the first session's second submit stores another shown plan");
     assert_eq!(
@@ -6831,6 +6877,7 @@ fn shown_submit_names_a_declared_ask() {
         PLAN_A,
         "https://Public/plan-approval/a.txt",
         "read",
+        "",
     );
     assert_eq!(
         unsupported_scheme, scheme_refusal,
@@ -6876,6 +6923,7 @@ fn shown_submit_names_a_declared_ask() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "mint",
+        "",
     );
     assert_eq!(
         unknown_action, invalid_mint,
@@ -6956,6 +7004,7 @@ fn shown_submit_names_a_declared_ask() {
             PLAN_A,
             resource,
             action,
+            "",
         );
         assert_eq!(
             result,
@@ -7001,6 +7050,7 @@ fn shown_submit_names_a_declared_ask() {
         PLAN_A,
         "localhost://Public/plan-approval/b.txt",
         "read",
+        "",
     );
     assert_eq!(
         shell_submit, shell_refusal,
@@ -7023,6 +7073,7 @@ fn shown_submit_names_a_declared_ask() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "read",
+        "",
     );
     assert_eq!(
         absent_submit,
@@ -7056,6 +7107,7 @@ fn shown_submit_names_a_declared_ask() {
         PLAN_A,
         "localhost://Public/plan-approval/a.txt",
         "READ",
+        "",
     )
     .expect("the agent's submit stores the declared ask");
     assert_eq!(
@@ -7112,6 +7164,7 @@ fn shown_submit_names_a_declared_ask() {
         PLAN_B,
         "localhost://Public/plan-approval/a.txt",
         "Write",
+        "",
     )
     .expect("the agent's write submit stores the declared ask");
     assert_eq!(
@@ -7157,6 +7210,7 @@ fn shown_submit_names_a_declared_ask() {
         PLAN_A,
         "localhost://Public/resident-instances/shared.txt",
         "read",
+        "",
     )
     .expect("the agent's shared submit stores the declared ask");
     assert_eq!(
@@ -7224,6 +7278,7 @@ fn shown_submit_names_a_declared_ask() {
         PLAN_A,
         "localhost://Public/plan-approval/b.txt",
         "read",
+        "",
     );
     assert_eq!(
         repeat,
@@ -7349,5 +7404,632 @@ fn shown_submit_names_a_declared_ask() {
         shell_live(&stand_in),
         empty_shell,
         "a shown submit names a declared ask: the refused second use leaves the live list empty"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn shown_request_reason_is_not_the_grant() {
+    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use fixtures::{PLAN_A, PLAN_B};
+    use journeys::{request, running_agent};
+    use serde_json::{json, Value};
+
+    fn shell_requests(stand_in: &StandIn, session: Option<&str>) -> Value {
+        read_shown_requests(stand_in, Caller::Shell, session)
+            .expect("the shell reads a session's request list")
+    }
+
+    fn shell_live(stand_in: &StandIn) -> Value {
+        read_shown_grants(stand_in, Caller::Shell, None).expect("the shell reads the live list")
+    }
+
+    fn client_live(stand_in: &StandIn, session: &str) -> Value {
+        read_shown_grants(
+            stand_in,
+            Caller::Client {
+                session_id: session,
+            },
+            None,
+        )
+        .expect("the session reads its live list")
+    }
+
+    fn shell_capsules(stand_in: &StandIn) -> Vec<Value> {
+        stand_in
+            .get_capsules(Caller::Shell)
+            .expect("shell capsules")["capsules"]
+            .as_array()
+            .cloned()
+            .expect("the shell capsule list holds a capsules array")
+    }
+
+    let plan_a = plan_sha256(PLAN_A);
+    let plan_b = plan_sha256(PLAN_B);
+    let resource_a = "localhost://Public/plan-approval/a.txt";
+    let resource_b = "localhost://Public/plan-approval/b.txt";
+    let empty_requests: Value = json!({ "requests": [] });
+    let empty_shell: Value = json!({ "scope": "all_sessions_live", "capabilities": [] });
+    let empty_client: Value = json!({ "capabilities": [] });
+    let shell_refusal: Result<String, (u16, String)> = Err((
+        403,
+        "capability request needs an instance session".to_owned(),
+    ));
+    let ask_refusal_a: Result<String, (u16, String)> = Err((
+        403,
+        format!("ask not declared in the signed manifest: {resource_a} read"),
+    ));
+    let ask_refusal_b: Result<String, (u16, String)> = Err((
+        403,
+        format!("ask not declared in the signed manifest: {resource_b} read"),
+    ));
+
+    let mut stand_in = StandIn::new();
+
+    // The reason travels with the caller and stores nothing on a refusal.
+    let shell_submit = request(
+        &mut stand_in,
+        Caller::Shell,
+        PLAN_A,
+        resource_a,
+        "read",
+        "show this step",
+    );
+    assert_eq!(
+        shell_submit, shell_refusal,
+        "a shown request reason is not the grant: a shell submit with a reason is the caller refusal"
+    );
+    assert_ne!(
+        shell_submit, ask_refusal_a,
+        "a shown request reason is not the grant: the shell refusal is not the declared-ask refusal"
+    );
+    assert_eq!(
+        shell_capsules(&stand_in),
+        Vec::<Value>::new(),
+        "a shown request reason is not the grant: the shell refusal stores no capsule"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        empty_requests,
+        "a shown request reason is not the grant: the shell refusal stores no reason"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown request reason is not the grant: the shell refusal mints no grant"
+    );
+
+    let first = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    assert_eq!(
+        first, "component-1",
+        "a shown request reason is not the grant: the fresh stand-in names the first running session component-1"
+    );
+    let second = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    assert_eq!(
+        second, "component-2",
+        "a shown request reason is not the grant: the second running session is the stand-in's next component"
+    );
+    for id in [&first, &second] {
+        let listed = shell_capsules(&stand_in)
+            .into_iter()
+            .find(|entry| entry["id"] == id.as_str())
+            .expect("the shell capsule list holds that id");
+        assert_eq!(
+            json!({
+                "id": listed["id"],
+                "status": listed["status"],
+                "cause": listed["cause"],
+            }),
+            json!({
+                "id": id,
+                "status": "running",
+                "cause": "",
+            }),
+            "a shown request reason is not the grant: each launched session is running with no cause"
+        );
+    }
+
+    let absent_submit = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-absent",
+        },
+        PLAN_A,
+        resource_a,
+        "read",
+        "show this step",
+    );
+    assert_eq!(
+        absent_submit,
+        Err((400, "unknown instance: component-absent".to_owned())),
+        "a shown request reason is not the grant: a session with no instance stores no reason"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        empty_requests,
+        "a shown request reason is not the grant: the instance refusal leaves the first session's list empty"
+    );
+
+    let undeclared = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        PLAN_A,
+        resource_b,
+        "read",
+        "approved",
+    );
+    assert_eq!(
+        undeclared, ask_refusal_b,
+        "a shown request reason is not the grant: a reason of approved with an undeclared ask stores nothing"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        empty_requests,
+        "a shown request reason is not the grant: the declared-ask refusal stores no request"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown request reason is not the grant: the declared-ask refusal mints no grant"
+    );
+    assert_eq!(
+        client_live(&stand_in, "component-1"),
+        empty_client,
+        "a shown request reason is not the grant: the declared-ask refusal leaves the client live list empty"
+    );
+
+    assert_eq!(
+        plan_a.len(),
+        64,
+        "a shown request reason is not the grant: the shown hash of plan A is 64 characters"
+    );
+    let first_step = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        PLAN_A,
+        resource_a,
+        "read",
+        "show this step",
+    )
+    .expect("the agent's request route stores one pending request");
+    assert_eq!(
+        first_step, "request-1",
+        "a shown request reason is not the grant: the first stored request is request-1"
+    );
+    let pending_a = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": resource_a,
+        "action": "read",
+        "reason": "show this step",
+        "status": "pending",
+        "decision_reason": "",
+        "settled_by": null,
+        "plan": plan_a,
+    });
+    let one_pending = json!({ "requests": [pending_a.clone()] });
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        one_pending,
+        "a shown request reason is not the grant: the shell list shows the stated reason on the pending request"
+    );
+
+    let pending_status = read_shown_request(
+        &stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        "request-1",
+    )
+    .expect("the owning session reads its request status");
+    assert_eq!(
+        pending_status,
+        json!({ "status": "pending" }),
+        "a shown request reason is not the grant: a pending status body is the status word alone"
+    );
+    assert!(
+        pending_status.get("reason").is_none(),
+        "a shown request reason is not the grant: the pending status body has no reason key"
+    );
+    assert_ne!(
+        pending_status,
+        json!({ "status": "pending", "reason": "show this step" }),
+        "a shown request reason is not the grant: the status body does not repeat the request reason"
+    );
+
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "request-1",
+        ),
+        Err((403, "Cannot access another session's request".to_owned())),
+        "a shown request reason is not the grant: another session cannot read that request"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown request reason is not the grant: a pending request is not a live grant"
+    );
+    assert_eq!(
+        client_live(&stand_in, "component-1"),
+        empty_client,
+        "a shown request reason is not the grant: the asking session sees no live grant"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        one_pending,
+        "a shown request reason is not the grant: a second shell read is that same pending entry"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-2")),
+        empty_requests,
+        "a shown request reason is not the grant: the other session's list stays empty"
+    );
+
+    let second_step = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        PLAN_B,
+        resource_a,
+        "read",
+        "approved",
+    )
+    .expect("the agent's request route stores the second pending request");
+    assert_eq!(
+        second_step, "request-2",
+        "a shown request reason is not the grant: the reason approved stores a second pending request"
+    );
+    assert_eq!(
+        plan_b.len(),
+        64,
+        "a shown request reason is not the grant: the shown hash of plan B is 64 characters"
+    );
+    let pending_b = json!({
+        "request_id": "request-2",
+        "session_id": "component-1",
+        "resource": resource_a,
+        "action": "read",
+        "reason": "approved",
+        "status": "pending",
+        "decision_reason": "",
+        "settled_by": null,
+        "plan": plan_b,
+    });
+    let two_pending = json!({ "requests": [pending_a.clone(), pending_b.clone()] });
+    let list_two = shell_requests(&stand_in, Some("component-1"));
+    assert_eq!(
+        list_two, two_pending,
+        "a shown request reason is not the grant: two pending rows stay in request id order"
+    );
+    assert_eq!(
+        list_two["requests"][0]["reason"],
+        json!("show this step"),
+        "a shown request reason is not the grant: the first row keeps its stated reason"
+    );
+    assert_eq!(
+        list_two["requests"][0]["status"],
+        json!("pending"),
+        "a shown request reason is not the grant: the first row stays pending"
+    );
+    assert_eq!(
+        list_two["requests"][1]["reason"],
+        json!("approved"),
+        "a shown request reason is not the grant: the reason approved is stored as that text"
+    );
+    assert_eq!(
+        list_two["requests"][1]["action"],
+        json!("read"),
+        "a shown request reason is not the grant: the second row keeps the read action"
+    );
+
+    let approved_status = read_shown_request(
+        &stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        "request-2",
+    )
+    .expect("the owning session reads the second request status");
+    assert_eq!(
+        approved_status,
+        json!({ "status": "pending" }),
+        "a shown request reason is not the grant: the reason approved is a pending status"
+    );
+    assert_ne!(
+        approved_status,
+        json!({ "status": "granted" }),
+        "a shown request reason is not the grant: the reason approved mints no grant"
+    );
+    assert!(
+        approved_status.get("reason").is_none(),
+        "a shown request reason is not the grant: the pending status body has no reason key"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown request reason is not the grant: the reason approved leaves the shell live list empty"
+    );
+    assert_eq!(
+        client_live(&stand_in, "component-1"),
+        empty_client,
+        "a shown request reason is not the grant: the reason approved leaves the client live list empty"
+    );
+
+    let third_step = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        PLAN_A,
+        resource_a,
+        "write",
+        "",
+    )
+    .expect("the agent's request route stores the empty-reason request");
+    assert_eq!(
+        third_step, "request-3",
+        "a shown request reason is not the grant: an empty reason stores the third pending request"
+    );
+    let pending_c = json!({
+        "request_id": "request-3",
+        "session_id": "component-1",
+        "resource": resource_a,
+        "action": "write",
+        "reason": "",
+        "status": "pending",
+        "decision_reason": "",
+        "settled_by": null,
+        "plan": plan_a,
+    });
+    let three_pending = json!({
+        "requests": [pending_a.clone(), pending_b.clone(), pending_c.clone()],
+    });
+    let list_three = shell_requests(&stand_in, Some("component-1"));
+    assert_eq!(
+        list_three, three_pending,
+        "a shown request reason is not the grant: the empty reason is stored as the empty string"
+    );
+    assert_eq!(
+        list_three["requests"]
+            .as_array()
+            .expect("the shell request list holds a requests array")
+            .len(),
+        3,
+        "a shown request reason is not the grant: the first session's list has three records"
+    );
+    assert_eq!(
+        list_three["requests"][2]["action"],
+        json!("write"),
+        "a shown request reason is not the grant: the third row keeps the write action"
+    );
+    assert_eq!(
+        list_three["requests"][2]["reason"],
+        json!(""),
+        "a shown request reason is not the grant: an empty reason is stored as an empty string"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-2")),
+        empty_requests,
+        "a shown request reason is not the grant: the other session's list stays empty"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown request reason is not the grant: the three pending reasons mint no grant"
+    );
+
+    let repeat = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        PLAN_A,
+        resource_b,
+        "read",
+        "approved",
+    );
+    assert_eq!(
+        repeat, ask_refusal_b,
+        "a shown request reason is not the grant: a repeated undeclared ask is still the ask refusal"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        three_pending,
+        "a shown request reason is not the grant: the repeat refusal leaves the three stored records"
+    );
+
+    assert_eq!(
+        approve(&mut stand_in, Caller::Shell, "request-1", "once", &plan_a),
+        Ok(json!({ "success": true })),
+        "a shown request reason is not the grant: the owner grants the read request once with the hash it saw"
+    );
+    let shell_grant = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": resource_a,
+        "action": "read",
+        "duration": "once",
+        "granted_at": 0,
+    });
+    let one_shell_grant = json!({
+        "scope": "all_sessions_live",
+        "capabilities": [shell_grant],
+    });
+    let shell_body = shell_live(&stand_in);
+    assert_eq!(
+        shell_body, one_shell_grant,
+        "a shown request reason is not the grant: the live grant carries no request reason"
+    );
+    assert!(
+        shell_body["capabilities"][0].get("reason").is_none(),
+        "a shown request reason is not the grant: the shell live entry has no reason key"
+    );
+    let client_grant = json!({
+        "request_id": "request-1",
+        "resource": resource_a,
+        "action": "read",
+        "duration": "once",
+        "granted_at": 0,
+    });
+    let client_body = client_live(&stand_in, "component-1");
+    assert_eq!(
+        client_body,
+        json!({ "capabilities": [client_grant] }),
+        "a shown request reason is not the grant: the client live list omits the session and the reason"
+    );
+    assert!(
+        client_body["capabilities"][0].get("session_id").is_none(),
+        "a shown request reason is not the grant: the client live entry has no session id"
+    );
+    assert!(
+        client_body["capabilities"][0].get("reason").is_none(),
+        "a shown request reason is not the grant: the client live entry has no reason key"
+    );
+
+    let granted_a = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": resource_a,
+        "action": "read",
+        "reason": "show this step",
+        "status": "granted",
+        "decision_reason": "owner approved",
+        "settled_by": "shell",
+        "plan": plan_a,
+    });
+    let granted_three = json!({
+        "requests": [granted_a, pending_b.clone(), pending_c.clone()],
+    });
+    let list_granted = shell_requests(&stand_in, Some("component-1"));
+    assert_eq!(
+        list_granted, granted_three,
+        "a shown request reason is not the grant: the request keeps its reason after the owner grants"
+    );
+    assert_eq!(
+        list_granted["requests"]
+            .as_array()
+            .expect("the shell request list holds a requests array")
+            .len(),
+        3,
+        "a shown request reason is not the grant: the granted record adds no request"
+    );
+    assert_eq!(
+        list_granted["requests"][0]["reason"],
+        json!("show this step"),
+        "a shown request reason is not the grant: the granted record keeps show this step"
+    );
+    assert_eq!(
+        list_granted["requests"][0]["status"],
+        json!("granted"),
+        "a shown request reason is not the grant: the first record is granted"
+    );
+    assert_eq!(
+        list_granted["requests"][0]["settled_by"],
+        json!("shell"),
+        "a shown request reason is not the grant: the owner settles the request as shell"
+    );
+    assert_eq!(
+        list_granted["requests"][0]["decision_reason"],
+        json!("owner approved"),
+        "a shown request reason is not the grant: the owner's approval reason is stored"
+    );
+    assert_eq!(
+        list_granted["requests"][1]["status"],
+        json!("pending"),
+        "a shown request reason is not the grant: the approved reason stays pending"
+    );
+    assert_eq!(
+        list_granted["requests"][1]["reason"],
+        json!("approved"),
+        "a shown request reason is not the grant: the second record keeps approved"
+    );
+    assert_eq!(
+        list_granted["requests"][2]["status"],
+        json!("pending"),
+        "a shown request reason is not the grant: the empty reason stays pending"
+    );
+    assert_eq!(
+        list_granted["requests"][2]["reason"],
+        json!(""),
+        "a shown request reason is not the grant: the third record keeps the empty reason"
+    );
+
+    let granted_status = read_shown_request(
+        &stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        "request-1",
+    )
+    .expect("the owning session reads the granted status");
+    assert_eq!(
+        granted_status,
+        json!({ "status": "granted" }),
+        "a shown request reason is not the grant: a granted status body is the status word alone"
+    );
+    assert!(
+        granted_status.get("reason").is_none(),
+        "a shown request reason is not the grant: the granted status body has no reason key"
+    );
+
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "request-1",
+            PLAN_A,
+        ),
+        Ok(json!({ "valid": true })),
+        "a shown request reason is not the grant: the once grant authorises its one use"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown request reason is not the grant: the spent once grant leaves the live list"
+    );
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "request-1",
+            PLAN_A,
+        ),
+        Err((400, "grant is not live: Exhausted".to_owned())),
+        "a shown request reason is not the grant: the next use of the spent once grant is refused"
+    );
+    let final_list = shell_requests(&stand_in, Some("component-1"));
+    assert_eq!(
+        final_list, granted_three,
+        "a shown request reason is not the grant: the three records stay after the spend"
+    );
+    assert_eq!(
+        final_list["requests"][0]["reason"],
+        json!("show this step"),
+        "a shown request reason is not the grant: the spent grant leaves the request reason in place"
+    );
+    assert_eq!(
+        final_list["requests"][0]["status"],
+        json!("granted"),
+        "a shown request reason is not the grant: the spent request record stays granted"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown request reason is not the grant: the refused second use leaves the live list empty"
     );
 }

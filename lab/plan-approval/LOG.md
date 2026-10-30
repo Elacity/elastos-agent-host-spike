@@ -1162,3 +1162,97 @@ Neither plant calls `seed_request`. After both restores,
 no `falsifiers.json`; no id is added.
 
 028: `journeys::request` takes the resource and the action it is given; `shown_submit_names_a_declared_ask` proves an exact declared ask is the only stored submit and the grant keeps that action; two hand-run plants caught and restored.
+
+## 029
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md) Request flow step 8:
+
+> Runtime records a pending request and Home or Inbox presents it.
+
+This task proves the reason recorded with a shown request. `journeys::request` gains
+`reason: &str` after `action`, sends it unchanged as the route's `reason` key, and returns
+that route's result with its `request_id` on Ok. It matches no `Caller` and no `reason`,
+contains no `seed_grant`, and calls no other `StandIn` method. Every existing call passes
+`""`; no other argument and no assertion changed.
+
+`shown_request_reason_is_not_the_grant` drives two sessions through `running_agent`. On a
+fresh stand-in the shell submit with reason `show this step` is the caller refusal and
+stores no capsule, request or grant. The absent instance and the undeclared `b.txt` ask
+with reason `approved` each store nothing. `request-1` stores `show this step` and stays
+pending while the shell list shows that reason, the status body is `{"status":"pending"}`
+with no reason key, and the shell and client live lists stay empty. `request-2` stores
+`approved` as a second pending row: its status body is `{"status":"pending"}`, not
+`{"status":"granted"}`, and the live lists stay empty. `request-3` stores `""` as `""` on
+the write action. A repeat of the undeclared ask stores nothing. The owner's `once` grant of
+`request-1` puts one live entry without a reason or (for the client) a session id on each
+live list, while the request list keeps `show this step` on the granted record. The owner
+status body is `{"status":"granted"}` alone. One `execute` spends the grant, a second use
+is `grant is not live: Exhausted`, and the three records keep their reasons and statuses.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_request_reason_is_not_the_grant -- --exact
+```
+
+### F-stated-reason-is-blank
+
+Old bytes, 33:
+
+```rust
+                "reason": reason,
+```
+
+New bytes, 70:
+
+```rust
+                "reason": if reason.is_empty() { reason } else { "" },
+```
+
+The planted crate compiled. `shown_request_reason_is_not_the_grant` failed at
+`src/lib.rs:7617:5` (planted tree) on the shell request list: `assertion left == right
+failed: a shown request reason is not the grant: the shell list shows the stated reason on
+the pending request`; left held a row with `reason` `""`, right expected `show this step`.
+The stated reason was blanked before the route stored it. Restored, the test passes.
+
+### F-approved-reason-mints
+
+Old bytes, 43:
+
+```rust
+        )?;
+        Ok(stored["request_id"]
+```
+
+New bytes, 411:
+
+```rust
+        )?;
+        if reason == "approved" {
+            stand_in.seed_grant(
+                "request-plant",
+                "component-1",
+                "localhost://Public/plan-approval/a.txt",
+                "read",
+                "once",
+                0,
+                agent_conformance::standin_runtime::Life::Live,
+                false,
+            );
+        }
+        Ok(stored["request_id"]
+```
+
+The planted crate compiled. `shown_request_reason_is_not_the_grant` failed at
+`src/lib.rs:7770:5` (planted tree) on the shell live list: `assertion left == right failed:
+a shown request reason is not the grant: the reason approved leaves the shell live list
+empty`; left held the seeded `request-plant` grant, right expected the empty shell body. A
+request reason of `approved` minted a grant. Restored, the test passes.
+
+Neither plant calls `seed_request`. After both restores,
+`git diff -- lab/plan-approval/src/lib.rs` holds no `request-plant`, no
+`reason.is_empty` and no plant `seed_grant` inside `journeys::request`. The restored proof
+command set (the fmt check and the twenty-two test commands in the task) took 1.72 s real.
+This lane has no `falsifiers.json`; no id is added.
+
+029: `journeys::request` takes the reason it is given and sends it on the one submit; `shown_request_reason_is_not_the_grant` proves the reason stays on the request, a pending or granted status body and a live grant carry none, and `approved` mints nothing; two hand-run plants caught and restored.
