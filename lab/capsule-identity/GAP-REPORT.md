@@ -680,6 +680,10 @@ B2 (Anders, 26 Oct)", added by task 026, whose citations are at that revision's 
 - Not shown: an implementation outside this lane. The second implementation is README's own Python, run on the
   same Mac:
   `lab/capsule-identity/README.md:264` `Not shown: Kubo itself, and Python on another machine. The check is two`
+  Corrected by task 051, on 2026-10-28: Kubo is an implementation outside the lane, run by hand, not in the gate.
+  One offline Kubo v0.40.1 hash-only cross-check with the Runtime's profile flags was run by hand on this Mac
+  (task 050) and printed every committed pin, and the claim words stay "Kubo v0.40.1 profile, computed by the
+  lab" until Rong or Flint changes them.
   No Runtime code and no other team's code reads the record. The record is the lab's own schema, not the
   Runtime's `elastos.capsule.record/v1`, and nothing here changes what the Runtime's manifest signature covers
   (13.2, point 3).
@@ -702,13 +706,15 @@ B2 (Anders, 26 Oct)", added by task 026, whose citations are at that revision's 
   and `lab/capsule-identity/tests/cross_implementation.rs:127` `fn readme_python_recomputes_every_lab_cid_pin() {`
 - Archive hashes stay delivery checks: the lab names the bundle's files, not the Runtime's archive,
   `lab/capsule-identity/README.md:1200` `a delivery check of those archive bytes, not this CID.`
-- Not shown: the value is not checked against Kubo, which is not on this Mac:
-  `lab/capsule-identity/README.md:39` `directories. This crate runs no Kubo, and no Kubo is installed on this Mac.`
-  No Kubo has computed any of the pinned values. Every pin comes from the lab code and a `python3 -I`
+- Kubo (corrected by task 051, on 2026-10-28; until task 050 this bullet said no Kubo had checked the value).
+  One offline Kubo v0.40.1 hash-only cross-check with the Runtime's
+  profile flags was run by hand on this Mac (task 050) and printed every committed pin, and the claim words stay
+  "Kubo v0.40.1 profile, computed by the lab" until Rong or Flint changes them.
+  The two Kubo tests are `#[ignore]` in `lab/capsule-identity/tests/cross_implementation.rs` and not in the gate;
+  task 051 ran them again with its new pin. Each pin was first computed by the lab code and a `python3 -I`
   recomputation of README's byte rules (the Python block that `readme_python_recomputes_every_lab_cid_pin`,
-  cited above, runs), not from Kubo:
-  `lab/capsule-identity/README.md:1221` `Kubo itself (none is installed on this Mac). The outside check is the`
-  and `lab/capsule-identity/README.md:1222` `README's Python block, written from the byte rules: the committed test`
+  cited above, runs), and the committed check is still that Python block:
+  `lab/capsule-identity/README.md:1222` `README's Python block, written from the byte rules: the committed test`
   Only the single-block, non-sharded subset of the profile is pinned:
   `lab/capsule-identity/README.md:40` `The tests pin only the single-block, non-sharded subset of that profile: one`
   The pins are reproduced on one Mac only, so no construction rule is frozen.
@@ -943,13 +949,27 @@ Added by task 048, on 2026-10-28: since task 048, a file of 2 to 174 raw leaves 
 by its balanced file root (`fn file_root(` and `const MAX_FILE_LINKS: usize = 174;` in
 `lab/capsule-identity/src/lib.rs`), and only a larger file or a directory block over 262144 bytes is refused; the
 listing call `encode_listed_files` still refuses a listed file over 262144 bytes.
+Added by task 051, on 2026-10-28: since task 051 a file of any size is named by Kubo's balanced layout (trickle
+off, `max-file-links` 174 at every level, any depth; `FileOverLeafLimit` is gone), so only a directory block over
+262144 bytes is refused, and the Runtime-admitted SmolLM2 model package (`weights.gguf`, 144811072 bytes, 553
+leaves) gets its admitted CID `bafybeiew3vuq32fvuz2kmps7lmgl4rxpvwsvklxykx4covogbrkhgy5qky` from the lab encoder
+(hand run, task 051: `kubo_profile_reproduces_the_admitted_model_package_cid`, `#[ignore]`, not in the gate).
 At `c641bcff2` the value was a framed SHA-256 stream printed `lab-cid:sha256:`
 (`lab/capsule-identity/src/lib.rs:73` `pub const LAB_CID_PREFIX: &str = "lab-cid:sha256:";` at that commit).
 It is not the Runtime's CID: the Runtime names a release archive, and that archive's hash and CID stay delivery
 checks (`lab/capsule-identity/README.md:1200` `a delivery check of those archive bytes, not this CID.`).
-No Kubo computed any pin: each comes from the lab code and README's Python rule, which a committed test runs with
+Each pin was first computed by the lab code and README's Python rule, which a committed test runs with
 `python3 -I`
 (`lab/capsule-identity/tests/cross_implementation.rs:127` `fn readme_python_recomputes_every_lab_cid_pin() {`).
+Corrected by task 051, on 2026-10-28 (until task 050 this sentence said no Kubo computed any pin):
+One offline Kubo v0.40.1 hash-only cross-check with the Runtime's
+profile flags was run by hand on this Mac (task 050) and printed every committed pin, and the claim words stay
+"Kubo v0.40.1 profile, computed by the lab" until Rong or Flint changes them.
+Added by task 050, on 2026-10-28: an offline Kubo v0.40.1 hash-only import with the Runtime's profile flags, run by
+hand on this Mac, printed every committed pin (all 14), and the same flags printed the package CID the Runtime
+admitted here for the SmolLM2 model package; the tests are `kubo_hash_only_import_prints_every_lab_cid_pin` and
+`kubo_profile_reproduces_the_admitted_model_package_cid` in `lab/capsule-identity/tests/cross_implementation.rs`,
+both `#[ignore]` and not in the gate. The claim words stay "Kubo v0.40.1 profile, computed by the lab".
 
 Records and bindings live outside the bundle
 (`lab/capsule-identity/README.md:786` `` `PackageRecord` is that record, in the lab. It stays outside the bundle. ``
@@ -960,8 +980,10 @@ The binding groups CIDs and defines no shared capsule identity.
 
 Its results hold for one Mac and these fixtures, with test keys only
 (`lab/capsule-identity/README.md:1217` `One Mac, these fixtures: macOS 26.5.2 on arm64 (APFS), rustc 1.91.0`).
-Not checked: Linux, Kubo and the Runtime's IPFS CID
-(`lab/capsule-identity/README.md:1220` `on every filesystem. Not checked here: Linux, the Runtime's IPFS CID, and`).
+Not checked: Linux and the Runtime's IPFS CID. Kubo is not in the gate; corrected by task 051, on 2026-10-28
+(until task 050 this line listed Kubo as not checked): One offline Kubo v0.40.1 hash-only cross-check with the Runtime's
+profile flags was run by hand on this Mac (task 050) and printed every committed pin, and the claim words stay
+"Kubo v0.40.1 profile, computed by the lab" until Rong or Flint changes them.
 It does not show how the Runtime should name, sign, admit or publish a capsule, and this report did not run
 its tests.
 

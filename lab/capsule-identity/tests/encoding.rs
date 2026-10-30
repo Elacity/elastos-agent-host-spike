@@ -193,31 +193,35 @@ fn file_over_one_leaf_has_the_pinned_cid() {
 }
 
 #[test]
-fn file_of_174_leaves_is_named_and_one_byte_more_is_refused() {
-    // 174 leaves of 262144 bytes (45613056 bytes) is the most one file root
-    // links (`max-file-links`). One byte more needs a 175th leaf and so a
-    // second tree level, which the lab refuses. In memory: no folder.
+fn file_over_174_leaves_gets_a_second_tree_level() {
+    // 174 leaves of 262144 bytes (45613056 bytes) is the most one file node
+    // links (`max-file-links`). One byte more is a 175th leaf, so Kubo's
+    // balanced layout puts a root over two nodes: one of 174 leaves and one
+    // of a single leaf, still a node of one link. Its pin was recomputed by
+    // README's Python rule and printed by Kubo v0.40.1 (task 051). In memory:
+    // no folder.
     let limit = 174 * 262_144;
     assert_eq!(limit, 45_613_056);
-    let mut file = vec![0; limit];
-    let named = encode_entries(&[entry("full.bin", &file)])
-        .unwrap_or_else(|refusal| panic!("174 leaves: {refusal}"));
-    assert!(named.to_string().starts_with("bafybei"), "{named}");
+    let manifest = entry(
+        "capsule.json",
+        &read_fixture(&CONTENT_SAMPLE, "capsule.json"),
+    );
+    let file = two_level_bytes();
+    assert_eq!(file.len(), limit + 1);
+    let named = |content: &[u8]| {
+        encode_entries(&[manifest.clone(), entry("sample.example", content)])
+            .unwrap_or_else(|refusal| panic!("{} bytes: {refusal}", content.len()))
+            .to_string()
+    };
+    let two_levels = named(&file);
+    assert_eq!(two_levels, TWO_LEVEL_FILE_LAB_CID);
+    assert!(two_levels.starts_with("bafybei"), "{two_levels}");
 
-    file.push(0);
-    let refusal = encode_entries(&[entry("full.bin", &file)])
-        .expect_err("a file of 175 leaves must be refused");
-    assert_eq!(
-        refusal,
-        Refusal::FileOverLeafLimit {
-            path: "full.bin".into(),
-            length: 45_613_057
-        }
-    );
-    assert_eq!(
-        refusal.to_string(),
-        "full.bin is 45613057 bytes, over the 174-leaf limit of one file root (45613056 bytes): the lab names no deeper file tree"
-    );
+    // 174 leaves still get one file node, so a name that is not the
+    // two-level one.
+    let one_level = named(&file[..limit]);
+    assert!(one_level.starts_with("bafybei"), "{one_level}");
+    assert_ne!(one_level, two_levels, "174 and 175 leaves got one name");
 }
 
 #[test]
