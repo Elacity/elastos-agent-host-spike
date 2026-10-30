@@ -6,13 +6,260 @@ present is the one file-profile contract: `check_profile_contract`, run over
 `(deny default)` second, an explicit `(deny network*)`, no `(allow default)`,
 no network allow, only the `PROVIDER_EXECUTABLE`, `STORAGE_ROOT` and
 `STORAGE_PARENT` tokens, and the three shared rules verbatim.
-This contract has no Linux enforcement or tests yet. Nothing in this file is
-current behaviour.
+This contract has no Linux enforcement yet. Its only current Linux behaviour is
+the seccomp allow list in "The seccomp allow list" below: a generated allow
+list, source that builds, and one real Linux run behind it in which
+wallet-provider starts under the generated filter and the four refused calls
+answer the filter's own marker.
 `confine.sb` stays each provider's one oracle. The contract is shared, so its
 Linux mapping is written once here, beside the one contract check (P10). The
 Linux policy that the Runtime would generate from the same approved declared
 rights must carry each oracle rule as this file maps it, and no second profile
 file exists (P10).
+
+## The seccomp allow list
+
+One part of this design exists today as source, for `wallet-provider` only: a
+seccomp allow list generated from the provider's declared rights, and one real
+Linux run behind it. That run starts the wallet provider under the filter and
+proves the four denied calls. Namespaces, Landlock, capability dropping and
+every file row of the contract stay unbuilt, so a seccomp filter is the only
+Linux confinement this lab applies.
+
+One function builds the list:
+`seccomp_allow_list_from_declared_rights(name, declared)` in
+`capsules/wallet-provider/tests/confine.rs` calls `generate_profile`, the one lab
+generator, reads the profile text back through `profile_forms`, the one profile
+parser, and maps each allow form through one table. It reads no file, holds no
+rule text of its own and never reads the declared-rights JSON: `declared_entries`
+reaches it only through `generate_profile`, so the JSON has one reader and the
+profile one parser (P10).
+
+The filter is an allow list. Its final decision is the deny marker
+`SECCOMP_RET_ERRNO` with `EACCES` (13), and every `SECCOMP_RET_ALLOW` return sits
+behind an equality test against a syscall number the list names, so a changed
+jump target fails even when the number is right. A call the list does not name is
+refused by the default arm. That is what closes the 0710 fault class, in which
+every call a list does not name is permitted.
+
+`SECCOMP_RULE_SYSCALLS` is the one mapping table, keyed on the allow-form text.
+It holds exactly one row for each of the five allow forms a wallet profile
+carries:
+
+| Allow form | Syscalls the row admits |
+| --- | --- |
+| `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))` | `execve`, `execveat` |
+| `(allow file-read* (literal (param "STORAGE_PARENT")))` | `faccessat`, `fstat`, `getdents64`, `lseek`, `newfstatat`, `openat`, `openat2`, `pread64`, `read`, `readlinkat`, `readv`, `statx` |
+| `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` | the file-read row, plus `fchmod`, `fdatasync`, `fsync`, `ftruncate`, `linkat`, `mkdirat`, `pwrite64`, `renameat2`, `unlinkat`, `write`, `writev` |
+| `(allow file-read* (literal "/"))` | the file-read row |
+| `(allow sysctl-read)` | `uname`, `sysinfo` |
+
+The head forms (`(version 1)`, `(deny default)`) and the deny forms grant
+nothing, so they take no row and add no syscall. An allow form with no row is a
+refusal that names the provider and the form and builds no filter, symmetrical
+to `check_profile_contract`'s refusals. The one recogniser that decides what an
+allow form is, `is_allow_form`, reads `(allow)`, `(allow(file-read*))` and
+`(allow file-read*)` as allow forms; the three allow predicates and
+`allow_forms` call it, so the rule has one spelling.
+
+The table is the only source of the list's declared syscalls, so a declaration
+with no allow form yields an empty list and a program whose only decisions are
+the two ABI guards and the deny marker. A launch additionally needs the measured
+set below, which no declared right covers. That set joins the list in exactly one
+place, `SeccompAllowList::with_launch_essentials`, and the launcher and the probe
+child both install the result through the one `install_seccomp`, so there is one
+list and one install path (P10).
+
+`LAUNCH_ESSENTIALS` is measured, not guessed, on the Linux host the proof ran on:
+each entry was dropped alone from the whole list, the probe re-run, and the call
+that then failed named it. This run's seven calls are:
+
+| Entry | The call whose refusal named it |
+| --- | --- |
+| `close` | `close(3)` in the loader, refused before the first mapping |
+| `exit_group` | `exit_group(0)`, refused as the provider ended its own run |
+| `getrandom` | `getrandom(0xec92ac7c6700, 8, GRND_NONBLOCK)` in the loader |
+| `mmap` | `mmap(NULL, 8192, PROT_READ\|PROT_WRITE, MAP_PRIVATE\|MAP_ANONYMOUS, -1, 0)` in the loader, after which the provider took `SIGSEGV` |
+| `mprotect` | `mprotect(0xf2640329f000, 65536, PROT_NONE)` in the loader |
+| `ppoll` | `ppoll([{fd=0, events=0}, {fd=1, events=0}, {fd=2, events=0}], 3, {tv_sec=0, tv_nsec=0}, NULL, 0)` while the provider waits |
+| `rt_sigaction` | `rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[PIPE], sa_flags=SA_RESTART}, 0xffffea09ff80, 8)` in the loader |
+
+Four calls are in no row and in no launch entry, so the default decision is the
+only answer they receive: `ptrace`, `mount`, `bpf` and `keyctl`. The named test
+`seccomp_program_denies_by_default_and_lists_no_undeclared_call` asserts each of
+the four is in no list entry and no table row and is tested by no equality in
+the program, so adding one to a row turns it red. The filter's marker errno is
+`EACCES` rather than `EPERM` on purpose: a host can already answer `EPERM` for a
+call an unprivileged process may not make, so a plain `EPERM` assertion would
+pass with no filter installed.
+
+`install_seccomp_with(allow, steps)` is the one step sequencer and makes no
+kernel call. It checks the audit architecture first, then runs
+`NoNewPrivileges` and `Filter` in that order, and stops at the first failure with
+that step's own reason and errno. `install_seccomp(allow)` is the one function
+that makes the two kernel calls, and it copies the program into a fixed stack
+buffer so it allocates nothing after a fork.
+`seccomp_launch_refuses_each_reporting_failure` covers the record writer, which
+completes a short write and retries on `EINTR`, and gives a failed write and a
+zero-byte write distinct reasons and errnos.
+`seccomp_launch_record_refuses_missing_or_unknown_report` covers the record
+reader: a record that is missing, short, long or names an unknown step is a
+refusal with its own reason, never a bare spawn error. It also covers the
+launcher's own answer through `seccomp_launch_answers_or_refusal`, the one place
+a record becomes a launch result: a child that never wrote a record, because its
+own write failed or because it never ran, keeps the record's reason and adds what
+the child did instead, so that reason is never lost behind a bare spawn error.
+
+`seccomp_keyctl_probe_supplies_every_argument_without_creation` covers the probe's
+`keyctl` request, whose first three arguments are `KEYCTL_GET_KEYRING_ID`
+(command `0`), the session keyring, a create flag of `0` that asks for no keyring
+to be created, and two unused zeros. One table, `SECCOMP_PROBE_KEYCTL_TABLE`,
+holds all five, and the test reads both the table and the call, so a call that
+passed fewer arguments than the kernel reads fails even though it compiles.
+
+### The kernel proof
+
+The named test `linux_wallet_journey_runs_under_the_seccomp_allow_list` ran on
+host `spark1.local`: `aarch64`, Ubuntu 24.04.4, kernel `6.17.0-1029-nvidia`, 20
+cores, unprivileged. It builds the list from wallet's committed declared-rights
+file, starts the provider through `standin_spawn_confined_provider` with a
+`Seccomp` policy, and requires `init` `ok`, one read-only wallet call `ok`, a
+`wallet-key.hex` of 64 hex digits and a newline under `STORAGE_ROOT`, no
+profile written, and the named sibling `ElastOS/SystemServices/seccomp-outside-write`
+outside `STORAGE_ROOT` absent after the run. The file evidence is those named
+fixture paths; a seccomp filter carries syscall policy, not path policy, so the
+run claims no general file boundary.
+
+The current journey also compares the key's final bytes with the bytes captured
+immediately after `init`. Its separate `STORAGE_ROOT/seccomp-inside-write`
+fixture must equal `b"wallet seccomp journey fixture\n"` after the read-only
+calls and shutdown. The key check requires the trailing newline.
+
+The launched child's own `/proc/<pid>/status` reports `Seccomp: 2`
+(`SECCOMP_MODE_FILTER`). That mode alone also accepts an inherited filter, so the
+launcher's record additionally carries the marker call's answer before and after
+its own `pre_exec` install, and the two must differ.
+
+The current test runs that journey in a child test process with an inherited
+allow-all filter, installed through `install_seccomp`. It checks `Seccomp: 2`
+before launching the provider and prints the launcher's before/after answers.
+This makes the WP176 skip-install plant reach the before/after assertion even
+when the provider already carries an inherited filter.
+
+Then one forked probe child records the four calls before the filter, installs
+the same filter through `install_seccomp`, and records them again:
+
+| Call | Before the filter | After the filter |
+| --- | --- | --- |
+| `ptrace(PTRACE_TRACEME)` | returned `0` | `EACCES` (13) |
+| `mount` | `ENOENT` (2) | `EACCES` (13) |
+| `bpf` (request `0` with a null attribute pointer) | `EINVAL` (22) | `EACCES` (13) |
+| `keyctl(KEYCTL_GET_KEYRING_ID, session keyring, create 0)` | a session keyring id, which differs per session | `EACCES` (13) |
+
+Every filtered answer is the deny marker, and the marker differs from the
+unfiltered answer the same probe recorded, so a host that already refuses a call
+cannot stand in for the filter. The kernel already answers `EPERM` for `bpf`
+under `unprivileged_bpf_disabled=2` and `EACCES` is never that answer, which is
+why the marker is `EACCES`. The `keyctl` row names the keyring and a create flag
+of `0`, because command `0` reads both: a call that passed only its command would
+leave the registers behind it to chance, and the probe could select another
+keyring or be asked to create one.
+
+The probe child allocates nothing after its fork, and the report proves it. The
+test binary counts the probe child's own allocations and the child writes the
+count with its report, which is `0` on every kernel-proof child; a child that
+allocated reports a count the parser reads and the probe refuses with its own
+reason. The report pipe is created with atomic `O_CLOEXEC`. One child ownership
+check uses `close_range` before the filter to keep only that child's report
+writer, including when another probe or launcher has an open report channel.
+The parent owns a bounded, nonblocking reader directly, so a read deadline
+closes the descriptor without leaving a reader thread behind. A kernel that
+refuses `close_range` ends the probe with its errno before any probe call.
+
+`linux_seccomp_probe_descriptors_stay_with_their_owner` holds the pipe-creation
+window open while another thread launches a provider, checks its `/proc` file
+descriptors, and runs a fork-only sibling that requires both inherited pipe
+ends to be closed. The owner then reaches EOF while the provider stays alive.
+A retained parent writer exercises the read deadline and checks descriptor
+cleanup on that error.
+
+The reaping test `linux_seccomp_probe_reaps_failures_and_repeated_journeys` starts
+children for both failed install steps, an architecture mismatch, missing
+reports, stops, timeouts, allocations and repeated kernel proofs. Install
+failures use the launcher's fixed-record encoder and decoder, and the test
+requires the architecture refusal to name both architectures. A stopped child is
+killed and reaped like a timed-out one, because `PTRACE_TRACEME` makes a child's
+stops reportable without `WUNTRACED` and a stopped child is still alive. The reap
+is asserted on every result before any arm can return, and the whole test is
+bounded well inside eight deadlines.
+
+Namespaces, Landlock, capability dropping and every file row of the contract stay
+unbuilt on Linux, and a seccomp filter reads syscall numbers and not paths, so no
+sentence here says a contract file row is enforced on Linux. `linux` stays out of
+`DECLARED_CONFINED_OS`. A `linux` host under a `Seatbelt` policy keeps the words
+this lab already used, and a `linux` host under a `Seccomp` policy is accepted by
+the host rule and starts the provider under the filter; on any other OS the same
+seat refuses the start by name instead of starting the provider unconfined.
+`standin_host_refusal_decides_each_policy` holds both.
+
+Every Linux-only plant below names exactly one test. The quoted outputs are
+from the earlier run on the host above; the repair's new inheritance cases await
+a Linux rerun. None is registered in `falsifiers.json`:
+the runner runs on the Mac, where these `#[cfg(target_os = "linux")]` tests do not
+run, so none can print a CAUGHT line there. Two Mac-runnable rules beside them are
+registered instead: WP166's argument rule in
+`seccomp_keyctl_probe_supplies_every_argument_without_creation` and WP167's
+missing-record reason in `seccomp_launch_record_refuses_missing_or_unknown_report`.
+
+- WP168 suppresses the `NoNewPrivileges` install failure, so
+  `linux_seccomp_launch_refuses_each_failed_install` fails with
+  `wallet-provider start is refused: seccomp install refused: PR_SET_NO_NEW_PRIVS
+  failed with errno 1 must refuse the start`.
+- WP169 suppresses the `Filter` install failure, so the same test fails with
+  `wallet-provider start is refused: seccomp install refused: the filter install
+  failed with errno 22 must refuse the start`.
+- WP170 substitutes `PROVIDER_BINARY` for the given program, so
+  `linux_seccomp_launcher_runs_the_requested_program` fails with
+  `left: "/home/spark1/t148/capsules/wallet-provider/target/debug/wallet-provider"`,
+  `right: "/tmp/.tmpjY5EWl/requested-program"`.
+- WP171 reads a stopped child as an end, so
+  `linux_seccomp_probe_reaps_failures_and_repeated_journeys` fails with
+  `a stopped child must be reported as stopped and reaped: seccomp probe refused:
+  child exit status: 19 wrote no complete report within 10s`.
+- WP172 omits the kill and reap for a timed-out probe, so the same test fails with
+  `the probe child must already be reaped, and a second wait answered 0`.
+- WP173 kills a timed-out probe without reaping it, so the same test fails with
+  the same reaped assertion.
+- WP174 omits the whole wait, so the same test fails with the same reaped
+  assertion.
+- WP175 collects the filtered answers into a `Vec` after the fork, so the same
+  test fails with `the probe child allocated 1 times after its fork, where only
+  async-signal-safe calls are available`.
+- WP176 skips only the launcher's `pre_exec` install and leaves the self-filtering
+  probe intact. The earlier `linux_wallet_journey_runs_under_the_seccomp_allow_list` run failed
+  with `the launched provider must carry SECCOMP_MODE_FILTER in its own /proc
+  status`, `left: 0`, `right: 2`. That run did not exercise an inherited filter.
+  The current test installs the inherited fixture first. Its required plant
+  failure is `an inherited filter alone must not satisfy the launcher's own install`,
+  with equal before/after answers. This additional Linux run is NOT RUN in the
+  repair session, which runs on macOS. To exercise it, replace only
+  `let install = install_seccomp(&allow);` in `start_under_seccomp` with
+  `let install: Result<(), SeccompInstallFailure> = Ok(());`, then run
+  `cargo test --locked --manifest-path capsules/wallet-provider/Cargo.toml --test confine linux_wallet_journey_runs_under_the_seccomp_allow_list -- --exact --nocapture`.
+  The inherited fixture's install and the probe's install stay intact.
+- WP177 writes the named outside sibling in `status`'s ok arm, so the journey
+  finds `ElastOS/SystemServices/seccomp-outside-write` present and fails with
+  `the named sibling outside STORAGE_ROOT must stay absent after the run`. That
+  plant shows the fixture can fail; a seccomp filter does not stop that write, so
+  the assertion is path evidence for the run and not a Linux file boundary.
+
+The earlier WP166 and WP167 plants were CAUGHT on the Mac, in
+`seccomp_keyctl_probe_supplies_every_argument_without_creation` and
+`seccomp_launch_record_refuses_missing_or_unknown_report`. WP166 now removes
+the call's four trailing arguments. A macOS hand run of that exact edit failed
+the named test with `the keyctl call must pass the table's five arguments and
+no register it did not set`; the source was then restored byte-for-byte. The
+registered runner check remains with the supervisor.
 
 ## The frame
 
@@ -34,10 +281,11 @@ rule, as its row says. The private `/proc` mount the mount namespace provides
 is a mount, not a grant. The policy is a second rendering of the same rights,
 and the one contract check stays the one check of the oracle.
 
-The Linux policy would be applied before the provider image is entered. This
-file is a design: each row names the Linux test that would prove it, the Linux
-counterparts do not exist yet, and no sentence here claims that any provider is
-confined on Linux.
+The Linux policy would be applied before the provider image is entered. Apart
+from the seccomp allow list above, this file is a design: each row names the
+Linux test that would prove it, those Linux counterparts do not exist yet, and
+no sentence here claims that any provider is confined on Linux beyond that one
+filter.
 
 ## The contract on Linux
 

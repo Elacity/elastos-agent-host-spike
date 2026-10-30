@@ -38,10 +38,21 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::LazyLock;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+// The one lab profile generator, included rather than copied: the did, wallet
+// and model test crates all name this one file (P10).
+#[path = "common/profile_generator.rs"]
+mod profile_generator;
+
+use profile_generator::{
+    declared_entries, generate_profile, platform_baseline_justification, platform_baseline_status,
+    write_generated_profile, DeclaredClaim, CONTRACT_RIGHTS, DECLARED_RIGHTS_ROLE,
+    PLATFORM_BASELINE, PLATFORM_BASELINE_IDS, PROFILE_HEAD,
+};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 /// The host OSes where `CONFINEMENT.md` says the confinement tests exercise
@@ -51,6 +62,10 @@ const DECLARED_CONFINED_OS: [&str; 1] = ["macos"];
 const PROVIDER_BINARY: &str = env!("CARGO_BIN_EXE_wallet-provider");
 const PROFILE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/confine.sb");
 const WALLET_KEY_FILE: &str = "wallet-key.hex";
+/// The storage key's length in bytes; its file holds the same value as lowercase
+/// hex digits and one newline.
+#[cfg(target_os = "linux")]
+const WALLET_KEY_BYTES: usize = 32;
 const WALLET_DIR: [&str; 3] = ["ElastOS", "SystemServices", "Wallet"];
 /// The provider names the stand-in launcher serves. One derivation picks each
 /// provider's storage-root layout from its name.
@@ -65,6 +80,51 @@ const CHILD_EXIT_DEADLINE: Duration = Duration::from_secs(10);
 const CHILD_EXIT_POLL: Duration = Duration::from_millis(20);
 
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+
+/// The heap allocations a probe child makes after its fork. A forked child may
+/// rely only on async-signal-safe calls, and the allocator is not one of them:
+/// another thread of the parent can hold its lock at the moment of the fork, so
+/// an allocation in the child can block for ever. The child counts its own
+/// allocations and refuses its own report when the count is not zero.
+///
+/// The child is a fork of this process and holds only the calling thread, so
+/// this flag in the child's own copy is the child's alone and the parent's
+/// threads, which keep running in the parent's copy, cannot set it.
+static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+static COUNT_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
+
+/// The test binary's allocator, which counts the probe child's allocations and
+/// changes nothing else.
+struct CountingAllocator;
+
+unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        self.count_one();
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+        unsafe { std::alloc::System.dealloc(pointer, layout) }
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+        self.count_one();
+        unsafe { std::alloc::System.realloc(pointer, layout, size) }
+    }
+}
+
+impl CountingAllocator {
+    /// Counts this allocation when the calling process is a counted probe
+    /// child.
+    fn count_one(&self) {
+        if COUNT_ALLOCATIONS.load(Ordering::Relaxed) {
+            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 /// Whether a sandbox test runs on this host.
 ///
@@ -621,17 +681,25 @@ struct ConfinedProvider {
     stdout: BufReader<ChildStdout>,
     stderr_reader: Option<JoinHandle<String>>,
     stderr_text: String,
+    /// The marker's answer before and after the launcher's own filter install,
+    /// reported by the child over the one fixed record. `None` for a child that
+    /// installed none.
+    #[cfg(target_os = "linux")]
+    seccomp_launch_answers: Option<[i64; 2]>,
 }
 
 impl ConfinedProvider {
-    /// The one spawn path; `command` already carries its arguments.
-    fn spawn(mut command: Command) -> Self {
+    /// The one spawn path; `command` already carries its arguments. A spawn
+    /// that fails, including a `pre_exec` install that refuses, returns the OS
+    /// error instead of panicking, because a caller that must report the
+    /// failing install step reads the child's record and not this errno.
+    fn try_spawn(mut command: Command) -> Result<Self, String> {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("the test child must start");
+            .map_err(|err| format!("the test child must start: {err}"))?;
         let stdin = child.stdin.take().expect("provider stdin");
         let stdout = BufReader::new(child.stdout.take().expect("provider stdout"));
         let mut stderr_pipe = child.stderr.take().expect("provider stderr");
@@ -640,13 +708,21 @@ impl ConfinedProvider {
             let _ = stderr_pipe.read_to_end(&mut bytes);
             String::from_utf8_lossy(&bytes).into_owned()
         });
-        Self {
+        Ok(Self {
             child,
             stdin,
             stdout,
             stderr_reader: Some(stderr_reader),
             stderr_text: String::new(),
-        }
+            #[cfg(target_os = "linux")]
+            seccomp_launch_answers: None,
+        })
+    }
+
+    /// The same path for a caller whose child must start: a failure is the
+    /// test's own failure, so it panics with the reason `try_spawn` returned.
+    fn spawn(command: Command) -> Self {
+        Self::try_spawn(command).unwrap_or_else(|failure| panic!("{failure}"))
     }
 
     fn start(base: &Path) -> Self {
@@ -685,6 +761,122 @@ impl ConfinedProvider {
         }
         command.arg(program);
         Self::spawn(command)
+    }
+
+    /// The Linux seat of the one launch builder: `program` with the launch
+    /// list installed in `pre_exec`, through the same `spawn`. The program is
+    /// the one this function is given, so a Linux start cannot run another
+    /// binary.
+    ///
+    /// The install report crosses the fork as one fixed record on a socket
+    /// pair, because Rust's exec-error pipe carries only a raw errno and no
+    /// step. An install that refuses reports the step and its errno, and the
+    /// parent turns it into that step's own reason, so a failed install starts
+    /// nothing (P11). A missing, short, long or unknown-step record is a
+    /// refusal with its own reason and never a bare spawn error.
+    ///
+    /// Every other OS refuses the start by name and starts nothing: a seccomp
+    /// filter is installed on Linux only, and a provider never runs
+    /// unconfined here.
+    #[cfg(target_os = "linux")]
+    fn start_under_seccomp(allow: &SeccompAllowList, program: &Path) -> Result<Self, String> {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::net::UnixStream;
+        use std::os::unix::process::CommandExt as _;
+
+        let allow = allow.with_launch_essentials();
+        let provider_name = allow.provider.clone();
+        let (mut reader, writer) = UnixStream::pair().map_err(|err| {
+            format!(
+                "{} start is refused: the seccomp install report channel could not open: {err}",
+                allow.provider
+            )
+        })?;
+        let mut command = Command::new(program);
+        // The closure holds the list and the reporting socket before the fork,
+        // so the child allocates nothing after it.
+        unsafe {
+            command.pre_exec(move || {
+                let before = seccomp_launch_marker_answer();
+                let install = install_seccomp(&allow);
+                let record = match install {
+                    Ok(()) => seccomp_launch_record(
+                        SECCOMP_LAUNCH_INSTALLED,
+                        before,
+                        seccomp_launch_marker_answer(),
+                    ),
+                    Err(failure) => failure.launch_record(),
+                };
+                // `write` is admitted by the list and is async-signal-safe
+                // after a fork; a socket write is not in the list at all.
+                write_seccomp_launch_record(&record, |bytes| {
+                    let written =
+                        libc::write(writer.as_raw_fd(), bytes.as_ptr().cast(), bytes.len());
+                    if written < 0 {
+                        return Err(*libc::__errno_location());
+                    }
+                    Ok(written as usize)
+                })
+                .map_err(|failure| std::io::Error::from_raw_os_error(failure.errno()))?;
+                install.map_err(|failure| {
+                    std::io::Error::from_raw_os_error(match failure {
+                        SeccompInstallFailure::Step(_, errno) => errno,
+                        SeccompInstallFailure::AuditArchitecture(_) => libc::EINVAL,
+                    })
+                })
+            });
+        }
+        // `try_spawn` owns the command, so the parent's copy of the report
+        // socket closes when it returns and the read below sees end of file.
+        let spawned = Self::try_spawn(command);
+        let mut record = Vec::new();
+        reader
+            .read_to_end(&mut record)
+            .map_err(|err| format!("{provider_name} start is refused: {err}"))?;
+        // What the child did instead of reporting: it did not start, with that
+        // reason, or it started and its own report never arrived. Either way the
+        // record decides the first half of the refusal, so a reporting failure
+        // keeps the install report's own reason (P11).
+        let child = match &spawned {
+            Err(failure) => failure.as_str(),
+            Ok(_) => "the child started and its install report arrived incomplete",
+        };
+        let answers = match seccomp_launch_answers_or_refusal(&record, child) {
+            Ok(answers) => answers,
+            Err(refusal) => return Err(format!("{provider_name} start is refused: {refusal}")),
+        };
+        let mut provider = spawned?;
+        provider.seccomp_launch_answers = Some(answers);
+        Ok(provider)
+    }
+
+    /// The same function where no seccomp filter exists: the start is refused
+    /// by name and nothing runs (P11).
+    #[cfg(not(target_os = "linux"))]
+    fn start_under_seccomp(allow: &SeccompAllowList, _: &Path) -> Result<Self, String> {
+        Err(format!(
+            "{} start is refused: a seccomp filter is installed on linux only",
+            allow.provider
+        ))
+    }
+
+    /// The filter mode the launched child reports in its own
+    /// `/proc/<pid>/status`: `2` for `SECCOMP_MODE_FILTER`. The mode alone also
+    /// accepts an inherited filter, so the journey compares the marker's answer
+    /// across this launcher's own install as well.
+    #[cfg(target_os = "linux")]
+    fn launched_seccomp_mode(&self) -> u32 {
+        let path = format!("/proc/{}/status", self.child.id());
+        let status = fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("the launched provider's {path} must be readable: {err}"));
+        let line = status
+            .lines()
+            .find(|line| line.starts_with("Seccomp:"))
+            .unwrap_or_else(|| panic!("{path} must report a Seccomp line: {status}"));
+        line["Seccomp:".len()..]
+            .trim()
+            .parse()
+            .unwrap_or_else(|err| panic!("{path} must report a filter mode: {line}: {err}"))
     }
 
     /// Sends one request and returns its answer; a failure panics with the
@@ -891,42 +1083,80 @@ impl StandinHost {
     }
 }
 
-/// The one rule that decides whether the stand-in can confine `host`.
+/// The one confinement policy a stand-in start carries.
+///
+/// A macOS start runs under its generated Seatbelt profile, the one file the
+/// lab writer generates; a Linux start would run under the seccomp allow list
+/// generated from the same declared rights. The policy is one input of the one
+/// launcher, so the two OS policies reach the start by one entry point and not
+/// two (P10).
+#[derive(Debug, Clone, Copy)]
+enum StandinPolicy<'a> {
+    /// The generated Seatbelt profile the start runs under.
+    Seatbelt(&'a Path),
+    /// The generated seccomp allow list the start installs.
+    Seccomp(&'a SeccompAllowList),
+}
+
+/// The one rule that decides whether the stand-in can confine `host` under
+/// `policy`.
 ///
 /// A host that reports a primitive unavailable is refused first, on every OS,
 /// so the report reaches this rule before the `DECLARED_CONFINED_OS` lookup and
 /// an OS in that list cannot pass a start with a missing primitive. That
 /// early refusal is the one host check (P10).
 ///
-/// `DECLARED_CONFINED_OS` is the only list of OSes where the stand-in applies
-/// confinement. Each refusal starts `{name} start on {os} is refused:` and then
-/// carries only its own case's words: a host that reports a primitive
-/// unavailable carries the design's exact words for that primitive; an OS with
-/// no confinement design names that OS and the list; a simulated Linux host
-/// that reports nothing missing says Linux is designed, not enforced, in this
-/// lab, so `linux` is not in `DECLARED_CONFINED_OS`.
-fn standin_host_refusal(name: &str, host: StandinHost) -> Result<(), String> {
+/// Each refusal starts `{name} start on {os} is refused:` and then carries only
+/// its own case's words. Under a `Seatbelt` policy, `DECLARED_CONFINED_OS` is
+/// the only list of OSes where the stand-in applies confinement: a host that
+/// reports a primitive unavailable carries the design's exact words for that
+/// primitive; an OS with no confinement design names that OS and the list; and
+/// a simulated Linux host that reports nothing missing says Linux is designed,
+/// not enforced, in this lab, so `linux` is not in `DECLARED_CONFINED_OS`. A
+/// `Seccomp` policy is the Linux policy, so the same rule accepts it on `linux`
+/// alone and refuses it on every other OS by name. `DECLARED_CONFINED_OS` stays
+/// the macOS list: accepting a seccomp policy on a simulated Linux host is a
+/// host-report answer about that policy, not a claim that Linux is confined.
+fn standin_host_refusal(
+    name: &str,
+    host: StandinHost,
+    policy: StandinPolicy<'_>,
+) -> Result<(), String> {
     let confined_os = DECLARED_CONFINED_OS.join(", ");
     if let Some(primitive) = host.unavailable {
         let reason = primitive.design_refusal();
         return Err(format!("{name} start on {} is refused: {reason}", host.os));
     }
-    if DECLARED_CONFINED_OS.contains(&host.os) {
-        return Ok(());
+    match policy {
+        StandinPolicy::Seatbelt(_) => {
+            if DECLARED_CONFINED_OS.contains(&host.os) {
+                return Ok(());
+            }
+            let reason = if host.os == "linux" {
+                format!(
+                    "linux is designed, not enforced, in this lab, so linux is not in \
+                     DECLARED_CONFINED_OS ({confined_os})"
+                )
+            } else {
+                format!(
+                    "{os} has no confinement design, and the lab stand-in applies confinement only on \
+                     {confined_os}",
+                    os = host.os
+                )
+            };
+            Err(format!("{name} start on {} is refused: {reason}", host.os))
+        }
+        StandinPolicy::Seccomp(_) => {
+            if host.os == "linux" {
+                return Ok(());
+            }
+            Err(format!(
+                "{name} start on {} is refused: the seccomp allow list is the linux policy, \
+                 and {} is not linux",
+                host.os, host.os
+            ))
+        }
     }
-    let reason = if host.os == "linux" {
-        format!(
-            "linux is designed, not enforced, in this lab, so linux is not in \
-             DECLARED_CONFINED_OS ({confined_os})"
-        )
-    } else {
-        format!(
-            "{os} has no confinement design, and the lab stand-in applies confinement only on \
-             {confined_os}",
-            os = host.os
-        )
-    };
-    Err(format!("{name} start on {} is refused: {reason}", host.os))
 }
 
 /// Lab stand-in for the Runtime's provider launch, not the Runtime.
@@ -939,62 +1169,80 @@ fn standin_host_refusal(name: &str, host: StandinHost) -> Result<(), String> {
 ///
 /// It copies the inputs of `ProviderBridge::spawn(binary_path, config)` with
 /// `ProviderConfig.base_path` (read only, in `elastos/`), plus the provider
-/// name, the host report, the confinement tool and the declared rights the lab
-/// generator profiles from. `Ok(ConfinedProvider)` is Started: the provider
-/// answered `init` `ok` under the generated profile. `Err(String)` is Refused:
-/// no provider is returned, and the reason says why.
+/// name, the host report, the one confinement policy and the declared rights
+/// the lab generator profiles from. `Ok(ConfinedProvider)` is Started: the
+/// provider answered `init` `ok` under the generated profile. `Err(String)` is
+/// Refused: no provider is returned, and the reason says why.
 ///
 /// It refuses, in this order:
 ///
-/// 1. a host that `standin_host_refusal` refuses, with that one reason, before
-///    any tool, binary or profile check, so a refused host writes no profile
-///    and creates no storage root. A host that reports a missing primitive is
-///    refused whatever its OS. The reason starts
+/// 1. a host that `standin_host_refusal` refuses under this policy, with that
+///    one reason, before any tool, binary or profile check, so a refused host
+///    writes no profile and creates no storage root. A host that reports a
+///    missing primitive is refused whatever its OS. The reason starts
 ///    `{name} start on {os} is refused:` and holds the words of its own case
 ///    for a host that reports a primitive unavailable, for an OS with no
-///    confinement design, and for a simulated Linux host that reports nothing
-///    missing;
+///    confinement design, for a simulated Linux host that reports nothing
+///    missing under a `Seatbelt` policy, and for a host that is not Linux under
+///    a `Seccomp` policy;
 /// 2. an absent `sandbox_exec`, with a reason that names the OS and the path;
 /// 3. a present `sandbox_exec` that is not `SANDBOX_EXEC`, with a reason that
 ///    names the OS, the given path and `SANDBOX_EXEC`, so the tool the stand-in
 ///    checks is the one `start_under` runs;
-/// 4. a `binary_path` that is not a file, with a reason that names the
+/// 4. a `Seccomp` policy whose list was generated for another provider, with a
+///    reason that names both providers;
+/// 5. a `binary_path` that is not a file, with a reason that names the
 ///    provider and that path, before any profile is written;
-/// 5. a refusal of `write_generated_profile`, returned unchanged;
-/// 6. a start that `sandbox-exec` refuses, with the `try_send` failure;
-/// 7. an `init` that does not answer `ok`, with the answer.
+/// 6. a refusal of `write_generated_profile`, returned unchanged;
+/// 7. a start that `sandbox-exec` refuses, with the `try_send` failure;
+/// 8. an `init` that does not answer `ok`, with the answer.
 ///
-/// Otherwise it writes the profile the one lab writer generates from the
-/// declared rights into `profile_dir`, creates the shared ancestors, starts
+/// `policy` is the one input that says how the start is confined. A `Seatbelt`
+/// policy writes the profile the one lab writer generates from the declared
+/// rights into `profile_dir`, creates the shared ancestors, starts
 /// `binary_path` under that profile through `start_under` with the canonical
-/// bindings for `name`, `base_path` and `binary_path`, and sends `init` with
-/// the provider config from `provider_init_config`. It never starts
-/// `binary_path` outside `sandbox-exec`. `name` and `binary_path` are inputs
-/// rather than this provider's constants, so another provider's binary can
-/// start through this same function.
+/// bindings for `name`, `base_path` and `binary_path`, and never starts
+/// `binary_path` outside `sandbox-exec`. A `Seccomp` policy writes no profile
+/// and starts that same `binary_path` through the same `ConfinedProvider::spawn`
+/// by `start_under_seccomp`, which installs the allow list in `pre_exec`; on a
+/// host without a filter that call refuses the start by name, so no provider
+/// starts unconfined on any host this build runs on. Both then send `init` with
+/// the provider config from `provider_init_config`. `name` and `binary_path`
+/// are inputs rather than this provider's constants, so another provider's
+/// binary can start through this same function.
 fn standin_spawn_confined_provider(
     host: StandinHost,
-    sandbox_exec: &Path,
+    policy: StandinPolicy<'_>,
     name: &str,
     binary_path: &Path,
     base_path: &Path,
     declared: &Value,
     profile_dir: &Path,
 ) -> Result<ConfinedProvider, String> {
-    standin_host_refusal(name, host)?;
+    standin_host_refusal(name, host, policy)?;
     let os = host.os;
-    if !sandbox_exec.is_file() {
-        return Err(format!(
-            "{name} start on {os} is refused: the confinement tool {} is absent",
-            sandbox_exec.display()
-        ));
+    if let StandinPolicy::Seatbelt(sandbox_exec) = policy {
+        if !sandbox_exec.is_file() {
+            return Err(format!(
+                "{name} start on {os} is refused: the confinement tool {} is absent",
+                sandbox_exec.display()
+            ));
+        }
+        if sandbox_exec != Path::new(SANDBOX_EXEC) {
+            return Err(format!(
+                "{name} start on {os} is refused: the confinement tool {} is not {SANDBOX_EXEC}, \
+                 which is the one the stand-in runs",
+                sandbox_exec.display()
+            ));
+        }
     }
-    if sandbox_exec != Path::new(SANDBOX_EXEC) {
-        return Err(format!(
-            "{name} start on {os} is refused: the confinement tool {} is not {SANDBOX_EXEC}, \
-             which is the one the stand-in runs",
-            sandbox_exec.display()
-        ));
+    if let StandinPolicy::Seccomp(allow) = policy {
+        if allow.provider != name {
+            return Err(format!(
+                "{name} start is refused: the seccomp allow list was generated for {}",
+                allow.provider
+            ));
+        }
     }
     if !binary_path.is_file() {
         return Err(format!(
@@ -1002,15 +1250,23 @@ fn standin_spawn_confined_provider(
             binary_path.display()
         ));
     }
-    let profile = profile_dir.join(format!("{name}-standin.sb"));
-    write_generated_profile(name, declared, &profile)?;
     let canonical = canonical_bindings(name, base_path, binary_path);
-    create_shared_ancestors(&canonical);
-    let bindings: Vec<(&str, &Path)> = canonical
-        .iter()
-        .map(|(binding, path)| (*binding, path.as_path()))
-        .collect();
-    let mut provider = ConfinedProvider::start_under(&profile, &bindings, binary_path);
+    let mut provider = match policy {
+        StandinPolicy::Seatbelt(_) => {
+            let profile = profile_dir.join(format!("{name}-standin.sb"));
+            write_generated_profile(name, declared, &profile)?;
+            create_shared_ancestors(&canonical);
+            let bindings: Vec<(&str, &Path)> = canonical
+                .iter()
+                .map(|(binding, path)| (*binding, path.as_path()))
+                .collect();
+            ConfinedProvider::start_under(&profile, &bindings, binary_path)
+        }
+        StandinPolicy::Seccomp(allow) => {
+            create_shared_ancestors(&canonical);
+            ConfinedProvider::start_under_seccomp(allow, binary_path)?
+        }
+    };
     let init = json!({
         "op": "init",
         "config": provider_init_config(name, base_path),
@@ -3973,7 +4229,7 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
         let profile_dir = resolved(profile_root.path());
         let refusal = standin_spawn_confined_provider(
             host,
-            sandbox_exec,
+            StandinPolicy::Seatbelt(sandbox_exec),
             name,
             provider,
             &base,
@@ -4032,7 +4288,7 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
     );
     let refusal = standin_spawn_confined_provider(
         StandinHost::reporting(std::env::consts::OS),
-        Path::new(SANDBOX_EXEC),
+        StandinPolicy::Seatbelt(Path::new(SANDBOX_EXEC)),
         name,
         &absent_binary,
         &base,
@@ -4079,7 +4335,7 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
         }));
     let refusal = standin_spawn_confined_provider(
         StandinHost::reporting(std::env::consts::OS),
-        Path::new(SANDBOX_EXEC),
+        StandinPolicy::Seatbelt(Path::new(SANDBOX_EXEC)),
         name,
         provider,
         &base,
@@ -4129,7 +4385,7 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
         ));
     let refusal = standin_spawn_confined_provider(
         StandinHost::reporting(std::env::consts::OS),
-        Path::new(SANDBOX_EXEC),
+        StandinPolicy::Seatbelt(Path::new(SANDBOX_EXEC)),
         name,
         provider,
         &base,
@@ -4167,7 +4423,7 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
     fs::write(&planted, b"not a directory").expect("plant a regular file at the storage root");
     let refusal = standin_spawn_confined_provider(
         StandinHost::reporting(std::env::consts::OS),
-        Path::new(SANDBOX_EXEC),
+        StandinPolicy::Seatbelt(Path::new(SANDBOX_EXEC)),
         name,
         provider,
         &base,
@@ -4215,7 +4471,7 @@ fn standin_confined_journey(name: &str, provider: &Path, declared: &Value) {
     let profile_dir = resolved(profile_root.path());
     let mut started = standin_spawn_confined_provider(
         StandinHost::reporting(std::env::consts::OS),
-        Path::new(SANDBOX_EXEC),
+        StandinPolicy::Seatbelt(Path::new(SANDBOX_EXEC)),
         name,
         provider,
         &base,
@@ -4999,7 +5255,7 @@ fn standin_b3_journey(provider: &B3Provider) {
     let profile_dir = resolved(profile_fixture.path());
     let mut standin = standin_spawn_confined_provider(
         StandinHost::reporting(std::env::consts::OS),
-        Path::new(SANDBOX_EXEC),
+        StandinPolicy::Seatbelt(Path::new(SANDBOX_EXEC)),
         name,
         provider.binary,
         &standin_root,
@@ -5139,7 +5395,7 @@ fn standin_start_runs_under_the_generated_profile_not_the_committed_file() {
     let profile_dir = resolved(profile_fixture.path());
     let refusal = standin_spawn_confined_provider(
         StandinHost::reporting(std::env::consts::OS),
-        Path::new(SANDBOX_EXEC),
+        StandinPolicy::Seatbelt(Path::new(SANDBOX_EXEC)),
         "wallet-provider",
         Path::new(PROVIDER_BINARY),
         &base,
@@ -5605,18 +5861,44 @@ fn invalid_json_answer_names_the_request_and_the_parse_error() {
     eprintln!("invalid-JSON failure: {failure}");
 }
 
+/// Whether `form` is a top-level allow rule, whichever way it writes the
+/// operator: `(allow file-read*)` and `(allow(literal "/x"))` put a space or a
+/// nested form after `allow`, `(allow)` is the bare operator, and
+/// `(allow network*)` is the spaced spelling. The three predicates below, the
+/// allow-form selector `allow_forms` and the seccomp mapping table's lookup all
+/// call this one function, so the rule has one spelling in this file (P10).
+///
+/// `allow` must be a whole token of the form: `(allowed ...)`, `(allowing x)`
+/// and `(notallow)` are not allow forms.
+fn is_allow_form(form: &str) -> bool {
+    allow_form_rest(form).is_some()
+}
+
+/// The text after the `allow` operator of a top-level allow form, or `None`
+/// where the form is not one. `is_allow_form` answers the boolean question and
+/// `is_exec_allow` reads its operation names from this same rest, so the form
+/// head has one spelling (P10).
+fn allow_form_rest(form: &str) -> Option<&str> {
+    let rest = form.strip_prefix('(')?.trim_start();
+    let operation = rest.split([' ', '(', ')']).next().unwrap_or_default();
+    if operation != "allow" {
+        return None;
+    }
+    Some(&rest[operation.len()..])
+}
+
 /// Whether `form` is a top-level allow rule that grants the network. This is
 /// the one copy of the rule, used both by the provider's own profile test and
 /// by the shared file-profile contract check (P10).
 fn is_network_allow(form: &str) -> bool {
-    form.starts_with("(allow ") && form.contains("network")
+    is_allow_form(form) && form.contains("network")
 }
 
 /// Whether `form` is a top-level allow rule that grants every operation by
 /// default. This is the one copy of the rule, used both by the provider's own
 /// profile test and by the shared file-profile contract check (P10).
 fn is_default_allow(form: &str) -> bool {
-    form.starts_with("(allow ") && form.split([' ', '(', ')']).any(|token| token == "default")
+    is_allow_form(form) && form.split([' ', '(', ')']).any(|token| token == "default")
 }
 
 /// Whether `form` is a top-level allow rule that grants `process-exec`: one of
@@ -5629,10 +5911,10 @@ fn is_default_allow(form: &str) -> bool {
 /// quote or parenthesis reads here as `profile_forms` reads it. This is the one
 /// copy of the rule, used by the shared file-profile contract check (P10).
 fn is_exec_allow(form: &str) -> bool {
-    let Some(rest) = form.strip_prefix("(allow") else {
+    let Some(rest) = allow_form_rest(form) else {
         return false;
     };
-    if !rest.starts_with([' ', '(']) {
+    if !rest.is_empty() && !rest.starts_with([' ', '(']) {
         return false;
     }
     let mut operations: Vec<String> = Vec::new();
@@ -5716,11 +5998,6 @@ const SHARED_RULES: [&str; 3] = [
     r#"(allow file-read* (literal (param "STORAGE_PARENT")))"#,
     r#"(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))"#,
 ];
-/// The three head forms every file profile starts with, in profile order.
-const PROFILE_HEAD: [&str; 3] = ["(version 1)", "(deny default)", "(deny network*)"];
-/// The right ids the shared contract names. A declared-rights file may claim
-/// only these.
-const CONTRACT_RIGHTS: [&str; 2] = ["storage", "bound-executable"];
 /// The two allow forms did and wallet hold for startup: the provider reads the
 /// root directory to resolve its own path, and reads kernel facts before the
 /// protocol starts.
@@ -5728,10 +6005,6 @@ const STARTUP_RULES: [&str; 2] = [
     r#"(allow file-read* (literal "/"))"#,
     r#"(allow sysctl-read)"#,
 ];
-/// The platform-baseline ids the shared contract names. A declared-rights file
-/// may claim only these under its platform baseline; they are the Runtime
-/// platform baseline for the provider executable on macOS, not approved rights.
-const PLATFORM_BASELINE_IDS: [&str; 2] = ["startup-root-directory", "startup-sysctl"];
 /// The one id the shared contract names for each pinned allow rule: the three
 /// shared rules and the two startup forms. A shared rule must be claimed by its
 /// id, and a startup form must be claimed by its id whenever the profile holds
@@ -5744,21 +6017,6 @@ const PINNED_RULES: &[(&str, &str)] = &[
     (STARTUP_RULES[0], "startup-root-directory"),
     (STARTUP_RULES[1], "startup-sysctl"),
 ];
-/// The sentence a declared-rights file gives for its own role.
-const DECLARED_RIGHTS_ROLE: &str =
-    "lab stand-in for the Runtime generator's input, not a manifest field";
-/// The one key a declared-rights file holds its platform baseline under.
-const PLATFORM_BASELINE: &str = "platform_baseline";
-/// The status sentence a declared-rights file gives its platform baseline for
-/// `name`, the provider executable the Runtime binds on macOS.
-fn platform_baseline_status(name: &str) -> String {
-    format!("Runtime platform baseline for the {name} executable on macOS, not approved rights")
-}
-/// The prefix every platform-baseline justification starts with, naming the
-/// provider executable the Runtime binds as PROVIDER_EXECUTABLE.
-fn platform_baseline_justification(name: &str) -> String {
-    format!("macOS {name} executable bound as PROVIDER_EXECUTABLE: ")
-}
 /// The file profiles the one contract check requires. Every one of them must
 /// present the contract, in this order.
 const FILE_PROFILES: [&str; 3] = ["did-provider", "wallet-provider", "model-provider"];
@@ -5859,14 +6117,6 @@ fn check_file_profiles(capsules: &Path) -> Result<Vec<&'static str>, String> {
         checked.push(name);
     }
     Ok(checked)
-}
-
-/// One declared entry of a declared-rights file: its id and the allow rules it
-/// claims.
-#[derive(Debug)]
-struct DeclaredClaim {
-    id: String,
-    rules: Vec<String>,
 }
 
 /// The one declared-rights check for the did and wallet profiles: every
@@ -5970,169 +6220,6 @@ fn check_declared_rights(name: &str, profile: &str, declared: &Value) -> Result<
     Ok(())
 }
 
-/// The rights claims and the platform-baseline claims of `declared`, each
-/// proven to hold an id the shared contract names and a rules list of strings,
-/// and each platform-baseline entry proven to give a justification that starts
-/// with the provider's executable prefix and a reason after it.
-///
-/// The one declared-rights check and the one lab generator both read the
-/// declared entries through this function (P10). It refuses, in this order: a
-/// document without the role, provider, rights list or platform baseline; a
-/// platform baseline without its own status sentence; a platform baseline
-/// without its rules list; an entry of the declared rights list or the
-/// platform-baseline rules list without a string id, whose reason names that
-/// list and the entry; an entry without a rules list; a rule that is not a
-/// string; an id the shared contract does not name; and a platform-baseline
-/// entry without a justification that starts with the provider's prefix and
-/// gives a reason. Each refusal starts with the provider name and quotes the
-/// rule or names the id (P11).
-fn declared_entries(
-    name: &str,
-    declared: &Value,
-) -> Result<(Vec<DeclaredClaim>, Vec<DeclaredClaim>), String> {
-    if declared["role"].as_str() != Some(DECLARED_RIGHTS_ROLE) {
-        return Err(format!(
-            "{name} declared-rights file must give the role {DECLARED_RIGHTS_ROLE:?}"
-        ));
-    }
-    if declared["provider"].as_str() != Some(name) {
-        return Err(format!(
-            "{name} declared-rights file must name the provider {name}"
-        ));
-    }
-    let Some(rights) = declared["rights"].as_array() else {
-        return Err(format!(
-            "{name} declared-rights file must hold a rights list"
-        ));
-    };
-    let Some(baseline) = declared[PLATFORM_BASELINE].as_object() else {
-        return Err(format!(
-            "{name} declared-rights file must hold a platform baseline"
-        ));
-    };
-    let status = platform_baseline_status(name);
-    if baseline.get("status").and_then(Value::as_str) != Some(status.as_str()) {
-        return Err(format!(
-            "{name} platform baseline must give the status {status:?}"
-        ));
-    }
-    let Some(baseline_rules) = baseline.get("rules").and_then(Value::as_array) else {
-        return Err(format!("{name} platform baseline must hold a rules list"));
-    };
-    let rights = declared_claims(name, "declared rights list", rights)?;
-    let baseline = declared_claims(name, "platform baseline rules", baseline_rules)?;
-    for claim in &rights {
-        if !CONTRACT_RIGHTS.contains(&claim.id.as_str()) {
-            return Err(format!(
-                "{name} declares {}, which the shared contract does not name",
-                claim.id
-            ));
-        }
-    }
-    for claim in &baseline {
-        if !PLATFORM_BASELINE_IDS.contains(&claim.id.as_str()) {
-            return Err(format!(
-                "{name} declares {}, which the shared contract does not name",
-                claim.id
-            ));
-        }
-    }
-    let prefix = platform_baseline_justification(name);
-    for (entry, claim) in baseline_rules.iter().zip(&baseline) {
-        let Some(justification) = entry["justification"].as_str() else {
-            return Err(format!(
-                "{name} platform baseline {} must give a string justification",
-                claim.id
-            ));
-        };
-        if !justification.starts_with(&prefix) {
-            return Err(format!(
-                "{name} platform baseline {} justification must start with {prefix:?}",
-                claim.id
-            ));
-        }
-        if justification[prefix.len()..].trim().is_empty() {
-            return Err(format!(
-                "{name} platform baseline {} justification gives no reason after {prefix:?}",
-                claim.id
-            ));
-        }
-    }
-    Ok((rights, baseline))
-}
-
-/// The one lab generator for a file profile: the contract head, then every
-/// rule of every rights claim in file order, then every rule of every
-/// platform-baseline claim in file order, one form per line. It emits no
-/// comment and nothing else, it reads and writes no file, and it refuses an id
-/// the shared contract does not name through `declared_entries`.
-fn generate_profile(name: &str, declared: &Value) -> Result<String, String> {
-    let (rights, baseline) = declared_entries(name, declared)?;
-    let mut profile = String::new();
-    for form in PROFILE_HEAD {
-        profile.push_str(form);
-        profile.push('\n');
-    }
-    for claim in rights.iter().chain(&baseline) {
-        for rule in &claim.rules {
-            profile.push_str(rule);
-            profile.push('\n');
-        }
-    }
-    Ok(profile)
-}
-
-/// The one lab writer of a generated profile: it calls `generate_profile`
-/// first and returns that refusal unchanged, before it creates, opens or
-/// truncates `path`; only a generated profile is written, and a write failure
-/// is a refusal that names the provider and the path. It adds no validation of
-/// its own: every refusal reason comes from `declared_entries`.
-fn write_generated_profile(name: &str, declared: &Value, path: &Path) -> Result<(), String> {
-    let profile = generate_profile(name, declared)?;
-    fs::write(path, profile).map_err(|err| {
-        format!(
-            "{name} generated profile {} must be writable: {err}",
-            path.display()
-        )
-    })
-}
-
-/// The declared entries of `entries`, each proven to hold a string id and a
-/// rules list of strings. `label` names the list in the missing-id refusal, so
-/// the reader knows which of the two lists holds the entry; the index names
-/// the entry. The two other refusals name the id.
-fn declared_claims(
-    name: &str,
-    label: &str,
-    entries: &[Value],
-) -> Result<Vec<DeclaredClaim>, String> {
-    let mut claims = Vec::with_capacity(entries.len());
-    for (index, entry) in entries.iter().enumerate() {
-        let Some(id) = entry["id"].as_str() else {
-            return Err(format!(
-                "{name} {label} entry {index} must give a string id"
-            ));
-        };
-        let Some(rules) = entry["rules"].as_array() else {
-            return Err(format!("{name} declares {id} without a rules list"));
-        };
-        let mut claimed = Vec::with_capacity(rules.len());
-        for rule in rules {
-            let Some(rule) = rule.as_str() else {
-                return Err(format!(
-                    "{name} declares {id} with a rule that is not a string"
-                ));
-            };
-            claimed.push(rule.to_owned());
-        }
-        claims.push(DeclaredClaim {
-            id: id.to_owned(),
-            rules: claimed,
-        });
-    }
-    Ok(claims)
-}
-
 /// Reads one provider's declared-rights file. A missing, unreadable or invalid
 /// file is a refusal that names the path; there is no skip path.
 fn read_declared_rights(name: &str, path: &Path) -> Result<Value, String> {
@@ -6148,6 +6235,3095 @@ fn read_declared_rights(name: &str, path: &Path) -> Result<Value, String> {
             path.display()
         )
     })
+}
+
+/// The one mapping table from a top-level allow form's text to the syscall
+/// names it admits: the Linux seat of the file-profile contract.
+///
+/// The rows follow the contract's meaning rather than one kernel call.
+/// `file-read*` keeps the calls that read an opened file or a directory entry;
+/// `file-write*` keeps the calls that change one, plus the reads its own
+/// callers make. The startup rows carry the loader's start reads and the kernel
+/// facts `sysctl-read` names.
+///
+/// `ptrace`, `mount`, `bpf` and `keyctl` appear in no row, so the program's
+/// default decision is the only answer they receive. Adding one of them to a
+/// row would grant it and turn
+/// `seccomp_program_denies_by_default_and_lists_no_undeclared_call` red.
+///
+/// This table is the only source of the list's syscalls: the builder adds none
+/// of its own, so a syscall enters the filter only through a row an allow form
+/// of the generated profile selects.
+const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
+    (SHARED_RULES[0], &["execve", "execveat"]),
+    (
+        SHARED_RULES[1],
+        &[
+            "faccessat",
+            "fstat",
+            "getdents64",
+            "lseek",
+            "newfstatat",
+            "openat",
+            "openat2",
+            "pread64",
+            "read",
+            "readlinkat",
+            "readv",
+            "statx",
+        ],
+    ),
+    (
+        SHARED_RULES[2],
+        &[
+            "faccessat",
+            "fchmod",
+            "fdatasync",
+            "fstat",
+            "fsync",
+            "ftruncate",
+            "getdents64",
+            "linkat",
+            "lseek",
+            "mkdirat",
+            "newfstatat",
+            "openat",
+            "openat2",
+            "pread64",
+            "pwrite64",
+            "read",
+            "readlinkat",
+            "readv",
+            "renameat2",
+            "statx",
+            "unlinkat",
+            "write",
+            "writev",
+        ],
+    ),
+    (
+        STARTUP_RULES[0],
+        &[
+            "faccessat",
+            "fstat",
+            "getdents64",
+            "lseek",
+            "newfstatat",
+            "openat",
+            "openat2",
+            "pread64",
+            "read",
+            "readlinkat",
+            "readv",
+            "statx",
+        ],
+    ),
+    (STARTUP_RULES[1], &["uname", "sysinfo"]),
+];
+
+/// The system call numbers the filter tests against, per audit architecture:
+/// x86-64 first, then aarch64. `None` marks a call the target does not have.
+const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
+    ("bpf", Some(321), Some(280)),
+    ("close", Some(3), Some(57)),
+    ("execve", Some(59), Some(221)),
+    ("execveat", Some(322), Some(281)),
+    ("exit_group", Some(231), Some(94)),
+    ("faccessat", Some(269), Some(48)),
+    ("fchmod", Some(91), Some(52)),
+    ("fdatasync", Some(75), Some(83)),
+    ("fstat", Some(5), Some(80)),
+    ("fsync", Some(74), Some(82)),
+    ("ftruncate", Some(77), Some(46)),
+    ("getdents64", Some(217), Some(61)),
+    ("getrandom", Some(318), Some(278)),
+    ("keyctl", Some(250), Some(219)),
+    ("linkat", Some(265), Some(37)),
+    ("lseek", Some(8), Some(62)),
+    ("mkdirat", Some(258), Some(34)),
+    ("mmap", Some(9), Some(222)),
+    ("mount", Some(165), Some(40)),
+    ("mprotect", Some(10), Some(226)),
+    ("newfstatat", Some(262), Some(79)),
+    ("openat", Some(257), Some(56)),
+    ("openat2", Some(437), Some(437)),
+    ("ppoll", Some(271), Some(73)),
+    ("pread64", Some(17), Some(67)),
+    ("ptrace", Some(101), Some(117)),
+    ("pwrite64", Some(18), Some(68)),
+    ("read", Some(0), Some(63)),
+    ("readlinkat", Some(267), Some(78)),
+    ("readv", Some(19), Some(65)),
+    ("renameat2", Some(316), Some(276)),
+    ("rt_sigaction", Some(13), Some(134)),
+    ("statx", Some(332), Some(291)),
+    ("sysinfo", Some(99), Some(179)),
+    ("uname", Some(63), Some(160)),
+    ("unlinkat", Some(263), Some(35)),
+    ("write", Some(1), Some(64)),
+    ("writev", Some(20), Some(66)),
+];
+
+/// The audit architecture this target's kernel reports in `seccomp_data.arch`.
+/// A filter built for one architecture refuses the other instead of reading its
+/// syscall numbers as its own.
+#[cfg(target_arch = "x86_64")]
+const SECCOMP_AUDIT_ARCH: u32 = 0xc000_003e;
+#[cfg(target_arch = "aarch64")]
+const SECCOMP_AUDIT_ARCH: u32 = 0xc000_00b7;
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+const SECCOMP_AUDIT_ARCH: u32 = 0;
+
+/// The first number of the x32 call space on x86-64.
+const SECCOMP_X32_FIRST: u32 = 0x4000_0000;
+/// `seccomp_data.arch` sits at byte offset 4 and `seccomp_data.nr` at 0.
+const SECCOMP_ARCH_OFFSET: u32 = 4;
+const SECCOMP_NUMBER_OFFSET: u32 = 0;
+/// The classic-BPF codes the filter uses: load a word, test equality, test
+/// greater-or-equal, and return a decision.
+const SECCOMP_BPF_LD_W_ABS: u16 = 0x20;
+const SECCOMP_BPF_JEQ_K: u16 = 0x15;
+const SECCOMP_BPF_JGE_K: u16 = 0x35;
+const SECCOMP_BPF_RET_K: u16 = 0x06;
+/// `SECCOMP_RET_ALLOW`, and the marker errno this filter answers with. The
+/// marker is `EACCES`, so a refusal is distinguishable from the `EPERM` a
+/// kernel gives an unprivileged process for a call it may not make: a `bpf`
+/// assertion that reads `EPERM` would pass with no filter installed.
+const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+const SECCOMP_DENY_ERRNO: i32 = libc::EACCES;
+
+/// One classic-BPF instruction. The filter is built as this plain value so a
+/// test can walk it on every OS, and it becomes a `libc::sock_filter` only
+/// where a kernel reads it (task 148).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SeccompInstruction {
+    code: u16,
+    jt: u8,
+    jf: u8,
+    k: u32,
+}
+
+impl SeccompInstruction {
+    const fn stmt(code: u16, k: u32) -> Self {
+        Self {
+            code,
+            jt: 0,
+            jf: 0,
+            k,
+        }
+    }
+
+    const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> Self {
+        Self { code, jt, jf, k }
+    }
+}
+
+/// The value the filter returns for a refused call: `SECCOMP_RET_ERRNO` with
+/// the deny marker.
+const fn seccomp_deny_return() -> u32 {
+    0x0005_0000 | SECCOMP_DENY_ERRNO as u32
+}
+
+/// The generated Linux policy of one provider: the provider name, the audit
+/// architecture the program was built for, the syscall names it admits in
+/// program order, and the program itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SeccompAllowList {
+    provider: String,
+    audit_arch: u32,
+    syscalls: Vec<&'static str>,
+    program: Vec<SeccompInstruction>,
+    /// A step an install must refuse, so a launch refusal is proved without a
+    /// kernel that would refuse it. It is test input and `None` in every real
+    /// launch.
+    #[cfg(target_os = "linux")]
+    injected_step_failure: Option<(SeccompStep, i32)>,
+}
+
+impl SeccompAllowList {
+    /// Whether the list admits `name`.
+    fn admits(&self, name: &str) -> bool {
+        self.syscalls.contains(&name)
+    }
+
+    /// The list a launch installs: this declared list plus the measured launch
+    /// set, rebuilt by the one program builder. It is the only place the two
+    /// sources join, so the launcher and the probe install the same filter and
+    /// no second list is written (P10).
+    ///
+    /// The launch set is measured, not declared: no declared right covers a
+    /// runtime's own plumbing, and a launch that loses one cannot speak its
+    /// protocol. `LAUNCH_ESSENTIALS` holds none of the four calls the default
+    /// decision refuses, so adding the set leaves their answer unchanged.
+    #[cfg(target_os = "linux")]
+    fn with_launch_essentials(&self) -> Self {
+        let mut syscalls = self.syscalls.clone();
+        for (syscall, _) in LAUNCH_ESSENTIALS {
+            let syscall = *syscall;
+            if !syscalls.contains(&syscall) {
+                syscalls.push(syscall);
+            }
+        }
+        syscalls.sort_unstable();
+        Self {
+            provider: self.provider.clone(),
+            audit_arch: self.audit_arch,
+            program: seccomp_program(&syscalls, self.audit_arch),
+            syscalls,
+            injected_step_failure: self.injected_step_failure,
+        }
+    }
+}
+
+/// The number `name` has on `audit_arch`, or `None` where the call does not
+/// exist there. One reader serves the filter builder and every test (P10).
+fn seccomp_syscall_number(name: &str, audit_arch: u32) -> Option<u32> {
+    let (_, x86_64, aarch64) = SECCOMP_SYSCALL_NUMBERS
+        .iter()
+        .find(|(candidate, _, _)| *candidate == name)
+        .unwrap_or_else(|| panic!("{name} has no syscall number row"));
+    match audit_arch {
+        0xc000_003e => *x86_64,
+        0xc000_00b7 => *aarch64,
+        _ => None,
+    }
+}
+
+/// The one builder: the allow list of `name`, rendered from the profile
+/// `generate_profile` produces from `declared` and read back through
+/// `profile_forms`. It reads no file, holds no rule text of its own and never
+/// reads the declared-rights document directly, so the JSON has one reader and
+/// the profile one parser (P10).
+///
+/// Every admitted syscall comes from a mapping-table row an allow form selects,
+/// so a declaration with no allow form yields an empty list and a program whose
+/// only decisions are the ABI guards and the deny marker. The launch set a
+/// Linux start additionally needs is measured on the Linux host by the task
+/// that owns the kernel calls; nothing here adds a syscall of its own.
+///
+/// It refuses, in this order: whatever `generate_profile` refuses, with that
+/// reason unchanged; an allow form the mapping table does not hold, with a
+/// reason that names the provider and the form, before any filter is built; and
+/// a target whose audit architecture the filter cannot name.
+///
+/// The head forms and the deny forms grant nothing, so they take no row and add
+/// no syscall.
+fn seccomp_allow_list_from_declared_rights(
+    name: &str,
+    declared: &Value,
+) -> Result<SeccompAllowList, String> {
+    let rendered = generate_profile(name, declared)?;
+    let mut syscalls: Vec<&'static str> = Vec::new();
+    for form in profile_forms(&rendered) {
+        if !is_allow_form(&form) {
+            // The version, the default denial and the network denial grant
+            // nothing, so no syscall answers to them.
+            continue;
+        }
+        let Some(row) = SECCOMP_RULE_SYSCALLS
+            .iter()
+            .find(|(allowed, _)| *allowed == form.as_str())
+        else {
+            return Err(format!(
+                "{name} seccomp allow list refuses the allow form {form}: \
+                 the mapping table has no syscall row for it, so no filter is built"
+            ));
+        };
+        for syscall in row.1 {
+            if !syscalls.contains(syscall) {
+                syscalls.push(syscall);
+            }
+        }
+    }
+    if SECCOMP_AUDIT_ARCH == 0 {
+        return Err(format!(
+            "{name} seccomp allow list is unavailable on target architecture {}: \
+             the lab filter checks one audit architecture and this target has none",
+            std::env::consts::ARCH
+        ));
+    }
+    syscalls.sort_unstable();
+    let program = seccomp_program(&syscalls, SECCOMP_AUDIT_ARCH);
+    Ok(SeccompAllowList {
+        provider: name.to_string(),
+        audit_arch: SECCOMP_AUDIT_ARCH,
+        syscalls,
+        program,
+        #[cfg(target_os = "linux")]
+        injected_step_failure: None,
+    })
+}
+
+/// The program of `syscalls`, in the one shape the list has: the audit-arch
+/// check, the x32 guard, one equality test per admitted number with an `ALLOW`
+/// return behind it, and the deny marker as the final decision. The default arm
+/// is the marker, so every call the list does not name is refused.
+fn seccomp_program(syscalls: &[&'static str], audit_arch: u32) -> Vec<SeccompInstruction> {
+    let mut program = vec![
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARCH_OFFSET),
+        // A wrong audit architecture falls through to the deny marker.
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, audit_arch, 1, 0),
+        SeccompInstruction::stmt(SECCOMP_BPF_RET_K, seccomp_deny_return()),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_NUMBER_OFFSET),
+        // A number in the x32 space is not the call it looks like.
+        SeccompInstruction::jump(SECCOMP_BPF_JGE_K, SECCOMP_X32_FIRST, 0, 1),
+        SeccompInstruction::stmt(SECCOMP_BPF_RET_K, seccomp_deny_return()),
+    ];
+    for syscall in syscalls {
+        let Some(number) = seccomp_syscall_number(syscall, audit_arch) else {
+            continue;
+        };
+        program.push(SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number, 0, 1));
+        program.push(SeccompInstruction::stmt(
+            SECCOMP_BPF_RET_K,
+            SECCOMP_RET_ALLOW,
+        ));
+    }
+    program.push(SeccompInstruction::stmt(
+        SECCOMP_BPF_RET_K,
+        seccomp_deny_return(),
+    ));
+    program
+}
+
+/// The two steps a seccomp install takes, in order. Each has its own refusal,
+/// so a failure names the step that failed and keeps its errno (P11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeccompStep {
+    NoNewPrivileges,
+    Filter,
+}
+
+/// A fixed-size refusal value. Its `Display` implementation allocates, so the
+/// launcher formats it in the parent and never after fork.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeccompInstallFailure {
+    Step(SeccompStep, i32),
+    AuditArchitecture(u32),
+}
+
+impl SeccompInstallFailure {
+    /// Both child paths report failures through the same fixed record and
+    /// decoder. This conversion uses only stack values after a fork.
+    fn launch_record(self) -> [u8; SECCOMP_LAUNCH_RECORD_LEN] {
+        let (step, first, second) = match self {
+            Self::Step(SeccompStep::NoNewPrivileges, errno) => {
+                (SECCOMP_LAUNCH_NO_NEW_PRIVS, i64::from(errno), 0)
+            }
+            Self::Step(SeccompStep::Filter, errno) => (SECCOMP_LAUNCH_FILTER, i64::from(errno), 0),
+            Self::AuditArchitecture(arch) => (SECCOMP_LAUNCH_AUDIT_ARCH, 0, i64::from(arch)),
+        };
+        seccomp_launch_record(step, first, second)
+    }
+}
+
+impl std::fmt::Display for SeccompInstallFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Step(SeccompStep::NoNewPrivileges, errno) => write!(
+                f,
+                "seccomp install refused: PR_SET_NO_NEW_PRIVS failed with errno {errno}"
+            ),
+            Self::Step(SeccompStep::Filter, errno) => write!(
+                f,
+                "seccomp install refused: the filter install failed with errno {errno}"
+            ),
+            Self::AuditArchitecture(arch) => write!(
+                f,
+                "seccomp install refused: the list was built for audit architecture {arch:#x} \
+                 and this target reports {SECCOMP_AUDIT_ARCH:#x}"
+            ),
+        }
+    }
+}
+
+/// The one step sequencer, and it makes no kernel call: the architecture check
+/// first, then `NoNewPrivileges`, then `Filter`, stopping at the first failure
+/// with that step's own reason and errno. A failure of the first step means the
+/// second never runs.
+fn install_seccomp_with(
+    allow: &SeccompAllowList,
+    mut steps: impl FnMut(SeccompStep) -> Result<(), i32>,
+) -> Result<(), SeccompInstallFailure> {
+    if allow.audit_arch != SECCOMP_AUDIT_ARCH {
+        return Err(SeccompInstallFailure::AuditArchitecture(allow.audit_arch));
+    }
+    for step in [SeccompStep::NoNewPrivileges, SeccompStep::Filter] {
+        steps(step).map_err(|errno| SeccompInstallFailure::Step(step, errno))?;
+    }
+    Ok(())
+}
+
+/// The one install record writer, and it makes no kernel call: it writes the
+/// whole record to `write`, completing a short write and retrying on `EINTR`.
+///
+/// The install report crosses `pre_exec` as a fixed record, because Rust's
+/// exec-error pipe carries only a raw errno and no step. A failed write and a
+/// zero-byte write keep their own reasons and their own errno, so the two are
+/// told apart (P11).
+fn write_seccomp_launch_record(
+    record: &[u8],
+    mut write: impl FnMut(&[u8]) -> Result<usize, i32>,
+) -> Result<(), SeccompLaunchWriteFailure> {
+    let mut written = 0;
+    while written < record.len() {
+        match write(&record[written..]) {
+            Ok(0) => return Err(SeccompLaunchWriteFailure::WroteNothing),
+            Ok(count) => written += count,
+            Err(errno) if errno == libc::EINTR => continue,
+            Err(errno) => return Err(SeccompLaunchWriteFailure::Failed(errno)),
+        }
+    }
+    Ok(())
+}
+
+/// One of the two ways the install report fails to reach the parent. Each keeps
+/// its own reason and errno, so a failed write and a zero-byte write are told
+/// apart (P11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeccompLaunchWriteFailure {
+    Failed(i32),
+    WroteNothing,
+}
+
+impl SeccompLaunchWriteFailure {
+    fn errno(self) -> i32 {
+        match self {
+            Self::Failed(errno) => errno,
+            Self::WroteNothing => libc::EIO,
+        }
+    }
+}
+
+impl std::fmt::Display for SeccompLaunchWriteFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(errno) => write!(
+                f,
+                "seccomp launch refused: the install record could not be written, errno {errno}"
+            ),
+            Self::WroteNothing => {
+                write!(
+                    f,
+                    "seccomp launch refused: the install record wrote no bytes"
+                )
+            }
+        }
+    }
+}
+
+/// The system calls a launch needs beside the forms-derived part, and the call
+/// whose failure named each entry. No declared right covers them: they are the
+/// runtime's own plumbing, and a launch that loses one cannot speak its
+/// protocol.
+///
+/// The list is measured, not guessed. Each entry earned its place by dropping it
+/// alone from the whole list and reading the call that failed on the Linux host
+/// the proof ran on, and the comment after each name is that call, quoted from
+/// the run. `mount`, `ptrace`, `bpf` and `keyctl` are in no entry here and in no
+/// table row, so the default decision is the only answer they receive.
+#[cfg(target_os = "linux")]
+const LAUNCH_ESSENTIALS: &[(&str, &str)] = &[
+    (
+        "close",
+        "close(3) refused in the loader, before the first mapping",
+    ),
+    (
+        "exit_group",
+        "exit_group(0) refused as the provider ended its own run",
+    ),
+    (
+        "getrandom",
+        "getrandom(0xec92ac7c6700, 8, GRND_NONBLOCK) refused in the loader",
+    ),
+    (
+        "mmap",
+        "mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) refused \
+         in the loader, and the provider then took SIGSEGV",
+    ),
+    (
+        "mprotect",
+        "mprotect(0xf2640329f000, 65536, PROT_NONE) refused in the loader",
+    ),
+    (
+        "ppoll",
+        "ppoll([{fd=0, events=0}, {fd=1, events=0}, {fd=2, events=0}], 3, {tv_sec=0, \
+         tv_nsec=0}, NULL, 0) refused while the provider waits",
+    ),
+    (
+        "rt_sigaction",
+        "rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[PIPE], sa_flags=SA_RESTART}, \
+         0xffffea09ff80, 8) refused in the loader",
+    ),
+];
+
+/// The largest program the install's stack buffer holds.
+#[cfg(target_os = "linux")]
+const SECCOMP_PROGRAM_CAPACITY: usize = 256;
+
+/// The one install function, and the only place a seccomp filter becomes a
+/// kernel call. The launcher calls it from `pre_exec` and the probe child calls
+/// it in-process, so both install the same filter by one path (P10).
+///
+/// It copies the program into a fixed stack buffer and makes only the two
+/// `prctl` calls, in the Runtime's order and through 147's sequencing:
+/// `no_new_privs` first, then the filter, each with its own refusal and errno
+/// (P11). It allocates nothing after a fork, so a `pre_exec` caller may use it
+/// as is. `install_seccomp_with` checks the audit architecture first, so a list
+/// built for another architecture is refused before either kernel call.
+#[cfg(target_os = "linux")]
+fn install_seccomp(allow: &SeccompAllowList) -> Result<(), SeccompInstallFailure> {
+    if allow.program.len() > SECCOMP_PROGRAM_CAPACITY {
+        // The buffer is fixed because this runs after a fork. A longer program
+        // is refused as a failed filter step instead of installed truncated,
+        // because a short filter loses rows and could end on an `ALLOW`.
+        return Err(SeccompInstallFailure::Step(
+            SeccompStep::Filter,
+            libc::E2BIG,
+        ));
+    }
+    let mut code = [libc::sock_filter {
+        code: 0,
+        jt: 0,
+        jf: 0,
+        k: 0,
+    }; SECCOMP_PROGRAM_CAPACITY];
+    for (slot, instruction) in code.iter_mut().zip(&allow.program) {
+        *slot = libc::sock_filter {
+            code: instruction.code,
+            jt: instruction.jt,
+            jf: instruction.jf,
+            k: instruction.k,
+        };
+    }
+    let mut program = libc::sock_fprog {
+        len: allow.program.len() as u16,
+        filter: code.as_mut_ptr(),
+    };
+    install_seccomp_with(allow, |step| {
+        if let Some((failed, errno)) = allow.injected_step_failure {
+            if failed == step {
+                return Err(errno);
+            }
+        }
+        let installed = unsafe {
+            match step {
+                SeccompStep::NoNewPrivileges => libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0),
+                SeccompStep::Filter => libc::prctl(
+                    libc::PR_SET_SECCOMP,
+                    libc::SECCOMP_MODE_FILTER,
+                    &mut program as *mut libc::sock_fprog,
+                ),
+            }
+        };
+        if installed == 0 {
+            return Ok(());
+        }
+        Err(unsafe { *libc::__errno_location() })
+    })
+}
+
+/// The one install record: three signed 64-bit fields, in native byte order,
+/// written by the child before it execs. The first field names the outcome, and
+/// the other two carry that outcome's two values.
+const SECCOMP_LAUNCH_RECORD_LEN: usize = 24;
+/// The record's first field when the filter is installed: the marker's answer
+/// before the install, then the marker's answer after it.
+const SECCOMP_LAUNCH_INSTALLED: i64 = 0;
+/// `PR_SET_NO_NEW_PRIVS` failed: the second field is that step's errno.
+const SECCOMP_LAUNCH_NO_NEW_PRIVS: i64 = 1;
+/// The filter install failed: the second field is that step's errno.
+const SECCOMP_LAUNCH_FILTER: i64 = 2;
+/// The list was built for another audit architecture: the third field is it.
+const SECCOMP_LAUNCH_AUDIT_ARCH: i64 = 3;
+
+/// One child's install report, read from the fixed record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeccompLaunchRecord {
+    /// The filter is installed: the marker's answer before and after it.
+    Installed([i64; 2]),
+    /// The install refused at this step, with its errno.
+    Refused(SeccompInstallFailure),
+}
+
+/// The one record reader. A record that is not exactly one record's length is
+/// `RecordLength`, and a first field that names no outcome is `UnknownStep`, so
+/// each has its own reason and neither reads as a bare spawn error (P11).
+///
+/// The refusal names only counts and no bytes: a partly written record is the
+/// child's report, not evidence to quote.
+fn decode_seccomp_launch_record(record: &[u8]) -> Result<SeccompLaunchRecord, String> {
+    if record.len() != SECCOMP_LAUNCH_RECORD_LEN {
+        return Err(format!(
+            "seccomp install report refused: the child reported {} bytes and one record is {}",
+            record.len(),
+            SECCOMP_LAUNCH_RECORD_LEN
+        ));
+    }
+    let mut fields = [0i64; 3];
+    for (field, bytes) in fields.iter_mut().zip(record.chunks_exact(8)) {
+        *field = i64::from_ne_bytes(bytes.try_into().expect("one 8-byte record field"));
+    }
+    let [step, first, second] = fields;
+    match step {
+        SECCOMP_LAUNCH_INSTALLED => Ok(SeccompLaunchRecord::Installed([first, second])),
+        SECCOMP_LAUNCH_NO_NEW_PRIVS => Ok(SeccompLaunchRecord::Refused(
+            SeccompInstallFailure::Step(SeccompStep::NoNewPrivileges, first as i32),
+        )),
+        SECCOMP_LAUNCH_FILTER => Ok(SeccompLaunchRecord::Refused(SeccompInstallFailure::Step(
+            SeccompStep::Filter,
+            first as i32,
+        ))),
+        SECCOMP_LAUNCH_AUDIT_ARCH => Ok(SeccompLaunchRecord::Refused(
+            SeccompInstallFailure::AuditArchitecture(second as u32),
+        )),
+        other => Err(format!(
+            "seccomp install report refused: the child named step {other}, which is no install step"
+        )),
+    }
+}
+
+/// The one place a launched child's install report becomes the launcher's
+/// answer: the marker's two answers when the filter is installed, that step's
+/// own reason when the install refused, and, for a record that is missing,
+/// short, long or names an unknown step, the record reader's reason together
+/// with what the child did instead.
+///
+/// `child` describes the launched child: it did not start, with the reason the
+/// spawn gave, or it started and reported nothing. A child whose own write
+/// failed or that never ran leaves no record, so without this the caller would
+/// receive a bare spawn error and lose the reason the install report carries.
+/// The reader reads bytes and makes no kernel call, so every OS can hold it.
+fn seccomp_launch_answers_or_refusal(record: &[u8], child: &str) -> Result<[i64; 2], String> {
+    match decode_seccomp_launch_record(record) {
+        Ok(SeccompLaunchRecord::Installed(answers)) => Ok(answers),
+        Ok(SeccompLaunchRecord::Refused(failure)) => Err(failure.to_string()),
+        Err(refusal) => Err(format!("{refusal}; {child}")),
+    }
+}
+
+/// What one marker call answers in this process right now: the errno it failed
+/// with, or the value it returned.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeccompAnswer {
+    Errno(i32),
+    Returned(i64),
+}
+
+#[cfg(target_os = "linux")]
+impl SeccompAnswer {
+    /// The answer as the probe writes it and reads it back: `errno:<n>` for a
+    /// failed call and `ok:<n>` for one that returned.
+    fn text(self) -> String {
+        match self {
+            Self::Errno(errno) => format!("errno:{errno}"),
+            Self::Returned(value) => format!("ok:{value}"),
+        }
+    }
+
+    /// The answer a probe record token names, or `None` when it names none.
+    fn parse(token: &str) -> Option<Self> {
+        if let Some(errno) = token.strip_prefix("errno:") {
+            return errno.parse().ok().map(Self::Errno);
+        }
+        token
+            .strip_prefix("ok:")
+            .and_then(|value| value.parse().ok())
+            .map(Self::Returned)
+    }
+}
+
+/// Runs one kernel call and turns it into its answer. One reader serves every
+/// probe call, so the four calls cannot measure their failures differently.
+#[cfg(target_os = "linux")]
+fn seccomp_answer(call: impl FnOnce() -> i64) -> SeccompAnswer {
+    let answer = call();
+    if answer == -1 {
+        let errno = std::io::Error::last_os_error()
+            .raw_os_error()
+            .expect("a failed call must carry an errno");
+        SeccompAnswer::Errno(errno)
+    } else {
+        SeccompAnswer::Returned(answer)
+    }
+}
+
+/// The call whose answer distinguishes this filter from the host: a `bpf`
+/// request with an invalid command and null attributes, which the kernel
+/// refuses with `EINVAL` and which this filter refuses with the deny marker.
+///
+/// The marker is read before and after the install in the same process, so a
+/// child that inherits a filter from its parent cannot show the change. The
+/// answer is negative for an errno, so a returned value is distinguishable.
+#[cfg(target_os = "linux")]
+fn seccomp_launch_marker_answer() -> i64 {
+    let answer = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            -1 as libc::c_long,
+            0 as libc::c_long,
+            0 as libc::c_long,
+        )
+    };
+    if answer == -1 {
+        -i64::from(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+    } else {
+        answer
+    }
+}
+
+/// The four calls the filter refuses and no allow form names. The journey
+/// requires each of them to answer the deny marker after the install and to
+/// answer something else before it, so a host that already refuses a call
+/// cannot stand in for the filter.
+#[cfg(target_os = "linux")]
+const SECCOMP_PROBE_CALLS: &[&str] = &["ptrace", "mount", "bpf", "keyctl"];
+
+/// The keyring `keyctl` names in the probe: the session keyring. It is a real
+/// keyring this process is expected to hold, so without the filter the call
+/// answers a usable id and the filter's refusal is the only reason it stops.
+const SECCOMP_PROBE_KEYRING: libc::c_long = -3;
+
+/// The `keyctl` request the probe makes: `KEYCTL_GET_KEYRING_ID`, command `0`.
+const SECCOMP_PROBE_KEYCTL_GET_KEYRING_ID: libc::c_long = 0;
+
+/// How many registers `keyctl` reads for the probe's request: the command, the
+/// keyring, the create flag and two unused arguments.
+const SECCOMP_PROBE_KEYCTL_ARGUMENTS: usize = 5;
+
+/// Every argument the probe passes to one call, so the call's whole argument
+/// list is visible in one place and no register is left to chance.
+///
+/// `keyctl`'s command decides how many of its other arguments the kernel reads,
+/// and command `0` reads a special keyring id that may hold `-1` to `-9`. A
+/// call that passed a shorter argument list would leave the registers after it
+/// unspecified, so the kernel could select another keyring or be asked to
+/// create one. This table names all of them: the command, the keyring, and a
+/// create flag of `0` that refuses creation, followed by two unused zeros. It
+/// carries no kernel call, so every OS can read it.
+const SECCOMP_PROBE_KEYCTL_TABLE: [libc::c_long; SECCOMP_PROBE_KEYCTL_ARGUMENTS] = [
+    SECCOMP_PROBE_KEYCTL_GET_KEYRING_ID,
+    SECCOMP_PROBE_KEYRING,
+    0,
+    0,
+    0,
+];
+
+/// The `keyctl` probe passes its complete argument list: command `0`, a named
+/// keyring, and a create flag of `0` that refuses creation, with two unused
+/// zeros behind it. The command's own reference makes all of these arguments
+/// part of the request, and a short argument list would leave the kernel
+/// reading registers this probe never set, so it could select another keyring
+/// or be asked to create one.
+///
+/// The test reads the table and the probe's call, so a call that passed fewer
+/// arguments than the command reads fails here even though the call compiles.
+/// It makes no kernel call and starts no process, so it runs on every OS.
+///
+/// Falsifier: WP166 passes only the command to `keyctl`, so the call's own
+/// list omits the keyring, create flag and unused arguments while the table
+/// still supplies the complete fixture.
+#[test]
+fn seccomp_keyctl_probe_supplies_every_argument_without_creation() {
+    assert_eq!(
+        SECCOMP_PROBE_KEYCTL_TABLE[0], SECCOMP_PROBE_KEYCTL_GET_KEYRING_ID,
+        "the probe must make the KEYCTL_GET_KEYRING_ID request"
+    );
+    assert_eq!(
+        SECCOMP_PROBE_KEYCTL_TABLE[1], SECCOMP_PROBE_KEYRING,
+        "the probe must name the keyring it reads, and a special id is a real id"
+    );
+    assert!(
+        SECCOMP_PROBE_KEYCTL_TABLE[1] < 0 && SECCOMP_PROBE_KEYCTL_TABLE[1] >= -9,
+        "the keyring must be a special keyring id, which is -1 to -9: {}",
+        SECCOMP_PROBE_KEYCTL_TABLE[1]
+    );
+    assert_eq!(
+        SECCOMP_PROBE_KEYCTL_TABLE[2], 0,
+        "the create flag must be 0, because a probe asks for no keyring to be created"
+    );
+    assert_eq!(
+        SECCOMP_PROBE_KEYCTL_TABLE[3..],
+        [0; SECCOMP_PROBE_KEYCTL_ARGUMENTS - 3],
+        "the arguments after the create flag are unused and must be named as zeros"
+    );
+
+    // The call's own argument list, read from the source that makes it, so a
+    // probe that passed a shorter list cannot pass on a table it never uses.
+    let source = fs::read_to_string(Path::new("tests/confine.rs"))
+        .expect("this test's own source must be readable");
+    let signature = "fn seccomp_probe_answers(call: &str) -> SeccompAnswer {";
+    let call = source
+        .rsplit_once(signature)
+        .map(|(_, call)| call)
+        .expect("the probe must hold its one call reader");
+    let keyctl = call
+        .split("\"keyctl\" =>")
+        .nth(1)
+        .expect("the probe must hold its keyctl arm");
+    let keyctl = keyctl
+        .split("other =>")
+        .next()
+        .expect("the keyctl arm must end before the catch-all");
+    assert!(
+        keyctl.contains("libc::syscall(libc::SYS_keyctl, command, keyring, create, first, second)"),
+        "the keyctl call must pass the table's five arguments and no register it did not set: \
+         {keyctl}"
+    );
+    assert!(
+        keyctl.contains(
+            "let [command, keyring, create, first, second] = SECCOMP_PROBE_KEYCTL_TABLE;"
+        ),
+        "the keyctl call must read its whole argument list from the one table: {keyctl}"
+    );
+}
+
+/// What `call` answers in this process right now. The probe child calls this
+/// once before the filter and once after, through the same function, so the two
+/// records cannot differ in what they measure. Each arm passes its complete
+/// argument list: no call relies on a register this function did not set.
+#[cfg(target_os = "linux")]
+fn seccomp_probe_answers(call: &str) -> SeccompAnswer {
+    match call {
+        "ptrace" => {
+            seccomp_answer(|| unsafe { libc::ptrace(libc::PTRACE_TRACEME, 0, 0, 0) as i64 })
+        }
+        "mount" => seccomp_answer(|| unsafe {
+            libc::mount(
+                c"/nonexistent-seccomp-probe-source".as_ptr(),
+                c"/nonexistent-seccomp-probe-target".as_ptr(),
+                c"none".as_ptr(),
+                0,
+                std::ptr::null(),
+            ) as i64
+        }),
+        "bpf" => seccomp_answer(|| unsafe {
+            libc::syscall(
+                libc::SYS_bpf,
+                0 as libc::c_long,
+                0 as libc::c_long,
+                0 as libc::c_long,
+            )
+        }),
+        "keyctl" => seccomp_answer(|| unsafe {
+            let [command, keyring, create, first, second] = SECCOMP_PROBE_KEYCTL_TABLE;
+            libc::syscall(libc::SYS_keyctl, command, keyring, create, first, second)
+        }),
+        other => panic!("the probe names no call {other}"),
+    }
+}
+
+/// The allow list is an allow list, not a deny list.
+///
+/// The program's final decision is the deny marker, and every `ALLOW` return is
+/// reachable only through an equality test against a number the list names: the
+/// test walks each test's true and false jump and requires the true jump to land
+/// on its `ALLOW` and the false jump to step over it, so a changed jump target
+/// fails even when the syscall number is right. It then collects every number
+/// the program tests and requires that set to equal the numbers the admitted
+/// syscalls name, so a number swapped for an undeclared call's fails even when
+/// every jump target is right.
+///
+/// It also holds the architecture guard: a program whose audit-arch test
+/// refused the target instead of admitting it would deny every call, and one
+/// with no guard would read another architecture's numbers as its own. A
+/// fixture program built for the other architecture shows the guard is part of
+/// the program and falls through to the marker.
+///
+/// The test reads the built program, starts no process and calls no kernel, so
+/// it runs on every OS.
+///
+/// Falsifier: WP146 replaces the default decision with `ALLOW` and refuses only
+/// `socket`, `connect` and `execve`, so the last instruction allows. WP150
+/// admits both architecture branches. WP151 makes a false jump land on its own
+/// `ALLOW`, so a call the test does not name is admitted. WP161 tests `ptrace`'s
+/// number where an admitted syscall's belongs, so the program tests a number no
+/// row names and admits a call the list never derived.
+#[test]
+fn seccomp_program_denies_by_default_and_lists_no_undeclared_call() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let allow = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &declared)
+        .unwrap_or_else(|err| panic!("{err}"));
+    let program = &allow.program;
+
+    let last = program.last().expect("the program must hold a decision");
+    assert_eq!(
+        *last,
+        SeccompInstruction::stmt(SECCOMP_BPF_RET_K, seccomp_deny_return()),
+        "the final decision must be the deny marker, not ALLOW"
+    );
+
+    let mut allowed = 0usize;
+    for (index, instruction) in program.iter().enumerate() {
+        if instruction.code != SECCOMP_BPF_RET_K || instruction.k != SECCOMP_RET_ALLOW {
+            continue;
+        }
+        allowed += 1;
+        let test_index = index
+            .checked_sub(1)
+            .expect("an ALLOW return must follow its equality test");
+        let test = program[test_index];
+        assert_eq!(
+            test.code, SECCOMP_BPF_JEQ_K,
+            "instruction {index} allows without an equality test in front of it"
+        );
+        assert_eq!(
+            index + usize::from(test.jt),
+            index,
+            "instruction {test_index} must jump to its own ALLOW on a true test"
+        );
+        assert_eq!(
+            index + usize::from(test.jf),
+            index + 1,
+            "instruction {test_index} must step over its ALLOW on a false test"
+        );
+        assert_eq!(
+            test.jt, 0,
+            "instruction {test_index} must not jump past its own ALLOW on a true test"
+        );
+        assert_eq!(
+            test.jf, 1,
+            "instruction {test_index} must step over its own ALLOW on a false test"
+        );
+    }
+    assert_eq!(
+        allowed,
+        allow.syscalls.len(),
+        "the program must hold one ALLOW per admitted syscall"
+    );
+
+    // Every equality test names a number the list admits, and every admitted
+    // syscall has its own equality test: a number swapped for an undeclared
+    // call's passes the layout checks above but fails here.
+    let mut expected: Vec<u32> = allow
+        .syscalls
+        .iter()
+        .filter_map(|syscall| seccomp_syscall_number(syscall, SECCOMP_AUDIT_ARCH))
+        .collect();
+    expected.sort_unstable();
+    let mut tested: Vec<u32> = program
+        .iter()
+        .filter(|instruction| instruction.code == SECCOMP_BPF_JEQ_K)
+        .map(|instruction| instruction.k)
+        .filter(|number| *number != SECCOMP_AUDIT_ARCH)
+        .collect();
+    tested.sort_unstable();
+    for number in &tested {
+        assert!(
+            expected.contains(number),
+            "the program must test only admitted syscall numbers, and {number} is in no row: {:?}",
+            allow.syscalls
+        );
+    }
+    assert_eq!(
+        tested, expected,
+        "the program must test exactly the admitted syscall numbers: {:?}",
+        allow.syscalls
+    );
+
+    for denied in ["bpf", "keyctl", "mount", "ptrace"] {
+        assert!(
+            !allow.admits(denied),
+            "{denied} must be in no allow-list entry, so the default decision refuses it"
+        );
+        let Some(number) = seccomp_syscall_number(denied, SECCOMP_AUDIT_ARCH) else {
+            continue;
+        };
+        assert!(
+            !program
+                .iter()
+                .any(|instruction| instruction.code == SECCOMP_BPF_JEQ_K
+                    && instruction.k == number),
+            "the program must test no equality against {denied}'s number {number}"
+        );
+    }
+
+    // The audit-arch check reads `seccomp_data.arch`, jumps to its admit arm
+    // only for this target's architecture, and falls through to the marker.
+    assert_eq!(
+        program[0],
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARCH_OFFSET),
+        "the program must load seccomp_data.arch first"
+    );
+    assert_eq!(
+        program[1],
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, SECCOMP_AUDIT_ARCH, 1, 0),
+        "the architecture test must jump to its admit arm only for {SECCOMP_AUDIT_ARCH:#x}"
+    );
+    assert_eq!(
+        program[2],
+        SeccompInstruction::stmt(SECCOMP_BPF_RET_K, seccomp_deny_return()),
+        "a wrong architecture must be refused with the deny marker"
+    );
+    assert_eq!(
+        program[3],
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_NUMBER_OFFSET),
+        "the admit arm must load seccomp_data.nr"
+    );
+
+    // A program built for the other architecture carries that architecture in
+    // its guard and the other architecture's numbers, so the guard is part of
+    // the program and not of the caller.
+    for foreign in [0xc000_003e, 0xc000_00b7]
+        .into_iter()
+        .filter(|arch| *arch != SECCOMP_AUDIT_ARCH)
+    {
+        let fixture = seccomp_program(&["read"], foreign);
+        assert_eq!(
+            fixture[1],
+            SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, foreign, 1, 0),
+            "a fixture program must guard its own architecture {foreign:#x}"
+        );
+        assert_eq!(
+            fixture[2],
+            SeccompInstruction::stmt(SECCOMP_BPF_RET_K, seccomp_deny_return()),
+            "the foreign fixture's wrong-architecture arm must be the deny marker"
+        );
+        assert_eq!(
+            fixture.last(),
+            Some(&SeccompInstruction::stmt(
+                SECCOMP_BPF_RET_K,
+                seccomp_deny_return()
+            )),
+            "the foreign fixture must also deny by default"
+        );
+    }
+}
+
+/// The allow list follows the declared rights: the file syscalls of `storage`
+/// and the exec syscalls of `bound-executable` come from the two rights, a copy
+/// of the file without `storage` yields a list without the calls only that right
+/// brings, a copy with no allow form at all yields an empty list and a program
+/// with no `ALLOW` decision, and a copy holding an id the shared contract does
+/// not name is refused with `declared_entries`' existing reason, unchanged.
+///
+/// The removed right's own calls are the ones the startup-root-directory row
+/// does not also grant, because that row still admits `read`, `openat` and the
+/// other reads of an opened file. The empty case is the one that forbids a
+/// second permission source: the builder adds no syscall of its own beside the
+/// rows an allow form selects. The test reads the committed fixture, starts no
+/// process and calls no kernel, so it runs on every OS.
+///
+/// Falsifier: WP147 makes the builder return a fixed list and ignore its
+/// declared input, so neither the removal case nor its syscalls change. WP160
+/// adds an unconditional syscall beside the rows, so the empty case admits it
+/// and this test fails on the empty list.
+#[test]
+fn seccomp_allow_list_follows_the_declared_rights() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let allow = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &declared)
+        .unwrap_or_else(|err| panic!("{err}"));
+
+    for syscall in ["execve", "execveat"] {
+        assert!(
+            allow.admits(syscall),
+            "the bound-executable row must admit {syscall}: {:?}",
+            allow.syscalls
+        );
+    }
+    for syscall in ["mkdirat", "write", "unlinkat", "renameat2"] {
+        assert!(
+            allow.admits(syscall),
+            "the storage rows must admit {syscall}: {:?}",
+            allow.syscalls
+        );
+    }
+
+    let mut without_storage = declared.clone();
+    without_storage["rights"]
+        .as_array_mut()
+        .expect("the declared rights must hold a rights list")
+        .retain(|entry| entry["id"] != "storage");
+    let reduced = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &without_storage)
+        .unwrap_or_else(|err| panic!("{err}"));
+    for syscall in ["mkdirat", "write", "unlinkat", "renameat2"] {
+        assert!(
+            allow.admits(syscall),
+            "the storage right must admit {syscall}: {:?}",
+            allow.syscalls
+        );
+        assert!(
+            !reduced.admits(syscall),
+            "removing the storage right must remove {syscall} from the list: {:?}",
+            reduced.syscalls
+        );
+    }
+    assert!(
+        reduced.admits("execve"),
+        "the bound-executable right stays, so execve stays: {:?}",
+        reduced.syscalls
+    );
+    assert!(
+        reduced.admits("read"),
+        "the startup-root-directory row still admits read: {:?}",
+        reduced.syscalls
+    );
+
+    // A declaration with no allow form grants nothing: the list is empty and the
+    // program holds no `ALLOW` decision, so a builder that adds a syscall of its
+    // own beside the rows shows here.
+    let mut empty = declared.clone();
+    empty["rights"]
+        .as_array_mut()
+        .expect("the declared rights must hold a rights list")
+        .clear();
+    empty[PLATFORM_BASELINE]["rules"]
+        .as_array_mut()
+        .expect("the platform baseline must hold a rules list")
+        .clear();
+    let nothing = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &empty)
+        .unwrap_or_else(|err| panic!("{err}"));
+    assert!(
+        nothing.syscalls.is_empty(),
+        "a declaration with no allow form must admit no syscall: {:?}",
+        nothing.syscalls
+    );
+    assert!(
+        !nothing
+            .program
+            .iter()
+            .any(|instruction| instruction.code == SECCOMP_BPF_RET_K
+                && instruction.k == SECCOMP_RET_ALLOW),
+        "a program built from no allow form must hold no ALLOW decision"
+    );
+    assert_eq!(
+        nothing.program.last(),
+        Some(&SeccompInstruction::stmt(
+            SECCOMP_BPF_RET_K,
+            seccomp_deny_return()
+        )),
+        "a program built from no allow form must end on the deny marker"
+    );
+
+    let mut unnamed = declared.clone();
+    unnamed["rights"]
+        .as_array_mut()
+        .expect("the declared rights must hold a rights list")
+        .push(json!({
+            "id": "unnamed-right",
+            "rules": [r#"(allow file-read* (literal "/private/var/cc-seccomp-unnamed"))"#],
+        }));
+    let refusal = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &unnamed)
+        .expect_err("an id the shared contract does not name must be refused");
+    assert_eq!(
+        refusal,
+        format!(
+            "{WALLET_PROVIDER} declares unnamed-right, which the shared contract does not name"
+        ),
+        "the refusal must be declared_entries' own reason, unchanged"
+    );
+}
+
+/// An allow form the mapping table does not hold is a refusal that names the
+/// provider and the form and builds no filter, symmetrical to
+/// `check_profile_contract`'s refusals.
+///
+/// Each of the three spellings of an allow form is tried: `(allow)`,
+/// `(allow(file-read*))` and the spaced `(allow file-read*)`. All three are
+/// allow forms to the one recogniser, and none of them is a row of the mapping
+/// table, so each is refused by name. The test reads the committed fixture,
+/// starts no process and calls no kernel, so it runs on every OS.
+///
+/// Falsifier: WP148 skips an allow form with no row instead of refusing it, so
+/// the list is built and no refusal comes. WP149 makes the recogniser require a
+/// space after the operator, so `(allow)` and `(allow(file-read*))` are not
+/// allow forms, take no row and are read as head forms instead of refused.
+#[test]
+fn seccomp_rejects_unmapped_allow_form() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    for form in [
+        "(allow)",
+        r#"(allow(file-read* (literal "/private/var/cc-seccomp-unmapped")))"#,
+        r#"(allow mach-lookup (global-name "com.apple.system.logger"))"#,
+    ] {
+        let mut unmapped = declared.clone();
+        let storage = unmapped["rights"]
+            .as_array_mut()
+            .expect("the declared rights must hold a rights list")
+            .iter_mut()
+            .find(|entry| entry["id"] == "storage")
+            .expect("the declared rights must hold the storage right");
+        storage["rules"]
+            .as_array_mut()
+            .expect("the storage right must hold a rules list")
+            .push(json!(form));
+
+        let refusal = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &unmapped)
+            .expect_err("an allow form with no syscall row must be refused");
+        assert!(
+            refusal.contains(WALLET_PROVIDER),
+            "the refusal must name the provider: {refusal}"
+        );
+        assert!(
+            refusal.contains(form),
+            "the refusal must quote the offending form: {refusal}"
+        );
+        assert!(
+            refusal.contains("no filter is built"),
+            "the refusal must state that no filter is built: {refusal}"
+        );
+        assert_eq!(
+            refusal,
+            format!(
+                "{WALLET_PROVIDER} seccomp allow list refuses the allow form {form}: \
+                 the mapping table has no syscall row for it, so no filter is built"
+            )
+        );
+    }
+}
+
+/// The install rule gives each failed step its own reason and keeps its errno:
+/// `PR_SET_NO_NEW_PRIVS` failing and the filter failing are told apart, each
+/// message carries the errno it read, a failed first step stops before the
+/// filter, and the two steps run in that order.
+///
+/// The test injects the steps, so it runs on every OS and calls no kernel.
+///
+/// Falsifier: WP152 reverses the two steps, so the filter runs before
+/// `no_new_privs` and the test fails on its recorded order. WP153 returns one
+/// fixed reason for both steps, so the second step's refusal names the first
+/// step and the test fails on it. WP154 continues after a failed first step, so
+/// the test fails on its recorded order.
+#[test]
+fn seccomp_install_refuses_each_failed_step() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let allow = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &declared)
+        .unwrap_or_else(|err| panic!("{err}"));
+
+    let mut ran: Vec<SeccompStep> = Vec::new();
+    let failure = install_seccomp_with(&allow, |step| {
+        ran.push(step);
+        if step == SeccompStep::NoNewPrivileges {
+            Err(libc::EPERM)
+        } else {
+            Ok(())
+        }
+    })
+    .expect_err("a failed no_new_privs step must be refused");
+    assert_eq!(
+        failure.to_string(),
+        format!(
+            "seccomp install refused: PR_SET_NO_NEW_PRIVS failed with errno {}",
+            libc::EPERM
+        ),
+        "the first step's refusal must name that step and its errno"
+    );
+    assert_eq!(
+        ran,
+        vec![SeccompStep::NoNewPrivileges],
+        "a failed first step must stop before the filter"
+    );
+
+    let mut ran: Vec<SeccompStep> = Vec::new();
+    let failure = install_seccomp_with(&allow, |step| {
+        ran.push(step);
+        if step == SeccompStep::Filter {
+            Err(libc::EINVAL)
+        } else {
+            Ok(())
+        }
+    })
+    .expect_err("a failed filter step must be refused");
+    assert_eq!(
+        failure.to_string(),
+        format!(
+            "seccomp install refused: the filter install failed with errno {}",
+            libc::EINVAL
+        ),
+        "the filter step's refusal must name that step and its errno"
+    );
+    assert_eq!(
+        ran,
+        vec![SeccompStep::NoNewPrivileges, SeccompStep::Filter],
+        "the filter runs after no_new_privs"
+    );
+
+    let first = SeccompInstallFailure::Step(SeccompStep::NoNewPrivileges, libc::EPERM);
+    let second = SeccompInstallFailure::Step(SeccompStep::Filter, libc::EPERM);
+    assert_ne!(
+        first.to_string(),
+        second.to_string(),
+        "the two steps must give distinct reasons for one errno"
+    );
+
+    let mut wrong_arch = allow.clone();
+    wrong_arch.audit_arch = SECCOMP_AUDIT_ARCH.wrapping_add(1);
+    let failure = install_seccomp_with(&wrong_arch, |_| {
+        panic!("the architecture refusal precedes both kernel steps")
+    })
+    .expect_err("a list built for another architecture must be refused");
+    assert!(
+        failure.to_string().contains("audit architecture"),
+        "the refusal must name the audit architecture: {failure}"
+    );
+}
+
+/// The install record's two reporting failures each keep their own reason and
+/// errno, and the two reasons differ: a failed write and a zero-byte write are
+/// told apart. The write loop completes a short write and retries on `EINTR`
+/// instead of giving up.
+///
+/// The test reads the one pure write function and calls no kernel, so it runs on
+/// every OS.
+///
+/// Falsifier: WP155 truncates the record at its first short write, so the loop
+/// stops early and the test fails on the record it expects. WP156 suppresses the
+/// `EINTR` retry, so the interrupted write is reported as a failure and the test
+/// fails on it. WP157 returns one fixed reason for both reporting failures, so
+/// the test fails because the two reasons are equal.
+#[test]
+fn seccomp_launch_refuses_each_reporting_failure() {
+    let record = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+
+    // A short write is completed, and `EINTR` is retried, so the whole record
+    // arrives.
+    let mut written: Vec<u8> = Vec::new();
+    let mut calls = 0usize;
+    write_seccomp_launch_record(&record, |bytes| {
+        calls += 1;
+        match calls {
+            1 => {
+                written.extend_from_slice(&bytes[..2]);
+                Ok(2)
+            }
+            2 => Err(libc::EINTR),
+            _ => {
+                written.extend_from_slice(&bytes[..1]);
+                Ok(1)
+            }
+        }
+    })
+    .expect("a short write and an interrupted write must both be completed");
+    assert_eq!(
+        written,
+        record.to_vec(),
+        "the loop must write every byte of the record"
+    );
+    assert_eq!(
+        calls,
+        record.len(),
+        "the loop must retry after EINTR and finish one byte at a time"
+    );
+
+    let failed = write_seccomp_launch_record(&record, |_| Err(libc::EPIPE))
+        .expect_err("a failed write must be refused");
+    assert_eq!(failed, SeccompLaunchWriteFailure::Failed(libc::EPIPE));
+    assert_eq!(failed.errno(), libc::EPIPE);
+
+    let nothing = write_seccomp_launch_record(&record, |_| Ok(0))
+        .expect_err("a zero-byte write must be refused");
+    assert_eq!(nothing, SeccompLaunchWriteFailure::WroteNothing);
+    assert_eq!(nothing.errno(), libc::EIO);
+
+    assert_ne!(
+        failed.to_string(),
+        nothing.to_string(),
+        "the two reporting failures must give distinct reasons"
+    );
+    assert!(
+        failed.to_string().contains("could not be written")
+            && failed
+                .to_string()
+                .contains(&format!("errno {}", libc::EPIPE)),
+        "the failed write must carry its own words and errno: {failed}"
+    );
+    assert!(
+        nothing.to_string().contains("wrote no bytes"),
+        "the zero-byte write must carry its own words: {nothing}"
+    );
+}
+
+/// The install record's shape decides the launch reason: a record that is
+/// missing, short, long or names an unknown step is a refusal with its own
+/// words and never a bare spawn error, and a complete installed record carries
+/// the two marker answers the journey compares.
+///
+/// The launcher's own answer is read through `seccomp_launch_answers_or_refusal`,
+/// the one place the record becomes a launch result, so a child that never wrote
+/// a record keeps the record's reason and adds what it did instead. A failed
+/// write, a zero-byte write, a child that did not start and a child that started
+/// and reported nothing each give their own refusal, and no case is the bare
+/// spawn error finding 4 named.
+///
+/// The test reads the one pure record reader and parses no bytes a kernel wrote,
+/// so it runs on every OS.
+///
+/// Falsifier: WP163 accepts any record length, so a short record decodes as an
+/// installed one and the missing-length refusal does not come. WP164 decodes an
+/// unknown first field as an installed record, so the unknown-step refusal does
+/// not come. WP167 bypasses the reader when the child also failed to start, so
+/// the missing-report case answers the spawn's reason alone and the test fails
+/// on it.
+#[test]
+fn seccomp_launch_record_refuses_missing_or_unknown_report() {
+    let missing = decode_seccomp_launch_record(&[]).expect_err("a missing record must be refused");
+    assert_eq!(
+        missing,
+        format!(
+            "seccomp install report refused: the child reported 0 bytes and one record is \
+             {SECCOMP_LAUNCH_RECORD_LEN}"
+        ),
+        "a missing record must name its own reason"
+    );
+
+    let mut reasons: Vec<String> = vec![missing.clone()];
+    for length in [SECCOMP_LAUNCH_RECORD_LEN - 8, SECCOMP_LAUNCH_RECORD_LEN + 8] {
+        let record = vec![0u8; length];
+        let refusal = decode_seccomp_launch_record(&record)
+            .expect_err("a short or long record must be refused");
+        assert_eq!(
+            refusal,
+            format!(
+                "seccomp install report refused: the child reported {length} bytes and one \
+                 record is {SECCOMP_LAUNCH_RECORD_LEN}"
+            ),
+            "a record of {length} bytes must name its length and the record's"
+        );
+        reasons.push(refusal);
+    }
+
+    let mut unknown = [0u8; SECCOMP_LAUNCH_RECORD_LEN];
+    unknown[..8].copy_from_slice(&7i64.to_ne_bytes());
+    let refusal =
+        decode_seccomp_launch_record(&unknown).expect_err("an unknown step must be refused");
+    assert_eq!(
+        refusal, "seccomp install report refused: the child named step 7, which is no install step",
+        "an unknown step must name the step the child gave"
+    );
+    reasons.push(refusal);
+    assert_eq!(
+        reasons.len(),
+        reasons
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        "each record case must give its own reason: {reasons:?}"
+    );
+
+    // The launcher's own answer, one case per child outcome. Each keeps the
+    // record's reason and names what the child did instead, and no case is the
+    // bare spawn error.
+    let mut launch_reasons: Vec<String> = Vec::new();
+    for (record, child) in [
+        (
+            Vec::new(),
+            "the test child must start: No such file or directory (os error 2)",
+        ),
+        (
+            Vec::new(),
+            "the child started and its install report arrived incomplete",
+        ),
+        (
+            vec![0u8; SECCOMP_LAUNCH_RECORD_LEN - 8],
+            "the child started and its install report arrived incomplete",
+        ),
+        (
+            unknown.to_vec(),
+            "the child started and its install report arrived incomplete",
+        ),
+    ] {
+        let refusal = seccomp_launch_answers_or_refusal(&record, child)
+            .expect_err("a record this child did not complete must be refused");
+        assert!(
+            refusal.starts_with("seccomp install report refused: "),
+            "the launcher's refusal must carry the record's reason: {refusal}"
+        );
+        assert!(
+            refusal.contains(child),
+            "the launcher's refusal must say what the child did instead: {refusal}"
+        );
+        launch_reasons.push(refusal);
+    }
+    let missing_report = &launch_reasons[0];
+    assert!(
+        missing_report.contains("reported 0 bytes"),
+        "a child that never reported must answer the missing-report reason, not the spawn's \
+         alone: {missing_report}"
+    );
+    assert_eq!(
+        launch_reasons.len(),
+        launch_reasons
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        "each child outcome must give its own reason: {launch_reasons:?}"
+    );
+    assert_eq!(
+        seccomp_launch_answers_or_refusal(
+            &seccomp_launch_record(
+                SECCOMP_LAUNCH_INSTALLED,
+                -i64::from(libc::EINVAL),
+                -i64::from(SECCOMP_DENY_ERRNO),
+            ),
+            "the child started and reported an installed filter"
+        )
+        .expect("a complete installed record must answer the launcher's two answers"),
+        [-i64::from(libc::EINVAL), -i64::from(SECCOMP_DENY_ERRNO)],
+        "the launcher must carry the marker's two answers"
+    );
+
+    let installed = decode_seccomp_launch_record(&seccomp_launch_record(
+        SECCOMP_LAUNCH_INSTALLED,
+        -i64::from(libc::EINVAL),
+        -i64::from(SECCOMP_DENY_ERRNO),
+    ))
+    .expect("a complete installed record must decode");
+    assert_eq!(
+        installed,
+        SeccompLaunchRecord::Installed([-i64::from(libc::EINVAL), -i64::from(SECCOMP_DENY_ERRNO)]),
+        "an installed record must carry the marker's answer before and after the install"
+    );
+
+    for (step, errno) in [
+        (SECCOMP_LAUNCH_NO_NEW_PRIVS, libc::EPERM),
+        (SECCOMP_LAUNCH_FILTER, libc::EINVAL),
+    ] {
+        let decoded =
+            decode_seccomp_launch_record(&seccomp_launch_record(step, i64::from(errno), 0))
+                .expect("a failed-step record must decode");
+        let SeccompLaunchRecord::Refused(failure) = decoded else {
+            panic!("a failed step must decode as a refusal");
+        };
+        assert_eq!(
+            failure.launch_record(),
+            seccomp_launch_record(step, i64::from(errno), 0),
+            "both child paths must encode the same failed-step record"
+        );
+        assert!(
+            failure.to_string().starts_with("seccomp install refused: ")
+                && failure.to_string().contains(&format!("errno {errno}")),
+            "the refusal must name the step and its errno: {failure}"
+        );
+    }
+    let supplied_arch = SECCOMP_AUDIT_ARCH.wrapping_add(1);
+    let failure = SeccompInstallFailure::AuditArchitecture(supplied_arch);
+    assert_eq!(
+        failure.launch_record(),
+        seccomp_launch_record(SECCOMP_LAUNCH_AUDIT_ARCH, 0, i64::from(supplied_arch)),
+        "the architecture must keep all its unsigned bits in the fixed record"
+    );
+    assert_eq!(
+        decode_seccomp_launch_record(&failure.launch_record()).unwrap(),
+        SeccompLaunchRecord::Refused(failure),
+        "the shared decoder must preserve the architecture refusal for both child paths"
+    );
+}
+
+/// One install record's bytes, so the reader's cases are built by the record's
+/// own layout instead of a hand-written literal.
+fn seccomp_launch_record(step: i64, first: i64, second: i64) -> [u8; SECCOMP_LAUNCH_RECORD_LEN] {
+    let mut record = [0u8; SECCOMP_LAUNCH_RECORD_LEN];
+    for (field, value) in record.chunks_exact_mut(8).zip([step, first, second]) {
+        field.copy_from_slice(&value.to_ne_bytes());
+    }
+    record
+}
+
+/// A failed install starts nothing, and says which step failed with its errno:
+/// each injected step failure and a list built for another architecture come
+/// back from the launcher as that step's own reason, and no program runs.
+///
+/// The requested program is a byte-identical copy of the provider binary, so a
+/// start that got past the install would show as a live process whose own
+/// `/proc/<pid>/exe` names that copy. The test requires the refusal and then
+/// requires no such process to exist, so "starts nothing" is observed and not
+/// inferred. On another OS the launcher has no filter at all, and the refusal
+/// there names the provider and says the filter is a linux policy.
+///
+/// Falsifier: WP168 suppresses the `NoNewPrivileges` install failure, so the
+/// filter case names `no_new_privs` and the test fails on it. WP169 suppresses
+/// the `Filter` install failure, so that case never refuses.
+///
+/// All three plants reach this test's Linux arm only, which is not compiled on
+/// the Mac, so none of them is registered in `falsifiers.json`: they are
+/// recorded in `CONFINEMENT-LINUX.md` and re-run on the Linux host with their
+/// red output quoted there.
+#[test]
+fn linux_seccomp_launch_refuses_each_failed_install() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let allow = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &declared)
+        .unwrap_or_else(|err| panic!("{err}"));
+    let fixture = tempfile::tempdir().expect("temporary launch fixture");
+    let fixture = resolved(fixture.path());
+    let program = fixture.join("requested-program");
+    fs::copy(Path::new(PROVIDER_BINARY), &program).expect("the fixture copy must be writable");
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let refusal = ConfinedProvider::start_under_seccomp(&allow, &program)
+            .err()
+            .expect("a start without a filter must be refused");
+        assert_eq!(
+            refusal,
+            format!(
+                "{WALLET_PROVIDER} start is refused: a seccomp filter is installed on linux only"
+            ),
+            "the refusal must name the provider and say the filter is a linux policy"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut cases: Vec<(SeccompAllowList, String)> = Vec::new();
+        for (failed, errno) in [
+            (SeccompStep::NoNewPrivileges, libc::EPERM),
+            (SeccompStep::Filter, libc::EINVAL),
+        ] {
+            let mut candidate = allow.clone();
+            candidate.injected_step_failure = Some((failed, errno));
+            cases.push((
+                candidate,
+                format!(
+                    "{WALLET_PROVIDER} start is refused: {}",
+                    SeccompInstallFailure::Step(failed, errno)
+                ),
+            ));
+        }
+        let mut wrong_arch = allow.clone();
+        wrong_arch.audit_arch = SECCOMP_AUDIT_ARCH.wrapping_add(1);
+        cases.push((
+            wrong_arch.clone(),
+            format!(
+                "{WALLET_PROVIDER} start is refused: {}",
+                SeccompInstallFailure::AuditArchitecture(wrong_arch.audit_arch)
+            ),
+        ));
+
+        for (candidate, expected) in cases {
+            let refusal = ConfinedProvider::start_under_seccomp(&candidate, &program)
+                .err()
+                .unwrap_or_else(|| panic!("{expected} must refuse the start"));
+            assert_eq!(
+                refusal, expected,
+                "the refusal must be that step's own reason and errno"
+            );
+            assert!(
+                running_programs(&program).is_empty(),
+                "a refused install must start nothing, and {} runs {}",
+                program.display(),
+                running_programs(&program).len()
+            );
+        }
+    }
+}
+
+/// The launcher starts the program it is given and no other: the fixture holds
+/// the provider binary and a byte-identical copy of it, the launcher is given the
+/// copy, and the started child's own `/proc/<pid>/exe` must name that copy. A
+/// start that substituted the provider binary would run a different path and fail
+/// here, even though both files hold the same bytes.
+///
+/// The copy is byte-identical so only the path can tell them apart, and the
+/// provider binary is the program under test because it is the one the filter's
+/// measured launch set was measured against.
+///
+/// Falsifier: WP170 substitutes `PROVIDER_BINARY` for the given program, so the
+/// child's `/proc/<pid>/exe` names the original and the test fails on it. It
+/// reaches a Linux-only arm, so it is not registered in `falsifiers.json` and
+/// `CONFINEMENT-LINUX.md` records it with the red run on the Linux host.
+#[test]
+fn linux_seccomp_launcher_runs_the_requested_program() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let allow = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &declared)
+        .unwrap_or_else(|err| panic!("{err}"));
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let refusal = ConfinedProvider::start_under_seccomp(&allow, Path::new(PROVIDER_BINARY))
+            .err()
+            .expect("a start without a filter must be refused");
+        assert_eq!(
+            refusal,
+            format!(
+                "{WALLET_PROVIDER} start is refused: a seccomp filter is installed on linux only"
+            ),
+            "the refusal must name the provider and say the filter is a linux policy"
+        );
+        return;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let fixture = tempfile::tempdir().expect("temporary launch fixture");
+        let fixture = resolved(fixture.path());
+        let original = resolved(Path::new(PROVIDER_BINARY));
+        let requested = fixture.join("requested-program");
+        fs::copy(&original, &requested).expect("the fixture copy must be writable");
+        assert_eq!(
+            fs::read(&requested).expect("the copy must be readable"),
+            fs::read(&original).expect("the provider binary must be readable"),
+            "the copy must be byte-identical, so only its path tells the two apart"
+        );
+
+        let mut provider = ConfinedProvider::start_under_seccomp(&allow, &requested)
+            .unwrap_or_else(|refusal| panic!("the requested program must start: {refusal}"));
+        let launched = fs::read_link(format!("/proc/{}/exe", provider.child.id()))
+            .expect("the launched child's own /proc exe link must be readable");
+        let _ = provider.wait_for_exit();
+        assert_eq!(
+            launched, requested,
+            "the launcher must run the program it is given and no other"
+        );
+    }
+}
+
+/// The pids whose own `/proc/<pid>/exe` names `program`. It reads `/proc` and
+/// starts nothing, so a refusal can be checked for the process it must not
+/// leave behind.
+#[cfg(target_os = "linux")]
+fn running_programs(program: &Path) -> Vec<libc::pid_t> {
+    let mut pids = Vec::new();
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return pids;
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<libc::pid_t>().ok())
+        else {
+            continue;
+        };
+        if fs::read_link(entry.path().join("exe")).is_ok_and(|exe| exe == program) {
+            pids.push(pid);
+        }
+    }
+    pids
+}
+
+/// The prefix every probe record line starts with.
+#[cfg(target_os = "linux")]
+const SECCOMP_PROBE_MARKER: &str = "seccomp-probe:";
+/// The prefix the probe child's own refusal starts with.
+#[cfg(target_os = "linux")]
+const SECCOMP_PROBE_REFUSED: &str = "seccomp-probe-refused:";
+/// The prefix the probe child writes its own allocation count under.
+#[cfg(target_os = "linux")]
+const SECCOMP_PROBE_ALLOCATIONS: &str = "seccomp-probe-allocations:";
+/// `SECCOMP_MODE_FILTER`, the mode `/proc/<pid>/status` reports for a process
+/// that carries a seccomp filter.
+#[cfg(target_os = "linux")]
+const SECCOMP_MODE_FILTER: u32 = 2;
+
+/// The probe child's report: one `(call, before, after)` per refused call, and
+/// the number of times the child allocated after its fork.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SeccompProbeReport {
+    records: Vec<(&'static str, SeccompAnswer, SeccompAnswer)>,
+    /// The child's own allocation count after the fork, which must be zero.
+    allocations: usize,
+}
+
+/// What the probe child is asked to do; a plain value, because it crosses a fork
+/// into a child that allocates nothing.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeccompProbeRun {
+    /// The kernel proof: record the four calls, install the filter, record them
+    /// again and report.
+    Filter,
+    /// Exit at once with no report, so a complete report is required to pass.
+    WithoutReport,
+    /// Write a complete report and never exit, so only the bounded wait ends
+    /// the run.
+    WithoutExit,
+    /// Trace itself and stop, so the wait sees a stopped child that is still
+    /// alive: `PTRACE_TRACEME` makes its stops reportable without `WUNTRACED`.
+    Stopped,
+    /// Allocate after the fork, so the allocation guard has something to count.
+    Allocating,
+    /// Check that another probe's pipe ends were closed in this fork-only
+    /// child, then run the normal filter proof.
+    CheckInheritedDescriptors([std::os::fd::RawFd; 2]),
+}
+
+/// The probe child's own body: record the four calls, install the filter through
+/// `install_seccomp`, record them again, write one line per call and end the
+/// process at once.
+///
+/// It runs in a forked child before any exec, so its filter reaches only that
+/// child and the harness above it stays unfiltered. It allocates nothing and
+/// writes with raw `write` calls, because a forked child may rely only on
+/// async-signal-safe calls. The allocation guard counts this child's own
+/// allocations, and a child that allocated refuses its own report instead of
+/// writing it, so a `Vec` after the fork cannot pass as a fixed array. Both sets
+/// of answers live in fixed arrays of the list's own length. It ends with
+/// `exit_group`, because ending one thread would leave the other waiting on
+/// calls this filter refuses.
+#[cfg(target_os = "linux")]
+fn run_seccomp_probe_child(
+    report: std::os::fd::RawFd,
+    run: SeccompProbeRun,
+    allow: &SeccompAllowList,
+    prepared_report: Option<&[u8]>,
+) -> ! {
+    // CLOEXEC protects exec children. This one shared ownership check also
+    // closes other probes' pipes and launcher sockets in fork-only children.
+    if let Err(errno) = retain_probe_report_descriptor(report) {
+        write_all(
+            report,
+            b"the probe child could not close inherited descriptors: errno ",
+        );
+        write_number(report, i64::from(errno));
+        unsafe { libc::_exit(71) }
+    }
+    if let SeccompProbeRun::CheckInheritedDescriptors(inherited) = run {
+        for fd in inherited {
+            let result = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            if result != -1 || unsafe { *libc::__errno_location() } != libc::EBADF {
+                write_all(
+                    report,
+                    b"the probe child retained another probe's descriptor",
+                );
+                unsafe { libc::_exit(71) }
+            }
+        }
+    }
+    if run == SeccompProbeRun::WithoutReport {
+        unsafe { libc::_exit(0) }
+    }
+    if run == SeccompProbeRun::Stopped {
+        // A traced child's stops are reportable without `WUNTRACED`, so a wait
+        // that read this stop as an end would leave the child alive. Raising
+        // SIGSTOP is the same observable state as an external stop.
+        unsafe {
+            libc::ptrace(libc::PTRACE_TRACEME, 0, 0, 0);
+            libc::raise(libc::SIGSTOP);
+        }
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    }
+    if run == SeccompProbeRun::WithoutExit {
+        write_all(
+            report,
+            prepared_report.expect("the parent prepares this report"),
+        );
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    }
+
+    // From here on this child counts its own allocations, so the report can
+    // say whether anything after the fork took the allocator.
+    begin_counting_child_allocations();
+    if run == SeccompProbeRun::Allocating {
+        // The guard's own fixture: one allocation after the fork, so the count
+        // is not zero and the test can see the guard fire.
+        let allocated: Vec<u8> = Vec::with_capacity(1);
+        let _ = allocated.capacity();
+    }
+
+    let mut before = [SeccompAnswer::Returned(0); SECCOMP_PROBE_CALLS.len()];
+    for (slot, call) in before.iter_mut().zip(SECCOMP_PROBE_CALLS) {
+        *slot = seccomp_probe_answers(call);
+    }
+    // The probe installs the same filter the launcher installs, so it proves
+    // that filter and not a second one. `LAUNCH_ESSENTIALS` holds none of the
+    // four refused calls, so their answer is still the default decision.
+    if let Err(failure) = install_seccomp(allow) {
+        write_all(report, SECCOMP_PROBE_REFUSED.as_bytes());
+        write_all(report, &failure.launch_record());
+        unsafe { libc::_exit(70) }
+    }
+    let mut after = [SeccompAnswer::Returned(0); SECCOMP_PROBE_CALLS.len()];
+    for (slot, call) in after.iter_mut().zip(SECCOMP_PROBE_CALLS) {
+        *slot = seccomp_probe_answers(call);
+    }
+    let mut buffer = [0u8; 512];
+    for ((call, before), after) in SECCOMP_PROBE_CALLS.iter().zip(before).zip(after) {
+        let mut written = 0usize;
+        written += copy_bytes(&mut buffer[written..], SECCOMP_PROBE_MARKER.as_bytes());
+        written += copy_bytes(&mut buffer[written..], b" ");
+        written += copy_bytes(&mut buffer[written..], call.as_bytes());
+        written += copy_bytes(&mut buffer[written..], b" ");
+        written += copy_answer(&mut buffer[written..], before);
+        written += copy_bytes(&mut buffer[written..], b" ");
+        written += copy_answer(&mut buffer[written..], after);
+        written += copy_bytes(&mut buffer[written..], b"\n");
+        write_all(report, &buffer[..written]);
+    }
+    // The guard: this child writes how many times it allocated after the fork,
+    // and the test that decides the rule requires the count to be zero. The
+    // line is written whatever the count, so a child that allocated still
+    // reports and the count itself is the evidence.
+    write_all(report, SECCOMP_PROBE_ALLOCATIONS.as_bytes());
+    write_number(report, child_allocations() as i64);
+    write_all(report, b"\n");
+    unsafe {
+        libc::syscall(libc::SYS_exit_group, 0 as libc::c_long);
+    }
+    unreachable!("exit_group must not return")
+}
+
+/// The fork-only child owns exactly its report writer. Closing both ranges
+/// also covers descriptors created by concurrent threads before the fork.
+/// This runs before installing the filter, using raw syscalls and stack values.
+/// A kernel that cannot close the ranges refuses the probe before it runs.
+#[cfg(target_os = "linux")]
+fn retain_probe_report_descriptor(report: std::os::fd::RawFd) -> Result<(), i32> {
+    for (first, last) in [(0, report as u32), (report as u32 + 1, u32::MAX)] {
+        if first == last {
+            continue;
+        }
+        let last = if first == 0 { last - 1 } else { last };
+        if unsafe { libc::syscall(libc::SYS_close_range, first, last, 0u32) } != 0 {
+            return Err(unsafe { *libc::__errno_location() });
+        }
+    }
+    Ok(())
+}
+
+/// Makes this probe child count its own allocations. It runs in the forked
+/// child, after the fork, so the flag it sets is the child's own copy: the
+/// parent's threads keep running in the parent's copy and set nothing here.
+#[cfg(target_os = "linux")]
+fn begin_counting_child_allocations() {
+    ALLOCATIONS.store(0, Ordering::SeqCst);
+    COUNT_ALLOCATIONS.store(true, Ordering::SeqCst);
+}
+
+/// How many allocations this probe child made since it started counting.
+#[cfg(target_os = "linux")]
+fn child_allocations() -> usize {
+    ALLOCATIONS.load(Ordering::SeqCst)
+}
+
+/// Writes `bytes` to `fd` with the raw `write` call the filter admits.
+#[cfg(target_os = "linux")]
+fn write_all(fd: std::os::fd::RawFd, bytes: &[u8]) {
+    let mut written = 0usize;
+    while written < bytes.len() {
+        let count =
+            unsafe { libc::write(fd, bytes[written..].as_ptr().cast(), bytes.len() - written) };
+        if count <= 0 {
+            return;
+        }
+        written += count as usize;
+    }
+}
+
+/// Writes `value` as decimal digits to `fd`, with no formatting and no
+/// allocation.
+#[cfg(target_os = "linux")]
+fn write_number(fd: std::os::fd::RawFd, value: i64) {
+    let mut digits = [0u8; 20];
+    let mut count = 0usize;
+    let negative = value < 0;
+    let mut magnitude = value.unsigned_abs();
+    loop {
+        digits[count] = b'0' + (magnitude % 10) as u8;
+        magnitude /= 10;
+        count += 1;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if negative {
+        write_all(fd, b"-");
+    }
+    while count > 0 {
+        count -= 1;
+        write_all(fd, &digits[count..=count]);
+    }
+}
+
+/// The list the launcher and the probe both install: the one list built from the
+/// committed declared rights, plus the measured launch set, through the one
+/// builder. It is built once per run, in the parent, before any fork.
+#[cfg(target_os = "linux")]
+fn seccomp_probe_list() -> SeccompAllowList {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &declared)
+        .unwrap_or_else(|err| panic!("{err}"))
+        .with_launch_essentials()
+}
+
+/// Copies `bytes` into `into` and returns how much it wrote. The probe's report
+/// is built in a fixed buffer after the filter is installed, where no allocator
+/// may be called.
+#[cfg(target_os = "linux")]
+fn copy_bytes(into: &mut [u8], bytes: &[u8]) -> usize {
+    into[..bytes.len()].copy_from_slice(bytes);
+    bytes.len()
+}
+
+/// Writes one answer as `errno:<n>` or `ok:<n>` into `into` and returns how much
+/// it wrote, without formatting a `String`.
+#[cfg(target_os = "linux")]
+fn copy_answer(into: &mut [u8], answer: SeccompAnswer) -> usize {
+    let (prefix, value) = match answer {
+        SeccompAnswer::Errno(errno) => (&b"errno:"[..], i64::from(errno)),
+        SeccompAnswer::Returned(value) => (&b"ok:"[..], value),
+    };
+    let mut written = copy_bytes(into, prefix);
+    let mut digits = [0u8; 20];
+    let mut count = 0usize;
+    let negative = value < 0;
+    let mut magnitude = value.unsigned_abs();
+    loop {
+        digits[count] = b'0' + (magnitude % 10) as u8;
+        magnitude /= 10;
+        count += 1;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if negative {
+        written += copy_bytes(&mut into[written..], b"-");
+    }
+    while count > 0 {
+        count -= 1;
+        written += copy_bytes(&mut into[written..], &digits[count..=count]);
+    }
+    written
+}
+
+/// How a probe child ended.
+///
+/// A stop is its own end, because a stopped child is alive: `PTRACE_TRACEME`
+/// makes a child's stops reportable without `WUNTRACED`, so a wait that read a
+/// stop as an end would leave the child and its pipe behind (P11).
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeExit {
+    Code(i32),
+    Signal(i32),
+    /// The child stopped with this signal; it was killed and reaped.
+    Stopped(i32),
+    TimedOut,
+    /// The child could not be waited on any more, with this errno.
+    Gone(i32),
+}
+
+#[cfg(target_os = "linux")]
+impl std::fmt::Display for ProbeExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Code(0) => write!(f, "exit status: 0"),
+            Self::Code(code) => write!(f, "exit status: {code}"),
+            Self::Signal(signal) => write!(f, "signal: {signal}"),
+            Self::Stopped(signal) => write!(
+                f,
+                "stopped by signal: {signal}, so it was killed and reaped"
+            ),
+            Self::Gone(errno) => write!(f, "no longer waitable, errno {errno}"),
+            Self::TimedOut => write!(
+                f,
+                "no exit within {}s, so it was killed",
+                CHILD_EXIT_DEADLINE.as_secs()
+            ),
+        }
+    }
+}
+
+/// The child's report, or a refusal naming what it did instead. The child is a
+/// fork of this process, so its filter reaches only itself. The read is bounded
+/// and the child is reaped on every result, including a timeout, so a repeated
+/// journey leaves no probe behind.
+///
+/// The reap is asserted before the report is read, so no early return can skip
+/// it: a wait that ended without reaping the child fails here whatever the child
+/// wrote.
+#[cfg(target_os = "linux")]
+fn seccomp_denied_call_probe(
+    allow: &SeccompAllowList,
+    run: SeccompProbeRun,
+) -> Result<SeccompProbeReport, String> {
+    seccomp_denied_call_probe_with_pipe(allow, run, |_| {})
+}
+
+/// The probe's one channel and fork path. The observer runs in the parent
+/// after pipe creation and before the fork, so the inheritance test can hold
+/// that exact race window open while it launches other children.
+#[cfg(target_os = "linux")]
+fn seccomp_denied_call_probe_with_pipe(
+    allow: &SeccompAllowList,
+    run: SeccompProbeRun,
+    observe_pipe: impl FnOnce([std::os::fd::RawFd; 2]),
+) -> Result<SeccompProbeReport, String> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    let mut fds = [0 as libc::c_int; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
+        return Err(format!(
+            "seccomp probe refused: the report pipe could not open: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let mut reader = unsafe { fs::File::from_raw_fd(fds[0]) };
+    let writer = unsafe { fs::File::from_raw_fd(fds[1]) };
+    observe_pipe(fds);
+    // The lifecycle fixture's report is built here, where an allocator is
+    // allowed, and the child only writes it. Counted children allocate nothing,
+    // so that report says zero.
+    let prepared = match run {
+        SeccompProbeRun::WithoutExit => Some(probe_report_text(&SeccompProbeReport {
+            records: SECCOMP_PROBE_CALLS
+                .iter()
+                .map(|call| {
+                    (
+                        *call,
+                        SeccompAnswer::Errno(libc::EPERM),
+                        SeccompAnswer::Errno(SECCOMP_DENY_ERRNO),
+                    )
+                })
+                .collect(),
+            allocations: 0,
+        })),
+        _ => None,
+    };
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(format!(
+            "seccomp probe refused: the probe child could not start: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if pid == 0 {
+        run_seccomp_probe_child(
+            writer.as_raw_fd(),
+            run,
+            allow,
+            prepared.as_deref().map(str::as_bytes),
+        );
+    }
+    drop(writer);
+
+    let exit = wait_for_probe_exit(pid);
+    // The wait must have reaped the child on every result: a second wait finds
+    // no child, so a repeated journey leaves no probe running. This is asserted
+    // here, before any arm can return, so no early return skips it.
+    assert_probe_reaped(pid);
+    // Reports fit within PIPE_BUF, so the child can write before this read.
+    // The parent owns the nonblocking reader throughout, including every
+    // error and deadline. A concurrent exec may briefly hold a CLOEXEC writer
+    // before exec closes it; wait for that close within the same bound.
+    let started = Instant::now();
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 512];
+    loop {
+        if started.elapsed() >= CHILD_EXIT_DEADLINE {
+            return Err(format!(
+                "seccomp probe refused: child {exit} wrote no complete report within {}s",
+                CHILD_EXIT_DEADLINE.as_secs()
+            ));
+        }
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                bytes.extend_from_slice(&buffer[..count]);
+                if bytes.len() > libc::PIPE_BUF {
+                    return Err("seccomp probe refused: the report exceeds PIPE_BUF".into());
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(CHILD_EXIT_POLL);
+            }
+            Err(err) => {
+                return Err(format!(
+                    "seccomp probe refused: reading the report failed: {err}"
+                ))
+            }
+        }
+    }
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+
+    match exit {
+        ProbeExit::Code(code) if code == 0 => {}
+        ProbeExit::Code(_) if bytes.starts_with(SECCOMP_PROBE_REFUSED.as_bytes()) => {
+            return Err(
+                match decode_seccomp_launch_record(&bytes[SECCOMP_PROBE_REFUSED.len()..]) {
+                    Ok(SeccompLaunchRecord::Refused(failure)) => format!(
+                        "seccomp probe refused: the probe child must install the filter: {failure}"
+                    ),
+                    Ok(SeccompLaunchRecord::Installed(_)) => {
+                        "seccomp probe refused: the refused child reported an installed filter"
+                            .into()
+                    }
+                    Err(reason) => format!("seccomp probe refused: {reason}"),
+                },
+            );
+        }
+        other => {
+            return Err(format!(
+                "seccomp probe refused: child {other}; report: {text}"
+            ))
+        }
+    }
+    let report = parse_seccomp_probe_report(&text)
+        .map_err(|refusal| format!("seccomp probe refused: {refusal}"))?;
+    // The guard's one decision: a child that allocated after its fork may have
+    // blocked on an allocator lock another thread held at the fork, so its
+    // report is refused with its own reason. A child that allocated nothing
+    // reports zero and is accepted.
+    if report.allocations != 0 {
+        return Err(format!(
+            "seccomp probe refused: the probe child allocated {} times after its fork, where \
+             only async-signal-safe calls are available",
+            report.allocations
+        ));
+    }
+    Ok(report)
+}
+
+/// Asserts that this process no longer holds `pid`: a second wait answers
+/// `ECHILD`, so the child was reaped. It is called on every probe result before
+/// any arm can return, so no path can skip the reaping rule.
+#[cfg(target_os = "linux")]
+fn assert_probe_reaped(pid: libc::pid_t) {
+    let mut status = 0;
+    let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    let errno = std::io::Error::last_os_error().raw_os_error();
+    assert_eq!(
+        waited, -1,
+        "the probe child must already be reaped, and a second wait answered {waited}"
+    );
+    assert_eq!(
+        errno,
+        Some(libc::ECHILD),
+        "the probe child must already be reaped with ECHILD, and the wait answered {errno:?}"
+    );
+}
+
+/// Waits up to `CHILD_EXIT_DEADLINE` for `pid` to end, killing and reaping it
+/// on every other result. It is the one wait for a probe child.
+///
+/// A stop is not an end: `PTRACE_TRACEME` makes a child's stops reportable
+/// without `WUNTRACED`, so a stopped child is killed with `SIGKILL` and reaped
+/// before this returns, exactly as a timed-out child is. An `EINTR` from
+/// `waitpid` retries the same wait instead of ending it, and a child the kernel
+/// no longer holds is `Gone` with its errno. Every arm leaves no child behind,
+/// so the caller can finish its bounded read and a repeated journey reaps everything.
+#[cfg(target_os = "linux")]
+fn wait_for_probe_exit(pid: libc::pid_t) -> ProbeExit {
+    let started = Instant::now();
+    loop {
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        let errno = if waited < 0 {
+            std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::ECHILD)
+        } else {
+            0
+        };
+        if waited == pid {
+            if libc::WIFEXITED(status) {
+                return ProbeExit::Code(libc::WEXITSTATUS(status));
+            }
+            if libc::WIFSIGNALED(status) {
+                return ProbeExit::Signal(libc::WTERMSIG(status));
+            }
+            if libc::WIFSTOPPED(status) {
+                // The child is alive and stopped, and this wait will never see
+                // its end: kill and reap it here rather than return a result a
+                // reader could read as an end.
+                return ProbeExit::Stopped(kill_and_reap(pid, libc::WSTOPSIG(status)));
+            }
+            return ProbeExit::Code(libc::WEXITSTATUS(status));
+        }
+        if waited < 0 {
+            if errno == libc::EINTR {
+                continue;
+            }
+            // `ECHILD` is the one errno that says this process holds no such
+            // child any more, so nothing is left to reap and no wait can help.
+            return ProbeExit::Gone(errno);
+        }
+        if started.elapsed() >= CHILD_EXIT_DEADLINE {
+            kill_and_reap(pid, 0);
+            return ProbeExit::TimedOut;
+        }
+        std::thread::sleep(CHILD_EXIT_POLL);
+    }
+}
+
+/// Kills `pid` with `SIGKILL` and reaps it, returning `stop_signal` so its
+/// caller can report a stop. A child the kernel no longer holds is already
+/// reaped, so this returns without waiting. It is the one kill-and-reap for a
+/// probe child.
+#[cfg(target_os = "linux")]
+fn kill_and_reap(pid: libc::pid_t, stop_signal: i32) -> i32 {
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+    loop {
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if waited == pid {
+            break;
+        }
+        let errno = std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::ECHILD);
+        if errno == libc::EINTR {
+            continue;
+        }
+        // Any other errno means the kernel holds no child for this pid, so it
+        // has been reaped already and the wait cannot succeed.
+        break;
+    }
+    stop_signal
+}
+
+/// The report text for `report`, built with an allocator before a fork. It is
+/// the same text the child writes, so the parser reads one shape from both.
+#[cfg(target_os = "linux")]
+fn probe_report_text(report: &SeccompProbeReport) -> String {
+    let mut text: String = report
+        .records
+        .iter()
+        .map(|(call, before, after)| {
+            format!(
+                "{SECCOMP_PROBE_MARKER} {call} {} {}\n",
+                before.text(),
+                after.text()
+            )
+        })
+        .collect();
+    text.push_str(&format!(
+        "{SECCOMP_PROBE_ALLOCATIONS}{}\n",
+        report.allocations
+    ));
+    text
+}
+
+/// The four records the probe child wrote, each with its unfiltered and filtered
+/// answer, and the child's own allocation count. A missing or unreadable record
+/// is a refusal that names the call, so a child that stopped early cannot pass
+/// the journey, and a missing count is its own refusal.
+#[cfg(target_os = "linux")]
+fn parse_seccomp_probe_report(text: &str) -> Result<SeccompProbeReport, String> {
+    let mut records = Vec::new();
+    for call in SECCOMP_PROBE_CALLS {
+        let marker = format!("{SECCOMP_PROBE_MARKER} {call} ");
+        let line = text
+            .lines()
+            .find(|line| line.starts_with(&marker))
+            .ok_or_else(|| format!("the probe recorded no answer for {call}: {text}"))?;
+        let (before, after) = line[marker.len()..]
+            .split_once(' ')
+            .ok_or_else(|| format!("{call} must hold two answers: {line}"))?;
+        let before = SeccompAnswer::parse(before)
+            .ok_or_else(|| format!("{call}: {before} is not an answer"))?;
+        let after = SeccompAnswer::parse(after)
+            .ok_or_else(|| format!("{call}: {after} is not an answer"))?;
+        records.push((*call, before, after));
+    }
+    let line = text
+        .lines()
+        .find(|line| line.starts_with(SECCOMP_PROBE_ALLOCATIONS))
+        .ok_or_else(|| format!("the probe recorded no allocation count: {text}"))?;
+    let allocations = line[SECCOMP_PROBE_ALLOCATIONS.len()..]
+        .trim()
+        .parse::<usize>()
+        .map_err(|err| format!("the probe's allocation count is not a number: {line}: {err}"))?;
+    Ok(SeccompProbeReport {
+        records,
+        allocations,
+    })
+}
+
+/// Every child the probe starts is reaped, a failed install is reported rather
+/// than left to hang, a stopped child and a child that never exits are both
+/// killed at a bound, a child that allocated after its fork is refused, and a
+/// repeated journey answers the same as the first.
+///
+/// The test covers both failed install steps and a wrong audit architecture,
+/// then missing reports, stops, timeouts, allocations and repeated kernel
+/// proofs. Each child must end, and the kernel proof must give the same four
+/// records twice in a row, so the second journey reaps everything the first
+/// started.
+///
+/// Falsifier: WP171 reads a stopped child as an end, so this test hangs on the
+/// stopped case until the harness kills it, and the stopped child is never
+/// reaped. WP172 omits the `SIGKILL` and reap for a timed-out probe, so that
+/// child is left behind. WP173 removes the reaping assertion, so a child the
+/// harness leaves running keeps the test green where it must fail. WP174 omits
+/// the `waitpid` and reap entirely, so no child is ever reaped. WP175 collects
+/// the filtered answers with a `Vec` after the fork, so the allocation guard
+/// counts one and the guard case's refusal does not come.
+///
+/// Every plant here reaches a Linux-only arm, so none of them is registered in
+/// `falsifiers.json`; `CONFINEMENT-LINUX.md` records them and quotes the red run
+/// on the Linux host.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_seccomp_probe_reaps_failures_and_repeated_journeys() {
+    let started = Instant::now();
+
+    let allow = seccomp_probe_list();
+    for (step, errno, reason) in [
+        (
+            SeccompStep::NoNewPrivileges,
+            libc::EPERM,
+            "seccomp install refused: PR_SET_NO_NEW_PRIVS failed with errno 1",
+        ),
+        (
+            SeccompStep::Filter,
+            libc::EINVAL,
+            "seccomp install refused: the filter install failed with errno 22",
+        ),
+    ] {
+        let mut candidate = allow.clone();
+        candidate.injected_step_failure = Some((step, errno));
+        assert_eq!(
+            seccomp_denied_call_probe(&candidate, SeccompProbeRun::Filter).unwrap_err(),
+            format!("seccomp probe refused: the probe child must install the filter: {reason}"),
+            "the probe must preserve each install step's own refusal"
+        );
+    }
+    let mut wrong_arch = allow.clone();
+    wrong_arch.audit_arch = SECCOMP_AUDIT_ARCH.wrapping_add(1);
+    assert_eq!(
+        seccomp_denied_call_probe(&wrong_arch, SeccompProbeRun::Filter).unwrap_err(),
+        format!(
+            "seccomp probe refused: the probe child must install the filter: \
+             seccomp install refused: the list was built for audit architecture {:#x} \
+             and this target reports {SECCOMP_AUDIT_ARCH:#x}",
+            wrong_arch.audit_arch
+        ),
+        "the probe must preserve the supplied and target audit architectures"
+    );
+    let failed = seccomp_denied_call_probe(&allow, SeccompProbeRun::Filter)
+        .expect("the filter proof must pass on this host");
+    assert_eq!(
+        failed.records.len(),
+        SECCOMP_PROBE_CALLS.len(),
+        "the probe must record every refused call"
+    );
+    assert_eq!(
+        failed.allocations, 0,
+        "the kernel-proof child must allocate nothing after its fork, and it allocated"
+    );
+
+    let empty = seccomp_denied_call_probe(&allow, SeccompProbeRun::WithoutReport)
+        .expect_err("a child with no report must be refused");
+    assert!(
+        empty.contains("the probe recorded no answer for ptrace"),
+        "a child that reports nothing must name the first record: {empty}"
+    );
+
+    // A stopped child is alive, not ended. The wait must kill and reap it, and
+    // the report it never finished must be refused by name.
+    let stopped = seccomp_denied_call_probe(&allow, SeccompProbeRun::Stopped)
+        .expect_err("a child that stops must be killed and reaped");
+    assert!(
+        stopped.contains("stopped by signal") && stopped.contains("killed and reaped"),
+        "a stopped child must be reported as stopped and reaped: {stopped}"
+    );
+
+    let held = seccomp_denied_call_probe(&allow, SeccompProbeRun::WithoutExit)
+        .expect_err("a child that never exits must be killed at the deadline");
+    assert!(
+        held.contains("so it was killed"),
+        "a child that never exits must be reported as killed: {held}"
+    );
+
+    // The guard fires on a child that allocates after its fork, so the zero the
+    // kernel proof reported above is a measurement and not a constant.
+    let allocated = seccomp_denied_call_probe(&allow, SeccompProbeRun::Allocating)
+        .expect_err("a child that allocates after its fork must be refused");
+    assert!(
+        allocated.contains("allocated") && allocated.contains("after its fork"),
+        "a child that allocates must be refused with that reason: {allocated}"
+    );
+
+    let first = seccomp_denied_call_probe(&allow, SeccompProbeRun::Filter)
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    let second = seccomp_denied_call_probe(&allow, SeccompProbeRun::Filter)
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(
+        first, second,
+        "a repeated journey must answer the same as the first"
+    );
+    assert_eq!(
+        first.records.len(),
+        SECCOMP_PROBE_CALLS.len(),
+        "the probe must record every refused call"
+    );
+    assert_eq!(
+        first.allocations, 0,
+        "both kernel-proof children must allocate nothing after their forks"
+    );
+    assert!(
+        started.elapsed() < CHILD_EXIT_DEADLINE * 8,
+        "the probe cases must finish well inside eight deadlines, and this took {:?}",
+        started.elapsed()
+    );
+}
+
+/// Hold the report pipe open before its fork while a concurrent launch execs
+/// and another fork-only probe runs. Both ends belong to the first probe;
+/// neither other child may use them or keep its report reader waiting for EOF.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_seccomp_probe_descriptors_stay_with_their_owner() {
+    let allow = seccomp_probe_list();
+    let mut provider = None;
+    let started = Instant::now();
+    let report = seccomp_denied_call_probe_with_pipe(&allow, SeccompProbeRun::Filter, |fds| {
+        let channel = fs::read_link(format!("/proc/self/fd/{}", fds[0]))
+            .expect("the probe pipe must have a kernel identity");
+        for fd in fds {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(flags >= 0, "the report descriptor must be open");
+            assert_ne!(
+                flags & libc::FD_CLOEXEC,
+                0,
+                "each report descriptor must be close-on-exec at creation"
+            );
+        }
+        // The callback is a barrier after pipe creation: both pipe ends stay
+        // open until this other thread has completed the provider's exec.
+        provider = Some(std::thread::scope(|scope| {
+            scope
+                .spawn(|| ConfinedProvider::start_under_seccomp(&allow, Path::new(PROVIDER_BINARY)))
+                .join()
+                .expect("the concurrent launch thread must finish")
+                .expect("the concurrent provider must start")
+        }));
+        let pid = provider.as_ref().unwrap().child.id();
+        for entry in fs::read_dir(format!("/proc/{pid}/fd")).expect("the provider's descriptors") {
+            let path = entry.expect("a provider descriptor").path();
+            let identity = match fs::read_link(path) {
+                Ok(identity) => identity,
+                // The loader may close a descriptor after read_dir listed it.
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => panic!("the descriptor's kernel identity must be readable: {err}"),
+            };
+            assert_ne!(
+                identity, channel,
+                "the concurrent provider must inherit neither probe pipe end"
+            );
+        }
+        let sibling =
+            seccomp_denied_call_probe(&allow, SeccompProbeRun::CheckInheritedDescriptors(fds))
+                .expect("a fork-only probe must close both inherited pipe ends before its calls");
+        assert_eq!(sibling.allocations, 0);
+    })
+    .expect("the owner must reap its probe and reach EOF while the provider stays alive");
+    assert_eq!(report.allocations, 0);
+    let mut provider = provider.expect("the observer started the concurrent provider");
+    assert!(
+        provider.child.try_wait().unwrap().is_none(),
+        "the provider must remain alive when the probe report reaches EOF"
+    );
+    assert!(
+        started.elapsed() < CHILD_EXIT_DEADLINE,
+        "descriptor ownership must let both probes finish before a timeout"
+    );
+    provider.shutdown();
+
+    // Hold an extra writer in the parent to force the read deadline even after
+    // the probe is reaped. The caller must close its reader on that error too.
+    use std::os::fd::FromRawFd as _;
+    let mut held_writer = None;
+    let mut owned_fds = [0; 2];
+    let mut channel = None;
+    let refusal =
+        seccomp_denied_call_probe_with_pipe(&allow, SeccompProbeRun::WithoutReport, |fds| {
+            owned_fds = fds;
+            channel = Some(fs::read_link(format!("/proc/self/fd/{}", fds[0])).unwrap());
+            let duplicate = unsafe { libc::fcntl(fds[1], libc::F_DUPFD_CLOEXEC, 0) };
+            assert!(duplicate >= 0, "the deadline fixture must hold a writer");
+            held_writer = Some(unsafe { fs::File::from_raw_fd(duplicate) });
+        })
+        .expect_err("an open writer must cause a bounded report refusal");
+    assert_eq!(
+        refusal,
+        "seccomp probe refused: child exit status: 0 wrote no complete report within 10s"
+    );
+    for fd in owned_fds {
+        assert_ne!(
+            fs::read_link(format!("/proc/self/fd/{fd}")).ok(),
+            channel,
+            "the deadline must close the probe owner's descriptors"
+        );
+    }
+    drop(held_writer);
+    assert!(started.elapsed() < CHILD_EXIT_DEADLINE * 3);
+}
+
+/// The one launcher decides each policy: a `Seatbelt` policy keeps today's host
+/// answers unchanged, a `Seccomp` policy is accepted on `linux` alone, and a
+/// start this build cannot confine is refused by name so no provider runs
+/// unconfined on any OS.
+///
+/// The test drives `standin_host_refusal` and `standin_spawn_confined_provider`,
+/// so it covers the launcher's own `Seccomp` seat and not only the host rule. It
+/// creates no storage root, writes no profile file and starts no provider.
+///
+/// Falsifier: WP158 accepts a `linux` host under a `Seatbelt` policy, so the
+/// unchanged refusal is lost. WP159 bypasses the launcher's `Seccomp` seat and
+/// lets the start continue, so the `Seccomp` case returns Started.
+#[test]
+fn standin_host_refusal_decides_each_policy() {
+    let name = WALLET_PROVIDER;
+    let declared = read_declared_rights(name, &declared_rights_path(name))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let allow = seccomp_allow_list_from_declared_rights(name, &declared)
+        .unwrap_or_else(|err| panic!("{err}"));
+    let confined_os = DECLARED_CONFINED_OS.join(", ");
+    let seatbelt = StandinPolicy::Seatbelt(Path::new(SANDBOX_EXEC));
+    let seccomp = StandinPolicy::Seccomp(&allow);
+
+    // A Seatbelt policy keeps every today answer.
+    standin_host_refusal(name, StandinHost::reporting("macos"), seatbelt)
+        .expect("a macos host under a Seatbelt policy must be accepted");
+    assert_eq!(
+        standin_host_refusal(name, StandinHost::reporting("linux"), seatbelt).unwrap_err(),
+        format!(
+            "{name} start on linux is refused: linux is designed, not enforced, in this lab, \
+             so linux is not in DECLARED_CONFINED_OS ({confined_os})"
+        ),
+        "a linux host under a Seatbelt policy must keep today's exact words"
+    );
+    assert_eq!(
+        standin_host_refusal(name, StandinHost::reporting("plan9"), seatbelt).unwrap_err(),
+        format!(
+            "{name} start on plan9 is refused: plan9 has no confinement design, and the lab \
+             stand-in applies confinement only on {confined_os}"
+        ),
+        "an OS with no confinement design must keep today's exact words"
+    );
+
+    // A Seccomp policy is the linux policy: linux is accepted, another OS is
+    // refused by name, and a missing primitive outranks both.
+    standin_host_refusal(name, StandinHost::reporting("linux"), seccomp)
+        .expect("a linux host under a Seccomp policy must be accepted");
+    assert_eq!(
+        standin_host_refusal(name, StandinHost::reporting("macos"), seccomp).unwrap_err(),
+        format!(
+            "{name} start on macos is refused: the seccomp allow list is the linux policy, \
+             and macos is not linux"
+        ),
+        "a non-linux host under a Seccomp policy must be refused by name"
+    );
+    assert_eq!(
+        standin_host_refusal(
+            name,
+            StandinHost::missing("macos", StandinPrimitive::Landlock),
+            seccomp
+        )
+        .unwrap_err(),
+        format!(
+            "{name} start on macos is refused: linux confinement refused: the kernel has no \
+             Landlock"
+        ),
+        "a reported missing primitive must be refused before the policy's OS rule"
+    );
+
+    // The launcher's own seat: a Seccomp start under a list generated for
+    // another provider is refused by name before anything is created, and a
+    // list generated for this provider reaches the one spawn path on linux and
+    // the linux-only refusal on every other OS.
+    let fixture = tempfile::tempdir().expect("temporary wallet base");
+    let base = resolved(fixture.path());
+    let profile_root = tempfile::tempdir().expect("temporary profile root");
+    let profile_dir = resolved(profile_root.path());
+    let other = SeccompAllowList {
+        provider: DID_PROVIDER.to_string(),
+        ..allow.clone()
+    };
+    let refusal = standin_spawn_confined_provider(
+        StandinHost::reporting("linux"),
+        StandinPolicy::Seccomp(&other),
+        name,
+        Path::new(PROVIDER_BINARY),
+        &base,
+        &declared,
+        &profile_dir,
+    )
+    .err()
+    .expect("a list generated for another provider must refuse the start");
+    assert_eq!(
+        refusal,
+        format!("{name} start is refused: the seccomp allow list was generated for {DID_PROVIDER}"),
+        "the launcher must refuse a list generated for another provider"
+    );
+    assert!(
+        !provider_storage_root(name, &base).exists(),
+        "a refused Seccomp start must create no storage root: {}",
+        provider_storage_root(name, &base).display()
+    );
+    assert!(
+        fs::read_dir(&profile_dir)
+            .expect("the profile directory must be readable")
+            .next()
+            .is_none(),
+        "a Seccomp start must write no profile: {}",
+        profile_dir.display()
+    );
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let refusal = ConfinedProvider::start_under_seccomp(&allow, Path::new(PROVIDER_BINARY))
+            .err()
+            .expect("a start without a filter must be refused");
+        assert_eq!(
+            refusal,
+            format!("{name} start is refused: a seccomp filter is installed on linux only"),
+            "the linux-only refusal must name the provider and the policy's OS"
+        );
+    }
+}
+
+/// The journey's own label, on every OS: the one helper both the label test and
+/// the journey print. On Linux it names the host and kernel the proof ran on;
+/// anywhere else it says the journey is not applicable and names this OS, so a
+/// Mac run cannot read as a Linux claim.
+///
+/// It reads no filter and starts no process, so it runs everywhere.
+fn linux_seccomp_journey_label() -> String {
+    if cfg!(target_os = "linux") {
+        format!(
+            "linux seccomp journey: applicable, host {}/{}, kernel {}",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            linux_kernel_release()
+        )
+    } else {
+        format!(
+            "linux seccomp journey: not applicable on {}, because a seccomp filter is \
+             installed on linux only and this test passes nothing on for a Linux claim",
+            std::env::consts::OS
+        )
+    }
+}
+
+/// The kernel release this process runs under, read from `uname`; off Linux no
+/// kernel release answers the question, so it names the OS instead.
+fn linux_kernel_release() -> String {
+    if !cfg!(target_os = "linux") {
+        return std::env::consts::OS.to_string();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut name: libc::utsname = unsafe { std::mem::zeroed() };
+        let read = unsafe { libc::uname(&mut name) };
+        assert_eq!(
+            read,
+            0,
+            "uname must answer: {}",
+            std::io::Error::last_os_error()
+        );
+        let release: Vec<u8> = name
+            .release
+            .iter()
+            .take_while(|byte| **byte != 0)
+            .map(|byte| *byte as u8)
+            .collect();
+        String::from_utf8_lossy(&release).into_owned()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::env::consts::OS.to_string()
+    }
+}
+
+/// The journey's label says where the journey stands: off Linux the shared
+/// helper says it is not applicable and names this OS, and on Linux it names
+/// the Linux host. The test reads no filter, starts no process and builds none,
+/// so it runs on every OS.
+///
+/// Falsifier: WP162 labels the journey with a Linux host on a host that is not
+/// Linux, so the off-Linux case reads a claim instead of `not applicable` and
+/// the test fails on it.
+#[test]
+fn linux_seccomp_journey_is_not_applicable_off_linux() {
+    let line = linux_seccomp_journey_label();
+    if cfg!(target_os = "linux") {
+        assert!(
+            line.contains("linux") && !line.contains("not applicable"),
+            "on Linux the label must name the host the journey ran on: {line}"
+        );
+    } else {
+        assert!(
+            line.contains("not applicable"),
+            "off Linux the label must say the journey is not applicable: {line}"
+        );
+        assert!(
+            line.contains(std::env::consts::OS),
+            "the label must name this OS: {line}"
+        );
+        assert!(
+            !line.contains("applicable, host"),
+            "off Linux the label must claim no Linux host: {line}"
+        );
+    }
+    eprintln!("{line}");
+}
+
+/// The Linux journey: wallet starts under the generated seccomp allow list, and
+/// one probe child under the same filter shows the four refused calls answering
+/// the filter's own marker.
+///
+/// The test builds the list from wallet's committed declared-rights file, starts
+/// the provider through `standin_spawn_confined_provider` with a `Seccomp`
+/// policy, and requires `init` `ok`, one read-only wallet call `ok`, a file it
+/// wrote under `STORAGE_ROOT` to keep its bytes, a named file to keep the exact
+/// fixture bytes,
+/// and a named sibling path outside `STORAGE_ROOT` to be absent. The file
+/// evidence is those named fixture paths: a seccomp filter carries syscall
+/// policy and not path policy, so this test claims no general file boundary.
+///
+/// The launched child must report `SECCOMP_MODE_FILTER` in its own
+/// `/proc/<pid>/status`, and the mode alone also accepts an inherited filter, so
+/// the launcher's record must additionally show the marker answering differently
+/// before and after this launcher's own install.
+///
+/// Then one probe child records what `ptrace(PTRACE_TRACEME)`, `mount`, `bpf` and
+/// `keyctl` answer before the filter, installs the filter through
+/// `install_seccomp`, and records the same four after. Each filtered answer must
+/// be the deny marker, and the marker must differ from the unfiltered answer the
+/// same probe recorded, so a host that already refuses a call cannot stand in
+/// for the filter.
+///
+/// The comment below is the record of where this ran: the marker errno, the
+/// host, and the call whose failure named each `LAUNCH_ESSENTIALS` entry.
+///
+/// Falsifier: WP176 skips only the launcher's `pre_exec` install and leaves the
+/// self-filtering probe intact. The journey inherits an allow-all fixture
+/// filter, so the mode assertion passes and the before/after assertion fails.
+/// WP177 writes the named
+/// outside sibling, so the journey finds it present and fails. WP162 labels the
+/// journey with a Linux host off Linux and is caught by
+/// `linux_seccomp_journey_is_not_applicable_off_linux` on the Mac. Both Linux
+/// plants reach a Linux-only test, so neither is registered in
+/// `falsifiers.json`; `CONFINEMENT-LINUX.md` records them with the red run.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
+    use std::os::unix::process::CommandExt as _;
+
+    // Run this same journey in a separate test process beneath an inherited
+    // filter. Install that fixture through the shared installer as well; its
+    // ALLOW decision leaves the host's marker answer intact. The parent test
+    // runner keeps its own policy and the existing process owner reaps the run.
+    const INHERITED_FIXTURE: &str = "WALLET_SECCOMP_INHERITED_FIXTURE";
+    if std::env::var_os(INHERITED_FIXTURE).as_deref() != Some(std::ffi::OsStr::new("1")) {
+        let mut inherited = seccomp_probe_list();
+        inherited.program = vec![SeccompInstruction::stmt(
+            SECCOMP_BPF_RET_K,
+            SECCOMP_RET_ALLOW,
+        )];
+        let mut command = Command::new(std::env::current_exe().expect("the journey test binary"));
+        command
+            .args([
+                "--exact",
+                "linux_wallet_journey_runs_under_the_seccomp_allow_list",
+                "--nocapture",
+            ])
+            .env(INHERITED_FIXTURE, "1");
+        unsafe {
+            command.pre_exec(move || {
+                install_seccomp(&inherited).map_err(|failure| {
+                    std::io::Error::from_raw_os_error(match failure {
+                        SeccompInstallFailure::Step(_, errno) => errno,
+                        SeccompInstallFailure::AuditArchitecture(_) => libc::EINVAL,
+                    })
+                })
+            });
+        }
+        let mut journey = ConfinedProvider::spawn(command);
+        let exit = journey.wait_for_exit();
+        let stderr = journey.stderr().to_owned();
+        let mut stdout = String::new();
+        journey
+            .stdout
+            .read_to_string(&mut stdout)
+            .expect("the journey output");
+        eprintln!("{stdout}{stderr}");
+        assert_eq!(
+            exit.code(),
+            Some(0),
+            "the journey under an inherited filter must pass: {exit}"
+        );
+        return;
+    }
+    let inherited_status = fs::read_to_string("/proc/self/status").expect("the fixture's status");
+    assert!(
+        inherited_status.lines().any(|line| line == "Seccomp:\t2"),
+        "the journey fixture must already carry an inherited filter"
+    );
+    eprintln!("journey fixture before provider launch: Seccomp: 2 (inherited)");
+    // Ran on spark1.local: aarch64, Ubuntu 24.04.4, kernel 6.17.0-1029-nvidia.
+    // The deny marker is EACCES (13). Each unfiltered answer differed from it on
+    // that host: ptrace(PTRACE_TRACEME) returned 0, mount answered ENOENT (2),
+    // bpf answered EINVAL (22) and keyctl(KEYCTL_GET_KEYRING_ID, session
+    // keyring, create 0) answered a session keyring id. EACCES is chosen because
+    // the kernel answers EPERM for a call an unprivileged process may not make,
+    // so a plain EPERM assertion would pass with no filter installed.
+    //
+    // Each LAUNCH_ESSENTIALS entry was dropped alone from the whole list on that
+    // host and the call that then failed was read:
+    // close -> close(3) in the loader, refused before the first mapping;
+    // exit_group -> exit_group(0) as the provider ended its own run; getrandom ->
+    // getrandom(0xec92ac7c6700, 8, GRND_NONBLOCK) in the loader; mmap ->
+    // mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+    // in the loader, after which the provider took SIGSEGV; mprotect ->
+    // mprotect(0xf2640329f000, 65536, PROT_NONE) in the loader; ppoll ->
+    // ppoll([{fd=0}, {fd=1}, {fd=2}], 3, {tv_sec=0, tv_nsec=0}, NULL, 0) while
+    // the provider waits; rt_sigaction -> rt_sigaction(SIGPIPE,
+    // {sa_handler=SIG_IGN, sa_mask=[PIPE], sa_flags=SA_RESTART},
+    // 0xffffea09ff80, 8).
+    let declared_rights =
+        read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+            .unwrap_or_else(|err| panic!("{err}"));
+    let allow = seccomp_probe_list();
+    eprintln!("{}", linux_seccomp_journey_label());
+
+    let fixture = tempfile::tempdir().expect("temporary wallet base");
+    let base = resolved(fixture.path());
+    let profile_fixture = tempfile::tempdir().expect("temporary profile root");
+    let profile_dir = resolved(profile_fixture.path());
+    // The named path outside STORAGE_ROOT, and the named path inside it.
+    let outside = base
+        .join("ElastOS")
+        .join("SystemServices")
+        .join("seccomp-outside-write");
+    let root = provider_storage_root(WALLET_PROVIDER, &base);
+    let inside = root.join(WALLET_KEY_FILE);
+    let inside_fixture = root.join("seccomp-inside-write");
+    let expected_fixture = b"wallet seccomp journey fixture\n";
+
+    let mut provider = standin_spawn_confined_provider(
+        StandinHost::reporting("linux"),
+        StandinPolicy::Seccomp(&allow),
+        WALLET_PROVIDER,
+        Path::new(PROVIDER_BINARY),
+        &base,
+        &declared_rights,
+        &profile_dir,
+    )
+    .unwrap_or_else(|err| panic!("the linux wallet start must be confined: {err}"));
+    // Init creates the random key. Keep those exact bytes as the expected
+    // value across the read-only calls, and also compare a fixed byte fixture.
+    let expected_key = fs::read(&inside).expect("init must create the storage key");
+    fs::write(&inside_fixture, expected_fixture)
+        .expect("the named inside fixture must be writable");
+
+    assert_eq!(
+        provider.launched_seccomp_mode(),
+        SECCOMP_MODE_FILTER,
+        "the launched provider must carry SECCOMP_MODE_FILTER in its own /proc status, \
+         so the launcher's pre_exec install is observed"
+    );
+    let [before_install, after_install] = provider
+        .seccomp_launch_answers
+        .expect("the launcher must report its own install's before and after answers");
+    eprintln!("launcher marker: before {before_install}, after {after_install}");
+    assert_ne!(
+        before_install, after_install,
+        "an inherited filter alone must not satisfy the launcher's own install"
+    );
+    assert_eq!(
+        after_install,
+        -i64::from(SECCOMP_DENY_ERRNO),
+        "this launcher's install must supply the deny marker"
+    );
+
+    let status = provider.send(&json!({ "op": "status" }));
+    assert_eq!(status["status"], "ok", "status must answer: {status}");
+    let accounts = provider.wallet(WalletProviderOperationV2::ListAccounts {
+        include_revoked: false,
+    });
+    assert_eq!(
+        ok_data(accounts)["accounts"],
+        json!([]),
+        "a fresh wallet lists no account"
+    );
+    assert!(
+        profile_dir_entries(&profile_dir).is_empty(),
+        "a seccomp start writes no profile: {}",
+        profile_dir.display()
+    );
+    provider.shutdown();
+
+    let written = fs::read(&inside)
+        .unwrap_or_else(|err| panic!("the launch must write {}: {err}", inside.display()));
+    assert_eq!(
+        written, expected_key,
+        "the read-only journey must keep the exact key bytes from init"
+    );
+    let text = String::from_utf8(written).expect("the storage key must be hex text");
+    let digits = text
+        .strip_suffix('\n')
+        .expect("the storage key must end with a newline");
+    assert_eq!(
+        digits.len(),
+        2 * WALLET_KEY_BYTES,
+        "the storage key must hold its {} hex digits and a newline: {}",
+        2 * WALLET_KEY_BYTES,
+        inside.display()
+    );
+    assert_eq!(
+        fs::read(&inside_fixture).expect("the named inside fixture must remain readable"),
+        expected_fixture,
+        "the named inside fixture must keep its exact expected bytes"
+    );
+    assert!(
+        digits.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "the storage key must be hex: {}",
+        inside.display()
+    );
+    assert!(
+        !outside.exists(),
+        "the named sibling outside STORAGE_ROOT must stay absent after the run: {}",
+        outside.display()
+    );
+
+    let probe = seccomp_denied_call_probe(&allow, SeccompProbeRun::Filter)
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    for (call, before, after) in &probe.records {
+        assert_eq!(
+            *after,
+            SeccompAnswer::Errno(SECCOMP_DENY_ERRNO),
+            "{call} must answer the deny marker {SECCOMP_DENY_ERRNO} under the filter, \
+             and it answered {after:?}"
+        );
+        assert_ne!(
+            after, before,
+            "{call} answered {after:?} both with and without the filter, so this probe \
+             does not show the filter's own answer"
+        );
+        eprintln!("{call}: before {}, after {}", before.text(), after.text());
+    }
+    assert_eq!(
+        probe.allocations, 0,
+        "the probe child must allocate nothing after its fork"
+    );
+}
+
+/// The names directly under `path`, sorted. A path that does not exist yet names
+/// nothing, which is what an empty profile directory must report.
+#[cfg(target_os = "linux")]
+fn profile_dir_entries(path: &Path) -> Vec<String> {
+    let mut names: Vec<String> = match fs::read_dir(path) {
+        Ok(entries) => entries
+            .map(|entry| {
+                entry
+                    .expect("a profile directory entry must list")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    names.sort_unstable();
+    names
 }
 
 /// Selects the removal check's profiles from the one file-profile list. The
@@ -7035,7 +10211,7 @@ fn operations_table_row_problems(
 fn allow_forms(profile: &str) -> Vec<String> {
     profile_forms(profile)
         .into_iter()
-        .filter(|form| form.starts_with("(allow "))
+        .filter(|form| is_allow_form(form))
         .collect()
 }
 
