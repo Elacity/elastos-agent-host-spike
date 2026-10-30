@@ -427,9 +427,14 @@ def pinned_line(root, sha, rel, number):
 
 
 def _span_target(span):
-    """Return the path and line number of SPAN."""
-    rel, _, number = span.rpartition(":")
-    return rel, int(number)
+    """Return the path and start line number of SPAN.
+
+    ``CITATION`` reads the number, so a range span resolves to its start line
+    and a single line span is unchanged. No text after a colon is read as an
+    integer here, so a range suffix never raises.
+    """
+    match = CITATION.fullmatch(span)
+    return match.group("path"), int(match.group("start"))
 
 
 def cited_line(span, lines):
@@ -955,6 +960,17 @@ OTHER_INDENT_SPANS = (
     "elastos/wit/elastos-bus-v1.wit:10",
 )
 
+# Range line spans whose block equals the pinned start line, in draft order.
+# Each one is spliced into QUOTE_TARGETS with a None quoter, the same way as
+# OTHER_INDENT_SPANS, and is scored at its start line only.
+RANGE_LINE_SPANS = (
+    "examples/agent-host/src/lib.rs:471-476",
+    "capsules/model-provider/src/journal.rs:391-397",
+    "elastos/crates/elastos-server/src/api/gateway_model_service.rs:1452-1454",
+    "examples/agent-host/src/lib.rs:2421-2422",
+    "examples/agent-host/src/lib.rs:4032-4033",
+)
+
 # The one fixed prefix of the target list: one entry per line decision, in
 # source order before the function spans and the indent line spans. A range's
 # two endpoints share one marker. The quoter name is looked up at call time so
@@ -1094,6 +1110,7 @@ def _build_quote_targets():
         + _quote_target_tail(RESTATED_LINE_SPANS)
         + _quote_target_tail(LEDGER_LINE_SPANS)
         + _quote_target_tail(OTHER_INDENT_SPANS)
+        + _quote_target_tail(RANGE_LINE_SPANS)
     )
 
 
@@ -1122,7 +1139,8 @@ class _QuoteTargets:
 # The only target list: one entry per line decision, then one None-quoter entry
 # per FUNCTION_QUOTE_SPANS entry, then one per INDENT_LINE_SPANS entry, then one
 # per EGRESS_LINE_SPANS entry, then one per RESTATED_LINE_SPANS entry, then one
-# per LEDGER_LINE_SPANS entry, then one per OTHER_INDENT_SPANS entry.
+# per LEDGER_LINE_SPANS entry, then one per OTHER_INDENT_SPANS entry, then one
+# per RANGE_LINE_SPANS entry.
 QUOTE_TARGETS = _QuoteTargets()
 
 

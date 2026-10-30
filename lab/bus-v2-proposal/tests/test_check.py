@@ -6814,11 +6814,14 @@ class CitationCheckTests(unittest.TestCase):
             self.assertNotEqual(selector(short), lines[index], span)
 
     def test_edit_walk_fixture_keeps_every_decision_on_its_pinned_line(self):
+        body = self._edit_walk_body()
         got, reads = self._pinned_reads(
-            self._edit_walk_body(), {OWNED_REL: self._file_ask_source()}
+            body, {OWNED_REL: self._file_ask_source()}
         )
         self.assertEqual(got, [])
-        self.assertEqual(reads, list(EDIT_DECISION_ORDER))
+        self.assertEqual(
+            reads, list(EDIT_DECISION_ORDER) + _trailing_range_reads(body)
+        )
 
     def _assert_edit_quote_mismatch(self, name):
         _, number, span, lines, index = self._edit_case(name)
@@ -6870,7 +6873,9 @@ class CitationCheckTests(unittest.TestCase):
         )
         got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
         self.assertEqual(got, [])
-        self.assertEqual(reads, [EDIT_START_NUMBER, EDIT_END_NUMBER])
+        self.assertEqual(
+            reads, [EDIT_START_NUMBER, EDIT_END_NUMBER] + _trailing_range_reads(body)
+        )
 
     def test_edit_start_line_does_not_stand_for_line_2422(self):
         lines = {
@@ -6913,7 +6918,11 @@ class CitationCheckTests(unittest.TestCase):
                 body, {OWNED_REL: self._file_ask_source()}
             )
             self.assertEqual(got, [], index)
-            self.assertEqual(reads, [EDIT_START_NUMBER, EDIT_END_NUMBER], index)
+            self.assertEqual(
+                reads,
+                [EDIT_START_NUMBER, EDIT_END_NUMBER] + _trailing_range_reads(body),
+                index,
+            )
 
     def test_request_record_line_does_not_stand_for_line_2720(self):
         body = self._edit_walk_body(
@@ -7006,26 +7015,30 @@ class CitationCheckTests(unittest.TestCase):
 
     def test_draft_without_the_request_span_adds_no_request_refusal(self):
         groups = [group for group in EDIT_GROUPS if group != "request_walk"]
+        body = self._edit_walk_body(groups=groups)
         got, reads = self._pinned_reads(
-            self._edit_walk_body(groups=groups),
+            body,
             {OWNED_REL: self._file_ask_source()},
         )
         self.assertEqual(got, [])
         self.assertEqual(
             reads,
-            [number for number in EDIT_DECISION_ORDER if number != REQUEST_WALK_NUMBER],
+            [number for number in EDIT_DECISION_ORDER if number != REQUEST_WALK_NUMBER]
+            + _trailing_range_reads(body),
         )
 
     def test_draft_without_the_is_write_span_adds_no_is_write_refusal(self):
         groups = [group for group in EDIT_GROUPS if group != "is_write"]
+        body = self._edit_walk_body(groups=groups)
         got, reads = self._pinned_reads(
-            self._edit_walk_body(groups=groups),
+            body,
             {OWNED_REL: self._file_ask_source()},
         )
         self.assertEqual(got, [])
         self.assertEqual(
             reads,
-            [number for number in EDIT_DECISION_ORDER if number != IS_WRITE_NUMBER],
+            [number for number in EDIT_DECISION_ORDER if number != IS_WRITE_NUMBER]
+            + _trailing_range_reads(body),
         )
 
     def test_observe_mismatch_wins_over_the_edit_range_mismatch(self):
@@ -8280,7 +8293,11 @@ class CitationCheckTests(unittest.TestCase):
         )
         got, reads = self._pinned_reads(body, {OWNED_REL: self._append_source()})
         self.assertEqual(got, [], span)
-        self.assertEqual(reads, self._present_append_decisions(body), span)
+        self.assertEqual(
+            reads,
+            self._present_append_decisions(body) + _trailing_range_reads(body),
+            span,
+        )
 
     def test_live_draft_append_quotes_match_their_pinned_lines(self):
         root = check.worktree_root()
@@ -8304,11 +8321,14 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(check.problems(root), [])
 
     def test_append_fixture_keeps_every_decision_on_its_pinned_line(self):
+        body = self._append_body()
         got, reads = self._pinned_reads(
-            self._append_body(), {OWNED_REL: self._append_source()}
+            body, {OWNED_REL: self._append_source()}
         )
         self.assertEqual(got, [])
-        self.assertEqual(reads, list(APPEND_DECISION_ORDER))
+        self.assertEqual(
+            reads, list(APPEND_DECISION_ORDER) + _trailing_range_reads(body)
+        )
 
     def test_append_selectors_need_a_window_that_holds_the_cited_line(self):
         for name, number, span, lines, index in APPEND_CASES:
@@ -8470,7 +8490,12 @@ class CitationCheckTests(unittest.TestCase):
             "append_cap": [],
             "append_call": [APPEND_CAP_NUMBER],
             "outcome_held": [APPEND_CAP_NUMBER],
-            "write_invoke": [APPEND_CAP_NUMBER, APPEND_CALL_NUMBER, OUTCOME_HELD_NUMBER],
+            "write_invoke": [
+                APPEND_CAP_NUMBER,
+                APPEND_CALL_NUMBER,
+                OUTCOME_HELD_NUMBER,
+                APPEND_CALL_NUMBER,
+            ],
         }
         # A walk cut inside itself keeps a window over its first cited line, so
         # that line is refused for not matching and the walk stops there.
@@ -8562,7 +8587,8 @@ class CitationCheckTests(unittest.TestCase):
             self.assertEqual(got, [], span)
             self.assertEqual(
                 reads,
-                [number for number in APPEND_DECISION_ORDER if number not in gone],
+                [number for number in APPEND_DECISION_ORDER if number not in gone]
+                + _trailing_range_reads(body),
                 span,
             )
 
@@ -10158,7 +10184,8 @@ class CitationCheckTests(unittest.TestCase):
             + len(check.EGRESS_LINE_SPANS)
             + len(check.RESTATED_LINE_SPANS)
             + len(check.LEDGER_LINE_SPANS)
-            + len(check.OTHER_INDENT_SPANS),
+            + len(check.OTHER_INDENT_SPANS)
+            + len(check.RANGE_LINE_SPANS),
         )
         self.assertEqual(set(ALIGNED_ALREADY_DECIDED) - ALIGNED_ENDPOINT_SET, set())
 
@@ -10205,7 +10232,8 @@ class CitationCheckTests(unittest.TestCase):
             + len(check.EGRESS_LINE_SPANS)
             + len(check.RESTATED_LINE_SPANS)
             + len(check.LEDGER_LINE_SPANS)
-            + len(check.OTHER_INDENT_SPANS),
+            + len(check.OTHER_INDENT_SPANS)
+            + len(check.RANGE_LINE_SPANS),
         )
         # The spans this task adds, read back from the target list as spans, are
         # exactly the 65 names above minus the 12 that already had entries. A
@@ -10228,6 +10256,7 @@ class CitationCheckTests(unittest.TestCase):
             and endpoint not in check.RESTATED_LINE_SPANS
             and endpoint not in check.LEDGER_LINE_SPANS
             and endpoint not in check.OTHER_INDENT_SPANS
+            and endpoint not in check.RANGE_LINE_SPANS
         ]
         self.assertEqual(len(added), len(ALIGNED_NEW_ENDPOINTS))
         added_spans = {
@@ -10247,7 +10276,11 @@ class CitationCheckTests(unittest.TestCase):
         got, reads = self._aligned_reads(root, sha, body)
         self.assertEqual(got, [])
         order = self._aligned_order(body)
-        self.assertEqual(reads, [int(span.rpartition(":")[2]) for span in order])
+        self.assertEqual(
+            reads,
+            [int(span.rpartition(":")[2]) for span in order]
+            + _trailing_range_reads(body),
+        )
         for span in ALIGNED_ENDPOINTS:
             index, offset = self._aligned_place(span)
             changed = (index, offset)
@@ -10420,8 +10453,8 @@ class CitationCheckTests(unittest.TestCase):
         # then one None quoter per indent line span, then one None quoter per
         # egress line span, then one None quoter per retargeted line span, then
         # one None quoter per ledger line span, then one None quoter per
-        # other-indent line span. A missing, extra, or duplicated
-        # entry fails this ordered comparison.
+        # other-indent line span, then one None quoter per range line span. A
+        # missing, extra, or duplicated entry fails this ordered comparison.
         expected = BASE_QUOTE_TARGETS + tuple(
             (span, "`" + span + "`", None) for span in FUNCTION_QUOTE_SPAN_ORDER
         ) + tuple(
@@ -10434,6 +10467,8 @@ class CitationCheckTests(unittest.TestCase):
             (span, "`" + span + "`", None) for span in LEDGER_LINE_SPAN_ORDER
         ) + tuple(
             (span, "`" + span + "`", None) for span in OTHER_INDENT_SPAN_ORDER
+        ) + tuple(
+            (span, "`" + span + "`", None) for span in RANGE_LINE_SPAN_ORDER
         )
         self.assertEqual(check.QUOTE_TARGETS, expected)
         self.assertEqual(check.FUNCTION_QUOTE_SPANS, FUNCTION_QUOTE_SPAN_ORDER)
@@ -10442,36 +10477,42 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(check.RESTATED_LINE_SPANS, RESTATED_LINE_SPAN_ORDER)
         self.assertEqual(check.LEDGER_LINE_SPANS, LEDGER_LINE_SPAN_ORDER)
         self.assertEqual(check.OTHER_INDENT_SPANS, OTHER_INDENT_SPAN_ORDER)
+        self.assertEqual(check.RANGE_LINE_SPANS, RANGE_LINE_SPAN_ORDER)
         self.assertEqual(len(FUNCTION_QUOTE_SPAN_ORDER), 51)
         self.assertEqual(len(INDENT_LINE_SPAN_ORDER), 18)
         self.assertEqual(len(EGRESS_LINE_SPAN_ORDER), 2)
         self.assertEqual(len(RESTATED_LINE_SPAN_ORDER), 2)
         self.assertEqual(len(LEDGER_LINE_SPAN_ORDER), 3)
         self.assertEqual(len(OTHER_INDENT_SPAN_ORDER), 3)
-        self.assertEqual(len(expected), 194)
+        self.assertEqual(len(RANGE_LINE_SPAN_ORDER), 5)
+        self.assertEqual(len(expected), 199)
         self.assertEqual(
             len(check.QUOTE_TARGETS),
             len({target[0] for target in check.QUOTE_TARGETS}),
         )
         self.assertEqual(
-            tuple(target[0] for target in check.QUOTE_TARGETS[-28:-10]),
+            tuple(target[0] for target in check.QUOTE_TARGETS[-33:-15]),
             INDENT_LINE_SPAN_ORDER,
         )
         self.assertEqual(
-            tuple(target[0] for target in check.QUOTE_TARGETS[-10:-8]),
+            tuple(target[0] for target in check.QUOTE_TARGETS[-15:-13]),
             EGRESS_LINE_SPAN_ORDER,
         )
         self.assertEqual(
-            tuple(target[0] for target in check.QUOTE_TARGETS[-8:-6]),
+            tuple(target[0] for target in check.QUOTE_TARGETS[-13:-11]),
             RESTATED_LINE_SPAN_ORDER,
         )
         self.assertEqual(
-            tuple(target[0] for target in check.QUOTE_TARGETS[-6:-3]),
+            tuple(target[0] for target in check.QUOTE_TARGETS[-11:-8]),
             LEDGER_LINE_SPAN_ORDER,
         )
         self.assertEqual(
-            tuple(target[0] for target in check.QUOTE_TARGETS[-3:]),
+            tuple(target[0] for target in check.QUOTE_TARGETS[-8:-5]),
             OTHER_INDENT_SPAN_ORDER,
+        )
+        self.assertEqual(
+            tuple(target[0] for target in check.QUOTE_TARGETS[-5:]),
+            RANGE_LINE_SPAN_ORDER,
         )
         for span in UNMATCHED_FUNCTION_SPANS:
             self.assertNotIn(span, check.FUNCTION_QUOTE_SPANS, span)
@@ -10492,6 +10533,8 @@ class CitationCheckTests(unittest.TestCase):
                 (span, "`" + span + "`", None) for span in LEDGER_LINE_SPAN_ORDER
             ) + tuple(
                 (span, "`" + span + "`", None) for span in OTHER_INDENT_SPAN_ORDER
+            ) + tuple(
+                (span, "`" + span + "`", None) for span in RANGE_LINE_SPAN_ORDER
             )
             self.assertEqual(check.QUOTE_TARGETS, expected)
             self.assertNotIn(
@@ -10885,6 +10928,131 @@ class CitationCheckTests(unittest.TestCase):
             "CAUGHT other-indent-spans",
         )
 
+    def test_cited_line_reads_a_range_span_as_its_start_line(self):
+        # A range span resolves to its start line, so the one reader scores it
+        # and no span suffix is read as an integer.
+        for span, start in (
+            ("examples/agent-host/src/lib.rs:471-476", 471),
+            (
+                "elastos/crates/elastos-server/src/api/gateway_model_service.rs:1452-1454",
+                1452,
+            ),
+            ("examples/agent-host/src/lib.rs:4032-4033", 4032),
+        ):
+            self.assertEqual(check.cited_line(span, None), start, span)
+            self.assertEqual(check.cited_line(span, ["fn other("]), start, span)
+            self.assertEqual(check._span_target(span)[1], start, span)
+
+    def test_reversed_range_never_reaches_the_quote_walk(self):
+        # A reversed range is refused before the quote walk reads a line, so a
+        # block under it adds no second reason.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        sha = check.pin_sha(text)
+        body = (
+            "Pinned commit: " + sha + "\n"
+            "See `examples/agent-host/src/lib.rs:476-471`.\n"
+            "    let Ok(id) = propose_journal_append(journal, cursor) else {\n"
+        )
+        self.assertEqual(
+            self._problems_for(body),
+            [
+                "refuse: line range 476-471 is reversed in "
+                "examples/agent-host/src/lib.rs"
+            ],
+        )
+
+    def _range_reads(self, body):
+        """Return the numbers BODY makes the one walk read from the pin."""
+        reads = []
+        original = check.pinned_line
+
+        def record(read_root, read_sha, read_rel, read_number):
+            reads.append(read_number)
+            return original(read_root, read_sha, read_rel, read_number)
+
+        check.pinned_line = record
+        try:
+            got = self._problems_for(body)
+        finally:
+            check.pinned_line = original
+        return got, reads
+
+    def _assert_changed_range_line(self, span):
+        """One changed character of SPAN's scored remainder refuses SPAN alone.
+
+        The marker makes three decisions: its start endpoint, its end endpoint,
+        and the range entry itself. The unchanged body reads all three, so its
+        read list names the range entry's own read of the start line; a walk
+        without that entry reads only the two endpoints.
+        """
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        sha = check.pin_sha(text)
+        remainders = check._remainders(text, "`" + span + "`")
+        match = check.CITATION.fullmatch(span)
+        rel = match.group("path")
+        start = int(match.group("start"))
+        end = int(match.group("end"))
+        pinned = check._pinned_lines(root, sha, rel)
+        number = check.cited_line(span, pinned)
+        marker = "Pinned commit: " + sha + "\n`" + span + "`\n\n"
+        kept = marker + "".join("    " + row + "\n" for row in remainders)
+        self.assertEqual(self._range_reads(kept), ([], [start, end, start]), span)
+        index = check._quote_window(remainders, pinned, number)
+        changed = list(remainders)
+        line = changed[index]
+        changed[index] = line[:-1] + ("x" if line[-1] != "x" else "y")
+        body = marker + "".join("    " + row + "\n" for row in changed)
+        got, reads = self._range_reads(body)
+        self.assertEqual(
+            got,
+            ["refuse: quoted line does not match " + rel + ":" + str(number)],
+            span,
+        )
+        self.assertEqual(reads, [start], span)
+
+    def test_changed_range_471_line_remainder_does_not_match(self):
+        self._assert_changed_range_line("examples/agent-host/src/lib.rs:471-476")
+
+    def test_changed_range_line_remainder_does_not_match(self):
+        # One changed character of the remainder that stands for the pinned
+        # start line refuses that range span and raises no exception.
+        self.assertEqual(len(check.RANGE_LINE_SPANS), 5)
+        for span in RANGE_LINE_SPAN_ORDER:
+            self._assert_changed_range_line(span)
+
+    def test_repeated_range_marker_is_not_one_line(self):
+        # Each of the five spans stands once in the draft, and a marker that
+        # stands twice is refused before the line read.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        sha = check.pin_sha(text)
+        for span in RANGE_LINE_SPAN_ORDER:
+            self.assertEqual(text.count("`" + span + "`"), 1, span)
+            body = (
+                "Pinned commit: " + sha + "\n"
+                "`" + span + "`\n"
+                "`" + span + "`\n"
+                "    kept\n"
+            )
+            self.assertEqual(
+                self._problems_for(body),
+                ["refuse: quoted line is not one line: " + span],
+                span,
+            )
+
+    def test_falsifier_range_line_spans(self):
+        # An empty RANGE_LINE_SPANS drops the range entry, so the walk reads
+        # [471, 476] and the named test's three-read list fails.
+        self._caught(
+            "RANGE_LINE_SPANS",
+            (),
+            self.test_changed_range_471_line_remainder_does_not_match,
+            "examples/agent-host/src/lib.rs:471-476",
+            "CAUGHT range-line-spans",
+        )
+
 # The quote-target walk before function spans, in list order.
 BASE_QUOTE_TARGETS = (
     ('examples/agent-host/src/lib.rs:2067', '`examples/agent-host/src/lib.rs:2067`', 'observe_quote'),
@@ -11119,3 +11287,33 @@ OTHER_INDENT_SPAN_ORDER = (
     'elastos/crates/elastos-compute/src/providers/component.rs:384',
     'elastos/wit/elastos-bus-v1.wit:10',
 )
+
+# The 5 range line spans spliced after the other-indent line spans, in draft
+# order. Each one is scored at its start line only.
+RANGE_LINE_SPAN_ORDER = (
+    'examples/agent-host/src/lib.rs:471-476',
+    'capsules/model-provider/src/journal.rs:391-397',
+    'elastos/crates/elastos-server/src/api/gateway_model_service.rs:1452-1454',
+    'examples/agent-host/src/lib.rs:2421-2422',
+    'examples/agent-host/src/lib.rs:4032-4033',
+)
+
+
+def _range_start_number(span):
+    """Return the start line of SPAN, which is the line a range is scored at."""
+    return int(span.rpartition(":")[2].split("-")[0])
+
+
+def _trailing_range_reads(body):
+    """The range start lines the walk reads after every earlier target.
+
+    The range spans sit last in the target list, so a body that cites one of
+    their markers with one indented block makes the walk read its start line
+    after the reads of the earlier targets and nothing else.
+    """
+    return [
+        _range_start_number(span)
+        for span in RANGE_LINE_SPAN_ORDER
+        if body.count("`" + span + "`") == 1
+        and check._remainders(body, "`" + span + "`")
+    ]
