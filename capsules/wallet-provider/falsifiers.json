@@ -3312,6 +3312,38 @@
       "tests": [
         "socket_sweep_reports_every_family_and_type_refused"
       ]
+    },
+    {
+      "id": "WP225",
+      "title": "the manifest compare accepts a declared operation the provider does not answer",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    for operation in &declared {\n        if !answered.contains(operation) {",
+          "new": "    for operation in &declared {\n        if false {"
+        }
+      ],
+      "tests": [
+        "operations_table_row_check_refuses_each_bad_table"
+      ]
+    },
+    {
+      "id": "WP226",
+      "title": "a missing operations list reads as an empty list, so the missing-list case passes",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        let Some(operations) = capability[MANIFEST_OPERATIONS_FIELD].as_array() else {\n            problems.push(format!(\n                \"{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} capability entry in {} holds \\\n                 no {MANIFEST_OPERATIONS_FIELD} list\",\n                manifest_path.display()\n            ));\n            continue;\n        };",
+          "new": "        let absent: Vec<Value> = Vec::new();\n        let operations = capability[MANIFEST_OPERATIONS_FIELD]\n            .as_array()\n            .unwrap_or(&absent);"
+        }
+      ],
+      "tests": [
+        "operations_table_row_check_refuses_each_bad_table"
+      ]
     }
   ]
 }

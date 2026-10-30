@@ -285,8 +285,11 @@ use std::process::Command;
 /// allow-form row admits a network call; and WP224, which makes the socket sweep
 /// judge accept a returned descriptor for one family. Both are CAUGHT on the Mac,
 /// by `seccomp_program_denies_by_default_and_lists_no_undeclared_call` and
-/// `socket_sweep_reports_every_family_and_type_refused`.
-const EXPECTED_FALSIFIERS: usize = 204;
+/// `socket_sweep_reports_every_family_and_type_refused`. Task 162 adds WP225,
+/// which accepts a declared operation the provider does not answer, and WP226,
+/// which reads a missing `operations` list as an empty list. Both are CAUGHT on
+/// the Mac by `operations_table_row_check_refuses_each_bad_table`.
+const EXPECTED_FALSIFIERS: usize = 206;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

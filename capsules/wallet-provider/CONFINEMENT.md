@@ -494,7 +494,11 @@ colons and a function name. The check
 `every_operations_table_row_matches_its_provider_and_the_contract` holds every
 row to four rules: the row set follows the provider's own dispatch, a Right
 cell names a declared id or `none: needs no declared right`, a right row cites
-both sides, and every Linux cell stays `designed, not enforced`. The same check
+both sides, and every Linux cell stays `designed, not enforced`. A fifth rule,
+beside those four row rules, holds the capsule's own `capsule.json`, and
+`operations_table_row_check_refuses_each_bad_table` refuses a manifest that
+breaks it, because a manifest declares only operations the provider answers and
+a provider may own operations its manifest does not name. The same check
 reads each ordinary row's Inputs cell against the fields its `Request` arm
 declares, in declaration order, and reads a `wallet_contract` row's Inputs cell
 against that operation's declared `params`.
@@ -1526,6 +1530,12 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   rule.
 - WP224: The socket sweep judge accepts a returned descriptor for one family.
   `socket_sweep_reports_every_family_and_type_refused` checks this rule.
+- WP225: The manifest compare accepts a declared operation the provider does
+  not answer.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP226: A missing `operations` list reads as an empty list, so the
+  missing-list case passes.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

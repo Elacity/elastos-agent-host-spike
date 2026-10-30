@@ -13962,30 +13962,23 @@ fn attribute_end(text: &str) -> Option<usize> {
     None
 }
 
-/// Every problem with one table's row set, each naming the document and the row
-/// or the arm that has no partner.
+/// Every operation name `provider_source` answers, in dispatch order, or the
+/// reason they cannot be read.
 ///
-/// The row set must equal the operations `provider_source` answers. Every
-/// `Request::<Variant>` arm of `fn handle` is one name, and the names of the
-/// ordinary arms appear in the table in dispatch order. Where `fn handle`
-/// answers `wallet_contract`, every `WalletProviderOperationV2::<Variant>` arm
-/// of `fn dispatch_wallet_operation` is one `wallet_contract <kind>` row, and
-/// those rows follow the ordinary rows in their own dispatch order. Each arm
-/// matches exactly one row. A name reaches snake_case by
-/// `variant_snake_case`. The contract enum is the only list of kinds, so a new
-/// kind fails here until its row exists.
-fn row_set_problems(
-    document_name: &str,
-    rows: &[OperationsRow],
+/// Every `Request::<Variant>` arm of `fn handle` is one name, and the names of
+/// the ordinary arms keep dispatch order. Where `fn handle` answers
+/// `wallet_contract`, every `WalletProviderOperationV2::<Variant>` arm of
+/// `fn dispatch_wallet_operation` is one `wallet_contract <kind>` name, and
+/// those names follow the ordinary names in their own dispatch order. A name
+/// reaches snake_case by `variant_snake_case`. The contract enum is the only
+/// list of kinds. This is the one reader of the answered surface: the row-set
+/// rule and the manifest rule both call it (P10).
+fn answered_operation_names(
     provider_source: &str,
     provider_path: &Path,
-) -> Vec<String> {
+) -> Result<Vec<String>, String> {
     let Some(arms) = dispatch_arm_variants(provider_source, "fn handle(", REQUEST_ARM) else {
-        return vec![format!(
-            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set cannot be checked \
-             because {} holds no fn handle",
-            provider_path.display()
-        )];
+        return Err(format!("{} holds no fn handle", provider_path.display()));
     };
     let arm_names: Vec<String> = arms.iter().map(|arm| variant_snake_case(arm)).collect();
     let answers_contract = arm_names.iter().any(|name| name == WALLET_CONTRACT_ARM);
@@ -13999,12 +13992,10 @@ fn row_set_problems(
             "fn dispatch_wallet_operation(",
             WALLET_OPERATION_ARM,
         ) else {
-            return vec![format!(
-                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set cannot be checked \
-                 because {} answers {WALLET_CONTRACT_ARM} and holds no \
-                 fn dispatch_wallet_operation",
+            return Err(format!(
+                "{} answers {WALLET_CONTRACT_ARM} and holds no fn dispatch_wallet_operation",
                 provider_path.display()
-            )];
+            ));
         };
         for kind in &kinds {
             expected.push(format!(
@@ -14013,6 +14004,33 @@ fn row_set_problems(
             ));
         }
     }
+    Ok(expected)
+}
+
+/// Every problem with one table's row set, each naming the document and the row
+/// or the arm that has no partner.
+///
+/// The row set must equal the operations `provider_source` answers, as
+/// `answered_operation_names` reads them. The names of the ordinary arms appear
+/// in the table in dispatch order, the `wallet_contract <kind>` rows follow them
+/// in their own dispatch order, and each arm matches exactly one row. The
+/// contract enum is the only list of kinds, so a new kind fails here until its
+/// row exists.
+fn row_set_problems(
+    document_name: &str,
+    rows: &[OperationsRow],
+    provider_source: &str,
+    provider_path: &Path,
+) -> Vec<String> {
+    let expected = match answered_operation_names(provider_source, provider_path) {
+        Ok(expected) => expected,
+        Err(reason) => {
+            return vec![format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set cannot be checked \
+                 because {reason}"
+            )];
+        }
+    };
     let observed: Vec<&str> = rows.iter().map(|row| row.operation.as_str()).collect();
     let mut unmatched_rows = observed.clone();
     let mut problems = Vec::new();
@@ -14101,6 +14119,148 @@ fn row_set_order_problems(
             provider_path.display(),
             expected[index]
         ));
+    }
+    problems
+}
+
+/// The one manifest file a capsule declares its operation surface in.
+const CAPSULE_MANIFEST_FILE: &str = "capsule.json";
+
+/// The field of a manifest capability that lists the operations it declares.
+const MANIFEST_OPERATIONS_FIELD: &str = "operations";
+
+/// The field of a manifest interface method that names the one operation it
+/// declares.
+const MANIFEST_OPERATION_FIELD: &str = "operation";
+
+/// Every problem with the operations one manifest declares, each naming the
+/// document, `capsule.json` and the operation or the field.
+///
+/// A manifest declares only operations the provider answers, and a provider may
+/// own operations its manifest does not name: the rule is one-way, so it refuses
+/// a declared operation that `fn handle` does not answer and never demands that
+/// every answered operation be declared. The two declared lists are
+/// `authority.capabilities[].operations` and `interfaces[].methods[].operation`,
+/// and each declared name is compared with the names
+/// `answered_operation_names` reads through `dispatch_arm_variants` and
+/// `variant_snake_case`. A manifest that cannot be read, that is not JSON, whose
+/// `authority.capabilities` is absent or empty, a capability with no
+/// `operations` list, an interface method with no `operation` or one that is not
+/// a string, and a method whose `operation` differs from its `id` are each a
+/// refusal, so a capsule cannot pass by having no manifest. The check reads
+/// files, makes no kernel call and starts no process, so it runs on every OS.
+fn manifest_operation_problems(
+    document_name: &str,
+    provider_dir: &Path,
+    provider_source: &str,
+    provider_path: &Path,
+) -> Vec<String> {
+    let manifest_path = provider_dir.join(CAPSULE_MANIFEST_FILE);
+    let refusal = |reason: String| {
+        format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} declared operations cannot be \
+             checked because {reason}"
+        )
+    };
+    let text = match fs::read_to_string(&manifest_path) {
+        Ok(text) => text,
+        Err(err) => {
+            return vec![refusal(format!(
+                "{} is not readable: {err}",
+                manifest_path.display()
+            ))];
+        }
+    };
+    let manifest: Value = match serde_json::from_str(&text) {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            return vec![refusal(format!(
+                "{} is not valid JSON: {err}",
+                manifest_path.display()
+            ))];
+        }
+    };
+    let capabilities = manifest["authority"]["capabilities"]
+        .as_array()
+        .filter(|capabilities| !capabilities.is_empty());
+    let Some(capabilities) = capabilities else {
+        return vec![refusal(format!(
+            "{} holds no authority.capabilities entry",
+            manifest_path.display()
+        ))];
+    };
+    let mut declared: Vec<String> = Vec::new();
+    let mut problems = Vec::new();
+    for capability in capabilities {
+        let Some(operations) = capability[MANIFEST_OPERATIONS_FIELD].as_array() else {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} capability entry in {} holds \
+                 no {MANIFEST_OPERATIONS_FIELD} list",
+                manifest_path.display()
+            ));
+            continue;
+        };
+        for operation in operations {
+            match operation.as_str() {
+                Some(operation) => declared.push(operation.to_string()),
+                None => problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} capability entry in {} \
+                     holds an item of its {MANIFEST_OPERATIONS_FIELD} list that is not a string: \
+                     {operation}",
+                    manifest_path.display()
+                )),
+            }
+        }
+    }
+    let methods = manifest["interfaces"]
+        .as_array()
+        .map(|interfaces| {
+            interfaces
+                .iter()
+                .flat_map(|interface| interface["methods"].as_array())
+                .flatten()
+        })
+        .into_iter()
+        .flatten();
+    for method in methods {
+        let Some(operation) = method[MANIFEST_OPERATION_FIELD].as_str() else {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} interface method in {} holds \
+                 an {MANIFEST_OPERATION_FIELD} that is not a string: {method}",
+                manifest_path.display()
+            ));
+            continue;
+        };
+        match method["id"].as_str() {
+            Some(id) if id == operation => {}
+            Some(id) => problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} interface method in {} names \
+                 the id {id} and the operation {operation}, and its operation must be its id",
+                manifest_path.display()
+            )),
+            None => problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} interface method in {} holds \
+                 no id string beside its operation {operation}",
+                manifest_path.display()
+            )),
+        }
+        declared.push(operation.to_string());
+    }
+    let answered = match answered_operation_names(provider_source, provider_path) {
+        Ok(answered) => answered,
+        // `row_set_problems` already refuses a provider whose answered surface
+        // cannot be read, so this rule adds no second line for that cause.
+        Err(_) => return problems,
+    };
+    for operation in &declared {
+        if !answered.contains(operation) {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} {} declares the operation \
+                 {operation}, and {} does not answer it",
+                manifest_path.display(),
+                provider_path.display()
+            ));
+        }
     }
     problems
 }
@@ -15477,6 +15637,12 @@ fn operations_table_row_problems(
                 &source,
                 &provider_path,
             ));
+            problems.extend(manifest_operation_problems(
+                document_name,
+                provider_dir,
+                &source,
+                &provider_path,
+            ));
             dispatch = Some(source);
         }
         Err(err) => problems.push(format!(
@@ -15711,6 +15877,48 @@ fn write_declared_rights_in(provider_dir: &Path, provider: &str) {
     .expect("fixture declared-rights directory");
     fs::write(&path, row_check_declared_rights(provider).to_string())
         .expect("fixture declared rights");
+}
+
+/// The manifest fixture the operations row check reads: one capability that
+/// declares every operation the fixture dispatch answers, and one interface
+/// whose methods name the same operations.
+fn row_check_capsule_manifest() -> Value {
+    capsule_manifest(&FIXTURE_OPERATIONS)
+}
+
+/// A manifest declaring exactly `operations`, in one capability and one
+/// interface method each.
+fn capsule_manifest(operations: &[&str]) -> Value {
+    json!({
+        "authority": {
+            "capabilities": [{
+                MANIFEST_OPERATIONS_FIELD: operations,
+            }],
+        },
+        "interfaces": [{
+            "id": "elastos.provider.fixture",
+            "methods": operations
+                .iter()
+                .map(|operation| json!({"id": operation, MANIFEST_OPERATION_FIELD: operation}))
+                .collect::<Vec<Value>>(),
+        }],
+    })
+}
+
+/// Writes the row check's manifest fixture into one provider directory, at the
+/// path the row check reads.
+fn write_capsule_manifest_in(provider_dir: &Path) {
+    write_capsule_manifest_declaring(provider_dir, &FIXTURE_OPERATIONS);
+}
+
+/// Writes a manifest declaring exactly `operations` into one provider
+/// directory, at the path the row check reads.
+fn write_capsule_manifest_declaring(provider_dir: &Path, operations: &[&str]) {
+    fs::write(
+        provider_dir.join(CAPSULE_MANIFEST_FILE),
+        capsule_manifest(operations).to_string(),
+    )
+    .expect("fixture capsule manifest");
 }
 
 /// The declared-rights fixture the operations row check reads: `storage` owns
@@ -17528,7 +17736,8 @@ const FIXTURE_OPERATIONS: [&str; 5] = [
 /// names the rule.
 ///
 /// A temporary provider folder holds `src/main.rs` with the fixture dispatch
-/// and its `enum Request`: `fn handle` answers `init`, `status`, `echo`,
+/// and its `enum Request`, its declared-rights fixture, and a `capsule.json` that
+/// declares the same operations: `fn handle` answers `init`, `status`, `echo`,
 /// `wallet_contract` and `shutdown`, and `fn dispatch_wallet_operation` answers
 /// `list_accounts`. The passing table returns no problem. Rule 1 refuses a
 /// `handle` arm with no row, a row with no
@@ -17584,7 +17793,13 @@ const FIXTURE_OPERATIONS: [&str; 5] = [
 /// `inputs_match` ignore children, so a `params` list can name an undeclared
 /// field. WP221 accepts any allow quote on a declared-right row, so the exec
 /// form on the `init` row passes; WP222 does not read a `none:` row's allow
-/// quote, so the subpath form on that row passes.
+/// quote, so the subpath form on that row passes. Rule 7 refuses a manifest that
+/// declares an operation the provider does not answer, one that cannot be read,
+/// is not JSON, or holds no `authority.capabilities` entry, a capability with no
+/// `operations` list, a `operations` item that is not a string, an interface
+/// method with no `operation` string or no `id` string, and a method whose
+/// `operation` differs from its `id`. WP225 accepts a declared operation the/// provider does not answer, so the phantom case passes; WP226 reads a missing
+/// `operations` list as an empty list, so the missing-list case passes.
 #[test]
 fn operations_table_row_check_refuses_each_bad_table() {
     let provider = tempfile::tempdir().expect("temporary provider folder");
@@ -17593,6 +17808,8 @@ fn operations_table_row_check_refuses_each_bad_table() {
     fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source");
     let declared_path = provider.path().join(DECLARED_RIGHTS_FILE);
     write_declared_rights_in(provider.path(), "fixture-provider");
+    let manifest_path = provider.path().join(CAPSULE_MANIFEST_FILE);
+    write_capsule_manifest_in(provider.path());
 
     for (case, variant) in [
         ("VerifyDidRecovery", "verify_did_recovery"),
@@ -17614,7 +17831,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
     assert_eq!(
         operations_table_row_problems("fixture-provider", &passing, provider.path()),
         Vec::<String>::new(),
-        "a table that follows all four rules must pass"
+        "a table that follows every rule, with its manifest present, must pass"
     );
 
     // Rule 1: an arm with no row, and a kind arm with no row.
@@ -18609,6 +18826,18 @@ enum WalletProviderOperationV2 {
     ) + contract_enum;
     assert_ne!(contract_source, ROW_FIXTURE_PROVIDER);
     fs::write(&provider_source, &contract_source).expect("fixture contract source");
+    write_capsule_manifest_declaring(
+        provider.path(),
+        &[
+            "init",
+            "status",
+            "echo",
+            "shutdown",
+            "wallet_contract empty",
+            "wallet_contract named_none",
+            "wallet_contract pair",
+        ],
+    );
     let contract_cell = |kind: &str, params: &str| {
         format!("`op`, `request` (`kind: {kind}`, `params` ({params})), `_runtime_invocation`")
     };
@@ -18702,6 +18931,7 @@ enum WalletProviderOperationV2 {
         );
     }
     fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+    write_capsule_manifest_in(provider.path());
 
     // Rule 5: every source refusal keeps its own reason that names the file.
     for (case, anchor, replacement, reason) in [
@@ -18763,6 +18993,7 @@ enum WalletProviderOperationV2 {
     )
     .expect("wallet fixture provider source");
     write_declared_rights_in(wallet_fixture.path(), "wallet-provider");
+    write_capsule_manifest_in(wallet_fixture.path());
     let protocol_path = wallet_fixture.path().join("src/protocol.rs");
     let missing = operations_table_row_problems("wallet-provider", &passing, wallet_fixture.path());
     assert_eq!(
@@ -18975,6 +19206,167 @@ enum WalletProviderOperationV2 {
             "the refusal must name the rule, the row and the value"
         );
     }
+
+    // Rule 7: the manifest declares only operations the provider answers. One
+    // case per refusal, and the passing table with its manifest present still
+    // returns no problem.
+    let manifest_read = |manifest: Value| -> Vec<String> {
+        fs::write(&manifest_path, manifest.to_string()).expect("fixture capsule manifest");
+        operations_table_row_problems("fixture-provider", &passing, provider.path())
+    };
+    let mut phantom = row_check_capsule_manifest();
+    phantom["authority"]["capabilities"][0][MANIFEST_OPERATIONS_FIELD][1] =
+        json!("phantom_operation");
+    let mut no_operations = row_check_capsule_manifest();
+    no_operations["authority"]["capabilities"][0]
+        .as_object_mut()
+        .expect("the fixture capability is an object")
+        .remove(MANIFEST_OPERATIONS_FIELD);
+    let mut not_a_string = row_check_capsule_manifest();
+    not_a_string["authority"]["capabilities"][0][MANIFEST_OPERATIONS_FIELD][1] = json!(7);
+    let mut renamed_method = row_check_capsule_manifest();
+    renamed_method["interfaces"][0]["methods"][1][MANIFEST_OPERATION_FIELD] =
+        json!("status_renamed");
+    let mut no_method_operation = row_check_capsule_manifest();
+    no_method_operation["interfaces"][0]["methods"][1]
+        .as_object_mut()
+        .expect("the fixture method is an object")
+        .remove(MANIFEST_OPERATION_FIELD);
+    let mut no_method_id = row_check_capsule_manifest();
+    no_method_id["interfaces"][0]["methods"][1]
+        .as_object_mut()
+        .expect("the fixture method is an object")
+        .remove("id");
+    let mut no_capabilities = row_check_capsule_manifest();
+    no_capabilities["authority"]
+        .as_object_mut()
+        .expect("the fixture authority is an object")
+        .remove("capabilities");
+    let mut empty_capabilities = row_check_capsule_manifest();
+    empty_capabilities["authority"]["capabilities"] = json!([]);
+    for (case, manifest, reason) in [
+        (
+            "a declared operation the provider does not answer",
+            phantom,
+            vec![format!(
+                "{OPERATIONS_HEADING} {} declares the operation phantom_operation, and {} does \
+                 not answer it",
+                manifest_path.display(),
+                provider_paths
+            )],
+        ),
+        (
+            "a capability with no operations list",
+            no_operations,
+            vec![format!(
+                "{OPERATIONS_HEADING} capability entry in {} holds no \
+                 {MANIFEST_OPERATIONS_FIELD} list",
+                manifest_path.display()
+            )],
+        ),
+        (
+            "an operations item that is not a string",
+            not_a_string,
+            vec![format!(
+                "{OPERATIONS_HEADING} capability entry in {} holds an item of its \
+                 {MANIFEST_OPERATIONS_FIELD} list that is not a string: 7",
+                manifest_path.display()
+            )],
+        ),
+        (
+            "a method whose operation differs from its id",
+            renamed_method,
+            vec![
+                format!(
+                    "{OPERATIONS_HEADING} interface method in {} names the id status and the \
+                     operation status_renamed, and its operation must be its id",
+                    manifest_path.display()
+                ),
+                format!(
+                    "{OPERATIONS_HEADING} {} declares the operation status_renamed, and {} does \
+                     not answer it",
+                    manifest_path.display(),
+                    provider_paths
+                ),
+            ],
+        ),
+        (
+            "a method with no operation string",
+            no_method_operation,
+            vec![format!(
+                "{OPERATIONS_HEADING} interface method in {} holds an \
+                 {MANIFEST_OPERATION_FIELD} that is not a string: {{\"id\":\"status\"}}",
+                manifest_path.display()
+            )],
+        ),
+        (
+            "a method with no id string",
+            no_method_id,
+            vec![format!(
+                "{OPERATIONS_HEADING} interface method in {} holds no id string beside its \
+                 operation status",
+                manifest_path.display()
+            )],
+        ),
+        (
+            "no authority.capabilities entry",
+            no_capabilities,
+            vec![format!(
+                "{OPERATIONS_HEADING} declared operations cannot be checked because {} holds no \
+                 authority.capabilities entry",
+                manifest_path.display()
+            )],
+        ),
+        (
+            "an empty authority.capabilities",
+            empty_capabilities,
+            vec![format!(
+                "{OPERATIONS_HEADING} declared operations cannot be checked because {} holds no \
+                 authority.capabilities entry",
+                manifest_path.display()
+            )],
+        ),
+    ] {
+        let problems = manifest_read(manifest);
+        let expected: Vec<String> = reason
+            .iter()
+            .map(|reason| format!("fixture-provider CONFINEMENT.md: {reason}"))
+            .collect();
+        assert_eq!(
+            problems, expected,
+            "{case} must keep its exact refusal naming the manifest and the field"
+        );
+    }
+    fs::write(&manifest_path, "not JSON").expect("unparsable fixture capsule manifest");
+    let unparsable = fs::read_to_string(&manifest_path).expect("unparsable manifest text");
+    let json_error = serde_json::from_str::<Value>(&unparsable)
+        .expect_err("the unparsable fixture text must not be JSON");
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &passing, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} declared operations cannot be \
+             checked because {} is not valid JSON: {json_error}",
+            manifest_path.display()
+        )],
+        "a manifest that is not JSON must keep its exact refusal"
+    );
+    fs::remove_file(&manifest_path).expect("remove fixture capsule manifest");
+    let read_error = fs::read_to_string(&manifest_path).expect_err("missing capsule manifest");
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &passing, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} declared operations cannot be \
+             checked because {} is not readable: {read_error}",
+            manifest_path.display()
+        )],
+        "a missing manifest is a refusal, never a skipped provider"
+    );
+    write_capsule_manifest_in(provider.path());
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &passing, provider.path()),
+        Vec::<String>::new(),
+        "the passing table with its manifest present must return no problem"
+    );
 }
 
 /// The one contract check refuses a profile that omits the explicit network
