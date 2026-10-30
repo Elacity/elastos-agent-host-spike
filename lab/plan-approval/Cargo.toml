@@ -9,3 +9,14 @@ license = "MIT"
 
 [dependencies]
 agent-conformance = { path = "../agent-conformance" }
+serde_json = "=1.0.154"
+
+[dev-dependencies]
+# The journey admits and launches one live session through the stand-in's own
+# routes, so its fixture bundle needs the same fixture crates as
+# `lab/agent-conformance`'s dev-dependencies.
+capsule-identity = { path = "../capsule-identity" }
+ed25519-dalek = "2.1"
+rand = "0.8"
+tempfile = "3"
+elastos-identity = { path = "../../elastos/crates/elastos-identity" }

@@ -178,6 +178,10 @@ struct HomeSnapshot {
     actions: Vec<ActionInfo>,
     #[serde(default)]
     notice: Option<String>,
+    /// Set when the stored nickname exists but cannot be read. A storage error
+    /// is not absence, so the summary names the failure instead of "not set".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nickname_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1146,13 +1150,16 @@ async fn gather_snapshot_from_parts(
         let _ = elastos_server::notifications::sync_room_notifications(data_dir, &room_summary);
         Some(elastos_server::notifications::load_summary(data_dir).unwrap_or_default())
     };
-    let nickname = if gateway_owned {
-        required_projected_home_display_name(home_summary_projection.as_ref())?
+    let (nickname, nickname_error) = if gateway_owned {
+        (
+            required_projected_home_display_name(home_summary_projection.as_ref())?,
+            None,
+        )
     } else if let Some(display_name) = projected_home_display_name(home_summary_projection.as_ref())
     {
-        Some(display_name)
+        (Some(display_name), None)
     } else {
-        load_runtime_nickname(data_dir).await
+        load_runtime_nickname(data_dir).await?
     };
     let did = if gateway_owned {
         Some(required_projected_home_identity(
@@ -1307,6 +1314,7 @@ async fn gather_snapshot_from_parts(
             .collect(),
         actions: Vec::new(),
         notice: None,
+        nickname_error,
     };
 
     snapshot.system_services = gather_system_services(&snapshot.components);
@@ -2272,8 +2280,17 @@ fn load_existing_did(data_dir: &Path) -> Option<String> {
         .map(|(_, did)| did)
 }
 
-async fn load_runtime_nickname(data_dir: &Path) -> Option<String> {
-    elastos_identity::load_nickname(data_dir).ok().flatten()
+async fn load_runtime_nickname(
+    data_dir: &Path,
+) -> anyhow::Result<(Option<String>, Option<String>)> {
+    match elastos_identity::load_nickname(data_dir) {
+        Ok(nickname) => Ok((nickname, None)),
+        // The reason carries the single prefix; readers print it as it is.
+        Err(_) => Ok((
+            None,
+            Some(crate::identity_cmd::unreadable_nickname_reason(data_dir)),
+        )),
+    }
 }
 
 fn load_default_source(data_dir: &Path) -> anyhow::Result<Option<SourceStatus>> {
@@ -2852,11 +2869,14 @@ fn write_home_state_probe(
     writeln!(out, "ElastOS Home State Probe")?;
     writeln!(out, "  Version:   {}", snapshot.version)?;
     writeln!(out, "  User:      {}", snapshot.user)?;
-    writeln!(
-        out,
-        "  Nickname:  {}",
-        snapshot.nickname.as_deref().unwrap_or("(not set)")
-    )?;
+    match snapshot.nickname_error.as_deref() {
+        Some(reason) => writeln!(out, "  Nickname:  {reason}")?,
+        None => writeln!(
+            out,
+            "  Nickname:  {}",
+            snapshot.nickname.as_deref().unwrap_or("(not set)")
+        )?,
+    }
     writeln!(
         out,
         "  Identity:  {}",
@@ -2938,11 +2958,14 @@ fn write_home_state_probe(
     writeln!(out)?;
 
     writeln!(out, "People")?;
-    writeln!(
-        out,
-        "  Nick:      {}",
-        snapshot.nickname.as_deref().unwrap_or("(not set)")
-    )?;
+    match snapshot.nickname_error.as_deref() {
+        Some(reason) => writeln!(out, "  Nick:      {reason}")?,
+        None => writeln!(
+            out,
+            "  Nick:      {}",
+            snapshot.nickname.as_deref().unwrap_or("(not set)")
+        )?,
+    }
     let (carrier, delivery) = people_carrier_status(snapshot.runtime.peer_count);
     writeln!(out, "  Carrier:   {}", carrier)?;
     writeln!(out, "  Delivery:  {}", delivery)?;
@@ -3328,6 +3351,117 @@ mod tests {
         assert_eq!(
             resolve_home_cli_renderer_program(temp.path()).unwrap(),
             renderer
+        );
+    }
+
+    #[test]
+    fn home_snapshot_names_the_nickname_file_when_it_is_unreadable() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let did_dir = dir.path().join("did");
+        fs::create_dir_all(&did_dir).unwrap();
+        let nickname_path = did_dir.join("nickname.enc");
+
+        // Absent: no nickname file means no nickname and no error.
+        assert_eq!(
+            rt.block_on(load_runtime_nickname(dir.path())).unwrap(),
+            (None, None)
+        );
+
+        // Stored but unreadable: the check must report it, not read absence.
+        fs::write(&nickname_path, b"permission-denied").unwrap();
+
+        fs::set_permissions(&did_dir, fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = fs::read(&nickname_path).err();
+        let result = rt.block_on(load_runtime_nickname(dir.path()));
+        fs::set_permissions(&did_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let Some(_denied) = denied else {
+            eprintln!("skipping: running with permission override (root)");
+            return;
+        };
+
+        let (nickname, error) = result.unwrap();
+        assert_eq!(nickname, None);
+        let error = error.expect("unreadable nickname must be reported, not read as absence");
+        assert_eq!(
+            error,
+            format!("nickname unreadable: {}", nickname_path.display())
+        );
+
+        let mut snapshot = sample_snapshot_with_components(&[]);
+        // The file is present and only its contents are unreadable: the summary
+        // must not fall back to the "no nickname" wording.
+        snapshot.nickname = None;
+        snapshot.nickname_error = Some(error);
+        let mut out = Vec::new();
+        write_home_state_probe(&mut out, &snapshot).unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+        let nick_line = rendered
+            .lines()
+            .find(|line| line.trim_start().starts_with("Nickname:"))
+            .unwrap_or_else(|| panic!("no Nickname line: {rendered}"));
+        assert_eq!(
+            nick_line.matches("nickname unreadable").count(),
+            1,
+            "the prefix must be printed once: {nick_line}"
+        );
+        assert!(
+            nick_line.contains("nickname.enc"),
+            "the reason must name the file: {nick_line}"
+        );
+        assert!(
+            !nick_line.contains("(not set)"),
+            "unreadable is not absent: {nick_line}"
+        );
+
+        // The People section renders the same reason, not the fallback.
+        let people_line = rendered
+            .lines()
+            .find(|line| line.trim_start().starts_with("Nick:"))
+            .unwrap_or_else(|| panic!("no Nick line: {rendered}"));
+        assert_eq!(
+            people_line.matches("nickname unreadable").count(),
+            1,
+            "the reason must be printed once: {people_line}"
+        );
+        assert!(
+            people_line.contains("nickname.enc") && !people_line.contains("(not set)"),
+            "unreadable is not absent: {people_line}"
+        );
+
+        // With no nickname file and no error, both lines still say "(not set)".
+        let empty_dir = tempfile::tempdir().unwrap();
+        let (absent_nickname, absent_error) = rt
+            .block_on(load_runtime_nickname(empty_dir.path()))
+            .unwrap();
+        assert!(absent_nickname.is_none() && absent_error.is_none());
+        let mut absent = sample_snapshot_with_components(&[]);
+        absent.nickname = absent_nickname;
+        absent.nickname_error = absent_error;
+        let mut absent_out = Vec::new();
+        write_home_state_probe(&mut absent_out, &absent).unwrap();
+        let absent_rendered = String::from_utf8(absent_out).unwrap();
+        for label in ["Nickname:", "Nick:"] {
+            let line = absent_rendered
+                .lines()
+                .find(|line| line.trim_start().starts_with(label))
+                .unwrap_or_else(|| panic!("no {label} line: {absent_rendered}"));
+            assert!(
+                line.trim_end().ends_with("(not set)"),
+                "{label} must say (not set): {line}"
+            );
+        }
+
+        // Present: the nickname is returned with no error.
+        let data_dir = tempfile::tempdir().unwrap();
+        let (signing_key, _did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        drop(signing_key);
+        elastos_identity::save_nickname(data_dir.path(), "owner").unwrap();
+        assert_eq!(
+            rt.block_on(load_runtime_nickname(data_dir.path())).unwrap(),
+            (Some("owner".to_string()), None)
         );
     }
 
@@ -3844,6 +3978,7 @@ mod tests {
             command_groups: Vec::new(),
             actions: Vec::new(),
             notice: None,
+            nickname_error: None,
         }
     }
 

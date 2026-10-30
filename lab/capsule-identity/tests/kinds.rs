@@ -7,7 +7,7 @@ mod common;
 use std::fs;
 use std::path::Path;
 
-use capsule_identity::{check_name, sign_package_record, verify_package_record, MANIFEST_FILE};
+use capsule_identity::{sign_package_record, verify_package_record, MANIFEST_FILE};
 use common::*;
 use elastos_common::CapsuleManifest;
 
