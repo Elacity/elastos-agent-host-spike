@@ -1,10 +1,12 @@
-// Stand-in model provider for the Linux confined-launch route test. It answers
-// each request line and records the kernel state it inherited. It writes the
-// token file only when every check holds: no_new_privs is 1, the seccomp mode is
-// filter (2), and an AF_INET socket is refused with EPERM.
+// Stand-in model provider for the Linux model-provider launch route test. It
+// answers each request line and records the kernel state it inherited in
+// `<its own executable path>.observed`, one `name=value` line per observation:
+// `no_new_privs`, `seccomp` mode, and `inet_socket`. Each line holds the raw
+// value, so a red run names the check that failed.
 //
-// The probe is built with a bare `rustc` (no crates), so it reaches the kernel
-// through raw syscalls.
+// The report path comes from the probe's own executable path, so no process
+// variable selects it. The probe is built with a bare `rustc` (no crates), so it
+// reaches the kernel through raw syscalls.
 use std::io::{self, BufRead as _, Write as _};
 
 const SYS_PRCTL: i64 = if cfg!(target_arch = "x86_64") { 157 } else { 167 };
@@ -52,21 +54,28 @@ unsafe fn syscall(number: i64, a: i64, b: i64, c: i64, d: i64) -> i64 {
     result
 }
 
-fn inherited_socket_filter() -> bool {
-    let no_new_privs = unsafe { syscall(SYS_PRCTL, PR_GET_NO_NEW_PRIVS, 0, 0, 0, ) };
+/// The three kernel observations, each as `<name>=<value>`. A refused AF_INET
+/// socket reports `EPERM`; any other errno or an open socket reports its number.
+fn observations() -> String {
+    let no_new_privs = unsafe { syscall(SYS_PRCTL, PR_GET_NO_NEW_PRIVS, 0, 0, 0) };
     let seccomp = unsafe { syscall(SYS_PRCTL, PR_GET_SECCOMP, 0, 0, 0) };
     let fd = unsafe { syscall(SYS_SOCKET, AF_INET, SOCK_STREAM, 0, 0) };
     if fd >= 0 {
         unsafe { syscall(SYS_CLOSE, fd, 0, 0, 0) };
     }
-    no_new_privs == 1 && seccomp == 2 && fd == -EPERM
+    let inet = if fd == -EPERM {
+        "EPERM".to_string()
+    } else {
+        fd.to_string()
+    };
+    format!("no_new_privs={no_new_privs}\nseccomp={seccomp}\ninet_socket={inet}\n")
 }
 
 fn main() {
-    if let Ok(token) = std::env::var("ELASTOS_LINUX_MODEL_PROBE_TOKEN") {
-        if !token.is_empty() && inherited_socket_filter() {
-            std::fs::write(&token, b"confined").unwrap();
-        }
+    // The route expects NO_NEW_PRIVS=1, seccomp mode 2, AF_INET EPERM.
+    if let Ok(exe) = std::env::current_exe() {
+        let report = exe.with_extension("observed");
+        std::fs::write(report, observations()).unwrap();
     }
     let stdin = io::stdin();
     let mut stdout = io::stdout();
