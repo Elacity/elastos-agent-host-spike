@@ -67,6 +67,8 @@ A request may carry `plan`, the `sha256` that `plan_approval::preview` returned;
 
 `StandIn::bridge_envelope` is the one hostcall. A capability line calls `post_capability_request` for the capsule id. An invoke line calls `authorise` for that capsule id with no plan hash. The principal argument does not choose the caller. A bound grant stays live. Two-capsule-run passes the line, the capsule id, and the principal, and this lane does not run the component bytes. A PASS gives the Runtime no A3 credit.
 
+`StandIn::get_audit` answers `GET /api/audit`. A client is refused. `record_use` appends one event after a shell grant or a shell deny succeeds. A refusal appends nothing. A sibling settled by `settle_pending` stays off the list. The list is newest first and holds at most 1000 events. `StandIn::get_audit_types` answers `GET /api/audit/types` with `capability_denied` and `capability_grant`. The lab event has no token and no reason key. A PASS gives the Runtime no A15 credit.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.

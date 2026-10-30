@@ -10071,3 +10071,263 @@ Rerun, same environment (`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFL
 
 A passing row gives the real Runtime no A3 credit. Two-capsule-run owns the real component bytes.
 
+## 114 — A15: shell grant and deny share one audit list
+
+114: `record_use` is the only append. A shell grant calls it once after `seed_grant` and the plan mint, with `capability_grant` and `success` true. A shell deny calls it once after `settle_record` of that request, with `capability_denied` and `success` false. `get_audit` answers `GET /api/audit`. `get_audit_types` answers `GET /api/audit/types` with `capability_denied` then `capability_grant`. A refusal appends nothing. The list is newest first and holds at most 1000 events. Comparison base, recorded before the first edit: `80a2405624121eef3404fe3b3814a558be4b7cb5`. `b2eccab68f03ce9a0ced0c8afea96b496dbfd15f` is an ancestor. `fff8f1761eb851f642f8e9b680ea1c6747974060` is not.
+
+### Quote from the request flow (read only)
+
+`docs/AGENT_ARCHITECTURE.md` section "Request flow", step 9:
+
+> Runtime dispatches an approved operation to the owning provider and records the result in the same audit path used for a human action.
+
+This task is that record for a shell grant and a shell deny. It does not mint a grant.
+
+### Quote from the audit path (read only)
+
+`elastos/crates/elastos-runtime/src/primitives/audit.rs`. `MAX_MEMORY_EVENTS` is 1000. `emit` drops the oldest before the next append. `event_type_name` gives `capability_grant` and `capability_denied`. `recent_events` is newest first:
+
+```text
+const MAX_MEMORY_EVENTS: usize = 1000;
+```
+
+```text
+                if buffer.len() >= MAX_MEMORY_EVENTS {
+                    buffer.pop_front();
+                }
+```
+
+```text
+            AuditEvent::CapabilityGrant { .. } => "capability_grant",
+```
+
+```text
+            AuditEvent::CapabilityDenied { .. } => "capability_denied",
+```
+
+```text
+    /// Returns the most recent `limit` events, newest first.
+```
+
+`elastos/crates/elastos-server/src/api/handlers/capability.rs`, `get_audit_log`. The query names are `limit` (default 100, max 1000) and `type`. The body's keys in that handler include `events` and `total_in_memory`. The stand-in copies those two limits and those two body keys. It does not copy the handler's full type list, a token, a `token_id`, a reason on the event, an epoch, or a file log.
+
+```text
+    /// Maximum number of events to return (default: 100, max: 1000)
+```
+
+### Plants
+
+Each plant was applied alone, the planted crate compiled, the named test failed on its assertion, and the file was restored before the next. Restored, that test passed. No `falsifiers.json` id.
+
+Command for F-audit-stub through F-audit-oldest: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_shell_grant_and_deny_share_one_audit_list -- --exact`.
+
+F-audit-stub. Real 1.96 seconds. Restored real 1.14 seconds. Assertion `src/../standin-runtime/mod.rs:10331:9` (restored `:10330`): `the stand-in did the work: a client audit read is refused`. The call returned Ok of `{"events":[],"total_in_memory":0}`. The early return compiled; rustc warned `unreachable statement` and the test still ran.
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let total_in_memory = self.audit.len();
+```
+
+New:
+
+```text
+        return Ok(json!({ "events": [], "total_in_memory": 0 }));
+        require_shell(caller)?;
+        let total_in_memory = self.audit.len();
+```
+
+F-audit-before. Real 1.36 seconds. Restored real 1.13 seconds. Assertion `src/../standin-runtime/mod.rs:10481:9` (restored `:10480`): `the stand-in did the work: an unknown id appends nothing`. Left `Some(1)`. Right `Some(0)`.
+
+Old:
+
+```text
+        } = parsed?;
+        let Some(request) = self
+```
+
+New:
+
+```text
+        } = parsed?;
+        self.record_use(AUDIT_GRANT, request_id, "", "", "", true);
+        let Some(request) = self
+```
+
+F-audit-grant-as-use. Real 1.37 seconds. Restored real 1.17 seconds. Assertion `src/../standin-runtime/mod.rs:10546:9` (restored `:10546`): `the stand-in did the work: a grant appends capability_grant`. Left `String("capability_use")`. Right `"capability_grant"`.
+
+Old:
+
+```text
+        self.record_use(
+            AUDIT_GRANT,
+```
+
+New:
+
+```text
+        self.record_use(
+            "capability_use",
+```
+
+F-audit-deny-skip. Real 1.35 seconds. Restored real 1.10 seconds. Assertion `src/../standin-runtime/mod.rs:10617:9` (restored `:10625`): `the stand-in did the work: a deny appends one event`. Left `Some(2)`. Right `Some(3)`.
+
+Old:
+
+```text
+        self.settle_record(request_id, RequestStatus::Denied, reason, "shell");
+        self.record_use(
+            AUDIT_DENIED,
+            request_id,
+            &session_id,
+            &resource,
+            &action,
+            false,
+        );
+```
+
+New:
+
+```text
+        self.settle_record(request_id, RequestStatus::Denied, reason, "shell");
+```
+
+F-audit-settle-also. Real 1.35 seconds. Restored real 1.12 seconds. Assertion `src/../standin-runtime/mod.rs:10891:9` (restored `:10871`): `the stand-in did the work: a sibling settled by settle_pending stays off the list`. `req-s2` was listed.
+
+Old:
+
+```text
+        for request_id in pending {
+            self.settle_record(&request_id, RequestStatus::Denied, cause, "runtime");
+        }
+```
+
+New:
+
+```text
+        for request_id in pending {
+            let (session_id, resource, action) = self
+                .requests
+                .iter()
+                .find(|request| request.request_id == request_id)
+                .map(|request| {
+                    (
+                        request.session_id.clone(),
+                        request.resource.clone(),
+                        request.action.clone(),
+                    )
+                })
+                .expect("pending id");
+            self.settle_record(&request_id, RequestStatus::Denied, cause, "runtime");
+            self.record_use(
+                AUDIT_DENIED,
+                &request_id,
+                &session_id,
+                &resource,
+                &action,
+                false,
+            );
+        }
+```
+
+F-audit-reason. Real 1.37 seconds. Restored real 1.14 seconds. Assertion `src/../standin-runtime/mod.rs:2700:9` (restored `:2694`): `the stand-in did the work: the deny event has no reason key`. Left the seven names plus `reason`. Right the seven names.
+
+Old:
+
+```text
+        self.record_use(
+            AUDIT_DENIED,
+            request_id,
+            &session_id,
+            &resource,
+            &action,
+            false,
+        );
+        let instant = self.instant;
+```
+
+New:
+
+```text
+        self.record_use(
+            AUDIT_DENIED,
+            request_id,
+            &session_id,
+            &resource,
+            &action,
+            false,
+        );
+        if let Some(event) = self.audit.last_mut() {
+            event
+                .as_object_mut()
+                .expect("audit event")
+                .insert("reason".to_owned(), Value::String(reason.to_owned()));
+        }
+        let instant = self.instant;
+```
+
+F-audit-oldest. Real 1.41 seconds. Restored real 1.14 seconds. Assertion `src/../standin-runtime/mod.rs:10541:9` (restored `:10542`): `the stand-in did the work: the newest grant is req-b`. Left `String("req-a")`. Right `"req-b"`.
+
+Old:
+
+```text
+            .iter()
+            .rev()
+            .filter(|event| match event_type {
+```
+
+New:
+
+```text
+            .iter()
+            .filter(|event| match event_type {
+```
+
+Command for F-audit-keep: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_audit_list_keeps_one_thousand -- --exact`.
+
+F-audit-keep. Real 1.39 seconds. Restored real 1.17 seconds. Assertion `src/../standin-runtime/mod.rs:10964:9` (restored `:10967`): `the stand-in did the work: the 1001st decision drops the oldest and the list holds 1000`. Left `Some(1001)`. Right `Some(1000)`.
+
+Old:
+
+```text
+        if self.audit.len() >= AUDIT_MAX_EVENTS {
+            self.audit.remove(0);
+        }
+```
+
+New: those three lines deleted, so `record_use` appends without dropping.
+
+### Docs
+
+`standin-runtime/README.md` adds one paragraph immediately before `## Callers`. `get_audit` answers `GET /api/audit`, a client is refused, and `record_use` appends one event after a shell grant or a shell deny succeeds. A refusal appends nothing. A sibling settled by `settle_pending` stays off the list. The list is newest first and holds at most 1000 events. `get_audit_types` answers `GET /api/audit/types` with `capability_denied` and `capability_grant`. The lab event has no token and no reason key. A PASS gives the Runtime no A15 credit. The grant paragraph and the plan-approval section stay. `RUNBOOK.md` adds one paragraph after the last stand-in paragraph: `standin_shell_grant_and_deny_share_one_audit_list` is this stand-in, and a PASS there gives the Runtime no A15 credit for this list. Every other RUNBOOK paragraph stays.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. `Cargo.toml` and `Cargo.lock` are unchanged. `git diff` for `src/harness.rs`, `src/census.rs`, `src/report.rs`, `tests/effects.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. The changed files are `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md`. After the plants were restored, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` shows the audit list and shows no plant. `post_capability_grant` and `post_capability_deny` keep their refusal reasons and their Ok bodies. The new public methods are `get_audit` and `get_audit_types`. The new private function is `record_use`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.16 seconds.
+- First `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101, real 267.81 seconds. The only failure was `cleanup_census_refuses_each_leftover` in `tests/runtime.rs`. Its census line was `cleanup census: FAIL retained:target/home-34809-1793351613670589000-0; process leftover; processes:1 paths:["stdout-25"] API sockets:0 temp:0 paths:[]; excludes only test PID; outside-root:BLOCKED(AC-006-STORAGE)`. The only path is `stdout-25`, which matches `stdout-<digits>`. It does not include `host-process.lock`, a path containing `config.toml`, an audit event for `req-s2`, or `total_in_memory` above 1000. The stand-in was left as restored. `src/census.rs` and the operator stay unchanged.
+
+Rerun, same environment (`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`):
+
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 268.30 seconds, inside the 600-second bound. Targets: lib 92 passed (including `standin_shell_grant_and_deny_share_one_audit_list` and `standin_audit_list_keeps_one_thousand`); bin/report 1 passed; artifact 7 passed; build 1 passed; content_cid 2 passed; effects 63 passed and 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed (including `cleanup_census_refuses_each_leftover`) and 2 ignored; standin_contract 13 passed; standin_plan 8 passed; standin_residents 2 passed; probe 3 passed; doc-tests 0.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.16 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_shell_grant_and_deny_share_one_audit_list -- --exact` exit 0, 1 passed and 0 failed, real 0.11 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_audit_list_keeps_one_thousand -- --exact` exit 0, 1 passed and 0 failed, real 0.10 seconds. `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `record_use` at `standin-runtime/mod.rs:1550` stores the request's resource string. It adds no code or content identity. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `get_audit` calls `require_shell` at `:1078` before `self.audit` is read at `:1079`. The read mints nothing. |
+| 3. A second path or a second copy of one rule? | No | `record_use` at `:1534` is the only append. `post_capability_grant` calls it at `:1052`. `post_capability_deny` calls it at `:949`. `settle_pending` does not. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`. `elastos/` is untouched and its audit path is quoted only. |
+| 5. Refusals deny by default with a clear reason? | Yes | A client is status 403 `This endpoint requires shell privileges` at `:1078` and `:1105`, before the store is read. A refusal of grant or deny returns before `record_use`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The list is the stand-in for the shell audit path. This lane does not run the component bytes. A PASS gives the Runtime no A15 credit. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_shell_grant_and_deny_share_one_audit_list` at `:10347` and `standin_audit_list_keeps_one_thousand` at `:10917`. Each of the eight plants fails its named test on its assertion, and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | `record_use` at `:1052` runs after `seed_grant` and the plan mint. An unknown id, a bad body, a client, a request that is not pending, and a plan mismatch append nothing. `get_audit` does not mint a grant. |
+
+A passing row gives the real Runtime no A15 credit for this list.
+
+- 114: One audit list records a successful shell grant and a successful shell deny through `record_use`, and holds at most 1000 events.
+
