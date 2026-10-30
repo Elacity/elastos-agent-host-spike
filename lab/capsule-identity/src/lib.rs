@@ -1522,7 +1522,8 @@ fn put_length_delimited(out: &mut Vec<u8>, field: u8, bytes: &[u8]) {
 
 /// An unsigned protobuf varint: 7 bits per byte, low bits first, the high
 /// bit set on every byte but the last. A length or a Tsize can take more
-/// than one byte.
+/// than one byte: 127 is one byte (`0x7f`) and 128 is the first value that
+/// takes two (`0x80 0x01`).
 fn put_varint(out: &mut Vec<u8>, mut value: u64) {
     while value >= 0x80 {
         out.push((value as u8 & 0x7f) | 0x80);

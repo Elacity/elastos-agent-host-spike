@@ -64,6 +64,12 @@ pub const EMPTY_FILE_LAB_CID: &str = "bafybeic2y3c3met6txd62reatxwqjnodhfejchfml
 pub const LONG_UTF8_NAME_LAB_CID: &str =
     "bafybeih6g5cy7asndjexb7bazovwryqyj4faxvababcjrbe4jxayhzvgmy";
 
+/// content-sample with one more file, `b127`, of 127 zero bytes: a raw leaf
+/// whose link Tsize is 127, the largest value one varint byte holds (`0x7f`).
+/// A two-byte varint for 127 names another bundle. Built in a temp dir and
+/// never committed; task 091 printed it first with README's Python rule.
+pub const VARINT_127_LAB_CID: &str = "bafybeiaoepcos3axsxvnqjkuliaox7ahragf6xztg3npxgczphnwbkyd7q";
+
 /// content-sample with `sample.example` as 262145 zero bytes, one over the
 /// chunk limit: a balanced file root over two raw leaves, 262144 and 1
 /// bytes. Built in a temp dir and never committed.
