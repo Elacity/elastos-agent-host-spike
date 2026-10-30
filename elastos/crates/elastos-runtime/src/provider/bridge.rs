@@ -3248,4 +3248,74 @@ mod tests {
         let result = CapsuleProvider::to_resource_response(ResourceAction::Read, resp);
         assert!(matches!(result, Err(ProviderError::NotFound(_))));
     }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn spawn_confined_model_linux_child_inherits_socket_filter() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let source = tempdir.path().join("linux-model-seccomp-probe.rs");
+        std::fs::write(
+            &source,
+            include_str!("../../tests/fixtures/linux_model_seccomp_probe.rs"),
+        )
+        .unwrap();
+        let probe = tempdir.path().join("linux-model-seccomp-probe");
+        let built = std::process::Command::new("rustc")
+            .args(["--edition", "2021"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&probe)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "probe build failed: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let token = tempdir.path().join("confined-token");
+        let config = ProviderConfig {
+            base_path: tempdir.path().to_string_lossy().into_owned(),
+            extra: serde_json::json!({
+                "offers": [{"id":"fixture-local", "adapter":{"kind":"local_llama_cpp_text"}}],
+            }),
+            ..Default::default()
+        };
+        // The probe reads the token path from the environment it inherits, so
+        // the variable must be set before the route spawns it.
+        std::env::set_var("ELASTOS_LINUX_MODEL_PROBE_TOKEN", &token);
+        let spawned = ProviderBridge::spawn_confined_model_linux(&probe, config).await;
+        std::env::remove_var("ELASTOS_LINUX_MODEL_PROBE_TOKEN");
+        let (bridge, sockets, vacant, _) = spawned.unwrap();
+        let pid = bridge
+            .child
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .id()
+            .expect("confined provider pid");
+        assert_eq!(
+            std::fs::read(&token).unwrap_or_default(),
+            b"confined",
+            "probe did not inherit the socket filter"
+        );
+        assert_eq!(sockets.len(), 1);
+        assert!(sockets["fixture-local"].ends_with("/0.sock"));
+        assert_eq!(vacant.len(), MAX_LOCAL_MODEL_SLOTS - 1);
+        assert!(
+            process_exists(&pid.to_string()),
+            "provider exited after Init"
+        );
+        bridge.shutdown().await.unwrap();
+        for _ in 0..250 {
+            if !process_exists(&pid.to_string()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            !process_exists(&pid.to_string()),
+            "provider survived shutdown"
+        );
+    }
 }
