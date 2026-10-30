@@ -67,6 +67,15 @@ pub(crate) struct GrantRecord {
     instance: InstanceId,
     owned_root: String,
     rights: Rights,
+    once: bool,
+    expiry: Option<u64>,
+    effect_limit: Option<u64>,
+    effects: u64,
+    parent: Option<Handle>,
+    rate: Option<u64>,
+    window: u64,
+    window_start: u64,
+    window_effects: u64,
 }
 
 /// The binding copied out after a successful check.
@@ -77,6 +86,13 @@ pub struct Decision {
     pub instance: InstanceId,
     pub owned_root: String,
     pub rights: Rights,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Asker {
+    Home,
+    App,
 }
 
 /// A refusal with one clear reason.
@@ -93,6 +109,11 @@ pub enum Refuse {
     OutsideRoot,
     PublicRead,
     HomeMint,
+    Expired,
+    EffectLimit,
+    IssuingLimit,
+    Rate,
+    IssuingRate,
 }
 
 impl std::fmt::Display for Refuse {
@@ -109,6 +130,11 @@ impl std::fmt::Display for Refuse {
             Refuse::OutsideRoot => "use path leaves the owned root",
             Refuse::PublicRead => "public storage read does not bind",
             Refuse::HomeMint => "home does not mint an app capability",
+            Refuse::Expired => "grant has expired",
+            Refuse::EffectLimit => "effect limit is reached",
+            Refuse::IssuingLimit => "effect limit stays on the issuing grant",
+            Refuse::Rate => "rate limit is reached",
+            Refuse::IssuingRate => "rate stays on the issuing grant",
         })
     }
 }
@@ -128,6 +154,10 @@ pub struct Verifier {
     next_handle: u64,
     #[allow(dead_code)] // later slices fill the ledger
     ledger: std::sync::Mutex<ledger::Ledger>,
+    pending_once: bool,
+    pending_expiry: Option<u64>,
+    pending_parent: Option<Handle>,
+    verifier_now: u64,
 }
 
 impl Verifier {
@@ -139,6 +169,10 @@ impl Verifier {
             next_instance: 0,
             next_handle: 0,
             ledger: std::sync::Mutex::new(ledger::Ledger::new()),
+            pending_once: false,
+            pending_expiry: None,
+            pending_parent: None,
+            verifier_now: 0,
         }
     }
 
@@ -169,6 +203,10 @@ impl Verifier {
         resource: &str,
         rights: Rights,
     ) -> Result<Handle, Refuse> {
+        let once = self.pending_once;
+        let expiry = self.pending_expiry.take();
+        let parent = self.pending_parent.take();
+        self.pending_once = false;
         let record = self
             .registry
             .get(&instance)
@@ -187,9 +225,80 @@ impl Verifier {
                 instance,
                 owned_root,
                 rights,
+                once,
+                expiry,
+                effect_limit: None,
+                effects: 0,
+                parent,
+                rate: None,
+                window: 0,
+                window_start: 0,
+                window_effects: 0,
             },
         );
         Ok(handle)
+    }
+
+    #[cfg(test)]
+    pub fn ask_capability(
+        &mut self,
+        instance: InstanceId,
+        resource: &str,
+        rights: Rights,
+        claimed: Asker,
+    ) -> Result<Handle, Refuse> {
+        let _claimed = claimed;
+        self.bind_grant(instance, resource, rights)
+    }
+
+    pub fn bind_once(
+        &mut self,
+        instance: InstanceId,
+        resource: &str,
+        rights: Rights,
+    ) -> Result<Handle, Refuse> {
+        self.pending_once = true;
+        self.bind_grant(instance, resource, rights)
+    }
+
+    pub fn bind_until(
+        &mut self,
+        instance: InstanceId,
+        resource: &str,
+        rights: Rights,
+        expiry: u64,
+    ) -> Result<Handle, Refuse> {
+        self.pending_expiry = Some(expiry);
+        self.bind_grant(instance, resource, rights)
+    }
+
+    /// Removes one grant and the journals minted from it.
+    /// A missing handle removes nothing.
+    pub fn revoke_grant(&mut self, handle: Handle) {
+        if !self.grants.contains_key(&handle) {
+            return;
+        }
+        self.grants.remove(&handle);
+        self.remove_derived_grants(handle);
+    }
+
+    fn remove_derived_grants(&mut self, revoked: Handle) {
+        let mut removed = vec![revoked];
+        loop {
+            let children: Vec<Handle> = self
+                .grants
+                .iter()
+                .filter(|(_, grant)| grant.parent.is_some_and(|parent| removed.contains(&parent)))
+                .map(|(handle, _)| *handle)
+                .collect();
+            if children.is_empty() {
+                return;
+            }
+            for child in children {
+                self.grants.remove(&child);
+                removed.push(child);
+            }
+        }
     }
 
     /// Changes the registry identity for a live instance.
@@ -214,6 +323,60 @@ impl Verifier {
         Ok(())
     }
 
+    /// Stores the verifier clock. A grant expires when this instant is at or
+    /// after the expiry stored on that grant.
+    pub fn set_verifier_now(&mut self, now: u64) {
+        self.verifier_now = now;
+    }
+
+    pub fn set_effect_limit(&mut self, handle: Handle, limit: u64) -> Result<(), Refuse> {
+        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+        if grant.parent.is_some() {
+            return Err(Refuse::IssuingLimit);
+        }
+        grant.effect_limit = Some(limit);
+        Ok(())
+    }
+
+    pub fn set_rate(&mut self, handle: Handle, limit: u64, window: u64) -> Result<(), Refuse> {
+        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+        if grant.parent.is_some() {
+            return Err(Refuse::IssuingRate);
+        }
+        grant.rate = Some(limit);
+        grant.window = window;
+        grant.window_start = self.verifier_now;
+        grant.window_effects = 0;
+        Ok(())
+    }
+
+    fn note_effect(&mut self, handle: Handle) -> Result<(), Refuse> {
+        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+        grant.effects += 1;
+        if grant.rate.is_some() {
+            grant.window_effects += 1;
+        }
+        Ok(())
+    }
+
+    fn open_rate_window(&mut self, handle: Handle) -> Result<(), Refuse> {
+        let now = self.verifier_now;
+        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+        let Some(rate) = grant.rate else {
+            return Ok(());
+        };
+        let _ = rate;
+        if grant.window == 0 {
+            return Ok(());
+        }
+        let end = grant.window_start.saturating_add(grant.window);
+        if now >= end {
+            grant.window_start = now;
+            grant.window_effects = 0;
+        }
+        Ok(())
+    }
+
     /// The one handle check: resolves a handle and compares the stored grant
     /// with the registry record of the call's instance, in order.
     pub(crate) fn resolve(&self, call: Call, handle: Handle) -> Result<GrantRecord, Refuse> {
@@ -234,6 +397,11 @@ impl Verifier {
         }
         if call.instance != grant.instance {
             return Err(Refuse::Instance);
+        }
+        if let Some(expiry) = grant.expiry {
+            if self.verifier_now >= expiry {
+                return Err(Refuse::Expired);
+            }
         }
         Ok(grant)
     }
@@ -1762,4 +1930,243 @@ fn model_home_direct_mint_is_refused() {
         .use_grant(verifier.open_call(photo), &guest(handle))
         .expect("photo effect");
     assert_eq!(decision.identity, "photo");
+}
+
+#[test]
+fn model_revoke_one_app_stops_only_that_app() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let notes = verifier.register_instance("notes", "session-a");
+    let photo_handle = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("photo ask");
+    let notes_handle = verifier
+        .bind_grant(notes, "UsersAI/notes/pad", rights())
+        .expect("notes ask");
+    let photo_call = verifier.open_call(photo);
+    let notes_call = verifier.open_call(notes);
+    let photo_effect = verifier
+        .use_grant(photo_call, &guest(photo_handle))
+        .expect("photo effect");
+    assert_eq!(photo_effect.identity, "photo");
+    assert_eq!(photo_effect.owned_root, "UsersAI/photo/library");
+    verifier.revoke_grant(photo_handle);
+    let stopped = verifier
+        .use_grant(photo_call, &guest(photo_handle))
+        .expect_err("revoked photo effect");
+    assert_eq!(stopped, Refuse::UnknownHandle);
+    assert_eq!(stopped.to_string(), "unknown handle");
+    let kept = verifier
+        .use_grant(notes_call, &guest(notes_handle))
+        .expect("notes effect remains");
+    assert_eq!(kept.identity, "notes");
+    assert_eq!(kept.owned_root, "UsersAI/notes/pad");
+}
+
+#[test]
+fn model_revoke_stops_derived_child_journals() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let notes = verifier.register_instance("notes", "session-a");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("library ask");
+    let album = verifier
+        .bind_grant(photo, "UsersAI/photo/album", rights())
+        .expect("album ask");
+    let notes_handle = verifier
+        .bind_grant(notes, "UsersAI/notes/pad", rights())
+        .expect("notes ask");
+    let photo_call = verifier.open_call(photo);
+    let notes_call = verifier.open_call(notes);
+    let roll = verifier
+        .create_child_journal(&photo_call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    let frame = verifier
+        .create_child_journal(
+            &photo_call,
+            &guest(roll),
+            "UsersAI/photo/library/roll/frame",
+        )
+        .expect("nested journal");
+    assert_eq!(
+        verifier
+            .use_grant(photo_call, &guest(roll))
+            .expect("child effect")
+            .owned_root,
+        "UsersAI/photo/library/roll"
+    );
+    verifier.revoke_grant(library);
+    let stopped = verifier
+        .use_grant(photo_call, &guest(library))
+        .expect_err("revoked library");
+    assert_eq!(stopped, Refuse::UnknownHandle);
+    let child_stopped = verifier
+        .use_grant(photo_call, &guest(roll))
+        .expect_err("revoked child journal");
+    assert_eq!(child_stopped, Refuse::UnknownHandle);
+    assert_eq!(child_stopped.to_string(), "unknown handle");
+    let nested_stopped = verifier
+        .use_grant(photo_call, &guest(frame))
+        .expect_err("revoked nested journal");
+    assert_eq!(nested_stopped, Refuse::UnknownHandle);
+    let album_kept = verifier
+        .use_grant(photo_call, &guest(album))
+        .expect("album grant stays");
+    assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
+    let notes_kept = verifier
+        .use_grant(notes_call, &guest(notes_handle))
+        .expect("notes grant stays");
+    assert_eq!(notes_kept.identity, "notes");
+    assert_eq!(notes_kept.owned_root, "UsersAI/notes/pad");
+}
+
+#[test]
+fn model_failed_child_keeps_next_ask_independent() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("library ask");
+    let photo_call = verifier.open_call(photo);
+    let refusal = verifier
+        .create_child_journal(&photo_call, &guest(library), "UsersAI/photo/other")
+        .expect_err("child outside the library");
+    assert_eq!(refusal, ops::OperateRefuse::Binding(Refuse::OutsideRoot));
+    assert_eq!(refusal.to_string(), "use path leaves the owned root");
+    let album = verifier
+        .bind_grant(photo, "UsersAI/photo/album", rights())
+        .expect("album ask");
+    verifier.revoke_grant(library);
+    let stopped = verifier
+        .use_grant(photo_call, &guest(library))
+        .expect_err("revoked library");
+    assert_eq!(stopped, Refuse::UnknownHandle);
+    let album_kept = verifier
+        .use_grant(photo_call, &guest(album))
+        .expect("independent album stays");
+    assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
+}
+
+#[test]
+fn model_successful_child_keeps_next_ask_independent() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("library ask");
+    let photo_call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&photo_call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    let album = verifier
+        .bind_grant(photo, "UsersAI/photo/album", rights())
+        .expect("album ask");
+    verifier.revoke_grant(library);
+    let child_stopped = verifier
+        .use_grant(photo_call, &guest(roll))
+        .expect_err("revoked child journal");
+    assert_eq!(child_stopped, Refuse::UnknownHandle);
+    let album_kept = verifier
+        .use_grant(photo_call, &guest(album))
+        .expect("independent album stays");
+    assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
+}
+
+#[test]
+fn model_missing_handle_removes_nothing() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let notes = verifier.register_instance("notes", "session-a");
+    let library = verifier
+        .bind_once(photo, "UsersAI/photo/library", rights())
+        .expect("allow once");
+    let notes_handle = verifier
+        .bind_grant(notes, "UsersAI/notes/pad", rights())
+        .expect("notes ask");
+    let photo_call = verifier.open_call(photo);
+    let notes_call = verifier.open_call(notes);
+    let roll = verifier
+        .create_child_journal(&photo_call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    let frame = verifier
+        .create_child_journal(
+            &photo_call,
+            &guest(roll),
+            "UsersAI/photo/library/roll/frame",
+        )
+        .expect("nested journal");
+    verifier
+        .operate(&photo_call, &guest(library), ops::Operation::Append)
+        .expect("the allow-once grant ends");
+    let gone = verifier
+        .use_grant(photo_call, &guest(library))
+        .expect_err("spent parent");
+    assert_eq!(gone, Refuse::UnknownHandle);
+    assert_eq!(gone.to_string(), "unknown handle");
+    verifier.revoke_grant(library);
+    let child_kept = verifier
+        .use_grant(photo_call, &guest(roll))
+        .expect("a missing handle leaves the child journal");
+    assert_eq!(child_kept.owned_root, "UsersAI/photo/library/roll");
+    let nested_kept = verifier
+        .use_grant(photo_call, &guest(frame))
+        .expect("a missing handle leaves the nested journal");
+    assert_eq!(nested_kept.owned_root, "UsersAI/photo/library/roll/frame");
+    let notes_kept = verifier
+        .use_grant(notes_call, &guest(notes_handle))
+        .expect("notes grant stays");
+    assert_eq!(notes_kept.identity, "notes");
+    assert_eq!(notes_kept.owned_root, "UsersAI/notes/pad");
+}
+
+#[test]
+fn model_expired_grant_is_refused() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_until(photo, "UsersAI/photo/library", rights(), 5)
+        .expect("library ask");
+    verifier.set_verifier_now(4);
+    verifier
+        .use_grant(verifier.open_call(photo), &guest(library))
+        .expect("before the expiry");
+    verifier.set_verifier_now(5);
+    let due = verifier
+        .use_grant(verifier.open_call(photo), &guest(library))
+        .expect_err("the grant has expired");
+    assert_eq!(due, Refuse::Expired);
+    assert_eq!(due.to_string(), "grant has expired");
+    verifier.set_verifier_now(6);
+    let later = verifier
+        .use_grant(verifier.open_call(photo), &guest(library))
+        .expect_err("past the expiry is still due");
+    assert_eq!(later, Refuse::Expired);
+}
+
+#[test]
+fn model_unset_expiry_is_not_expired() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let leaked = verifier
+        .bind_until(photo, "Public/photo/desk", rights(), 0)
+        .expect_err("public storage does not bind");
+    assert_eq!(leaked, Refuse::PublicRead);
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("library ask");
+    verifier.set_verifier_now(u64::MAX);
+    let decision = verifier
+        .use_grant(verifier.open_call(photo), &guest(library))
+        .expect("unset expiry is not due");
+    assert_eq!(decision.owned_root, "UsersAI/photo/library");
+    let frames = verifier
+        .bind_until(photo, "UsersAI/photo/frames", rights(), 0)
+        .expect("zero expiry");
+    verifier.set_verifier_now(0);
+    let refusal = verifier
+        .use_grant(verifier.open_call(photo), &guest(frames))
+        .expect_err("a set expiry of 0 is due at 0");
+    assert_eq!(refusal, Refuse::Expired);
+    assert_eq!(refusal.to_string(), "grant has expired");
 }
