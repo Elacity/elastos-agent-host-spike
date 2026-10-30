@@ -1,0 +1,10 @@
+        {
+            use elastos::bus::capabilities;
+            use elastos::bus::types::CapabilityRequest;
+            let named = "localhost://Users/self/.AppData/Agents/agent-host/../../../runtime/capability-requests.jsonl";
+            capabilities::request(&CapabilityRequest {
+                resource: named.into(),
+                actions: vec!["write".into()],
+                reason: "Agent Host task journal".into(),
+            })?;
+        }
