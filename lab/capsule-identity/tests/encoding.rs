@@ -775,3 +775,82 @@ fn encoder_refuses_a_duplicate_path() {
         );
     }
 }
+
+#[test]
+fn a_hidden_name_is_refused_with_its_reason() {
+    // A path part that starts with `.` is a hidden name. Kubo v0.40.1 with
+    // the Runtime's import flags (`empty-dirs` false and no hidden flag)
+    // leaves that name out of the CID, so the lab refuses the bundle instead
+    // of naming it as if the name were absent. A dot inside or at the end of
+    // a name (`a.b`, `x.`) is a normal name. The normal names are encoded
+    // first, before any walk of a fixture, so a check that refuses them fails
+    // at that assertion.
+    for path in ["a.b", "x."] {
+        let named = encode_entries(&[entry(path, b"x")]);
+        assert!(
+            named.is_ok(),
+            "{path:?} is a normal name, not a hidden one: {:?}",
+            named.err()
+        );
+    }
+
+    fn reason(path: &str) -> String {
+        format!(
+            "{path} starts with '.': Kubo v0.40.1 with the Runtime import flags leaves a leading-dot name out of the CID, and the lab refuses that bundle"
+        )
+    }
+
+    for path in [".DS_Store", ".well-known/a.txt", "browser/.hidden"] {
+        let refusal = encode_entries(&[entry(path, b"x")]).expect_err("a hidden name");
+        assert_eq!(
+            refusal,
+            Refusal::HiddenName {
+                path: path.to_owned()
+            },
+            "{path:?}"
+        );
+        assert_eq!(refusal.to_string(), reason(path), "{path:?}");
+    }
+
+    // The listing call reaches the same one path check.
+    let listed = ListedFile {
+        path: ".x".to_owned(),
+        size: 1,
+        sha256: Sha256::digest(b"x").into(),
+    };
+    let refusal = encode_listed_files(&[listed]).expect_err("a hidden name");
+    assert_eq!(
+        refusal,
+        Refusal::HiddenName {
+            path: ".x".to_owned()
+        }
+    );
+    assert_eq!(refusal.to_string(), reason(".x"));
+
+    // Through the walk: web-app's committed files plus a root `.DS_Store`.
+    let bundle = assemble(&WEB_APP);
+    write_file(bundle.path(), ".DS_Store", b"x");
+    let refusal = lab_cid(bundle.path()).expect_err("a hidden name at the root");
+    assert_eq!(
+        refusal,
+        Refusal::HiddenName {
+            path: ".DS_Store".to_owned()
+        }
+    );
+    assert_eq!(refusal.to_string(), reason(".DS_Store"));
+
+    // One path check: `Directory::insert` holds the one `starts_with('.')`
+    // over the path parts, and the library holds no second one.
+    let code = library_code();
+    let insert = library_item(&code, "fn insert(");
+    assert_eq!(
+        insert.matches(".starts_with('.')").count(),
+        1,
+        "the one hidden-name rule:\n{insert}"
+    );
+    assert_eq!(
+        code.matches(".starts_with('.')").count(),
+        1,
+        "a second hidden-name check"
+    );
+}

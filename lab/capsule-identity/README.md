@@ -101,7 +101,18 @@ To recompute a lab CID by hand:
    after two passes).
 4. Each path part but the last is a **directory**: `browser/app.js` is a
    directory `browser` with a link named `app.js`. The root is the directory
-   of the bundle's entries. No empty directory is ever made.
+   of the bundle's entries. A path part that starts with `.` is refused as
+   `HiddenName`, because Kubo v0.40.1 with the Runtime import flags leaves a
+   leading-dot name out of the CID; a dot inside or at the end of a name
+   (`a.b`, `x.`) is normal. A folder below the root that holds no file at any
+   depth is refused as `EmptyFolder`, because Kubo with `--empty-dirs=false`
+   drops an empty folder and keeps a folder of empty folders. No empty
+   directory is ever made.
+   `a_hidden_name_is_refused_with_its_reason` and
+   `a_folder_with_no_file_is_refused_with_its_reason` pin both refusals and
+   catch F-CI87a (no hidden-name check), F-CI87b (a check of only the last
+   part), F-CI87c (a part tested for any dot), F-CI87d (no empty-folder
+   check) and F-CI87e (a pop that refuses every folder).
 5. Each directory's **links estimate** is the sum, over its direct children,
    of the child's name in bytes plus 36. It is not the block's length and not
    a child's Tsize; a child directory counts through its own name and is
@@ -323,8 +334,9 @@ the one Tsize rule, block length plus children's Tsizes. `encode_directory`
 is the one directory encoder: `links_estimate` decides a basic block or a
 `hamt_shard`, and `hamt_digest` holds the one marked copy of the HAMT hash.
 The encoder also
-refuses what the walk can never give but a caller of the encoder could: a path
-with an empty, `.` or `..` part, two entries with one path, and one path that
+refuses a path part that starts with `.`, which a bundle may hold, and the
+empty, `.` or `..` part that the walk never gives but a caller of the encoder
+could. It also refuses two entries with one path, and one path that
 is both a file and a directory (`a` and `a/b`, in either order). `check_name` checks a
 claimed name by calling `lab_cid`; it computes no name of its own.
 
@@ -371,6 +383,8 @@ rules and not from the Rust code, in
 | A name and a file's length are written with their lengths | `path_and_content_boundaries_cannot_collide` | F-CI1b, F-CI1p (name), F-CI1q (Tsize) |
 | A file and a directory at one path are refused | `encoder_refuses_file_directory_conflict` | F-CI18p, F-CI18q (one silently replaces the other) |
 | An empty, `.` or `..` path part is refused | `encoder_refuses_a_path_with_an_empty_or_dot_part` | F-CI18s |
+| A path part that starts with `.` is refused: Kubo with the Runtime import flags leaves it out of the CID | `a_hidden_name_is_refused_with_its_reason` | F-CI87a (no check), F-CI87b (only the last part), F-CI87c (any dot) |
+| A folder below the root that holds no file at any depth is refused: Kubo with `--empty-dirs=false` drops it | `a_folder_with_no_file_is_refused_with_its_reason` | F-CI87d (no check), F-CI87e (every folder refused at its pop) |
 | Two entries with one path are refused | `encoder_refuses_a_duplicate_path` | F-CI1r |
 
 The three pins these tests add are in `tests/common/mod.rs`, and the Python
@@ -2083,7 +2097,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 289 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 294 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a

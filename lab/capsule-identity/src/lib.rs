@@ -78,7 +78,9 @@
 //! 3. The root is the directory of the bundle's entries. Its CID prints as
 //!    `b` and the RFC 4648 base32 of its 36 bytes, lowercase, no padding.
 //!
-//! No empty directory is emitted. Nothing else enters a block: no folder
+//! No empty directory is emitted. A path part that starts with `.` is
+//! [`Refusal::HiddenName`], and a folder below the root that holds no file at
+//! any depth is [`Refusal::EmptyFolder`]. Nothing else enters a block: no folder
 //! name, absolute path, mtime, mode, owner or symlink target. The CIDv1 bytes
 //! and the base32 text are one marked lab copy in this crate, so the lab adds
 //! no crate (the Runtime's `cid` crate lives only in server crates the lab
@@ -490,6 +492,10 @@ pub enum Refusal {
     /// An entry given to the encoder has a path with an empty, `.` or `..`
     /// part, so it names no UnixFS link. The walk never makes one.
     BadPathPart { path: String },
+    /// A path part starts with `.`. Kubo v0.40.1 with the Runtime's import
+    /// flags leaves that name out of the CID, so the lab refuses the bundle
+    /// instead of naming it as if the name were absent.
+    HiddenName { path: String },
     /// One path given to the encoder is both a file and a directory, as
     /// `a` and `a/b` would be. The walk never makes one.
     FileAndDirectory { path: String },
@@ -520,6 +526,11 @@ pub enum Refusal {
     /// An entry's open handle is not the kind its folder's listing said: the
     /// entry changed between the listing and the open.
     Changed { path: String },
+    /// A folder below the bundle root that the walk entered holds no file at
+    /// any depth. Kubo with `--empty-dirs=false` drops such a folder, so the
+    /// lab refuses the bundle instead of naming it with the folder absent.
+    /// The root is never this refusal.
+    EmptyFolder { path: String },
     /// The walk could not read an entry; `.` is the bundle root. `reason` is
     /// the system's own text. (The field is not named `error`: falsify.py
     /// takes that word with a colon in test output for a harness error, so a
@@ -610,6 +621,10 @@ impl fmt::Display for Refusal {
                 f,
                 "the path {path:?} has an empty, . or .. part: each part names one UnixFS link"
             ),
+            Refusal::HiddenName { path } => write!(
+                f,
+                "{path} starts with '.': Kubo v0.40.1 with the Runtime import flags leaves a leading-dot name out of the CID, and the lab refuses that bundle"
+            ),
             Refusal::FileAndDirectory { path } => write!(
                 f,
                 "{path} is both a file and a directory: a bundle path names one or the other"
@@ -635,6 +650,10 @@ impl fmt::Display for Refusal {
                 "the HAMT shard {path} needs a ninth digest byte: the murmur3 digest is {HAMT_DIGEST_BYTES} bytes, so no deeper level names these links"
             ),
             Refusal::Changed { path } => write!(f, "{path} changed while the bundle was named"),
+            Refusal::EmptyFolder { path } => write!(
+                f,
+                "{path} holds no file: the lab refuses a folder with no file at any depth, because Kubo with --empty-dirs=false drops an empty folder and keeps a folder of empty folders"
+            ),
             Refusal::Unreadable { path, reason } => write!(f, "could not read {path}: {reason}"),
             Refusal::NotALabCid { claimed } => write!(
                 f,
@@ -1179,13 +1198,18 @@ enum Child {
 
 impl Directory {
     /// Put the file node `file` at the bundle path `path`, making each directory
-    /// on the way. A path with an empty, `.` or `..` part is refused; so is
-    /// a path already given, and a path that is a file and a directory, in
-    /// either order.
+    /// on the way. A path with an empty, `.` or `..` part is refused, and so
+    /// is a path with a part that starts with `.`; so is a path already
+    /// given, and a path that is a file and a directory, in either order.
     fn insert(&mut self, path: &str, file: Child) -> Result<(), Refusal> {
         let parts: Vec<&str> = path.split('/').collect();
         if parts.iter().any(|part| matches!(*part, "" | "." | "..")) {
             return Err(Refusal::BadPathPart {
+                path: path.to_owned(),
+            });
+        }
+        if parts.iter().any(|part| part.starts_with('.')) {
+            return Err(Refusal::HiddenName {
                 path: path.to_owned(),
             });
         }
@@ -1545,9 +1569,15 @@ struct Listed {
     file_type: FileType,
 }
 
-/// A folder the walk is in: its checked handle and the rest of its listing.
+/// A folder the walk is in: its checked handle and the rest of its listing,
+/// its bundle path, and the walk's file count when it was pushed.
 struct Folder {
     handle: OwnedFd,
+    /// The folder's bundle path; the root's is empty.
+    path: String,
+    /// `entries.len()` when the walk pushed this folder, so a pop with the
+    /// same count shows that no file was added under it.
+    files_at_push: usize,
     listing: std::vec::IntoIter<Listed>,
 }
 
@@ -1557,7 +1587,10 @@ struct Folder {
 /// entry through its folder's handle: it checks the listed type, opens the
 /// entry, checks the open handle, and only then reads or lists that handle.
 /// It goes depth first, so it holds one handle per folder level. The first
-/// refusal stops the walk. Listing order does not matter: the encoder sorts.
+/// refusal stops the walk. A folder below the root that added no file since
+/// the walk pushed it holds no file at any depth: the walk refuses it with
+/// [`Refusal::EmptyFolder`], because a Kubo import drops it. Listing order
+/// does not matter: the encoder sorts.
 fn collect_entries(
     bundle: &Path,
     observe: &mut dyn FnMut(Moment, &str),
@@ -1566,6 +1599,8 @@ fn collect_entries(
     let listing = list_folder(root.as_fd(), "")?;
     let mut folders = vec![Folder {
         handle: root,
+        path: String::new(),
+        files_at_push: 0,
         listing,
     }];
     let mut entries = Vec::new();
@@ -1576,6 +1611,11 @@ fn collect_entries(
             file_type,
         }) = folder.listing.next()
         else {
+            if !folder.path.is_empty() && entries.len() == folder.files_at_push {
+                return Err(Refusal::EmptyFolder {
+                    path: folder.path.clone(),
+                });
+            }
             folders.pop();
             continue;
         };
@@ -1588,7 +1628,12 @@ fn collect_entries(
         observe(Moment::AfterCheck, &path);
         if kind == EntryKind::Directory {
             let listing = list_folder(handle.as_fd(), &path)?;
-            folders.push(Folder { handle, listing });
+            folders.push(Folder {
+                handle,
+                path,
+                files_at_push: entries.len(),
+                listing,
+            });
         } else {
             let content = read_file(handle, &path)?;
             entries.push(BundleEntry { path, content });
