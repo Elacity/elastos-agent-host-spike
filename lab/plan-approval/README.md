@@ -84,6 +84,18 @@ grant, so `execute` returns `grant is not live: Revoked` and the request record
 stays `granted`. This crate stores no lifetime and does not copy the expiry
 rule; the stand-in owns it.
 
+A shown grant authorises only the session that asked for it. `execute` is the
+only use call, and it passes the session it is given. Another session's use of
+that shown grant is refused with status 403 and `wrong capsule: expected ` that
+grant's session, then `, got ` the caller's session, and the grant stays on the
+live list. The owning session's own use still runs, and a `once` grant then
+leaves the live list. This crate stores no session check of its own; the
+stand-in compares the grant's session with the caller's. `preview`,
+`plan_sha256`, `approve`, `execute`, `deny_shown_plan`, `age_shown_plan` and
+`stop_shown_session` are unchanged by this slice. The crate does not copy the
+stand-in, and it names no planner. A passing run gives the Runtime no A15
+credit.
+
 `preview`, `plan_sha256`, `execute`, `deny_shown_plan`, `age_shown_plan` and
 `stop_shown_session` are unchanged by this slice; `approve` gains the duration
 argument and remains the only grant call. This crate calls
@@ -106,12 +118,14 @@ authority") is a later slice; RA-4 and RA-5 stay open.
   `preview_makes_no_effect`, `plan_sha256_hashes_the_exact_bytes`,
   `deny_one_shown_step`, `unanswered_shown_step_expires`,
   `stop_settles_that_sessions_shown_steps`, `shown_allow_once_expires`,
-  `shown_session_lasts_until_stop` and the bound-plan journey.
+  `shown_session_lasts_until_stop`, `shown_grant_authorises_only_its_session`
+  and the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_grant_authorises_only_its_session -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_session_lasts_until_stop -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_allow_once_expires -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib stop_settles_that_sessions_shown_steps -- --exact

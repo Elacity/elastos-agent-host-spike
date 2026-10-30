@@ -1670,3 +1670,244 @@ fn shown_session_lasts_until_stop() {
         "the refused use of the revoked grant mints nothing"
     );
 }
+
+#[cfg(test)]
+#[test]
+fn shown_grant_authorises_only_its_session() {
+    use agent_conformance::standin_runtime::Caller;
+    use fixtures::{PLAN_A, PLAN_B};
+    use journeys::{request, running_agent};
+    use serde_json::{json, Value};
+
+    fn live(stand_in: &StandIn) -> Vec<Value> {
+        stand_in
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
+            .expect("shell live list")["capabilities"]
+            .as_array()
+            .cloned()
+            .expect("the shell live list holds a capabilities array")
+    }
+
+    fn client_live(stand_in: &StandIn, session: &str) -> Value {
+        stand_in
+            .get_capability_list(
+                Caller::Client {
+                    session_id: session,
+                },
+                None,
+            )
+            .expect("the client live list")
+    }
+
+    fn record(stand_in: &StandIn, session: &str, request_id: &str) -> Value {
+        stand_in
+            .get_capability_requests(Caller::Shell, Some(session))
+            .expect("the shell reads the session's requests")["requests"]
+            .as_array()
+            .cloned()
+            .expect("the shell request view holds a requests array")
+            .into_iter()
+            .find(|entry| entry["request_id"] == request_id)
+            .expect("the session's request view holds that id")
+    }
+
+    let mut stand_in = StandIn::new();
+    let first_session = running_agent(&mut stand_in);
+    let second_session = running_agent(&mut stand_in);
+    assert_eq!(
+        first_session, "component-1",
+        "a shown grant authorises only its session: the fresh stand-in names its first session component-1"
+    );
+    assert_eq!(
+        second_session, "component-2",
+        "a shown grant authorises only its session: the stand-in names its second session component-2"
+    );
+
+    let plan_a = plan_sha256(PLAN_A);
+    let plan_b = plan_sha256(PLAN_B);
+    let first_step = request(&mut stand_in, &first_session, PLAN_A);
+    let second_step = request(&mut stand_in, &second_session, PLAN_B);
+    assert_eq!(
+        first_step, "request-1",
+        "a shown grant authorises only its session: the first session's step is request-1"
+    );
+    assert_eq!(
+        second_step, "request-2",
+        "a shown grant authorises only its session: the second session's step is request-2"
+    );
+
+    // The owner allows each shown step once, through the one grant call,
+    // naming the hash that request posted.
+    assert_eq!(
+        approve(&mut stand_in, &first_step, "once", &plan_a),
+        Ok(json!({ "success": true })),
+        "a shown grant authorises only its session: the owner allows the first session's step once"
+    );
+    assert_eq!(
+        approve(&mut stand_in, &second_step, "once", &plan_b),
+        Ok(json!({ "success": true })),
+        "a shown grant authorises only its session: the owner allows the second session's step once"
+    );
+
+    let granted_first = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "granted",
+        "decision_reason": "owner approved",
+        "settled_by": "shell",
+        "plan": plan_a,
+    });
+    let granted_second = json!({
+        "request_id": "request-2",
+        "session_id": "component-2",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "granted",
+        "decision_reason": "owner approved",
+        "settled_by": "shell",
+        "plan": plan_b,
+    });
+    assert_eq!(
+        record(&stand_in, &first_session, &first_step),
+        granted_first,
+        "a shown grant authorises only its session: the first step is granted under the shell with the hash of plan A"
+    );
+    assert_eq!(
+        record(&stand_in, &second_session, &second_step),
+        granted_second,
+        "a shown grant authorises only its session: the second step is granted under the shell with the hash of plan B"
+    );
+
+    let live_first = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "duration": "once",
+        "granted_at": 0,
+    });
+    let live_second = json!({
+        "request_id": "request-2",
+        "session_id": "component-2",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "duration": "once",
+        "granted_at": 0,
+    });
+    let both_live = vec![live_first.clone(), live_second.clone()];
+    assert_eq!(
+        live(&stand_in),
+        both_live,
+        "a shown grant authorises only its session: the shell live list has both once grants, request-1 then request-2"
+    );
+
+    let client_first = json!({
+        "capabilities": [{
+            "request_id": "request-1",
+            "resource": "localhost://Public/plan-approval/a.txt",
+            "action": "read",
+            "duration": "once",
+            "granted_at": 0,
+        }],
+    });
+    let client_second = json!({
+        "capabilities": [{
+            "request_id": "request-2",
+            "resource": "localhost://Public/plan-approval/a.txt",
+            "action": "read",
+            "duration": "once",
+            "granted_at": 0,
+        }],
+    });
+    assert_eq!(
+        client_live(&stand_in, &first_session),
+        client_first,
+        "a shown grant authorises only its session: the first session's live list holds request-1 alone and omits session_id"
+    );
+    assert_eq!(
+        client_live(&stand_in, &second_session),
+        client_second,
+        "a shown grant authorises only its session: the second session's live list holds request-2 alone and omits session_id"
+    );
+
+    // Each session uses the other session's shown grant. The use is refused
+    // before any spend, so both grants stay live.
+    assert_eq!(
+        execute(&mut stand_in, "component-2", &first_step, PLAN_A),
+        Err((
+            403,
+            "wrong capsule: expected component-1, got component-2".to_owned()
+        )),
+        "a shown grant authorises only its session: the second session's use of request-1 is refused"
+    );
+    assert_eq!(
+        execute(&mut stand_in, &first_session, &second_step, PLAN_B),
+        Err((
+            403,
+            "wrong capsule: expected component-2, got component-1".to_owned()
+        )),
+        "a shown grant authorises only its session: the first session's use of request-2 is refused"
+    );
+
+    assert_eq!(
+        live(&stand_in),
+        both_live,
+        "a shown grant authorises only its session: after both refused uses the shell live list is unchanged byte for byte"
+    );
+    assert_eq!(
+        client_live(&stand_in, &first_session),
+        client_first,
+        "a shown grant authorises only its session: the first session's live list is unchanged"
+    );
+    assert_eq!(
+        client_live(&stand_in, &second_session),
+        client_second,
+        "a shown grant authorises only its session: the second session's live list is unchanged"
+    );
+    assert_eq!(
+        record(&stand_in, &first_session, &first_step),
+        granted_first,
+        "a shown grant authorises only its session: the first request stays granted with the hash of plan A"
+    );
+    assert_eq!(
+        record(&stand_in, &second_session, &second_step),
+        granted_second,
+        "a shown grant authorises only its session: the second request stays granted with the hash of plan B"
+    );
+
+    // Each session's own use of its own grant still runs and spends it.
+    assert_eq!(
+        execute(&mut stand_in, &first_session, &first_step, PLAN_A),
+        Ok(json!({ "valid": true })),
+        "a shown grant authorises only its session: the first session's own use of request-1 still runs"
+    );
+    assert_eq!(
+        live(&stand_in),
+        vec![live_second.clone()],
+        "a shown grant authorises only its session: the spent first grant leaves the live list and the second grant stays"
+    );
+    assert_eq!(
+        execute(&mut stand_in, &second_session, &second_step, PLAN_B),
+        Ok(json!({ "valid": true })),
+        "a shown grant authorises only its session: the second session's own use of request-2 still runs"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "a shown grant authorises only its session: both once grants left the live list"
+    );
+    assert_eq!(
+        record(&stand_in, &first_session, &first_step),
+        granted_first,
+        "a shown grant authorises only its session: the first request stays granted under the shell with the owner's decision"
+    );
+    assert_eq!(
+        record(&stand_in, &second_session, &second_step),
+        granted_second,
+        "a shown grant authorises only its session: the second request stays granted under the shell with the owner's decision"
+    );
+}
