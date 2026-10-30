@@ -253,16 +253,71 @@ WRITE_ACTION_MARKER = "`" + WRITE_ACTION_SPAN + "`"
 DEFAULT_ACTION_SPAN = "elastos/crates/elastos-server/src/provider_resource.rs:192"
 DEFAULT_ACTION_MARKER = "`" + DEFAULT_ACTION_SPAN + "`"
 
+# Its quotation is the removal at the end of the activation, source line 218.
+RESIDENT_REL = "elastos/crates/elastos-compute/src/providers/component.rs"
+RESIDENT_RUN_SPAN = RESIDENT_REL + ":218"
+RESIDENT_RUN_MARKER = "`" + RESIDENT_RUN_SPAN + "`"
+
+# Its quotation is the contract error in the stop body, source line 232.
+RESIDENT_STOP_SPAN = RESIDENT_REL + ":232"
+RESIDENT_STOP_MARKER = "`" + RESIDENT_STOP_SPAN + "`"
+
+# Its quotation is the one export the capsule kernel provides, source line 87.
+RESIDENT_EXPORT_SPAN = "elastos/wit/elastos-bus-v1.wit:87"
+RESIDENT_EXPORT_MARKER = "`" + RESIDENT_EXPORT_SPAN + "`"
+
+# The journal range holds the two budget comparisons. Its two endpoints share
+# one marker, and each endpoint's remainder is its own pinned line.
+JOURNAL_RANGE_SPAN = "capsules/model-provider/src/journal.rs:391-397"
+JOURNAL_RANGE_MARKER = "`" + JOURNAL_RANGE_SPAN + "`"
+
+# The model-service range holds the create comment. Its two endpoints share
+# one marker, and each endpoint's remainder is its own pinned line.
+GATEWAY_RANGE_SPAN = (
+    "elastos/crates/elastos-server/src/api/gateway_model_service.rs:1452-1454"
+)
+GATEWAY_RANGE_MARKER = "`" + GATEWAY_RANGE_SPAN + "`"
+
+# The guest range holds the zeroed step budget. Its two endpoints share one
+# marker, and each endpoint's remainder is its own pinned line.
+GUEST_RANGE_SPAN = "examples/agent-host/src/lib.rs:471-476"
+GUEST_RANGE_MARKER = "`" + GUEST_RANGE_SPAN + "`"
+
+# The two resident-A3 claims the draft never makes. Each has its own refusal.
+A3_MET_CLAIM = "A3 is met"
+A3_GRANT_CLAIM = "ComponentProvider grants resident A3 credit"
+
 # The draft indents a quotation by exactly four spaces.
 DRAFT_INDENT = "    "
 
 
-def read_file(root, rel):
-    """Return file bytes, or None when ``rel`` is not a file under ``root``."""
-    path = Path(root) / rel
-    if not path.is_file():
+# One blob at one commit never changes, so one run reads each blob once. A
+# citation and the quotations of the same file share this one read.
+BLOBS = {}
+
+
+def read_file(root, rel, sha):
+    """Return the bytes of REL at commit SHA, or None when it has no such blob.
+
+    The pinned commit is the one revision a citation is judged against, so this
+    reads the commit and never the worktree.
+    """
+    if sha is None:
         return None
-    return path.read_bytes()
+    key = (str(root), sha, rel)
+    if key in BLOBS:
+        return BLOBS[key]
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "cat-file", "blob", sha + ":" + rel],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+    data = None if result.returncode != 0 else result.stdout
+    BLOBS[key] = data
+    return data
 
 
 def decode_text(data):
@@ -353,20 +408,11 @@ def _spans(text):
 
 def _pinned_lines(root, sha, rel):
     """Return every line of REL at commit SHA, or None when it is absent."""
-    if sha is None:
+    data = read_file(root, rel, sha)
+    if data is None:
         return None
     try:
-        result = subprocess.run(
-            ["git", "-C", str(root), "show", sha + ":" + rel],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-    except OSError:
-        return None
-    if result.returncode != 0:
-        return None
-    try:
-        text = decode_text(result.stdout)
+        text = decode_text(data)
     except UnicodeDecodeError:
         return None
     return text.splitlines()
@@ -384,6 +430,26 @@ def _span_target(span):
     """Return the path and line number of SPAN."""
     rel, _, number = span.rpartition(":")
     return rel, int(number)
+
+
+def cited_line(span, lines):
+    """Return the 1-based line SPAN cites.
+
+    A line span is the number ``_span_target`` reads. A function span is the
+    first line of LINES that declares that function, using the same ``fn`` or
+    ``def`` pattern as ``has_function``.
+    """
+    match = CITATION.fullmatch(span)
+    func = None if match is None else match.group("func")
+    if func is not None:
+        if not lines:
+            return None
+        pattern = r"(?:^|\s)(?:fn|def) " + re.escape(func) + r"\("
+        for number, line in enumerate(lines, 1):
+            if re.search(pattern, line):
+                return number
+        return None
+    return _span_target(span)[1]
 
 
 def _remainders(text, marker):
@@ -461,19 +527,22 @@ def _pinned_quote(text, span, marker, root=None, sha=None, pinned=None):
 
     PINNED is the pinned file's lines when the caller already read them.
     Otherwise this reads them through ``_pinned_lines`` at the draft pin, or at
-    the worktree draft pin when TEXT carries none.
+    the worktree draft pin when TEXT carries none. ``cited_line`` then names
+    the line: the numbered line of a line span, or the declaring line of a
+    function span.
     """
     remainders = _remainders(text, marker)
     if not remainders:
         return None
-    rel, number = _span_target(span)
     if pinned is None:
         if root is None:
             root = worktree_root()
         if sha is None:
             sha = _pin_of(text, root)
+        match = CITATION.fullmatch(span)
+        rel = match.group("path")
         pinned = _pinned_lines(root, sha, rel)
-    return quote_for(remainders, pinned, number)
+    return quote_for(remainders, pinned, cited_line(span, pinned))
 
 
 def owned_quote(text, root=None, sha=None, pinned=None):
@@ -756,10 +825,141 @@ def default_action_quote(text, root=None, sha=None, pinned=None):
     return _pinned_quote(text, DEFAULT_ACTION_SPAN, DEFAULT_ACTION_MARKER, root, sha, pinned)
 
 
-# The only target list: one entry per line decision, in source order. A range's
-# two endpoints share one marker. The quoter name is looked up at call time so a
-# test can plant a neighbouring remainder through the production path.
-QUOTE_TARGETS = (
+def resident_run_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the activation removal, or None."""
+    return _pinned_quote(text, RESIDENT_RUN_SPAN, RESIDENT_RUN_MARKER, root, sha, pinned)
+
+
+def resident_stop_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the stop contract error, or None."""
+    return _pinned_quote(text, RESIDENT_STOP_SPAN, RESIDENT_STOP_MARKER, root, sha, pinned)
+
+
+def resident_export_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the lifecycle export, or None."""
+    return _pinned_quote(text, RESIDENT_EXPORT_SPAN, RESIDENT_EXPORT_MARKER, root, sha, pinned)
+
+
+# Function spans whose indented block already equals the declaring line, in
+# draft order. Each one is spliced into QUOTE_TARGETS with a None quoter, so
+# the tuple and the list cannot drift. A None quoter is the only selector.
+FUNCTION_QUOTE_SPANS = (
+    "elastos/crates/elastos-server/src/auth.rs::local_person_principal_id",
+    "elastos/crates/elastos-server/src/auth.rs::principal_localhost_root",
+    "elastos/crates/elastos-server/src/resource_bridge.rs::scope_current_user_alias",
+    "elastos/crates/elastos-server/src/resource_bridge.rs::manifest_bound_users_self_matches_active_principal_root_only_with_context",
+    "examples/agent-host/src/lib.rs::journal_resource",
+    "lab/capsule-identity/src/lib.rs::name_signature_message",
+    "lab/capsule-identity/src/lib.rs::sign_bundle",
+    "lab/capsule-identity/src/lib.rs::verify_checked_signature",
+    "examples/agent-host/src/lib.rs::authorize",
+    "elastos/crates/elastos-runtime/src/capability/manager.rs::test_wrong_capsule",
+    "examples/agent-host/src/lib.rs::propose_hosted",
+    "capsules/model-provider/src/adapters.rs::effect_request",
+    "elastos/crates/elastos-server/src/api/model_provider_egress.rs::handle",
+    "examples/agent-host/src/lib.rs::step_payload",
+    "capsules/model-provider/src/journal.rs::journal_budget_fault",
+    "capsules/model-provider/src/journal.rs::active_run_count",
+    "capsules/model-provider/src/contract.rs::is_terminal",
+    "elastos/crates/elastos-server/src/api/gateway_model_service.rs::reserve_run_slot",
+    "capsules/model-provider/src/journal.rs::validate_backend_usage",
+    "examples/agent-host/src/lib.rs::ask_kind_name",
+    "examples/agent-host/src/lib.rs::declared_ask",
+    "examples/agent-host/src/lib.rs::propose_read",
+    "examples/agent-host/src/lib.rs::observe",
+    "examples/agent-host/src/lib.rs::propose_edit",
+    "examples/agent-host/src/lib.rs::propose_restore",
+    "examples/agent-host/src/lib.rs::is_write",
+    "examples/agent-host/src/lib.rs::edit_request",
+    "examples/agent-host/src/lib.rs::request_body",
+    "elastos/crates/elastos-server/src/provider_resource.rs::provider_operation_action",
+    "elastos/crates/elastos-server/src/provider_resource.rs::localhost_op_required_action",
+    "examples/agent-host/src/lib.rs::propose_run",
+    "elastos/crates/elastos-compute/src/exec_vm.rs::decide_exec",
+    "elastos/crates/elastos-compute/src/exec_vm.rs::admit_project_files",
+    "examples/agent-host/src/lib.rs::propose_child",
+    "examples/agent-host/src/lib.rs::authorize_child",
+    "examples/agent-host/src/lib.rs::open_child_host",
+    "examples/agent-host/src/lib.rs::grant_child_host",
+    "examples/agent-host/src/lib.rs::propose_init",
+    "examples/agent-host/src/lib.rs::journal_write_body",
+    "examples/agent-host/src/lib.rs::append_journal",
+    "examples/agent-host/src/lib.rs::propose_journal_append",
+    "elastos/crates/elastos-server/src/provider_resource.rs::agents_area_refusal",
+    "elastos/crates/elastos-server/src/resource_bridge.rs::write_precondition",
+    "lab/grant-binding/src/ops.rs::model_overwrite_grant_does_not_permit_append",
+    "lab/grant-binding/src/lib.rs::register_instance",
+    "lab/grant-binding/src/lib.rs::resource_name",
+    "lab/grant-binding/src/lib.rs::bind_grant",
+    "lab/grant-binding/src/lib.rs::use_grant",
+    "lab/grant-binding/src/ledger.rs::model_reserve_over_the_ceiling_is_refused",
+    "lab/grant-binding/src/ledger.rs::model_reported_usage_does_not_lower_the_hold",
+    "lab/grant-binding/src/ops.rs::operate",
+)
+
+# Line spans whose block equals the pinned window once every remainder gains
+# four spaces, in draft order. Each one is spliced into QUOTE_TARGETS with a
+# None quoter, the same way as FUNCTION_QUOTE_SPANS.
+INDENT_LINE_SPANS = (
+    "elastos/crates/elastos-server/src/resource_bridge.rs:43",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:984",
+    "elastos/crates/elastos-compute/src/providers/component.rs:352",
+    "elastos/crates/elastos-server/src/api/handlers/capability.rs:182",
+    "elastos/crates/elastos-server/src/api/handlers/capability.rs:339",
+    "elastos/crates/elastos-server/src/api/handlers/capability.rs:341",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:40",
+    "elastos/crates/elastos-runtime/src/capability/manager.rs:326",
+    "elastos/crates/elastos-runtime/src/capability/token.rs:203",
+    "examples/agent-host/asks.json:10",
+    "examples/agent-host/asks.json:11",
+    "capsules/model-provider/src/adapters.rs:1670",
+    "capsules/model-provider/src/config.rs:111",
+    "capsules/model-provider/src/config.rs:113",
+    "elastos/crates/elastos-runtime/src/provider/bridge.rs:774",
+    "elastos/crates/elastos-runtime/src/provider/registry.rs:841",
+    "lab/grant-binding/src/lib.rs:162",
+    "lab/grant-binding/src/lib.rs:244",
+)
+
+# Egress line spans whose block equals the pinned line, in draft order. Each
+# one is spliced into QUOTE_TARGETS with a None quoter, the same way as
+# INDENT_LINE_SPANS.
+EGRESS_LINE_SPANS = (
+    "elastos/crates/elastos-server/src/api/model_provider_egress.rs:504",
+    "elastos/crates/elastos-server/src/api/model_provider_egress.rs:509",
+)
+
+# Retargeted line spans whose block equals the pinned window once every
+# remainder gains four spaces, in draft order. Each one is spliced into
+# QUOTE_TARGETS with a None quoter, the same way as EGRESS_LINE_SPANS.
+RESTATED_LINE_SPANS = (
+    "elastos/crates/elastos-server/src/resource_bridge.rs:931",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:398",
+)
+
+# Retargeted ledger line spans whose block equals the pinned line, in draft
+# order. Each one is spliced into QUOTE_TARGETS with a None quoter, the same
+# way as RESTATED_LINE_SPANS.
+LEDGER_LINE_SPANS = (
+    "lab/grant-binding/src/ledger.rs:356",
+    "lab/grant-binding/src/ledger.rs:341",
+    "lab/grant-binding/src/ledger.rs:417",
+)
+
+# Caller-check and grant-id line spans whose block equals the pinned line, in
+# draft order. Each one is spliced into QUOTE_TARGETS with a None quoter, the
+# same way as LEDGER_LINE_SPANS.
+OTHER_INDENT_SPANS = (
+    "elastos/crates/elastos-runtime/src/capability/manager.rs:409",
+    "elastos/crates/elastos-compute/src/providers/component.rs:384",
+    "elastos/wit/elastos-bus-v1.wit:10",
+)
+
+# The one fixed prefix of the target list: one entry per line decision, in
+# source order before the function spans and the indent line spans. A range's
+# two endpoints share one marker. The quoter name is looked up at call time so
+# a test can plant a neighbouring remainder through the production path.
+_QUOTE_TARGETS_PREFIX = (
     (OBSERVE_SPAN, OBSERVE_MARKER, "observe_quote"),
     (EDIT_START_SPAN, EDIT_RANGE_MARKER, "edit_start_quote"),
     (EDIT_END_SPAN, EDIT_RANGE_MARKER, "edit_end_quote"),
@@ -816,7 +1016,114 @@ QUOTE_TARGETS = (
     (READ_ACTION_SPAN, READ_ACTION_MARKER, "read_action_quote"),
     (WRITE_ACTION_SPAN, WRITE_ACTION_MARKER, "write_action_quote"),
     (DEFAULT_ACTION_SPAN, DEFAULT_ACTION_MARKER, "default_action_quote"),
+    (RESIDENT_RUN_SPAN, RESIDENT_RUN_MARKER, "resident_run_quote"),
+    (RESIDENT_STOP_SPAN, RESIDENT_STOP_MARKER, "resident_stop_quote"),
+    (RESIDENT_EXPORT_SPAN, RESIDENT_EXPORT_MARKER, "resident_export_quote"),
+    # The 56 aligned entries this task adds, in draft order. Each reads its own
+    # span through the shared window rule. A range's two endpoints share one
+    # marker and stand first endpoint then second endpoint.
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:814", "`elastos/crates/elastos-server/src/resource_bridge.rs:814`", None),
+    ("lab/capsule-identity/src/lib.rs:1425", "`lab/capsule-identity/src/lib.rs:1425`", None),
+    ("lab/capsule-identity/README.md:946", "`lab/capsule-identity/README.md:946`", None),
+    ("elastos/crates/elastos-compute/src/providers/component.rs:350", "`elastos/crates/elastos-compute/src/providers/component.rs:350`", None),
+    ("capsules/model-provider/src/adapters.rs:58", "`capsules/model-provider/src/adapters.rs:58`", None),
+    ("elastos/crates/elastos-server/src/api/gateway_model_service.rs:1", "`elastos/crates/elastos-server/src/api/gateway_model_service.rs:1`", None),
+    ("elastos/crates/elastos-server/src/api/gateway_model_service.rs:4", "`elastos/crates/elastos-server/src/api/gateway_model_service.rs:4`", None),
+    ("examples/agent-host/src/lib.rs:471", GUEST_RANGE_MARKER, None),
+    ("examples/agent-host/src/lib.rs:476", GUEST_RANGE_MARKER, None),
+    ("examples/agent-host/src/lib.rs:532", "`examples/agent-host/src/lib.rs:532`", None),
+    ("examples/agent-host/src/lib.rs:754", "`examples/agent-host/src/lib.rs:754`", None),
+    ("capsules/model-provider/src/journal.rs:391", JOURNAL_RANGE_MARKER, None),
+    ("capsules/model-provider/src/journal.rs:397", JOURNAL_RANGE_MARKER, None),
+    ("capsules/model-provider/src/journal.rs:921", "`capsules/model-provider/src/journal.rs:921`", None),
+    ("capsules/model-provider/src/state.rs:530", "`capsules/model-provider/src/state.rs:530`", None),
+    ("capsules/model-provider/src/state.rs:609", "`capsules/model-provider/src/state.rs:609`", None),
+    ("capsules/model-provider/src/contract.rs:134", "`capsules/model-provider/src/contract.rs:134`", None),
+    ("elastos/crates/elastos-server/src/api/gateway_model_service.rs:355", "`elastos/crates/elastos-server/src/api/gateway_model_service.rs:355`", None),
+    ("elastos/crates/elastos-server/src/api/gateway_model_service.rs:1452", GATEWAY_RANGE_MARKER, None),
+    ("elastos/crates/elastos-server/src/api/gateway_model_service.rs:1454", GATEWAY_RANGE_MARKER, None),
+    ("examples/agent-host/asks.json:4", "`examples/agent-host/asks.json:4`", None),
+    ("examples/agent-host/asks.json:5", "`examples/agent-host/asks.json:5`", None),
+    ("examples/agent-host/asks.json:6", "`examples/agent-host/asks.json:6`", None),
+    ("elastos/crates/elastos-server/src/provider_resource.rs:422", "`elastos/crates/elastos-server/src/provider_resource.rs:422`", None),
+    ("examples/agent-host/asks.json:7", "`examples/agent-host/asks.json:7`", None),
+    ("examples/agent-host/asks.json:8", "`examples/agent-host/asks.json:8`", None),
+    ("examples/agent-host/asks.json:9", "`examples/agent-host/asks.json:9`", None),
+    ("elastos/crates/elastos-compute/src/exec_vm.rs:43", "`elastos/crates/elastos-compute/src/exec_vm.rs:43`", None),
+    ("elastos/crates/elastos-compute/src/exec_vm.rs:49", "`elastos/crates/elastos-compute/src/exec_vm.rs:49`", None),
+    ("elastos/crates/elastos-compute/src/exec_vm.rs:130", "`elastos/crates/elastos-compute/src/exec_vm.rs:130`", None),
+    ("elastos/crates/elastos-server/src/provider_resource.rs:174", "`elastos/crates/elastos-server/src/provider_resource.rs:174`", None),
+    ("elastos/crates/elastos-server/src/provider_resource.rs:176", "`elastos/crates/elastos-server/src/provider_resource.rs:176`", None),
+    ("elastos/crates/elastos-server/src/provider_resource.rs:163", "`elastos/crates/elastos-server/src/provider_resource.rs:163`", None),
+    ("elastos/crates/elastos-server/src/provider_resource.rs:164", "`elastos/crates/elastos-server/src/provider_resource.rs:164`", None),
+    ("elastos/crates/elastos-server/src/provider_resource.rs:165", "`elastos/crates/elastos-server/src/provider_resource.rs:165`", None),
+    ("examples/agent-host/asks.json:12", "`examples/agent-host/asks.json:12`", None),
+    ("elastos/crates/elastos-server/src/provider_resource.rs:379", "`elastos/crates/elastos-server/src/provider_resource.rs:379`", None),
+    ("elastos/crates/elastos-server/src/provider_resource.rs:382", "`elastos/crates/elastos-server/src/provider_resource.rs:382`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:696", "`elastos/crates/elastos-server/src/resource_bridge.rs:696`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:697", "`elastos/crates/elastos-server/src/resource_bridge.rs:697`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:698", "`elastos/crates/elastos-server/src/resource_bridge.rs:698`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:699", "`elastos/crates/elastos-server/src/resource_bridge.rs:699`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:570", "`elastos/crates/elastos-server/src/resource_bridge.rs:570`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:571", "`elastos/crates/elastos-server/src/resource_bridge.rs:571`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:582", "`elastos/crates/elastos-server/src/resource_bridge.rs:582`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:583", "`elastos/crates/elastos-server/src/resource_bridge.rs:583`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:603", "`elastos/crates/elastos-server/src/resource_bridge.rs:603`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:606", "`elastos/crates/elastos-server/src/resource_bridge.rs:606`", None),
+    ("lab/grant-binding/README.md:12", "`lab/grant-binding/README.md:12`", None),
+    ("docs/AGENT_ARCHITECTURE.md:19", "`docs/AGENT_ARCHITECTURE.md:19`", None),
+    ("docs/AGENT_ARCHITECTURE.md:21", "`docs/AGENT_ARCHITECTURE.md:21`", None),
+    ("docs/AGENT_ARCHITECTURE.md:24", "`docs/AGENT_ARCHITECTURE.md:24`", None),
+    ("docs/AGENT_ARCHITECTURE.md:332", "`docs/AGENT_ARCHITECTURE.md:332`", None),
+    ("lab/grant-binding/src/lib.rs:280", "`lab/grant-binding/src/lib.rs:280`", None),
+    ("lab/grant-binding/src/lib.rs:23", "`lab/grant-binding/src/lib.rs:23`", None),
+    ("lab/grant-binding/src/lib.rs:25", "`lab/grant-binding/src/lib.rs:25`", None),
 )
+
+def _quote_target_tail(spans):
+    return tuple((span, "`" + span + "`", None) for span in spans)
+
+
+def _build_quote_targets():
+    """Return the one target list from the current span tuples."""
+    return (
+        _QUOTE_TARGETS_PREFIX
+        + _quote_target_tail(FUNCTION_QUOTE_SPANS)
+        + _quote_target_tail(INDENT_LINE_SPANS)
+        + _quote_target_tail(EGRESS_LINE_SPANS)
+        + _quote_target_tail(RESTATED_LINE_SPANS)
+        + _quote_target_tail(LEDGER_LINE_SPANS)
+        + _quote_target_tail(OTHER_INDENT_SPANS)
+    )
+
+
+class _QuoteTargets:
+    """Tuple-like view of the one target list."""
+
+    def _built(self):
+        return _build_quote_targets()
+
+    def __iter__(self):
+        return iter(self._built())
+
+    def __len__(self):
+        return len(self._built())
+
+    def __getitem__(self, index):
+        return self._built()[index]
+
+    def __eq__(self, other):
+        return self._built() == other
+
+    def __repr__(self):
+        return repr(self._built())
+
+
+# The only target list: one entry per line decision, then one None-quoter entry
+# per FUNCTION_QUOTE_SPANS entry, then one per INDENT_LINE_SPANS entry, then one
+# per EGRESS_LINE_SPANS entry, then one per RESTATED_LINE_SPANS entry, then one
+# per LEDGER_LINE_SPANS entry, then one per OTHER_INDENT_SPANS entry.
+QUOTE_TARGETS = _QuoteTargets()
 
 
 def quoted_line_matches(quoted, source):
@@ -824,22 +1131,51 @@ def quoted_line_matches(quoted, source):
     return quoted == source
 
 
-def _quote_refusal(root, text, sha, target):
+def _target_quotation(text, target, root, sha):
+    """Return the quotation for TARGET.
+
+    A target with a named selector reads through that selector. A target with
+    no selector reads its own span at its own marker through ``_pinned_quote``,
+    which is the same window rule and the same equality decision.
+    """
+    span, marker, quoter = target
+    if quoter is None:
+        return _pinned_quote(text, span, marker, root, sha)
+    return globals()[quoter](text, root, sha)
+
+
+def marker_stands_without_a_block(text, marker):
+    """True when MARKER stands exactly once and no indented block follows it."""
+    return text.count(marker) == 1 and not _remainders(text, marker)
+
+
+def _quote_refusal(root, text, sha, target, refused_spans=frozenset()):
     """Return the refusal for one target, or None when it matches or is absent.
 
-    The walk has no remainder for MARKER: no refusal, and the next target runs.
-    The marker is not one line: refused before the line read. The pinned line is
-    absent, or no window holds the cited line: the quotation is not in the pin.
+    The pin already refused this citation, or the marker it reads, with a
+    structural reason: one citation has one reason, so no quote refusal runs.
+    The marker stands and no indented block follows it: refused before the line
+    read. The walk has no remainder for MARKER: no refusal, and the next target
+    runs. The marker is not one line: refused before the line read. ``cited_line``
+    names the line after the pinned file is read: the numbered line of a line
+    span, or the declaring line of a function span. The pinned line is absent,
+    or no window holds the cited line: the quotation is not in the pin.
     The comparison fails, including a zero score: the quotation does not match.
     """
     span, marker, quoter = target
+    if span in refused_spans or marker.strip("`") in refused_spans:
+        return None
     if text.count(marker) > 1:
         return "refuse: quoted line is not one line: " + marker.strip("`")
+    if marker_stands_without_a_block(text, marker):
+        return "refuse: quoted line has no block: " + span
     if not _remainders(text, marker):
         return None
-    rel, number = _span_target(span)
-    source = pinned_line(root, sha, rel, number)
-    quoted = globals()[quoter](text, root, sha)
+    rel = CITATION.fullmatch(span).group("path")
+    lines = _pinned_lines(root, sha, rel)
+    number = cited_line(span, lines)
+    source = None if number is None else pinned_line(root, sha, rel, number)
+    quoted = _target_quotation(text, target, root, sha)
     if quoted is None or source is None:
         return "refuse: quoted line is not in the pinned commit: " + span
     if not quoted_line_matches(quoted, source):
@@ -847,22 +1183,37 @@ def _quote_refusal(root, text, sha, target):
     return None
 
 
-def _quote_refusals(root, text, sha):
-    """Return at most one quote refusal, walking QUOTE_TARGETS in source order."""
+def _quote_refusals(root, text, sha, refused_spans=frozenset()):
+    """Return at most one quote refusal, walking the one target list in order."""
     for target in QUOTE_TARGETS:
-        reason = _quote_refusal(root, text, sha, target)
+        reason = _quote_refusal(root, text, sha, target, refused_spans)
         if reason is not None:
             return [reason]
     return []
+
+
+def a3_claim_refusals(text):
+    """Return one refusal per claim that closes resident A3, each its own line."""
+    refusals = []
+    if A3_MET_CLAIM in text:
+        refusals.append("refuse: draft says " + A3_MET_CLAIM)
+    if A3_GRANT_CLAIM in text:
+        refusals.append("refuse: draft says " + A3_GRANT_CLAIM)
+    return refusals
 
 
 def _past_end(number, rel, count):
     return "refuse: line %s is past the end of %s (%s lines)" % (number, rel, count)
 
 
-def _refusal(root, match):
+def _refusal(root, match, sha):
+    """Return the structural refusal for one citation at commit SHA.
+
+    A path, a UTF-8 read, a line bound and a function name all read the pinned
+    commit, so one draft is judged against one revision.
+    """
     rel = match.group("path")
-    data = read_file(root, rel)
+    data = read_file(root, rel, sha)
     if data is None:
         return "refuse: path does not exist: " + rel
     try:
@@ -891,8 +1242,22 @@ def _refusal(root, match):
     return None
 
 
+def pin_allows_structural_reads(pin_reason, pinned):
+    """True only when the pin names a commit, so one revision is read.
+
+    A missing pin, a bad pin line and an unknown pin each name no revision, so
+    they stay the only refusal and the structural reads do not run.
+    """
+    return pin_reason is None and pinned
+
+
 def problems(root):
-    """Return one refusal per bad pin or citation, pin refusals first."""
+    """Return one refusal per bad pin or citation, pin refusals first.
+
+    A bad pin, a bad pin line or an unknown pin is the only refusal of its own,
+    because no revision is named to read. The structural reads run only once
+    the pin names a commit, and they read that commit.
+    """
     text = load_draft(root)
     if text is None:
         return ["refuse: proposal is absent"]
@@ -907,15 +1272,18 @@ def problems(root):
         pinned = sha is not None and commit_exists(root, sha)
         if sha is not None and not pinned:
             refusals.append("refuse: pinned commit is not a commit: " + sha)
-    for span in _spans(text):
-        match = CITATION.fullmatch(span)
-        if match is None:
-            continue
-        reason = _refusal(root, match)
-        if reason is not None:
-            refusals.append(reason)
-    if pin_reason is None and pinned:
-        refusals.extend(_quote_refusals(root, text, sha))
+    if pin_allows_structural_reads(pin_reason, pinned):
+        refused_spans = set()
+        for span in _spans(text):
+            match = CITATION.fullmatch(span)
+            if match is None:
+                continue
+            reason = _refusal(root, match, sha)
+            if reason is not None:
+                refusals.append(reason)
+                refused_spans.add(span)
+        refusals.extend(_quote_refusals(root, text, sha, refused_spans))
+        refusals.extend(a3_claim_refusals(text))
     return refusals
 
 
