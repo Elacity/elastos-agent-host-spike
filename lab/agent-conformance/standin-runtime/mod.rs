@@ -1386,11 +1386,14 @@ fn mint_plan_binding(plan: &Option<String>) -> Option<PlanBinding> {
 
 /// The one run-pair compare (M1 check A6). A use that presents no run id
 /// (the validate route) is compared on the request id alone. A use that
-/// presents one must present the exact pair the grant route minted.
+/// presents one must present the exact pair the grant route minted, and an
+/// empty presented id is a pair this stand-in never minted. A seeded grant
+/// holds an empty run id, so no presented pair reaches it, empty or not.
 fn run_accepts(grant: &Grant, run_id: Option<&str>) -> bool {
     match run_id {
         None => true,
-        Some(run_id) => grant.run.run_id == run_id,
+        Some("") => false,
+        Some(run_id) => !grant.run.run_id.is_empty() && grant.run.run_id == run_id,
     }
 }
 

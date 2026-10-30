@@ -1368,12 +1368,6 @@ fn serve_hosted_effect(
         .value("x-elastos-request-id")
         .unwrap_or_default()
         .to_string();
-    // The other half of the pair (M1 check A6). The provider sends the run id
-    // the grant route minted beside the request id (`src/adapters.rs:67-68`).
-    let run_id = recorded
-        .value("x-elastos-run-id")
-        .unwrap_or_default()
-        .to_string();
     // A relaying answer forwards the provider's exact bytes, which the record
     // keeps for the test. The request is recorded before any wait, so a held
     // answer still counts the send the provider made.
@@ -1415,21 +1409,18 @@ fn serve_hosted_effect(
                 let _ = (&stream).write_all(RUNTIME_HOSTED_REFUSAL);
                 return;
             }
-            // The effect presents the pair its own grant route minted, on the
-            // grant route's hosted seam `StandIn::post_hosted_effect`
-            // (`lab/agent-conformance/standin-runtime/mod.rs:750-770`). The
-            // stand-in refuses an unminted run id, a request id it never
-            // minted, a spent grant and a grant for another session, each with
-            // its own reason; only the live entry for this session reaches the
-            // backend.
-            if let Err((_, reason)) = grants.lock().unwrap().post_hosted_effect(
+            // The same check's session tie is the shared stand-in's one
+            // admission rule, behind its use route
+            // `StandIn::post_capability_validate`
+            // (`lab/agent-conformance/standin-runtime/mod.rs:554-563`): the
+            // grant must be for the session this stand-in serves, or the route
+            // refuses with its own reason, which names both sessions.
+            let use_body = json!({ "request_id": request_id });
+            if let Err((_, reason)) = grants.lock().unwrap().post_capability_validate(
                 Caller::Client {
                     session_id: &served_session,
                 },
-                HOSTED_EFFECT_OFFER,
-                "text",
-                &run_id,
-                &request_id,
+                &use_body,
             ) {
                 refusals.lock().unwrap().push(reason);
                 let _ = (&stream).write_all(RUNTIME_HOSTED_REFUSAL);

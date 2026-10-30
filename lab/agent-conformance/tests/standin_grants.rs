@@ -15,7 +15,7 @@
 #[path = "common/signed_bundle.rs"]
 mod signed_bundle;
 
-use agent_conformance::standin_runtime::{Caller, StandIn, Start};
+use agent_conformance::standin_runtime::{Caller, Life, StandIn, Start};
 use serde_json::{json, Value};
 use signed_bundle::SignedBundle;
 
@@ -169,24 +169,68 @@ fn an_agent_cannot_present_another_agents_grant_pair() {
         "the two agents are two resident instances"
     );
     let victim = own_grant(&mut standin, &agent_a);
+    // A seeded grant stores no run pair, so an empty presented run id must
+    // find it and still be refused, live afterwards. The id is a journey
+    // literal because no route seeds one.
+    standin.seed_grant(
+        "request-seeded",
+        &agent_a,
+        ASK_RESOURCE,
+        "read",
+        "once",
+        0,
+        Life::Live,
+        false,
+    );
     let refused = (
         403u16,
         format!("wrong capsule: expected {agent_a}, got {agent_b}"),
     );
+    let reason = |run_id: &str, request_id: &str| {
+        (
+            403u16,
+            format!("effect run {run_id} is not bound to request {request_id}"),
+        )
+    };
 
     // A pair the route never minted is refused with the one pair reason, and
     // agent A's grant stays live. Its request id still exists and is live, so
     // only the run half can refuse.
-    present(
-        &mut standin,
-        &agent_a,
-        "run-never-minted",
-        &victim.request_id,
-    )
-    .expect_err("an unminted run id must be refused");
+    assert_eq!(
+        present(
+            &mut standin,
+            &agent_a,
+            "run-never-minted",
+            &victim.request_id
+        ),
+        Err(reason("run-never-minted", &victim.request_id)),
+        "an unminted run id is refused with the one pair reason"
+    );
     assert!(
         listed_live(&standin, &victim.request_id),
         "an unminted pair spends nothing"
+    );
+
+    // An empty presented run id is a pair nothing minted, even for the grant's
+    // own session: the stand-in refuses it and spends nothing (a seeded grant
+    // stores an empty run id, so no presented pair reaches it).
+    assert_eq!(
+        present(&mut standin, &agent_a, "", &victim.request_id),
+        Err(reason("", &victim.request_id)),
+        "an empty presented run id is refused with the one pair reason"
+    );
+    assert!(
+        listed_live(&standin, &victim.request_id),
+        "an empty pair leaves agent A's grant live and unspent"
+    );
+    assert_eq!(
+        present(&mut standin, &agent_a, "", "request-seeded"),
+        Err(reason("", "request-seeded")),
+        "a seeded grant is refused an empty pair with the one pair reason"
+    );
+    assert!(
+        listed_live(&standin, "request-seeded"),
+        "the seeded grant stays live and unspent"
     );
 
     // Agent B cannot read agent A's pair, and cannot present it.

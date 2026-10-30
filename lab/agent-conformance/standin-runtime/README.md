@@ -72,4 +72,6 @@ This value is the lab stand-in and the real route can replace it later because t
 M1 check A6: the grant route mints the pair `(run_id, request_id)` onto the
 grant, its answer stays `{"success": true}`, and the grant's own session reads
 the pair back from `get_run_binding`; a hosted effect through
-`post_hosted_effect` refuses any pair the route did not mint.
+`post_hosted_effect` refuses any pair the route did not mint, including an
+empty run id and a seeded grant (which stores none), with status 403 and the
+reason `effect run {run_id} is not bound to request {request_id}`.
