@@ -4341,15 +4341,27 @@ mod tests {
         }
     }
 
+    /// Fix one scratch directory's mode so it does not follow the operator umask.
+    #[cfg(target_os = "linux")]
+    fn set_scratch_mode(directory: &Path, mode: u32) {
+        fs::set_permissions(directory, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
     /// Install the probe as the model provider below one scratch data root. The
     /// startup path verifies the binary against that root's manifest and reads
     /// the operator model config below it, so it reaches only scratch files.
     #[cfg(target_os = "linux")]
     fn staged_model_probe() -> StagedModelProbe {
         let scratch = TempDir::new().unwrap();
+        // Startup refuses an identity root writable by others, so the probe's
+        // own scratch roots are 0700 whatever the operator umask is.
+        set_scratch_mode(scratch.path(), 0o700);
         let root = scratch.path().join("data/elastos");
         let bin = root.join("bin");
         fs::create_dir_all(&bin).unwrap();
+        for directory in [&root, &scratch.path().join("data")] {
+            set_scratch_mode(directory, 0o700);
+        }
         let probe = bin.join("model-provider");
         let source = scratch.path().join("probe.rs");
         fs::write(
@@ -4432,8 +4444,11 @@ mod tests {
             stdout,
             stderr,
         } = Command::new(std::env::current_exe().unwrap())
+            // The child half is `#[ignore]`d so a plain suite run skips it;
+            // this parent names it with `--ignored`.
             .args([
                 "--exact",
+                "--ignored",
                 "--nocapture",
                 "server_infra::tests::linux_model_startup_probe",
             ])
@@ -4499,6 +4514,7 @@ mod tests {
     /// bound.
     #[cfg(target_os = "linux")]
     #[tokio::test]
+    #[ignore = "child half of linux_model_startup_starts_provider_through_the_egress_filtered_spawn; run by the parent"]
     async fn linux_model_startup_probe() {
         // `main` installs these before startup; the test process starts there.
         rustls::crypto::ring::default_provider()
