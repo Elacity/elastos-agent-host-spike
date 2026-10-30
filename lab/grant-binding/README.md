@@ -13,6 +13,14 @@ reference model, not the Runtime; counts toward no M1 check; the Runtime half is
 
 `Verifier::bind_grant` is the stand-in entry for a capability ask. The asker is the registered instance principal. A Home principal is refused and does not mint. An app principal stores the binding. A caller claim is not the principal and no caller names the asker. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
 
+`Verifier::bind_once` and `Verifier::bind_until` store an allow-once grant and an expiry through the one `bind_grant`. One successful append or overwrite removes an allow-once grant. `resolve` refuses a grant when `verifier_now` is at or after its expiry. An unset expiry is not due. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
+`Verifier::set_effect_limit` stores an effect limit on that grant. One successful append or overwrite counts toward that limit. The next append or overwrite is refused when the count has reached it, and the grant stays in the store. An unset limit does not refuse. A child-journal operate does not count. This mirrors the stand-in ceiling in `model_admitted_ask_sets_the_ceiling`. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
+`Verifier::set_effect_limit` on a derived child journal is refused. An append or overwrite on that journal counts against the issuing grant's effect limit. The child keeps no limit of its own. This is the same one counter `model_second_agent_does_not_raise_the_ceiling` keeps for one identity. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
+`Verifier::revoke_grant` removes that handle from the one grant store and every child journal minted from it. A grant asked on its own stays. The next effect on a removed handle is `Refuse::UnknownHandle`. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
 `Verifier::admit_ask` caps one agent's budget ask and stores the granted amount through the one `admit`. This is a lab stand-in for that admission. It is not the Runtime. It does not count toward A7 or M1-R.
 
 A forged identity, session, instance, usage, ceiling or set of rights changes
