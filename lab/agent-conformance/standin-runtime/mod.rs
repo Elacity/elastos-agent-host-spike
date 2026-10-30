@@ -226,6 +226,11 @@ pub struct StandIn {
     /// stand-in reads and writes only under this Home. `None` until a test or
     /// a launcher names it through `set_home`.
     home: Option<PathBuf>,
+    /// The held Home handle `set_home` opened once, from a handle on `/` with
+    /// one `O_NOFOLLOW` step per component. Every storage call walks below
+    /// this handle; no call opens the Home by path again. A failed open is
+    /// kept as its error, so every later storage call answers with it.
+    home_fd: Option<Result<OwnedFd, (u16, String)>>,
     grants: Vec<Grant>,
     requests: Vec<Request>,
     admitted: Vec<Admitted>,
@@ -244,6 +249,7 @@ impl StandIn {
     pub fn new() -> Self {
         Self {
             home: None,
+            home_fd: None,
             grants: Vec::new(),
             requests: Vec::new(),
             admitted: Vec::new(),
@@ -260,10 +266,18 @@ impl StandIn {
     ///
     /// Names the one Home root this stand-in runs under. The launcher names
     /// it from the selected Home; the storage routes then take it from this
-    /// value, never from a caller string or a request body. This call creates
+    /// value, never from a caller string or a request body. This call opens
+    /// the Home exactly once, from a handle on `/` with one
+    /// `O_DIRECTORY|O_NOFOLLOW` step per component, and stores that handle.
+    /// Every later storage call walks below the stored handle and never
+    /// opens the Home by path again, so an ancestor renamed into the Home's
+    /// place after this call is not followed. A failed open is stored as its
+    /// error and every later storage call answers with it. This call creates
     /// nothing and reads no clock.
     pub fn set_home(&mut self, home: &Path) {
+        let opened = open_home(home);
         self.home = Some(home.to_path_buf());
+        self.home_fd = Some(opened);
     }
 
     /// Lab test seam, not a route.
@@ -364,31 +378,20 @@ impl StandIn {
         if self.storage_record(&home, entry).is_some() {
             return Err((400, EXISTS_REASON.to_owned()));
         }
-        // The walk reports the handle it reached and the first step it did
-        // not open. That step and every step after it are made here, in
-        // order, on that handle, so creation resolves no path again.
-        let (walked, absent) = self.storage_directory(&home)?;
-        let storage = Self::storage_for_home(&home)?;
-        let path = storage
-            .strip_prefix(&home)
-            .map_err(|_| (400, DATA_REASON.to_owned()))?
-            .components()
-            .filter_map(|part| match part {
-                Component::Normal(part) => Some(part),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let from = match &absent {
-            Some(absent) => path
-                .iter()
-                .position(|part| *part == absent)
-                .ok_or_else(|| (400, DATA_REASON.to_owned()))?,
-            None => path.len(),
+        // The walk reports the handle it reached and, when a step is absent,
+        // that step and every step below it by name. Creation makes exactly
+        // those names on that handle, so no path is derived from the Home
+        // again: a Home path re-opened here would follow a swapped ancestor.
+        let handle = match self.storage_directory(&home)? {
+            Walk::Reached(directory) => directory,
+            Walk::Absent { parent, steps } => {
+                let mut made = parent;
+                for part in steps {
+                    made = make_step(&made, &part)?;
+                }
+                made
+            }
         };
-        let mut handle = walked;
-        for part in &path[from..] {
-            handle = make_step(&handle, part)?;
-        }
         let make = rustix::fs::openat(
             handle.as_fd(),
             entry,
@@ -524,77 +527,58 @@ impl StandIn {
             .ok_or_else(|| (400, "storage needs a selected Home".to_owned()))
     }
 
-    /// Opens the storage directory from a fresh handle on the file-system
-    /// root with one `O_NOFOLLOW|O_DIRECTORY` step per component, so a
-    /// symbolic link at any step, an ancestor of the Home included, is
-    /// refused and not followed. The Home must be absolute and hold no `.`
-    /// or `..` component. No step is a multi-component path, and no step
-    /// starts at the current directory: every step of the Home is opened by
-    /// its own last component on the handle of the step above, and the
-    /// storage steps below the Home continue from the Home handle. Nothing
-    /// is canonicalized, so no outside path is resolved.
+    /// Walks from the HELD Home handle `set_home` opened once, with one
+    /// `O_NOFOLLOW|O_DIRECTORY` step per component of
+    /// `harness::data_dir(home)` down to the storage directory, so a
+    /// symbolic link at any step below the Home is refused and not followed,
+    /// and an ancestor of the Home swapped after `set_home` cannot reach
+    /// this walk at all: no path is opened here, and no step starts at the
+    /// current directory. The held handle is borrowed for the walk; the
+    /// reachable result holds a step or a `try_clone` of the held handle
+    /// when the storage directory is the Home itself. Nothing is
+    /// canonicalized.
     ///
-    /// The walked handle is returned with `None` when the storage directory
-    /// itself was opened, or with the name of the first step that is absent
-    /// and the handle of its parent. Creation then makes that step and the
-    /// rest with `mkdirat` on the handle the walk reached. One walk is the
-    /// one path from the selected Home to the directory that is used.
-    fn storage_directory(
-        &self,
-        home: &Path,
-    ) -> Result<(OwnedFd, Option<std::ffi::OsString>), (u16, String)> {
+    /// The walk stops on the first absent step and returns the names of that
+    /// step and every step below it, on the handle of the absent step's
+    /// parent. Creation then makes exactly those names with `mkdirat` on the
+    /// handle the walk reached, so it derives no path from the Home again.
+    fn storage_directory(&self, home: &Path) -> Result<Walk, (u16, String)> {
         use std::os::fd::AsFd;
 
+        let Some(opened) = &self.home_fd else {
+            return Err((400, "storage needs a selected Home".to_owned()));
+        };
+        let held = opened.as_ref().map_err(Clone::clone)?;
         let storage = Self::storage_for_home(home)?;
         let to_storage = storage
             .strip_prefix(home)
             .map_err(|_| (400, DATA_REASON.to_owned()))?;
-        let home_parts = home
-            .components()
-            .map(|part| match part {
-                Component::RootDir => Ok(None),
-                Component::Normal(part) => Ok(Some(part)),
-                Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
-                    Err((400, DATA_REASON.to_owned()))
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if !home.is_absolute() || home_parts.iter().all(Option::is_none) {
-            return Err((400, DATA_REASON.to_owned()));
-        }
-        // A step that was opened and then closed under the walk is refused
-        // with the one storage reason for its class.
-        let present = |_: &rustix::io::Errno| false;
-
-        let mut current = rustix::fs::open(
-            "/",
-            rustix::fs::OFlags::RDONLY
-                | rustix::fs::OFlags::DIRECTORY
-                | rustix::fs::OFlags::NOFOLLOW
-                | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::empty(),
-        )
-        .map_err(|error| storage_failure(&error))?;
-        for part in home_parts.into_iter().flatten() {
-            let Some(next) = step(current.as_fd(), &present, &storage_failure, part)? else {
-                return Err((400, MISSING_STORAGE_REASON.to_owned()));
-            };
-            current = next;
-        }
-        // The storage path's own components are opened from the Home handle
-        // above. The walk stops on the first absent one and returns the
-        // handle it reached, with that step's name.
+        let mut current = held
+            .try_clone()
+            .map_err(|_| (400, DATA_REASON.to_owned()))?;
+        let mut absent: Vec<std::ffi::OsString> = Vec::new();
         for part in to_storage.components() {
             let Component::Normal(part) = part else {
                 return Err((400, DATA_REASON.to_owned()));
             };
-            let absent_step = |error: &rustix::io::Errno| *error == rustix::io::Errno::NOENT;
-            match step(current.as_fd(), &absent_step, &storage_failure, part)? {
+            if !absent.is_empty() {
+                absent.push(part.to_os_string());
+                continue;
+            }
+            let missing = |error: &rustix::io::Errno| *error == rustix::io::Errno::NOENT;
+            match step(current.as_fd(), &missing, &storage_failure, part)? {
                 Some(next) => current = next,
-                None => return Ok((current, Some(part.to_os_string()))),
+                None => absent.push(part.to_os_string()),
             }
         }
-        Ok((current, None))
+        if absent.is_empty() {
+            Ok(Walk::Reached(current))
+        } else {
+            Ok(Walk::Absent {
+                parent: current,
+                steps: absent,
+            })
+        }
     }
 
     /// Opens one storage entry on the Home's directory handle and checks
@@ -612,10 +596,9 @@ impl StandIn {
         // A recorded name needs the storage directory. An absent one is the
         // directory's own reason, so a missing directory never reads as a
         // missing file.
-        let (directory, absent) = self.storage_directory(home)?;
-        if absent.is_some() {
+        let Walk::Reached(directory) = self.storage_directory(home)? else {
             return Err((400, MISSING_STORAGE_REASON.to_owned()));
-        }
+        };
         let Some((device, inode)) = self.storage_record(home, entry) else {
             return Err((400, NOT_CREATED_REASON.to_owned()));
         };
@@ -1584,6 +1567,62 @@ fn check_file(stat: &rustix::fs::Stat) -> Result<(), (u16, String)> {
         return Err((400, NOT_ONE_LINK_REASON.to_owned()));
     }
     Ok(())
+}
+
+/// Where the storage walk stopped: on the storage directory itself, or on
+/// the handle of the parent of the first absent step, with that step and
+/// every step below it. Both cases hold a directory handle the walk reached
+/// from the held Home handle, never a path.
+enum Walk {
+    Reached(OwnedFd),
+    Absent {
+        parent: OwnedFd,
+        steps: Vec<std::ffi::OsString>,
+    },
+}
+
+/// Opens the Home once, from a handle on the file-system root with one
+/// `O_DIRECTORY|O_NOFOLLOW` step per component. The Home must be absolute
+/// and hold no `.` or `..` component. No step is a multi-component path and
+/// no step starts at the current directory, so a symbolic link at an
+/// ancestor of the Home or at the Home itself fails that step and nothing is
+/// followed. This is the only place a Home path is opened.
+fn open_home(home: &Path) -> Result<OwnedFd, (u16, String)> {
+    use std::os::fd::AsFd;
+
+    let parts = home
+        .components()
+        .map(|part| match part {
+            Component::RootDir => Ok(None),
+            Component::Normal(part) => Ok(Some(part)),
+            Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
+                Err((400, DATA_REASON.to_owned()))
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if !home.is_absolute() || parts.iter().all(Option::is_none) {
+        return Err((400, DATA_REASON.to_owned()));
+    }
+    // Every step of the Home must be present: an absent one is the missing
+    // storage directory, as before.
+    let present = |_: &rustix::io::Errno| false;
+
+    let mut current = rustix::fs::open(
+        "/",
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|error| storage_failure(&error))?;
+    for part in parts.into_iter().flatten() {
+        let Some(next) = step(current.as_fd(), &present, &storage_failure, part)? else {
+            return Err((400, MISSING_STORAGE_REASON.to_owned()));
+        };
+        current = next;
+    }
+    Ok(current)
 }
 
 /// One directory step of the storage walk: `name` is opened on the handle of
@@ -8022,64 +8061,102 @@ mod tests {
         home.finish().expect("the throwaway Home finishes");
     }
 
-    /// Task 112, M1 check A9: the walk reaches the Home itself one component
-    /// at a time from a handle on `/`, so a symbolic link at an ANCESTOR of
-    /// the Home is refused and not followed. Swapping `base` for a link to
-    /// another tree of the same shape turns the first assertion below red
-    /// when the Home is opened again by its full path, because that one
-    /// `openat` follows the link in `base` and reaches the other tree.
+    /// Task 112, M1 check A9: `set_home` opens the Home once and every
+    /// storage call walks from that held handle, so an ancestor swapped AFTER
+    /// startup is not followed: no call opens the Home by path again. Stage 1
+    /// swaps `base` for a link, stage 2 renames the other tree's real `base`
+    /// into its place. In both stages the creation succeeds in the ORIGINAL
+    /// tree (the moved `scratch/real-base`) and the other tree is unchanged.
+    /// Re-opening the Home by a `/` walk inside `storage_directory` turns
+    /// stage 2 red at its `create_storage` assertion, because that walk
+    /// follows the real directory now named `base` and creates the file
+    /// under the other tree.
     #[test]
-    fn standin_storage_refuses_an_ancestor_symlink_of_the_home() {
+    fn standin_storage_holds_the_home_after_an_ancestor_swap() {
         use std::os::unix::fs::symlink;
 
-        let scratch = TempDir::new().expect("a scratch directory for the ancestor link row");
+        let scratch = TempDir::new().expect("a scratch directory for the ancestor swap row");
         let base = scratch.path().join("base");
+        let real_base = scratch.path().join("real-base");
         let home = base.join("mid").join("holder").join("thehome");
         std::fs::create_dir_all(&home).expect("the test makes the real Home tree");
         let storage = StandIn::storage_for_home(&home)
             .expect("the stand-in returns the selected Home's storage path");
-        let outside = scratch.path().join("outside");
-        let outside_home = outside.join("mid").join("holder").join("thehome");
-        std::fs::create_dir_all(&outside_home).expect("the test makes the other tree");
+        let other = scratch.path().join("other");
+        let other_home = other.join("mid").join("holder").join("thehome");
+        let other_storage = StandIn::storage_for_home(&other_home)
+            .expect("the stand-in returns the other Home's storage path");
 
         let mut standin = StandIn::new();
         standin.set_home(&home);
-        // The tree works before the swap, so the refusal below is the link.
         assert_eq!(
-            standin.create_storage("notes.txt"),
+            standin.create_storage("first.txt"),
             Ok(()),
-            "the stand-in did the work: the real ancestor tree accepts the file"
+            "the stand-in did the work: the real Home accepts the first file"
         );
-        let real = storage.join("notes.txt");
-        assert_eq!(
-            std::fs::read(&real).expect("the real file stays readable"),
-            b"",
-            "the file lands under the real Home"
+        assert!(
+            storage.join("first.txt").is_file(),
+            "the first file lands under the Home"
         );
 
-        // The other tree holds the same shape and a real storage directory,
-        // so only the link on `base` can refuse the second tree.
-        let outside_storage = StandIn::storage_for_home(&outside_home)
-            .expect("the stand-in returns the other Home's storage path");
-        std::fs::create_dir_all(&outside_storage).expect("the test makes the other storage");
-        std::fs::write(outside_storage.join("notes.txt"), b"outside bytes")
-            .expect("the test writes the outside file");
-        std::fs::rename(&base, scratch.path().join("real-base"))
-            .expect("the test moves the real base aside");
-        symlink(&outside, &base).expect("the test makes the base an ancestor link");
+        // The other tree has the same shape, a real storage directory and a
+        // real file, so the victim exists before the swap.
+        std::fs::create_dir_all(&other_storage).expect("the test makes the other storage");
+        std::fs::write(other_storage.join("notes.txt"), b"outside bytes")
+            .expect("the test writes the other file");
+        // The victim directory is held by handle before either swap, so the
+        // assertions below see the same directory the stand-in could reach.
+        let victim = std::fs::File::open(&other_storage).expect("the other storage stays readable");
 
+        // Stage 1: `base` becomes a symbolic link to the other tree.
+        std::fs::rename(&base, &real_base).expect("the test moves the real base aside");
+        symlink(&other, &base).expect("the test makes the base an ancestor link");
         assert_eq!(
             standin.create_storage("second.txt"),
-            Err((400, LINK_REASON.to_owned())),
-            "the stand-in did the work: it refuses an ancestor link of the Home"
+            Ok(()),
+            "the stand-in did the work: a link on base after startup is not followed"
         );
+        assert!(
+            real_base
+                .join(
+                    storage
+                        .strip_prefix(&base)
+                        .expect("the storage path is under the base")
+                )
+                .join("second.txt")
+                .is_file(),
+            "the stand-in did the work: the second file lands in the original tree"
+        );
+
+        // Stage 2: the other tree's REAL base is renamed into `base`'s place,
+        // so only a fresh open of the Home path reaches it.
+        std::fs::remove_file(&base).expect("the test removes the base link");
+        std::fs::rename(&other, &base).expect("the test renames the other real base in");
         assert_eq!(
-            standin.confirm_storage("notes.txt"),
-            Err((400, LINK_REASON.to_owned())),
-            "the stand-in did the work: the check refuses that ancestor link too"
+            standin.create_storage("third.txt"),
+            Ok(()),
+            "the stand-in did the work: a real base renamed in after startup is not entered"
         );
-        let mut names = std::fs::read_dir(&outside_storage)
-            .expect("the other storage stays readable")
+        assert!(
+            real_base
+                .join(
+                    storage
+                        .strip_prefix(&base)
+                        .expect("the storage path is under the base")
+                )
+                .join("third.txt")
+                .is_file(),
+            "the stand-in did the work: the third file lands in the original tree"
+        );
+
+        // The other tree is checked through its own directory handle, opened
+        // once here, so the assertion sees the directory the rename put at
+        // `base`, whatever `base` names now. It holds one name, and the file
+        // read through that handle keeps its bytes.
+        use std::os::fd::{AsFd, AsRawFd};
+        let held_victim = format!("/proc/self/fd/{}", victim.as_fd().as_raw_fd());
+        let mut names = std::fs::read_dir(&held_victim)
+            .expect("the other storage lists")
             .map(|entry| entry.expect("the other entry reads").file_name())
             .collect::<Vec<_>>();
         names.sort();
@@ -8088,26 +8165,19 @@ mod tests {
             vec![std::ffi::OsString::from("notes.txt")],
             "the stand-in did the work: it creates nothing in the other tree"
         );
+        let held = rustix::fs::openat(
+            victim.as_fd(),
+            "notes.txt",
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .expect("the other file opens on the held handle");
+        let mut kept = Vec::new();
+        std::io::Read::read_to_end(&mut std::fs::File::from(held), &mut kept)
+            .expect("the other file reads");
         assert_eq!(
-            std::fs::read(outside_storage.join("notes.txt"))
-                .expect("the outside file stays readable"),
-            b"outside bytes",
-            "the stand-in did the work: the outside file is unchanged"
-        );
-
-        // Restore the real base: the route then works, so the refusal above
-        // came from the link and nothing else.
-        std::fs::remove_file(&base).expect("the test removes the link");
-        std::fs::rename(scratch.path().join("real-base"), &base)
-            .expect("the test puts the real base back");
-        assert_eq!(
-            standin.create_storage("second.txt"),
-            Ok(()),
-            "the stand-in did the work: the real base accepts a second file"
-        );
-        assert!(
-            storage.join("second.txt").is_file(),
-            "the file lands under the Home"
+            kept, b"outside bytes",
+            "the stand-in did the work: the other file is unchanged"
         );
     }
 
