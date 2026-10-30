@@ -1,0 +1,4 @@
+subject-run exit=101 manager-before=cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a manager-after=cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a
+first run.sh: FAILED. 56 passed; 1 failed (a12_inode_reuse_same_path_is_found)
+isolated inode-reuse: 5/5 ok
+plants: 34 / 39 CAUGHT on the same run; manager.rs restored

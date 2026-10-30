@@ -1,0 +1,35 @@
+r6 hunts at 5547edeacab167bd822e90a6af7258c5d55f2ce1
+
+CAUGHT
+  r6-detached-during
+  r6-overflow (IN_Q_OVERFLOW fail closed)
+  r6-otmpfile (linkat dest still present)
+  r6-preopen-existing
+  r6-rename-in
+  r6-rename-out-event
+  r6-pidns-self-pid1
+  r6-ra6-current BLOCKED
+
+SURVIVED
+  r6-detached-after-return
+  r6-hardlink-out
+  r6-home-cache (outside isolation and /tmp: leftover_found=false)
+  r6-subdir-ephemeral
+  r6-preopen-dirfd
+  r6-otmpfile-unlink
+  r6-rename-out-dest
+  r6-watch-limit (add failures ignored)
+  R6-IGNORE-OVERFLOW against named create-then-delete test
+  R6-IGNORE-WATCH-ADD in source
+  R5-NO-OPENAT2 against parent-swap named test
+
+NOT RUN (must fail closed, never PASS)
+  r6-bind-mount
+  r6-pidns
+  r6-run-user
+  r6-watch-limit-host
+
+Author 57/0: first full rerun 56/1 (a12_inode_reuse_same_path_is_found
+panicked because reuse did not happen). Isolated rerun 5/5 ok.
+--list names 57 tests. Independent replant: 34 plants, 39 CAUGHT, 0 SURVIVED.
+manager.rs sha256 cd4772f1…066b2a before and after.
