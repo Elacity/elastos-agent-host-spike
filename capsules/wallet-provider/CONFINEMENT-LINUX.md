@@ -406,7 +406,10 @@ two rows this installer is for — `(deny default)`, files, and
 `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` — are not
 written as passing. Every other row of "The contract on Linux" was not run.
 `linux` stays out of `DECLARED_CONFINED_OS`. Nothing here says the Runtime
-installed a ruleset.
+installed a ruleset. The ruleset test
+`landlock_ruleset_follows_the_declared_rights` now derives did's and wallet's
+rulesets on the Mac, each on its own storage root, and neither provider's
+kernel run exists yet.
 
 What the harness holds, and what a later host run would record:
 

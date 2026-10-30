@@ -560,6 +560,43 @@ fn storage_parent(name: &str, base: &Path) -> PathBuf {
         .to_path_buf()
 }
 
+/// One provider's inputs to its Landlock ruleset: the declared rights its
+/// committed file holds, the three parameter bindings its launch uses, and the
+/// binary that launch starts.
+struct ProviderRulesetInputs {
+    declared: Value,
+    bindings: [(&'static str, PathBuf); 3],
+    binary: &'static Path,
+}
+
+/// The one chooser of a provider's ruleset inputs under `base`. The ruleset
+/// test and the did journey read a provider's inputs here, so each provider's
+/// rules name its own root and no second derivation exists (P10).
+///
+/// It adds no provider-name refusal of its own. The bindings come from
+/// `canonical_bindings`, which derives every path through
+/// `provider_storage_root`, so an unknown name is refused there with that one
+/// message; the declared rights come from that provider's own file through
+/// `read_declared_rights`, which refuses a file that names another provider
+/// (P11).
+fn provider_ruleset_inputs(name: &str, base: &Path) -> Result<ProviderRulesetInputs, String> {
+    // did's binary is the one this crate builds; every other served name uses
+    // this crate's own binary. An unknown name never reaches a returned value,
+    // because `canonical_bindings` refuses it through `provider_storage_root`.
+    let binary = if name == DID_PROVIDER {
+        did_provider_binary()
+    } else {
+        Path::new(PROVIDER_BINARY)
+    };
+    let bindings = canonical_bindings(name, base, binary);
+    let declared = read_declared_rights(name, &declared_rights_path(name))?;
+    Ok(ProviderRulesetInputs {
+        declared,
+        bindings,
+        binary,
+    })
+}
+
 /// The `init` config the stand-in sends for `name` at `base`. The stand-in
 /// sends `base_path` to both providers, and did also receives the isolated
 /// fixture device key so its `get_did` answers. It builds this one config for
@@ -4141,13 +4178,6 @@ fn standin_launcher_finds_the_built_did_binary() {
         "the binary must be named {DID_PROVIDER}: {}",
         binary.display()
     );
-    assert!(
-        binary
-            .ancestors()
-            .any(|dir| dir.file_name().is_some_and(|part| part == "target")),
-        "the binary must sit under a target directory: {}",
-        binary.display()
-    );
     let did_target = did_provider_dir().join("target");
     let cargo_target = std::env::var_os("CARGO_TARGET_DIR").map(|dir| {
         let dir = PathBuf::from(dir);
@@ -7351,176 +7381,216 @@ fn landlock_abi_refusal(ruleset: &LandlockRuleset) -> String {
     String::new()
 }
 
-/// Wallet's committed declared rights yield the `STORAGE_ROOT` rule and the
-/// `EXECUTE` rule, the three zero-right rows stay decisions that add no path,
-/// and a declaration the shared contract does not name keeps `declared_entries`'
-/// reason. The test builds rulesets and reads them. It starts no process and
-/// calls no kernel, so it runs on every OS.
+/// Each served provider's committed declared rights yield the `STORAGE_ROOT`
+/// rule on that provider's own root and the `EXECUTE` rule on that provider's
+/// own binary, the three zero-right rows stay decisions that add no path, and a
+/// declaration the shared contract does not name keeps `declared_entries`'
+/// reason. One body runs over `DID_PROVIDER` and `WALLET_PROVIDER`, each with
+/// its own base, its own declared-rights file and its own binary, so a rule
+/// path cannot be read for one provider and bound for the other (P10).
+///
+/// The test reads a ruleset's own rules and the paths the launch binds. It
+/// installs no ruleset and starts no provider, so it says nothing about a
+/// kernel.
 ///
 /// Falsifier: WP202 adds `READ_FILE` to the `STORAGE_PARENT` row, so this test
-/// fails on the parent decision.
+/// fails on the parent decision. WP216 makes the chooser ignore the provider
+/// name and answer wallet's `STORAGE_ROOT` binding for both, so the did
+/// iteration fails on the expected root.
 #[test]
 fn landlock_ruleset_follows_the_declared_rights() {
-    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
-        .unwrap_or_else(|err| panic!("{err}"));
-    let fixture = tempfile::tempdir().expect("temporary wallet base");
-    let base = resolved(fixture.path());
-    let bindings = canonical_bindings(WALLET_PROVIDER, &base, Path::new(PROVIDER_BINARY));
-    let ruleset = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, 7, &[])
-        .unwrap_or_else(|err| panic!("{err}"));
-    assert!(ruleset.injected_step_failure.is_none());
-    assert_eq!(LANDLOCK_RULE_RIGHTS.len(), 5);
+    for name in [DID_PROVIDER, WALLET_PROVIDER] {
+        let fixture = tempfile::tempdir().expect("temporary provider base");
+        let base = resolved(fixture.path());
+        let inputs = provider_ruleset_inputs(name, &base).unwrap_or_else(|err| panic!("{err}"));
+        let declared = &inputs.declared;
+        let bindings = &inputs.bindings;
+        let ruleset = landlock_path_rules(name, declared, bindings, 7, &[])
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(ruleset.injected_step_failure.is_none());
+        assert_eq!(LANDLOCK_RULE_RIGHTS.len(), 5);
 
-    let rule = |parameter: &str| {
-        ruleset
-            .rules
-            .iter()
-            .find(|rule| rule.parameter == parameter)
-            .unwrap_or_else(|| panic!("the ruleset must hold the {parameter} rule: {ruleset:?}"))
-    };
-    let bound = |parameter: &str| {
-        bindings
-            .iter()
-            .find(|(name, _)| *name == parameter)
-            .unwrap_or_else(|| panic!("the launch must bind {parameter}"))
-            .1
-            .clone()
-    };
+        let rule = |parameter: &str| {
+            ruleset
+                .rules
+                .iter()
+                .find(|rule| rule.parameter == parameter)
+                .unwrap_or_else(|| {
+                    panic!("{name}: the ruleset must hold the {parameter} rule: {ruleset:?}")
+                })
+        };
+        let bound = |parameter: &str| {
+            bindings
+                .iter()
+                .find(|(binding, _)| *binding == parameter)
+                .unwrap_or_else(|| panic!("{name}: the launch must bind {parameter}"))
+                .1
+                .clone()
+        };
+        println!(
+            "{name}: STORAGE_PARENT {}, STORAGE_ROOT {} (rights {:#x}), PROVIDER_EXECUTABLE {}",
+            bound("STORAGE_PARENT").display(),
+            rule("STORAGE_ROOT").path.display(),
+            rule("STORAGE_ROOT").rights,
+            rule("PROVIDER_EXECUTABLE").path.display(),
+        );
 
-    assert_eq!(
-        rule("STORAGE_ROOT").rights,
-        LANDLOCK_ACCESS_FS_READ_FILE
-            | LANDLOCK_ACCESS_FS_READ_DIR
-            | LANDLOCK_ACCESS_FS_WRITE_FILE
-            | LANDLOCK_ACCESS_FS_REMOVE_FILE
-            | LANDLOCK_ACCESS_FS_REMOVE_DIR
-            | LANDLOCK_ACCESS_FS_MAKE_DIR
-            | LANDLOCK_ACCESS_FS_MAKE_REG,
-        "the storage subpath row must carry the seven rights init needs"
-    );
-    assert_eq!(rule("STORAGE_ROOT").path, bound("STORAGE_ROOT"));
-    assert_eq!(
-        rule("PROVIDER_EXECUTABLE").rights,
-        LANDLOCK_ACCESS_FS_EXECUTE,
-        "the bound-executable row must carry execution-only rights"
-    );
-    assert_eq!(
-        rule("PROVIDER_EXECUTABLE").path,
-        bound("PROVIDER_EXECUTABLE")
-    );
+        assert_eq!(
+            rule("STORAGE_ROOT").rights,
+            LANDLOCK_ACCESS_FS_READ_FILE
+                | LANDLOCK_ACCESS_FS_READ_DIR
+                | LANDLOCK_ACCESS_FS_WRITE_FILE
+                | LANDLOCK_ACCESS_FS_REMOVE_FILE
+                | LANDLOCK_ACCESS_FS_REMOVE_DIR
+                | LANDLOCK_ACCESS_FS_MAKE_DIR
+                | LANDLOCK_ACCESS_FS_MAKE_REG,
+            "{name}: the storage subpath row must carry the seven rights init needs"
+        );
+        assert_eq!(rule("STORAGE_ROOT").path, bound("STORAGE_ROOT"));
+        // The expected root is written from the layout this provider keeps, not
+        // from the chooser under test: did keeps `<base>/did` and wallet keeps the
+        // three-component wallet path under its base.
+        let expected_root = if name == DID_PROVIDER {
+            base.join("did")
+        } else {
+            wallet_dir(&base)
+        };
+        assert_eq!(
+            provider_storage_root(name, &base),
+            expected_root,
+            "{name}: the layout derivation must keep the root this provider's name names"
+        );
+        assert_eq!(
+            rule("STORAGE_ROOT").path,
+            expected_root,
+            "{name}: the STORAGE_ROOT rule must bind this provider's own root"
+        );
+        assert_eq!(
+            rule("PROVIDER_EXECUTABLE").rights,
+            LANDLOCK_ACCESS_FS_EXECUTE,
+            "{name}: the bound-executable row must carry execution-only rights"
+        );
+        assert_eq!(
+            rule("PROVIDER_EXECUTABLE").path,
+            bound("PROVIDER_EXECUTABLE")
+        );
+        assert_eq!(
+            rule("PROVIDER_EXECUTABLE").path,
+            resolved(inputs.binary),
+            "{name}: the PROVIDER_EXECUTABLE rule must bind this provider's own binary"
+        );
 
-    let parent = LANDLOCK_RULE_RIGHTS
-        .iter()
-        .find(|(form, _)| *form == SHARED_RULES[1])
-        .expect("the parent form must have an explicit decision")
-        .1;
-    assert_eq!(parent, 0, "the STORAGE_PARENT row must grant no right");
-    assert_eq!(
-        parent & LANDLOCK_ACCESS_FS_READ_FILE,
-        0,
-        "the STORAGE_PARENT row must grant no read"
-    );
-    assert_eq!(
-        parent & LANDLOCK_ACCESS_FS_WRITE_FILE,
-        0,
-        "the STORAGE_PARENT row must grant no write"
-    );
-    for form in [STARTUP_RULES[0], STARTUP_RULES[1]] {
-        let rights = LANDLOCK_RULE_RIGHTS
+        let parent = LANDLOCK_RULE_RIGHTS
             .iter()
-            .find(|(candidate, _)| *candidate == form)
-            .unwrap_or_else(|| panic!("{form} must have an explicit decision"))
+            .find(|(form, _)| *form == SHARED_RULES[1])
+            .expect("the parent form must have an explicit decision")
             .1;
-        assert_eq!(rights, 0, "{form} must grant no path right");
-    }
-    assert!(
-        !ruleset
-            .rules
-            .iter()
-            .any(|rule| rule.parameter == "STORAGE_PARENT"),
-        "the zero-right parent form must add no path"
-    );
+        assert_eq!(parent, 0, "the STORAGE_PARENT row must grant no right");
+        assert_eq!(
+            parent & LANDLOCK_ACCESS_FS_READ_FILE,
+            0,
+            "the STORAGE_PARENT row must grant no read"
+        );
+        assert_eq!(
+            parent & LANDLOCK_ACCESS_FS_WRITE_FILE,
+            0,
+            "the STORAGE_PARENT row must grant no write"
+        );
+        for form in [STARTUP_RULES[0], STARTUP_RULES[1]] {
+            let rights = LANDLOCK_RULE_RIGHTS
+                .iter()
+                .find(|(candidate, _)| *candidate == form)
+                .unwrap_or_else(|| panic!("{form} must have an explicit decision"))
+                .1;
+            assert_eq!(rights, 0, "{form} must grant no path right");
+        }
+        assert!(
+            !ruleset
+                .rules
+                .iter()
+                .any(|rule| rule.parameter == "STORAGE_PARENT"),
+            "the zero-right parent form must add no path"
+        );
 
-    let mut without_storage = declared.clone();
-    without_storage["rights"]
-        .as_array_mut()
-        .expect("the declared rights must hold a rights list")
-        .retain(|entry| entry["id"] != "storage");
-    let reduced = landlock_path_rules(WALLET_PROVIDER, &without_storage, &bindings, 7, &[])
-        .unwrap_or_else(|err| panic!("{err}"));
-    assert!(
-        !reduced
-            .rules
-            .iter()
-            .any(|rule| rule.parameter == "STORAGE_ROOT"),
-        "removing the storage right must remove the STORAGE_ROOT rule: {reduced:?}"
-    );
-    assert!(
-        reduced
-            .rules
-            .iter()
-            .any(|rule| rule.parameter == "PROVIDER_EXECUTABLE"),
-        "the bound-executable right stays, so its rule stays: {reduced:?}"
-    );
+        let mut without_storage = declared.clone();
+        without_storage["rights"]
+            .as_array_mut()
+            .expect("the declared rights must hold a rights list")
+            .retain(|entry| entry["id"] != "storage");
+        let reduced = landlock_path_rules(name, &without_storage, bindings, 7, &[])
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(
+            !reduced
+                .rules
+                .iter()
+                .any(|rule| rule.parameter == "STORAGE_ROOT"),
+            "{name}: removing the storage right must remove the STORAGE_ROOT rule: {reduced:?}"
+        );
+        assert!(
+            reduced
+                .rules
+                .iter()
+                .any(|rule| rule.parameter == "PROVIDER_EXECUTABLE"),
+            "{name}: the bound-executable right stays, so its rule stays: {reduced:?}"
+        );
 
-    let mut unnamed = declared.clone();
-    unnamed["rights"]
-        .as_array_mut()
-        .expect("the declared rights must hold a rights list")
-        .push(json!({
-            "id": "unnamed-right",
-            "rules": [r#"(allow file-read* (literal "/private/var/cc-landlock-unnamed"))"#],
-        }));
-    let refusal = landlock_path_rules(WALLET_PROVIDER, &unnamed, &bindings, 7, &[])
-        .expect_err("an id the shared contract does not name must be refused");
-    assert_eq!(
+        let mut unnamed = declared.clone();
+        unnamed["rights"]
+            .as_array_mut()
+            .expect("the declared rights must hold a rights list")
+            .push(json!({
+                "id": "unnamed-right",
+                "rules": [r#"(allow file-read* (literal "/private/var/cc-landlock-unnamed"))"#],
+            }));
+        let refusal = landlock_path_rules(name, &unnamed, bindings, 7, &[])
+            .expect_err("an id the shared contract does not name must be refused");
+        assert_eq!(
+            refusal,
+            format!("{name} declares unnamed-right, which the shared contract does not name"),
+            "{name}: the refusal must be declared_entries' own reason, unchanged"
+        );
+
+        let mut unmapped = declared.clone();
+        unmapped["rights"]
+            .as_array_mut()
+            .expect("the declared rights must hold a rights list")
+            .iter_mut()
+            .find(|entry| entry["id"] == "storage")
+            .expect("the declared rights must hold the storage right")["rules"]
+            .as_array_mut()
+            .expect("the storage right must hold a rules list")
+            .push(json!(
+                r#"(allow mach-lookup (global-name "com.apple.system.logger"))"#
+            ));
+        let refusal = landlock_path_rules(name, &unmapped, bindings, 7, &[])
+            .expect_err("an allow form with no rights row must be refused");
+        assert_eq!(
         refusal,
         format!(
-            "{WALLET_PROVIDER} declares unnamed-right, which the shared contract does not name"
-        ),
-        "the refusal must be declared_entries' own reason, unchanged"
-    );
-
-    let mut unmapped = declared.clone();
-    unmapped["rights"]
-        .as_array_mut()
-        .expect("the declared rights must hold a rights list")
-        .iter_mut()
-        .find(|entry| entry["id"] == "storage")
-        .expect("the declared rights must hold the storage right")["rules"]
-        .as_array_mut()
-        .expect("the storage right must hold a rules list")
-        .push(json!(
-            r#"(allow mach-lookup (global-name "com.apple.system.logger"))"#
-        ));
-    let refusal = landlock_path_rules(WALLET_PROVIDER, &unmapped, &bindings, 7, &[])
-        .expect_err("an allow form with no rights row must be refused");
-    assert_eq!(
-        refusal,
-        format!(
-            "{WALLET_PROVIDER} landlock ruleset refuses the allow form \
+            "{name} landlock ruleset refuses the allow form \
              (allow mach-lookup (global-name \"com.apple.system.logger\")): \
              the rights table has no row for it, so no ruleset is built"
         ),
-        "an allow form the rights table does not hold must be refused in these exact words"
+        "{name}: an allow form the rights table does not hold must be refused in these exact words"
     );
 
-    let exec_binding: Vec<(&'static str, PathBuf)> = bindings
-        .iter()
-        .filter(|(name, _)| *name == "PROVIDER_EXECUTABLE")
-        .cloned()
-        .collect();
-    let refusal = landlock_path_rules(WALLET_PROVIDER, &declared, &exec_binding, 7, &[])
-        .expect_err("a form whose parameter the launch does not bind must be refused");
-    assert_eq!(
-        refusal,
-        format!(
-            "{WALLET_PROVIDER} landlock ruleset refuses the allow form {}: \
+        let exec_binding: Vec<(&'static str, PathBuf)> = bindings
+            .iter()
+            .filter(|(binding, _)| *binding == "PROVIDER_EXECUTABLE")
+            .cloned()
+            .collect();
+        let refusal = landlock_path_rules(name, declared, &exec_binding, 7, &[])
+            .expect_err("a form whose parameter the launch does not bind must be refused");
+        assert_eq!(
+            refusal,
+            format!(
+                "{name} landlock ruleset refuses the allow form {}: \
              the launch binds no parameter it names, so no ruleset is built",
-            SHARED_RULES[2]
-        ),
-        "an unbound parameter must be refused rather than skipped"
-    );
+                SHARED_RULES[2]
+            ),
+            "{name}: an unbound parameter must be refused rather than skipped"
+        );
+    }
 }
 
 /// ABI 1, 2 and 4 build no ruleset, because the default denial must be able to

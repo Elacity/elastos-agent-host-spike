@@ -1488,6 +1488,10 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - WP215: `inputs_match` ignores the children of `params`, so a `params` list
   that names a field the arm does not declare passes.
   `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP216: The provider chooser ignores the provider name and answers wallet's
+  `STORAGE_ROOT` binding for both, so the did iteration fails on the expected
+  root.
+  `landlock_ruleset_follows_the_declared_rights` checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

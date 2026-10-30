@@ -269,8 +269,12 @@ use std::process::Command;
 /// here. Task 155 adds WP214, which treats an empty arm and a field named
 /// `none` as the same item, and WP215, which makes `inputs_match` ignore the
 /// children of `params`. Both are CAUGHT on the Mac by
-/// `operations_table_row_check_refuses_each_bad_table`.
-const EXPECTED_FALSIFIERS: usize = 195;
+/// `operations_table_row_check_refuses_each_bad_table`. Task 159 adds WP216,
+/// which makes the provider chooser ignore the provider name and answer
+/// wallet's `STORAGE_ROOT` binding for both, so the did iteration fails on the
+/// expected root; it is CAUGHT on the Mac by
+/// `landlock_ruleset_follows_the_declared_rights`.
+const EXPECTED_FALSIFIERS: usize = 196;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
