@@ -29,7 +29,10 @@
 //! Expired` and the live view drops the grant.
 //!
 //! `get_capability_requests` answers `GET /api/capability/requests?session=`
-//! from one request store beside the grants. `seed_request` is the test seam.
+//! from one request store beside the grants. `seed_request` is the store
+//! writer: the only non-test caller is `post_capability_request`, which runs
+//! `declared_ask` before it, so every stored request passed the signed ask
+//! check.
 //! An accepted stop denies that session's pending requests with the stop
 //! cause; a worker kill passes `stopped: worker killed`. A failed
 //! start denies them with the failure cause. One writer stores those three
@@ -670,11 +673,12 @@ impl StandIn {
         });
     }
 
-    /// Lab test seam, not a route.
+    /// Lab test seam, not a route. Private to this module.
     ///
     /// Stores one pending request at the current instant. This method reads no
-    /// clock and no disk.
-    pub fn seed_request(
+    /// clock and no disk. Its route caller `post_capability_request` runs
+    /// `declared_ask` first, so an id it stores carries a declared ask.
+    pub(crate) fn seed_request(
         &mut self,
         request_id: &str,
         session_id: &str,
