@@ -276,8 +276,12 @@ use std::process::Command;
 /// `landlock_ruleset_follows_the_declared_rights`. Task 160 adds WP217, which
 /// makes the file row's bound-executable probe read name wallet's binary for
 /// both providers, so did's probe would read the wrong program; it is CAUGHT on
-/// the Mac by `landlock_probe_paths_follow_the_bound_parameters`.
-const EXPECTED_FALSIFIERS: usize = 200;
+/// the Mac by `landlock_probe_paths_follow_the_bound_parameters`. Task 158 adds
+/// WP221, which accepts any allow quote on a declared-right row, so the exec
+/// form on the fixture `init` row passes; and WP222, which does not read a
+/// `none:` row's allow quote, so the subpath form on that row passes. Both are
+/// CAUGHT on the Mac by `operations_table_row_check_refuses_each_bad_table`.
+const EXPECTED_FALSIFIERS: usize = 202;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

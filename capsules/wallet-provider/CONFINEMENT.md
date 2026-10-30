@@ -505,9 +505,12 @@ and its `Error` fields, and `data`'s children are the keys of that handler's
 one `json!`, or the fields `WalletProviderResponseV2` declares on a
 `wallet_contract` row, in declaration order.
 `operations_table_row_check_refuses_each_bad_table` refuses an Outputs cell
-that leaves a key out, adds one, or writes another error name. A refusal under
-`(deny default)` is a denial,
-not a grant, and no row writes it as a right. A refusal from a `kind` comes back as an outer
+that leaves a key out, adds one, or writes another error name. The check also
+reads a declared-right row's macOS cell for an allow form of that right, and a
+`none: needs no declared right` row quotes none, so
+`operations_table_row_check_refuses_each_bad_table` refuses a bad quote. A
+refusal under `(deny default)` is a denial, not a grant, and no row writes it
+as a right. A refusal from a `kind` comes back as an outer
 `status` `ok` whose `data.result` holds `status` `error`, `code` and `message`;
 the outer `status`/`code`/`message` error covers envelope failures only. A
 `storage` row cites both sides of its right: `permitted:` names the test that
@@ -1510,6 +1513,12 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `operations_table_row_check_refuses_each_bad_table` checks this rule.
 - WP220: The `wallet_contract` compare does not read
   `WalletProviderResponseV2`, so an extra envelope name passes.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP221: The macOS allow compare accepts any allow quote on a declared-right
+  row, so the exec form on a `storage` row passes.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP222: A `none:` row's allow quote is not read, so the subpath form on that
+  row passes.
   `operations_table_row_check_refuses_each_bad_table` checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.

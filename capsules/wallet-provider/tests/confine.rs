@@ -14738,6 +14738,129 @@ fn linux_status_problems(document_name: &str, row: &OperationsRow) -> Vec<String
     )]
 }
 
+/// The one declared-rights file under a provider directory. The row check
+/// reads the file the provider folder holds, so it reads no crate path of its
+/// own and no second JSON reader (P10).
+const DECLARED_RIGHTS_FILE: &str = "tests/fixtures/confine/declared-rights.json";
+
+/// The prefix a macOS cell's allow quote starts with. The cell writes a rule in
+/// its spaced spelling, so `(allow(file-read*))` is prose and is not a quote.
+const ALLOW_QUOTE_PREFIX: &str = "(allow ";
+
+/// Whether `cell` ends inside a backtick span. `backtick_spans` leaves such a
+/// tail out of its answer, so this one test refuses it by name instead of
+/// reading prose as a form.
+fn has_unclosed_span(cell: &str) -> bool {
+    cell.matches('`').count() % 2 == 1
+}
+
+/// The one allow form `span` quotes, or `None` where the span is not an allow
+/// quote. A span quotes a form only when `profile_forms` of that span alone
+/// returns exactly one form and that form starts with `ALLOW_QUOTE_PREFIX`, so
+/// a prose span and a span holding two forms are not read. Only a closed span
+/// reaches `profile_forms`, never a whole cell.
+fn allow_quote(span: &str) -> Option<String> {
+    match profile_forms(span).as_slice() {
+        [form] if form.starts_with(ALLOW_QUOTE_PREFIX) => Some(form.clone()),
+        _ => None,
+    }
+}
+
+/// The one declared contract id `right` names, or `None` where the Right cell
+/// is `NO_DECLARED_RIGHT` or holds another value. `declared_right_cell` is the
+/// one vocabulary reader, so this function reads the same cell it reads (P10).
+fn declared_right_id(right: &str) -> Option<&str> {
+    if !declared_right_cell(right) || right == NO_DECLARED_RIGHT {
+        return None;
+    }
+    right.strip_prefix('`')?.strip_suffix('`')
+}
+
+/// Every problem with one row's macOS allow quote, each naming the document,
+/// the row and the form.
+///
+/// A row whose Right is one declared id quotes at least one allow form, and
+/// every quoted allow form is one rule of that id in the `rights` list
+/// `declared_entries` returns. A form the right does not own, including a
+/// platform-baseline form, is a refusal that names `declared_path`. A declared
+/// right that quotes no allow form is a refusal, and a `NO_DECLARED_RIGHT` row
+/// that quotes one is a refusal.
+///
+/// Honesty limit: a declared right may own more than one form. The cell quotes
+/// at least one, and every quoted allow form is one of that right's rules, so a
+/// cell that quotes only the parent-read form passes. A form written outside
+/// backticks is not read, and an unclosed span is refused by name. The
+/// platform-baseline list is not a row right, so a Right cell that names one of
+/// its ids has no right whose rules its quote could follow and is refused with
+/// those words.
+fn macos_allow_quote_problems(
+    document_name: &str,
+    row: &OperationsRow,
+    rights: &[DeclaredClaim],
+    declared_path: &Path,
+) -> Vec<String> {
+    if has_unclosed_span(&row.macos) {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} quotes an unclosed \
+             backtick span in its macOS cell",
+            row.operation
+        )];
+    }
+    let quotes: Vec<String> = backtick_spans(&row.macos)
+        .into_iter()
+        .filter_map(allow_quote)
+        .collect();
+    if row.right == NO_DECLARED_RIGHT {
+        return quotes
+            .iter()
+            .map(|form| {
+                format!(
+                    "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} is \
+                     {NO_DECLARED_RIGHT} and quotes the macOS allow form {form}",
+                    row.operation
+                )
+            })
+            .collect();
+    }
+    let Some(id) = declared_right_id(&row.right) else {
+        return Vec::new();
+    };
+    let Some(rules) = rights
+        .iter()
+        .find(|claim| claim.id == id)
+        .map(|claim| &claim.rules)
+    else {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names the Right {}, \
+             which is no right of the rights list in {}, so its macOS cell has no right whose \
+             rules its quote follows",
+            row.operation,
+            row.right,
+            declared_path.display()
+        )];
+    };
+    if quotes.is_empty() {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names the Right {} and \
+             its macOS cell quotes no allow form of that right",
+            row.operation, row.right
+        )];
+    }
+    quotes
+        .iter()
+        .filter(|form| !rules.contains(form))
+        .map(|form| {
+            format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} quotes the macOS \
+                 allow form {form}, which is not a rule of the Right {} in {}",
+                row.operation,
+                row.right,
+                declared_path.display()
+            )
+        })
+        .collect()
+}
+
 /// Every problem with one operations table's rows, each naming the document,
 /// the row (or the arm) and the value.
 ///
@@ -14760,13 +14883,17 @@ fn linux_status_problems(document_name: &str, row: &OperationsRow) -> Vec<String
 /// side as the provider's serde tag and `Error` fields, and its ok side's
 /// `data` children as its handler's own `json!` keys, or as
 /// `WalletProviderResponseV2`'s declared fields on a `wallet_contract` row.
+/// A declared-right row's macOS cell quotes at least one allow form of that
+/// right through `macos_allow_quote_problems`, and a `none:` row quotes none.
 ///
 /// Honesty limits: rule 1 reads the dispatch arms as text, so it shows the row
 /// set matches the arms, not that every arm is reachable; rule 2 reads a
 /// `wallet_contract` row's Inputs cell against that kind's declared `params`;
-/// and rule 6 reads a handler's `json!` keys and a declaration's fields as
-/// source text, so it does not read a serialized value, a key a helper adds at
-/// run time, or a key inside a nested value.
+/// rule 6 reads a handler's `json!` keys and a declaration's fields as source
+/// text, so it does not read a serialized value, a key a helper adds at run
+/// time, or a key inside a nested value; and the allow quote reads the rules a
+/// right owns, not the Effect cell's prose, so a right with two forms passes on
+/// either one.
 fn operations_table_row_problems(
     document_name: &str,
     document: &str,
@@ -14802,6 +14929,25 @@ fn operations_table_row_problems(
         problems.extend(right_vocabulary_problems(document_name, row));
         problems.extend(right_side_problems(document_name, row));
         problems.extend(linux_status_problems(document_name, row));
+    }
+    let declared_path = provider_dir.join(DECLARED_RIGHTS_FILE);
+    match read_declared_rights(document_name, &declared_path)
+        .and_then(|declared| declared_entries(document_name, &declared))
+    {
+        Ok((rights, _baseline)) => {
+            for row in &rows {
+                problems.extend(macos_allow_quote_problems(
+                    document_name,
+                    row,
+                    &rights,
+                    &declared_path,
+                ));
+            }
+        }
+        Err(reason) => problems.push(format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} macOS cells cannot be checked \
+             because {reason}"
+        )),
     }
     if let Some(source) = &dispatch {
         let declaration_path = provider_dir.join(request_declaration_file(document_name));
@@ -14992,6 +15138,55 @@ fn write_declared_rights(capsules: &Path, provider: &str, declared: &Value) {
     fs::create_dir_all(&dir).expect("fixture declared-rights directory");
     fs::write(dir.join("declared-rights.json"), declared.to_string())
         .expect("fixture declared rights");
+}
+
+/// Writes the row check's declared-rights fixture into one provider directory,
+/// at the path the row check reads.
+fn write_declared_rights_in(provider_dir: &Path, provider: &str) {
+    let path = provider_dir.join(DECLARED_RIGHTS_FILE);
+    fs::create_dir_all(
+        path.parent()
+            .expect("the declared-rights file must sit under a directory"),
+    )
+    .expect("fixture declared-rights directory");
+    fs::write(&path, row_check_declared_rights(provider).to_string())
+        .expect("fixture declared rights");
+}
+
+/// The declared-rights fixture the operations row check reads: `storage` owns
+/// the one subpath form a `storage` row quotes, `bound-executable` owns the
+/// exec form, and both platform-baseline ids keep their own forms. The other
+/// fields are the ones `declared_entries` accepts.
+fn row_check_declared_rights(provider: &str) -> Value {
+    let prefix = platform_baseline_justification(provider);
+    json!({
+        "role": DECLARED_RIGHTS_ROLE,
+        "provider": provider,
+        "rights": [
+            {"id": "storage", "rules": [SHARED_RULES[2]]},
+            {"id": "bound-executable", "rules": [SHARED_RULES[0]]},
+        ],
+        PLATFORM_BASELINE: {
+            "status": platform_baseline_status(provider),
+            "rules": [
+                {
+                    "id": "startup-root-directory",
+                    "justification": format!(
+                        "{prefix}file-read* of literal / is the startup root-directory read."
+                    ),
+                    "rules": [STARTUP_RULES[0]],
+                },
+                {
+                    "id": "startup-sysctl",
+                    "justification": format!(
+                        "{prefix}sysctl-read is the startup read of kernel facts by the loader \
+                         and the allocator."
+                    ),
+                    "rules": [STARTUP_RULES[1]],
+                },
+            ],
+        },
+    })
 }
 
 /// The did, wallet and model file profiles present one contract: the same
@@ -15819,7 +16014,9 @@ fn every_operations_table_cites_existing_tests() {
 /// exactly `none: needs no declared right` or one
 /// declared id in a backtick span; a row whose Right is a declared right cites
 /// both `permitted:` and `nearest outside refused:`, and a `none:` row cites
-/// neither; and every Linux cell is exactly `designed, not enforced`. Each
+/// neither; a declared-right row's macOS cell quotes at least one allow form of
+/// that right and a `none:` row quotes none; and every Linux cell is exactly
+/// `designed, not enforced`. Each
 /// fault is one line naming the document, the row (or the arm) and the value.
 /// The check reads files and starts no process, so it runs on every platform.
 ///
@@ -15830,7 +16027,9 @@ fn every_operations_table_cites_existing_tests() {
 /// side pass; WP144 disables the Linux-status rule, so a cell naming another
 /// status passes; WP181 disables the field reader's `serde` attribute and
 /// WP182 the Inputs compare's length rule, so an ordinary row's stale Inputs
-/// cell passes. `operations_table_row_check_refuses_each_bad_table` catches
+/// cell passes; WP221 accepts any allow quote and WP222 does not read a `none:`
+/// row's quote, so a bad macOS cell passes.
+/// `operations_table_row_check_refuses_each_bad_table` catches
 /// each mutation with a bad-table fixture; this test checks the real tables.
 #[test]
 fn every_operations_table_row_matches_its_provider_and_the_contract() {
@@ -16725,7 +16924,8 @@ fn passing_fixture_row(operation: &str) -> String {
             &fixture_inputs(operation),
             &fixture_outputs(operation),
             "`storage`",
-            "permitted: `tests/confine.rs::present_case` shows the write. \
+            "The `storage` rule is `(allow file-read* file-write* (subpath (param \
+             \"STORAGE_ROOT\")))`. permitted: `tests/confine.rs::present_case` shows the write. \
              nearest outside refused: `tests/confine.rs::present_case` shows the refusal.",
             LINUX_STATUS,
         )
@@ -16785,8 +16985,10 @@ const FIXTURE_OPERATIONS: [&str; 5] = [
 /// another cell count are each refused as one problem. Rule 2 refuses a Right
 /// cell that names an undeclared
 /// id and one that says `no named test shows this`. Rule 3 refuses a right row
-/// missing `permitted:`, a right row missing `nearest outside refused:` and a
-/// `none:` row citing `permitted:`. Rule 4 refuses a Linux cell that is not
+/// missing `permitted:`, a right row missing `nearest outside refused:`, a
+/// `none:` row citing `permitted:`, a right row quoting an allow form it does
+/// not own, a right row quoting no allow form, a `none:` row quoting one and a
+/// right row quoting an unclosed span. Rule 4 refuses a Linux cell that is not
 /// `designed, not enforced`, naming every row. Rule 5 refuses an ordinary row's
 /// Inputs cell with an extra name, a missing name, another order, a renamed
 /// field's Rust name, a name only a comment mentions, a bare word where the
@@ -16820,13 +17022,17 @@ const FIXTURE_OPERATIONS: [&str; 5] = [
 /// field after it. WP214 makes an empty arm and a field named `none` the same
 /// item, so the bare marker passes for the renamed field. WP215 makes
 /// `inputs_match` ignore children, so a `params` list can name an undeclared
-/// field.
+/// field. WP221 accepts any allow quote on a declared-right row, so the exec
+/// form on the `init` row passes; WP222 does not read a `none:` row's allow
+/// quote, so the subpath form on that row passes.
 #[test]
 fn operations_table_row_check_refuses_each_bad_table() {
     let provider = tempfile::tempdir().expect("temporary provider folder");
     fs::create_dir_all(provider.path().join("src")).expect("fixture src folder");
     let provider_source = provider.path().join("src/main.rs");
     fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source");
+    let declared_path = provider.path().join(DECLARED_RIGHTS_FILE);
+    write_declared_rights_in(provider.path(), "fixture-provider");
 
     for (case, variant) in [
         ("VerifyDidRecovery", "verify_did_recovery"),
@@ -17326,6 +17532,114 @@ enum WalletProviderOperationV2 {
             "{case} must be refused as one problem"
         );
     }
+
+    // Rule 3: the macOS allow quote. A `storage` row quotes an allow form of
+    // its own right, so the exec form, no form and a `none:` row's form are
+    // each refused.
+    let storage_quote = format!("`{}`", SHARED_RULES[2]);
+    let exec_quote = format!("`{}`", SHARED_RULES[0]);
+    {
+        let document = passing.replacen(&storage_quote, &exec_quote, 1);
+        assert_ne!(document, passing, "the exec form must replace the quote");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init quotes the macOS \
+                 allow form {}, which is not a rule of the Right `storage` in {}",
+                SHARED_RULES[0],
+                declared_path.display()
+            )],
+            "the exec form on a storage row must be refused"
+        );
+    }
+    {
+        let document = passing.replacen(&storage_quote, "`tests/confine.rs::present_case`", 1);
+        assert_ne!(document, passing, "the quote must be removed");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init names the Right \
+                 `storage` and its macOS cell quotes no allow form of that right"
+            )],
+            "a declared-right row with no allow quote must be refused"
+        );
+    }
+    for (case, quoted) in [
+        ("the subpath form", storage_quote.clone()),
+        (
+            "an allow form outside backticks",
+            SHARED_RULES[2].to_string(),
+        ),
+    ] {
+        let document = passing.replacen(
+            "| `tests/confine.rs::present_case` shows the answer. |",
+            &format!("| {quoted}. |"),
+            1,
+        );
+        assert_ne!(document, passing, "{case} must change the none: row");
+        let expected = if case == "the subpath form" {
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status is \
+                 {NO_DECLARED_RIGHT} and quotes the macOS allow form {}",
+                SHARED_RULES[2]
+            )]
+        } else {
+            Vec::<String>::new()
+        };
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            expected,
+            "{case} on a none: row must be read by its backticks"
+        );
+    }
+    {
+        let document = passing.replacen(&storage_quote, "`(allow file-read*", 1);
+        assert_ne!(document, passing, "the unclosed span must change the quote");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init quotes an unclosed \
+                 backtick span in its macOS cell"
+            )],
+            "an unclosed span must be refused by name, not read as a form"
+        );
+    }
+
+    // Rule 3: the platform baseline is not a row right, so a Right cell that
+    // names one of its ids is refused with those words.
+    {
+        let right = format!("`{}`", PLATFORM_BASELINE_IDS[0]);
+        let document = passing.replacen("| `storage` |", &format!("| {right} |"), 1);
+        assert_ne!(
+            document, passing,
+            "the baseline id must replace the Right cell"
+        );
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init names the Right \
+                 {right}, which is no right of the rights list in {}, so its macOS cell has no \
+                 right whose rules its quote follows",
+                declared_path.display()
+            )],
+            "a platform-baseline id on a row must be refused, because it is not a row right"
+        );
+    }
+
+    // Rule 3: the file the row check reads names its path when it is missing,
+    // and every later case reads the restored file.
+    fs::remove_file(&declared_path).expect("remove the fixture declared rights");
+    let read_error = fs::read_to_string(&declared_path).expect_err("missing declared rights");
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &passing, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} macOS cells cannot be checked \
+             because fixture-provider declared-rights file {} must be readable: {read_error}",
+            declared_path.display()
+        )],
+        "a missing declared-rights file must be one refusal naming its path"
+    );
+    write_declared_rights_in(provider.path(), "fixture-provider");
 
     // Rule 5: an ordinary row's Inputs cell against its `Request` arm. One
     // case per refusal: another name, a missing name, another order, a renamed
@@ -17888,6 +18202,7 @@ enum WalletProviderOperationV2 {
         ROW_FIXTURE_PROVIDER,
     )
     .expect("wallet fixture provider source");
+    write_declared_rights_in(wallet_fixture.path(), "wallet-provider");
     let protocol_path = wallet_fixture.path().join("src/protocol.rs");
     let missing = operations_table_row_problems("wallet-provider", &passing, wallet_fixture.path());
     assert_eq!(
