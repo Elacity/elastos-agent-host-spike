@@ -15,6 +15,7 @@
 - 023: `deny_one_shown_step` stores both shown steps through `journeys::request` after `running_agent`; the shell deny of `request-1` for `PLAN_A` settles it as denied and leaves `request-2` for `PLAN_B` pending, whose allow-once `approve` lets `execute` spend `PLAN_B`; the test calls no `seed_request` and the helpers stay unchanged; two hand-run plants caught and restored; 1 test, 2 plants.
 - 024: `only_a_live_session_submits_a_shown_plan` proves `request` is submitted only by a live instance session: the never-launched session and the stopped session are each refused for `PLAN_A`, `PLAN_B` and empty plan bytes and store nothing, while the other running session's submit stores one pending request that the shell grants and that session's `execute` spends; two hand-run plants return the route error as `Ok("request-1")` and neither calls `seed_request`; 1 test, 2 plants.
 - 020: `deny_shown_plan` gains `caller: Caller<'_>` after `stand_in` and passes that value to `post_capability_deny`, staying the one deny call; `agent_cannot_deny_its_own_shown_plan` proves the session that posted the shown plan and the other running session are refused with `This endpoint requires shell privileges` for their own step, the sibling step and an absent id before the deny body is read, both requests stay pending with the live list empty, the shell's deny then settles `request-1` and leaves `request-2` pending for its allow-once `approve` and `execute`; two hand-run plants caught and restored; 1 test, 2 plants.
+- 022: `running_agent` gains `caller: Caller<'_>` after `stand_in`, passes it to `get_capsules` and `post_capsules`, and returns `Result<String, (u16, String)>`, staying the one launch journey; `agent_cannot_launch_a_shown_session` proves a client launch for a never-launched id, an absent id and an empty id is the 403 shell refusal before `admit_resident` and stores nothing, the shell's launches then start `component-1` and `component-2` and a client launch after them mints no `component-3`, and both shell sessions submit, are granted once and spend that one use; two hand-run plants caught and restored; 1 test, 2 plants.
 
 ## 001
 
@@ -653,3 +654,97 @@ cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_can
 After both restores, `git diff -- lab/plan-approval/src/lib.rs` shows no plant. The restored proof
 command set (the fmt check and the sixteen test commands in the task) took 2 s real. This lane has
 no `falsifiers.json`; no id is added.
+
+## 022
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md),
+Non-negotiable boundaries:
+
+> A provider implements an operation; Runtime authorizes the caller.
+
+This task proves that sentence for a launch: the agent is not the shell, so it cannot start a
+session, while the shell's own launch stays the existing journey. `running_agent` stays the one
+launch journey and gains `caller: Caller<'_>` after `stand_in`; it returns
+`Result<String, (u16, String)>`, passes that caller to the one `get_capsules` call and the one
+`post_capsules` call, and returns the list error with `?` before it reads the list length and
+before `admit_resident`. The Ok list's length still chooses `SignedBundle::new()` for 0 and
+`SignedBundle::distinct` with name `agent-host-{sessions}` otherwise; `admit_resident`,
+`post_capsules` and `finish_start` propagate with `?`, and the Ok value is the launch `id`. It
+contains no match on `Caller` and no copy of the shell check. Every existing call now passes
+`Caller::Shell` and unwraps with `expect("the shell launches one running session")`, keeping its
+other arguments and assertions.
+
+`agent_cannot_launch_a_shown_session` asserts the fresh client launches for `component-1`,
+`component-absent` and an empty id are each the 403 shell refusal
+`This endpoint requires shell privileges`, not an unknown instance, an unadmitted bundle, a missing
+launch cid or an already-admitted bundle, and that each leaves the capsule list, both request
+arrays and the live list empty; the shell's launch then returns `component-1`, running with no
+cause and with no grant or request; the client launches for `component-1`, for `component-2` and
+for an empty id after it are each still the 403 refusal, never `bundle already admitted`, an
+unknown instance or a not-live instance, and leave `component-1` running and the capsule list
+holding only `component-1`; the shell's second launch returns `component-2`, and both sessions stay
+running; `request` of `PLAN_A` as the `component-1` client returns `request-1` with a 64-character
+hash, pending with the stored hash, no settler and empty reasons, while the other request array and
+the live list stay empty; `approve` of `request-1` as the shell with `once` and that hash stores
+the one live entry and the request as granted under `shell` with `owner approved`; `execute` as the
+`component-1` client spends that one use and the live list ends empty; a client launch after both
+shell sessions is still the 403 refusal and not `bundle already admitted`, the capsule list holds
+`component-1` and `component-2` and no `component-3`, both stay running, and `request-1` stays
+granted with the live list empty; the `component-2` client then submits `request-2`, the shell
+grants it `once`, and its own `execute` spends it. The test calls no `seed_request`, no
+`post_capability_*` method, no `admit_resident`, `post_capsules`, `finish_start`, `set_instant`,
+`delete_capsule` or `worker_exited`. This crate stores no copy of the shell check, does not copy
+the stand-in and names no planner. A passing run gives the Runtime no A15 credit.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_cannot_launch_a_shown_session -- --exact
+```
+
+### F-launch-forces-shell
+
+- old bytes, 66 and 79: the two planted lines of `running_agent`:
+  ```
+          let sessions = stand_in.get_capsules(caller)?["capsules"]
+          let launched = stand_in.post_capsules(caller, &bundle.launch_body())?;
+  ```
+- new bytes, 73 and 86:
+  ```
+          let sessions = stand_in.get_capsules(Caller::Shell)?["capsules"]
+          let launched = stand_in.post_capsules(Caller::Shell, &bundle.launch_body())?;
+  ```
+- planted crate compiled; `agent_cannot_launch_a_shown_session` failed at `src/lib.rs:4351:9`
+  (planted tree) on the first fresh client launch: `assertion left == right failed: the agent
+  cannot launch a shown session: a client launch for component-1 on a fresh stand-in is the shell
+  refusal`; left held `Ok("component-1")`, right expected
+  `Err((403, "This endpoint requires shell privileges"))`. The forced shell caller ran the list
+  and launch routes for the client caller.
+- restored, the test passes.
+
+### F-admit-before-shell
+
+- old bytes, 66: the `get_capsules` line above.
+- new bytes, 361:
+  ```
+          let forced = SignedBundle::new();
+          stand_in
+              .admit_resident(
+                  forced.path(),
+                  &forced.signature(),
+                  forced.accepted(),
+                  Start::Ok,
+              )
+              .expect("the stand-in admits the signed fixture");
+          let sessions = stand_in.get_capsules(caller)?["capsules"]
+  ```
+- planted crate compiled; `agent_cannot_launch_a_shown_session` failed at `src/lib.rs:400:14`
+  (planted tree) in `running_agent` on the shell's own launch: `the stand-in admits the signed
+  fixture: (403, "bundle already admitted: bafybeidjg24vyrqdcsfau5cz3emylziuu2dn7cpjqpszlnyq6knb66w5xm")`.
+  The admission ran before the list route's shell check, so the shell's later
+  `SignedBundle::new()` could not admit the same CID.
+- restored, the test passes.
+
+After both restores, `git diff -- lab/plan-approval/src/lib.rs` shows no plant. The restored proof
+command set (the fmt check and the seventeen test commands in the task) took 2.447 s real. This
+lane has no `falsifiers.json`; no id is added.

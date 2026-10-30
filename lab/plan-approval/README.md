@@ -279,6 +279,28 @@ owner-hash binding of this slice is the third part. The principal and restart
 stay open, and the remaining binding rules stay open, so RA-4 and RA-5 stay
 open.
 
+A client call through `running_agent` cannot launch a shown session. The
+design states the boundary:
+
+> A provider implements an operation; Runtime authorizes the caller.
+
+`running_agent` is the only launch journey, and it passes the caller it is
+given to `get_capsules` and `post_capsules`. A client caller is refused with
+status 403 and `This endpoint requires shell privileges` at the list route,
+before `admit_resident` and before this crate reads the list. A session id that
+was never launched, an absent id and an empty id are that same refusal, because
+the list route's shell check does not read the session id. Each refusal stores
+nothing: the capsule list, both request arrays and the live list stay empty.
+The shell's own launch then starts `component-1`, and its second launch starts
+`component-2`; a client launch after those two is still the shell refusal and
+mints no `component-3`. Both shell sessions can submit a plan, be granted once
+and spend that one use. The distinct-bundle choice stays and runs only after
+the list returns. This crate stores no copy of the shell check; the stand-in's
+list and launch routes make it. `preview`, `plan_sha256`, `approve`, `execute`,
+`deny_shown_plan`, `age_shown_plan`, `stop_shown_session` and `request` are
+unchanged by this slice. The crate does not copy the stand-in, and it names no
+planner. A passing run gives the Runtime no A15 credit.
+
 ## Layout
 
 - `src/lib.rs`: `Preview`, `preview`, `plan_sha256`, `approve`,
@@ -292,12 +314,14 @@ open.
   `agent_cannot_deny_its_own_shown_plan`,
   `shell_cannot_spend_a_shown_grant`, `shell_cannot_submit_a_shown_plan`,
   `only_a_live_session_submits_a_shown_plan`,
-  `agent_cannot_stop_a_shown_session` and the bound-plan journey.
+  `agent_cannot_stop_a_shown_session`, `agent_cannot_launch_a_shown_session`
+  and the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_cannot_launch_a_shown_session -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_cannot_stop_a_shown_session -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_cannot_deny_its_own_shown_plan -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib only_a_live_session_submits_a_shown_plan -- --exact

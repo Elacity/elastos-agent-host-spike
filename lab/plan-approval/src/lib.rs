@@ -370,8 +370,14 @@ mod journeys {
     use serde_json::json;
 
     /// One session reaches `Running` through the stand-in's own routes:
-    /// `admit_resident` for the signed fixture, `post_capsules` for its CID and
-    /// `finish_start`. This mints no grant.
+    /// `get_capsules` for the count, `admit_resident` for the signed fixture,
+    /// `post_capsules` for its CID and `finish_start`. This mints no grant.
+    ///
+    /// `caller` is the authenticated caller, a method argument. This journey
+    /// passes it to the list route and the launch route unchanged and does not
+    /// judge it, so each route's own shell-only check runs before the body is
+    /// read: a client caller is refused at the list route, before this journey
+    /// reads the count or admits anything, and nothing is stored.
     ///
     /// The stand-in keeps one admitted row per lab CID, so a session after the
     /// first admits the same fixture files with one changed byte through
@@ -379,10 +385,11 @@ mod journeys {
     /// A fresh stand-in admits the plain fixture, so the first session is
     /// unchanged. The capsule list is the stand-in's own read of how many
     /// sessions it holds; this journey adds no second launch path.
-    pub fn running_agent(stand_in: &mut StandIn) -> String {
-        let sessions = stand_in
-            .get_capsules(Caller::Shell)
-            .expect("the shell reads the capsule list")["capsules"]
+    pub fn running_agent(
+        stand_in: &mut StandIn,
+        caller: Caller<'_>,
+    ) -> Result<String, (u16, String)> {
+        let sessions = stand_in.get_capsules(caller)?["capsules"]
             .as_array()
             .map(Vec::len)
             .unwrap_or(0);
@@ -391,23 +398,19 @@ mod journeys {
         } else {
             SignedBundle::distinct(&format!("agent-host-{sessions}"))
         };
-        stand_in
-            .admit_resident(
-                bundle.path(),
-                &bundle.signature(),
-                bundle.accepted(),
-                Start::Ok,
-            )
-            .expect("the stand-in admits the signed fixture");
-        let launched = stand_in
-            .post_capsules(Caller::Shell, &bundle.launch_body())
-            .expect("the shell launches the admitted CID");
+        stand_in.admit_resident(
+            bundle.path(),
+            &bundle.signature(),
+            bundle.accepted(),
+            Start::Ok,
+        )?;
+        let launched = stand_in.post_capsules(caller, &bundle.launch_body())?;
         let id = launched["id"]
             .as_str()
             .expect("the stand-in names the launch")
             .to_owned();
-        stand_in.finish_start(&id).expect("the stand-in starts it");
-        id
+        stand_in.finish_start(&id)?;
+        Ok(id)
     }
 
     /// The agent asks for one plan through `post_capability_request`. The
@@ -447,7 +450,8 @@ fn a_grant_bound_to_one_plan_is_refused_for_another_plan() {
     use journeys::{request, running_agent};
 
     let mut stand_in = StandIn::new();
-    let session = running_agent(&mut stand_in);
+    let session = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
 
     let request_a = request(
         &mut stand_in,
@@ -645,7 +649,8 @@ fn deny_one_shown_step() {
 
     // The one launch journey makes the running session the shown steps come
     // from. It mints no grant.
-    let session = running_agent(&mut stand_in);
+    let session = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
     assert_eq!(
         session, "component-1",
         "the fresh stand-in names the one running session component-1"
@@ -921,12 +926,14 @@ fn agent_cannot_deny_its_own_shown_plan() {
 
     // Two running sessions: the agent that posts the plans and the other
     // session that must not settle them.
-    let first = running_agent(&mut stand_in);
+    let first = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
     assert_eq!(
         first, "component-1",
         "the fresh stand-in names the first running session component-1"
     );
-    let second = running_agent(&mut stand_in);
+    let second = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
     assert_eq!(
         second, "component-2",
         "the second running session is the stand-in's next component"
@@ -1180,7 +1187,8 @@ fn unanswered_shown_step_expires() {
     }
 
     let mut stand_in = StandIn::new();
-    let session = running_agent(&mut stand_in);
+    let session = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
     assert_eq!(
         session, "component-1",
         "the fresh stand-in names the one session component-1"
@@ -1433,8 +1441,10 @@ fn stop_settles_that_sessions_shown_steps() {
     );
 
     // Two sessions come from the one launch journey.
-    let first = running_agent(&mut stand_in);
-    let second = running_agent(&mut stand_in);
+    let first = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    let second = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
     assert_eq!(first, "component-1", "the first launch is component-1");
     assert_eq!(second, "component-2", "the second launch is component-2");
     assert_eq!(
@@ -1685,7 +1695,8 @@ fn shown_allow_once_expires() {
     }
 
     let mut stand_in = StandIn::new();
-    let session = running_agent(&mut stand_in);
+    let session = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
     assert_eq!(
         session, "component-1",
         "the fresh stand-in names the one session component-1"
@@ -1927,7 +1938,8 @@ fn shown_session_lasts_until_stop() {
     };
 
     let mut stand_in = StandIn::new();
-    let session = running_agent(&mut stand_in);
+    let session = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
     assert_eq!(
         session, "component-1",
         "the fresh stand-in names the one session component-1"
@@ -2288,8 +2300,10 @@ fn shown_grant_authorises_only_its_session() {
     }
 
     let mut stand_in = StandIn::new();
-    let first_session = running_agent(&mut stand_in);
-    let second_session = running_agent(&mut stand_in);
+    let first_session = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    let second_session = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
     assert_eq!(
         first_session, "component-1",
         "a shown grant authorises only its session: the fresh stand-in names its first session component-1"
@@ -2532,7 +2546,8 @@ fn owner_approves_only_the_shown_hash() {
     }
 
     let mut stand_in = StandIn::new();
-    let session = running_agent(&mut stand_in);
+    let session = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
     assert_eq!(
         session, "component-1",
         "the owner grant mints only the hash the shown request stored: the fresh stand-in names its session component-1"
@@ -2710,8 +2725,10 @@ fn agent_cannot_approve_its_own_shown_plan() {
     }
 
     let mut stand_in = StandIn::new();
-    let poster = running_agent(&mut stand_in);
-    let other = running_agent(&mut stand_in);
+    let poster = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    let other = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
     assert_eq!(
         poster, "component-1",
         "the agent that showed the plan cannot mint its grant: the fresh stand-in names the session that posts the plan component-1"
@@ -2955,8 +2972,10 @@ fn shell_cannot_spend_a_shown_grant() {
     }
 
     let mut stand_in = StandIn::new();
-    let owner_session = running_agent(&mut stand_in);
-    let other_session = running_agent(&mut stand_in);
+    let owner_session = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    let other_session = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
     assert_eq!(
         owner_session, "component-1",
         "the shell cannot spend a shown grant: the fresh stand-in names its first session component-1"
@@ -3251,8 +3270,10 @@ fn shell_cannot_submit_a_shown_plan() {
     );
 
     // Two sessions come from the one launch journey and stay running.
-    let first = running_agent(&mut stand_in);
-    let second = running_agent(&mut stand_in);
+    let first = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    let second = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
     assert_eq!(
         first, "component-1",
         "the shell cannot submit a shown plan: the fresh stand-in names its first session component-1"
@@ -3598,8 +3619,10 @@ fn only_a_live_session_submits_a_shown_plan() {
     }
 
     // Two live sessions come from the one launch journey.
-    let first = running_agent(&mut stand_in);
-    let second = running_agent(&mut stand_in);
+    let first = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    let second = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
     assert_eq!(
         first, "component-1",
         "only a live session submits a shown plan: the fresh stand-in names its first session component-1"
@@ -3960,8 +3983,10 @@ fn agent_cannot_stop_a_shown_session() {
     );
 
     // Two sessions come from the one launch journey.
-    let first = running_agent(&mut stand_in);
-    let second = running_agent(&mut stand_in);
+    let first = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    let second = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
     assert_eq!(first, "component-1", "the first launch is component-1");
     assert_eq!(second, "component-2", "the second launch is component-2");
     for id in [&first, &second] {
@@ -4226,5 +4251,412 @@ fn agent_cannot_stop_a_shown_session() {
         live(&stand_in),
         Vec::<Value>::new(),
         "the other session's once grant is spent by its one use"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn agent_cannot_launch_a_shown_session() {
+    use agent_conformance::standin_runtime::Caller;
+    use fixtures::PLAN_A;
+    use journeys::{request, running_agent};
+    use serde_json::{json, Value};
+
+    fn live(stand_in: &StandIn) -> Vec<Value> {
+        stand_in
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
+            .expect("shell live list")["capabilities"]
+            .as_array()
+            .cloned()
+            .expect("the shell live list holds a capabilities array")
+    }
+
+    fn shown(stand_in: &StandIn, session: &str) -> Vec<Value> {
+        stand_in
+            .get_capability_requests(Caller::Shell, Some(session))
+            .expect("the shell reads the session's requests")["requests"]
+            .as_array()
+            .cloned()
+            .expect("the shell request view holds a requests array")
+    }
+
+    fn record(stand_in: &StandIn, session: &str, request_id: &str) -> Value {
+        shown(stand_in, session)
+            .into_iter()
+            .find(|entry| entry["request_id"] == request_id)
+            .expect("the session's request view holds that id")
+    }
+
+    fn capsule(stand_in: &StandIn, id: &str) -> Value {
+        let listed = stand_in
+            .get_capsules(Caller::Shell)
+            .expect("shell capsules");
+        listed["capsules"]
+            .as_array()
+            .and_then(|capsules| capsules.iter().find(|entry| entry["id"] == id))
+            .cloned()
+            .unwrap_or_else(|| panic!("the capsule list names {id}: {listed}"))
+    }
+
+    fn capsule_ids(stand_in: &StandIn) -> Vec<String> {
+        stand_in
+            .get_capsules(Caller::Shell)
+            .expect("shell capsules")["capsules"]
+            .as_array()
+            .expect("the capsule list holds a capsules array")
+            .iter()
+            .map(|entry| {
+                entry["id"]
+                    .as_str()
+                    .expect("a capsule entry names its id")
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    fn shell_refusal() -> Result<String, (u16, String)> {
+        Err((403, "This endpoint requires shell privileges".to_owned()))
+    }
+
+    fn refusal_reason(refused: &Result<String, (u16, String)>) -> &str {
+        refused
+            .as_ref()
+            .err()
+            .map(|(_, reason)| reason.as_str())
+            .expect("a client launch is refused")
+    }
+
+    let mut stand_in = StandIn::new();
+
+    // A client launch never reaches the list body or an admission: the list
+    // route's shell check runs first, so a session id that was never launched,
+    // an absent id and an empty id are the same refusal and store nothing.
+    let fresh_launches = [
+        (
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "component-1",
+        ),
+        (
+            Caller::Client {
+                session_id: "component-absent",
+            },
+            "component-absent",
+        ),
+        (Caller::Client { session_id: "" }, "an empty id"),
+    ];
+    for (caller, label) in fresh_launches {
+        let refused = running_agent(&mut stand_in, caller);
+        assert_eq!(
+            refused,
+            shell_refusal(),
+            "the agent cannot launch a shown session: a client launch for {label} on a fresh stand-in is the shell refusal"
+        );
+        assert_ne!(
+            refused,
+            Err((400, "unknown instance: component-absent".to_owned())),
+            "the agent cannot launch a shown session: the client launch for {label} runs no instance lookup"
+        );
+        assert_ne!(
+            refused,
+            Err((400, "unknown instance: component-1".to_owned())),
+            "the agent cannot launch a shown session: the client launch for {label} runs no instance lookup"
+        );
+        assert_ne!(
+            refused,
+            Err((400, "unknown instance: ".to_owned())),
+            "the agent cannot launch a shown session: the client launch for {label} runs no instance lookup"
+        );
+        assert_ne!(
+            refusal_reason(&refused),
+            "resident launch body needs cid",
+            "the agent cannot launch a shown session: the client launch for {label} reads no launch body"
+        );
+        assert!(
+            !refusal_reason(&refused).starts_with("bundle already admitted"),
+            "the agent cannot launch a shown session: the client launch for {label} admits no bundle"
+        );
+        assert!(
+            !refusal_reason(&refused).starts_with("no bundle is admitted"),
+            "the agent cannot launch a shown session: the client launch for {label} launches no admitted bundle"
+        );
+        assert_eq!(
+            stand_in
+                .get_capsules(Caller::Shell)
+                .expect("shell capsules"),
+            json!({ "capsules": [] }),
+            "the agent cannot launch a shown session: the refused client launch for {label} stores no instance"
+        );
+        assert_eq!(
+            live(&stand_in),
+            Vec::<Value>::new(),
+            "the agent cannot launch a shown session: the refused client launch for {label} mints no grant"
+        );
+        assert_eq!(
+            shown(&stand_in, "component-1"),
+            Vec::<Value>::new(),
+            "the agent cannot launch a shown session: the refused client launch for {label} stores no request for component-1"
+        );
+        assert_eq!(
+            shown(&stand_in, "component-absent"),
+            Vec::<Value>::new(),
+            "the agent cannot launch a shown session: the refused client launch for {label} stores no request for component-absent"
+        );
+    }
+
+    // The shell's own launch is the existing journey and starts component-1.
+    let first = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    assert_eq!(
+        first, "component-1",
+        "the agent cannot launch a shown session: the shell's first launch is component-1"
+    );
+    assert_eq!(
+        {
+            let running = capsule(&stand_in, &first);
+            json!({ "status": running["status"], "cause": running["cause"] })
+        },
+        json!({ "status": "running", "cause": "" }),
+        "the agent cannot launch a shown session: the shell's launch starts component-1 running with no cause"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "the agent cannot launch a shown session: the shell's launch mints no grant"
+    );
+    assert_eq!(
+        shown(&stand_in, &first),
+        Vec::<Value>::new(),
+        "the agent cannot launch a shown session: the shell's launch stores no request"
+    );
+
+    // A client launch after the shell has launched is still the shell refusal:
+    // it mints no component-3 and leaves component-1 running.
+    let launched_launches = [
+        (
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "component-1",
+        ),
+        (
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "component-2",
+        ),
+        (Caller::Client { session_id: "" }, "an empty id"),
+    ];
+    for (caller, label) in launched_launches {
+        let refused = running_agent(&mut stand_in, caller);
+        assert_eq!(
+            refused,
+            shell_refusal(),
+            "the agent cannot launch a shown session: a client launch for {label} after the shell's launch is the shell refusal"
+        );
+        assert!(
+            !refusal_reason(&refused).starts_with("bundle already admitted"),
+            "the agent cannot launch a shown session: the client launch for {label} finds no already-admitted bundle"
+        );
+        assert_ne!(
+            refusal_reason(&refused),
+            "unknown instance: component-2",
+            "the agent cannot launch a shown session: the client launch for {label} runs no instance lookup"
+        );
+        assert_ne!(
+            refusal_reason(&refused),
+            "instance is not live: stopped",
+            "the agent cannot launch a shown session: the client launch for {label} reaches no instance state"
+        );
+        assert_eq!(
+            {
+                let running = capsule(&stand_in, &first);
+                json!({ "status": running["status"], "cause": running["cause"] })
+            },
+            json!({ "status": "running", "cause": "" }),
+            "the agent cannot launch a shown session: component-1 stays running with no cause after the client launch for {label}"
+        );
+        assert_eq!(
+            capsule_ids(&stand_in),
+            vec!["component-1".to_owned()],
+            "the agent cannot launch a shown session: the capsule list holds one entry, component-1, after the client launch for {label}"
+        );
+        assert_eq!(
+            live(&stand_in),
+            Vec::<Value>::new(),
+            "the agent cannot launch a shown session: the refused client launch for {label} mints no grant"
+        );
+    }
+
+    // The shell's second launch is component-2, and component-1 stays running.
+    let second = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    assert_eq!(
+        second, "component-2",
+        "the agent cannot launch a shown session: the shell's second launch is component-2"
+    );
+    for id in [&first, &second] {
+        assert_eq!(
+            {
+                let running = capsule(&stand_in, id);
+                json!({ "status": running["status"], "cause": running["cause"] })
+            },
+            json!({ "status": "running", "cause": "" }),
+            "the agent cannot launch a shown session: {id} runs with no cause"
+        );
+    }
+
+    // The shown session submits its plan and the owner allows it once.
+    let client_session = Caller::Client {
+        session_id: "component-1",
+    };
+    let shown_step = request(&mut stand_in, client_session, PLAN_A)
+        .expect("the agent's request route stores the shown plan");
+    assert_eq!(
+        shown_step, "request-1",
+        "the agent cannot launch a shown session: the shown plan is the stand-in's first request"
+    );
+    let plan_a = plan_sha256(PLAN_A);
+    assert_eq!(
+        plan_a.len(),
+        64,
+        "the agent cannot launch a shown session: the shown plan hash is SHA-256 hex"
+    );
+    let pending = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "pending",
+        "decision_reason": "",
+        "settled_by": null,
+        "plan": plan_a,
+    });
+    assert_eq!(
+        record(&stand_in, &first, &shown_step),
+        pending,
+        "the agent cannot launch a shown session: the shown step is pending with the plan hash the owner will see"
+    );
+    assert_eq!(
+        shown(&stand_in, &second),
+        Vec::<Value>::new(),
+        "the agent cannot launch a shown session: the other session stores no request"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "the agent cannot launch a shown session: the pending step mints no grant"
+    );
+
+    assert_eq!(
+        approve(&mut stand_in, Caller::Shell, &shown_step, "once", &plan_a),
+        Ok(json!({ "success": true })),
+        "the agent cannot launch a shown session: the owner allows the shown plan once with the hash it saw"
+    );
+    let granted = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "granted",
+        "decision_reason": "owner approved",
+        "settled_by": "shell",
+        "plan": plan_a,
+    });
+    assert_eq!(
+        record(&stand_in, &first, &shown_step),
+        granted,
+        "the agent cannot launch a shown session: the owner's approval stores the shown step as granted by the shell"
+    );
+    let one_live = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "duration": "once",
+        "granted_at": 0,
+    });
+    assert_eq!(
+        live(&stand_in),
+        vec![one_live.clone()],
+        "the agent cannot launch a shown session: the owner's approval stores one live grant for the shown step"
+    );
+
+    assert_eq!(
+        execute(&mut stand_in, client_session, &shown_step, PLAN_A),
+        Ok(json!({ "valid": true })),
+        "the agent cannot launch a shown session: the shown session's allow-once grant authorises its own use"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "the agent cannot launch a shown session: the shown session's once grant is spent by its one use"
+    );
+
+    // A client launch after both shell sessions is still the shell refusal and
+    // mints no component-3; the granted step stays granted.
+    let after_two = running_agent(&mut stand_in, client_session);
+    assert_eq!(
+        after_two,
+        shell_refusal(),
+        "the agent cannot launch a shown session: a client launch after both shell sessions is the shell refusal"
+    );
+    assert!(
+        !refusal_reason(&after_two).starts_with("bundle already admitted"),
+        "the agent cannot launch a shown session: the client launch after both shell sessions finds no already-admitted bundle"
+    );
+    assert_eq!(
+        capsule_ids(&stand_in),
+        vec!["component-1".to_owned(), "component-2".to_owned()],
+        "the agent cannot launch a shown session: the capsule list holds component-1 and component-2 and no component-3"
+    );
+    for id in [&first, &second] {
+        assert_eq!(
+            {
+                let running = capsule(&stand_in, id);
+                json!({ "status": running["status"], "cause": running["cause"] })
+            },
+            json!({ "status": "running", "cause": "" }),
+            "the agent cannot launch a shown session: {id} stays running with no cause after the refused client launch"
+        );
+    }
+    assert_eq!(
+        record(&stand_in, &first, &shown_step),
+        granted,
+        "the agent cannot launch a shown session: the refused client launch leaves the shown step granted by the shell"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "the agent cannot launch a shown session: the refused client launch leaves the live list empty"
+    );
+
+    // The other shell session can also submit, be granted and spend one use.
+    let other_session = Caller::Client {
+        session_id: "component-2",
+    };
+    let other_step = request(&mut stand_in, other_session, PLAN_A)
+        .expect("the other session's request route stores its plan");
+    assert_eq!(
+        other_step, "request-2",
+        "the agent cannot launch a shown session: the other session's plan is the stand-in's second request"
+    );
+    assert_eq!(
+        approve(&mut stand_in, Caller::Shell, &other_step, "once", &plan_a),
+        Ok(json!({ "success": true })),
+        "the agent cannot launch a shown session: the owner allows the other session's plan once with the hash it saw"
+    );
+    assert_eq!(
+        execute(&mut stand_in, other_session, &other_step, PLAN_A),
+        Ok(json!({ "valid": true })),
+        "the agent cannot launch a shown session: the other shell session's allow-once grant authorises its own use"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "the agent cannot launch a shown session: the other shell session's once grant is spent by its one use"
     );
 }
