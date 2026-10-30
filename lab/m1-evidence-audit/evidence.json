@@ -1,0 +1,476 @@
+{
+  "rule": "A check counts only when its complete journey, refusal evidence and required reviews all pass.",
+  "honest_count": ["A1", "A2", "A8", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "S1"],
+  "base": {
+    "branch": "spike/agent-host",
+    "commit": "62e4aa697052d923bedb98a2c9a62917fc5b0c25"
+  },
+  "sources": {
+    "redteam": {
+      "pr": 294,
+      "ref": "origin/cursor/redteam-m1-c3b0",
+      "path": "lab/redteam-m1/REPORT.md",
+      "state": "draft"
+    },
+    "a1_a8_hardening": {
+      "pr": 301,
+      "ref": "origin/cursor/a1-a8-hardening-85ce",
+      "path": "lab/a1-a8-hardening/LOG.md",
+      "state": "draft"
+    }
+  },
+  "checks": [
+    {
+      "id": "A1",
+      "wording": "Agent logic runs as a WASM component that imports only elastos:bus (no wasi:*), admitted by the Runtime's import allowlist",
+      "verdict": "weak",
+      "merged_prs": ["#3", "#1", "#2"],
+      "draft_prs": ["#301"],
+      "refusal_row": true,
+      "runtime_or_kernel": "merged path is a unit allowlist and a lab probe; the real Runtime admission row lives on draft #301",
+      "skip_counted_as_pass": false,
+      "needs_mac": "no for the unit row and for #301 (Linux). The older agent-conformance probe path uses a macOS throwaway Home.",
+      "reviews": "handoff/reviews/3-fcd27b75.md records verdict not recorded. GitHub review objects on #3 are empty. #3 merged while still draft. #301 has no review.",
+      "why": "The complete journey as worded is Runtime admission of a WASI import. That row is on draft #301, not on merged #3. #3's own cited launch test is untrusted-signer admission, a different check. The unit allowlist holds. Required reviews do not.",
+      "rows": [
+        {
+          "id": "A1-unit-wasi",
+          "kind": "refusal",
+          "path": "elastos/crates/elastos-server/src/component.rs",
+          "marker": "fn rejects_extra_component_import",
+          "also": ["wasi:filesystem/types@0.2.0", "not allowed"],
+          "expected_present": true,
+          "note": "Unit parse of a synthetic component. No Runtime process."
+        },
+        {
+          "id": "A1-lab-probe",
+          "kind": "journey",
+          "path": "lab/agent-conformance/tests/artifact.rs",
+          "marker": "fn probe_imports_only_the_bus",
+          "also": ["fn foreign_and_wrong_version_imports_are_refused", "wasi:cli/environment@0.2.0"],
+          "expected_present": true,
+          "note": "Lab probe import list. Not Runtime admission."
+        },
+        {
+          "id": "A1-draft-301-runtime",
+          "kind": "journey",
+          "path": "lab/a1-a8-hardening/tests/a1_wasi_import.rs",
+          "ref": "origin/cursor/a1-a8-hardening-85ce",
+          "marker": "fn wasi_import_is_refused_at_admission",
+          "also": ["wasi:cli/environment@0.2.0", "is not allowed"],
+          "expected_present": true,
+          "note": "Real elastos serve + elastos run on Linux. Draft PR #301. Unreviewed."
+        },
+        {
+          "id": "A1-review-3",
+          "kind": "review",
+          "path": "examples/agent-host/handoff/reviews/3-fcd27b75.md",
+          "marker": "Verdict:   not recorded",
+          "expected_present": true,
+          "note": "The merged #3 review record does not hold a PASS."
+        }
+      ]
+    },
+    {
+      "id": "A2",
+      "wording": "Session journal written through the real Runtime bridge, revision-checked, resumable by head hash",
+      "verdict": "weak",
+      "merged_prs": ["#20", "#8", "#9"],
+      "draft_prs": [],
+      "refusal_row": true,
+      "runtime_or_kernel": "e2e journey is a real Runtime bridge test marked #[ignore]; stale-revision refusal is unit-only",
+      "skip_counted_as_pass": false,
+      "needs_mac": "no. The ignored e2e needs the guest wasm build (examples/agent-host/run-e2e.sh), not a Mac kernel.",
+      "reviews": "handoff/reviews/8-6c232136.md, 9-9cd7f09a.md and 20-e50544d2.md each record Codex PASS. GitHub review objects are empty.",
+      "why": "The named e2e journey exists and is ignored, so a default cargo test run does not execute it. The revision check is a separate unit test, not that journey. Reviews exist only as handoff files, not as GitHub review objects.",
+      "rows": [
+        {
+          "id": "A2-e2e-bridge",
+          "kind": "journey",
+          "path": "elastos/crates/elastos-server/src/runtime.rs",
+          "marker": "async fn the_agent_host_writes_and_reads_its_journal_through_the_real_bridge",
+          "also": ["#[ignore = \"loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh\"]"],
+          "expected_present": true,
+          "note": "Ignored. Not a silent skip: cargo reports ignored, not ok."
+        },
+        {
+          "id": "A2-unit-stale-revision",
+          "kind": "refusal",
+          "path": "elastos/crates/elastos-server/src/resource_bridge.rs",
+          "marker": "async fn a_stale_journal_revision_is_refused_and_the_stored_journal_is_kept",
+          "expected_present": true,
+          "note": "Unit refusal. Not the e2e journey."
+        },
+        {
+          "id": "A2-review-20",
+          "kind": "review",
+          "path": "examples/agent-host/handoff/reviews/20-e50544d2.md",
+          "marker": "Verdict:   PASS",
+          "expected_present": true,
+          "note": "One Codex PASS on the e2e PR. No second-family GitHub review object."
+        }
+      ]
+    },
+    {
+      "id": "A8",
+      "wording": "Host secrets denied: an agent's read of a host-secret fixture in the throwaway home is refused with a reason",
+      "verdict": "weak",
+      "merged_prs": ["#179"],
+      "draft_prs": ["#301"],
+      "refusal_row": true,
+      "runtime_or_kernel": "#179 uses a real Runtime on a macOS throwaway Home. #301 repeats a Runtime refusal on Linux with an injected guest. Red-team FM-A8: the same outcome for an ordinary undeclared file.",
+      "skip_counted_as_pass": false,
+      "needs_mac": "yes for #179 (ThrowawayHome::data_dir returns 'throwaway Homes require macOS'). #301 ran on Linux. probe::skipped panics, so a Linux #179 run is not an ok skip.",
+      "reviews": "#179 body says 'reviews PASS: claude' only. GitHub review objects empty. #301 unreviewed.",
+      "why": "The row is literally true. Red-team FM-A8 on #294 shows the asserted refusal is the generic manifest bound, not host-file protection. #301's shipped-bytes row is BLOCKED (AC-002-ARGS). One claimed reviewer.",
+      "rows": [
+        {
+          "id": "A8-ac-host-key",
+          "kind": "journey",
+          "path": "lab/agent-conformance/tests/effects.rs",
+          "marker": "fn host_key_read_is_refused",
+          "also": ["mod host_key"],
+          "expected_present": true,
+          "note": "Calls host_key::exercise. Needs macOS ThrowawayHome."
+        },
+        {
+          "id": "A8-skip-panic",
+          "kind": "skip",
+          "path": "lab/agent-conformance/tests/common/probe.rs",
+          "marker": "pub fn skipped(reason: &str) -> !",
+          "also": ["panic!(\"probe could not run\")"],
+          "expected_present": true,
+          "note": "A skip here is a panic, not an ok pass."
+        },
+        {
+          "id": "A8-redteam-fm-a8",
+          "kind": "attack",
+          "path": "lab/redteam-m1/REPORT.md",
+          "ref": "origin/cursor/redteam-m1-c3b0",
+          "marker": "#179 cx-agent-conformance 017",
+          "also": ["**weak**", "an-ordinary-undeclared-file.txt"],
+          "expected_present": true,
+          "note": "Draft #294. Same outcome line when the fake key is replaced by an ordinary undeclared file."
+        },
+        {
+          "id": "A8-draft-301-runtime",
+          "kind": "refusal",
+          "path": "lab/a1-a8-hardening/tests/a8_agent_host_host_key.rs",
+          "ref": "origin/cursor/a1-a8-hardening-85ce",
+          "marker": "fn agent_host_host_key_read_is_refused",
+          "also": ["capsule manifest does not declare authority"],
+          "expected_present": true,
+          "note": "Injected guest on a real Linux Runtime. Shipped-bytes row BLOCKED."
+        },
+        {
+          "id": "A8-review-179",
+          "kind": "review",
+          "path": "lab/m1-evidence-audit/reviews-excerpt.md",
+          "marker": "#179 reviews PASS: claude only; GitHub review objects empty",
+          "expected_present": true,
+          "note": "Recorded from gh pr view 179 on 26 Oct 2026."
+        }
+      ]
+    },
+    {
+      "id": "C1",
+      "wording": "did-provider refuses to start without its storage root",
+      "verdict": "weak",
+      "merged_prs": ["#57"],
+      "draft_prs": [],
+      "refusal_row": true,
+      "runtime_or_kernel": "provider unit test. No Runtime process. No kernel profile.",
+      "skip_counted_as_pass": false,
+      "needs_mac": "no",
+      "reviews": "#57 body says 'reviews PASS: claude,codex'. GitHub review objects empty. No handoff review file.",
+      "why": "The provider refusal row exists and is not a skip. The complete rule still needs reviews that can be pointed to. A PR-body string is not a review object.",
+      "rows": [
+        {
+          "id": "C1-init-requires-storage",
+          "kind": "refusal",
+          "path": "capsules/did-provider/src/main.rs",
+          "marker": "fn init_requires_storage_without_key",
+          "also": ["STORAGE_PATH_NOT_SET", "fn empty_storage_path_is_refused", "fn relative_storage_is_refused"],
+          "expected_present": true,
+          "note": "In-process Init. Falsifier described in the comment, not a committed CAUGHT receipt."
+        },
+        {
+          "id": "C1-review-57",
+          "kind": "review",
+          "path": "lab/m1-evidence-audit/reviews-excerpt.md",
+          "marker": "#57 reviews PASS: claude,codex; GitHub review objects empty",
+          "expected_present": true
+        }
+      ]
+    },
+    {
+      "id": "C2",
+      "wording": "A denied nickname read reports a storage error, not absence (store.rs:234 try_exists)",
+      "verdict": "weak",
+      "merged_prs": ["#65", "#66"],
+      "draft_prs": [],
+      "refusal_row": true,
+      "runtime_or_kernel": "identity crate unit test plus a did-provider unit test. No Runtime. Unix permission bit only.",
+      "skip_counted_as_pass": false,
+      "needs_mac": "no. The store test is cfg(unix).",
+      "reviews": "#65 and #66 bodies say 'reviews PASS: claude,codex'. GitHub review objects empty.",
+      "why": "The refusal row exists. Reviews are body strings only.",
+      "rows": [
+        {
+          "id": "C2-store-permission",
+          "kind": "refusal",
+          "path": "elastos/crates/elastos-identity/src/store.rs",
+          "marker": "fn nickname_metadata_change_reports_storage_error",
+          "also": ["PermissionDenied", "not absence"],
+          "expected_present": true
+        },
+        {
+          "id": "C2-provider-nickname",
+          "kind": "journey",
+          "path": "capsules/did-provider/src/main.rs",
+          "marker": "fn init_reports_nickname_read_error",
+          "expected_present": true
+        },
+        {
+          "id": "C2-review-65",
+          "kind": "review",
+          "path": "lab/m1-evidence-audit/reviews-excerpt.md",
+          "marker": "#65 reviews PASS: claude,codex; GitHub review objects empty",
+          "expected_present": true
+        }
+      ]
+    },
+    {
+      "id": "C3",
+      "wording": "did-provider runs under its own confine.sb; outside writes and reads denied with a reason",
+      "verdict": "weak",
+      "merged_prs": ["#66"],
+      "draft_prs": ["#294"],
+      "refusal_row": true,
+      "runtime_or_kernel": "macOS sandbox-exec profile tests. Runtime does not apply confine.sb (B3 still open).",
+      "skip_counted_as_pass": true,
+      "needs_mac": "yes. sandbox-exec. On Linux the tests print SKIP and return; cargo reports ok.",
+      "reviews": "#66 body says 'reviews PASS: claude,codex'. GitHub review objects empty.",
+      "why": "The journey needs a Mac kernel. Linux runs count skips as passes (red-team FM-C5). Nested SBPL forms pass the source contract check (FM-C1). The Runtime does not load this profile.",
+      "rows": [
+        {
+          "id": "C3-outside-write",
+          "kind": "refusal",
+          "path": "capsules/did-provider/tests/confine.rs",
+          "marker": "fn outside_write_denied",
+          "also": ["if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {"],
+          "expected_present": true
+        },
+        {
+          "id": "C3-outside-read",
+          "kind": "refusal",
+          "path": "capsules/did-provider/tests/confine.rs",
+          "marker": "fn outside_read_denied",
+          "expected_present": true
+        },
+        {
+          "id": "C3-skip-gate",
+          "kind": "skip",
+          "path": "capsules/did-provider/tests/confine.rs",
+          "marker": "the profile was not exercised on this machine",
+          "also": ["fn sandbox_available"],
+          "expected_present": true,
+          "note": "Ok(false) prints SKIP and returns. cargo reports ok."
+        },
+        {
+          "id": "C3-review-66",
+          "kind": "review",
+          "path": "lab/m1-evidence-audit/reviews-excerpt.md",
+          "marker": "#66 reviews PASS: claude,codex; GitHub review objects empty",
+          "expected_present": true
+        }
+      ]
+    },
+    {
+      "id": "C4",
+      "wording": "verify_did_recovery runs under the profile, one path",
+      "verdict": "weak",
+      "merged_prs": ["#67"],
+      "draft_prs": ["#294"],
+      "refusal_row": true,
+      "runtime_or_kernel": "same macOS sandbox-exec gate as C3",
+      "skip_counted_as_pass": true,
+      "needs_mac": "yes",
+      "reviews": "#67 body says 'reviews PASS: claude,codex'. GitHub review objects empty.",
+      "why": "Same skip-as-pass and Runtime-half gap as C3. The named test exists.",
+      "rows": [
+        {
+          "id": "C4-verify-under-profile",
+          "kind": "journey",
+          "path": "capsules/did-provider/tests/confine.rs",
+          "marker": "fn verify_did_recovery_under_profile",
+          "also": ["invalid_signature"],
+          "expected_present": true
+        },
+        {
+          "id": "C4-skip-gate",
+          "kind": "skip",
+          "path": "capsules/did-provider/tests/confine.rs",
+          "marker": "fn sandbox_available",
+          "expected_present": true
+        },
+        {
+          "id": "C4-review-67",
+          "kind": "review",
+          "path": "lab/m1-evidence-audit/reviews-excerpt.md",
+          "marker": "#67 reviews PASS: claude,codex; GitHub review objects empty",
+          "expected_present": true
+        }
+      ]
+    },
+    {
+      "id": "C5",
+      "wording": "wallet-provider refuses to start without its wallet directory",
+      "verdict": "weak",
+      "merged_prs": ["#62"],
+      "draft_prs": [],
+      "refusal_row": true,
+      "runtime_or_kernel": "provider unit test. No Runtime. No kernel profile.",
+      "skip_counted_as_pass": false,
+      "needs_mac": "no",
+      "reviews": "#62 body says 'reviews PASS: claude,codex'. GitHub review objects empty.",
+      "why": "Same shape as C1: the provider refusal holds as a unit row; reviews are body strings only.",
+      "rows": [
+        {
+          "id": "C5-missing-storage",
+          "kind": "refusal",
+          "path": "capsules/wallet-provider/src/tests/storage_root.rs",
+          "marker": "fn missing_storage_root_is_refused",
+          "also": ["STORAGE_PATH_NOT_SET", "fn empty_storage_root_is_refused"],
+          "expected_present": true
+        },
+        {
+          "id": "C5-review-62",
+          "kind": "review",
+          "path": "lab/m1-evidence-audit/reviews-excerpt.md",
+          "marker": "#62 reviews PASS: claude,codex; GitHub review objects empty",
+          "expected_present": true
+        }
+      ]
+    },
+    {
+      "id": "C6",
+      "wording": "wallet-provider runs under its profile, with real account and key writes under the root",
+      "verdict": "weak",
+      "merged_prs": ["#63", "#69"],
+      "draft_prs": ["#294"],
+      "refusal_row": true,
+      "runtime_or_kernel": "macOS sandbox-exec for the profile half. wallet_operations_stay_under_root is an in-process unit test.",
+      "skip_counted_as_pass": true,
+      "needs_mac": "yes for confined_outside_write_is_denied and confined_outside_read_is_denied",
+      "reviews": "#63 and #69 bodies say 'reviews PASS: claude,codex'. GitHub review objects empty.",
+      "why": "Profile tests skip-as-pass on Linux (FM-C5). In-process stay-under-root does not prove the kernel profile. Runtime does not apply the wallet profile.",
+      "rows": [
+        {
+          "id": "C6-outside-write",
+          "kind": "refusal",
+          "path": "capsules/wallet-provider/tests/confine.rs",
+          "marker": "fn confined_outside_write_is_denied",
+          "expected_present": true
+        },
+        {
+          "id": "C6-ops-under-root",
+          "kind": "journey",
+          "path": "capsules/wallet-provider/src/tests/storage_root.rs",
+          "marker": "fn wallet_operations_stay_under_root",
+          "expected_present": true,
+          "note": "In-process. Not sandbox-exec."
+        },
+        {
+          "id": "C6-skip-gate",
+          "kind": "skip",
+          "path": "capsules/wallet-provider/tests/confine.rs",
+          "marker": "fn sandbox_available",
+          "also": ["the profile was not exercised on this machine"],
+          "expected_present": true
+        },
+        {
+          "id": "C6-review-63",
+          "kind": "review",
+          "path": "lab/m1-evidence-audit/reviews-excerpt.md",
+          "marker": "#63 reviews PASS: claude,codex; GitHub review objects empty",
+          "expected_present": true
+        }
+      ]
+    },
+    {
+      "id": "C7",
+      "wording": "Model provider has its own confine.sb in the shared shape, proven by a sandbox test and falsifier",
+      "verdict": "weak",
+      "merged_prs": ["#88", "#112"],
+      "draft_prs": ["#294"],
+      "refusal_row": true,
+      "runtime_or_kernel": "macOS sandbox-exec. Runtime uses its own inline model policy, not this confine.sb.",
+      "skip_counted_as_pass": true,
+      "needs_mac": "yes",
+      "reviews": "#88 and #112 bodies say 'reviews PASS: codex' only. GitHub review objects empty.",
+      "why": "Skip-as-pass on Linux (FM-C5, FM-W1 style). One claimed reviewer. Falsifiers live in CONFINEMENT.md / confine-falsifiers.json; this audit does not replay them.",
+      "rows": [
+        {
+          "id": "C7-ops-under-profile",
+          "kind": "journey",
+          "path": "capsules/model-provider/tests/confine/main.rs",
+          "marker": "fn model_provider_ops_under_profile",
+          "expected_present": true
+        },
+        {
+          "id": "C7-outside-write",
+          "kind": "refusal",
+          "path": "capsules/model-provider/tests/confine/main.rs",
+          "marker": "fn model_outside_write_denied",
+          "also": ["fn model_outside_create_reports_access_denied"],
+          "expected_present": true
+        },
+        {
+          "id": "C7-skip-gate",
+          "kind": "skip",
+          "path": "capsules/model-provider/tests/confine/main.rs",
+          "marker": "fn sandbox_available",
+          "expected_present": true
+        },
+        {
+          "id": "C7-review-88",
+          "kind": "review",
+          "path": "lab/m1-evidence-audit/reviews-excerpt.md",
+          "marker": "#88 reviews PASS: codex only; GitHub review objects empty",
+          "expected_present": true
+        }
+      ]
+    },
+    {
+      "id": "S1",
+      "wording": "Rong's principles review grades every lane B or better",
+      "verdict": "weak",
+      "merged_prs": [],
+      "draft_prs": [],
+      "refusal_row": false,
+      "runtime_or_kernel": "none. This is a review booking, not a Runtime or kernel journey.",
+      "skip_counted_as_pass": false,
+      "needs_mac": "no",
+      "reviews": "Booked DONE by Flint 26 Oct 21:10 for seven running lanes. The named review file is not in this repository. Stopped lanes were not graded.",
+      "why": "The wording says every lane. The booking covers seven running lanes and names a re-check. The source review file rong-20261026-1920.md is absent here, so the grade list cannot be re-read.",
+      "rows": [
+        {
+          "id": "S1-rong-file",
+          "kind": "review",
+          "path": "rong-review/rong-20261026-1920.md",
+          "marker": "B or better",
+          "expected_present": false,
+          "note": "Cited by the milestone canvas. Not in this repository."
+        },
+        {
+          "id": "S1-booking-note",
+          "kind": "note",
+          "path": "lab/m1-evidence-audit/reviews-excerpt.md",
+          "marker": "S1 booked DONE by Flint 26 Oct 21:10 for 7 running lanes; rong-20261026-1920.md is not in this repository",
+          "expected_present": true
+        }
+      ]
+    }
+  ]
+}
