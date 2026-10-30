@@ -250,8 +250,15 @@ use std::process::Command;
 /// `src/main.rs` call after `create_wallet_dir_durable` answers, and WP180,
 /// which canonicalizes the wallet directory there so a symlinked parent passes
 /// the inspection; both are CAUGHT on the Mac by the two storage-root tests
-/// task 150 adds.
-const EXPECTED_FALSIFIERS: usize = 168;
+/// task 150 adds. Task 151 adds WP181, which makes the one field reader honour
+/// no `serde` attribute, and WP182, which makes the Inputs compare tolerate a
+/// cell that stops before a declared field; both are CAUGHT on the Mac by
+/// `operations_table_row_check_refuses_each_bad_table`.
+/// WP183 through WP197 exercise character and raw-identifier boundaries,
+/// quoting, order, malformed cells, and source or arm refusals in that test.
+/// WP198 removes the field-list reader's balance refusal, so a shift expression
+/// hides the field after it and the same test fails on its shift case.
+const EXPECTED_FALSIFIERS: usize = 186;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

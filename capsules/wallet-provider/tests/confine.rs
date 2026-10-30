@@ -10091,6 +10091,7 @@ const WALLET_OPERATION_ARM: &str = "WalletProviderOperationV2::";
 /// One operations table row, reduced to the cells the row check reads.
 struct OperationsRow {
     operation: String,
+    inputs: String,
     right: String,
     macos: String,
     linux: String,
@@ -10200,6 +10201,7 @@ fn operations_table_rows(
         }
         rows.push(OperationsRow {
             operation: cells[0].to_string(),
+            inputs: cells[1].to_string(),
             right: cells[3].to_string(),
             macos: cells[5].to_string(),
             linux: cells[6].to_string(),
@@ -10254,6 +10256,532 @@ fn dispatch_arm_variants(source: &str, signature: &str, arm_type: &str) -> Optio
         }
     }
     body.then_some(variants)
+}
+
+/// The body of the `enum <name>` or `struct <name>` declaration in `source`,
+/// or `None` when `source` holds no such declaration.
+///
+/// The declaration is a line whose qualifier words precede `enum <name> {` or
+/// `struct <name> {`, and whose text after the brace is empty, so a use of the
+/// name elsewhere does not count. The body runs from that `{` to the `}` that
+/// closes it, and a brace inside a string literal does not count. Comments are
+/// removed before selecting the declaration or finding its closing brace. A
+/// declaration spelled inside a string literal, including one that spans lines,
+/// is text in that string and never the declaration.
+fn item_body(source: &str, name: &str, kind: &str) -> Option<String> {
+    let source = without_comments(source);
+    let declaration = format!("{kind} {name} {{");
+    let mut from = 0;
+    while let Some(offset) = source[from..].find(&declaration) {
+        let start = from + offset;
+        from = start + declaration.len();
+        if inside_string(&source, start) {
+            continue;
+        }
+        let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
+        if !declaration_qualifier(source[line_start..start].trim()) {
+            continue;
+        }
+        let line_end = source[from..]
+            .find('\n')
+            .map_or(source.len(), |index| from + index);
+        if !source[from..line_end].trim().is_empty() {
+            continue;
+        }
+        let body = &source[from..];
+        return declaration_end(body).map(|end| body[..end].to_string());
+    }
+    None
+}
+
+/// Whether the text before a declaration's name on its line can precede an
+/// item: nothing, or the qualifier words `pub`, a `pub(...)` visibility, and
+/// the item kinds `struct` and `enum`.
+fn declaration_qualifier(text: &str) -> bool {
+    text.split_whitespace()
+        .all(|word| word == "pub" || word.starts_with("pub(") || matches!(word, "struct" | "enum"))
+}
+
+/// One declaration's wire field names, or the reason the declaration cannot be
+/// read.
+#[derive(Debug, PartialEq)]
+enum WireFieldNames {
+    /// The source holds no such declaration.
+    NoDeclaration,
+    /// The declaration's field list cannot be read, with its reason.
+    Unsupported(&'static str),
+    /// The declaration's wire field names, in declaration order.
+    Names(Vec<String>),
+}
+
+/// The wire field names of one enum arm or struct `item` in `source`, in
+/// declaration order, or why they cannot be read.
+///
+/// A declaration starts at a line whose items before `item` are qualifier words
+/// and whose text after it is `{` or `,`; a longer name that merely starts with
+/// `item`, and a name that sits inside another item or a string, are other
+/// items. A declaration with no fields, such as `Status,`, returns an empty
+/// list, so a missing item and an item with no fields stay apart. Inside the
+/// braces every field is one comma-separated item, and the active
+/// `#[serde(rename = "...")]` on that item names the wire field; every other
+/// field keeps its Rust name without a raw-identifier `r#` prefix. A trailing
+/// comma is optional. The source's
+/// comments are read as nothing, so no comment names an item or a field, and a
+/// declaration spelled inside a string literal, including one that spans lines,
+/// is text in that string and never the declaration. A field list whose
+/// delimiters do not balance is `Unsupported` with its reason, never a shorter
+/// list, so an unreadable declaration cannot pass by naming fewer fields.
+fn wire_field_names(source: &str, item: &str) -> WireFieldNames {
+    let source = without_comments(source);
+    let source = source.as_str();
+    let mut from = 0;
+    while let Some(offset) = source[from..].find(item) {
+        let start = from + offset;
+        from = start + item.len();
+        if inside_string(source, start) {
+            continue;
+        }
+        let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
+        if !declaration_qualifier(source[line_start..start].trim()) {
+            continue;
+        }
+        let rest = &source[from..];
+        let head = rest.trim_start();
+        let after_item = from + (rest.len() - head.len());
+        match head.chars().next() {
+            Some('{') => {
+                let body = &source[after_item + 1..];
+                let Some(end) = declaration_end(body) else {
+                    return WireFieldNames::NoDeclaration;
+                };
+                return match field_names(&body[..end]) {
+                    Ok(fields) => WireFieldNames::Names(fields),
+                    Err(reason) => WireFieldNames::Unsupported(reason),
+                };
+            }
+            Some(',') => return WireFieldNames::Names(Vec::new()),
+            _ => continue,
+        }
+    }
+    WireFieldNames::NoDeclaration
+}
+
+/// The wire names of the field items of one declaration body, or
+/// `UNBALANCED_FIELD_LIST` when the body's delimiters do not balance.
+fn field_names(body: &str) -> Result<Vec<String>, &'static str> {
+    Ok(declaration_items(body)?
+        .into_iter()
+        .filter(|field| !field.trim().is_empty())
+        .map(field_wire_name)
+        .collect())
+}
+
+/// Whether `index`, a byte offset into `text`, falls inside a `"..."` string
+/// literal, so text a string holds never selects a declaration.
+///
+/// The scan starts at the beginning of `text` and counts quote characters the
+/// way `without_comments` does: a `"` opens a string, the matching unescaped
+/// `"` closes it, and a backslash escapes the character after it, so an escaped
+/// quote keeps the string open. Text at `index` itself is not read, so the
+/// opening quote of a string is outside it. This is the one boundary test for
+/// both item and field selection (P10).
+fn inside_string(text: &str, index: usize) -> bool {
+    let mut in_string = false;
+    let mut quote_escape = false;
+    for (at, character) in text.char_indices() {
+        if at >= index {
+            break;
+        }
+        if in_string {
+            if character == '"' && !quote_escape {
+                in_string = false;
+            }
+            quote_escape = character == '\\' && !quote_escape;
+            continue;
+        }
+        if character == '"' {
+            in_string = true;
+            quote_escape = false;
+        }
+    }
+    in_string
+}
+
+/// `text` with every `//` line comment and every `/* ... */` block comment
+/// removed, and Rust strings decoded and quoted in ordinary escaped form.
+/// Normalizing raw strings here lets every declaration scanner use the same
+/// quoted-string boundary, including raw strings holding quotes or backslashes.
+/// Character and byte-character literals are quoted as text at this same
+/// boundary, so their punctuation cannot close a declaration or split a field.
+/// Lifetime apostrophes stay in the source.
+/// A `//` or `/*` inside a string literal stays part of that string, a
+/// line comment ends at its newline and keeps it, so the items around it keep
+/// their own lines, and a block comment keeps its newlines and one space so the
+/// tokens around it stay apart. Block comments can nest.
+fn without_comments(text: &str) -> String {
+    let mut kept = String::with_capacity(text.len());
+    let mut characters = text.char_indices().peekable();
+    while let Some((index, character)) = characters.next() {
+        let rest = &text[index..];
+        if let Some(length) = rust_character_literal_length(rest) {
+            kept.push_str(&format!("{:?}", &rest[..length]));
+            while characters
+                .peek()
+                .is_some_and(|(at, _)| *at < index + length)
+            {
+                characters.next();
+            }
+            continue;
+        }
+        if character == '"'
+            || (character == 'r' && rest[1..].trim_start_matches('#').starts_with('"'))
+        {
+            let (value, length) = rust_string_literal(rest)
+                .unwrap_or_else(|reason| panic!("wire field reader: {reason}"));
+            kept.push_str(&format!("{value:?}"));
+            while characters
+                .peek()
+                .is_some_and(|(at, _)| *at < index + length)
+            {
+                characters.next();
+            }
+            continue;
+        }
+        if character == '/' && characters.peek().is_some_and(|(_, next)| *next == '/') {
+            for (_, next) in characters.by_ref() {
+                if next == '\n' {
+                    kept.push('\n');
+                    break;
+                }
+            }
+            continue;
+        }
+        if character == '/' && characters.peek().is_some_and(|(_, next)| *next == '*') {
+            characters.next();
+            let mut depth = 1usize;
+            kept.push(' ');
+            while let Some((_, next)) = characters.next() {
+                if next == '/' && characters.peek().is_some_and(|(_, next)| *next == '*') {
+                    characters.next();
+                    depth += 1;
+                } else if next == '*' && characters.peek().is_some_and(|(_, next)| *next == '/') {
+                    characters.next();
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                } else if next == '\n' {
+                    kept.push('\n');
+                }
+            }
+            continue;
+        }
+        kept.push(character);
+    }
+    kept
+}
+
+/// The byte length of a character literal, or `None` for another token,
+/// including a lifetime. Only literals starting with a backslash need a scan
+/// for an unescaped closing apostrophe; a plain character has exactly one
+/// scalar before its closing apostrophe. Byte characters use this same reader
+/// after their `b` prefix. Escaped punctuation stays inside the literal.
+fn rust_character_literal_length(text: &str) -> Option<usize> {
+    let body = text.strip_prefix('\'')?;
+    let first = body.chars().next()?;
+    if first != '\\' {
+        return body[first.len_utf8()..]
+            .starts_with('\'')
+            .then_some(first.len_utf8() + 2);
+    }
+    let mut escaped = false;
+    for (index, character) in body.char_indices() {
+        if character == '\'' && !escaped {
+            return Some(index + 2);
+        }
+        escaped = character == '\\' && !escaped;
+    }
+    panic!("wire field reader: unterminated Rust character escape");
+}
+
+/// Decode one Rust string literal and return its byte length. Ordinary strings
+/// support Rust's simple, ASCII and Unicode escapes and line continuations;
+/// raw strings end at their matching quote and hash delimiter. A malformed or
+/// unsupported literal has an explicit reason instead of supplying a wire name.
+fn rust_string_literal(text: &str) -> Result<(String, usize), &'static str> {
+    if let Some(raw) = text.strip_prefix('r') {
+        let hashes = raw.len() - raw.trim_start_matches('#').len();
+        let body = raw[hashes..]
+            .strip_prefix('"')
+            .ok_or("expected a Rust string literal")?;
+        let closing = format!("\"{}", "#".repeat(hashes));
+        let end = body.find(&closing).ok_or("unterminated raw Rust string")?;
+        return Ok((
+            body[..end].replace("\r\n", "\n"),
+            2 + hashes + end + closing.len(),
+        ));
+    }
+    let body = text
+        .strip_prefix('"')
+        .ok_or("expected a Rust string literal")?;
+    let mut characters = body.char_indices().peekable();
+    let mut value = String::new();
+    while let Some((index, character)) = characters.next() {
+        match character {
+            '"' => return Ok((value, index + 2)),
+            '\r' if characters.peek().is_some_and(|(_, next)| *next == '\n') => {
+                characters.next();
+                value.push('\n');
+            }
+            '\\' => {
+                let (_, escape) = characters.next().ok_or("unterminated Rust string escape")?;
+                match escape {
+                    '\\' | '"' | '\'' => value.push(escape),
+                    'n' => value.push('\n'),
+                    'r' => value.push('\r'),
+                    't' => value.push('\t'),
+                    '0' => value.push('\0'),
+                    'x' => {
+                        let mut byte = 0;
+                        for _ in 0..2 {
+                            let digit = characters
+                                .next()
+                                .and_then(|(_, digit)| digit.to_digit(16))
+                                .ok_or("invalid Rust ASCII escape")?;
+                            byte = byte * 16 + digit;
+                        }
+                        if byte > 0x7f {
+                            return Err("Rust ASCII escape exceeds 0x7f");
+                        }
+                        value.push(char::from_u32(byte).unwrap());
+                    }
+                    'u' => {
+                        if characters.next().map(|(_, next)| next) != Some('{') {
+                            return Err("invalid Rust Unicode escape");
+                        }
+                        let mut scalar = 0;
+                        let mut digits = 0;
+                        loop {
+                            let (_, digit) = characters
+                                .next()
+                                .ok_or("unterminated Rust Unicode escape")?;
+                            match digit {
+                                '}' if digits > 0 => break,
+                                '_' if digits > 0 => continue,
+                                _ => {
+                                    let digit = digit
+                                        .to_digit(16)
+                                        .filter(|_| digits < 6)
+                                        .ok_or("invalid Rust Unicode escape")?;
+                                    scalar = scalar * 16 + digit;
+                                    digits += 1;
+                                }
+                            }
+                        }
+                        value.push(char::from_u32(scalar).ok_or("invalid Rust Unicode scalar")?);
+                    }
+                    '\n' | '\r' => {
+                        if escape == '\r' && characters.next().map(|(_, next)| next) != Some('\n') {
+                            return Err("invalid Rust line continuation");
+                        }
+                        while characters
+                            .peek()
+                            .is_some_and(|(_, next)| matches!(next, ' ' | '\t' | '\n' | '\r'))
+                        {
+                            characters.next();
+                        }
+                    }
+                    _ => return Err("unsupported Rust string escape"),
+                }
+            }
+            _ => value.push(character),
+        }
+    }
+    Err("unterminated Rust string literal")
+}
+
+/// The index of the `}` that closes a body whose opening brace sits directly
+/// before `text`, or `None` when `text` ends first. A brace inside a string
+/// literal does not count. `without_comments` normalizes character and raw
+/// string literals to this quoted form before the scan.
+fn declaration_end(text: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut in_string = false;
+    let mut quote_escape = false;
+    for (index, character) in text.char_indices() {
+        if in_string {
+            if character == '"' && !quote_escape {
+                in_string = false;
+            }
+            quote_escape = character == '\\' && !quote_escape;
+            continue;
+        }
+        match character {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The one reason a field list whose delimiters do not balance is refused.
+const UNBALANCED_FIELD_LIST: &str =
+    "unbalanced parentheses, brackets, braces or angle brackets in the field list";
+
+/// The comma-separated items of one declaration body, split at the commas
+/// outside parentheses, brackets, braces and angle brackets, so a field type
+/// such as `Option<String>` and an attribute such as
+/// `#[serde(default, skip_serializing_if = "x")]` each stay one item. Delimiters
+/// inside a string literal, including after an escaped quote, do not count.
+///
+/// A body whose delimiters do not balance is refused with
+/// `UNBALANCED_FIELD_LIST`, never read. An operator such as the `<<` of
+/// `[u8; 1 << 2]` is not a delimiter, so it opens one that never closes and
+/// every later field would join the item before it, which would drop a required
+/// field from the list.
+fn declaration_items(text: &str) -> Result<Vec<&str>, &'static str> {
+    let mut items = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    let mut in_string = false;
+    let mut quote_escape = false;
+    for (index, character) in text.char_indices() {
+        if in_string {
+            if character == '"' && !quote_escape {
+                in_string = false;
+            }
+            quote_escape = character == '\\' && !quote_escape;
+            continue;
+        }
+        match character {
+            '"' => in_string = true,
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' | ']' | '}' | '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                items.push(&text[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return Err(UNBALANCED_FIELD_LIST);
+    }
+    items.push(&text[start..]);
+    Ok(items)
+}
+
+/// The wire name of one field item: the `rename = "..."` of the active
+/// `#[serde(...)]` attribute the field carries, else the name it declares
+/// before its `:`, without its leading attributes and without a `pub`
+/// qualifier or raw-identifier prefix.
+///
+/// Only a `serde` attribute that stands before the field's name is read, and
+/// only its `rename` entry supplies the decoded Rust string. Spacing around
+/// `=` is immaterial; text inside another entry's value stays in that value.
+/// Split serialize/deserialize renames and expressions are refused explicitly.
+fn field_wire_name(field: &str) -> String {
+    let mut declared = field.trim_start();
+    let mut renamed = None;
+    while let Some(attribute) = declared.strip_prefix('#') {
+        let attributes = attribute
+            .trim_start()
+            .strip_prefix('[')
+            .expect("wire field reader: expected a bracketed field attribute");
+        let end =
+            attribute_end(attributes).expect("wire field reader: unterminated field attribute");
+        if is_serde_attribute(&attributes[..end]) {
+            let (_, arguments) = attributes[..end].split_once('(').unwrap();
+            let arguments = arguments
+                .trim_end()
+                .strip_suffix(')')
+                .expect("wire field reader: unterminated serde attribute");
+            for entry in declaration_items(arguments)
+                .unwrap_or_else(|reason| panic!("wire field reader: serde attribute: {reason}"))
+            {
+                let entry = entry.trim();
+                let entry = entry.strip_prefix("r#").unwrap_or(entry);
+                let key_end = entry
+                    .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                    .unwrap_or(entry.len());
+                if &entry[..key_end] != "rename" {
+                    continue;
+                }
+                let literal = entry[key_end..].trim_start().strip_prefix('=')
+                    .expect("wire field reader: unsupported serde rename syntax; expected rename = <Rust string literal>")
+                    .trim_start();
+                let (name, length) = rust_string_literal(literal)
+                    .unwrap_or_else(|reason| panic!("wire field reader: serde rename: {reason}"));
+                assert!(
+                    literal[length..].trim().is_empty(),
+                    "wire field reader: unsupported tokens after serde rename string"
+                );
+                assert!(
+                    renamed.replace(name).is_none(),
+                    "wire field reader: duplicate serde rename"
+                );
+            }
+        }
+        declared = attributes[end + 1..].trim_start();
+    }
+    if let Some(name) = renamed {
+        return name;
+    }
+    let name = declared
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .last()
+        .unwrap_or_default();
+    name.strip_prefix("r#").unwrap_or(name).to_string()
+}
+
+/// Whether the text of one attribute, after its `#[`, is `serde(...)`. A longer
+/// path such as `serde_with(...)` is another attribute.
+fn is_serde_attribute(attribute: &str) -> bool {
+    let attribute = attribute.trim_start();
+    let attribute = attribute.strip_prefix("r#").unwrap_or(attribute);
+    attribute
+        .trim_start()
+        .strip_prefix("serde")
+        .is_some_and(|rest| rest.trim_start().starts_with('('))
+}
+
+/// The index of the `]` that closes the attribute whose text follows `#[`, or
+/// `None` when the attribute ends first.
+fn attribute_end(text: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut in_string = false;
+    let mut quote_escape = false;
+    for (index, character) in text.char_indices() {
+        if in_string {
+            if character == '"' && !quote_escape {
+                in_string = false;
+            }
+            quote_escape = character == '\\' && !quote_escape;
+            continue;
+        }
+        match character {
+            '"' => in_string = true,
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Every problem with one table's row set, each naming the document and the row
@@ -10399,6 +10927,207 @@ fn row_set_order_problems(
     problems
 }
 
+/// One item of an Inputs cell: its name, and whether the cell wrote that name
+/// as a backticked span (`true`) or as a bare word (`false`).
+#[derive(Debug, PartialEq)]
+struct InputsItem {
+    name: String,
+    quoted: bool,
+}
+
+/// The items of one Inputs cell, or `None` when the cell is not a
+/// comma-separated list of names.
+///
+/// An item is one backticked span or one bare word, and each item records
+/// which of the two the cell wrote. A cell holding `(` or `)`, an empty item
+/// and an unterminated backtick span each return `None`, and the rule turns
+/// every `None` into a named refusal, never a pass.
+fn input_items(cell: &str) -> Option<Vec<InputsItem>> {
+    if cell.contains(['(', ')']) {
+        return None;
+    }
+    let mut items = Vec::new();
+    for item in cell.split(',') {
+        let item = item.trim();
+        let quoted = item.starts_with('`');
+        let name = if quoted {
+            item.strip_prefix('`')?.strip_suffix('`')?
+        } else {
+            item
+        };
+        if name.is_empty() || name.contains('`') {
+            return None;
+        }
+        items.push(InputsItem {
+            name: name.to_string(),
+            quoted,
+        });
+    }
+    Some(items)
+}
+
+/// Whether one observed Inputs cell is exactly the expected item list: the same
+/// names in the same order, each written the way the expected item is written,
+/// so a cell that stops before a declared field, names another order, adds a
+/// name or writes a bare word where the table writes a backticked name is a
+/// different cell.
+fn inputs_match(observed: &[InputsItem], expected: &[InputsItem]) -> bool {
+    observed.len() == expected.len()
+        && observed
+            .iter()
+            .zip(expected)
+            .all(|(observed, expected)| observed == expected)
+}
+
+/// One item list as an Inputs cell writes it, for a refusal's expected side.
+fn render_inputs(items: &[InputsItem]) -> String {
+    items
+        .iter()
+        .map(|item| format!("`{}`", item.name))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The Inputs items an ordinary row must hold: the backticked `op`, then the
+/// arm's wire field names in declaration order.
+fn ordinary_row_inputs(fields: &[String]) -> Vec<InputsItem> {
+    std::iter::once("op")
+        .chain(fields.iter().map(String::as_str))
+        .map(|name| InputsItem {
+            name: name.to_string(),
+            quoted: true,
+        })
+        .collect()
+}
+
+/// The file, relative to a provider directory, that declares the `Request`
+/// enum a table's Inputs cells name. Wallet declares it in `src/protocol.rs`
+/// and answers it from `src/main.rs`; did declares and answers it in its one
+/// `src/main.rs`, and every other provider uses that one file for both.
+fn request_declaration_file(name: &str) -> &'static str {
+    match name {
+        "wallet-provider" => "src/protocol.rs",
+        _ => "src/main.rs",
+    }
+}
+
+/// The provider sources one operations table's Inputs cells are read, each with
+/// the path a refusal names. The caller reads both files; the rule opens none.
+struct WireSources<'a> {
+    /// The provider's `src/main.rs`, which holds its dispatch.
+    dispatch: &'a str,
+    dispatch_path: &'a Path,
+    /// The provider file that declares its `Request` enum.
+    declarations: &'a str,
+    declarations_path: &'a Path,
+}
+
+/// Every problem with one table's ordinary Inputs cells, each naming the
+/// document, the row, the cell and the source it read.
+///
+/// An ordinary row's cell holds the backticked `op` and then the wire names its
+/// provider's `Request` arm declares, in declaration order. A first item other
+/// than the backticked `op`, another name, another order, a missing name, an
+/// extra name, a bare word where the table writes a backticked name and a cell
+/// the reader cannot parse are each one problem for that row. A row whose
+/// operation has no arm in `Request` is a named refusal, never a skip. A source
+/// with no `fn handle` and one with no `enum Request` each keep their own
+/// reason naming the file.
+///
+/// A row whose operation starts `wallet_contract ` is left exactly as
+/// `row_set_problems` leaves it: this rule returns no problem and no reason for
+/// it.
+///
+/// Honesty limits: the rule reads declarations, not serde's output, so a field
+/// carrying `#[serde(skip)]` would be required here and would need the rule
+/// widened when one is added, while `#[serde(default)]` and
+/// `#[serde(skip_serializing_if = ...)]` fields are real wire names and are
+/// required. It checks the names and their order, not a value's type. It reads
+/// no `wallet_contract` row, so the tables' claim about those rows' `params`
+/// names is unchecked and BACKLOG item 57 holds the slice that checks it.
+///
+/// Falsifier: WP181 makes `field_wire_name` honour no `serde` attribute, so a
+/// renamed field reads as its Rust name; WP182 makes `inputs_match` tolerate a
+/// cell that stops before a declared field.
+/// WP183 and WP184 change character-literal and raw-identifier handling.
+/// WP185 through WP197 change quoting, order, cell syntax, or source refusals.
+/// WP198 makes the field-list reader read a list whose delimiters do not
+/// balance as a shorter list. `operations_table_row_check_refuses_each_bad_table`
+/// fails on each.
+fn inputs_cell_problems(
+    document_name: &str,
+    rows: &[OperationsRow],
+    sources: &WireSources<'_>,
+) -> Vec<String> {
+    let Some(handle_arms) = dispatch_arm_variants(sources.dispatch, "fn handle(", REQUEST_ARM)
+    else {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} Inputs cells cannot be checked \
+             because {} holds no fn handle",
+            sources.dispatch_path.display()
+        )];
+    };
+    let Some(request_body) = item_body(sources.declarations, "Request", "enum") else {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} Inputs cells cannot be checked \
+             because {} declares no enum Request",
+            sources.declarations_path.display()
+        )];
+    };
+    let contract_prefix = format!("{WALLET_CONTRACT_ARM} ");
+    let mut problems = Vec::new();
+    for row in rows {
+        if row.operation.starts_with(&contract_prefix) {
+            continue;
+        }
+        let Some(variant) = handle_arms
+            .iter()
+            .find(|arm| variant_snake_case(arm) == row.operation)
+        else {
+            // A row with no dispatch arm is `row_set_problems`'s to refuse; this
+            // rule names no second reason for it.
+            continue;
+        };
+        let fields = match wire_field_names(&request_body, variant) {
+            WireFieldNames::Names(fields) => fields,
+            WireFieldNames::NoDeclaration => {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the Inputs \
+                     cell {}, and {} declares no {variant} arm",
+                    row.operation,
+                    row.inputs,
+                    sources.declarations_path.display()
+                ));
+                continue;
+            }
+            WireFieldNames::Unsupported(reason) => {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the Inputs \
+                     cell {}, and the {variant} arm of {} cannot be read: {reason}",
+                    row.operation,
+                    row.inputs,
+                    sources.declarations_path.display()
+                ));
+                continue;
+            }
+        };
+        let expected = ordinary_row_inputs(&fields);
+        let matched =
+            input_items(&row.inputs).is_some_and(|observed| inputs_match(&observed, &expected));
+        if !matched {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the Inputs cell \
+                 {}, and {} names {}",
+                row.operation,
+                row.inputs,
+                sources.declarations_path.display(),
+                render_inputs(&expected)
+            ));
+        }
+    }
+    problems
+}
+
 /// Whether `right` is exactly `NO_DECLARED_RIGHT` or one backtick span holding
 /// an id `CONTRACT_RIGHTS` or `PLATFORM_BASELINE_IDS` declares.
 fn declared_right_cell(right: &str) -> bool {
@@ -10477,10 +11206,13 @@ fn linux_status_problems(document_name: &str, row: &OperationsRow) -> Vec<String
 /// The section under `OPERATIONS_HEADING` must hold a table whose first line is
 /// complete `TABLE_HEADER` and whose second is the dash separator. Every later
 /// nonempty line is a row, including repeated headers and rows with leading
-/// whitespace or omitted outer bars. Then the section must hold four things. Its row set,
+/// whitespace or omitted outer bars. Then the section must hold five things. Its row set,
 /// in table order, must equal the operations `<provider_dir>/src/main.rs`
 /// answers through `fn handle`, with a `wallet_contract` arm expanded to one
-/// `wallet_contract <kind>` row per `fn dispatch_wallet_operation` arm. Each
+/// `wallet_contract <kind>` row per `fn dispatch_wallet_operation` arm. An
+/// ordinary row's Inputs cell must name the backticked `op` and then the wire
+/// field names its `Request` arm declares, in declaration order, from the file
+/// `request_declaration_file` names. Each
 /// Right cell must be exactly `NO_DECLARED_RIGHT` or one backtick span holding
 /// an id `CONTRACT_RIGHTS` or `PLATFORM_BASELINE_IDS` declares. A row whose
 /// Right is a declared right must cite `permitted:` and `nearest outside
@@ -10488,8 +11220,9 @@ fn linux_status_problems(document_name: &str, row: &OperationsRow) -> Vec<String
 /// Linux cell must be `LINUX_STATUS`.
 ///
 /// Honesty limits: rule 1 reads the dispatch arms as text, so it shows the row
-/// set matches the arms, not that every arm is reachable; and it says nothing
-/// about the Outputs keys, which stay held in BACKLOG item 21.
+/// set matches the arms, not that every arm is reachable; rule 2 reads no
+/// `wallet_contract` row; and the check says nothing about the Outputs keys,
+/// which stay held in BACKLOG item 21.
 fn operations_table_row_problems(
     document_name: &str,
     document: &str,
@@ -10504,6 +11237,7 @@ fn operations_table_row_problems(
         Err(problems) => return problems,
     };
     let provider_path = provider_dir.join("src").join("main.rs");
+    let mut dispatch: Option<String> = None;
     match fs::read_to_string(&provider_path) {
         Ok(source) => {
             problems.extend(row_set_problems(
@@ -10512,6 +11246,7 @@ fn operations_table_row_problems(
                 &source,
                 &provider_path,
             ));
+            dispatch = Some(source);
         }
         Err(err) => problems.push(format!(
             "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set cannot be checked \
@@ -10523,6 +11258,31 @@ fn operations_table_row_problems(
         problems.extend(right_vocabulary_problems(document_name, row));
         problems.extend(right_side_problems(document_name, row));
         problems.extend(linux_status_problems(document_name, row));
+    }
+    if let Some(source) = &dispatch {
+        let declaration_path = provider_dir.join(request_declaration_file(document_name));
+        let declarations = if declaration_path == provider_path {
+            Ok(source.clone())
+        } else {
+            fs::read_to_string(&declaration_path)
+        };
+        match declarations {
+            Ok(declarations) => problems.extend(inputs_cell_problems(
+                document_name,
+                &rows,
+                &WireSources {
+                    dispatch: source,
+                    dispatch_path: &provider_path,
+                    declarations: &declarations,
+                    declarations_path: &declaration_path,
+                },
+            )),
+            Err(err) => problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} Inputs cells cannot be \
+                 checked because {} is not readable: {err}",
+                declaration_path.display()
+            )),
+        }
     }
     problems
 }
@@ -11506,10 +12266,12 @@ fn every_operations_table_cites_existing_tests() {
 ///
 /// The check reads `capsules/<name>/CONFINEMENT.md` for each name in
 /// `OPERATIONS_TABLES`, cuts the section under `OPERATIONS_HEADING`, and
-/// requires four things of every row: the row set, in table order, equals the
+/// requires five things of every row: the row set, in table order, equals the
 /// operations `capsules/<name>/src/main.rs` answers through `fn handle`, with a
 /// `wallet_contract` arm expanded to one row per `fn dispatch_wallet_operation`
-/// arm; the Right cell is exactly `none: needs no declared right` or one
+/// arm; an ordinary row's Inputs cell names the backticked `op` and then its
+/// `Request` arm's wire field names in declaration order; the Right cell is
+/// exactly `none: needs no declared right` or one
 /// declared id in a backtick span; a row whose Right is a declared right cites
 /// both `permitted:` and `nearest outside refused:`, and a `none:` row cites
 /// neither; and every Linux cell is exactly `designed, not enforced`. Each
@@ -11521,7 +12283,9 @@ fn every_operations_table_cites_existing_tests() {
 /// naming an undeclared id or `no named test shows this` passes; WP143 disables
 /// the both-sides rule, so a right row with one side and a `none:` row with a
 /// side pass; WP144 disables the Linux-status rule, so a cell naming another
-/// status passes. `operations_table_row_check_refuses_each_bad_table` catches
+/// status passes; WP181 disables the field reader's `serde` attribute and
+/// WP182 the Inputs compare's length rule, so an ordinary row's stale Inputs
+/// cell passes. `operations_table_row_check_refuses_each_bad_table` catches
 /// each mutation with a bad-table fixture; this test checks the real tables.
 #[test]
 fn every_operations_table_row_matches_its_provider_and_the_contract() {
@@ -12260,14 +13024,46 @@ fn operations_table_check_rejects_paths_outside_provider() {
     }
 }
 
-/// The operations-table fixtures' provider source: `fn handle` answers
-/// `init`, `status`, `wallet_contract` and `shutdown`, and `fn
-/// dispatch_wallet_operation` answers the one `list_accounts` kind.
+/// The operations-table fixtures' provider source: `enum Request` declares the
+/// arms the fixture table names, `fn handle` answers `init`, `status`, `echo`,
+/// `wallet_contract` and `shutdown`, and `fn dispatch_wallet_operation` answers
+/// the one `list_accounts` kind.
+///
+/// `init` carries a field whose wire name is `wire_name` by
+/// `#[serde(rename = "...")]`, under a `//` comment that names an older
+/// `stale_name`, so only the active attribute may name the field. `echo`
+/// declares two plain fields. `Ping` declares one field and no dispatch arm
+/// answers it, so the fixture table names no field of it. `Status` and
+/// `Shutdown` declare no field.
 const ROW_FIXTURE_PROVIDER: &str = "\
+enum Request {
+    Init {
+        config: Value,
+        // Previously rename = \"stale_name\".
+        #[serde(rename = \"wire_name\")]
+        field_name: Option<Value>,
+    },
+    Status,
+    Echo {
+        message: String,
+        retry: u64,
+    },
+    WalletContract {
+        request: Value,
+        #[serde(rename = \"_runtime_invocation\")]
+        runtime_invocation: Box<RuntimeInvocationEnvelope>,
+    },
+    Ping {
+        reason: String,
+    },
+    Shutdown,
+}
+
 fn handle(&mut self, request: Request) -> Response {
     match request {
         Request::Init { config } => self.init(config),
         Request::Status => self.status(),
+        Request::Echo { message, retry } => self.echo(message, retry),
         Request::WalletContract { request } => self.handle_wallet_contract(request),
         Request::Shutdown => Response::empty_ok(),
     }
@@ -12280,20 +13076,33 @@ fn dispatch_wallet_operation(&mut self, request: &WalletProviderRequestV2) -> Re
 }
 ";
 
-/// One fixture operations row. The Inputs, Outputs and Effect cells are unread
-/// by the row check, so every row carries the same filler there.
-fn fixture_row(operation: &str, right: &str, macos: &str, linux: &str) -> String {
+/// The Inputs cell of one fixture operation's row: the backticked `op` and then
+/// the wire names the fixture `Request` arm declares, in declaration order. The
+/// `wallet_contract` row is left as the row-set rule reads it, because the
+/// Inputs rule reads no such row.
+fn fixture_inputs(operation: &str) -> String {
+    match operation {
+        "init" => "`op`, `config`, `wire_name`".to_string(),
+        "echo" => "`op`, `message`, `retry`".to_string(),
+        _ => "`op`".to_string(),
+    }
+}
+
+/// One fixture operations row. The Outputs and Effect cells are unread by the
+/// row check, so every row carries the same filler there.
+fn fixture_row(operation: &str, inputs: &str, right: &str, macos: &str, linux: &str) -> String {
     format!(
-        "| {operation} | `op` | ok: `status` | {right} | answers in memory | {macos} | {linux} |\n"
+        "| {operation} | {inputs} | ok: `status` | {right} | answers in memory | {macos} | {linux} |\n"
     )
 }
 
 /// One fixture operations row whose rows are in the fixture dispatch order and
-/// whose Right, macOS and Linux cells follow all four rules.
+/// whose Inputs, Right, macOS and Linux cells follow all five rules.
 fn passing_fixture_row(operation: &str) -> String {
     if operation == "init" {
         fixture_row(
             operation,
+            &fixture_inputs(operation),
             "`storage`",
             "permitted: `tests/confine.rs::present_case` shows the write. \
              nearest outside refused: `tests/confine.rs::present_case` shows the refusal.",
@@ -12302,6 +13111,7 @@ fn passing_fixture_row(operation: &str) -> String {
     } else {
         fixture_row(
             operation,
+            &fixture_inputs(operation),
             NO_DECLARED_RIGHT,
             "`tests/confine.rs::present_case` shows the answer.",
             LINUX_STATUS,
@@ -12322,11 +13132,12 @@ fn fixture_row_document(operations: &[&str]) -> String {
     document
 }
 
-/// The four operations the fixture dispatch answers, in table order: the
+/// The five operations the fixture dispatch answers, in table order: the
 /// ordinary arms of `fn handle` in dispatch order, then the one contract kind.
-const FIXTURE_OPERATIONS: [&str; 4] = [
+const FIXTURE_OPERATIONS: [&str; 5] = [
     "init",
     "status",
+    "echo",
     "shutdown",
     "wallet_contract list_accounts",
 ];
@@ -12334,10 +13145,11 @@ const FIXTURE_OPERATIONS: [&str; 4] = [
 /// The row check refuses each bad table, one case per rule and sub-rule, and
 /// names the rule.
 ///
-/// A temporary provider folder holds `src/main.rs` with the fixture dispatch:
-/// `fn handle` answers `init`, `status`, `wallet_contract` and `shutdown`, and
-/// `fn dispatch_wallet_operation` answers `list_accounts`. The passing table
-/// returns no problem. Rule 1 refuses a `handle` arm with no row, a row with no
+/// A temporary provider folder holds `src/main.rs` with the fixture dispatch
+/// and its `enum Request`: `fn handle` answers `init`, `status`, `echo`,
+/// `wallet_contract` and `shutdown`, and `fn dispatch_wallet_operation` answers
+/// `list_accounts`. The passing table returns no problem. Rule 1 refuses a
+/// `handle` arm with no row, a row with no
 /// arm, a kind arm with no row, ordinary rows in another order and a kind row
 /// before an ordinary row. A two-kind fixture also refuses swapped kind rows,
 /// duplicate ordinary and kind rows, and equal-length rows with the wrong
@@ -12353,14 +13165,34 @@ const FIXTURE_OPERATIONS: [&str; 4] = [
 /// id and one that says `no named test shows this`. Rule 3 refuses a right row
 /// missing `permitted:`, a right row missing `nearest outside refused:` and a
 /// `none:` row citing `permitted:`. Rule 4 refuses a Linux cell that is not
-/// `designed, not enforced`, naming every row. The four `snake_case` names the
+/// `designed, not enforced`, naming every row. Rule 5 refuses an ordinary row's
+/// Inputs cell with an extra name, a missing name, another order, a renamed
+/// field's Rust name, a name only a comment mentions, a bare word where the
+/// table writes backticked names, no backticked `op`, an unterminated backtick
+/// span, an empty item, a parenthesis and a longer name that starts with a
+/// declared one. A two-field arm and a fieldless arm each pin their own expected
+/// cell. An arm spelled inside an attribute string cannot hide a declared field.
+/// Character and byte-character literals retain the field after their type;
+/// raw identifiers use their wire spelling, and explicit renames keep their
+/// literal value. Unsupported field attributes and literals keep exact reasons.
+/// A `wallet_contract` row's Inputs cell is not read. A source with no
+/// `enum Request`, an arm the declaration omits, a declaration file the caller
+/// cannot read and a source with no `fn handle` each keep their own reason. The
+/// four `snake_case` names the
 /// contract already uses pin the helper. A missing or doubled heading stays with
 /// `section_under_one_heading`, which already refuses it once. The fixtures are
 /// a temporary directory; no process starts.
 ///
 /// Falsifiers: WP141 disables the row-set rule, WP142 the Right-vocabulary
-/// rule, WP143 the both-sides rule and WP144 the Linux-status rule; this test
-/// fails on that rule's cases, because the bad table is then accepted.
+/// rule, WP143 the both-sides rule, WP144 the Linux-status rule, WP181 the one
+/// field reader's `serde` attribute and WP182 the Inputs compare's length rule;
+/// this test fails on that rule's cases, because the bad table is then accepted.
+/// WP181 also fails the passing table, because `init`'s renamed field then reads
+/// as its Rust name.
+/// WP183 through WP197 cover literal boundaries, raw identifiers, quoting,
+/// order, malformed cells and missing source or arm refusals. WP198 removes
+/// the field-list reader's balance refusal, so a shift expression hides the
+/// field after it.
 #[test]
 fn operations_table_row_check_refuses_each_bad_table() {
     let provider = tempfile::tempdir().expect("temporary provider folder");
@@ -12660,6 +13492,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
             &fixture_row_document(&[
                 "status",
                 "init",
+                "echo",
                 "shutdown",
                 "wallet_contract list_accounts",
             ]),
@@ -12679,6 +13512,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
                 "wallet_contract list_accounts",
                 "init",
                 "status",
+                "echo",
                 "shutdown",
             ]),
             provider.path()
@@ -12702,6 +13536,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
     let two_kind_operations = [
         "init",
         "status",
+        "echo",
         "shutdown",
         "wallet_contract get_d_i_d",
         "wallet_contract list_accounts",
@@ -12717,7 +13552,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
     );
 
     let mut swapped_kinds = two_kind_operations;
-    swapped_kinds.swap(3, 4);
+    swapped_kinds.swap(4, 5);
     assert_eq!(
         operations_table_row_problems(
             "fixture-provider",
@@ -12733,7 +13568,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
         "contract kinds out of dispatch order must be refused"
     );
 
-    for (case, index) in [("the final kind row", 4), ("shutdown before the kinds", 2)] {
+    for (case, index) in [("the final kind row", 5), ("shutdown before the kinds", 3)] {
         let mut duplicate = two_kind_operations.to_vec();
         duplicate.insert(index + 1, duplicate[index]);
         assert_eq!(
@@ -12753,7 +13588,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
     }
 
     let mut replaced_kind = two_kind_operations;
-    replaced_kind[3] = replaced_kind[4];
+    replaced_kind[4] = replaced_kind[5];
     assert_eq!(
         operations_table_row_problems(
             "fixture-provider",
@@ -12776,7 +13611,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
     );
 
     let mut wrong_acronym = two_kind_operations;
-    wrong_acronym[3] = "wallet_contract get_did";
+    wrong_acronym[4] = "wallet_contract get_did";
     assert_eq!(
         operations_table_row_problems(
             "fixture-provider",
@@ -12856,6 +13691,502 @@ fn operations_table_row_check_refuses_each_bad_table() {
             "{case} must be refused as one problem"
         );
     }
+
+    // Rule 5: an ordinary row's Inputs cell against its `Request` arm. One
+    // case per refusal: another name, a missing name, another order, a renamed
+    // field's Rust name, a name the comment above the active attribute
+    // mentions, a bare word where the table writes backticked names, a first
+    // item that is not the backticked `op`, a cell the reader cannot parse and
+    // a name that starts with an arm's name.
+    let provider_paths = provider.path().join("src/main.rs").display().to_string();
+    for (case, cell) in [
+        ("an extra name", "`op`, `config`, `phantom`, `wire_name`"),
+        ("a missing name", "`op`, `config`"),
+        ("another order", "`op`, `wire_name`, `config`"),
+        (
+            "a renamed field's Rust name",
+            "`op`, `config`, `field_name`",
+        ),
+        ("a name a comment names", "`op`, `config`, `stale_name`"),
+        ("a bare word", "`op`, `config`, wire_name"),
+        ("no backticked op", "op, `config`, `wire_name`"),
+        ("no op", "`config`, `wire_name`"),
+        (
+            "an unterminated backtick span",
+            "`op`, `config`, `wire_name",
+        ),
+        ("an empty item", "`op`, , `config`, `wire_name`"),
+        ("a parenthesis", "`op`, `config` (`wire_name`)"),
+        ("an opening parenthesis", "`op`, `config`, `wire(name`"),
+        ("a closing parenthesis", "`op`, `config`, `wire)name`"),
+        ("an empty cell", ""),
+        ("an empty quoted item", "`op`, `config`, ``"),
+        ("a leading empty item", ", `op`, `config`, `wire_name`"),
+        ("a trailing empty item", "`op`, `config`, `wire_name`,"),
+        ("an embedded backtick", "`op`, `config`, `wire`name`"),
+        ("a longer name", "`op`, `config`, `wire_name_extra`"),
+    ] {
+        let document = passing.replacen(&fixture_inputs("init"), cell, 1);
+        assert_ne!(document, passing, "{case} must change the Inputs cell");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init holds the Inputs \
+                 cell {cell}, and {provider_paths} names `op`, `config`, `wire_name`"
+            )],
+            "an Inputs cell with {case} must be refused"
+        );
+    }
+
+    // Pin the cell reader's syntax refusals independently of the field-name
+    // comparison: malformed punctuation may also change the observed name.
+    for cell in [
+        "`op`, `wire(name`",
+        "`op`, `wire)name`",
+        "",
+        "`op`, ``",
+        ", `op`",
+        "`op`, , `config`",
+        "`op`,",
+        "`op`, `config",
+        "`op`, `con`fig`",
+        "`op`, config`",
+    ] {
+        assert_eq!(input_items(cell), None, "malformed Inputs cell: {cell}");
+    }
+
+    // Character punctuation stays inside its literal in every declaration
+    // scan. Each stale cell must name the field it omitted in the refusal.
+    let init_start = ROW_FIXTURE_PROVIDER.find("    Init {").unwrap();
+    let init_end = ROW_FIXTURE_PROVIDER.find("    Status,").unwrap();
+    for field_type in [
+        "[u8; ('}' as usize - '{' as usize)]",
+        "[u8; (b'}' as usize - b'{' as usize)]",
+        "[u8; (']' as usize + ',' as usize)]",
+        r#"[u8; ('"' as usize + '\\' as usize + '\'' as usize)]"#,
+        r#"[u8; ('\u{7d}' as usize - '\x7b' as usize)]"#,
+        "&'static [u8; ('é' as usize + '>' as usize + '<' as usize)]",
+    ] {
+        let mut source = ROW_FIXTURE_PROVIDER.to_string();
+        source.replace_range(
+            init_start..init_end,
+            &format!(
+                "    Init {{\n        config: {field_type},\n        required: String,\n    }},\n"
+            ),
+        );
+        fs::write(&provider_source, source).expect("character literal fixture");
+        let stale = "`op`, `config`";
+        let expected = "`op`, `config`, `required`";
+        assert_eq!(
+            operations_table_row_problems(
+                "fixture-provider",
+                &passing.replacen(&fixture_inputs("init"), stale, 1),
+                provider.path()
+            ),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init holds the Inputs \
+                 cell {stale}, and {provider_paths} names {expected}"
+            )],
+            "character literals in {field_type} must preserve the required field"
+        );
+        assert_eq!(
+            operations_table_row_problems(
+                "fixture-provider",
+                &passing.replacen(&fixture_inputs("init"), expected, 1),
+                provider.path()
+            ),
+            Vec::<String>::new(),
+            "the complete field list must pass for {field_type}"
+        );
+    }
+
+    // A field list whose delimiters do not balance is refused with its own
+    // reason, never read as a shorter list. The `<<` of a shift expression
+    // opens a delimiter that never closes, so every later field would join the
+    // item before it and a cell that omits one would pass.
+    for field_type in [
+        "[u8; 1 << 2]",
+        "[u8; 1 << 2 << 3]",
+        "[u8; (1 << 2) as usize]",
+        "Vec<[u8; 1 << 2]>",
+    ] {
+        let mut source = ROW_FIXTURE_PROVIDER.to_string();
+        source.replace_range(
+            init_start..init_end,
+            &format!(
+                "    Init {{\n        config: {field_type},\n        required: String,\n    }},\n"
+            ),
+        );
+        fs::write(&provider_source, source).expect("unbalanced field list fixture");
+        for cell in ["`op`, `config`", "`op`, `config`, `required`"] {
+            assert_eq!(
+                operations_table_row_problems(
+                    "fixture-provider",
+                    &passing.replacen(&fixture_inputs("init"), cell, 1),
+                    provider.path()
+                ),
+                vec![format!(
+                    "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init holds the \
+                     Inputs cell {cell}, and the Init arm of {provider_paths} cannot be read: \
+                     {UNBALANCED_FIELD_LIST}"
+                )],
+                "an unbalanced field list in {field_type} must be refused, not read"
+            );
+        }
+    }
+
+    // An arrow's `>` needs no opener of its own, so it does not unbalance a
+    // field list and the fields after it stay their own items.
+    for field_type in ["Box<dyn Fn() -> u8>", "[u8; 3 >> 1]", "[u8; 1 > 0]"] {
+        let mut source = ROW_FIXTURE_PROVIDER.to_string();
+        source.replace_range(
+            init_start..init_end,
+            &format!(
+                "    Init {{\n        config: {field_type},\n        required: String,\n    }},\n"
+            ),
+        );
+        fs::write(&provider_source, source).expect("balanced field list fixture");
+        let expected = "`op`, `config`, `required`";
+        assert_eq!(
+            operations_table_row_problems(
+                "fixture-provider",
+                &passing.replacen(&fixture_inputs("init"), expected, 1),
+                provider.path()
+            ),
+            Vec::<String>::new(),
+            "the complete field list must pass for {field_type}"
+        );
+        let stale = "`op`, `config`";
+        assert_eq!(
+            operations_table_row_problems(
+                "fixture-provider",
+                &passing.replacen(&fixture_inputs("init"), stale, 1),
+                provider.path()
+            ),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init holds the Inputs \
+                 cell {stale}, and {provider_paths} names {expected}"
+            )],
+            "the field after {field_type} must still be required"
+        );
+    }
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
+    // Serde removes r# from an identifier, while an explicit rename supplies
+    // its literal wire name even when that name itself starts with r#.
+    for (field, expected, stale) in [
+        ("r#type: String", "`op`, `type`", "`op`, `r#type`"),
+        (
+            "#[serde(rename = \"r#type\")] r#type: String",
+            "`op`, `r#type`",
+            "`op`, `type`",
+        ),
+    ] {
+        let mut source = ROW_FIXTURE_PROVIDER.to_string();
+        source.replace_range(
+            init_start..init_end,
+            &format!("    Init {{\n        {field},\n    }},\n"),
+        );
+        fs::write(&provider_source, source).expect("raw identifier fixture");
+        assert_eq!(
+            operations_table_row_problems(
+                "fixture-provider",
+                &passing.replacen(&fixture_inputs("init"), expected, 1),
+                provider.path()
+            ),
+            Vec::<String>::new(),
+            "the raw identifier's wire name must pass"
+        );
+        assert_eq!(
+            operations_table_row_problems(
+                "fixture-provider",
+                &passing.replacen(&fixture_inputs("init"), stale, 1),
+                provider.path()
+            ),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init holds the Inputs \
+                 cell {stale}, and {provider_paths} names {expected}"
+            )],
+            "the incorrect raw identifier spelling must be refused"
+        );
+    }
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
+    // Unsupported field syntax retains the reader's exact refusal. These
+    // cases exercise each explicit field-attribute and literal refusal.
+    let panic_message = |failure: Box<dyn std::any::Any + Send>| {
+        failure
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| failure.downcast_ref::<&str>().map(|text| text.to_string()))
+            .expect("the reader refusal must carry a string")
+    };
+    for (field, reason) in [
+        (
+            "#serde field: String",
+            "expected a bracketed field attribute",
+        ),
+        (
+            "#[serde(rename = \"wire\") field: String",
+            "unterminated field attribute",
+        ),
+        (
+            "#[serde(rename = \"wire\"] field: String",
+            "unterminated serde attribute",
+        ),
+        (
+            "#[serde(rename(deserialize = \"wire\"))] field: String",
+            "unsupported serde rename syntax; expected rename = <Rust string literal>",
+        ),
+        (
+            "#[serde(rename = \"wire\" extra)] field: String",
+            "unsupported tokens after serde rename string",
+        ),
+        (
+            "#[serde(rename = \"wire\", rename = \"other\")] field: String",
+            "duplicate serde rename",
+        ),
+        (
+            "#[serde(rename = \"wire\", other = 1 << 2)] field: String",
+            "serde attribute: unbalanced parentheses, brackets, braces or angle brackets in the \
+             field list",
+        ),
+    ] {
+        let refusal = std::panic::catch_unwind(|| field_wire_name(field))
+            .expect_err("unsupported field syntax must be refused");
+        assert_eq!(
+            panic_message(refusal),
+            format!("wire field reader: {reason}")
+        );
+    }
+    for (literal, reason) in [
+        ("name", "expected a Rust string literal"),
+        ("r#name", "expected a Rust string literal"),
+        ("r#\"name", "unterminated raw Rust string"),
+        ("\"name", "unterminated Rust string literal"),
+        ("\"name\\", "unterminated Rust string escape"),
+        (r#""\xg0""#, "invalid Rust ASCII escape"),
+        (r#""\x80""#, "Rust ASCII escape exceeds 0x7f"),
+        (r#""\u0""#, "invalid Rust Unicode escape"),
+        ("\"\\u{1", "unterminated Rust Unicode escape"),
+        (r#""\u{}""#, "invalid Rust Unicode escape"),
+        (r#""\u{d800}""#, "invalid Rust Unicode scalar"),
+        ("\"\\\rx\"", "invalid Rust line continuation"),
+        (r#""\q""#, "unsupported Rust string escape"),
+    ] {
+        assert_eq!(rust_string_literal(literal), Err(reason));
+        let field = format!("#[serde(rename = {literal})] field: String");
+        // An unclosed literal also keeps its own reason through the direct
+        // rename reader when its attribute delimiter is reachable.
+        if !reason.starts_with("unterminated") {
+            let refusal = std::panic::catch_unwind(|| field_wire_name(&field))
+                .expect_err("unsupported rename literal must be refused");
+            assert_eq!(
+                panic_message(refusal),
+                format!("wire field reader: serde rename: {reason}")
+            );
+        }
+    }
+    let refusal = std::panic::catch_unwind(|| without_comments("'\\"))
+        .expect_err("an unclosed character escape must be refused");
+    assert_eq!(
+        panic_message(refusal),
+        "wire field reader: unterminated Rust character escape"
+    );
+
+    // Rule 5: the fixture table's other ordinary rows name their own fields, so
+    // a two-field arm and a fieldless arm each keep their own expected cell.
+    for (operation, cell) in [
+        ("echo", "`op`, `retry`, `message`"),
+        ("shutdown", "`op`, `reason`"),
+    ] {
+        let row = passing_fixture_row(operation);
+        let changed = fixture_row(
+            operation,
+            cell,
+            NO_DECLARED_RIGHT,
+            "`tests/confine.rs::present_case` shows the answer.",
+            LINUX_STATUS,
+        );
+        let document = passing.replacen(&row, &changed, 1);
+        assert_ne!(document, passing, "{operation} must change the Inputs cell");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {operation} holds the \
+                 Inputs cell {cell}, and {provider_paths} names {}",
+                fixture_inputs(operation)
+            )],
+            "{operation} must name its arm's fields in declaration order"
+        );
+    }
+
+    // Rule 5: an attribute string that holds a copy of the arm without one of
+    // its fields is text, so a cell that follows the copy is still refused.
+    let documented = ROW_FIXTURE_PROVIDER.replacen(
+        "    Init {\n        config: Value,\n",
+        "    #[doc = \"\n    Init { config: Value },\n    \"]\n    Init {\n        config: Value,\n",
+        1,
+    );
+    assert_ne!(documented, ROW_FIXTURE_PROVIDER);
+    fs::write(&provider_source, &documented).expect("documented arm fixture");
+    let stale = "`op`, `config`";
+    assert_eq!(
+        operations_table_row_problems(
+            "fixture-provider",
+            &passing.replacen(&fixture_inputs("init"), stale, 1),
+            provider.path()
+        ),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init holds the Inputs cell \
+             {stale}, and {provider_paths} names `op`, `config`, `wire_name`"
+        )],
+        "an arm spelled inside an attribute string must not hide a declared field"
+    );
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &passing, provider.path()),
+        Vec::<String>::new(),
+        "the real arm's fields must be the ones the passing table names"
+    );
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
+    // Rule 5: a `wallet_contract` row is left as the row-set rule leaves it, so
+    // its Inputs cell is not read.
+    let ignored = passing.replacen(
+        "| wallet_contract list_accounts | `op` |",
+        "| wallet_contract list_accounts | garbage |",
+        1,
+    );
+    assert_ne!(ignored, passing, "the contract row's cell must change");
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &ignored, provider.path()),
+        Vec::<String>::new(),
+        "a wallet_contract row's Inputs cell must not be read"
+    );
+
+    // Rule 5: every source refusal keeps its own reason that names the file.
+    for (case, anchor, replacement, reason) in [
+        (
+            "a missing enum Request",
+            "enum Request {",
+            "enum OtherRequest {",
+            format!(
+                "Inputs cells cannot be checked because {provider_paths} declares no enum Request"
+            ),
+        ),
+        (
+            "no declared arm for the row",
+            "    Echo {\n        message: String,\n        retry: u64,\n    },\n",
+            "",
+            format!(
+                "row echo holds the Inputs cell `op`, `message`, `retry`, and {provider_paths} \
+                 declares no Echo arm"
+            ),
+        ),
+        (
+            "a longer declaration name than the row's arm",
+            "    Echo {",
+            "    EchoExtra {",
+            format!(
+                "row echo holds the Inputs cell `op`, `message`, `retry`, and {provider_paths} \
+                 declares no Echo arm"
+            ),
+        ),
+    ] {
+        assert_eq!(
+            ROW_FIXTURE_PROVIDER.matches(anchor).count(),
+            1,
+            "{case} has one anchor"
+        );
+        fs::write(
+            &provider_source,
+            ROW_FIXTURE_PROVIDER.replacen(anchor, replacement, 1),
+        )
+        .expect("source refusal fixture");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &passing, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} {reason}"
+            )],
+            "{case} must keep its exact refusal"
+        );
+        fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+    }
+
+    // Rule 5: a declaration file the caller cannot read keeps its own reason
+    // that names the path. Wallet declares `Request` in `src/protocol.rs`, so a
+    // fixture provider folder without that file is refused by name.
+    let wallet_fixture = tempfile::tempdir().expect("temporary wallet fixture folder");
+    fs::create_dir_all(wallet_fixture.path().join("src")).expect("wallet fixture src folder");
+    fs::write(
+        wallet_fixture.path().join("src/main.rs"),
+        ROW_FIXTURE_PROVIDER,
+    )
+    .expect("wallet fixture provider source");
+    let protocol_path = wallet_fixture.path().join("src/protocol.rs");
+    let missing = operations_table_row_problems("wallet-provider", &passing, wallet_fixture.path());
+    assert_eq!(
+        missing.len(),
+        1,
+        "an unreadable declaration file must be one refusal: {missing:?}"
+    );
+    assert!(
+        missing[0].starts_with(&format!(
+            "wallet-provider CONFINEMENT.md: {OPERATIONS_HEADING} Inputs cells cannot be checked \
+             because {} is not readable",
+            protocol_path.display()
+        )),
+        "an unreadable declaration file must keep its own reason: {}",
+        missing[0]
+    );
+    let read_error = fs::read_to_string(&protocol_path).expect_err("missing declaration source");
+    assert_eq!(
+        missing,
+        vec![format!(
+            "wallet-provider CONFINEMENT.md: {OPERATIONS_HEADING} Inputs cells cannot be checked \
+             because {} is not readable: {read_error}",
+            protocol_path.display()
+        )]
+    );
+    fs::write(&protocol_path, ROW_FIXTURE_PROVIDER).expect("wallet fixture declaration source");
+    assert_eq!(
+        operations_table_row_problems("wallet-provider", &passing, wallet_fixture.path()),
+        Vec::<String>::new(),
+        "the declaration file the caller reads must be the one the names come from"
+    );
+
+    // Rule 5: a provider source with no `fn handle` keeps its own reason, and
+    // the row-set rule keeps its own line beside it.
+    let no_handle = ROW_FIXTURE_PROVIDER.replace("fn handle(", "fn answer(");
+    assert_ne!(no_handle, ROW_FIXTURE_PROVIDER);
+    fs::write(&provider_source, &no_handle).expect("no-handle fixture provider source");
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &passing, provider.path()),
+        vec![
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set cannot be checked \
+                 because {provider_paths} holds no fn handle"
+            ),
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} Inputs cells cannot be \
+                 checked because {provider_paths} holds no fn handle"
+            ),
+        ],
+        "a source with no fn handle must keep both reasons"
+    );
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
+    fs::remove_file(&provider_source).expect("remove fixture dispatch source");
+    let read_error = fs::read_to_string(&provider_source).expect_err("missing dispatch source");
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &passing, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set cannot be checked \
+             because {provider_paths} is not readable: {read_error}"
+        )],
+        "an unreadable dispatch file must keep its exact refusal"
+    );
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
 
     // Rule 4: a Linux cell that is not `designed, not enforced`, one per row.
     let enforced = passing.replace(LINUX_STATUS, "enforced by Landlock");
