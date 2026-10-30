@@ -1,0 +1,60 @@
+Exception in thread Thread-1 (_fifo_writer):
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/threading.py", line 1073, in _bootstrap_inner
+    self.run()
+  File "/usr/lib/python3.12/threading.py", line 1010, in run
+    self._target(*self._args, **self._kwargs)
+  File "/workspace/lab/review-c9-442-r5/plants.py", line 568, in _fifo_writer
+    with ge.open("w") as handle:
+         ^^^^^^^^^^^^
+  File "/usr/lib/python3.12/pathlib.py", line 1015, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/tmp0onhuyfu/ev/guest-exit.txt'
+bash: line 1: wait: pid 14955 is not a child of this shell
+checker=/tmp/review-c9-442-r5-src/lab/linux-confine/guest/check-guest-results.py
+head_src=/tmp/review-c9-442-r5-src/lab/linux-confine/guest
+CAUGHT	R5-honest-pass	rc=0	complete live-format fixture. 
+CAUGHT	R5-skew-plus-1s	rc=0	mtime = now+1 within 2s skew. 
+CAUGHT	R4-1b-complete	rc=1	PREBOOT symlink, live format. HOST CHECK FAILED: |   pre-boot path is a symlink
+CAUGHT	R4-1d-complete	rc=1	PREBOOT contains ... live format. HOST CHECK FAILED: |   pre-boot path contains ..
+CAUGHT	R4-2-complete	rc=1	same nonce, new run_id, first_rc=0. HOST CHECK FAILED: |   nonce was already recorded for this work dir
+CAUGHT	R4-3-complete	rc=1	future mtime +1d, live format. HOST CHECK FAILED: |   F-LC-ANY-ERRNO.status: evidence file mtime is in the future |   F-LC-BLOCK.status: evidence file mtime is in the future |   F-LC-CAPBND.status: evidence file mtime is in the future | ...
+CAUGHT	R4-4a-complete	rc=1	extra empty-suite mark, live format. HOST CHECK FAILED: |   empty-suite: unexpected LC_MARK suite
+CAUGHT	R4-5a-complete	rc=1	CRLF guest_exit, live format. HOST CHECK FAILED: |   guest_exit.txt did not report 0: 'guest_exit=0'
+CAUGHT	R4-7a-complete	rc=1	extra confine2 fail, live format. HOST CHECK FAILED: |   confine2: unexpected LC_MARK suite |   confine2: unexpected status file FAIL
+CAUGHT	R4-8a-complete	rc=1	other $WORK, same hash/run_id. HOST CHECK FAILED: |   pre-boot work path does not match host-context
+CAUGHT	R4-9b-complete	rc=1	run_start=0, live format. HOST CHECK FAILED: |   pre-boot run_start missing
+CAUGHT	R4-live-wrapper-binds-work	rc=0	wrapper mints $WORK/host-preboot.txt and appends work=/run_id= last
+SURVIVED	R5-1-nonce-new-work	rc=0	replay same nonce on a new $WORK after first_rc=0. 
+SURVIVED	R5-1-wipe-used-nonces	rc=0	same $WORK after unlink used-nonces, first_rc=0. 
+CAUGHT	R5-1-fail-then-swap-pass	rc=1	failed tree then PASS swap, fail_rc=1. HOST CHECK FAILED: |   nonce was already recorded for this work dir
+CAUGHT	R5-2-hardlink-preboot	rc=1	PREBOOT is a hardlink into evidence. HOST CHECK FAILED: |   pre-boot nonce record is inside the guest-writable evidence dir
+SURVIVED	R5-2-hardlink-wipe-ledger	rc=0	truncate used-nonces via evidence hardlink, first_rc=0. 
+CAUGHT	R5-3-copied-preboot	rc=1	copied PREBOOT, work= still original. HOST CHECK FAILED: |   pre-boot path is not the host-preboot file under the bound work dir
+CAUGHT	R5-3-bind-mount	rc=1	PREBOOT via bind mount of $WORK. HOST CHECK FAILED: |   pre-boot path is not the host-preboot file under the bound work dir (bind PREBOOT path is not $WORK/host-preboot.txt)
+CAUGHT	R5-4-guest-qemu-exit-then-137	rc=1	guest qemu_exit=0, wrapper last qemu_exit=137. HOST CHECK FAILED: |   qemu_exit=137 is non-zero/abnormal
+CAUGHT	R5-4-fifo-guest-exit	rc=1	guest-exit.txt is a FIFO that delivers 0. HOST CHECK FAILED: |   guest_exit.txt did not report 0: ''
+SURVIVED	R5-5-nbsp-suite	rc=0	extra LC_MARK suite=confine+nbsp. 
+CAUGHT	R5-5-zwsp-elf-mark	rc=1	elf mark name has zwsp; standing elf missing. HOST CHECK FAILED: |   elf​: unexpected LC_MARK suite |   elf: missing LC_MARK serial line
+CAUGHT	R5-5-zwsp-guest-exit	rc=1	guest_exit=0 + zwsp. HOST CHECK FAILED: |   guest_exit.txt did not report 0: 'guest_exit=0\u200b'
+SURVIVED	R5-5-double-space-mark	rc=0	second elf mark with double space (may not parse). 
+CAUGHT	R5-6-run-start-plus-30	rc=1	run_start = now+30. HOST CHECK FAILED: |   pre-boot run_start is implausible
+SURVIVED	R5-6-run-start-plus-1-aligned	rc=0	run_start=now+1 and files touched to now+1. 
+SURVIVED	R5-7-guest-exit-no-nl	rc=0	guest_exit=0 with no trailing LF. 
+CAUGHT	R5-7-partial-status	rc=1	elf.status truncated to PAS. HOST CHECK FAILED: |   elf: status=PAS exit=0 |   elf: serial status PASS != 9p status PAS
+CAUGHT	R5-7-partial-preboot	rc=1	preboot cut after nonce_sha256. HOST CHECK FAILED: |   pre-boot run_start missing |   pre-boot work path missing |   pre-boot run_id missing
+CAUGHT	R5-7-missing-qemu-exit	rc=1	host-context has no qemu_exit=. HOST CHECK FAILED: |   qemu_exit missing from host-context.txt
+CAUGHT	R5-8-timeout-kill	rc=0	timeout KILL rc=137 stop_wait_rc=127 wrapper_has_kill=True
+CAUGHT	R5-9-extra-mark-smoke	rc=1	extra LC_MARK suite=smoke. HOST CHECK FAILED: |   smoke: unexpected LC_MARK suite
+CAUGHT	R5-9-extra-mark-full	rc=1	extra LC_MARK suite=full. HOST CHECK FAILED: |   full: unexpected LC_MARK suite
+CAUGHT	R5-9-extra-mark-PASS	rc=1	extra LC_MARK suite=PASS. HOST CHECK FAILED: |   PASS: unexpected LC_MARK suite
+CAUGHT	R5-9-extra-mark-guest2	rc=1	extra LC_MARK suite=guest2. HOST CHECK FAILED: |   guest2: unexpected LC_MARK suite
+CAUGHT	R5-9-extra-mark-helpers	rc=1	extra LC_MARK suite=helpers. HOST CHECK FAILED: |   helpers: unexpected LC_MARK suite
+CAUGHT	R5-9-dup-guest-mark	rc=1	two suite=guest marks. HOST CHECK FAILED: |   guest: duplicate LC_MARK serial line
+CAUGHT	R5-9-single-guest-mark	rc=0	one extra allowed suite=guest mark on an honest tree. 
+CAUGHT	R5-10-stale-preboot-other-nonce	rc=1	new evidence + old $WORK preboot. HOST CHECK FAILED: |   nonce does not match the pre-boot record |   pre-boot work path does not match host-context |   pre-boot run_id does not match host-context
+CAUGHT	R5-10-stale-copy-after-new-mint	rc=1	stale preboot copy after new mint + new run_id. HOST CHECK FAILED: |   pre-boot path is not the host-preboot file under the bound work dir |   pre-boot run_id does not match host-context
+CAUGHT	R5-10-restore-stale-bytes	rc=1	stale preboot bytes, new run_id last in host-context. HOST CHECK FAILED: |   pre-boot run_id does not match host-context
+CAUGHT	R5-10-preboot-is-dir	rc=1	PREBOOT path is a directory. HOST CHECK FAILED: |   pre-boot nonce record missing
+summary: 36 CAUGHT, 7 SURVIVED, 43 plants
