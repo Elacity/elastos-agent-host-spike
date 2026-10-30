@@ -31,7 +31,8 @@
 //!    its CID is the bytes `01 55 12 20` and the SHA-256 of the block (CID
 //!    version 1, raw codec `0x55`, multihash sha2-256 of 32 bytes), and its
 //!    Tsize is its length. A larger file is split into 262144-byte raw
-//!    leaves, the last one shorter, under a balanced dag-pb file tree
+//!    leaves, the last one a full 262144 bytes when the length is an exact
+//!    multiple of 262144 and shorter otherwise, under a balanced dag-pb file tree
 //!    (trickle off): each level groups its nodes left to right into groups of
 //!    up to 174 (`MAX_FILE_LINKS`), each full before the next starts, and
 //!    wraps each group in one file node, so only a level's last group can be
@@ -1120,7 +1121,8 @@ struct FileTreeNode {
 
 /// The CID bytes and Tsize of the balanced file root of `content`, the bytes
 /// of a file that is over one leaf. The bytes are split into
-/// [`CHUNK_SIZE`]-byte raw leaves, the last one shorter, by
+/// [`CHUNK_SIZE`]-byte raw leaves, the last one a full 262144 bytes when the
+/// length is an exact multiple of 262144 and shorter otherwise, by
 /// [`file_from_digests`], the one file-tree builder. A file of one leaf is
 /// never here: `file_node` names it as that leaf.
 fn file_root(content: &[u8]) -> (Vec<u8>, u64) {

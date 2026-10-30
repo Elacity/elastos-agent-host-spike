@@ -65,9 +65,10 @@ To recompute a lab CID by hand:
    each chunk is a raw leaf as in step 2. Every chunk but the last is 262144
    bytes; the last chunk is shorter only when the length is not an exact
    multiple of 262144, so a file of exactly two full chunks keeps two full
-   leaves. `two_full_chunks_keep_both_leaves` pins that file and catches
-   F-CI85a (a splitter drops the last byte when the length is an exact
-   multiple). The leaves make a balanced dag-pb **file tree** (trickle off).
+   leaves. `two_full_chunks_keep_both_leaves` pins a 524288-byte file and
+   catches F-CI85a and F-CI88a (a splitter drops the last byte when the
+   length is an exact multiple). The leaves make a balanced dag-pb **file
+   tree** (trickle off).
    Each level groups its nodes left to right into groups of up to 174
    (`max-file-links`), each full before the next starts, so only a level's
    last group can be short, and wraps each group in one **file node**; a
@@ -76,8 +77,8 @@ To recompute a lab CID by hand:
    a root of two depth-1 nodes, the first over 174 leaves and the second over
    one leaf. A file of exactly 174 leaves is one depth-1 file node:
    `exactly_174_leaves_stay_one_file_node` pins a 45350913-byte file (173
-   chunks of 262144 bytes and a last chunk of 1 byte) and catches F-CI86a (a
-   loop that skips a full group of 174). A file node's block
+   chunks of 262144 bytes and a last chunk of 1 byte) and catches F-CI86a and
+   F-CI88b (a loop that skips a full group of 174). A file node's block
    is, for each child in order, field 2 (`0x12`, length) holding a link:
    field 1 (`0x0a`, length) the child's CID bytes, field 2 with an empty name
    (`12 00`), field 3 (`0x18`) the child's Tsize as a varint. Then field 1
@@ -360,8 +361,8 @@ rules and not from the Rust code, in
 | Directory codec `0x70`, dag-pb | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18r (`0x71`) |
 | Chunk size 262144: a file of exactly that size is one block | `single_block_at_the_chunk_limit_has_the_pinned_cid` | F-CI18d (262143) |
 | A file over one leaf is a balanced root of raw leaves: empty link names, type 2, filesize, blocksizes, and a Tsize of its block and its leaves | `file_over_one_leaf_has_the_pinned_cid` | F-CI48a (no name field), F-CI48b (no blocksizes), F-CI48c (no filesize), F-CI48d (Tsize without the root block) |
-| A file of exactly two chunks keeps both full leaves, so a short-last-chunk pin cannot hide a splitter that drops the last byte | `two_full_chunks_keep_both_leaves` | F-CI85a (a splitter drops the last byte when the length is an exact multiple) |
-| A file of exactly 174 leaves is one depth-1 file node, and 45350913 bytes (173 chunks of 262144 bytes and a last chunk of 1 byte) groups once | `exactly_174_leaves_stay_one_file_node` | F-CI86a (the level loop skips a full group of 174) |
+| A file of exactly two chunks keeps both full leaves, so a short-last-chunk pin cannot hide a splitter that drops the last byte | `two_full_chunks_keep_both_leaves` | F-CI85a, F-CI88a (a splitter drops the last byte when the length is an exact multiple) |
+| A file of exactly 174 leaves is one depth-1 file node, and 45350913 bytes (173 chunks of 262144 bytes and a last chunk of 1 byte) groups once | `exactly_174_leaves_stay_one_file_node` | F-CI86a, F-CI88b (the level loop skips a full group of 174) |
 | The file tree's depth is the smallest `d` with `174^d` at least the leaf count: each level groups up to 174 children, left to right, each group full before the next starts, one file node per group, and a group of one child is a one-link node | `file_past_174_leaves_keeps_a_second_tree_level`, `file_past_174_squared_leaves_keeps_a_third_tree_level` | F-CI18e (the level loop runs only once), F-CI48e (the limit is 175), F-CI76a (a one-child group linked directly), F-CI76b (a child's Tsize as its blocksize), F-CI72a (the level loop stops after two passes) |
 | A file of 30277 leaves needs a third tree level: 175 depth-1 nodes, then 2, then the root's two children; 30276 full leaves still finish in two passes | `file_past_174_squared_leaves_keeps_a_third_tree_level` | F-CI72a (the level loop stops after two passes) |
 | The listing call names a file of at most one leaf; a listed file over one chunk is refused and named from its bytes instead | `listed_file_over_the_chunk_limit_is_refused`, `listed_file_over_one_leaf_names_the_bytes_call` | F-CI47c (`encode_listed_files` has no size refusal) |
@@ -2097,7 +2098,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 294 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 296 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
