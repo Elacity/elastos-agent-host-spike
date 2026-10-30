@@ -696,10 +696,10 @@ impl StandIn {
     ///
     /// `granted_at` is the seeded value. This method reads no clock. A seeded
     /// grant has no plan binding, which only `post_capability_grant` mints.
-    /// It also stores no ledger handle: the grant route is the one bind
-    /// site, and `admit_effect` refuses a grant with no stored handle with
-    /// status 403 and the ledger's `unknown handle` text, so a seeded grant
-    /// is never admitted.
+    /// It also stores no ledger handle and no run pair: the grant route binds
+    /// on the ledger, and `admit_effect` refuses a grant with no stored handle
+    /// with status 403 and the ledger's `unknown handle` text, so a seeded
+    /// grant is never admitted. `seed_bound_grant` is the seam that binds.
     #[allow(clippy::too_many_arguments)]
     pub fn seed_grant(
         &mut self,
@@ -731,6 +731,61 @@ impl StandIn {
                 request_id: String::new(),
             },
         });
+    }
+
+    /// Lab test seam, not a route.
+    ///
+    /// Stores one `Live` grant exactly as `seed_grant` does, then binds it
+    /// through `bind_on_ledger`, the same ledger path `post_capability_grant`
+    /// runs, and stamps the run pair from `mint_run_binding`. Its plan stays
+    /// `None`. A bound grant is admitted at a hosted use exactly like a
+    /// route-minted one, so a caller that cannot reach the request route can
+    /// still present the grant. `seed_grant` stays unbound.
+    #[allow(clippy::too_many_arguments)]
+    pub fn seed_bound_grant(
+        &mut self,
+        request_id: &str,
+        session_id: &str,
+        resource: &str,
+        action: &str,
+        duration: &str,
+        granted_at: u64,
+        life: Life,
+        session_ended: bool,
+    ) -> Result<(), (u16, String)> {
+        self.seed_grant(
+            request_id,
+            session_id,
+            resource,
+            action,
+            duration,
+            granted_at,
+            life,
+            session_ended,
+        );
+        self.bind_stored_grant(request_id)
+    }
+
+    /// The one "bind on the ledger, then store the binding and the run pair"
+    /// step. `post_capability_grant` and `seed_bound_grant` both run it, after
+    /// each has stored the grant for `request_id`.
+    fn bind_stored_grant(&mut self, request_id: &str) -> Result<(), (u16, String)> {
+        let session_id = self
+            .grants
+            .iter()
+            .find(|grant| grant.request_id == request_id)
+            .map(|grant| grant.session_id.clone())
+            .expect("the caller just stored this request's grant");
+        let instance = self.instance_on_ledger(&session_id);
+        let bound = self.bind_on_ledger(instance, &session_id)?;
+        let stored = self
+            .grants
+            .iter_mut()
+            .find(|grant| grant.request_id == request_id)
+            .expect("the caller just stored this request's grant");
+        stored.binding = Some(bound);
+        stored.run = mint_run_binding(request_id);
+        Ok(())
     }
 
     /// Lab test seam, not a route. Private to this module.
@@ -1015,8 +1070,6 @@ impl StandIn {
         let resource = request.resource.clone();
         let action = request.action.clone();
         let plan = request.plan.clone();
-        let instance = self.instance_on_ledger(&session_id);
-        let bound = self.bind_on_ledger(instance, &session_id)?;
         self.settle_record(&request_id, RequestStatus::Granted, rationale, "shell");
         let instant = self.instant;
         self.seed_grant(
@@ -1029,15 +1082,13 @@ impl StandIn {
             Life::Live,
             false,
         );
-        let stored = self
-            .grants
+        let minted = mint_plan_binding(&plan);
+        self.grants
             .iter_mut()
             .find(|grant| grant.request_id == request_id.as_str())
-            .expect("the grant route just stored this request's grant");
-        stored.binding = Some(bound);
-        let minted = mint_plan_binding(&plan);
-        stored.plan = minted;
-        stored.run = mint_run_binding(&request_id);
+            .expect("the grant route just stored this request's grant")
+            .plan = minted;
+        self.bind_stored_grant(&request_id)?;
         Ok(json!({ "success": true }))
     }
 
