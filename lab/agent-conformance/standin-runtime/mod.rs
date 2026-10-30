@@ -50,6 +50,10 @@
 //! sets `Revoked` on the grant already selected by `request_id` and
 //! `session_id`. A stop still walks one session through `revoke_live` and
 //! passes each of those grants to the same function.
+//! `post_capability_revoke_all` answers `POST /api/capability/revoke-all`
+//! through that writer for every `Granted` record, with the shell reason,
+//! then passes each `Live` grant to `revoke_grant`. A missing reason is
+//! `Revoked all by user`. The instances stay.
 //!
 //! `set_instant` calls `expire_due`, which passes the one writer `expired`,
 //! `Request timed out` and `runtime` for each pending request at least 300
@@ -767,6 +771,66 @@ impl StandIn {
         Ok(json!({
             "success": true,
             "revoked_request_id": id,
+        }))
+    }
+
+    /// `POST /api/capability/revoke-all.`
+    ///
+    /// A shell ends every live grant. `require_shell` runs before the body is
+    /// read. The body's only key is `reason`. A null body, or an object with
+    /// no reason, uses `Revoked all by user`. A present reason string,
+    /// including an empty one, is that text. `settle_record` then sets every
+    /// `Granted` record to `denied` with that reason and `shell`. Each grant
+    /// whose life is `Live` is passed to `revoke_grant`. An `Exhausted`,
+    /// `Revoked` or `Expired` grant is not passed. A pending, denied or
+    /// expired record stays. The instances stay. Ok is `success` and `reason`,
+    /// with no epoch and no token.
+    pub fn post_capability_revoke_all(
+        &mut self,
+        caller: Caller<'_>,
+        body: &Value,
+    ) -> Result<Value, (u16, String)> {
+        require_shell(caller)?;
+        const DEFAULT_REASON: &str = "Revoked all by user";
+        let reason = match body {
+            Value::Null => DEFAULT_REASON,
+            Value::Object(object) => {
+                let mut given = None;
+                let mut reason_not_string = false;
+                for (key, value) in object {
+                    match key.as_str() {
+                        "reason" => match value {
+                            Value::String(text) => given = Some(text.as_str()),
+                            _ => reason_not_string = true,
+                        },
+                        other => return Err((400, format!("revoke body rejects {other}"))),
+                    }
+                }
+                if reason_not_string {
+                    return Err((400, "revoke reason must be a string".to_owned()));
+                }
+                given.unwrap_or(DEFAULT_REASON)
+            }
+            _ => return Err((400, "revoke body needs an object".to_owned())),
+        };
+        let reason = reason.to_owned();
+        let granted = self
+            .requests
+            .iter()
+            .filter(|request| request.status == RequestStatus::Granted)
+            .map(|request| request.request_id.clone())
+            .collect::<Vec<_>>();
+        for request_id in granted {
+            self.settle_record(&request_id, RequestStatus::Denied, &reason, "shell");
+        }
+        for grant in &mut self.grants {
+            if is_live(grant.life) {
+                revoke_grant(grant);
+            }
+        }
+        Ok(json!({
+            "success": true,
+            "reason": reason,
         }))
     }
 
@@ -9177,6 +9241,564 @@ mod tests {
             "stopped",
             "stopped: stop one",
             "the stand-in did the work: component-1 is stopped",
+        );
+    }
+
+    /// `req-1` on `component-1` and `req-2` on `component-2`, each a session
+    /// grant, before any revoke-all.
+    fn grant_two_live(standin: &mut StandIn) {
+        let (first, second) = launch_two_running_ids(standin);
+        assert_eq!(
+            (first, second),
+            ("component-1".to_owned(), "component-2".to_owned()),
+            "the stand-in did the work: the launches are component-1 and component-2"
+        );
+        seed_shared_request(standin, "req-1", "component-1");
+        seed_shared_request(standin, "req-2", "component-2");
+        for (request_id, rationale) in [("req-1", "grant shared read"), ("req-2", "grant sibling")]
+        {
+            let granted = standin
+                .post_capability_grant(
+                    Caller::Shell,
+                    &json!({
+                        "request_id": request_id,
+                        "duration": "session",
+                        "rationale": rationale,
+                    }),
+                )
+                .expect("the stand-in did the work: the shell grants the request");
+            assert_eq!(
+                granted,
+                json!({ "success": true }),
+                "the stand-in did the work: the shell grant of {request_id} is success"
+            );
+        }
+    }
+
+    fn assert_no_orphan_request(standin: &StandIn) {
+        for session_id in ["component-1", "component-2"] {
+            for entry in request_entries(standin, session_id) {
+                let request_id = entry["request_id"].as_str().expect("request_id");
+                assert!(
+                    request_id != "req-orphan" && request_id != "req-old",
+                    "the stand-in did the work: no request entry has request_id {request_id}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn standin_shell_revoke_all_drops_every_live_grant() {
+        let mut standin = StandIn::new();
+        let (first, second) = launch_two_running_ids(&mut standin);
+        assert_eq!(
+            (first, second),
+            ("component-1".to_owned(), "component-2".to_owned()),
+            "the stand-in did the work: the launches are component-1 and component-2"
+        );
+        seed_shared_request(&mut standin, "req-e", "component-1");
+        standin.set_instant(300);
+        assert_eq!(
+            one_request(&standin, "component-1", "req-e"),
+            expired_request("req-e", "component-1"),
+            "the stand-in did the work: the shell record for req-e is expired"
+        );
+        seed_shared_request(&mut standin, "req-1", "component-1");
+        seed_shared_request(&mut standin, "req-3", "component-1");
+        seed_shared_request(&mut standin, "req-2", "component-2");
+        seed_shared_request(&mut standin, "req-p", "component-2");
+        seed_shared_request(&mut standin, "req-d", "component-2");
+        let denied = standin
+            .post_capability_deny(
+                Caller::Shell,
+                &json!({ "request_id": "req-d", "reason": "keep this deny" }),
+            )
+            .expect("the stand-in did the work: the shell denies req-d");
+        assert_eq!(
+            denied,
+            json!({ "success": true }),
+            "the stand-in did the work: the shell deny of req-d is success"
+        );
+        assert_eq!(
+            one_request(&standin, "component-2", "req-d"),
+            shell_denied_request("req-d", "component-2", "keep this deny"),
+            "the stand-in did the work: the shell record for req-d keeps its deny"
+        );
+        for (request_id, duration, rationale) in [
+            ("req-1", "session", "grant shared read"),
+            ("req-3", "once", "grant once"),
+            ("req-2", "session", "grant sibling"),
+        ] {
+            let granted = standin
+                .post_capability_grant(
+                    Caller::Shell,
+                    &json!({
+                        "request_id": request_id,
+                        "duration": duration,
+                        "rationale": rationale,
+                    }),
+                )
+                .expect("the stand-in did the work: the shell grants the request");
+            assert_eq!(
+                granted,
+                json!({ "success": true }),
+                "the stand-in did the work: the shell grant of {request_id} is success"
+            );
+        }
+        standin.seed_grant(
+            "req-orphan",
+            "component-2",
+            "res",
+            "read",
+            "session",
+            300,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-old",
+            "component-1",
+            "res",
+            "read",
+            "session",
+            300,
+            Life::Expired,
+            false,
+        );
+        let owner = Caller::Client {
+            session_id: "component-1",
+        };
+        let sibling = Caller::Client {
+            session_id: "component-2",
+        };
+        let valid = standin
+            .post_capability_validate(owner, &json!({ "request_id": "req-3" }))
+            .expect("the stand-in did the work: req-3 validates");
+        assert_eq!(
+            valid,
+            json!({ "valid": true }),
+            "the stand-in did the work: the component-1 client validates req-3"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-3"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: req-3 is exhausted"
+        );
+        let (plain, query) = shell_pair(&standin);
+        assert_eq!(
+            plain, query,
+            "the stand-in did the work: both shell forms are one body before the revoke-all"
+        );
+        assert_eq!(
+            request_ids(&plain),
+            BTreeSet::from([
+                "req-1".to_owned(),
+                "req-2".to_owned(),
+                "req-orphan".to_owned(),
+            ]),
+            "the stand-in did the work: the shell live-grant request_id set is exactly req-1, req-2 and req-orphan"
+        );
+        let body = json!({ "reason": "stop every grant" });
+        let revoked = standin
+            .post_capability_revoke_all(Caller::Shell, &body)
+            .expect("the stand-in did the work: the shell revokes every live grant");
+        assert_keys(
+            &revoked,
+            &["reason", "success"],
+            "the stand-in did the work: the revoke-all body is success and reason",
+        );
+        assert_eq!(
+            revoked,
+            json!({ "success": true, "reason": "stop every grant" }),
+            "the stand-in did the work: the shell revoke-all stores the shell reason and no epoch"
+        );
+        assert_eq!(
+            one_request(&standin, "component-1", "req-1"),
+            shell_denied_request("req-1", "component-1", "stop every grant"),
+            "the stand-in did the work: the shell record for req-1 is denied by the shell"
+        );
+        assert_eq!(
+            one_request(&standin, "component-2", "req-2"),
+            shell_denied_request("req-2", "component-2", "stop every grant"),
+            "the stand-in did the work: the shell record for req-2 is denied by the shell"
+        );
+        assert_eq!(
+            one_request(&standin, "component-1", "req-3"),
+            shell_denied_request("req-3", "component-1", "stop every grant"),
+            "the stand-in did the work: the shell record for req-3 is denied by the shell"
+        );
+        assert_eq!(
+            one_request(&standin, "component-2", "req-p"),
+            pending_request("req-p", "component-2"),
+            "the stand-in did the work: the shell record for req-p stays pending"
+        );
+        assert_eq!(
+            one_request(&standin, "component-2", "req-d"),
+            shell_denied_request("req-d", "component-2", "keep this deny"),
+            "the stand-in did the work: the shell record for req-d still keeps its deny"
+        );
+        assert_eq!(
+            one_request(&standin, "component-1", "req-e"),
+            expired_request("req-e", "component-1"),
+            "the stand-in did the work: the shell record for req-e stays expired"
+        );
+        assert_no_orphan_request(&standin);
+        assert_eq!(
+            grant_record(&standin, "req-1"),
+            (Life::Revoked, false),
+            "the stand-in did the work: req-1's live grant is revoked"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-2"),
+            (Life::Revoked, false),
+            "the stand-in did the work: req-2's live grant is revoked"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-orphan"),
+            (Life::Revoked, false),
+            "the stand-in did the work: req-orphan's live grant is revoked"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-3"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: the exhausted grant stays exhausted"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-old"),
+            (Life::Expired, false),
+            "the stand-in did the work: the expired grant stays expired"
+        );
+        let (plain, query) = shell_pair(&standin);
+        assert_eq!(
+            plain, query,
+            "the stand-in did the work: both shell forms stay one body after the revoke-all"
+        );
+        assert_eq!(
+            request_ids(&plain),
+            BTreeSet::new(),
+            "the stand-in did the work: the shell live-grant request_id set is empty"
+        );
+        let spent = standin.post_capability_validate(owner, &json!({ "request_id": "req-1" }));
+        assert_not_live(
+            &spent,
+            "Revoked",
+            "the stand-in did the work: req-1 is not live",
+        );
+        let exhausted = standin.post_capability_validate(owner, &json!({ "request_id": "req-3" }));
+        assert_not_live(
+            &exhausted,
+            "Exhausted",
+            "the stand-in did the work: req-3 is not live",
+        );
+        let sibling_spent =
+            standin.post_capability_validate(sibling, &json!({ "request_id": "req-2" }));
+        assert_not_live(
+            &sibling_spent,
+            "Revoked",
+            "the stand-in did the work: req-2 is not live",
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 stays running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running",
+        );
+        let again = standin
+            .post_capability_revoke_all(Caller::Shell, &body)
+            .expect("the stand-in did the work: a second revoke-all is ok");
+        assert_eq!(
+            again, revoked,
+            "the stand-in did the work: a second revoke-all returns the same body"
+        );
+        assert_eq!(
+            one_request(&standin, "component-1", "req-1"),
+            shell_denied_request("req-1", "component-1", "stop every grant"),
+            "the stand-in did the work: the denied record for req-1 stays"
+        );
+        assert_eq!(
+            one_request(&standin, "component-2", "req-2"),
+            shell_denied_request("req-2", "component-2", "stop every grant"),
+            "the stand-in did the work: the denied record for req-2 stays"
+        );
+        assert_eq!(
+            one_request(&standin, "component-1", "req-3"),
+            shell_denied_request("req-3", "component-1", "stop every grant"),
+            "the stand-in did the work: the denied record for req-3 stays"
+        );
+        assert_eq!(
+            one_request(&standin, "component-2", "req-p"),
+            pending_request("req-p", "component-2"),
+            "the stand-in did the work: req-p stays pending"
+        );
+        assert_eq!(
+            one_request(&standin, "component-2", "req-d"),
+            shell_denied_request("req-d", "component-2", "keep this deny"),
+            "the stand-in did the work: req-d stays denied"
+        );
+        assert_eq!(
+            one_request(&standin, "component-1", "req-e"),
+            expired_request("req-e", "component-1"),
+            "the stand-in did the work: req-e stays expired"
+        );
+        assert_no_orphan_request(&standin);
+        assert_eq!(
+            grant_record(&standin, "req-1"),
+            (Life::Revoked, false),
+            "the stand-in did the work: the revoked grant for req-1 stays"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-2"),
+            (Life::Revoked, false),
+            "the stand-in did the work: the revoked grant for req-2 stays"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-orphan"),
+            (Life::Revoked, false),
+            "the stand-in did the work: the revoked grant for req-orphan stays"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-3"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: req-3 stays exhausted"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-old"),
+            (Life::Expired, false),
+            "the stand-in did the work: req-old stays expired"
+        );
+        let (plain, query) = shell_pair(&standin);
+        assert_eq!(
+            plain, query,
+            "the stand-in did the work: both shell forms stay one body"
+        );
+        assert_eq!(
+            request_ids(&plain),
+            BTreeSet::new(),
+            "the stand-in did the work: the shell live-grant request_id set stays empty"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 stays running after the second revoke-all",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running after the second revoke-all",
+        );
+    }
+
+    #[test]
+    fn standin_shell_revoke_all_refuses_without_shell() {
+        let mut standin = StandIn::new();
+        grant_two_live(&mut standin);
+        let client = Caller::Client {
+            session_id: "component-1",
+        };
+        let refused = standin.post_capability_revoke_all(client, &json!({}));
+        assert_delete(
+            &refused,
+            403,
+            "This endpoint requires shell privileges",
+            "the stand-in did the work: a client revoke-all is refused",
+        );
+        let client_string =
+            standin.post_capability_revoke_all(client, &Value::String("client".to_owned()));
+        assert_delete(
+            &client_string,
+            403,
+            "This endpoint requires shell privileges",
+            "the stand-in did the work: a client string body is refused",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-1"),
+            (Life::Live, false),
+            "the stand-in did the work: req-1 stays live after the client revoke-all"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-2"),
+            (Life::Live, false),
+            "the stand-in did the work: req-2 stays live after the client revoke-all"
+        );
+        assert_eq!(
+            one_request(&standin, "component-1", "req-1"),
+            granted_request("req-1", "component-1", "grant shared read"),
+            "the stand-in did the work: req-1 stays granted after the client revoke-all"
+        );
+        assert_eq!(
+            one_request(&standin, "component-2", "req-2"),
+            granted_request("req-2", "component-2", "grant sibling"),
+            "the stand-in did the work: req-2 stays granted after the client revoke-all"
+        );
+        let shell_string =
+            standin.post_capability_revoke_all(Caller::Shell, &Value::String("shell".to_owned()));
+        assert_delete(
+            &shell_string,
+            400,
+            "revoke body needs an object",
+            "the stand-in did the work: a shell string body needs an object",
+        );
+        let extra = standin.post_capability_revoke_all(
+            Caller::Shell,
+            &json!({ "reason": "stop every grant", "token": "req-1" }),
+        );
+        assert_delete(
+            &extra,
+            400,
+            "revoke body rejects token",
+            "the stand-in did the work: a shell body rejects token",
+        );
+        let number = standin.post_capability_revoke_all(Caller::Shell, &json!({ "reason": 1 }));
+        assert_delete(
+            &number,
+            400,
+            "revoke reason must be a string",
+            "the stand-in did the work: a shell reason that is not a string is refused",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-1"),
+            (Life::Live, false),
+            "the stand-in did the work: req-1 stays live after the shell refusals"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-2"),
+            (Life::Live, false),
+            "the stand-in did the work: req-2 stays live after the shell refusals"
+        );
+        assert_eq!(
+            one_request(&standin, "component-1", "req-1"),
+            granted_request("req-1", "component-1", "grant shared read"),
+            "the stand-in did the work: req-1 stays granted after the shell refusals"
+        );
+        assert_eq!(
+            one_request(&standin, "component-2", "req-2"),
+            granted_request("req-2", "component-2", "grant sibling"),
+            "the stand-in did the work: req-2 stays granted after the shell refusals"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 stays running after the refusals",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running after the refusals",
+        );
+        let revoked = standin
+            .post_capability_revoke_all(Caller::Shell, &json!({}))
+            .expect("the stand-in did the work: the shell revoke-all of an empty object is ok");
+        assert_keys(
+            &revoked,
+            &["reason", "success"],
+            "the stand-in did the work: the empty-object body is success and reason",
+        );
+        assert_eq!(
+            revoked,
+            json!({ "success": true, "reason": "Revoked all by user" }),
+            "the stand-in did the work: a missing reason is Revoked all by user"
+        );
+        assert_eq!(
+            one_request(&standin, "component-1", "req-1"),
+            shell_denied_request("req-1", "component-1", "Revoked all by user"),
+            "the stand-in did the work: req-1 is denied with the missing reason"
+        );
+        assert_eq!(
+            one_request(&standin, "component-2", "req-2"),
+            shell_denied_request("req-2", "component-2", "Revoked all by user"),
+            "the stand-in did the work: req-2 is denied with the missing reason"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-1"),
+            (Life::Revoked, false),
+            "the stand-in did the work: req-1 is revoked"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-2"),
+            (Life::Revoked, false),
+            "the stand-in did the work: req-2 is revoked"
+        );
+        let (plain, query) = shell_pair(&standin);
+        assert_eq!(
+            plain, query,
+            "the stand-in did the work: both shell forms are one body after the empty object"
+        );
+        assert_eq!(
+            request_ids(&plain),
+            BTreeSet::new(),
+            "the stand-in did the work: the shell live-grant request_id set is empty"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 stays running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running",
+        );
+
+        let mut empty = StandIn::new();
+        grant_two_live(&mut empty);
+        let cleared = empty
+            .post_capability_revoke_all(Caller::Shell, &json!({ "reason": "" }))
+            .expect("the stand-in did the work: the shell revoke-all of an empty reason is ok");
+        assert_eq!(
+            cleared,
+            json!({ "success": true, "reason": "" }),
+            "the stand-in did the work: a present empty reason is stored empty"
+        );
+        assert_eq!(
+            one_request(&empty, "component-1", "req-1"),
+            shell_denied_request("req-1", "component-1", ""),
+            "the stand-in did the work: req-1 is denied with an empty reason"
+        );
+        assert_eq!(
+            one_request(&empty, "component-2", "req-2"),
+            shell_denied_request("req-2", "component-2", ""),
+            "the stand-in did the work: req-2 is denied with an empty reason"
+        );
+        assert_eq!(
+            grant_record(&empty, "req-1"),
+            (Life::Revoked, false),
+            "the stand-in did the work: req-1 is revoked for an empty reason"
+        );
+        assert_eq!(
+            grant_record(&empty, "req-2"),
+            (Life::Revoked, false),
+            "the stand-in did the work: req-2 is revoked for an empty reason"
+        );
+
+        let mut missing = StandIn::new();
+        grant_two_live(&mut missing);
+        let nulled = missing
+            .post_capability_revoke_all(Caller::Shell, &Value::Null)
+            .expect("the stand-in did the work: the shell revoke-all of null is ok");
+        assert_eq!(
+            nulled,
+            json!({ "success": true, "reason": "Revoked all by user" }),
+            "the stand-in did the work: a null body uses Revoked all by user"
         );
     }
 }
