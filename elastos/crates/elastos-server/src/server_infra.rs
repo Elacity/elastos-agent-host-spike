@@ -1048,9 +1048,9 @@ async fn setup_server_infrastructure_impl(
                         (provider::ProviderBridge, Option<()>, _, Option<()>),
                         provider::bridge::BridgeError,
                     > = match confinement {
-                        Ok(()) => Err(provider::bridge::BridgeError::InitFailed(
-                            "provider confinement has no backend on this OS".to_owned(),
-                        )),
+                        Ok(()) => unreachable!(
+                            "model_provider_confinement refuses every OS without a confinement backend"
+                        ),
                         Err(refusal) => Err(refusal),
                     };
                     #[cfg(target_os = "macos")]
