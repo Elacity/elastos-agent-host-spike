@@ -261,7 +261,11 @@ impl Verifier {
     }
 
     /// Removes one grant and the journals minted from it.
+    /// A missing handle removes nothing.
     pub fn revoke_grant(&mut self, handle: Handle) {
+        if !self.grants.contains_key(&handle) {
+            return;
+        }
         self.grants.remove(&handle);
         self.remove_derived_grants(handle);
     }
@@ -2022,6 +2026,53 @@ fn model_successful_child_keeps_next_ask_independent() {
         .use_grant(photo_call, &guest(album))
         .expect("independent album stays");
     assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
+}
+
+#[test]
+fn model_missing_handle_removes_nothing() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let notes = verifier.register_instance("notes", "session-a");
+    let library = verifier
+        .bind_once(photo, "UsersAI/photo/library", rights())
+        .expect("allow once");
+    let notes_handle = verifier
+        .bind_grant(notes, "UsersAI/notes/pad", rights())
+        .expect("notes ask");
+    let photo_call = verifier.open_call(photo);
+    let notes_call = verifier.open_call(notes);
+    let roll = verifier
+        .create_child_journal(&photo_call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    let frame = verifier
+        .create_child_journal(
+            &photo_call,
+            &guest(roll),
+            "UsersAI/photo/library/roll/frame",
+        )
+        .expect("nested journal");
+    verifier
+        .operate(&photo_call, &guest(library), ops::Operation::Append)
+        .expect("the allow-once grant ends");
+    let gone = verifier
+        .use_grant(photo_call, &guest(library))
+        .expect_err("spent parent");
+    assert_eq!(gone, Refuse::UnknownHandle);
+    assert_eq!(gone.to_string(), "unknown handle");
+    verifier.revoke_grant(library);
+    let child_kept = verifier
+        .use_grant(photo_call, &guest(roll))
+        .expect("a missing handle leaves the child journal");
+    assert_eq!(child_kept.owned_root, "UsersAI/photo/library/roll");
+    let nested_kept = verifier
+        .use_grant(photo_call, &guest(frame))
+        .expect("a missing handle leaves the nested journal");
+    assert_eq!(nested_kept.owned_root, "UsersAI/photo/library/roll/frame");
+    let notes_kept = verifier
+        .use_grant(notes_call, &guest(notes_handle))
+        .expect("notes grant stays");
+    assert_eq!(notes_kept.identity, "notes");
+    assert_eq!(notes_kept.owned_root, "UsersAI/notes/pad");
 }
 
 #[test]
