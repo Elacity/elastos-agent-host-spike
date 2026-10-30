@@ -11,6 +11,7 @@
 - 014: `shown_grant_authorises_only_its_session` proves a shown grant authorises only the session that asked for it; another session's use is refused as `wrong capsule` and spends nothing, both client live lists show one grant each without `session_id`, and each session's own use still runs until its `once` grant leaves the live list; two hand-run plants caught and restored; 1 test, 2 plants.
 - 015: `owner_approves_only_the_shown_hash` proves the owner's grant mints only the hash the shown request stored; another plan, an empty hash and a 63-character hash are refused with `approved plan does not match the requested plan` and mint nothing while the request stays pending, and the exact hash then grants one use that `execute` spends; two hand-run plants caught and restored; 1 test, 2 plants.
 - 016: `approve` gains `caller: Caller<'_>` after `stand_in` and passes that value to `post_capability_grant`, staying the one grant call; `agent_cannot_approve_its_own_shown_plan` proves the session that posted a plan and the other running session are refused with `This endpoint requires shell privileges` before the body is read, for another hash, an empty hash, a 63-character hash and the duration word `standing` too, and that the shell's call with the exact hash then grants one use which `execute` spends; two hand-run plants caught and restored; 1 test, 2 plants.
+- 017: `execute` gains `caller: Caller<'_>` after `stand_in` and passes that value to `post_capability_validate`, staying the one use call; `shell_cannot_spend_a_shown_grant` proves a shell caller is refused for the bound plan, a different plan and empty plan bytes before the plan check, the grant stays live, the other session is refused as `wrong capsule` without a spend, the owning session's use then runs once, and a shell call after that spend is still the session refusal; two hand-run plants caught and restored; 1 test, 2 plants.
 
 ## 001
 
@@ -306,3 +307,33 @@ cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_can
 - restored, the test passes.
 
 After both restores, `git diff -- lab/plan-approval/src/lib.rs` shows no plant. The restored proof command set (the fmt check and the eleven test commands in the task) took 3.212 s real. This lane has no `falsifiers.json`; no id is added.
+
+## 017
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md), Non-negotiable boundaries:
+
+> A provider implements an operation; Runtime authorizes the caller.
+
+This task proves that sentence for a shell caller on the use path. The session check stays 014, the hash check stays 015, the shell check on `approve` stays 016, a standing mandate stays BACKLOG item 11, and an audit record of the use stays item 16. `execute` gains `caller: Caller<'_>` after `stand_in` and passes that value to `post_capability_validate`, so it stays the one use call and does not match on `Caller`. Each existing call replaces its session argument with `Caller::Client { session_id: <that session> }` and keeps its other arguments and assertions. The new test calls only `journeys::running_agent`, `journeys::request`, `approve` and `execute`; it does not call `post_capability_validate`, `seed_request`, `set_instant` or `delete_capsule`. This crate stores no copy of the caller check and does not copy the stand-in.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shell_cannot_spend_a_shown_grant -- --exact
+```
+
+### F-execute-forces-client
+
+- old bytes, 16: `        caller,\n`
+- new bytes, 54: `        Caller::Client { session_id: "component-1" },\n`
+- planted crate compiled with one `unused variable: caller` warning; `shell_cannot_spend_a_shown_grant` failed at `src/lib.rs:2571:9` (planted tree) on the first shell-use assertion: `assertion left == right failed: the shell cannot spend a shown grant: the shell's use of request-1 with plan bytes [123, 34, 115, 116, 101, 112, 115, 34, 58, 91, 123, 34, 114, 101, 115, 111, 117, 114, 99, 101, 34, 58, 34, 108, 111, 99, 97, 108, 104, 111, 115, 116, 58, 47, 47, 80, 117, 98, 108, 105, 99, 47, 112, 108, 97, 110, 45, 97, 112, 112, 114, 111, 118, 97, 108, 47, 97, 46, 116, 120, 116, 34, 44, 34, 97, 99, 116, 105, 111, 110, 34, 58, 34, 114, 101, 97, 100, 34, 125, 93, 125] is refused as a shell on an instance-session route`; left held `Ok(Object {"valid": Bool(true)})`, right expected `Err((403, "capability validate needs an instance session"))`. The forced client spent the grant.
+- restored, the test passes.
+
+### F-empty-before-caller
+
+- old bytes, 39: `    stand_in.post_capability_validate(\n`
+- new bytes, 143: `    if plan.is_empty() {\n        return Err((403, "grant is not bound to this plan".to_owned()));\n    }\n    stand_in.post_capability_validate(\n`
+- planted crate compiled; `shell_cannot_spend_a_shown_grant` failed at `src/lib.rs:2574:9` (planted tree) on the shell-use assertion for empty plan bytes: `assertion left == right failed: the shell cannot spend a shown grant: the shell's use of request-1 with plan bytes [] is refused as a shell on an instance-session route`; left held `Err((403, "grant is not bound to this plan"))`, right expected `Err((403, "capability validate needs an instance session"))`. The plan check ran before the caller check, so a shell reached a body check.
+- restored, the test passes.
+
+After both restores, `git diff -- lab/plan-approval/src/lib.rs` shows no plant. The restored proof command set (the fmt check and the twelve test commands in the task) took 1.54 s real. This lane has no `falsifiers.json`; no id is added.

@@ -85,13 +85,13 @@ stays `granted`. This crate stores no lifetime and does not copy the expiry
 rule; the stand-in owns it.
 
 A shown grant authorises only the session that asked for it. `execute` is the
-only use call, and it passes the session it is given. Another session's use of
+only use call, and it passes the caller it is given. Another session's use of
 that shown grant is refused with status 403 and `wrong capsule: expected ` that
 grant's session, then `, got ` the caller's session, and the grant stays on the
 live list. The owning session's own use still runs, and a `once` grant then
 leaves the live list. This crate stores no session check of its own; the
 stand-in compares the grant's session with the caller's. `preview`,
-`plan_sha256`, `approve`, `execute`, `deny_shown_plan`, `age_shown_plan` and
+`plan_sha256`, `approve`, `deny_shown_plan`, `age_shown_plan` and
 `stop_shown_session` are unchanged by this slice. The crate does not copy the
 stand-in, and it names no planner. A passing run gives the Runtime no A15
 credit.
@@ -140,6 +140,26 @@ and `stop_shown_session` are unchanged by this slice. The crate does not copy
 the stand-in, and it names no planner. A passing run gives the Runtime no A15
 credit.
 
+A shell call through `execute` cannot spend a shown grant. The design states
+the boundary:
+
+> A provider implements an operation; Runtime authorizes the caller.
+
+`execute` is the only use call, and it passes the caller it is given. A shell
+caller is refused with status 403 and `capability validate needs an instance
+session` for the bound plan, for a different plan and for empty plan bytes,
+because the caller check runs before the plan check. Each refusal spends
+nothing: the request stays granted and the `once` grant stays live. The other
+session's use is refused with status 403 and `wrong capsule`, and the grant
+stays live. The owning session's own use then runs once and the grant leaves
+the live list. A shell call after that spend is still the session refusal,
+`capability validate needs an instance session`, and not `grant is not live:
+Exhausted`. This crate stores no copy of the caller check; the stand-in's use
+route makes it. `preview`, `plan_sha256`, `approve`, `deny_shown_plan`,
+`age_shown_plan` and `stop_shown_session` are unchanged by this slice. The
+crate does not copy the stand-in, and it names no planner. A passing run gives
+the Runtime no A15 credit.
+
 `preview`, `plan_sha256`, `execute`, `deny_shown_plan`, `age_shown_plan` and
 `stop_shown_session` are unchanged by this slice; `approve` gains the duration
 argument and remains the only grant call. This crate calls
@@ -163,13 +183,15 @@ open.
   `deny_one_shown_step`, `unanswered_shown_step_expires`,
   `stop_settles_that_sessions_shown_steps`, `shown_allow_once_expires`,
   `shown_session_lasts_until_stop`, `shown_grant_authorises_only_its_session`,
-  `owner_approves_only_the_shown_hash`, `agent_cannot_approve_its_own_shown_plan`
-  and the bound-plan journey.
+  `owner_approves_only_the_shown_hash`,
+  `agent_cannot_approve_its_own_shown_plan`,
+  `shell_cannot_spend_a_shown_grant` and the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shell_cannot_spend_a_shown_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_cannot_approve_its_own_shown_plan -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib owner_approves_only_the_shown_hash -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_grant_authorises_only_its_session -- --exact

@@ -91,17 +91,23 @@ pub fn deny_shown_plan(stand_in: &mut StandIn, request_id: &str) -> Result<Value
 
 /// The agent runs one plan through `POST /api/capability/validate`.
 ///
+/// `caller` is the authenticated caller, a method argument. This helper passes
+/// it to the use route unchanged and does not judge it, so the route's own
+/// instance-session check runs before the body is read: a shell caller is
+/// refused and spends nothing. Another session's use of a shown grant is
+/// refused and spends nothing.
+///
 /// The agent asks for the hash of the bytes it holds now, so a plan that
 /// changed after approval is refused by the stand-in with status 403 and
 /// `grant is not bound to this plan`, and a `once` grant stays `Live`.
 pub fn execute(
     stand_in: &mut StandIn,
-    session_id: &str,
+    caller: Caller<'_>,
     request_id: &str,
     plan: &[u8],
 ) -> Result<Value, (u16, String)> {
     stand_in.post_capability_validate(
-        Caller::Client { session_id },
+        caller,
         &json!({ "request_id": request_id, "plan_sha256": plan_sha256(plan) }),
     )
 }
@@ -466,7 +472,14 @@ fn a_grant_bound_to_one_plan_is_refused_for_another_plan() {
 
     // Executing plan A with grant G2 is refused and spends nothing.
     assert_eq!(
-        execute(&mut stand_in, &session, &request_b, PLAN_A),
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &session
+            },
+            &request_b,
+            PLAN_A
+        ),
         Err((403, "grant is not bound to this plan".to_owned())),
         "grant G2 is bound to plan B, not plan A"
     );
@@ -483,7 +496,14 @@ fn a_grant_bound_to_one_plan_is_refused_for_another_plan() {
 
     // Executing plan A with grant G1 spends exactly G1.
     assert_eq!(
-        execute(&mut stand_in, &session, &request_a, PLAN_A),
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &session
+            },
+            &request_a,
+            PLAN_A
+        ),
         Ok(json!({ "valid": true })),
         "grant G1 authorises plan A's one use"
     );
@@ -501,7 +521,14 @@ fn a_grant_bound_to_one_plan_is_refused_for_another_plan() {
         "the once grant G1 is spent and grant G2 is still live: {after}"
     );
     assert_eq!(
-        execute(&mut stand_in, &session, &request_b, PLAN_B),
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &session
+            },
+            &request_b,
+            PLAN_B
+        ),
         Ok(json!({ "valid": true })),
         "spending G1 left G2's own plan use intact"
     );
@@ -646,7 +673,14 @@ fn deny_one_shown_step() {
     );
 
     assert_eq!(
-        execute(&mut stand_in, "component-1", "req-a", PLAN_A),
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: "component-1"
+            },
+            "req-a",
+            PLAN_A
+        ),
         Err((400, "unknown grant".to_owned())),
         "running a denied step is refused with unknown grant, without an id"
     );
@@ -711,7 +745,14 @@ fn deny_one_shown_step() {
     );
 
     assert_eq!(
-        execute(&mut stand_in, "component-1", "req-a", PLAN_A),
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: "component-1"
+            },
+            "req-a",
+            PLAN_A
+        ),
         Err((400, "unknown grant".to_owned())),
         "the denied step still has no grant after its sibling is granted"
     );
@@ -722,7 +763,14 @@ fn deny_one_shown_step() {
     );
 
     assert_eq!(
-        execute(&mut stand_in, "component-1", "req-b", PLAN_A),
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: "component-1"
+            },
+            "req-b",
+            PLAN_A
+        ),
         Ok(json!({ "valid": true })),
         "the sibling grant authorises its own one use"
     );
@@ -907,7 +955,14 @@ fn unanswered_shown_step_expires() {
     );
 
     assert_eq!(
-        execute(&mut stand_in, &session, &unanswered, PLAN_A),
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &session
+            },
+            &unanswered,
+            PLAN_A
+        ),
         Err((400, "unknown grant".to_owned())),
         "an expired shown step is not a live grant, so running it is refused with unknown grant"
     );
@@ -919,7 +974,14 @@ fn unanswered_shown_step_expires() {
 
     // The allowed step still authorises exactly its own one use.
     assert_eq!(
-        execute(&mut stand_in, &session, &allowed, PLAN_B),
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &session
+            },
+            &allowed,
+            PLAN_B
+        ),
         Ok(json!({ "valid": true })),
         "the allowed step stays a grant and authorises its own one use"
     );
@@ -1093,7 +1155,12 @@ fn stop_settles_that_sessions_shown_steps() {
 
     // The revoked allow-once grant is refused through the existing use path.
     assert_eq!(
-        execute(&mut stand_in, &first, &allowed_step, PLAN_B),
+        execute(
+            &mut stand_in,
+            Caller::Client { session_id: &first },
+            &allowed_step,
+            PLAN_B
+        ),
         Err((400, "grant is not live: Revoked".to_owned())),
         "the revoked allow-once grant refuses its own plan's use"
     );
@@ -1166,7 +1233,14 @@ fn stop_settles_that_sessions_shown_steps() {
     );
 
     assert_eq!(
-        execute(&mut stand_in, &second, &other_step, PLAN_A),
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &second
+            },
+            &other_step,
+            PLAN_A
+        ),
         Ok(json!({ "valid": true })),
         "the other session's allow-once grant authorises its own use"
     );
@@ -1305,7 +1379,14 @@ fn shown_allow_once_expires() {
     // The first allow-once grant authorises exactly its own one use and is
     // then spent; the second stays unspent and live.
     assert_eq!(
-        execute(&mut stand_in, &session, &spent_step, PLAN_A),
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &session
+            },
+            &spent_step,
+            PLAN_A
+        ),
         Ok(json!({ "valid": true })),
         "the first allow-once grant authorises its own one use"
     );
@@ -1374,7 +1455,7 @@ fn shown_allow_once_expires() {
     );
 
     assert_eq!(
-        execute(&mut stand_in, &session, &unspent_step, PLAN_B),
+        execute(&mut stand_in, Caller::Client { session_id: &session }, &unspent_step, PLAN_B),
         Err((400, "grant is not live: Expired".to_owned())),
         "an unused allow-once expires at the stand-in's grant lifetime, so its use is refused as Expired"
     );
@@ -1385,7 +1466,14 @@ fn shown_allow_once_expires() {
     );
 
     assert_eq!(
-        execute(&mut stand_in, &session, &spent_step, PLAN_A),
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &session
+            },
+            &spent_step,
+            PLAN_A
+        ),
         Err((400, "grant is not live: Exhausted".to_owned())),
         "the spent step stays exhausted at the stand-in's grant lifetime"
     );
@@ -1635,7 +1723,14 @@ fn shown_session_lasts_until_stop() {
     // A session grant authorises its bound plan again and again, and a
     // different plan is refused without spending it.
     assert_eq!(
-        execute(&mut stand_in, &session, &session_step, PLAN_A),
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &session
+            },
+            &session_step,
+            PLAN_A
+        ),
         Ok(json!({ "valid": true })),
         "the session grant authorises its bound plan"
     );
@@ -1645,7 +1740,14 @@ fn shown_session_lasts_until_stop() {
         "the used session grant stays on the live list"
     );
     assert_eq!(
-        execute(&mut stand_in, &session, &session_step, PLAN_A),
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &session
+            },
+            &session_step,
+            PLAN_A
+        ),
         Ok(json!({ "valid": true })),
         "the session grant authorises its bound plan a second time"
     );
@@ -1655,7 +1757,14 @@ fn shown_session_lasts_until_stop() {
         "two uses of its plan leave the session grant live"
     );
     assert_eq!(
-        execute(&mut stand_in, &session, &session_step, PLAN_B),
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &session
+            },
+            &session_step,
+            PLAN_B
+        ),
         Err((403, "grant is not bound to this plan".to_owned())),
         "a different plan is refused with grant is not bound to this plan"
     );
@@ -1690,7 +1799,14 @@ fn shown_session_lasts_until_stop() {
         "the stopped session's grant record keeps the owner's decision reason"
     );
     assert_eq!(
-        execute(&mut stand_in, &session, &session_step, PLAN_A),
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &session
+            },
+            &session_step,
+            PLAN_A
+        ),
         Err((400, "grant is not live: Revoked".to_owned())),
         "the stopped session's grant is revoked, so its use is refused as Revoked"
     );
@@ -1867,7 +1983,7 @@ fn shown_grant_authorises_only_its_session() {
     // Each session uses the other session's shown grant. The use is refused
     // before any spend, so both grants stay live.
     assert_eq!(
-        execute(&mut stand_in, "component-2", &first_step, PLAN_A),
+        execute(&mut stand_in, Caller::Client { session_id: "component-2" }, &first_step, PLAN_A),
         Err((
             403,
             "wrong capsule: expected component-1, got component-2".to_owned()
@@ -1875,7 +1991,7 @@ fn shown_grant_authorises_only_its_session() {
         "a shown grant authorises only its session: the second session's use of request-1 is refused"
     );
     assert_eq!(
-        execute(&mut stand_in, &first_session, &second_step, PLAN_B),
+        execute(&mut stand_in, Caller::Client { session_id: &first_session }, &second_step, PLAN_B),
         Err((
             403,
             "wrong capsule: expected component-2, got component-1".to_owned()
@@ -1911,7 +2027,7 @@ fn shown_grant_authorises_only_its_session() {
 
     // Each session's own use of its own grant still runs and spends it.
     assert_eq!(
-        execute(&mut stand_in, &first_session, &first_step, PLAN_A),
+        execute(&mut stand_in, Caller::Client { session_id: &first_session }, &first_step, PLAN_A),
         Ok(json!({ "valid": true })),
         "a shown grant authorises only its session: the first session's own use of request-1 still runs"
     );
@@ -1921,7 +2037,7 @@ fn shown_grant_authorises_only_its_session() {
         "a shown grant authorises only its session: the spent first grant leaves the live list and the second grant stays"
     );
     assert_eq!(
-        execute(&mut stand_in, &second_session, &second_step, PLAN_B),
+        execute(&mut stand_in, Caller::Client { session_id: &second_session }, &second_step, PLAN_B),
         Ok(json!({ "valid": true })),
         "a shown grant authorises only its session: the second session's own use of request-2 still runs"
     );
@@ -2037,7 +2153,7 @@ fn owner_approves_only_the_shown_hash() {
 
     // A refused approval leaves nothing to run.
     assert_eq!(
-        execute(&mut stand_in, &session, &step, PLAN_A),
+        execute(&mut stand_in, Caller::Client { session_id: &session }, &step, PLAN_A),
         Err((400, "unknown grant".to_owned())),
         "the owner grant mints only the hash the shown request stored: running the request before the owner grants it is refused as unknown grant"
     );
@@ -2085,7 +2201,14 @@ fn owner_approves_only_the_shown_hash() {
 
     // The grant runs for the plan it is bound to and spends one use.
     assert_eq!(
-        execute(&mut stand_in, &session, &step, PLAN_A),
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &session
+            },
+            &step,
+            PLAN_A
+        ),
         Ok(json!({ "valid": true })),
         "the owner grant mints only the hash the shown request stored: the granted plan runs once"
     );
@@ -2095,7 +2218,7 @@ fn owner_approves_only_the_shown_hash() {
         "the owner grant mints only the hash the shown request stored: the spent once grant leaves the live list"
     );
     assert_eq!(
-        execute(&mut stand_in, &session, &step, PLAN_A),
+        execute(&mut stand_in, Caller::Client { session_id: &session }, &step, PLAN_A),
         Err((400, "grant is not live: Exhausted".to_owned())),
         "the owner grant mints only the hash the shown request stored: a second use of the same plan is refused as Exhausted"
     );
@@ -2261,7 +2384,14 @@ fn agent_cannot_approve_its_own_shown_plan() {
 
     // No client approval left anything to run.
     assert_eq!(
-        execute(&mut stand_in, &poster, &step, PLAN_A),
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &poster
+            },
+            &step,
+            PLAN_A
+        ),
         Err((400, "unknown grant".to_owned())),
         "the agent that showed the plan cannot mint its grant: the posted plan has no grant to run"
     );
@@ -2309,7 +2439,14 @@ fn agent_cannot_approve_its_own_shown_plan() {
 
     // The shell's grant authorises the posted plan's one use.
     assert_eq!(
-        execute(&mut stand_in, &poster, &step, PLAN_A),
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &poster
+            },
+            &step,
+            PLAN_A
+        ),
         Ok(json!({ "valid": true })),
         "the agent that showed the plan cannot mint its grant: the granted plan runs once"
     );
@@ -2319,7 +2456,7 @@ fn agent_cannot_approve_its_own_shown_plan() {
         "the agent that showed the plan cannot mint its grant: the spent once grant leaves the live list"
     );
     assert_eq!(
-        execute(&mut stand_in, &poster, &step, PLAN_A),
+        execute(&mut stand_in, Caller::Client { session_id: &poster }, &step, PLAN_A),
         Err((400, "grant is not live: Exhausted".to_owned())),
         "the agent that showed the plan cannot mint its grant: a second use of the same plan is refused as Exhausted"
     );
@@ -2327,5 +2464,232 @@ fn agent_cannot_approve_its_own_shown_plan() {
         live(&stand_in),
         Vec::<Value>::new(),
         "the agent that showed the plan cannot mint its grant: the refused second use leaves the live list empty"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn shell_cannot_spend_a_shown_grant() {
+    use agent_conformance::standin_runtime::Caller;
+    use fixtures::{PLAN_A, PLAN_B};
+    use journeys::{request, running_agent};
+    use serde_json::{json, Value};
+
+    fn live(stand_in: &StandIn) -> Vec<Value> {
+        stand_in
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
+            .expect("shell live list")["capabilities"]
+            .as_array()
+            .cloned()
+            .expect("the shell live list holds a capabilities array")
+    }
+
+    fn record(stand_in: &StandIn, session: &str, request_id: &str) -> Value {
+        stand_in
+            .get_capability_requests(Caller::Shell, Some(session))
+            .expect("the shell reads the session's requests")["requests"]
+            .as_array()
+            .cloned()
+            .expect("the shell request view holds a requests array")
+            .into_iter()
+            .find(|entry| entry["request_id"] == request_id)
+            .expect("the session's request view holds that id")
+    }
+
+    let mut stand_in = StandIn::new();
+    let owner_session = running_agent(&mut stand_in);
+    let other_session = running_agent(&mut stand_in);
+    assert_eq!(
+        owner_session, "component-1",
+        "the shell cannot spend a shown grant: the fresh stand-in names its first session component-1"
+    );
+    assert_eq!(
+        other_session, "component-2",
+        "the shell cannot spend a shown grant: the stand-in names its second session component-2"
+    );
+
+    let step = request(&mut stand_in, &owner_session, PLAN_A);
+    assert_eq!(
+        step, "request-1",
+        "the shell cannot spend a shown grant: the shown plan is request-1"
+    );
+
+    let shown = plan_sha256(PLAN_A);
+    assert_eq!(
+        shown.len(),
+        64,
+        "the shell cannot spend a shown grant: the shown hash is 64 lowercase hex characters"
+    );
+
+    assert_eq!(
+        approve(&mut stand_in, Caller::Shell, &step, "once", &shown),
+        Ok(json!({ "success": true })),
+        "the shell cannot spend a shown grant: the owner's approval with the shown hash is accepted"
+    );
+
+    let granted = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "granted",
+        "decision_reason": "owner approved",
+        "settled_by": "shell",
+        "plan": shown,
+    });
+    assert_eq!(
+        record(&stand_in, &owner_session, &step),
+        granted,
+        "the shell cannot spend a shown grant: the owner's approval settles request-1 under the shell with the shown hash"
+    );
+
+    let live_one = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "duration": "once",
+        "granted_at": 0,
+    });
+    assert_eq!(
+        live(&stand_in),
+        vec![live_one.clone()],
+        "the shell cannot spend a shown grant: the shell's approval stores one once grant"
+    );
+
+    // Three shell calls: the bound plan, a different plan and empty plan
+    // bytes. The use route refuses the shell before it reads the body, so
+    // none of them reaches the plan check and the grant stays live.
+    let refused = Err((
+        403,
+        "capability validate needs an instance session".to_owned(),
+    ));
+    let plans: [&[u8]; 3] = [PLAN_A, PLAN_B, b""];
+    for plan in plans {
+        let result = execute(&mut stand_in, Caller::Shell, &step, plan);
+        assert_eq!(
+            result, refused,
+            "the shell cannot spend a shown grant: the shell's use of request-1 with plan bytes {plan:?} is refused as a shell on an instance-session route"
+        );
+        assert_ne!(
+            result,
+            Err((403, "grant is not bound to this plan".to_owned())),
+            "the shell cannot spend a shown grant: the shell refusal runs before the plan check, so {plan:?} never reaches it"
+        );
+        assert_ne!(
+            result,
+            Err((
+                403,
+                "wrong capsule: expected component-1, got component-2".to_owned()
+            )),
+            "the shell cannot spend a shown grant: the shell refusal runs before the session check, so {plan:?} never reaches it"
+        );
+        assert_eq!(
+            record(&stand_in, &owner_session, &step),
+            granted,
+            "the shell cannot spend a shown grant: the shell's refused use with plan bytes {plan:?} leaves request-1 granted with the shown hash"
+        );
+        assert_eq!(
+            live(&stand_in),
+            vec![live_one.clone()],
+            "the shell cannot spend a shown grant: the shell's refused use with plan bytes {plan:?} leaves the once grant live"
+        );
+    }
+
+    // The other session's use is refused and spends nothing either.
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &other_session,
+            },
+            &step,
+            PLAN_A
+        ),
+        Err((
+            403,
+            "wrong capsule: expected component-1, got component-2".to_owned()
+        )),
+        "the shell cannot spend a shown grant: the other session's use of request-1 is refused"
+    );
+    assert_eq!(
+        live(&stand_in),
+        vec![live_one.clone()],
+        "the shell cannot spend a shown grant: the other session's refused use leaves the once grant live"
+    );
+    assert_eq!(
+        record(&stand_in, &owner_session, &step),
+        granted,
+        "the shell cannot spend a shown grant: the other session's refused use leaves request-1 granted"
+    );
+
+    // The owning session's own use runs once and spends the grant.
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &owner_session,
+            },
+            &step,
+            PLAN_A
+        ),
+        Ok(json!({ "valid": true })),
+        "the shell cannot spend a shown grant: the owning session's own use of request-1 still runs"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "the shell cannot spend a shown grant: the spent once grant leaves the live list"
+    );
+
+    // A shell call after that spend is still the session refusal, so the
+    // caller check runs before the life check.
+    let after_spend = execute(&mut stand_in, Caller::Shell, &step, PLAN_A);
+    assert_eq!(
+        after_spend, refused,
+        "the shell cannot spend a shown grant: a shell call after the spend is still refused as a shell"
+    );
+    assert_ne!(
+        after_spend,
+        Err((400, "grant is not live: Exhausted".to_owned())),
+        "the shell cannot spend a shown grant: the caller check runs before the life check, so the spent grant never reports Exhausted to a shell"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "the shell cannot spend a shown grant: the refused shell use after the spend leaves the live list empty"
+    );
+
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &owner_session,
+            },
+            &step,
+            PLAN_A
+        ),
+        Err((400, "grant is not live: Exhausted".to_owned())),
+        "the shell cannot spend a shown grant: a second use by the owning session is refused as Exhausted"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "the shell cannot spend a shown grant: the refused second use leaves the live list empty"
+    );
+
+    let settled = record(&stand_in, &owner_session, &step);
+    assert_eq!(
+        settled["status"], "granted",
+        "the shell cannot spend a shown grant: request-1 stays granted"
+    );
+    assert_eq!(
+        settled["settled_by"], "shell",
+        "the shell cannot spend a shown grant: request-1 stays settled by the shell"
+    );
+    assert_eq!(
+        settled["decision_reason"], "owner approved",
+        "the shell cannot spend a shown grant: request-1 keeps the owner's decision reason"
     );
 }
