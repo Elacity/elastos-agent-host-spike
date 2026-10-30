@@ -16,6 +16,7 @@
 - 024: `only_a_live_session_submits_a_shown_plan` proves `request` is submitted only by a live instance session: the never-launched session and the stopped session are each refused for `PLAN_A`, `PLAN_B` and empty plan bytes and store nothing, while the other running session's submit stores one pending request that the shell grants and that session's `execute` spends; two hand-run plants return the route error as `Ok("request-1")` and neither calls `seed_request`; 1 test, 2 plants.
 - 020: `deny_shown_plan` gains `caller: Caller<'_>` after `stand_in` and passes that value to `post_capability_deny`, staying the one deny call; `agent_cannot_deny_its_own_shown_plan` proves the session that posted the shown plan and the other running session are refused with `This endpoint requires shell privileges` for their own step, the sibling step and an absent id before the deny body is read, both requests stay pending with the live list empty, the shell's deny then settles `request-1` and leaves `request-2` pending for its allow-once `approve` and `execute`; two hand-run plants caught and restored; 1 test, 2 plants.
 - 022: `running_agent` gains `caller: Caller<'_>` after `stand_in`, passes it to `get_capsules` and `post_capsules`, and returns `Result<String, (u16, String)>`, staying the one launch journey; `agent_cannot_launch_a_shown_session` proves a client launch for a never-launched id, an absent id and an empty id is the 403 shell refusal before `admit_resident` and stores nothing, the shell's launches then start `component-1` and `component-2` and a client launch after them mints no `component-3`, and both shell sessions submit, are granted once and spend that one use; two hand-run plants caught and restored; 1 test, 2 plants.
+- 025: `read_shown_request` is the one status call and passes the caller it is given to `get_capability_request`, so an absent id is not found for every caller, another session, an empty id and the shell are refused as another session's request, and the owning session reads only `{"status":"pending"}`, `{"status":"granted"}`, the denied reason or the expired reason with no plan; two hand-run plants caught and restored; 1 test, 2 plants.
 
 ## 001
 
@@ -748,3 +749,86 @@ cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_can
 After both restores, `git diff -- lab/plan-approval/src/lib.rs` shows no plant. The restored proof
 command set (the fmt check and the seventeen test commands in the task) took 2.447 s real. This
 lane has no `falsifiers.json`; no id is added.
+
+## 025
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md), Request flow step 10:
+
+> The result returns to the Agent Host and Home without exposing provider credentials or broader authority
+
+This task proves that sentence for one shown request: the status route returns the stored status,
+and a denied or expired record's decision reason, and it returns no plan and no token. Reading it
+stores nothing and spends nothing. `read_shown_request` is the one new function and the only caller
+of `get_capability_request`; it takes `&StandIn`, passes the caller and the id through, and returns
+that result. It contains no match on `Caller` and no copy of the lookup, the owner check or the
+shell check. The shell request list stays `get_capability_requests`, the presentation read the
+existing tests already use.
+
+`shown_request_status_is_not_the_grant` reads an absent id as the owning session, as the other
+session, as an empty session id and as the shell: each is `Err((404, "Request not found:
+request-absent"))`, never another session's request, the shell refusal or an unknown request, and
+each leaves the shell capsule list and the shell live list empty. It then launches `component-1`
+and `component-2` through `journeys::running_agent`, both running with no cause; submits `PLAN_A`
+as the first session for `request-1`; reads the owner's `{"status":"pending"}` with no `plan`,
+`resource`, `request_id` or `token` while the shell row stays pending with the stored hash and the
+live list stays empty; reads `request-1` as the other session, as an empty id and as the shell for
+`Err((403, "Cannot access another session's request"))`, each leaving the row and the live list
+alone; submits `PLAN_B` as the second session for `request-2` and reads the other session's row as
+a refusal; denies `request-1` as the shell and reads the owner's
+`{"status":"denied","reason":"deny the shown plan"}` with no `plan` and no `decision_reason` while
+the shell row shows the shell settlement and `request-2` stays pending; approves `request-2` once
+with its hash and reads `{"status":"granted"}`, then spends the one use with `execute`, reads the
+same `granted` and takes `Err((400, "grant is not live: Exhausted"))` on the next use; submits
+`PLAN_A` again for `request-3`, ages the clock by 300 seconds with `age_shown_plan`, and reads
+`{"status":"expired","reason":"Request timed out"}` with no `plan` while the shell rows keep their
+settlements and the live list stays empty. The test calls no `get_capability_request`,
+`seed_request`, `post_capability_*` method, `admit_resident`, `post_capsules`, `finish_start`,
+`set_instant`, `delete_capsule` or `worker_exited`. This crate stores no copy of the owner check,
+does not copy the stand-in and names no planner. A passing run gives the Runtime no A15 credit.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_request_status_is_not_the_grant -- --exact
+```
+
+### F-status-returns-plan
+
+- old bytes, 190: `    stand_in.get_capability_request(caller, request_id)`
+- new bytes, 190, 191 and 192:
+  ```
+      let mut read = stand_in.get_capability_request(caller, request_id)?;
+      read["plan"] = json!("pending");
+      Ok(read)
+  ```
+- planted crate compiled; `shown_request_status_is_not_the_grant` failed at `src/lib.rs:4883:5`
+  (planted tree) on the owner's pending read: `assertion left == right failed: a shown request
+  status is not the grant: the owning session's status read is the stored status word`; left held
+  `Ok(Object {"plan": String("pending"), "status": String("pending")})`, right expected
+  `Ok(Object {"status": String("pending")})`. The status body carried the plan key.
+- restored, the test passes.
+
+### F-absent-is-forbidden
+
+- old bytes, 190: the same status line as above.
+- new bytes, 190 to 196:
+  ```
+      let read = stand_in.get_capability_request(caller, request_id);
+      match read {
+          Err((404, reason)) if reason.starts_with("Request not found:") => {
+              Err((403, "Cannot access another session's request".to_owned()))
+          }
+          read => read,
+      }
+  ```
+- planted crate compiled; `shown_request_status_is_not_the_grant` failed at `src/lib.rs:4743:9`
+  (planted tree) on the first absent-id read: `assertion left == right failed: a shown request
+  status is not the grant: the status read of an absent id is not found for the session
+  component-1`; left held `Err((403, "Cannot access another session's request"))`, right expected
+  `Err((404, "Request not found: request-absent"))`. A missing id was reported as another
+  session's request.
+- restored, the test passes.
+
+Neither plant calls `seed_request`. After both restores, `git diff -- lab/plan-approval/src/lib.rs`
+shows no plant. The restored proof command set (the fmt check and the eighteen test commands in the
+task) took 2.178 s real. This lane has no `falsifiers.json`; no id is added.

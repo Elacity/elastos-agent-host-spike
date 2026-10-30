@@ -301,10 +301,39 @@ list and launch routes make it. `preview`, `plan_sha256`, `approve`, `execute`,
 unchanged by this slice. The crate does not copy the stand-in, and it names no
 planner. A passing run gives the Runtime no A15 credit.
 
+A status read of a shown request is not the grant. The design states the result
+boundary at Request flow step 10:
+
+> The result returns to the Agent Host and Home without exposing provider
+> credentials or broader authority
+
+`read_shown_request` is the only status call, and it passes the caller it is
+given to the stand-in's own status route. The route looks up the request before
+it checks the caller. A missing id returns status 404 with `Request not found: `
+plus that id for the owning session, for the other session, for an empty session
+id and for the shell. An existing id returns status 403 with `Cannot access
+another session's request` for the other session, for an empty session id and
+for the shell. The owning session reads only the status word:
+`{"status":"pending"}` or `{"status":"granted"}`, and for a settled record
+`{"status":"denied","reason":"deny the shown plan"}` or
+`{"status":"expired","reason":"Request timed out"}`. Those bodies carry no plan,
+no resource, no request id and no token, and the read changes neither the shell
+request view nor the live list. A spent once grant still reads `granted`, and
+the next use is refused with `grant is not live: Exhausted`, because the status
+is not the grant. `shown_request_status_is_not_the_grant` reads the shell
+request view and the shell live list the way the other tests do, so the shell
+list stays `get_capability_requests`. This crate stores no copy of the owner
+check; the stand-in's status route makes it. `preview`, `plan_sha256`,
+`approve`, `execute`, `deny_shown_plan`, `age_shown_plan`, `stop_shown_session`,
+`running_agent` and `request` are unchanged by this slice. The crate does not
+copy the stand-in, and it names no planner. A passing run gives the Runtime no
+A15 credit.
+
 ## Layout
 
 - `src/lib.rs`: `Preview`, `preview`, `plan_sha256`, `approve`,
-  `age_shown_plan`, `deny_shown_plan`, `stop_shown_session`, `execute`,
+  `age_shown_plan`, `deny_shown_plan`, `stop_shown_session`,
+  `read_shown_request`, `execute`,
   `preview_makes_no_effect`, `plan_sha256_hashes_the_exact_bytes`,
   `deny_one_shown_step`, `unanswered_shown_step_expires`,
   `stop_settles_that_sessions_shown_steps`, `shown_allow_once_expires`,
@@ -314,13 +343,14 @@ planner. A passing run gives the Runtime no A15 credit.
   `agent_cannot_deny_its_own_shown_plan`,
   `shell_cannot_spend_a_shown_grant`, `shell_cannot_submit_a_shown_plan`,
   `only_a_live_session_submits_a_shown_plan`,
-  `agent_cannot_stop_a_shown_session`, `agent_cannot_launch_a_shown_session`
-  and the bound-plan journey.
+  `agent_cannot_stop_a_shown_session`, `agent_cannot_launch_a_shown_session`,
+  `shown_request_status_is_not_the_grant` and the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_request_status_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_cannot_launch_a_shown_session -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_cannot_stop_a_shown_session -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_cannot_deny_its_own_shown_plan -- --exact

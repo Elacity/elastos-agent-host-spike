@@ -165,6 +165,31 @@ pub fn stop_shown_session(
     )
 }
 
+/// One status read of a shown request through
+/// `GET /api/capability/request/:id`.
+///
+/// `caller` is the authenticated caller, a method argument. This helper passes
+/// it to the status route unchanged and does not judge it, so the route's own
+/// lookup and owner check decide the answer. The lookup runs first: a missing
+/// id is the not-found answer that names that id, for the owning session, for
+/// another session, for an empty session id and for the shell. An existing id
+/// that another session, an empty session id or the shell asks for is the
+/// other-session refusal.
+///
+/// The owning session's Ok is the stored status word, `pending`, `granted`,
+/// `denied` or `expired`, and for a denied or expired record the decision
+/// reason. That body carries no plan, no resource, no request id and no token.
+/// A read stores nothing and spends nothing: the shell request view and the
+/// live grant list stay as they were. The status is not the grant; only the
+/// owner's `approve` mints one.
+pub fn read_shown_request(
+    stand_in: &StandIn,
+    caller: Caller<'_>,
+    request_id: &str,
+) -> Result<Value, (u16, String)> {
+    stand_in.get_capability_request(caller, request_id)
+}
+
 #[cfg(test)]
 mod fixtures {
     pub const PLAN_A: &[u8] =
@@ -4658,5 +4683,555 @@ fn agent_cannot_launch_a_shown_session() {
         live(&stand_in),
         Vec::<Value>::new(),
         "the agent cannot launch a shown session: the other shell session's once grant is spent by its one use"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn shown_request_status_is_not_the_grant() {
+    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use fixtures::{PLAN_A, PLAN_B};
+    use journeys::{request, running_agent};
+    use serde_json::{json, Value};
+
+    fn live(stand_in: &StandIn) -> Vec<Value> {
+        stand_in
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
+            .expect("shell live list")["capabilities"]
+            .as_array()
+            .cloned()
+            .expect("the shell live list holds a capabilities array")
+    }
+
+    fn shown(stand_in: &StandIn, session: &str) -> Vec<Value> {
+        stand_in
+            .get_capability_requests(Caller::Shell, Some(session))
+            .expect("the shell reads the session's requests")["requests"]
+            .as_array()
+            .cloned()
+            .expect("the shell request view holds a requests array")
+    }
+
+    fn record(stand_in: &StandIn, session: &str, request_id: &str) -> Value {
+        shown(stand_in, session)
+            .into_iter()
+            .find(|entry| entry["request_id"] == request_id)
+            .expect("the session's request view holds that id")
+    }
+
+    let absent_error: Result<Value, (u16, String)> =
+        Err((404, "Request not found: request-absent".to_owned()));
+    let forbidden: Result<Value, (u16, String)> =
+        Err((403, "Cannot access another session's request".to_owned()));
+    let shell_refusal: Result<Value, (u16, String)> =
+        Err((403, "This endpoint requires shell privileges".to_owned()));
+    let unknown_request: Result<Value, (u16, String)> =
+        Err((400, "unknown request: request-absent".to_owned()));
+
+    let mut stand_in = StandIn::new();
+
+    // The lookup runs before the caller check, so a missing id is the not-found
+    // answer for every caller, the shell included.
+    for session_id in ["component-1", "component-2", ""] {
+        let read = read_shown_request(&stand_in, Caller::Client { session_id }, "request-absent");
+        assert_eq!(
+            read, absent_error,
+            "a shown request status is not the grant: the status read of an absent id is not found for the session {session_id}"
+        );
+        assert_ne!(
+            read, forbidden,
+            "a shown request status is not the grant: an absent id is not another session's request for {session_id}"
+        );
+        assert_ne!(
+            read, shell_refusal,
+            "a shown request status is not the grant: the status read is not a shell-only route for {session_id}"
+        );
+        assert_ne!(
+            read, unknown_request,
+            "a shown request status is not the grant: an absent id is not an unknown request for {session_id}"
+        );
+        assert_eq!(
+            stand_in
+                .get_capsules(Caller::Shell)
+                .expect("shell capsules"),
+            json!({ "capsules": [] }),
+            "a shown request status is not the grant: the absent-id read as {session_id} stores no instance"
+        );
+        assert_eq!(
+            live(&stand_in),
+            Vec::<Value>::new(),
+            "a shown request status is not the grant: the absent-id read as {session_id} mints no grant"
+        );
+    }
+
+    let shell_read = read_shown_request(&stand_in, Caller::Shell, "request-absent");
+    assert_eq!(
+        shell_read, absent_error,
+        "a shown request status is not the grant: the shell's status read of an absent id is not found"
+    );
+    assert_ne!(
+        shell_read, forbidden,
+        "a shown request status is not the grant: the shell's absent-id read is not another session's request"
+    );
+    assert_ne!(
+        shell_read, shell_refusal,
+        "a shown request status is not the grant: the shell may read a status"
+    );
+    assert_ne!(
+        shell_read, unknown_request,
+        "a shown request status is not the grant: the shell's absent-id read is not an unknown request"
+    );
+    assert_eq!(
+        stand_in
+            .get_capsules(Caller::Shell)
+            .expect("shell capsules"),
+        json!({ "capsules": [] }),
+        "a shown request status is not the grant: the shell's absent-id read stores no instance"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "a shown request status is not the grant: the shell's absent-id read mints no grant"
+    );
+
+    // Two running sessions come from the one launch journey.
+    let first = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    assert_eq!(
+        first, "component-1",
+        "a shown request status is not the grant: the fresh stand-in names the first running session component-1"
+    );
+    let second = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    assert_eq!(
+        second, "component-2",
+        "a shown request status is not the grant: the second running session is the stand-in's next component"
+    );
+    let capsules = stand_in
+        .get_capsules(Caller::Shell)
+        .expect("shell capsules");
+    let listed = capsules["capsules"]
+        .as_array()
+        .cloned()
+        .expect("the shell capsule list holds a capsules array");
+    assert_eq!(
+        listed.len(),
+        2,
+        "a shown request status is not the grant: both shell launches stay on the capsule list"
+    );
+    for capsule in &listed {
+        assert_eq!(
+            json!({
+                "id": capsule["id"],
+                "status": capsule["status"],
+                "cause": capsule["cause"],
+            }),
+            json!({
+                "id": capsule["id"],
+                "status": "running",
+                "cause": "",
+            }),
+            "a shown request status is not the grant: each launched session is running with no cause"
+        );
+    }
+
+    let plan_a = plan_sha256(PLAN_A);
+    let plan_b = plan_sha256(PLAN_B);
+    assert_eq!(
+        plan_a.len(),
+        64,
+        "a shown request status is not the grant: the shown hash of plan A is 64 characters"
+    );
+    assert_eq!(
+        plan_b.len(),
+        64,
+        "a shown request status is not the grant: the shown hash of plan B is 64 characters"
+    );
+
+    let first_step = request(&mut stand_in, Caller::Client { session_id: &first }, PLAN_A)
+        .expect("the agent's submit stores the first shown plan");
+    assert_eq!(
+        first_step, "request-1",
+        "a shown request status is not the grant: the first session's shown plan is the stand-in's first request"
+    );
+
+    let pending_a = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "pending",
+        "decision_reason": "",
+        "settled_by": null,
+        "plan": plan_a,
+    });
+    assert_eq!(
+        record(&stand_in, &first, &first_step),
+        pending_a,
+        "a shown request status is not the grant: the shell's own request view shows the pending step with its hash"
+    );
+
+    // The owning session reads only the status word.
+    let owner_pending = read_shown_request(
+        &stand_in,
+        Caller::Client { session_id: &first },
+        &first_step,
+    );
+    assert_eq!(
+        owner_pending,
+        Ok(json!({ "status": "pending" })),
+        "a shown request status is not the grant: the owning session's status read is the stored status word"
+    );
+    let value = owner_pending
+        .as_ref()
+        .expect("the owning session reads the status");
+    for key in ["plan", "resource", "request_id", "token"] {
+        assert!(
+            value.get(key).is_none(),
+            "a shown request status is not the grant: the status body carries no {key}"
+        );
+    }
+    assert_eq!(
+        record(&stand_in, &first, &first_step),
+        pending_a,
+        "a shown request status is not the grant: the status read leaves the pending row as it was"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "a shown request status is not the grant: the status read mints no grant"
+    );
+
+    // Another session, an empty session id and the shell own no shown request.
+    for caller in [
+        Caller::Client {
+            session_id: "component-2",
+        },
+        Caller::Client { session_id: "" },
+        Caller::Shell,
+    ] {
+        let read = read_shown_request(&stand_in, caller, &first_step);
+        assert_eq!(
+            read, forbidden,
+            "a shown request status is not the grant: only the owning session reads this status, {caller:?} is refused"
+        );
+        assert_ne!(
+            read,
+            Ok(json!({ "status": "pending" })),
+            "a shown request status is not the grant: {caller:?} does not receive the status word"
+        );
+        assert_ne!(
+            read,
+            Err((404, "Request not found: request-1".to_owned())),
+            "a shown request status is not the grant: the id exists for {caller:?}"
+        );
+        assert_ne!(
+            read, shell_refusal,
+            "a shown request status is not the grant: the status read is not a shell-only route for {caller:?}"
+        );
+        assert_eq!(
+            record(&stand_in, &first, &first_step),
+            pending_a,
+            "a shown request status is not the grant: the refused read by {caller:?} leaves the pending row"
+        );
+        assert_eq!(
+            live(&stand_in),
+            Vec::<Value>::new(),
+            "a shown request status is not the grant: the refused read by {caller:?} mints no grant"
+        );
+    }
+
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client { session_id: &first },
+            "request-absent",
+        ),
+        absent_error,
+        "a shown request status is not the grant: the owning session's read of an absent id is not found, not another session's request"
+    );
+
+    let second_step = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: &second,
+        },
+        PLAN_B,
+    )
+    .expect("the other session's submit stores the second shown plan");
+    assert_eq!(
+        second_step, "request-2",
+        "a shown request status is not the grant: the other session's shown plan is the stand-in's second request"
+    );
+
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client { session_id: &first },
+            &second_step,
+        ),
+        forbidden,
+        "a shown request status is not the grant: the first session does not read the other session's status"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: &second
+            },
+            &second_step,
+        ),
+        Ok(json!({ "status": "pending" })),
+        "a shown request status is not the grant: the other session reads its own pending status"
+    );
+
+    // The shell's deny settles the record. The owner's later read shows the
+    // decision reason and still no plan.
+    assert_eq!(
+        deny_shown_plan(&mut stand_in, Caller::Shell, &first_step),
+        Ok(json!({ "success": true })),
+        "a shown request status is not the grant: the shell denies the one shown step"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client { session_id: &first },
+            &first_step,
+        ),
+        Ok(json!({ "status": "denied", "reason": "deny the shown plan" })),
+        "a shown request status is not the grant: the owning session's denied status carries the decision reason"
+    );
+    let denied_body = read_shown_request(
+        &stand_in,
+        Caller::Client { session_id: &first },
+        &first_step,
+    )
+    .expect("the owning session reads the denied status");
+    for key in ["plan", "decision_reason"] {
+        assert!(
+            denied_body.get(key).is_none(),
+            "a shown request status is not the grant: the denied status body carries no {key}"
+        );
+    }
+    let denied_a = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "denied",
+        "decision_reason": "deny the shown plan",
+        "settled_by": "shell",
+        "plan": plan_a,
+    });
+    let pending_b = json!({
+        "request_id": "request-2",
+        "session_id": "component-2",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "pending",
+        "decision_reason": "",
+        "settled_by": null,
+        "plan": plan_b,
+    });
+    assert_eq!(
+        record(&stand_in, &first, &first_step),
+        denied_a,
+        "a shown request status is not the grant: the shell's view keeps the denied row and its hash"
+    );
+    assert_eq!(
+        record(&stand_in, &second, &second_step),
+        pending_b,
+        "a shown request status is not the grant: the shell's deny leaves the other session's plan pending"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "a shown request status is not the grant: a denied step is not a live grant"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client { session_id: &second },
+            &first_step,
+        ),
+        forbidden,
+        "a shown request status is not the grant: the other session reads a refusal, not the denied body"
+    );
+    assert_ne!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client { session_id: &second },
+            &first_step,
+        ),
+        Ok(json!({ "status": "denied", "reason": "deny the shown plan" })),
+        "a shown request status is not the grant: the denied body belongs to the owning session alone"
+    );
+
+    // The owner's grant is the only thing a status read is not.
+    assert_eq!(
+        approve(&mut stand_in, Caller::Shell, &second_step, "once", &plan_b),
+        Ok(json!({ "success": true })),
+        "a shown request status is not the grant: the owner allows the pending step once with the hash it saw"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: &second
+            },
+            &second_step,
+        ),
+        Ok(json!({ "status": "granted" })),
+        "a shown request status is not the grant: the owning session reads the granted status word"
+    );
+    let granted_body = read_shown_request(
+        &stand_in,
+        Caller::Client {
+            session_id: &second,
+        },
+        &second_step,
+    )
+    .expect("the owning session reads the granted status");
+    for key in ["plan", "reason"] {
+        assert!(
+            granted_body.get(key).is_none(),
+            "a shown request status is not the grant: the granted status body carries no {key}"
+        );
+    }
+    let allowed = vec![json!({
+        "request_id": "request-2",
+        "session_id": "component-2",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "duration": "once",
+        "granted_at": 0,
+    })];
+    assert_eq!(
+        live(&stand_in),
+        allowed,
+        "a shown request status is not the grant: the owner's approve mints the one live grant"
+    );
+
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: &second
+            },
+            &second_step,
+            PLAN_B,
+        ),
+        Ok(json!({ "valid": true })),
+        "a shown request status is not the grant: the live once grant authorises its one use"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "a shown request status is not the grant: the once grant is spent"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: &second
+            },
+            &second_step,
+        ),
+        Ok(json!({ "status": "granted" })),
+        "a shown request status is not the grant: a spent once grant still reads granted"
+    );
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client { session_id: &second },
+            &second_step,
+            PLAN_B,
+        ),
+        Err((400, "grant is not live: Exhausted".to_owned())),
+        "a shown request status is not the grant: the status word is not the live grant, so the next use is refused"
+    );
+
+    let third_step = request(&mut stand_in, Caller::Client { session_id: &first }, PLAN_A)
+        .expect("the agent's later submit stores the third shown plan");
+    assert_eq!(
+        third_step, "request-3",
+        "a shown request status is not the grant: the later shown plan is the stand-in's third request"
+    );
+
+    age_shown_plan(&mut stand_in, 300);
+
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client { session_id: &first },
+            &third_step,
+        ),
+        Ok(json!({ "status": "expired", "reason": "Request timed out" })),
+        "a shown request status is not the grant: the owning session's expired status carries the decision reason"
+    );
+    let expired_body = read_shown_request(
+        &stand_in,
+        Caller::Client { session_id: &first },
+        &third_step,
+    )
+    .expect("the owning session reads the expired status");
+    assert!(
+        expired_body.get("plan").is_none(),
+        "a shown request status is not the grant: the expired status body carries no plan"
+    );
+
+    let expired_a = json!({
+        "request_id": "request-3",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "expired",
+        "decision_reason": "Request timed out",
+        "settled_by": "runtime",
+        "plan": plan_a,
+    });
+    let granted_b = json!({
+        "request_id": "request-2",
+        "session_id": "component-2",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "granted",
+        "decision_reason": "owner approved",
+        "settled_by": "shell",
+        "plan": plan_b,
+    });
+    assert_eq!(
+        record(&stand_in, &first, &third_step),
+        expired_a,
+        "a shown request status is not the grant: the shell's view keeps the expired row and its hash"
+    );
+    assert_eq!(
+        record(&stand_in, &first, &first_step),
+        denied_a,
+        "a shown request status is not the grant: the denied row keeps its shell settlement"
+    );
+    assert_eq!(
+        record(&stand_in, &second, &second_step),
+        granted_b,
+        "a shown request status is not the grant: the granted row keeps its owner settlement"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "a shown request status is not the grant: the reads and the expiry mint no grant"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client { session_id: &first },
+            &first_step,
+        ),
+        Ok(json!({ "status": "denied", "reason": "deny the shown plan" })),
+        "a shown request status is not the grant: the earlier denied status still reads its decision reason"
     );
 }
