@@ -8169,12 +8169,22 @@ mod tests {
         // once here, so the assertion sees the directory the rename put at
         // `base`, whatever `base` names now. It holds one name, and the file
         // read through that handle keeps its bytes.
-        use std::os::fd::{AsFd, AsRawFd};
-        let held_victim = format!("/proc/self/fd/{}", victim.as_fd().as_raw_fd());
-        let mut names = std::fs::read_dir(&held_victim)
-            .expect("the other storage lists")
-            .map(|entry| entry.expect("the other entry reads").file_name())
-            .collect::<Vec<_>>();
+        use std::os::fd::AsFd;
+        use std::os::unix::ffi::OsStrExt;
+        // The directory is listed through its handle with rustix, which works
+        // on every Unix target; a `/proc/self/fd` or `/dev/fd` path would need
+        // Linux or would re-open a path.
+        let mut held_dir =
+            rustix::fs::Dir::read_from(victim.as_fd()).expect("the other storage lists");
+        let mut names = Vec::new();
+        while let Some(entry) = held_dir.read() {
+            let entry = entry.expect("the other entry reads");
+            let name = entry.file_name();
+            if name == c"." || name == c".." {
+                continue;
+            }
+            names.push(Path::new(std::ffi::OsStr::from_bytes(name.to_bytes())).to_owned());
+        }
         names.sort();
         assert_eq!(
             names,
