@@ -1,222 +1,1885 @@
-//! The one detector for a path dependency on this crate.
+//! The one detector for a dependency on this crate.
 
-/// True only when the text names `grant-binding` and carries a `path` key.
+use std::ffi::OsString;
+use std::fmt;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// True when one cargo metadata parse names a dependency grant-binding.
 ///
-/// A manifest that names the crate without a path dependency is not a link
-/// to this crate's source.
-#[rustfmt::skip]
+/// The package's own name is not a dependency. A manifest cargo cannot parse
+/// stops the check with a reason.
+/// Operational failures stop the check with a reason.
 pub fn cargo_toml_path_depends_on_grant_binding(cargo_toml: &str) -> bool {
-    let cargo_toml = decode_toml_basic_strings(cargo_toml);
-    cargo_toml.contains("grant-binding") && cargo_toml.contains("path")
+    dependency_names(cargo_toml)
 }
 
-/// Decode escapes in TOML basic strings, so an escaped link stays visible.
+/// Writes one manifest and a dummy source file, then checks that file.
 ///
-/// Text outside a string, a comment, and every literal string (`'...'` or
-/// `'''...'''`), is copied unchanged. Only a basic string (`"..."` or
-/// `"""..."""`) decodes `\\`, `\"`, `\b`, `\t`, `\n`, `\f`, `\r`, `\uXXXX`
-/// and `\UXXXXXXXX`. An escape that is unknown, short or not a Unicode scalar
-/// stays as source. One or two quote characters just inside a multiline
-/// closing delimiter are string text, not the start of a new string.
-fn decode_toml_basic_strings(cargo_toml: &str) -> String {
-    let bytes = cargo_toml.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'#' => {
-                let end = bytes[index..]
-                    .iter()
-                    .position(|byte| *byte == b'\n')
-                    .map_or(bytes.len(), |offset| index + offset);
-                decoded.extend_from_slice(&bytes[index..end]);
-                index = end;
-            }
-            b'\'' => index = copy_literal(bytes, index, &mut decoded),
-            b'"' => index = copy_basic(bytes, index, &mut decoded),
-            byte => {
-                decoded.push(byte);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8(decoded).expect("decoder splits only at ASCII bytes, so it stays UTF-8")
+/// Cargo is spawned by `metadata_names`, once, from the check below.
+/// An unsuccessful Cargo exit, including an unparseable manifest, stops this
+/// check with its own reason. Operational failures stop the check too.
+fn dependency_names(cargo_toml: &str) -> bool {
+    with_manifest_dir(&std::env::temp_dir(), |dir| {
+        stage_manifest(dir, cargo_toml)?;
+        let manifest = dir.join("Cargo.toml");
+        Ok(manifest_depends_on_grant_binding(&manifest))
+    })
+    .unwrap_or_else(|error| panic!("dependency check failed: {error}"))
 }
 
-/// Copy one literal string unchanged and return the index just past it.
-fn copy_literal(bytes: &[u8], start: usize, decoded: &mut Vec<u8>) -> usize {
-    if bytes[start..].starts_with(b"'''") {
-        decoded.extend_from_slice(b"'''");
-        copy_multiline(bytes, start + 3, b'\'', false, decoded)
-    } else {
-        decoded.push(b'\'');
-        let end = find_byte(bytes, start + 1, b'\'').map_or(bytes.len(), |end| end + 1);
-        decoded.extend_from_slice(&bytes[start + 1..end]);
-        end
-    }
-}
-
-/// Copy one basic string, decoding its escapes, and return the index past it.
-fn copy_basic(bytes: &[u8], start: usize, decoded: &mut Vec<u8>) -> usize {
-    if bytes[start..].starts_with(b"\"\"\"") {
-        decoded.extend_from_slice(b"\"\"\"");
-        copy_multiline(bytes, start + 3, b'"', true, decoded)
-    } else {
-        decoded.push(b'"');
-        let mut index = start + 1;
-        while index < bytes.len() && bytes[index] != b'"' {
-            if bytes[index] == b'\\' {
-                index = copy_escape(bytes, index, decoded);
-            } else {
-                decoded.push(bytes[index]);
-                index += 1;
-            }
-        }
-        if index < bytes.len() {
-            decoded.push(b'"');
-            index += 1;
-        }
-        index
-    }
-}
-
-/// Copy multiline string content up to and including its closing delimiter.
+/// Checks the manifest file, then its one metadata parse.
 ///
-/// A run of three or more quote characters ends the string; the last three are
-/// the delimiter and any earlier quote of that run is content.
-fn copy_multiline(
-    bytes: &[u8],
-    mut index: usize,
-    quote: u8,
-    decode: bool,
-    decoded: &mut Vec<u8>,
-) -> usize {
-    while index < bytes.len() {
-        if bytes[index] == quote {
-            let run = quote_run(bytes, index, quote);
-            if run >= 3 {
-                decoded.extend_from_slice(&bytes[index..index + run - 3]);
-                index += run - 3;
-                decoded.extend_from_slice(&bytes[index..index + 3]);
-                return index + 3;
+/// The verdict is the metadata parse alone, so a manifest Cargo cannot read
+/// stops this check with Cargo's reason.
+#[rustfmt::skip]
+pub fn manifest_depends_on_grant_binding(manifest: &std::path::Path) -> bool {
+    metadata_names(manifest).iter().any(|name| name == "grant-binding")
+}
+
+#[derive(Debug)]
+enum MetadataRefuse {
+    CreateDirectory,
+    CreateSourceDirectory,
+    WriteManifest,
+    WriteSource,
+    LaunchCargo,
+    MetadataFailed(String),
+    DecodeOutput,
+    ResolveManifest,
+    ManifestParent,
+    WorkspaceRoot,
+    ResolveWorkspaceRoot,
+    ResolvePackageManifest,
+    RemoveDirectory,
+    CleanupAfter(Box<MetadataRefuse>),
+    CleanupAfterPanic(String),
+}
+
+impl fmt::Display for MetadataRefuse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::CreateDirectory => "cannot create temporary manifest directory",
+            Self::CreateSourceDirectory => "cannot create temporary source directory",
+            Self::WriteManifest => "cannot write temporary Cargo.toml",
+            Self::WriteSource => "cannot write temporary src/lib.rs",
+            Self::LaunchCargo => "cannot launch cargo metadata",
+            Self::MetadataFailed(reason) => return f.write_str(reason),
+            Self::DecodeOutput => "cargo metadata output is not UTF-8",
+            Self::ResolveManifest => "cannot resolve input manifest path",
+            Self::ManifestParent => "input manifest path has no parent directory",
+            Self::WorkspaceRoot => "cargo metadata has no workspace root",
+            Self::ResolveWorkspaceRoot => "cannot resolve metadata workspace root",
+            Self::ResolvePackageManifest => "cannot resolve metadata package manifest path",
+            Self::RemoveDirectory => "cannot remove temporary manifest directory",
+            Self::CleanupAfter(error) => {
+                return write!(f, "{error}; {}", Self::RemoveDirectory);
             }
-            decoded.extend_from_slice(&bytes[index..index + run]);
-            index += run;
-        } else if decode && bytes[index] == b'\\' {
-            index = copy_escape(bytes, index, decoded);
+            Self::CleanupAfterPanic(reason) => {
+                return write!(
+                    f,
+                    "metadata operation panicked: {reason}; {}",
+                    Self::RemoveDirectory
+                );
+            }
+        })
+    }
+}
+
+/// This is the shared ownership boundary for all metadata files and cleanup.
+/// Cleanup runs once, including after a panic, and preserves both failures.
+fn with_manifest_dir<T>(
+    parent: &Path,
+    operation: impl FnOnce(&Path) -> Result<T, MetadataRefuse>,
+) -> Result<T, MetadataRefuse> {
+    let dir = fresh_manifest_dir(parent)?;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(&dir)));
+    match (result, fs::remove_dir_all(&dir)) {
+        (Ok(result), Ok(())) => result,
+        (Ok(result), Err(_)) => Err(match result {
+            Ok(_) => MetadataRefuse::RemoveDirectory,
+            Err(error) => MetadataRefuse::CleanupAfter(Box::new(error)),
+        }),
+        (Err(panic), Ok(())) => std::panic::resume_unwind(panic),
+        (Err(panic), Err(_)) => Err(MetadataRefuse::CleanupAfterPanic(
+            panic
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| {
+                    panic
+                        .downcast_ref::<&str>()
+                        .map(|reason| (*reason).to_owned())
+                })
+                .unwrap_or_else(|| "non-string panic".to_owned()),
+        )),
+    }
+}
+
+fn fresh_manifest_dir(parent: &Path) -> Result<PathBuf, MetadataRefuse> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    loop {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir = parent.join(format!("grant-binding-meta-{}-{n}", std::process::id()));
+        match builder.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err(MetadataRefuse::CreateDirectory),
+        }
+    }
+}
+
+fn write_metadata_inputs(dir: &Path, cargo_toml: &str) -> Result<(), MetadataRefuse> {
+    fs::write(dir.join("Cargo.toml"), cargo_toml).map_err(|_| MetadataRefuse::WriteManifest)?;
+    fs::write(dir.join("src/lib.rs"), "").map_err(|_| MetadataRefuse::WriteSource)
+}
+
+/// Writes the manifest and its source files.
+///
+/// The sibling crate `gb` is a real crate, so a `path` fixture names a
+/// dependency Cargo resolves. It is a sibling, not a member, so a workspace
+/// root under test never lists it.
+fn stage_manifest(dir: &Path, cargo_toml: &str) -> Result<(), MetadataRefuse> {
+    let src = dir.join("src");
+    fs::create_dir(&src).map_err(|_| MetadataRefuse::CreateSourceDirectory)?;
+    let stub = dir.join(DEPENDENCY_DIR);
+    fs::create_dir(&stub).map_err(|_| MetadataRefuse::CreateSourceDirectory)?;
+    fs::create_dir(stub.join("src")).map_err(|_| MetadataRefuse::CreateSourceDirectory)?;
+    fs::write(
+        stub.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"{DEPENDENCY_PACKAGE}\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n"
+        ),
+    )
+    .map_err(|_| MetadataRefuse::WriteManifest)?;
+    fs::write(stub.join("src/lib.rs"), "").map_err(|_| MetadataRefuse::WriteSource)?;
+    write_metadata_inputs(dir, cargo_toml)
+}
+
+#[cfg(test)]
+fn metadata_dependency_names(dir: &Path, cargo_toml: &str) -> Result<Vec<String>, MetadataRefuse> {
+    stage_manifest(dir, cargo_toml)?;
+    Ok(metadata_names(&dir.join("Cargo.toml")))
+}
+
+/// One `cargo metadata --offline --no-deps` parse.
+///
+/// An unsuccessful Cargo exit stops the check with the exit status and the
+/// trimmed stderr reason. Launch and decode failures stop it with their own
+/// reasons. The list is the checked package's dependency names, plus member
+/// package names when this directory is the workspace root. A member's
+/// dependency is not a name of the root.
+fn metadata_names(manifest: &Path) -> Vec<String> {
+    let manifest = fs::canonicalize(manifest).unwrap_or_else(|_| {
+        panic!(
+            "dependency check failed: {}",
+            MetadataRefuse::ResolveManifest
+        )
+    });
+    let manifest_dir = manifest.parent().unwrap_or_else(|| {
+        panic!(
+            "dependency check failed: {}",
+            MetadataRefuse::ManifestParent
+        )
+    });
+    let program = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = match Command::new(program)
+        .current_dir(manifest_dir)
+        .env("CARGO_TARGET_DIR", manifest_dir.join("target"))
+        .args([
+            "metadata",
+            "--offline",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--manifest-path",
+        ])
+        .arg(&manifest)
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => panic!("dependency check failed: {}", MetadataRefuse::LaunchCargo),
+    };
+    if !output.status.success() {
+        let reason = String::from_utf8_lossy(&output.stderr);
+        panic!(
+            "dependency check failed: {}",
+            MetadataRefuse::MetadataFailed(format!(
+                "cargo metadata exited with {}: {}",
+                output.status,
+                reason.trim()
+            ))
+        );
+    }
+    let json = match String::from_utf8(output.stdout) {
+        Ok(json) => json,
+        Err(_) => panic!("dependency check failed: {}", MetadataRefuse::DecodeOutput),
+    };
+    names_for_manifest(&read_metadata(&json), &manifest)
+        .unwrap_or_else(|error| panic!("dependency check failed: {error}"))
+}
+
+/// `name` strings from each package object's `dependencies` array.
+///
+/// A `dependencies` array inside metadata is not a package dependency.
+/// The package object's own `name` is not a dependency.
+#[cfg(test)]
+fn names_in_dependency_arrays(json: &str) -> Vec<String> {
+    read_metadata(json)
+        .packages
+        .into_iter()
+        .flat_map(|package| package.dependencies)
+        .collect()
+}
+
+struct SeenPackage {
+    id: String,
+    name: String,
+    manifest_path: String,
+    dependencies: Vec<String>,
+}
+
+struct MetadataSeen {
+    open_deps: Vec<String>,
+    workspace_root: Option<String>,
+    member_ids: Vec<String>,
+    packages: Vec<SeenPackage>,
+}
+
+fn read_metadata(json: &str) -> MetadataSeen {
+    let mut seen = MetadataSeen {
+        open_deps: Vec::new(),
+        workspace_root: None,
+        member_ids: Vec::new(),
+        packages: Vec::new(),
+    };
+    let mut scan = JsonScan {
+        bytes: json.as_bytes(),
+        index: 0,
+    };
+    scan.walk_document(&mut seen);
+    seen
+}
+
+/// Dependency names of the checked package, plus member package names when
+/// this directory is the workspace root.
+///
+/// A member manifest collects its own dependencies and not sibling names.
+/// A workspace root collects member package names and not member dependencies,
+/// and it leaves its own package name out. Each package path is resolved once
+/// before either collection rule.
+fn names_for_manifest(seen: &MetadataSeen, manifest: &Path) -> Result<Vec<String>, MetadataRefuse> {
+    let own = fs::canonicalize(manifest).map_err(|_| MetadataRefuse::ResolveManifest)?;
+    // The canonical manifest already gives us a resolved directory, including
+    // for a relative path or a symlink to a manifest in another directory.
+    let manifest_dir = own.parent().ok_or(MetadataRefuse::ManifestParent)?;
+    let workspace_root = seen
+        .workspace_root
+        .as_deref()
+        .ok_or(MetadataRefuse::WorkspaceRoot)?;
+    let workspace_root =
+        fs::canonicalize(workspace_root).map_err(|_| MetadataRefuse::ResolveWorkspaceRoot)?;
+    let is_workspace_root = manifest_dir == workspace_root;
+    let mut names = Vec::new();
+    for package in &seen.packages {
+        let path = fs::canonicalize(&package.manifest_path)
+            .map_err(|_| MetadataRefuse::ResolvePackageManifest)?;
+        let is_member = seen.member_ids.iter().any(|id| id == &package.id);
+        if path == own {
+            names.extend(package.dependencies.iter().cloned());
+        }
+        if is_workspace_root && is_member && path != own {
+            names.push(package.name.clone());
+        }
+    }
+    Ok(names)
+}
+
+struct JsonScan<'a> {
+    bytes: &'a [u8],
+    index: usize,
+}
+
+impl JsonScan<'_> {
+    fn skip_ws(&mut self) {
+        while self
+            .bytes
+            .get(self.index)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            self.index += 1;
+        }
+    }
+
+    fn walk_document(&mut self, seen: &mut MetadataSeen) {
+        self.skip_ws();
+        if self.bytes.get(self.index) == Some(&b'{') {
+            self.walk_object(seen, false, false, true);
         } else {
-            decoded.push(bytes[index]);
-            index += 1;
+            self.walk_value(seen);
         }
     }
-    index
-}
 
-/// Decode one escape at `index`, or copy it as source, and return the next.
-fn copy_escape(bytes: &[u8], index: usize, decoded: &mut Vec<u8>) -> usize {
-    match decode_escape(bytes, index) {
-        Some((scalar, next)) => {
-            let mut buffer = [0u8; 4];
-            decoded.extend_from_slice(scalar.encode_utf8(&mut buffer).as_bytes());
-            next
+    fn walk_value(&mut self, seen: &mut MetadataSeen) {
+        self.skip_ws();
+        match self.bytes.get(self.index).copied() {
+            Some(b'{') => self.walk_object(seen, false, false, false),
+            Some(b'[') => self.walk_array(seen, false, false, false),
+            Some(b'"') => {
+                let _ = self.parse_string();
+            }
+            Some(b't' | b'f' | b'n') => self.skip_letters(),
+            Some(b'-' | b'0'..=b'9') => self.skip_number(),
+            Some(_) => self.index += 1,
+            None => {}
         }
-        None => {
-            decoded.push(b'\\');
-            index + 1
+    }
+
+    /// `is_package` is an element of the root `packages` array.
+    /// Metadata objects stay plain: their keys are not dependency data.
+    /// A package object's own `name` is recorded for workspace members only.
+    fn walk_object(
+        &mut self,
+        seen: &mut MetadataSeen,
+        in_dependency: bool,
+        is_package: bool,
+        is_root: bool,
+    ) {
+        self.index += 1;
+        let mut package_id = String::new();
+        let mut package_name = String::new();
+        let mut package_manifest = String::new();
+        let saved_open_deps = if is_package {
+            std::mem::take(&mut seen.open_deps)
+        } else {
+            Vec::new()
+        };
+        loop {
+            self.skip_ws();
+            match self.bytes.get(self.index).copied() {
+                None | Some(b'}') => {
+                    if self.bytes.get(self.index) == Some(&b'}') {
+                        self.index += 1;
+                    }
+                    if is_package {
+                        let dependencies = std::mem::take(&mut seen.open_deps);
+                        seen.open_deps = saved_open_deps;
+                        seen.packages.push(SeenPackage {
+                            id: package_id,
+                            name: package_name,
+                            manifest_path: package_manifest,
+                            dependencies,
+                        });
+                    }
+                    return;
+                }
+                Some(b',') => self.index += 1,
+                Some(_) => {
+                    let key = self.parse_string();
+                    self.skip_ws();
+                    if self.bytes.get(self.index) == Some(&b':') {
+                        self.index += 1;
+                    }
+                    self.skip_ws();
+                    if in_dependency && key == "name" && self.bytes.get(self.index) == Some(&b'"') {
+                        seen.open_deps.push(self.parse_string());
+                    } else if is_package
+                        && key == "dependencies"
+                        && self.bytes.get(self.index) == Some(&b'[')
+                    {
+                        self.walk_array(seen, true, false, false);
+                    } else if is_package && key == "id" && self.bytes.get(self.index) == Some(&b'"')
+                    {
+                        package_id = self.parse_string();
+                    } else if is_package
+                        && key == "name"
+                        && self.bytes.get(self.index) == Some(&b'"')
+                    {
+                        package_name = self.parse_string();
+                    } else if is_package
+                        && key == "manifest_path"
+                        && self.bytes.get(self.index) == Some(&b'"')
+                    {
+                        package_manifest = self.parse_string();
+                    } else if is_root
+                        && key == "packages"
+                        && self.bytes.get(self.index) == Some(&b'[')
+                    {
+                        self.walk_array(seen, false, true, false);
+                    } else if is_root
+                        && key == "workspace_root"
+                        && self.bytes.get(self.index) == Some(&b'"')
+                    {
+                        seen.workspace_root = Some(self.parse_string());
+                    } else if is_root
+                        && key == "workspace_members"
+                        && self.bytes.get(self.index) == Some(&b'[')
+                    {
+                        self.walk_array(seen, false, false, true);
+                    } else {
+                        self.walk_value(seen);
+                    }
+                }
+            }
+        }
+    }
+
+    fn walk_array(
+        &mut self,
+        seen: &mut MetadataSeen,
+        dependency_elements: bool,
+        package_elements: bool,
+        member_id_elements: bool,
+    ) {
+        self.index += 1;
+        loop {
+            self.skip_ws();
+            match self.bytes.get(self.index).copied() {
+                None => return,
+                Some(b']') => {
+                    self.index += 1;
+                    return;
+                }
+                Some(b',') => self.index += 1,
+                Some(b'{') => {
+                    self.walk_object(seen, dependency_elements, package_elements, false);
+                }
+                Some(b'"') if member_id_elements => {
+                    seen.member_ids.push(self.parse_string());
+                }
+                Some(_) => self.walk_value(seen),
+            }
+        }
+    }
+
+    fn parse_string(&mut self) -> String {
+        if self.bytes.get(self.index) != Some(&b'"') {
+            if self.index < self.bytes.len() {
+                self.index += 1;
+            }
+            return String::new();
+        }
+        self.index += 1;
+        let mut out = Vec::new();
+        while let Some(byte) = self.bytes.get(self.index).copied() {
+            self.index += 1;
+            if byte == b'"' {
+                break;
+            }
+            if byte != b'\\' {
+                out.push(byte);
+                continue;
+            }
+            let Some(escaped) = self.bytes.get(self.index).copied() else {
+                break;
+            };
+            self.index += 1;
+            match escaped {
+                b'"' | b'\\' | b'/' => out.push(escaped),
+                b'b' => out.push(0x08),
+                b'f' => out.push(0x0c),
+                b'n' => out.push(b'\n'),
+                b'r' => out.push(b'\r'),
+                b't' => out.push(b'\t'),
+                b'u' => {
+                    if let Some(ch) = self.decode_u_escape() {
+                        let mut buf = [0u8; 4];
+                        out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                    }
+                }
+                other => out.push(other),
+            }
+        }
+        String::from_utf8(out).unwrap_or_default()
+    }
+
+    fn decode_u_escape(&mut self) -> Option<char> {
+        let mut value = 0u32;
+        for _ in 0..4 {
+            let digit = self.bytes.get(self.index).copied()?;
+            let hex = match digit {
+                b'0'..=b'9' => u32::from(digit - b'0'),
+                b'a'..=b'f' => u32::from(digit - b'a') + 10,
+                b'A'..=b'F' => u32::from(digit - b'A') + 10,
+                _ => return None,
+            };
+            self.index += 1;
+            value = (value << 4) | hex;
+        }
+        char::from_u32(value)
+    }
+
+    fn skip_letters(&mut self) {
+        while self
+            .bytes
+            .get(self.index)
+            .is_some_and(u8::is_ascii_alphabetic)
+        {
+            self.index += 1;
+        }
+    }
+
+    fn skip_number(&mut self) {
+        while self
+            .bytes
+            .get(self.index)
+            .is_some_and(|byte| matches!(byte, b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E'))
+        {
+            self.index += 1;
         }
     }
 }
 
-/// The next occurrence of `byte` at or after `from`.
-fn find_byte(bytes: &[u8], from: usize, byte: u8) -> Option<usize> {
-    bytes
-        .get(from..)?
-        .iter()
-        .position(|found| *found == byte)
-        .map(|offset| from + offset)
+#[cfg(test)]
+fn package_manifest(body: &str) -> String {
+    format!("[package]\nname = \"fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n{body}")
 }
 
-/// How many `quote` bytes start at `index`.
-fn quote_run(bytes: &[u8], index: usize, quote: u8) -> usize {
-    bytes[index..]
-        .iter()
-        .take_while(|byte| **byte == quote)
-        .count()
+#[cfg(test)]
+fn dependency_manifest(deps: &str) -> String {
+    package_manifest(&format!("[dependencies]\n{deps}"))
 }
 
-/// Decode one backslash escape at `index`, with the index just past it.
-fn decode_escape(bytes: &[u8], index: usize) -> Option<(char, usize)> {
-    let escaped = *bytes.get(index + 1)?;
-    let simple = index + 2;
-    match escaped {
-        b'\\' => Some(('\\', simple)),
-        b'"' => Some(('"', simple)),
-        b'b' => Some(('\u{08}', simple)),
-        b't' => Some(('\t', simple)),
-        b'n' => Some(('\n', simple)),
-        b'f' => Some(('\u{0c}', simple)),
-        b'r' => Some(('\r', simple)),
-        b'u' => decode_unicode(bytes, index, 4),
-        b'U' => decode_unicode(bytes, index, 8),
-        _ => None,
-    }
+#[cfg(test)]
+fn root_then_package(root: &str) -> String {
+    format!("{root}\n[package]\nname = \"fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n")
 }
 
-/// Decode `\uXXXX` or `\UXXXXXXXX` when the hex is present and a scalar.
-fn decode_unicode(bytes: &[u8], index: usize, digits: usize) -> Option<(char, usize)> {
-    let start = index + 2;
-    let end = start + digits;
-    if end > bytes.len() {
-        return None;
-    }
-    let mut value = 0u32;
-    for byte in &bytes[start..end] {
-        value = value.checked_mul(16)? + hex_value(*byte)?;
-    }
-    char::from_u32(value).map(|scalar| (scalar, end))
+/// The directory `stage_manifest` writes the dependency crate into, beside the
+/// checked package.
+const DEPENDENCY_DIR: &str = "grant-binding";
+
+/// The staged dependency crate's package name. It matches `DEPENDENCY_DIR`, so
+/// a fixture whose `path` names that directory links this crate and Cargo
+/// accepts it.
+const DEPENDENCY_PACKAGE: &str = "grant-binding";
+
+/// The `path` value a link fixture uses for the staged sibling crate.
+///
+/// A fixture uses this so a valid manifest in the test measures the link and
+/// not a Cargo refusal.
+#[cfg(test)]
+fn stub_path() -> &'static str {
+    "../grant-binding"
 }
 
-/// A hex digit as its value, accepting `0-9`, `a-f` and `A-F`.
-fn hex_value(byte: u8) -> Option<u32> {
-    match byte {
-        b'0'..=b'9' => Some(u32::from(byte - b'0')),
-        b'a'..=b'f' => Some(u32::from(byte - b'a') + 10),
-        b'A'..=b'F' => Some(u32::from(byte - b'A') + 10),
-        _ => None,
+/// A `path` value that reaches the staged crate from one directory below the
+/// checked package, for a fixture that needs a directory between the two.
+#[cfg(test)]
+const ONE_LEVEL_UP: &str = "../../grant-binding";
+
+/// A `path` value that reaches the staged crate through a different spelling
+/// only. Cargo reads the escape or the line continuation, so the fixture
+/// measures that spelling and the link.
+#[cfg(test)]
+fn escaped_stub_path(spelling: &str) -> String {
+    ONE_LEVEL_UP.replace("grant-binding", spelling)
+}
+
+/// Reports whether the dependency of a real workspace member `app` links this
+/// crate: the member sits beside a crate named `grant-binding`, the way a
+/// fixture's `path` value resolves.
+///
+/// Cargo takes a dependency's package name from that crate's manifest, so a
+/// rename to another spelling stays that other name.
+#[cfg(test)]
+fn renamed_dependency_manifest(rename: &str) -> bool {
+    with_manifest_dir(&std::env::temp_dir(), |dir| {
+        for (name, manifest) in [
+            (
+                "app",
+                format!(
+                    "[package]\nname = \"app\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\ngb = {{ package = \"{rename}\", path = \"../grant-binding\" }}\n"
+                ),
+            ),
+            (
+                "grant-binding",
+                "[package]\nname = \"grant-binding\"\nversion = \"0.0.0\"\nedition = \"2021\"\n"
+                    .to_owned(),
+            ),
+        ] {
+            let package = dir.join(name);
+            fs::create_dir_all(package.join("src")).unwrap();
+            fs::write(package.join("Cargo.toml"), manifest).unwrap();
+            fs::write(package.join("src/lib.rs"), "").unwrap();
+        }
+        fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
+        Ok(manifest_depends_on_grant_binding(&dir.join("app/Cargo.toml")))
+    })
+    .unwrap()
+}
+
+#[cfg(test)]
+fn assert_cargo_rejects(manifest: &str, reason: &str) {
+    let panic = std::panic::catch_unwind(|| cargo_toml_path_depends_on_grant_binding(manifest))
+        .unwrap_err();
+    let text = panic.downcast_ref::<String>().unwrap();
+    assert!(
+        text.starts_with("dependency check failed: cargo metadata exited with exit status: 101: "),
+        "{manifest}"
+    );
+    assert!(text.contains(reason), "{manifest}: {text}");
+}
+
+#[cfg(test)]
+fn metadata_test_child(dir: &Path, cargo: Option<&Path>) -> std::process::Output {
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .args(["--exact", std::thread::current().name().expect("test name")])
+        .env("GRANT_BINDING_METADATA_TEST_CHILD", "1")
+        .env("TMPDIR", dir)
+        .env("TMP", dir)
+        .env("TEMP", dir);
+    if let Some(cargo) = cargo {
+        command.env("CARGO", cargo);
     }
+    command.output().expect("run metadata test child")
+}
+
+#[cfg(test)]
+fn assert_metadata_child_failure(output: std::process::Output, reason: &str) {
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.status.code(), Some(101), "{text}");
+    assert!(
+        text.lines()
+            .any(|line| line == format!("dependency check failed: {reason}")),
+        "{text}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn model_metadata_collisions_preserve_existing_files() {
+    use std::os::unix::fs::symlink;
+
+    if std::env::var_os("GRANT_BINDING_METADATA_TEST_CHILD").is_some() {
+        // The child runs only this test, so its first candidate uses counter 0.
+        let parent = std::env::temp_dir();
+        let candidate = |n| parent.join(format!("grant-binding-meta-{}-{n}", std::process::id()));
+        let planted = candidate(0);
+        fs::create_dir(&planted).expect("collision directory");
+        fs::create_dir(planted.join("src")).expect("planted source directory");
+        fs::write(planted.join("sentinel"), "keep sentinel").expect("sentinel");
+        fs::write(planted.join("Cargo.toml"), "keep manifest").expect("manifest sentinel");
+        let target = parent.join("disposable-source");
+        fs::write(&target, "keep source").expect("disposable source");
+        symlink(&target, planted.join("src/lib.rs")).expect("planted source symlink");
+        fs::write(candidate(1), "keep file collision").expect("file collision");
+        symlink(&planted, candidate(2)).expect("directory symlink collision");
+        symlink(parent.join("absent"), candidate(3)).expect("dangling symlink collision");
+
+        assert!(cargo_toml_path_depends_on_grant_binding(
+            &dependency_manifest("grant-binding = '1.2.3'\n\n[workspace]\n")
+        ));
+        assert_eq!(
+            fs::read_to_string(planted.join("sentinel")).unwrap(),
+            "keep sentinel"
+        );
+        assert_eq!(
+            fs::read_to_string(planted.join("Cargo.toml")).unwrap(),
+            "keep manifest"
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep source");
+        assert_eq!(fs::read_link(planted.join("src/lib.rs")).unwrap(), target);
+        assert_eq!(
+            fs::read_to_string(candidate(1)).unwrap(),
+            "keep file collision"
+        );
+        assert_eq!(fs::read_link(candidate(2)).unwrap(), planted);
+        assert_eq!(fs::read_link(candidate(3)).unwrap(), parent.join("absent"));
+        assert!(!candidate(4).exists(), "owned directory was cleaned");
+        assert_eq!(fs::read_dir(parent).unwrap().count(), 5);
+        return;
+    }
+    with_manifest_dir(&std::env::temp_dir(), |dir| {
+        let output = metadata_test_child(dir, None);
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn model_metadata_file_failures_have_reasons_and_cleanup() {
+    with_manifest_dir(&std::env::temp_dir(), |parent| {
+        let missing_parent = parent.join("missing");
+        let error = with_manifest_dir(&missing_parent, |_| -> Result<(), MetadataRefuse> {
+            panic!("operation requires an owned directory")
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "cannot create temporary manifest directory"
+        );
+        for (stage, reason) in [
+            (0, "cannot create temporary source directory"),
+            (1, "cannot write temporary Cargo.toml"),
+            (2, "cannot write temporary src/lib.rs"),
+        ] {
+            let error = with_manifest_dir(parent, |dir| {
+                if stage == 0 {
+                    fs::write(dir.join("src"), "occupied").unwrap();
+                    return metadata_dependency_names(dir, &package_manifest(""));
+                }
+                fs::create_dir(dir.join("src")).unwrap();
+                let blocked = if stage == 1 {
+                    "Cargo.toml"
+                } else {
+                    "src/lib.rs"
+                };
+                fs::create_dir(dir.join(blocked)).unwrap();
+                write_metadata_inputs(dir, &package_manifest(""))?;
+                Ok(Vec::new())
+            })
+            .unwrap_err();
+            assert_eq!(error.to_string(), reason);
+            assert_eq!(fs::read_dir(parent).unwrap().count(), 0);
+        }
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn model_metadata_missing_cargo_stops_the_detector() {
+    if std::env::var_os("GRANT_BINDING_METADATA_TEST_CHILD").is_some() {
+        assert!(!cargo_toml_path_depends_on_grant_binding(
+            &dependency_manifest("grant-binding = { path = 'missing-gb' }\n")
+        ));
+        return;
+    }
+    with_manifest_dir(&std::env::temp_dir(), |dir| {
+        let output = metadata_test_child(dir, Some(&dir.join("missing-cargo")));
+        assert_metadata_child_failure(output, "cannot launch cargo metadata");
+        assert_eq!(fs::read_dir(dir).unwrap().count(), 0);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn model_metadata_output_failure_and_nonzero_exit_stay_distinct() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if std::env::var_os("GRANT_BINDING_METADATA_TEST_CHILD").is_some() {
+        let root = std::env::temp_dir().join("ws");
+        fs::create_dir_all(root.join("gb/src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"gb\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("gb/Cargo.toml"),
+            "[package]\nname = \"grant-binding\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("gb/src/lib.rs"), "").unwrap();
+        let manifest = root.join("Cargo.toml");
+        let cargo = PathBuf::from(std::env::var_os("CARGO").unwrap());
+        for status in [0, 1, 101] {
+            fs::write(
+                &cargo,
+                format!("#!/bin/sh\nprintf '\\377'\nexit {status}\n"),
+            )
+            .unwrap();
+            fs::set_permissions(&cargo, fs::Permissions::from_mode(0o700)).unwrap();
+            if status == 0 {
+                for direct in [true, false] {
+                    let panic = std::panic::catch_unwind(|| {
+                        if direct {
+                            manifest_depends_on_grant_binding(&manifest)
+                        } else {
+                            cargo_toml_path_depends_on_grant_binding(&package_manifest(""))
+                        }
+                    })
+                    .unwrap_err();
+                    assert_eq!(
+                        panic.downcast_ref::<String>().unwrap(),
+                        "dependency check failed: cargo metadata output is not UTF-8"
+                    );
+                }
+            } else {
+                let reason = format!(
+                    "dependency check failed: cargo metadata exited with exit status: {status}: "
+                );
+                for direct in [true, false] {
+                    let panic = std::panic::catch_unwind(|| {
+                        if direct {
+                            manifest_depends_on_grant_binding(&manifest)
+                        } else {
+                            cargo_toml_path_depends_on_grant_binding(&package_manifest(""))
+                        }
+                    })
+                    .unwrap_err();
+                    assert_eq!(panic.downcast_ref::<String>().unwrap(), &reason);
+                }
+            }
+        }
+        fs::remove_dir_all(&root).unwrap();
+        return;
+    }
+    with_manifest_dir(&std::env::temp_dir(), |dir| {
+        let cargo = dir.join("cargo-fixture");
+        let output = metadata_test_child(dir, Some(&cargo));
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_dir(dir).unwrap().count(),
+            1,
+            "only the fixture remains"
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn model_unparseable_manifest_stops_the_check() {
+    let root = std::env::temp_dir().join(format!("gb-bad-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies\ngrant-binding = { path = \"missing-gb\" }\n",
+    )
+    .unwrap();
+    fs::write(root.join("src/lib.rs"), "").unwrap();
+    let manifest = root.join("Cargo.toml");
+    for direct in [true, false] {
+        let panic = std::panic::catch_unwind(|| {
+            if direct {
+                manifest_depends_on_grant_binding(&manifest)
+            } else {
+                cargo_toml_path_depends_on_grant_binding(
+                    "[dependencies\ngrant-binding = { path = \"missing-gb\" }\n",
+                )
+            }
+        })
+        .unwrap_err();
+        let reason = panic.downcast_ref::<String>().unwrap();
+        assert!(
+            reason.starts_with(
+                "dependency check failed: cargo metadata exited with exit status: 101: "
+            ) && reason.contains("unclosed table, expected `]`"),
+            "{reason}"
+        );
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn model_metadata_rejection_is_refused() {
+    let root = std::env::temp_dir().join(format!("gb-reject-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"missing\"]\n",
+    )
+    .unwrap();
+    let manifest = root.join("Cargo.toml");
+    for direct in [true, false] {
+        let panic = std::panic::catch_unwind(|| {
+            if direct {
+                manifest_depends_on_grant_binding(&manifest)
+            } else {
+                cargo_toml_path_depends_on_grant_binding("[workspace]\nmembers = [\"missing\"]\n")
+            }
+        })
+        .unwrap_err();
+        let reason = panic.downcast_ref::<String>().unwrap();
+        assert!(
+            reason.starts_with(
+                "dependency check failed: cargo metadata exited with exit status: 101: "
+            ) && reason.contains("failed to load manifest"),
+            "{reason}"
+        );
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn model_metadata_cleanup_failure_keeps_both_reasons() {
+    with_manifest_dir(&std::env::temp_dir(), |parent| {
+        for (result, reason) in [
+            (Ok(false), "cannot remove temporary manifest directory"),
+            (Ok(true), "cannot remove temporary manifest directory"),
+            (
+                Err(MetadataRefuse::LaunchCargo),
+                "cannot launch cargo metadata; cannot remove temporary manifest directory",
+            ),
+        ] {
+            let error = with_manifest_dir(parent, |dir| {
+                fs::remove_dir(dir).unwrap();
+                fs::write(dir, "block directory cleanup").unwrap();
+                result
+            })
+            .unwrap_err();
+            assert_eq!(error.to_string(), reason);
+        }
+        Ok(())
+    })
+    .unwrap();
 }
 
 #[test]
 fn model_escaped_unicode_path_is_a_link() {
-    let escaped = "\
-[package]\n\
-name = \"escape-probe\"\n\
-version = \"0.0.0\"\n\
-edition = \"2021\"\n\
-\n\
-[dependencies]\n\
-gb = { path = \"../grant-bind\\u0069ng\", package = \"grant-bind\\u0069ng\" }\n";
+    let escaped = dependency_manifest(&format!(
+        "gb = {{ package = \"grant-bind\\u0069ng\", path = \"{}\" }}\n",
+        escaped_stub_path("grant-bind\\u0069ng")
+    ));
     assert!(!escaped.contains("grant-binding"));
     assert!(escaped.contains("\\u0069"));
-    assert!(cargo_toml_path_depends_on_grant_binding(escaped));
-    let wide =
-        "gb = { path = \"../grant-bind\\U00000069ng\", package = \"grant-bind\\U00000069ng\" }\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(&escaped));
+    let wide = dependency_manifest(&format!(
+        "gb = {{ package = \"grant-bind\\U00000069ng\", path = \"{}\" }}\n",
+        escaped_stub_path("grant-bind\\U00000069ng")
+    ));
     assert!(!wide.contains("grant-binding"));
-    assert!(cargo_toml_path_depends_on_grant_binding(wide));
-    let literal = "gb = { path = '../grant-bind\\u0069ng', package = 'grant-bind\\u0069ng' }\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(&wide));
+    // A literal string keeps the backslash, which is not a name character:
+    // Cargo refuses the manifest, so the check stops with its reason.
+    let literal =
+        dependency_manifest("gb = { package = 'grant-bind\\u0069ng', version = '1.2.3' }\n");
     assert!(!literal.contains("grant-binding"));
-    assert!(!cargo_toml_path_depends_on_grant_binding(literal));
-    let comment = "# don't edit\n[dependencies]\ngb = { path = \"../grant-bind\\u0069ng\", package = \"grant-bind\\u0069ng\" }\n";
+    let panic = std::panic::catch_unwind(|| cargo_toml_path_depends_on_grant_binding(&literal))
+        .unwrap_err();
+    assert!(
+        panic
+            .downcast_ref::<String>()
+            .unwrap()
+            .starts_with("dependency check failed: cargo metadata exited with exit status: 101: "),
+        "{literal}"
+    );
+    let comment = dependency_manifest(&format!(
+        "# don't edit\ngb = {{ package = \"grant-bind\\u0069ng\", path = \"{}\" }}\n",
+        escaped_stub_path("grant-bind\\u0069ng")
+    ));
     assert!(!comment.contains("grant-binding"));
     assert!(comment.contains("\\u0069"));
-    assert!(cargo_toml_path_depends_on_grant_binding(comment));
-    let quoted_comment = "# the \"quoted note\ngb = { path = \"../grant-bind\\u0069ng\" }\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(&comment));
+    let quoted_comment = dependency_manifest(&format!(
+        "# the \"quoted note\ngb = {{ package = \"grant-bind\\u0069ng\", path = \"{}\" }}\n",
+        escaped_stub_path("grant-bind\\u0069ng")
+    ));
     assert!(!quoted_comment.contains("grant-binding"));
-    assert!(cargo_toml_path_depends_on_grant_binding(quoted_comment));
-    let quoted_run = "a = \"\"\"x\"\"\"\"\ngb = { path = \"../grant-bind\\u0069ng\" }\n";
-    assert!(!quoted_run.contains("grant-binding"));
-    assert!(cargo_toml_path_depends_on_grant_binding(quoted_run));
-    let literal_run = "a = '''x''''\ngb = { path = \"../grant-bind\\u0069ng\" }\n";
-    assert!(!literal_run.contains("grant-binding"));
-    assert!(cargo_toml_path_depends_on_grant_binding(literal_run));
+    assert!(cargo_toml_path_depends_on_grant_binding(&quoted_comment));
+}
+
+#[test]
+fn model_multiline_basic_string_escape_is_a_link() {
+    let multiline = dependency_manifest(&format!(
+        "gb = {{ package = \"\"\"grant-bind\\u0069ng\"\"\", path = \"{}\" }}\n",
+        escaped_stub_path("grant-bind\\u0069ng")
+    ));
+    assert!(!multiline.contains("grant-binding"));
+    assert!(multiline.contains("\\u0069"));
+    assert!(multiline.contains("\"\"\""));
+    assert!(cargo_toml_path_depends_on_grant_binding(&multiline));
+}
+
+#[test]
+fn model_unknown_hex_escape_is_refused() {
+    // Cargo has no `\x` escape, so the manifest cannot be read and the check
+    // stops with Cargo's own reason.
+    let hex =
+        dependency_manifest("gb = { package = \"grant-bind\\x69ng\", version = \"1.2.3\" }\n");
+    assert!(!hex.contains("grant-binding"));
+    assert!(hex.contains("\\x69"));
+    assert_cargo_rejects(
+        &hex,
+        "missing escaped value, expected `b`, `f`, `n`, `r`, `\\`, `\"`, `u`, `U`",
+    );
+}
+
+#[test]
+fn model_uppercase_hex_escape_is_a_link() {
+    let upper = dependency_manifest(&format!(
+        "gb = {{ package = \"grant-bindi\\u006Eg\", path = \"{}\" }}\n",
+        escaped_stub_path("grant-bindi\\u006Eg")
+    ));
+    assert!(!upper.contains("grant-binding"));
+    assert!(upper.contains("\\u006E"));
+    assert!(cargo_toml_path_depends_on_grant_binding(&upper));
+}
+
+#[test]
+fn model_lowercase_hex_escape_is_a_link() {
+    let lower =
+        dependency_manifest("gb = { package = \"grant-bindi\\u006eg\", version = \"1.2.3\" }\n");
+    assert!(!lower.contains("grant-binding"));
+    assert!(lower.contains("\\u006e"));
+    assert!(cargo_toml_path_depends_on_grant_binding(&lower));
+}
+
+#[test]
+fn model_newline_escape_is_not_a_link() {
+    // A newline is not a name character, so Cargo refuses the name and the
+    // check stops with Cargo's own reason.
+    let escaped =
+        dependency_manifest("gb = { package = \"grant-bindi\\ng\", version = \"1.2.3\" }\n");
+    assert!(!escaped.contains("grant-binding"));
+    assert!(escaped.contains("\\n"));
+    assert_cargo_rejects(&escaped, "in package name: `grant-bindi");
+}
+
+#[test]
+fn model_backspace_escape_is_not_a_link() {
+    // A backspace is not a visible name character, so Cargo refuses the name
+    // and the check stops with Cargo's own reason.
+    let escaped =
+        dependency_manifest("gb = { package = \"grant-\\binding\", version = \"1.2.3\" }\n");
+    assert!(!escaped.contains("grant-binding"));
+    assert!(escaped.contains("\\b"));
+    assert_cargo_rejects(&escaped, "in package name: `grant-␈inding`");
+}
+
+#[test]
+fn model_tab_escape_is_not_a_link() {
+    // A tab is not a name character, so Cargo refuses the name and the check
+    // stops with Cargo's own reason.
+    let escaped =
+        dependency_manifest("gb = { package = \"gran\\t-binding\", version = \"1.2.3\" }\n");
+    assert!(!escaped.contains("grant-binding"));
+    assert!(escaped.contains("\\t"));
+    assert_cargo_rejects(&escaped, "in package name: `gran");
+}
+
+#[test]
+fn model_carriage_return_escape_is_not_a_link() {
+    // A carriage return is not a visible name character, so Cargo refuses the
+    // name and the check stops with Cargo's own reason.
+    let escaped =
+        dependency_manifest("gb = { package = \"g\\rant-binding\", version = \"1.2.3\" }\n");
+    assert!(!escaped.contains("grant-binding"));
+    assert!(escaped.contains("\\r"));
+    assert_cargo_rejects(
+        &escaped,
+        "invalid character `␍` in package name: `g␍ant-binding`, characters must be Unicode XID characters",
+    );
+}
+
+#[test]
+fn model_line_ending_escape_is_a_link() {
+    // A backslash followed by a line ending is a continuation Cargo strips, so
+    // the package name joins to this crate and the dependency is a link.
+    let lf = dependency_manifest(&format!(
+        "gb = {{ package = \"\"\"grant-bindi\\\nng\"\"\", path = \"{}\" }}\n",
+        escaped_stub_path("grant-bindi\\u0069ng")
+    ));
+    assert!(!lf.contains("grant-binding"));
+    assert!(lf.contains("\\\n"));
+    assert!(cargo_toml_path_depends_on_grant_binding(&lf));
+    let crlf = dependency_manifest(&format!(
+        "gb = {{ package = \"\"\"grant-bindi\\\r\nng\"\"\", path = \"{}\" }}\n",
+        escaped_stub_path("grant-bindi\\u0069ng")
+    ));
+    assert!(!crlf.contains("grant-binding"));
+    assert!(cargo_toml_path_depends_on_grant_binding(&crlf));
+    let spaced = dependency_manifest(&format!(
+        "gb = {{ package = \"\"\"grant-bindi\\\n  ng\"\"\", path = \"{}\" }}\n",
+        escaped_stub_path("grant-bindi\\u0069ng")
+    ));
+    assert!(!spaced.contains("grant-binding"));
+    assert!(cargo_toml_path_depends_on_grant_binding(&spaced));
+    // A literal string keeps the backslash, which is not a name character:
+    // Cargo refuses the name, so the check stops with its reason.
+    let literal =
+        dependency_manifest("gb = { package = '''grant-bindi\\\nng''', version = '1.2.3' }\n");
+    assert!(!literal.contains("grant-binding"));
+    assert_cargo_rejects(&literal, "in package name: `grant-bindi");
+    // A continuation inside the inline table is a line ending Cargo refuses.
+    for broken in [
+        package_manifest("[dependencies]\ngb = { package = \"\"\"grant-binding\"\"\", path = \"../../grant-bindi\\\nng\" }\n"),
+        package_manifest("[dependencies]\ngb = { package = \"\"\"grant-binding\"\"\", path = \"../../grant-bindi\\\r\nng\" }\n"),
+    ] {
+        assert_cargo_rejects(&broken, "newlines are unsupported in inline tables");
+    }
+}
+
+#[test]
+fn model_comment_is_not_a_path_link() {
+    let whole_line = package_manifest("# path = \"../grant-binding\"\n");
+    assert!(whole_line.contains("grant-binding"));
+    assert!(whole_line.contains("path"));
+    assert!(!cargo_toml_path_depends_on_grant_binding(&whole_line));
+    let trailing = "\
+[package]\n\
+name = \"grant-binding\"\n\
+version = \"0.1.0\"\n\
+edition = \"2021\"\n\
+# path = \"lab/grant-binding\"\n";
+    assert!(trailing.contains("grant-binding"));
+    assert!(trailing.contains("path"));
+    assert!(!cargo_toml_path_depends_on_grant_binding(trailing));
+    let followed = package_manifest(&format!(
+        "# path = \"../grant-binding\"\n[dependencies]\ngrant-binding = {{ path = '{}' }}\n",
+        stub_path()
+    ));
+    assert!(cargo_toml_path_depends_on_grant_binding(&followed));
+}
+
+#[test]
+fn model_literal_string_path_is_a_link() {
+    let single = dependency_manifest(&format!("grant-binding = {{ path = '{}' }}\n", stub_path()));
+    assert!(single.contains("grant-binding"));
+    assert!(single.contains("path"));
+    assert!(cargo_toml_path_depends_on_grant_binding(&single));
+    let multi = dependency_manifest(&format!(
+        "grant-binding = {{ path = '''{}''' }}\n",
+        stub_path()
+    ));
+    assert!(multi.contains("grant-binding"));
+    assert!(multi.contains("path"));
+    assert!(cargo_toml_path_depends_on_grant_binding(&multi));
+    // A literal string keeps the backslash, which is not a name character:
+    // Cargo refuses the name, so the check stops with its reason.
+    let escaped =
+        dependency_manifest("gb = { package = 'grant-bind\\u0069ng', version = '1.2.3' }\n");
+    assert!(!escaped.contains("grant-binding"));
+    assert!(escaped.contains("\\u0069"));
+    assert_cargo_rejects(&escaped, "in package name: `grant-bind\\u0069ng`");
+}
+
+#[test]
+fn model_case_different_manifest_is_not_a_link() {
+    // A rename with different capital letters names a package the path
+    // resolves under its own name, so the link stays absent.
+    let renamed_toml = "gb = { package = 'Grant-Binding', path = '../grant-binding' }\n";
+    assert!(renamed_toml.contains("path"));
+    assert!(!renamed_toml.contains("package = 'grant-binding'"));
+    assert!(!renamed_dependency_manifest("Grant-Binding"));
+    // A quoted key spells this crate's name in plain letters and resolves the
+    // same sibling crate, so the link is present.
+    let key = dependency_manifest(&format!(
+        "\"grant-binding\" = {{ path = '{}' }}\n",
+        stub_path()
+    ));
+    assert!(key.contains("grant-binding"));
+    assert!(key.contains("path"));
+    assert!(cargo_toml_path_depends_on_grant_binding(&key));
+    // A table key is not a dependency field: `Path` is not `path`, so the
+    // dependency names no path and Cargo stops on the registry requirement.
+    let field = package_manifest(&format!(
+        "[dependencies.grant-binding]\nPath = '{}'\n",
+        stub_path()
+    ));
+    assert!(field.contains("grant-binding"));
+    assert!(!field.contains("path"));
+    assert_cargo_rejects(
+        &field,
+        "dependency (grant-binding) specified without providing a local path, Git repository, version, or workspace dependency to use",
+    );
+}
+
+#[test]
+fn model_hash_inside_a_string_is_still_a_link() {
+    let basic = "\
+[package]\n\
+name = \"fixture\"\n\
+version = \"0.0.0\"\n\
+edition = \"2021\"\n\
+description = \"uses # syntax\"\n\
+\n\
+[dependencies]\n\
+grant-binding = { path = \"missing-gb\" }\n";
+    assert!(basic.contains("grant-binding"));
+    assert!(basic.contains("path"));
+    assert!(basic.contains('#'));
+    assert!(cargo_toml_path_depends_on_grant_binding(basic));
+    let literal = "\
+[package]\n\
+name = \"fixture\"\n\
+version = \"0.0.0\"\n\
+edition = \"2021\"\n\
+description = 'uses # syntax'\n\
+\n\
+[dependencies]\n\
+grant-binding = { path = 'missing-gb' }\n";
+    assert!(literal.contains("grant-binding"));
+    assert!(literal.contains("path"));
+    assert!(literal.contains('#'));
+    assert!(cargo_toml_path_depends_on_grant_binding(literal));
+}
+
+#[test]
+fn model_git_or_registry_dependency_is_a_link() {
+    // Cargo reads the dependency name from each manifest below, so the link is
+    // the only question. A fixture whose path names an absent directory is
+    // refused before it can measure a link, so every path names the staged
+    // sibling crate, and a fixture that names no path keeps its origin version.
+    for manifest in [
+        dependency_manifest("grant-binding = { git = \"https://example.com/gb.git\" }\n"),
+        dependency_manifest("grant-binding={git=\"https://example.com/gb.git\"}\n"),
+        dependency_manifest("grant-binding = { version = \"1.2.3\" }\n"),
+        dependency_manifest("grant-binding={version=\"1.2.3\"}\n"),
+        dependency_manifest("grant-binding = \"1.2.3\"\n"),
+        dependency_manifest("grant-binding=\"1.2.3\"\n"),
+        dependency_manifest("gb = { package = \"grant-binding\", version = \"1.2.3\" }\n"),
+        dependency_manifest(
+            "gb = { package = \"grant-binding\", git = \"https://example.com/gb.git\" }\n",
+        ),
+        package_manifest(
+            "[dependencies]\ngrant-binding = { default-features = false, version = \"1.2.3\" }\n",
+        ),
+        package_manifest(
+            "[dependencies]\ngrant-binding = { default-features = false, git = \"https://example.com/gb.git\" }\n",
+        ),
+        package_manifest("[dependencies]\ngrant-binding = '1.2.3'\n"),
+        package_manifest("[dependencies.grant-binding]\nversion = \"1.2.3\"\n"),
+        package_manifest(
+            "[dependencies.grant-binding]\ndefault-features = false\ngit = 'https://example.com/gb.git'\n",
+        ),
+        package_manifest("[dependencies]\n'grant-binding' = '1.2.3'\n"),
+        package_manifest("[dependencies]\n\"grant-binding\" = \"1.2.3\"\n"),
+        // Cargo reads the escape, so the dependency key names this crate.
+        package_manifest(&format!(
+            concat!("[dependencies]\n\"grant-b", "\\", "u0069nding\" = {{ path = \"{}\" }}\n"),
+            escaped_stub_path("grant-b\\u0069nding")
+        )),
+        package_manifest("[dependencies]\ngrant-binding = '''1.2.3'''\n"),
+        package_manifest("[dependencies]\ngrant-binding = \"\"\"1.2.3\"\"\"\n"),
+        package_manifest(
+            "[dependencies]\n'grant-binding' = { 'default-features' = false, 'version' = '1.2.3' }\n",
+        ),
+        package_manifest(
+            "[dependencies]\n\"grant-binding\" = { \"default-features\" = false, \"git\" = 'https://example.com/gb.git' }\n",
+        ),
+        package_manifest("['dependencies'.'grant-binding']\n'version' = '1.2.3'\n"),
+        package_manifest(
+            "[\"dependencies\".\"grant-binding\"]\n\"git\" = 'https://example.com/gb.git'\n",
+        ),
+        package_manifest("[dependencies]\ngrant-binding.version = '1.2.3'\n"),
+        package_manifest("[dependencies]\n'grant-binding'.'git' = 'https://example.com/gb.git'\n"),
+        root_then_package("dependencies.grant-binding.version = '1.2.3'"),
+        root_then_package(
+            "dependencies = { grant-binding = { default-features = false, git = 'https://example.com/gb.git' } }",
+        ),
+        package_manifest(
+            "[dependencies]\ngb = { default-features = false, package = 'grant-binding', version = '1.2.3' }\n",
+        ),
+        package_manifest(
+            "[dependencies]\ngb = { git = 'https://example.com/gb.git', 'package' = 'grant-binding' }\n",
+        ),
+        package_manifest(
+            "[dependencies]\ngb = { \"version\" = '1.2.3', \"package\" = \"grant-binding\" }\n",
+        ),
+        package_manifest(
+            "[dependencies]\ngb = { version = '1.2.3', package = '''grant-binding''' }\n",
+        ),
+        package_manifest(
+            "[dependencies]\ngb = { git = 'https://example.com/gb.git', package = \"\"\"grant-binding\"\"\" }\n",
+        ),
+        package_manifest("[dependencies.gb]\nversion = '1.2.3'\npackage = 'grant-binding'\n"),
+        package_manifest(
+            "[dependencies.gb]\npackage = 'grant-binding'\ngit = 'https://example.com/gb.git'\n",
+        ),
+        package_manifest("[dependencies]\ngb.package = 'grant-binding'\ngb.version = '1.2.3'\n"),
+        package_manifest("[dev-dependencies.grant-binding]\nversion = '1.2.3'\n"),
+        package_manifest("[build-dependencies.grant-binding]\ngit = 'https://example.com/gb.git'\n"),
+        package_manifest(
+            "[target.'cfg(unix)'.dependencies.grant-binding]\nversion = '1.2.3'\n",
+        ),
+    ] {
+        assert!(
+            cargo_toml_path_depends_on_grant_binding(&manifest),
+            "{manifest}"
+        );
+    }
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        "[package]\nname = \"grant-binding\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
+    ));
+    assert_cargo_rejects(
+        &package_manifest("[dependencies]\ngrant-binding = { package = \"grant-binding\" }\n"),
+        "dependency (grant-binding) specified without providing a local path, Git repository, version, or workspace dependency to use",
+    );
+    // The checked package's own name is not a dependency, and a dependency
+    // that names no version Cargo can read stops the check with its reason.
+    for manifest in [
+        "[package]\nname = 'grant-binding'\nversion = '1.2.3'\n".to_string(),
+        "[package]\n\"name\" = \"grant-binding\"\n\"version\" = '1.2.3'\n".to_string(),
+        dependency_manifest("'Grant-Binding' = '1.2.3'\n"),
+        package_manifest("[dependencies.Grant-Binding]\nversion = '1.2.3'\n"),
+        package_manifest("[dependencies]\n# grant-binding = '1.2.3'\n"),
+        dependency_manifest("Grant-Binding = { git = \"https://example.com/gb.git\" }\n"),
+        dependency_manifest("Grant-Binding = { version = \"1.2.3\" }\n"),
+        dependency_manifest("grant-binding-other = \"1.2.3\"\n"),
+        root_then_package("[workspace.dependencies.grant-binding]\nversion = '1.2.3'"),
+    ] {
+        assert!(
+            !cargo_toml_path_depends_on_grant_binding(&manifest),
+            "{manifest}"
+        );
+    }
+    // A rename on its own names no source, and a version that is not a version
+    // stops Cargo at the dependency.
+    for (manifest, reason) in [
+        (
+            package_manifest("[dependencies]\ngb = { package = 'grant-binding' }\n"),
+            "dependency (gb) specified without providing a local path, Git repository, version, or workspace dependency to use",
+        ),
+        (
+            package_manifest("[dependencies]\ngrant-binding = '1.2.3.4'\n"),
+            "expected comma after patch version number, found '.'",
+        ),
+    ] {
+        assert_cargo_rejects(&manifest, reason);
+    }
+}
+
+#[test]
+fn model_table_or_dotted_dependency_is_a_link() {
+    let branch_first = dependency_manifest(
+        "grant-binding = { branch = \"main\", git = \"https://example.com/gb.git\" }\n",
+    );
+    assert!(cargo_toml_path_depends_on_grant_binding(&branch_first));
+    let registry_first =
+        dependency_manifest("grant-binding = { registry = \"crates-io\", version = \"1.2.3\" }\n");
+    assert!(cargo_toml_path_depends_on_grant_binding(&registry_first));
+    // A registry or an inherited entry without a version or a path names no
+    // crate Cargo can resolve, so the check stops with its reason.
+    for manifest in [
+        dependency_manifest("grant-binding = { registry = \"crates-io\" }\n"),
+        package_manifest("[dependencies.grant-binding]\nregistry = \"crates-io\"\n"),
+        dependency_manifest("grant-binding.registry = \"crates-io\"\n"),
+    ] {
+        assert_cargo_rejects(
+            &manifest,
+            "dependency (grant-binding) specified without providing a local path, Git repository, version, or workspace dependency to use",
+        );
+    }
+    // An inherited entry asks the root for that entry, and a dependency table
+    // is no workspace root, so the check stops at the missing root and its
+    // entry.
+    for manifest in [
+        dependency_manifest("grant-binding = { workspace = true }\n"),
+        dependency_manifest("grant-binding.workspace = true\n"),
+    ] {
+        assert_cargo_rejects(
+            &manifest,
+            "error inheriting `grant-binding` from workspace root manifest's `workspace.dependencies.grant-binding`",
+        );
+    }
+    // An entry that inherits needs the root to hold that entry, and without
+    // one the check stops at the missing root.
+    for manifest in [
+        root_then_package("dependencies.grant-binding = { workspace = true }"),
+        root_then_package("dependencies = { grant-binding = { workspace = true } }"),
+    ] {
+        assert_cargo_rejects(&manifest, "failed to find a workspace root");
+    }
+    let table = package_manifest("[dependencies.grant-binding]\nversion = \"1.2.3\"\n");
+    assert!(cargo_toml_path_depends_on_grant_binding(&table));
+    let dev_table = package_manifest(
+        "[dev-dependencies.grant-binding]\ngit = \"https://example.com/gb.git\"\n",
+    );
+    assert!(cargo_toml_path_depends_on_grant_binding(&dev_table));
+    let patch_table =
+        root_then_package("[patch.crates-io.grant-binding]\ngit = \"https://example.com/gb.git\"");
+    assert!(!cargo_toml_path_depends_on_grant_binding(&patch_table));
+    let dotted_version = dependency_manifest("grant-binding.version = \"1.2.3\"\n");
+    assert!(cargo_toml_path_depends_on_grant_binding(&dotted_version));
+    let dotted_git = dependency_manifest("grant-binding.git = \"https://example.com/gb.git\"\n");
+    assert!(cargo_toml_path_depends_on_grant_binding(&dotted_git));
+    // The checked package's own name is not a dependency, and a dependency
+    // whose name differs by case is a link to a different package.
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        &root_then_package("[dependencies.Grant-Binding]\nversion = '1.2.3'")
+    ));
+}
+
+#[test]
+fn model_workspace_member_is_a_link() {
+    let root = std::env::temp_dir().join(format!("gb-member-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    for (name, manifest) in [
+        (
+            "app",
+            "[package]\nname = \"app\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "lab/grant-binding",
+            "[package]\nname = \"grant-binding\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        ),
+    ] {
+        fs::create_dir_all(root.join(name).join("src")).unwrap();
+        fs::write(root.join(name).join("Cargo.toml"), manifest).unwrap();
+        fs::write(root.join(name).join("src/lib.rs"), "").unwrap();
+    }
+    let root_manifest = "[workspace]\nmembers = [\"app\", \"lab/grant-binding\"]\n";
+    fs::write(root.join("Cargo.toml"), root_manifest).unwrap();
+    // A root asks Cargo for its member package names, so a member named after
+    // this crate is in this list though it is no dependency of the root.
+    assert!(metadata_names(&root.join("Cargo.toml"))
+        .iter()
+        .any(|name| name == "grant-binding"));
+    // The same entry without the member's manifest cannot load that member.
+    let app_manifest = root.join("app/Cargo.toml");
+    fs::rename(&app_manifest, root.join("moved.toml")).unwrap();
+    let panic =
+        std::panic::catch_unwind(|| manifest_depends_on_grant_binding(&root.join("Cargo.toml")))
+            .unwrap_err();
+    let reason = panic.downcast_ref::<String>().unwrap();
+    assert!(
+        reason
+            .starts_with("dependency check failed: cargo metadata exited with exit status: 101: ")
+            && reason.contains("failed to load manifest for workspace member"),
+        "{reason}"
+    );
+    // The member's own manifest declares its workspace root, so a root that
+    // lists it as a member holds two roots and stops the check.
+    fs::create_dir_all(root.join("lab/grant-binding/inner/src")).unwrap();
+    fs::write(
+        root.join("lab/grant-binding/inner/Cargo.toml"),
+        "[package]\nname = \"inner\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(root.join("lab/grant-binding/inner/src/lib.rs"), "").unwrap();
+    fs::rename(root.join("moved.toml"), &app_manifest).unwrap();
+    let member_manifest = root.join("lab/grant-binding/Cargo.toml");
+    fs::write(
+        &member_manifest,
+        "[package]\nname = \"grant-binding\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\nmembers = [\"inner\"]\n",
+    )
+    .unwrap();
+    let panic =
+        std::panic::catch_unwind(|| manifest_depends_on_grant_binding(&root.join("Cargo.toml")))
+            .unwrap_err();
+    let reason = panic.downcast_ref::<String>().unwrap();
+    assert!(
+        reason
+            .starts_with("dependency check failed: cargo metadata exited with exit status: 101: ")
+            && reason.contains("multiple workspace roots found in the same workspace"),
+        "{reason}"
+    );
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn model_metadata_dependencies_are_not_a_link() {
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        &package_manifest("[package.metadata]\ndependencies = [{ name = \"grant-binding\" }]\n",)
+    ));
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        &package_manifest(
+            "[package.metadata.nested]\ndependencies = [{ name = \"grant-binding\" }]\n",
+        )
+    ));
+    assert!(!cargo_toml_path_depends_on_grant_binding(&format!(
+        "[workspace.metadata]\ndependencies = [{{ name = \"grant-binding\" }}]\npackages = [{{ dependencies = [{{ name = \"grant-binding\" }}] }}]\n\n{}",
+        package_manifest("")
+    )));
+    assert!(cargo_toml_path_depends_on_grant_binding(
+        &package_manifest(
+            "[package.metadata]\ndependencies = [{ name = \"other\" }]\n\n[dependencies]\ngrant-binding = { path = \"missing-gb\" }\n",
+        )
+    ));
+    let ahead = r#"{"metadata":{"dependencies":[{"name":"grant-binding"}],"packages":[{"dependencies":[{"name":"grant-binding"}]}]},"packages":[{"metadata":{"dependencies":[{"name":"grant-binding"}]},"name":"grant-binding","dependencies":[{"name":"kept"}]}]}"#;
+    assert_eq!(names_in_dependency_arrays(ahead), vec!["kept".to_string()]);
+    let absent = r#"{"packages":[{"name":"grant-binding","metadata":{"dependencies":[{"name":"grant-binding"}],"packages":[{"dependencies":[{"name":"grant-binding"}]}]},"dependencies":[]}],"metadata":{"dependencies":[{"name":"grant-binding"}]}}"#;
+    assert!(names_in_dependency_arrays(absent).is_empty());
+}
+
+#[test]
+fn model_metadata_panics_preserve_cleanup_failures() {
+    with_manifest_dir(&std::env::temp_dir(), |parent| {
+        let panic = std::panic::catch_unwind(|| {
+            with_manifest_dir(parent, |_| -> Result<(), MetadataRefuse> {
+                panic!("fixture operation failed")
+            })
+        })
+        .unwrap_err();
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"fixture operation failed")
+        );
+        assert_eq!(fs::read_dir(parent).unwrap().count(), 0);
+
+        for (kind, reason) in [
+            (0, "metadata operation panicked: fixture operation failed; cannot remove temporary manifest directory"),
+            (1, "metadata operation panicked: owned panic reason; cannot remove temporary manifest directory"),
+            (2, "metadata operation panicked: non-string panic; cannot remove temporary manifest directory"),
+        ] {
+            let error = with_manifest_dir(parent, |dir| -> Result<(), MetadataRefuse> {
+                fs::remove_dir(dir).unwrap();
+                fs::write(dir, "block directory cleanup").unwrap();
+                match kind {
+                    0 => panic!("fixture operation failed"),
+                    1 => std::panic::panic_any(String::from("owned panic reason")),
+                    _ => std::panic::panic_any(17u8),
+                }
+            })
+            .unwrap_err();
+            assert_eq!(error.to_string(), reason);
+        }
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn model_workspace_relative_manifest_is_a_link() {
+    // Keep a relative manifest beneath the test working directory without
+    // changing the process directory used by other tests.
+    fs::create_dir_all("target").unwrap();
+    with_manifest_dir(Path::new("target"), |dir| {
+        let root = dir.join("ws");
+        fs::create_dir(&root).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = ['gb', 'other']\nresolver = '2'\n",
+        )
+        .unwrap();
+        for (member, name) in [("gb", "grant-binding"), ("other", "other")] {
+            let package = root.join(member);
+            fs::create_dir(&package).unwrap();
+            stage_manifest(
+                &package,
+                &format!("[package]\nname = '{name}'\nversion = '0.0.0'\nedition = '2021'\n"),
+            )?;
+        }
+        let manifest = root.join("Cargo.toml");
+        assert!(manifest.is_relative());
+        assert!(manifest_depends_on_grant_binding(
+            &manifest.canonicalize().unwrap()
+        ));
+        assert!(manifest_depends_on_grant_binding(&manifest));
+        assert!(!manifest_depends_on_grant_binding(
+            &root.join("gb/Cargo.toml")
+        ));
+        assert!(!manifest_depends_on_grant_binding(
+            &root.join("other/Cargo.toml")
+        ));
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[cfg(test)]
+fn stage_registry_workspace(dir: &Path) -> PathBuf {
+    fs::write(
+        dir.join("Cargo.toml"),
+        "[workspace]\nmembers = ['app', 'other']\nresolver = '2'\n",
+    )
+    .unwrap();
+    for (name, dependencies) in [
+        ("app", "[dependencies]\ngrant-binding = '1.2.3'\n"),
+        ("other", ""),
+    ] {
+        let package = dir.join(name);
+        fs::create_dir(&package).unwrap();
+        stage_manifest(
+            &package,
+            &format!(
+                "[package]\nname = '{name}'\nversion = '0.0.0'\nedition = '2021'\n\n{dependencies}"
+            ),
+        )
+        .unwrap();
+    }
+    dir.join("Cargo.toml")
+}
+
+#[test]
+fn model_virtual_workspace_root_does_not_take_member_dependencies() {
+    with_manifest_dir(&std::env::temp_dir(), |dir| {
+        let manifest = stage_registry_workspace(dir);
+        assert!(
+            !manifest_depends_on_grant_binding(&manifest),
+            "workspace root"
+        );
+        assert!(
+            manifest_depends_on_grant_binding(&dir.join("app/Cargo.toml")),
+            "member dependency"
+        );
+        assert!(
+            !manifest_depends_on_grant_binding(&dir.join("other/Cargo.toml")),
+            "sibling"
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn model_metadata_path_failures_have_exact_reasons() {
+    with_manifest_dir(&std::env::temp_dir(), |dir| {
+        let dir = &dir.canonicalize().unwrap();
+        let manifest = stage_registry_workspace(dir);
+        // Capture real metadata while all referenced files exist. The same
+        // parsed snapshot must fail explicitly when one of its paths is lost.
+        let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .current_dir(dir)
+            .args([
+                "metadata",
+                "--offline",
+                "--no-deps",
+                "--format-version",
+                "1",
+                "--manifest-path",
+            ])
+            .arg(&manifest)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut seen = read_metadata(&String::from_utf8(output.stdout).unwrap());
+        let mut names = names_for_manifest(&seen, &manifest).unwrap();
+        names.sort();
+        assert_eq!(names, ["app", "other"]);
+
+        let workspace_root = seen.workspace_root.take();
+        assert_eq!(
+            names_for_manifest(&seen, &manifest)
+                .unwrap_err()
+                .to_string(),
+            "cargo metadata has no workspace root"
+        );
+        seen.workspace_root = Some(dir.join("missing-root").to_str().unwrap().to_owned());
+        assert_eq!(
+            names_for_manifest(&seen, &manifest)
+                .unwrap_err()
+                .to_string(),
+            "cannot resolve metadata workspace root"
+        );
+        seen.workspace_root = workspace_root;
+
+        let text = fs::read_to_string(&manifest).unwrap();
+        fs::remove_file(&manifest).unwrap();
+        assert_eq!(
+            names_for_manifest(&seen, &manifest)
+                .unwrap_err()
+                .to_string(),
+            "cannot resolve input manifest path"
+        );
+        fs::write(&manifest, text).unwrap();
+
+        let filesystem_root = manifest.ancestors().last().unwrap();
+        assert_eq!(
+            names_for_manifest(&seen, filesystem_root)
+                .unwrap_err()
+                .to_string(),
+            "input manifest path has no parent directory"
+        );
+        for package in &seen.packages {
+            let text = fs::read_to_string(&package.manifest_path).unwrap();
+            fs::remove_file(&package.manifest_path).unwrap();
+            for input in [&manifest, &dir.join("app/Cargo.toml")] {
+                // A removed input has its own reason; this checks a removed
+                // referenced package for both root and member queries.
+                if input != Path::new(&package.manifest_path) {
+                    assert_eq!(
+                        names_for_manifest(&seen, input).unwrap_err().to_string(),
+                        "cannot resolve metadata package manifest path"
+                    );
+                }
+            }
+            fs::write(&package.manifest_path, text).unwrap();
+        }
+        assert_eq!(names_for_manifest(&seen, &manifest).unwrap().len(), 2);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn model_metadata_path_failures_stop_both_entry_points() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if std::env::var_os("GRANT_BINDING_METADATA_TEST_CHILD").is_some() {
+        let cargo = PathBuf::from(std::env::var_os("CARGO").unwrap());
+        fs::write(&cargo, "#!/bin/sh\ncat \"$CARGO.json\"\n").unwrap();
+        fs::set_permissions(&cargo, fs::Permissions::from_mode(0o700)).unwrap();
+        with_manifest_dir(&std::env::temp_dir(), |dir| {
+            stage_manifest(dir, &package_manifest(""))?;
+            let manifest = dir.join("Cargo.toml");
+            let root = dir.canonicalize().unwrap();
+            for (json, reason) in [
+                (
+                    "{\"packages\":[]}".to_owned(),
+                    "dependency check failed: cargo metadata has no workspace root",
+                ),
+                (
+                    format!("{{\"workspace_root\":{:?},\"packages\":[]}}", root.join("missing")),
+                    "dependency check failed: cannot resolve metadata workspace root",
+                ),
+                (
+                    format!(
+                        "{{\"workspace_root\":{root:?},\"workspace_members\":[\"missing\"],\"packages\":[{{\"id\":\"missing\",\"name\":\"grant-binding\",\"manifest_path\":{:?},\"dependencies\":[]}}]}}",
+                        root.join("missing/Cargo.toml")
+                    ),
+                    "dependency check failed: cannot resolve metadata package manifest path",
+                ),
+            ] {
+                fs::write(cargo.with_extension("json"), json).unwrap();
+                for direct in [true, false] {
+                    let panic = std::panic::catch_unwind(|| {
+                        if direct {
+                            manifest_depends_on_grant_binding(&manifest)
+                        } else {
+                            cargo_toml_path_depends_on_grant_binding(&package_manifest(""))
+                        }
+                    })
+                    .unwrap_err();
+                    assert_eq!(panic.downcast_ref::<String>().unwrap(), reason);
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        return;
+    }
+    with_manifest_dir(&std::env::temp_dir(), |dir| {
+        let output = metadata_test_child(dir, Some(&dir.join("cargo-fixture")));
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_dir(dir).unwrap().count(),
+            2,
+            "only fixtures remain"
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn model_metadata_input_path_failures_stop_the_detector() {
+    with_manifest_dir(&std::env::temp_dir(), |dir| {
+        for (manifest, reason) in [
+            (
+                dir.join("missing/Cargo.toml"),
+                "dependency check failed: cannot resolve input manifest path",
+            ),
+            (
+                dir.ancestors().last().unwrap().to_owned(),
+                "dependency check failed: input manifest path has no parent directory",
+            ),
+        ] {
+            let panic = std::panic::catch_unwind(|| manifest_depends_on_grant_binding(&manifest))
+                .unwrap_err();
+            assert_eq!(panic.downcast_ref::<String>().unwrap(), reason);
+        }
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn model_workspace_metadata_names_the_member() {
+    let root = std::env::temp_dir().join(format!("gb-ws-a-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("gb/src")).unwrap();
+    std::fs::create_dir_all(root.join("other/src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"gb\", \"other\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("gb/Cargo.toml"),
+        "[package]\nname = \"grant-binding\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("gb/src/lib.rs"), "").unwrap();
+    std::fs::write(
+        root.join("other/Cargo.toml"),
+        "[package]\nname = \"other\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("other/src/lib.rs"), "").unwrap();
+    assert!(
+        manifest_depends_on_grant_binding(&root.join("Cargo.toml")),
+        "workspace root"
+    );
+    assert!(
+        !manifest_depends_on_grant_binding(&root.join("gb/Cargo.toml")),
+        "own manifest"
+    );
+    assert!(
+        !manifest_depends_on_grant_binding(&root.join("other/Cargo.toml")),
+        "sibling"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+
+    let root_b = std::env::temp_dir().join(format!("gb-ws-b-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root_b);
+    std::fs::create_dir_all(root_b.join("app/src")).unwrap();
+    std::fs::create_dir_all(root_b.join("vendor/grant-binding/src")).unwrap();
+    std::fs::write(
+        root_b.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n\n[workspace.dependencies]\ngrant-binding = { path = \"vendor/grant-binding\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root_b.join("app/Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\ngrant-binding = { workspace = true }\n",
+    )
+    .unwrap();
+    std::fs::write(root_b.join("app/src/lib.rs"), "").unwrap();
+    std::fs::write(
+        root_b.join("vendor/grant-binding/Cargo.toml"),
+        "[package]\nname = \"grant-binding\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(root_b.join("vendor/grant-binding/src/lib.rs"), "").unwrap();
+    assert!(
+        manifest_depends_on_grant_binding(&root_b.join("app/Cargo.toml")),
+        "workspace dependency"
+    );
+    assert!(
+        !manifest_depends_on_grant_binding(&root_b.join("vendor/grant-binding/Cargo.toml")),
+        "vendor own manifest"
+    );
+    std::fs::remove_dir_all(&root_b).unwrap();
+
+    let root_c = std::env::temp_dir().join(format!("gb-ws-c-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root_c);
+    std::fs::create_dir_all(root_c.join("gb/src")).unwrap();
+    std::fs::write(
+        root_c.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"gb\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root_c.join("gb/Cargo.toml"),
+        "[package]\nname = \"grant-binding-other\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(root_c.join("gb/src/lib.rs"), "").unwrap();
+    assert!(
+        !manifest_depends_on_grant_binding(&root_c.join("Cargo.toml")),
+        "longer name"
+    );
+    std::fs::remove_dir_all(&root_c).unwrap();
 }
