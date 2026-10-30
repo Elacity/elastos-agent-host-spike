@@ -815,8 +815,29 @@ pub struct PrincipalRecord {
     pub role: RuntimePrincipalRole,
     #[serde(default)]
     pub localhost_root: String,
+    /// Set by the Runtime when it mints the record, never inferred from a
+    /// passkey-less binding. Records stored before this field load as Human.
+    #[serde(default = "PrincipalKind::human")]
+    pub kind: PrincipalKind,
     pub created_at: u64,
     pub updated_at: u64,
+}
+
+/// The two principals a Home can mint. Each kind owns one rooted space:
+/// a human under `localhost://Users/`, an agent under `localhost://UsersAI/`.
+/// A stored record without this field was minted as a human.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrincipalKind {
+    Human,
+    Agent,
+}
+
+impl PrincipalKind {
+    /// The kind every record without a stored kind has.
+    fn human() -> Self {
+        Self::Human
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1741,6 +1762,7 @@ pub(crate) fn complete_owner_recovery(
             display_name,
             initial_profile_display_name: None,
             role: RuntimePrincipalRole::Admin,
+            kind: PrincipalKind::Human,
             created_at: now,
             updated_at: now,
         });
@@ -1897,6 +1919,7 @@ pub(crate) fn complete_passkey_add(
             display_name: signer.display_name.clone(),
             initial_profile_display_name: None,
             role: RuntimePrincipalRole::Admin,
+            kind: signer.kind,
             created_at: now,
             updated_at: now,
         };
@@ -2299,6 +2322,7 @@ pub(crate) fn complete_owner_enrollment_with_intent(
             display_name: verification.display_name.unwrap_or_default(),
             initial_profile_display_name: verification.profile_display_name.clone(),
             role: RuntimePrincipalRole::Admin,
+            kind: PrincipalKind::Human,
             created_at: now,
             updated_at: now,
         });
@@ -4059,6 +4083,7 @@ fn grant_passkey_session_in_state(
                     display_name: display_name.unwrap_or_default(),
                     initial_profile_display_name: profile_display_name,
                     role: RuntimePrincipalRole::Guest,
+                    kind: PrincipalKind::Human,
                     created_at: now,
                     updated_at: now,
                 };
@@ -4789,12 +4814,12 @@ pub fn upsert_principal_for_binding_as_role_named(
     mutate_auth_state(data_dir, |state| {
         normalize_principal_records(state);
         let proof_binding_id = binding.id();
-        let localhost_root = principal_localhost_root(&principal_id);
         if let Some(existing) = state
             .principals
             .iter_mut()
             .find(|principal| principal.proof_binding_id == proof_binding_id)
         {
+            let localhost_root = principal_kind_localhost_root(&principal_id, existing.kind);
             preserve_passkey_binding_metadata(&mut binding, &existing.proof_binding);
             existing.principal_id = principal_id;
             existing.proof_binding = binding;
@@ -4806,6 +4831,7 @@ pub fn upsert_principal_for_binding_as_role_named(
             return Ok(existing.clone());
         }
 
+        let localhost_root = principal_localhost_root(&principal_id);
         let record = PrincipalRecord {
             principal_id,
             proof_binding_id,
@@ -4813,6 +4839,9 @@ pub fn upsert_principal_for_binding_as_role_named(
             display_name: display_name.unwrap_or_default(),
             initial_profile_display_name: None,
             role,
+            // The Runtime mints a human by default; an agent mint is the
+            // step that adds `PrincipalMint` and sets Agent here.
+            kind: PrincipalKind::Human,
             localhost_root,
             created_at: now,
             updated_at: now,
@@ -4824,8 +4853,9 @@ pub fn upsert_principal_for_binding_as_role_named(
 
 fn normalize_principal_records(state: &mut AuthState) {
     for principal in &mut state.principals {
-        if principal.localhost_root.trim().is_empty() {
-            principal.localhost_root = principal_localhost_root(&principal.principal_id);
+        if principal.localhost_root.trim().is_empty() || principal.kind == PrincipalKind::Agent {
+            principal.localhost_root =
+                principal_kind_localhost_root(&principal.principal_id, principal.kind);
         }
     }
 }
@@ -5304,7 +5334,12 @@ pub fn read_principal_root_object(
     object_uri: &str,
     path: &Path,
 ) -> anyhow::Result<Vec<u8>> {
-    validate_principal_root_object_binding(principal_id, localhost_root, object_uri)?;
+    validate_principal_root_object_binding_in_state(
+        data_dir,
+        principal_id,
+        localhost_root,
+        object_uri,
+    )?;
     let _guard = principal_root_object_mutation_lock()
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
@@ -5320,7 +5355,26 @@ pub(crate) fn read_protected_principal_root_object(
     object_uri: &str,
     path: &Path,
 ) -> anyhow::Result<Option<Vec<u8>>> {
-    validate_principal_root_object_binding(principal_id, localhost_root, object_uri)?;
+    // A `Users/` root under a principal id with no stored record keeps the
+    // human-only contract. A stored Agent record, or any other root such as
+    // an agent's `UsersAI/`, is checked against the record's kind.
+    match stored_principal_record(data_dir, principal_id)? {
+        Some(record) => validate_principal_root_object_binding_for_kind(
+            principal_id,
+            localhost_root,
+            object_uri,
+            Some(record.kind),
+        )?,
+        None if principal_localhost_root(principal_id) == localhost_root => {
+            validate_principal_root_object_binding(principal_id, localhost_root, object_uri)?
+        }
+        None => validate_principal_root_object_binding_in_state(
+            data_dir,
+            principal_id,
+            localhost_root,
+            object_uri,
+        )?,
+    }
     let _guard = principal_root_object_mutation_lock()
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
@@ -5739,7 +5793,12 @@ impl<'a> PrincipalRootObjectMutation<'a> {
         object_uri: &str,
         path: &Path,
     ) -> anyhow::Result<Vec<u8>> {
-        validate_principal_root_object_binding(principal_id, localhost_root, object_uri)?;
+        validate_principal_root_object_binding_in_state(
+            self.data_dir,
+            principal_id,
+            localhost_root,
+            object_uri,
+        )?;
         validate_principal_root_object_path(self.data_dir, object_uri, path)?;
         read_principal_root_object_locked(
             self.data_dir,
@@ -5787,7 +5846,12 @@ fn write_principal_root_object_inner(
     plaintext: &[u8],
     options: PrincipalRootObjectWriteOptions<'_>,
 ) -> anyhow::Result<()> {
-    validate_principal_root_object_binding(principal_id, localhost_root, object_uri)?;
+    validate_principal_root_object_binding_in_state(
+        data_dir,
+        principal_id,
+        localhost_root,
+        object_uri,
+    )?;
     validate_principal_root_object_path(data_dir, object_uri, path)?;
     let _guard = principal_root_object_mutation_lock()
         .lock()
@@ -5812,7 +5876,12 @@ fn write_principal_root_object_locked(
     plaintext: &[u8],
     options: PrincipalRootObjectWriteOptions<'_>,
 ) -> anyhow::Result<()> {
-    validate_principal_root_object_binding(principal_id, localhost_root, object_uri)?;
+    validate_principal_root_object_binding_in_state(
+        data_dir,
+        principal_id,
+        localhost_root,
+        object_uri,
+    )?;
     validate_principal_root_object_path(data_dir, object_uri, path)?;
     if let Some(precondition) = options.precondition {
         let exists = match std::fs::symlink_metadata(path) {
@@ -7092,6 +7161,19 @@ pub fn principal_localhost_root(principal_id: &str) -> String {
     format!("localhost://Users/{}", hex::encode(&digest[..12]))
 }
 
+/// The record's root, chosen by the kind the Runtime minted: an agent owns
+/// `localhost://UsersAI/<sha256 of the same principal id>` and a human keeps
+/// `localhost://Users/<sha256 of the same principal id>`.
+fn principal_kind_localhost_root(principal_id: &str, kind: PrincipalKind) -> String {
+    match kind {
+        PrincipalKind::Human => principal_localhost_root(principal_id),
+        PrincipalKind::Agent => {
+            let digest = Sha256::digest(principal_id.as_bytes());
+            format!("localhost://UsersAI/{}", hex::encode(&digest[..12]))
+        }
+    }
+}
+
 pub fn now_ts() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -7128,11 +7210,27 @@ fn validate_principal_root_object_binding(
     localhost_root: &str,
     object_uri: &str,
 ) -> anyhow::Result<()> {
+    validate_principal_root_object_binding_for_kind(principal_id, localhost_root, object_uri, None)
+}
+
+/// Checks the object URI against the root the minted kind owns. `Some(kind)`
+/// is the persisted record's kind; `None` accepts only the root a record
+/// whose id the caller names without a kind always has, `localhost://Users/`.
+fn validate_principal_root_object_binding_for_kind(
+    principal_id: &str,
+    localhost_root: &str,
+    object_uri: &str,
+    kind: Option<PrincipalKind>,
+) -> anyhow::Result<()> {
     if principal_id.trim().is_empty() {
         anyhow::bail!("principal id must not be empty");
     }
-    if !localhost_root.starts_with("localhost://Users/") {
-        anyhow::bail!("principal localhost root must be under localhost://Users/");
+    let own_root = kind.map_or_else(
+        || principal_localhost_root(principal_id),
+        |kind| principal_kind_localhost_root(principal_id, kind),
+    );
+    if localhost_root != own_root {
+        anyhow::bail!("principal localhost root must be the record's own root for its kind");
     }
     let under_root = object_uri == localhost_root
         || object_uri
@@ -7142,6 +7240,42 @@ fn validate_principal_root_object_binding(
         anyhow::bail!("principal-root object URI is outside the principal root");
     }
     Ok(())
+}
+
+/// The stored record for `principal_id`, or None when none is stored.
+fn stored_principal_record(
+    data_dir: &Path,
+    principal_id: &str,
+) -> anyhow::Result<Option<PrincipalRecord>> {
+    let state = load_auth_state(data_dir)?;
+    Ok(state
+        .principals
+        .into_iter()
+        .find(|principal| principal.principal_id == principal_id))
+}
+
+/// The kind the stored record for `principal_id` was minted with. A principal
+/// id with no stored record keeps the human root.
+fn stored_principal_kind(data_dir: &Path, principal_id: &str) -> anyhow::Result<PrincipalKind> {
+    Ok(stored_principal_record(data_dir, principal_id)?
+        .map_or(PrincipalKind::Human, |principal| principal.kind))
+}
+
+/// Binds an object URI to the root of the record's persisted kind, so an
+/// agent's `localhost://UsersAI/` root is accepted only for an agent record.
+fn validate_principal_root_object_binding_in_state(
+    data_dir: &Path,
+    principal_id: &str,
+    localhost_root: &str,
+    object_uri: &str,
+) -> anyhow::Result<()> {
+    let kind = stored_principal_kind(data_dir, principal_id)?;
+    validate_principal_root_object_binding_for_kind(
+        principal_id,
+        localhost_root,
+        object_uri,
+        Some(kind),
+    )
 }
 
 fn validate_principal_root_object_path(
@@ -10440,6 +10574,18 @@ pub(crate) fn store_test_principal_root_protection(
     principal_id: &str,
 ) -> PrincipalRootProtectionV1 {
     let localhost_root = principal_localhost_root(principal_id);
+    store_test_principal_root_protection_for(data_dir, principal_id, &localhost_root)
+}
+
+/// The test protection written under a caller-named root, so a test can put
+/// an object under a root the human default does not name.
+#[cfg(test)]
+fn store_test_principal_root_protection_for(
+    data_dir: &Path,
+    principal_id: &str,
+    localhost_root: &str,
+) -> PrincipalRootProtectionV1 {
+    let localhost_root = localhost_root.to_string();
     let created_at = now_ts();
     let mut data_key = [0u8; 32];
     let mut salt = [0u8; 32];
@@ -12468,6 +12614,8 @@ mod tests {
         .unwrap()
         .is_none());
         assert_eq!(std::fs::read(&path).unwrap(), encrypted);
+        // A foreign id under this principal's `Users/` root names another
+        // root, so that id's kind binding refuses before any open.
         assert!(read_protected_principal_root_object(
             data,
             "person:local:foreign",
@@ -12475,8 +12623,7 @@ mod tests {
             &uri,
             &path,
         )
-        .unwrap()
-        .is_none());
+        .is_err());
         assert!(read_protected_principal_root_object(
             data,
             principal,
@@ -15062,5 +15209,341 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("revoked"));
+    }
+    /// A passkey-less human record keeps the human Users/ root; the kind is
+    /// stored, not inferred from the missing passkey.
+    #[test]
+    fn human_principal_without_passkey_keeps_the_users_root() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let now = now_ts();
+        let binding =
+            ProofBinding::evm_account(20, "0x1111111111111111111111111111111111111111", now);
+        let record = upsert_principal_for_binding(data_dir.path(), binding, now).unwrap();
+        assert!(record.proof_binding.passkey.is_none());
+        assert_eq!(record.kind, PrincipalKind::Human);
+        let sha = hex::encode(&Sha256::digest(record.principal_id.as_bytes())[..12]);
+        assert_eq!(record.localhost_root, format!("localhost://Users/{sha}"));
+        assert!(!record.localhost_root.starts_with("localhost://UsersAI/"));
+
+        let stored = load_auth_state(data_dir.path()).unwrap().principals;
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].kind, PrincipalKind::Human);
+        assert_eq!(stored[0].localhost_root, record.localhost_root);
+        // The stored human record owns its Users/ root on the object route.
+        let uri = format!("{}/notes.md", record.localhost_root);
+        let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"human note").unwrap();
+        assert_eq!(
+            read_principal_root_object(
+                data_dir.path(),
+                &record.principal_id,
+                &record.localhost_root,
+                &uri,
+                &path
+            )
+            .unwrap(),
+            b"human note"
+        );
+    }
+
+    /// An Agent record roots under UsersAI/ with the same suffix rule.
+    #[test]
+    fn agent_principal_owns_the_usersai_root() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let now = now_ts();
+        let binding =
+            ProofBinding::evm_account(20, "0x2222222222222222222222222222222222222222", now);
+        let record = upsert_principal_for_binding(data_dir.path(), binding, now).unwrap();
+        let agent = mutate_auth_state(data_dir.path(), |state| {
+            let stored = state
+                .principals
+                .iter_mut()
+                .find(|principal| principal.principal_id == record.principal_id)
+                .unwrap();
+            stored.kind = PrincipalKind::Agent;
+            let agent = stored.clone();
+            Ok(agent)
+        })
+        .unwrap();
+        let mut reloaded = load_auth_state(data_dir.path()).unwrap();
+        normalize_principal_records(&mut reloaded);
+        let stored = reloaded
+            .principals
+            .into_iter()
+            .find(|principal| principal.principal_id == record.principal_id)
+            .unwrap();
+        assert_eq!(stored.kind, PrincipalKind::Agent);
+        let sha = hex::encode(&Sha256::digest(agent.principal_id.as_bytes())[..12]);
+        let expected = format!("localhost://UsersAI/{sha}");
+        assert_eq!(
+            principal_kind_localhost_root(&agent.principal_id, PrincipalKind::Agent),
+            expected
+        );
+        assert_eq!(stored.localhost_root, expected);
+        assert!(!stored.localhost_root.starts_with("localhost://Users/"));
+    }
+
+    /// Each kind's own root only; the other kind's root is refused.
+    #[test]
+    fn principal_root_binding_accepts_only_the_record_kind_root() {
+        let human_id = "person:local:human-binding-check";
+        let agent_id = "person:local:agent-binding-check";
+        let human_root = principal_localhost_root(human_id);
+        let agent_root = principal_kind_localhost_root(agent_id, PrincipalKind::Agent);
+        let human_sha = hex::encode(&Sha256::digest(human_id.as_bytes())[..12]);
+        let agent_sha = hex::encode(&Sha256::digest(agent_id.as_bytes())[..12]);
+        assert_eq!(human_root, format!("localhost://Users/{human_sha}"));
+        assert_eq!(agent_root, format!("localhost://UsersAI/{agent_sha}"));
+
+        // Each record's own root and a path under it are accepted.
+        validate_principal_root_object_binding_for_kind(
+            human_id,
+            &human_root,
+            &human_root,
+            Some(PrincipalKind::Human),
+        )
+        .unwrap();
+        validate_principal_root_object_binding_for_kind(
+            agent_id,
+            &agent_root,
+            &format!("{agent_root}/notes.md"),
+            Some(PrincipalKind::Agent),
+        )
+        .unwrap();
+
+        // An Agent record refuses the Users/ root of its own id, at the root
+        // and under it: the sibling name is not an owned root.
+        let human_shaped_agent_root = principal_kind_localhost_root(agent_id, PrincipalKind::Human);
+        assert_eq!(
+            human_shaped_agent_root,
+            format!(
+                "localhost://Users/{}",
+                hex::encode(&Sha256::digest(agent_id.as_bytes())[..12])
+            )
+        );
+        for uri in [
+            human_shaped_agent_root.clone(),
+            format!("{human_shaped_agent_root}/notes.md"),
+        ] {
+            let err = validate_principal_root_object_binding_for_kind(
+                agent_id,
+                &human_shaped_agent_root,
+                &uri,
+                Some(PrincipalKind::Agent),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("own root for its kind"), "{err}");
+        }
+
+        // A Human record refuses the UsersAI/ root of its own id.
+        let agent_shaped_human_root = principal_kind_localhost_root(human_id, PrincipalKind::Agent);
+        assert_eq!(
+            agent_shaped_human_root,
+            format!(
+                "localhost://UsersAI/{}",
+                hex::encode(&Sha256::digest(human_id.as_bytes())[..12])
+            )
+        );
+        for uri in [
+            agent_shaped_human_root.clone(),
+            format!("{agent_shaped_human_root}/notes.md"),
+        ] {
+            let err = validate_principal_root_object_binding_for_kind(
+                human_id,
+                &agent_shaped_human_root,
+                &uri,
+                Some(PrincipalKind::Human),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("own root for its kind"), "{err}");
+        }
+
+        // The name-based check keeps the human root for a record it cannot
+        // see: Users/ is accepted and UsersAI/ is refused.
+        validate_principal_root_object_binding(human_id, &human_root, &human_root).unwrap();
+        assert!(validate_principal_root_object_binding(
+            agent_id,
+            &agent_shaped_human_root,
+            &agent_shaped_human_root,
+        )
+        .is_err());
+        // A sibling name that only shares the prefix is outside the root.
+        assert!(validate_principal_root_object_binding_for_kind(
+            agent_id,
+            &agent_root,
+            &format!("{agent_root}x/notes.md"),
+            Some(PrincipalKind::Agent),
+        )
+        .is_err());
+    }
+
+    /// A stored record without `kind` loads as Human and keeps Users/.
+    #[test]
+    fn old_principal_record_without_kind_loads_as_human() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let now = now_ts();
+        let binding =
+            ProofBinding::evm_account(20, "0x3333333333333333333333333333333333333333", now);
+        let record = upsert_principal_for_binding(data_dir.path(), binding, now).unwrap();
+        let uri = format!("{}/notes.md", record.localhost_root);
+        let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"legacy note").unwrap();
+
+        // Rewrite the state file as an older Home wrote it: the current record
+        // serialised with its `kind` key removed. The real reader then has to
+        // load that file without the field.
+        let state = load_auth_state(data_dir.path()).unwrap();
+        let mut value = serde_json::to_value(&state).unwrap();
+        let written = value["principals"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|principal| principal["principal_id"] == record.principal_id.as_str())
+            .unwrap();
+        assert!(
+            written.as_object_mut().unwrap().remove("kind").is_some(),
+            "current record did not serialise kind: {written}"
+        );
+        assert!(
+            serde_json::from_value::<PrincipalRecord>(written.clone())
+                .unwrap()
+                .kind
+                == PrincipalKind::Human,
+            "legacy json did not default to Human: {written}"
+        );
+        std::fs::write(
+            auth_state_path(data_dir.path()).unwrap(),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+
+        let legacy =
+            load_principal_for_proof_binding(data_dir.path(), &record.proof_binding_id).unwrap();
+        assert_eq!(legacy.kind, PrincipalKind::Human);
+        assert_eq!(legacy.localhost_root, record.localhost_root);
+        assert!(legacy.localhost_root.starts_with("localhost://Users/"));
+        assert_eq!(
+            read_principal_root_object(
+                data_dir.path(),
+                &legacy.principal_id,
+                &legacy.localhost_root,
+                &uri,
+                &path
+            )
+            .unwrap(),
+            b"legacy note"
+        );
+    }
+
+    /// Makes the existing record for `principal_id` an Agent record that keeps
+    /// `root` as its stored root.
+    fn mint_agent_record(
+        data_dir: &Path,
+        principal_id: &str,
+        root: Option<&str>,
+    ) -> PrincipalRecord {
+        let agent = mutate_auth_state(data_dir, |state| {
+            let stored = state
+                .principals
+                .iter_mut()
+                .find(|principal| principal.principal_id == principal_id)
+                .expect("test principal is stored");
+            stored.kind = PrincipalKind::Agent;
+            stored.localhost_root = root.map(str::to_string).unwrap_or_else(|| {
+                principal_kind_localhost_root(&stored.principal_id, stored.kind)
+            });
+            Ok(stored.clone())
+        })
+        .unwrap();
+        assert_eq!(
+            stored_principal_kind(data_dir, principal_id).unwrap(),
+            PrincipalKind::Agent
+        );
+        agent
+    }
+
+    /// A stored Agent record cannot read the `Users/` root of its own id: the
+    /// same id, the same existing file and its protection under `Users/`. The
+    /// protection covers the `UsersAI/` root, so nothing but the kind check
+    /// stands before the open. The same file and protection serve the Human
+    /// record's own root.
+    #[test]
+    fn protected_read_refuses_an_agent_records_users_root() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let human = upsert_principal_for_binding(
+            data_dir.path(),
+            ProofBinding::evm_account(20, &format!("0x{}", '1'.to_string().repeat(40)), now_ts()),
+            now_ts(),
+        )
+        .unwrap();
+        assert_eq!(human.kind, PrincipalKind::Human);
+        let root = human.localhost_root.clone();
+        let agent_root = principal_kind_localhost_root(&human.principal_id, PrincipalKind::Agent);
+        let uri = format!("{root}/notes.md");
+        let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"human note").unwrap();
+        let protection =
+            store_test_principal_root_protection_for(data_dir.path(), &human.principal_id, &root);
+
+        let agent = mint_agent_record(data_dir.path(), &human.principal_id, None);
+        assert_eq!(agent.kind, PrincipalKind::Agent);
+        assert_eq!(agent.localhost_root, agent_root);
+        let err = read_protected_principal_root_object(
+            data_dir.path(),
+            &agent.principal_id,
+            &root,
+            &uri,
+            &path,
+        )
+        .expect_err("an Agent record must not read a Users/ root");
+        assert_eq!(
+            err.to_string(),
+            "principal localhost root must be the record's own root for its kind"
+        );
+        assert_eq!(
+            principal_root_object_opens(data_dir.path()),
+            Vec::<String>::new(),
+            "the refused reads opened nothing"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"human note",
+            "the refused reads left the file untouched"
+        );
+        assert_eq!(
+            load_principal_root_protection(data_dir.path(), &human.principal_id, &root).unwrap(),
+            Some(protection),
+            "the refusals keep the current protection"
+        );
+
+        // The valid row: once the record is Human again, the same file and
+        // its protection serve its own root.
+        mutate_auth_state(data_dir.path(), |state| {
+            state
+                .principals
+                .iter_mut()
+                .find(|principal| principal.principal_id == human.principal_id)
+                .unwrap()
+                .kind = PrincipalKind::Human;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            read_protected_principal_root_object(
+                data_dir.path(),
+                &human.principal_id,
+                &root,
+                &uri,
+                &path
+            )
+            .expect_err("a plaintext object is not read under protection")
+            .to_string(),
+            format!("{PROTECTED_PRINCIPAL_ROOT_OBJECT_NOT_ENCRYPTED}: {uri}")
+        );
     }
 }
