@@ -1,5 +1,10 @@
+use std::{fs, path::Path};
 use wasm_capsule_audit::{audit, audit_component, Refusal};
 use wasmparser::{Parser, Payload, Validator};
+
+mod common;
+
+use common::{append_custom_section, COMPONENT_TYPE_NAME};
 
 fn assert_undeclared(wasm: &[u8], declared: &[&str], name: &str) {
     let refusal =
@@ -353,4 +358,45 @@ fn embedded_imports_are_internal() {
     let name = "elastos:bus/runtime@1.0.0";
     assert_eq!(audit_component(&wasm, &[name]), Ok(vec![name.into()]));
     assert_undeclared(&wasm, &[], name);
+}
+
+#[test]
+fn componentized_product_capsule_passes_audit_component() {
+    let names = [
+        "elastos:bus/types@1.0.0",
+        "elastos:bus/runtime@1.0.0",
+        "elastos:bus/identity@1.0.0",
+        "elastos:bus/capabilities@1.0.0",
+        "elastos:bus/providers@1.0.0",
+    ];
+    let mut wasm = wat::parse_str(
+        r#"(component
+            (import "elastos:bus/types@1.0.0" (instance))
+            (import "elastos:bus/runtime@1.0.0" (instance))
+            (import "elastos:bus/identity@1.0.0" (instance))
+            (import "elastos:bus/capabilities@1.0.0" (instance))
+            (import "elastos:bus/providers@1.0.0" (instance)))"#,
+    )
+    .unwrap();
+
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wit-bindgen-0.57.1-component-type.bin");
+    let section = fs::read(fixture).unwrap();
+    append_custom_section(&mut wasm, COMPONENT_TYPE_NAME, &section);
+    Validator::new().validate_all(&wasm).unwrap();
+
+    let component_type_sections: Vec<_> = Parser::new(0)
+        .parse_all(&wasm)
+        .map(|payload| payload.unwrap())
+        .filter_map(|payload| match payload {
+            Payload::CustomSection(custom) if custom.name().starts_with("component-type") => {
+                Some(custom.data())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(component_type_sections, [section.as_slice()]);
+
+    let expected: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
+    assert_eq!(audit_component(&wasm, &names), Ok(expected));
 }
