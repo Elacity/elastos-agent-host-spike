@@ -63,6 +63,8 @@ A request may carry `plan`, the `sha256` that `plan_approval::preview` returned;
 
 `delete_capability` answers `DELETE /api/capability/:id`. A shell revoke sets that granted record to `denied` with `Revoked by user` and `settled_by` `shell`, and `revoke_grant` then sets `Revoked` on the grant already selected by `request_id` and `session_id`. The instance stays. Another grant of that session stays. A grant of another session stays, including when the request id is the same. The Ok body is `success` and `revoked_request_id`, with no token. A record that is not granted is `Capability ` plus the id plus ` was not granted`. A stop still revokes every live grant of that session through `revoke_live`. A PASS gives the Runtime no A6 credit for this revoke.
 
+`post_capability_request` denies a system-backend resource and a generic wallet resource after the live-instance check and before `declared_ask`. The Ok body is `denied` and the handler's reason. `elastos://wallet/meta/status` with `read` and a declared `elastos://content/...` ask still store. A stopped instance stays `instance is not live`. A PASS gives the Runtime no A6 credit for this denial.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.

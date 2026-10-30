@@ -10321,3 +10321,256 @@ The acceptance proof filter `standin_shell_revoke` with `--exact` names no test.
 
 A passing row gives the real Runtime no A6 credit for this revoke.
 
+## 111 — A6: deny system and wallet before the store
+
+111: `post_capability_request` denies a system-backend resource and a generic wallet resource after the live-instance check and before `declared_ask`, so those resources never become a pending grant.
+
+Checkout before the first edit: `git rev-parse HEAD` is `031bd8e4de668730c72803dcaf553288b746b4fb`. That commit is the comparison base. `git merge-base --is-ancestor b2eccab68f03ce9a0ced0c8afea96b496dbfd15f HEAD` is true. `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false. `fn post_capability_request` and `fn declared_ask` were present, and `post_capability_request` called `declared_ask`. `fn prestore_denial` was absent. HEAD did not move.
+
+### Quote from the architecture (read only)
+
+`docs/AGENT_ARCHITECTURE.md`, section "Request flow". Step 7 is the verification. Step 8 records a pending request after that verification. This task is that gate for the two resources the handler denies before the store. It does not mint a grant.
+
+```text
+7. Runtime verifies the exact resource, action, operation, principal, session,
+   capsule, grant, expiry, and revocation state.
+8. If additional consent is required, Runtime records a pending request and
+   Home or Inbox presents it. The UI does not mint the grant itself.
+```
+
+### Quote from the route (read only)
+
+`elastos/crates/elastos-server/src/api/handlers/capability.rs`, `request_capability`, the two `Ok` branches after the scheme check and the action check. A system-backend resource returns `status` `denied` and the reason, with no `request_id` and no token, and it does not insert a record. The system reason is `system backends are not app capabilities; use elastos://content`.
+
+`elastos/crates/elastos-common/src/localhost.rs`, `is_system_only_backend_resource`. The first segment is the text before the first `/`, `?` or `#` after `elastos://`. The seven names are `elacity`, `elacity-sdk`, `gateway`, `ipfs`, `ipfs-cluster`, `ipfs-provider` and `kubo`.
+
+`elastos/crates/elastos-server/src/provider_resource.rs`. `WALLET_STATUS_RESOURCE` is `elastos://wallet/meta/status`. `ensure_generic_wallet_capability` returns the wallet reason `generic Wallet access is limited to read-only elastos://wallet/meta/status; use the private Runtime Wallet Bus for authority-bound operations` unless the resource is that status resource and the action is read.
+
+### Code
+
+`prestore_denial` at `standin-runtime/mod.rs:1679` is the only new function above `#[cfg(test)]`. It is private. `post_capability_request` at `:502` calls it once, at `:542`, after the live-instance check at `:539` and before `declared_ask` at `:545`. The action argument is the action the route already lowercased at `:521`. `Some` returns Ok `{"status":"denied","reason":...}` and does not call `declared_ask`, does not mint an id, and does not call `seed_request`. `None` falls through to the existing `declared_ask` call and then the existing `seed_request` success. The system compare runs before the wallet compare. The seven names appear once. Each reason string appears once. The one allowed wallet request is resource `elastos://wallet/meta/status` with action `read`. `declared_ask`, `seed_request`, `seed_grant`, `post_capability_grant`, `post_capability_deny`, `deny_body`, `settle_pending` and `not_live` are unchanged. The shell, body, scheme, action, unknown-instance and `not_live` refusals stay ahead of `prestore_denial`. No new public method and no new request store.
+
+### Tests
+
+`standin_system_and_wallet_requests_never_become_pending` at `:9226`, in the module's `#[cfg(test)]`. It passes with no operator and no probe build. Assertion text says the stand-in did the work. It reuses `Shared`, `declare_asks`, `admit_shared`, `launch_starting`, `launch_finished`, `request_entries` and `delete_capsule`.
+
+`Shared::new()`, then `declare_asks` on that bundle path, before admit, with `SHARED_RESOURCE` `read`, `SHARED_RESOURCE` `write`, `elastos://IPFS/x` `read`, `elastos://ipfs-extra/x` `read`, `elastos://wallet/meta/status` `read` and `elastos://content/demo` `read`. Admit with `Start::Ok`. One launch, no `finish_start` yet. The id is `component-1`, status `starting`, cause `""`. For that client, `elastos://ipfs/x` and `elastos://wallet/open`, each action `read` and reason `read shared`, are Ok denied with the system reason and the wallet reason. `request_entries` for `component-1` is empty. `elastos://content/demo` is Ok `{"status":"pending","request_id":"request-1"}`. `finish_start` stores `running`. The same client then receives Ok denied, with the system reason and no `request_id` key, for `elastos://elacity/x`, `elastos://elacity-sdk/x`, `elastos://gateway/x`, `elastos://ipfs-cluster/x`, `elastos://ipfs-provider/x`, `elastos://kubo/x`, `elastos://ipfs`, `elastos://ipfs?hash` and `elastos://ipfs#hash`. It receives Ok denied with the wallet reason for `elastos://wallet/meta/status` action `write`, `elastos://wallet/meta/status/extra` action `read`, `elastos://wallet/meta/status?x` action `read`, and `elastos://wallet/meta/status#x` action `read`. `elastos://IPFS/x` is Ok `request-2`. `elastos://wallet/meta/status` action `Read` is Ok `request-3`. `elastos://ipfs-extra/x` is Ok `request-4`. `elastos://content/other` and `elastos://Wallet/open` are each status 403 and `ask not declared in the signed manifest: ` plus that resource, a space, and `read`. A further `elastos://ipfs/x` is Ok denied with the system reason. The shell records, in order, are those four pending requests, each action `read`, reason `read shared`, status `pending`, `decision_reason` `""`, `settled_by` null and `plan` null. A second launch `finish_start` is `component-2` `running`. The shell `delete_capsule` of `component-2` with `{"reason":"stop one"}` is Ok null. The `component-2` client request for `elastos://ipfs/x` is status 400 and `instance is not live: stopped`. `request_entries` for `component-2` is empty. `component-1` stays `running` with cause `""`. The shell live-grant `request_id` set is empty.
+
+### Hand-run falsifiers
+
+The plants ran by hand, one at a time, each restored before the next. Each planted crate compiled (`Finished`, then the named test failed on its assertion). No `falsifiers.json` id was added. After the restore, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` shows the candidate only, and no plant remains. `RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`. Command for each: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_system_and_wallet_requests_never_become_pending -- --exact`.
+
+F-prestore-stub. `prestore_denial` is not called, so the starting `elastos://ipfs/x` is not Ok denied. Planted exit 101 in 5.73 s. Restored exit 0 in 1.10 s. Planted assertion: `src/../standin-runtime/mod.rs:9262:9` `the stand-in did the work: a starting elastos://ipfs/x is denied with the system reason`. Restored, that assertion is `:9265`.
+
+Old:
+
+```text
+        if let Some(reason) = prestore_denial(resource, &action) {
+            return Ok(json!({ "status": "denied", "reason": reason }));
+        }
+```
+
+New: no bytes. Those lines are absent.
+
+F-prestore-keep. The route returns the denied body and still calls `seed_request` for that resource. Planted exit 101 in 1.32 s. Restored exit 0 in 1.09 s. Planted assertion: `src/../standin-runtime/mod.rs:9278:9` `the stand-in did the work: the starting denials store no request`. Restored, that assertion is `:9275`.
+
+Old:
+
+```text
+        if let Some(reason) = prestore_denial(resource, &action) {
+            return Ok(json!({ "status": "denied", "reason": reason }));
+        }
+```
+
+New:
+
+```text
+        if let Some(denied) = prestore_denial(resource, &action) {
+            let request_id = format!("request-{}", self.next_request);
+            self.seed_request(&request_id, session_id, resource, &action, reason)?;
+            self.next_request += 1;
+            return Ok(json!({ "status": "denied", "reason": denied }));
+        }
+```
+
+F-prestore-ask-first. `declared_ask` runs before `prestore_denial`, so the undeclared starting `elastos://ipfs/x` is status 403. Planted exit 101 in 1.32 s. Restored exit 0 in 1.11 s. Planted assertion: `src/../standin-runtime/mod.rs:9265:9` `the stand-in did the work: a starting elastos://ipfs/x is denied with the system reason`. Restored, that assertion is `:9265`.
+
+Old:
+
+```text
+        if let Some(reason) = prestore_denial(resource, &action) {
+            return Ok(json!({ "status": "denied", "reason": reason }));
+        }
+        self.declared_ask(session_id, resource, &action)?;
+```
+
+New:
+
+```text
+        self.declared_ask(session_id, resource, &action)?;
+        if let Some(reason) = prestore_denial(resource, &action) {
+            return Ok(json!({ "status": "denied", "reason": reason }));
+        }
+```
+
+F-prestore-wallet-read. `elastos://wallet/meta/status` with action `read` takes the wallet reason. Planted exit 101 in 1.35 s. Restored exit 0 in 1.09 s. Planted assertion: `src/../standin-runtime/mod.rs:9334:9` `the stand-in did the work: elastos://wallet/meta/status read stores request-3`. Restored, that assertion is `:9336`.
+
+Old:
+
+```text
+    if segment == Some("wallet")
+        && !(resource == "elastos://wallet/meta/status" && action == "read")
+    {
+```
+
+New:
+
+```text
+    if segment == Some("wallet") {
+```
+
+F-prestore-prefix. A first segment that starts with `ipfs` takes the system reason, so `elastos://ipfs-extra/x` is denied. Planted exit 101 in 1.29 s. Restored exit 0 in 1.10 s. Planted assertion: `src/../standin-runtime/mod.rs:9342:9` `the stand-in did the work: elastos://ipfs-extra/x stores request-4`. Restored, that assertion is `:9341`.
+
+Old:
+
+```text
+    if matches!(
+        segment,
+        Some(
+            "elacity"
+                | "elacity-sdk"
+                | "gateway"
+                | "ipfs"
+                | "ipfs-cluster"
+                | "ipfs-provider"
+                | "kubo"
+        )
+    ) {
+```
+
+New:
+
+```text
+    if matches!(
+        segment,
+        Some(
+            "elacity"
+                | "elacity-sdk"
+                | "gateway"
+                | "ipfs"
+                | "ipfs-cluster"
+                | "ipfs-provider"
+                | "kubo"
+        )
+    ) || segment.is_some_and(|name| name.starts_with("ipfs"))
+    {
+```
+
+F-prestore-wallet-bypass. A `wallet` segment returns `None`, so `elastos://wallet/open` is not Ok denied. Planted exit 101 in 1.30 s. Restored exit 0 in 1.10 s. Planted assertion: `src/../standin-runtime/mod.rs:9263:9` `the stand-in did the work: a starting elastos://wallet/open is denied with the wallet reason`. Restored, that assertion is `:9270`.
+
+Old:
+
+```text
+    if segment == Some("wallet")
+        && !(resource == "elastos://wallet/meta/status" && action == "read")
+    {
+        return Some(
+            "generic Wallet access is limited to read-only elastos://wallet/meta/status; use the private Runtime Wallet Bus for authority-bound operations",
+        );
+    }
+```
+
+New: no bytes. That `if` is absent, so a `wallet` segment falls through to `None`.
+
+F-prestore-running-only. `prestore_denial` runs only when the phase is `Running`, so the starting `elastos://ipfs/x` is not Ok denied. Planted exit 101 in 1.34 s. Restored exit 0 in 1.05 s. Planted assertion: `src/../standin-runtime/mod.rs:9267:9` `the stand-in did the work: a starting elastos://ipfs/x is denied with the system reason`. Restored, that assertion is `:9265`.
+
+Old:
+
+```text
+        if let Some(reason) = prestore_denial(resource, &action) {
+            return Ok(json!({ "status": "denied", "reason": reason }));
+        }
+```
+
+New:
+
+```text
+        if phase == ResidentStatus::Running {
+            if let Some(reason) = prestore_denial(resource, &action) {
+                return Ok(json!({ "status": "denied", "reason": reason }));
+            }
+        }
+```
+
+F-prestore-before-live. `prestore_denial` runs before the live-instance check, so the stopped `component-2` request is Ok denied. Planted exit 101 in 1.33 s. Restored exit 0 in 1.09 s. Planted assertion: `src/../standin-runtime/mod.rs:9441:9` `the stand-in did the work: a stopped instance stays instance is not live`. Restored, that assertion is `:9441`.
+
+Old:
+
+```text
+        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
+            return Err(not_live(phase));
+        }
+        if let Some(reason) = prestore_denial(resource, &action) {
+            return Ok(json!({ "status": "denied", "reason": reason }));
+        }
+```
+
+New:
+
+```text
+        if let Some(reason) = prestore_denial(resource, &action) {
+            return Ok(json!({ "status": "denied", "reason": reason }));
+        }
+        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
+            return Err(not_live(phase));
+        }
+```
+
+F-prestore-raw-action. `prestore_denial` receives the body's action before it is lowercased, so action `Read` on `elastos://wallet/meta/status` is denied. Planted exit 101 in 1.35 s. Restored exit 0 in 1.08 s. Planted assertion: `src/../standin-runtime/mod.rs:9336:9` `the stand-in did the work: elastos://wallet/meta/status read stores request-3`. Restored, that assertion is `:9336`.
+
+Old:
+
+```text
+        if let Some(reason) = prestore_denial(resource, &action) {
+```
+
+New:
+
+```text
+        if let Some(reason) = prestore_denial(resource, given_action) {
+```
+
+### Docs
+
+`standin-runtime/README.md` keeps the grant paragraph, the plan-approval section and the `declared_ask` sentence. One paragraph immediately before `## Callers` states that `post_capability_request` denies a system-backend resource and a generic wallet resource after the live-instance check and before `declared_ask`, that the Ok body is `denied` and the handler's reason, and that `elastos://wallet/meta/status` with `read` and a declared `elastos://content/...` ask still store. A stopped instance stays `instance is not live`. A PASS gives the Runtime no A6 credit for this denial. `RUNBOOK.md` gains one paragraph after the last stand-in paragraph: `standin_system_and_wallet_requests_never_become_pending` is this stand-in, and a PASS there gives the Runtime no A6 credit for this denial. Every other paragraph keeps its bytes, including a paragraph 105, 107, 108 or 109 adds.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged. `git diff` for `src/harness.rs`, `src/census.rs`, `src/report.rs`, `tests/effects.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. The changed files are `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.15 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 264.96 seconds, inside the 600-second bound. Targets in order: lib 88 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; content_cid 2 passed; effects 63 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 13 passed; standin_plan 8 passed; standin_residents 2 passed; probe 3 passed; doc-tests 0 and 0. No census leftover and no rerun.
+
+### Proof
+
+The plants were already restored.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.18 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_system_and_wallet_requests_never_become_pending -- --exact`: exit 0, 1 passed and 0 failed, real 0.12 seconds.
+- `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false. HEAD is still `031bd8e4de668730c72803dcaf553288b746b4fb`.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `prestore_denial` at `standin-runtime/mod.rs:1679` compares the resource text the request already carried. The launch still names the bundle by its lab CID. |
+| 2. Capsule, Home or UI gains ungranted access? | No | On `Some`, `post_capability_request` at `:542` returns denied and does not call `seed_request`. No grant is minted. |
+| 3. A second path or a second copy of one rule? | No | `prestore_denial` at `:1679` is the one new function, called once at `:542`. The seven names and each reason string appear once. `declared_ask` at `:545` stays the one manifest check. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`. `elastos/` is untouched. |
+| 5. Refusals deny by default with a clear reason? | Yes | A system segment returns the system reason at `:1696`. A wallet segment returns the wallet reason at `:1701`, except `elastos://wallet/meta/status` with `read`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The denial stays inside the stand-in. No capsule code, import or world changes. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `:9226`. F-prestore-stub fails at planted `:9262`, F-prestore-keep at `:9278`, F-prestore-ask-first at `:9265`, F-prestore-wallet-read at `:9334`, F-prestore-prefix at `:9342`, F-prestore-wallet-bypass at `:9263`, F-prestore-running-only at `:9267`, F-prestore-before-live at `:9441`, and F-prestore-raw-action at `:9336`. Restored, the test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | The live-instance check at `:539` stays ahead of the denial. `declared_ask` at `:545` still checks the signed asks. A denial stores no grant and does not change the instance. |
+
+A passing row gives the real Runtime no A6 credit for this denial.
+
