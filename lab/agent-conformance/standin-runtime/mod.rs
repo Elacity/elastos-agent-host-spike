@@ -112,6 +112,11 @@ struct Grant {
     /// and `authorise` compares it with the plan hash of the use. No caller
     /// holds or constructs it.
     plan: Option<PlanBinding>,
+    /// The hosted run this grant was minted for (M1 check A6). The grant route
+    /// mints it from the request's session; the request read returns it; the
+    /// use path compares the pair the effect presents. Its fields are private,
+    /// so only this module mints a value and no test or crate can name one.
+    run: RunBinding,
 }
 
 /// One approved-plan binding on a grant. Its one field is private, so only
@@ -119,6 +124,26 @@ struct Grant {
 #[derive(Clone)]
 struct PlanBinding {
     plan_sha256: String,
+}
+
+/// The pair a hosted effect presents: the run id and the request id its own
+/// grant route minted (M1 check A6). The Runtime binds an effect by the same
+/// pair (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:645-646`),
+/// and the provider sends both as `x-elastos-run-id` and
+/// `x-elastos-request-id` (`capsules/model-provider/src/adapters.rs:67-68`).
+/// Both fields are private: a caller reads the pair back from a route answer
+/// and cannot construct one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RunBinding {
+    run_id: String,
+    request_id: String,
+}
+
+impl RunBinding {
+    /// The `x-elastos-run-id` value: the grant's request id under `run-`.
+    fn run_id_for(request_id: &str) -> String {
+        format!("run-{request_id}")
+    }
 }
 
 /// One admitted row. It keeps what launch needs to re-run the same check:
@@ -322,6 +347,12 @@ impl StandIn {
             life,
             session_ended,
             plan: None,
+            // `seed_grant` mints no run pair: only the grant route does (M1
+            // check A6), so a seeded grant is not reachable by a presented pair.
+            run: RunBinding {
+                run_id: String::new(),
+                request_id: String::new(),
+            },
         });
     }
 
@@ -619,13 +650,14 @@ impl StandIn {
             false,
         );
         let minted = mint_plan_binding(&plan);
-        if let Some(minted) = minted {
-            let stored = self
-                .grants
-                .iter_mut()
-                .find(|grant| grant.request_id == request_id.as_str())
-                .expect("the grant route just stored this request's grant");
-            stored.plan = Some(minted);
+        let run = mint_run_binding(&request_id);
+        if let Some(stored) = self
+            .grants
+            .iter_mut()
+            .find(|grant| grant.request_id == request_id.as_str())
+        {
+            stored.plan = minted;
+            stored.run = run.clone();
         }
         Ok(json!({ "success": true }))
     }
@@ -697,9 +729,66 @@ impl StandIn {
         body: &Value,
     ) -> Result<Value, (u16, String)> {
         require_client(caller)?;
-        let (request_id, plan_sha256) = validate_body(body)?;
-        self.authorise(caller, request_id, plan_sha256)?;
+        let (request_id, run_id, plan_sha256) = validate_body(body)?;
+        self.authorise(caller, request_id, run_id, plan_sha256)?;
         Ok(json!({ "valid": true }))
+    }
+
+    /// `POST /api/hosted-effect` (M1 check A6), the stand-in's hosted effect
+    /// socket. A hosted effect carries no grant id and no session: the
+    /// provider sends the offer, the effect, and the pair `(run_id,
+    /// request_id)` the grant route minted
+    /// (`capsules/model-provider/src/adapters.rs:61-70`). That pair alone
+    /// names the grant, and the grant's own session is then checked, so an
+    /// agent that presents another agent's pair is refused. Ok is
+    /// `{"valid": true}`; every refusal spends nothing.
+    pub fn post_hosted_effect(
+        &mut self,
+        caller: Caller<'_>,
+        offer_id: &str,
+        effect: &str,
+        run_id: &str,
+        request_id: &str,
+    ) -> Result<Value, (u16, String)> {
+        if offer_id.is_empty() || effect.is_empty() {
+            return Err((400, "hosted effect needs an offer and an effect".to_owned()));
+        }
+        self.authorise(caller, request_id, Some(run_id), None)?;
+        Ok(json!({ "valid": true }))
+    }
+
+    /// The pair the grant route minted for `request_id`, read back by the
+    /// grant's own session. `GET /api/capability/run-binding`.
+    ///
+    /// This is a read, not a use: it spends nothing and changes no record.
+    /// It exists because the grant route's answer stays exactly
+    /// `{"success": true}` (its shape is a standing contract), so an instance
+    /// that wants to present the pair on a hosted effect reads it here. Only
+    /// the grant's own session reads it, and only while the grant is live, so
+    /// a sibling learns nothing (M1 check A6). A request id with no grant is
+    /// status 400 `unknown grant`; a sibling or the shell is status 403.
+    pub fn get_run_binding(
+        &self,
+        caller: Caller<'_>,
+        request_id: &str,
+    ) -> Result<Value, (u16, String)> {
+        let Some(grant) = self
+            .grants
+            .iter()
+            .find(|grant| grant.request_id == request_id)
+        else {
+            return Err(unknown_grant());
+        };
+        if !is_live(grant.life) {
+            return Err(grant_not_live(grant.life));
+        }
+        if !session_authorises(grant, caller) {
+            return Err(wrong_capsule(grant, caller));
+        }
+        Ok(json!({
+            "run_id": grant.run.run_id,
+            "request_id": grant.run.request_id,
+        }))
     }
 
     /// The one use check. `post_capability_validate` is its route.
@@ -712,6 +801,7 @@ impl StandIn {
         &mut self,
         caller: Caller<'_>,
         request_id: &str,
+        run_id: Option<&str>,
         plan_sha256: Option<&str>,
     ) -> Result<(), (u16, String)> {
         let Some(index) = self
@@ -721,12 +811,16 @@ impl StandIn {
         else {
             return Err(unknown_grant());
         };
+        let run_matches = run_accepts(&self.grants[index], run_id);
         let grant = &self.grants[index];
         if !is_live(grant.life) {
             return Err(grant_not_live(grant.life));
         }
         if is_due(grant, self.instant) {
             return Err(grant_not_live(Life::Expired));
+        }
+        if !run_matches {
+            return Err(unminted_run(run_id.unwrap_or_default(), request_id));
         }
         if !session_authorises(grant, caller) {
             return Err(wrong_capsule(grant, caller));
@@ -1229,19 +1323,28 @@ fn require_client(caller: Caller<'_>) -> Result<(), (u16, String)> {
 /// The validate body's keys are `request_id` and an optional string
 /// `plan_sha256`. The use names the plan it runs, and the hash is compared
 /// with a bound grant's own hash.
-fn validate_body(body: &Value) -> Result<(&str, Option<&str>), (u16, String)> {
+/// The validate body's three fields: the request id, and the optional pair
+/// `(run_id, plan_sha256)` a use may present.
+type ValidateFields<'a> = (&'a str, Option<&'a str>, Option<&'a str>);
+
+fn validate_body(body: &Value) -> Result<ValidateFields<'_>, (u16, String)> {
     const NEEDS_ID: &str = "validate body needs request_id";
 
     let Some(object) = body.as_object() else {
         return Err((400, NEEDS_ID.to_owned()));
     };
     let mut request_id = None;
+    let mut run_id = None;
     let mut plan_sha256 = None;
     for (key, value) in object {
         match key.as_str() {
             "request_id" => match value {
                 Value::String(text) => request_id = Some(text.as_str()),
                 _ => return Err((400, "validate request_id must be a string".to_owned())),
+            },
+            "run_id" => match value {
+                Value::String(text) => run_id = Some(text.as_str()),
+                _ => return Err((400, "validate run_id must be a string".to_owned())),
             },
             "plan_sha256" => match value {
                 Value::String(text) => plan_sha256 = Some(text.as_str()),
@@ -1251,7 +1354,25 @@ fn validate_body(body: &Value) -> Result<(&str, Option<&str>), (u16, String)> {
         }
     }
     let request_id = request_id.ok_or_else(|| (400, NEEDS_ID.to_owned()))?;
-    Ok((request_id, plan_sha256))
+    Ok((request_id, run_id, plan_sha256))
+}
+
+/// The one mint helper for the run pair (M1 check A6). Only the grant route
+/// calls it, so the pair exists only after the shell approved the request.
+fn mint_run_binding(request_id: &str) -> RunBinding {
+    RunBinding {
+        run_id: RunBinding::run_id_for(request_id),
+        request_id: request_id.to_owned(),
+    }
+}
+
+/// The one refusal for a hosted effect whose pair this stand-in did not mint
+/// (M1 check A6).
+fn unminted_run(run_id: &str, request_id: &str) -> (u16, String) {
+    (
+        403,
+        format!("effect run {run_id} is not bound to request {request_id}"),
+    )
 }
 
 /// The one mint helper for an approved-plan binding. Only
@@ -1261,6 +1382,16 @@ fn mint_plan_binding(plan: &Option<String>) -> Option<PlanBinding> {
     plan.as_ref().map(|plan_sha256| PlanBinding {
         plan_sha256: plan_sha256.clone(),
     })
+}
+
+/// The one run-pair compare (M1 check A6). A use that presents no run id
+/// (the validate route) is compared on the request id alone. A use that
+/// presents one must present the exact pair the grant route minted.
+fn run_accepts(grant: &Grant, run_id: Option<&str>) -> bool {
+    match run_id {
+        None => true,
+        Some(run_id) => grant.run.run_id == run_id,
+    }
 }
 
 /// One binding compare. A grant with no binding accepts any use, as before. A

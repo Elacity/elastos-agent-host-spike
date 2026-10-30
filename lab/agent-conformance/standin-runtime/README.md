@@ -68,3 +68,8 @@ This folder is the one stand-in. Another lane calls `agent_conformance::standin_
 `standin_matches_ra1_fields` and `standin_matches_ra6_states` in `tests/standin_contract.rs` lock the RA-1 and RA-6 fields and states above. `standin_unsigned_bundle_is_refused`, `standin_mismatched_bundle_is_refused`, `standin_corrupted_signature_is_refused`, `standin_flipped_byte_after_signing_is_refused`, `standin_launch_by_path_is_refused`, `standin_unadmitted_cid_is_refused`, `standin_one_admit_per_cid`, `standin_bundle_changed_after_admit_is_refused_at_launch` and `standin_valid_signature_grants_nothing` in `mod.rs` lock the CID-only launch, the signature check before launch and the no-grant rule (M1 check B1). RA-2, RA-3, RA-4, RA-5 and RA-7 are later slices. #309 at `513988ebd` names no provider-launch route.
 
 This value is the lab stand-in and the real route can replace it later because the JSON matches (M1-R). A PASS gives the Runtime no credit.
+
+M1 check A6: the grant route mints the pair `(run_id, request_id)` onto the
+grant, its answer stays `{"success": true}`, and the grant's own session reads
+the pair back from `get_run_binding`; a hosted effect through
+`post_hosted_effect` refuses any pair the route did not mint.
