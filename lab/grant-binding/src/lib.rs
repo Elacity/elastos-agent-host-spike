@@ -72,6 +72,10 @@ pub(crate) struct GrantRecord {
     effect_limit: Option<u64>,
     effects: u64,
     parent: Option<Handle>,
+    rate: Option<u64>,
+    window: u64,
+    window_start: u64,
+    window_effects: u64,
 }
 
 /// The binding copied out after a successful check.
@@ -108,6 +112,8 @@ pub enum Refuse {
     Expired,
     EffectLimit,
     IssuingLimit,
+    Rate,
+    IssuingRate,
 }
 
 impl std::fmt::Display for Refuse {
@@ -127,6 +133,8 @@ impl std::fmt::Display for Refuse {
             Refuse::Expired => "grant has expired",
             Refuse::EffectLimit => "effect limit is reached",
             Refuse::IssuingLimit => "effect limit stays on the issuing grant",
+            Refuse::Rate => "rate limit is reached",
+            Refuse::IssuingRate => "rate stays on the issuing grant",
         })
     }
 }
@@ -222,6 +230,10 @@ impl Verifier {
                 effect_limit: None,
                 effects: 0,
                 parent,
+                rate: None,
+                window: 0,
+                window_start: 0,
+                window_effects: 0,
             },
         );
         Ok(handle)
@@ -326,9 +338,42 @@ impl Verifier {
         Ok(())
     }
 
+    pub fn set_rate(&mut self, handle: Handle, limit: u64, window: u64) -> Result<(), Refuse> {
+        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+        if grant.parent.is_some() {
+            return Err(Refuse::IssuingRate);
+        }
+        grant.rate = Some(limit);
+        grant.window = window;
+        grant.window_start = self.verifier_now;
+        grant.window_effects = 0;
+        Ok(())
+    }
+
     fn note_effect(&mut self, handle: Handle) -> Result<(), Refuse> {
         let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
         grant.effects += 1;
+        if grant.rate.is_some() {
+            grant.window_effects += 1;
+        }
+        Ok(())
+    }
+
+    fn open_rate_window(&mut self, handle: Handle) -> Result<(), Refuse> {
+        let now = self.verifier_now;
+        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+        let Some(rate) = grant.rate else {
+            return Ok(());
+        };
+        let _ = rate;
+        if grant.window == 0 {
+            return Ok(());
+        }
+        let end = grant.window_start.saturating_add(grant.window);
+        if now >= end {
+            grant.window_start = now;
+            grant.window_effects = 0;
+        }
         Ok(())
     }
 

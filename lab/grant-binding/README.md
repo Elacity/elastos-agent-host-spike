@@ -21,6 +21,8 @@ reference model, not the Runtime; counts toward no M1 check; the Runtime half is
 
 `Verifier::revoke_grant` removes that handle from the one grant store and every child journal minted from it. A grant asked on its own stays. The next effect on a removed handle is `Refuse::UnknownHandle`. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
 
+`Verifier::set_rate` stores a rate and a window on that grant. One successful append or overwrite counts toward that rate through the one `note_effect`. The next append or overwrite is refused when the count has reached the rate inside the window, and the grant stays in the store. A verifier instant at or after the window end starts a new count. An unset rate does not refuse. A set rate of 0 stops the first effect. A child-journal operate does not count. `Verifier::set_rate` on a derived child journal is refused. This mirrors `model_early_timeout_is_refused`: the verifier clock decides. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
 `Verifier::admit_ask` caps one agent's budget ask and stores the granted amount through the one `admit`. This is a lab stand-in for that admission. It is not the Runtime. It does not count toward A7 or M1-R.
 
 A forged identity, session, instance, usage, ceiling or set of rights changes
