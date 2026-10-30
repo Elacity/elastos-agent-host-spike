@@ -1,0 +1,4 @@
+target/
+homes/
+scratch/
+*.component.wasm
