@@ -10071,3 +10071,292 @@ Rerun, same environment (`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFL
 
 A passing row gives the real Runtime no A3 credit. Two-capsule-run owns the real component bytes.
 
+## 115 — A6: invoke presents one exact operation
+
+115: `authorise` keeps `(caller, request_id, plan_sha256)` and calls `authorise_presented` with no presented resource and no presented action. `authorise_presented` is the one use check. The invoke arm reads `token`, then `uri`, then `operation`, and calls `authorise_presented` with that token, no plan hash, and those two strings. A mismatch is `wrong action` or `wrong resource` and spends nothing. `public_resource_covers` is the one resource compare. `post_capability_validate` still parses only `request_id` and `plan_sha256` and still calls `authorise`. Comparison base, recorded before the first edit: `80a2405624121eef3404fe3b3814a558be4b7cb5`. `b2eccab68f03ce9a0ced0c8afea96b496dbfd15f` is an ancestor. `fff8f1761eb851f642f8e9b680ea1c6747974060` is not.
+
+### Quote from delegation and the request flow (read only)
+
+`docs/AGENT_ARCHITECTURE.md`, section "Delegation and mandates":
+
+> **Allow once** authorizes one exact operation.
+
+`docs/AGENT_ARCHITECTURE.md`, section "Request flow", step 7:
+
+> Runtime verifies the exact resource, action, operation, principal, session, capsule, grant, expiry, and revocation state.
+
+This task is that Allow once sentence on the one hostcall. A standing mandate stays out. Request flow step 7 is the same check.
+
+### Quote from the resource match (read only)
+
+`elastos/crates/elastos-runtime/src/capability/token.rs`, `ResourceId::normalize` and `ResourceId::matches`. After `://`, empty segments and `.` segments are dropped and `..` is kept. A stored resource whose normalized form ends in `/*` matches a presented resource that starts with that prefix without the final `*`, and fails when the suffix contains `..`. Any other stored resource matches only the normalized presented resource.
+
+`elastos/crates/elastos-runtime/src/capability/manager.rs` formats `wrong action: expected {}, got {}` and `wrong resource: expected {}, got {}`.
+
+### Plants
+
+Each plant was applied alone, the planted crate compiled, the named test failed on its assertion, and the file was restored before the next. No `falsifiers.json` id.
+
+F-invoke-stub. Real 6.27 seconds. Assertion `src/../standin-runtime/mod.rs:9879:9` (restored `:9878`): `the stand-in did the work: the sibling invoke spends nothing`. Left `String("ok")`, right `"error"`. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_invoke_covers_one_operation -- --exact`.
+
+Old:
+
+```text
+                match self.authorise_presented(
+                    Caller::Client {
+                        session_id: capsule_id,
+                    },
+```
+
+New:
+
+```text
+                return Ok("{\"id\":4,\"response\":{\"type\":\"ok\",\"data\":null}}".to_owned());
+                match self.authorise_presented(
+                    Caller::Client {
+                        session_id: capsule_id,
+                    },
+```
+
+F-invoke-skip-action. Real 1.35 seconds. Assertion `src/../standin-runtime/mod.rs:9872:9` (restored `:9878`): `the stand-in did the work: write is the wrong action`. Left `String("ok")`, right `"error"`. Same command.
+
+Old:
+
+```text
+                let operation = operation.to_ascii_lowercase();
+                if operation != action {
+                    return Err((
+                        403,
+                        format!("wrong action: expected {action}, got {operation}"),
+                    ));
+                }
+```
+
+New:
+
+```text
+                let _ = operation.to_ascii_lowercase();
+```
+
+F-invoke-skip-resource. Real 1.31 seconds. Assertion `src/../standin-runtime/mod.rs:9880:9` (restored `:9878`): `the stand-in did the work: another file is the wrong resource`. Left `String("ok")`, right `"error"`. Same command.
+
+Old:
+
+```text
+fn public_resource_covers(stored: &str, presented: &str) -> bool {
+    fn normalize(resource: &str) -> String {
+```
+
+New:
+
+```text
+fn public_resource_covers(stored: &str, presented: &str) -> bool {
+    let _ = (stored, presented);
+    return true;
+    fn normalize(resource: &str) -> String {
+```
+
+F-invoke-dotdot. Real 1.33 seconds. Assertion `src/../standin-runtime/mod.rs:9879:9` (restored `:9878`): `the stand-in did the work: a dotdot suffix is outside the star`. Left `String("ok")`, right `"error"`. Same command.
+
+Old:
+
+```text
+        return !suffix.split('/').any(|segment| segment == "..");
+```
+
+New:
+
+```text
+        let _ = suffix;
+        return true;
+```
+
+F-invoke-prefix. Real 1.30 seconds. Assertion `src/../standin-runtime/mod.rs:9878:9` (restored `:9878`): `the stand-in did the work: the text before the slash is not the prefix`. Left `String("ok")`, right `"error"`. Same command.
+
+Old:
+
+```text
+        let prefix = &stored_norm[..stored_norm.len() - 1];
+```
+
+New:
+
+```text
+        let prefix = &stored_norm[..stored_norm.len() - 2];
+```
+
+F-invoke-collapse. Real 1.32 seconds. Assertion `src/../standin-runtime/mod.rs:9898:9` (restored `:9878`): `the stand-in did the work: a stored dotdot segment stays`. Left `String("ok")`, right `"error"`. Same command.
+
+Old:
+
+```text
+    presented_norm == stored_norm
+}
+```
+
+New:
+
+```text
+    {
+        fn collapse(resource: &str) -> String {
+            let Some(scheme_end) = resource.find("://") else {
+                return resource.to_owned();
+            };
+            let (scheme, rest) = resource.split_at(scheme_end + 3);
+            let mut parts = Vec::new();
+            for segment in rest.split('/') {
+                if segment.is_empty() || segment == "." {
+                    continue;
+                }
+                if segment == ".." {
+                    parts.pop();
+                    continue;
+                }
+                parts.push(segment);
+            }
+            format!("{scheme}{}", parts.join("/"))
+        }
+        collapse(&stored_norm) == collapse(&presented_norm)
+    }
+}
+```
+
+F-invoke-coerce-op. Real 1.31 seconds. Assertion `src/../standin-runtime/mod.rs:10364:14` (restored `:10364`): `the stand-in did the work: a non-string operation is refused`. The call returned Ok of `{"id":3,"response":{"data":null,"type":"ok"}}`, so `authorise_presented` ran. Same command.
+
+Old:
+
+```text
+                let operation = match request.get("operation") {
+                    Some(Value::String(text)) => text.as_str(),
+                    Some(_) => return Err("invoke operation must be a string".to_owned()),
+                    None => return Err("invoke operation must be a string".to_owned()),
+                };
+```
+
+New:
+
+```text
+                let operation = match request.get("operation") {
+                    Some(Value::String(text)) => text.as_str(),
+                    Some(_) => "read",
+                    None => return Err("invoke operation must be a string".to_owned()),
+                };
+```
+
+F-invoke-spend-before-plan. Real 1.74 seconds. Assertion `src/../standin-runtime/mod.rs:10583:9` (restored `:10583`): `the stand-in did the work: the unbound invoke leaves request-1 live`. Left `(Exhausted, false)`, right `(Live, false)`. Same command.
+
+Old:
+
+```text
+        if !plan_accepts(self.grants[index].plan.as_ref(), plan_sha256) {
+            return Err(plan_not_bound());
+        }
+        match (presented_resource, presented_action) {
+            (None, None) => {}
+            (Some(uri), Some(operation)) => {
+                let operation = operation.to_ascii_lowercase();
+                if operation != action {
+                    return Err((
+                        403,
+                        format!("wrong action: expected {action}, got {operation}"),
+                    ));
+                }
+                if !public_resource_covers(&resource, uri) {
+                    return Err((
+                        403,
+                        format!("wrong resource: expected {resource}, got {uri}"),
+                    ));
+                }
+            }
+            _ => return Err((400, "invoke presentation is incomplete".to_owned())),
+        }
+        if duration == "once" {
+            self.grants[index].life = Life::Exhausted;
+        }
+```
+
+New:
+
+```text
+        match (presented_resource, presented_action) {
+            (None, None) => {}
+            (Some(uri), Some(operation)) => {
+                let operation = operation.to_ascii_lowercase();
+                if operation != action {
+                    return Err((
+                        403,
+                        format!("wrong action: expected {action}, got {operation}"),
+                    ));
+                }
+                if !public_resource_covers(&resource, uri) {
+                    return Err((
+                        403,
+                        format!("wrong resource: expected {resource}, got {uri}"),
+                    ));
+                }
+            }
+            _ => return Err((400, "invoke presentation is incomplete".to_owned())),
+        }
+        if duration == "once" {
+            self.grants[index].life = Life::Exhausted;
+        }
+        if !plan_accepts(self.grants[index].plan.as_ref(), plan_sha256) {
+            return Err(plan_not_bound());
+        }
+```
+
+F-validate-requires-present. Real 1.31 seconds. Assertion `src/../standin-runtime/mod.rs:10608:14` (restored `:10608`): `the stand-in did the work: validate of req-val succeeds`. The call returned `(403, "wrong resource: expected localhost://Public/resident-instances/shared.txt, got ")`. Same command.
+
+Old:
+
+```text
+        self.authorise_presented(caller, request_id, plan_sha256, None, None)
+```
+
+New:
+
+```text
+        self.authorise_presented(caller, request_id, plan_sha256, Some(""), Some("read"))
+```
+
+F-cover-keep-dot. Real 1.29 seconds. Assertion `src/../standin-runtime/mod.rs:10644:9` (restored `:10644`): `the stand-in did the work: a dot segment is dropped`. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_public_resource_covers_matches_runtime -- --exact`.
+
+Old:
+
+```text
+            if segment.is_empty() || segment == "." {
+```
+
+New:
+
+```text
+            if segment.is_empty() {
+```
+
+### Docs
+
+`standin-runtime/README.md` adds one paragraph immediately before `## Callers`. A `resource_invoke` presents the uri and the operation to `authorise_presented`. `authorise` still passes no presented resource. A mismatch is `wrong action` or `wrong resource` and spends nothing. A stored `/*` resource matches one path under that prefix and rejects a `..` suffix. A `.` segment is dropped and a `..` segment in an exact resource is kept. `post_capability_validate` with only `request_id` stays the existing use route. There is no protected-path branch on this check. A PASS gives the Runtime no A6 credit. The grant paragraph and the plan-approval section stay. `RUNBOOK.md` adds one paragraph after the last stand-in paragraph: `standin_invoke_covers_one_operation` is this stand-in, and a PASS there gives the Runtime no A6 credit for this exact operation. Every other RUNBOOK paragraph stays.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. `Cargo.toml` and `Cargo.lock` are unchanged. `git diff` for `src/harness.rs`, `src/census.rs`, `src/report.rs`, `tests/effects.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. After the plants were restored, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` shows no plant. `standin_bridge_envelope_records_the_capsule_request` still passes. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.18 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 274.48 seconds, inside the 600-second bound. Targets: lib 92 passed (including `standin_invoke_covers_one_operation`, `standin_public_resource_covers_matches_runtime`, and `standin_bridge_envelope_records_the_capsule_request`); bin/report 1 passed; artifact 7 passed; build 1 passed; content_cid 2 passed; effects 63 passed and 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed and 2 ignored; standin_contract 13 passed; standin_plan 8 passed; standin_residents 2 passed; probe 3 passed; doc-tests 0.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.18 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_invoke_covers_one_operation -- --exact` exit 0, 1 passed and 0 failed, real 0.12 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_public_resource_covers_matches_runtime -- --exact` exit 0, 1 passed and 0 failed, real 0.07 seconds. `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `public_resource_covers` at `standin-runtime/mod.rs:2031` compares the grant's stored resource with the presented uri. It adds no code or content identity. |
+| 2. Capsule, Home or UI gains ungranted access? | No | The once store is at `:1179`, after the action compare at `:1164` and the resource compare at `:1170`. `let _ = principal` at `:1200` drops the principal. The caller is `capsule_id` at `:1271`. |
+| 3. A second path or a second copy of one rule? | No | `authorise` at `:1112` calls `authorise_presented` with `None` and `None`. The invoke arm calls that same function at `:1269`. `public_resource_covers` at `:2031` is the only resource compare. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`. `elastos/` is untouched and its match is quoted only. |
+| 5. Refusals deny by default with a clear reason? | Yes | A non-string token is `invoke token must be a string` at `:1257`. A bad uri is `invoke uri must be a string` at `:1261`. A bad operation is `invoke operation must be a string` at `:1266`. A mismatch is `wrong action` at `:1167` or `wrong resource` at `:1173`. One presented value is `invoke presentation is incomplete` at `:1177`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `bridge_envelope` at `:1194` is the stand-in for the one hostcall. This lane does not run the component bytes. A PASS gives the Runtime no A6 credit. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_invoke_covers_one_operation` at `:10289` and `standin_public_resource_covers_matches_runtime` at `:10636`. Each of the ten plants fails its named test on its assertion, and the restored tests pass. |
+| 8. Identity, admission and allowance stay separate? | Yes | The plan check at `:1157` stays before the once store. A matching uri and operation with no plan hash leaves the bound grant `Live`. `post_capability_validate` still passes no presented resource. |
+
+A passing row gives the real Runtime no A6 credit for this exact operation.
+

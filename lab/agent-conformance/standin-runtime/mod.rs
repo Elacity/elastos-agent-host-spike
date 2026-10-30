@@ -14,8 +14,10 @@
 //! that session's `Live` grants; a failed start stores `failed` and revokes
 //! them too. One map names the five statuses. One age compare keeps a
 //! `failed` or `stopped` entry. One check refuses a client on a shell-only
-//! route. `post_capability_validate` is the one use path; its private
-//! `authorise` runs on that same filter.
+//! route. `post_capability_validate` is the one use path. Its private
+//! `authorise` calls `authorise_presented` with no presented resource and
+//! no presented action. The invoke arm presents the uri and the operation
+//! to that same check.
 //!
 //! `stop_one` and the `worker_exited` seam share one private end path,
 //! `end_instance`. It refuses an unknown or already-ended id before anything
@@ -1095,17 +1097,38 @@ impl StandIn {
         Ok(json!({ "valid": true }))
     }
 
-    /// The one use check. `post_capability_validate` is its route.
+    /// The validate route's use check.
     ///
-    /// `Ok(())` means the grant authorises that caller and, for a bound grant,
-    /// that exact plan hash, and a `once` grant stores `Exhausted`. Every
-    /// refusal runs before that store, so a refused use spends nothing. This
-    /// method reads no clock, no disk and no WIT file.
+    /// It calls `authorise_presented` with no presented resource and no
+    /// presented action. That route still compares the caller and, for a
+    /// bound grant, the plan hash, and it does not compare a resource or an
+    /// action.
     fn authorise(
         &mut self,
         caller: Caller<'_>,
         request_id: &str,
         plan_sha256: Option<&str>,
+    ) -> Result<(), (u16, String)> {
+        self.authorise_presented(caller, request_id, plan_sha256, None, None)
+    }
+
+    /// The one use check. `authorise` and the invoke arm both call it.
+    ///
+    /// The order is the unknown id, a grant that is not live, the wrong
+    /// caller, then the plan hash. Both presented values `None` skip the
+    /// resource and action compare. Both `Some` compare before a `once`
+    /// grant stores `Exhausted`. One `Some` and one `None` is status 400
+    /// with `invoke presentation is incomplete`, and that refusal spends
+    /// nothing. The action compare lowercases the presented operation. A
+    /// mismatch is status 403 with `wrong action` or `wrong resource`, and
+    /// it spends nothing. This method reads no clock, no disk and no WIT file.
+    fn authorise_presented(
+        &mut self,
+        caller: Caller<'_>,
+        request_id: &str,
+        plan_sha256: Option<&str>,
+        presented_resource: Option<&str>,
+        presented_action: Option<&str>,
     ) -> Result<(), (u16, String)> {
         let Some(index) = self
             .grants
@@ -1114,20 +1137,46 @@ impl StandIn {
         else {
             return Err(unknown_grant());
         };
-        let grant = &self.grants[index];
-        if !is_live(grant.life) {
-            return Err(grant_not_live(grant.life));
-        }
-        if is_due(grant, self.instant) {
-            return Err(grant_not_live(Life::Expired));
-        }
-        if !session_authorises(grant, caller) {
-            return Err(wrong_capsule(grant, caller));
-        }
-        if !plan_accepts(grant.plan.as_ref(), plan_sha256) {
+        let (action, resource, duration) = {
+            let grant = &self.grants[index];
+            if !is_live(grant.life) {
+                return Err(grant_not_live(grant.life));
+            }
+            if is_due(grant, self.instant) {
+                return Err(grant_not_live(Life::Expired));
+            }
+            if !session_authorises(grant, caller) {
+                return Err(wrong_capsule(grant, caller));
+            }
+            (
+                grant.action.clone(),
+                grant.resource.clone(),
+                grant.duration.clone(),
+            )
+        };
+        if !plan_accepts(self.grants[index].plan.as_ref(), plan_sha256) {
             return Err(plan_not_bound());
         }
-        if grant.duration == "once" {
+        match (presented_resource, presented_action) {
+            (None, None) => {}
+            (Some(uri), Some(operation)) => {
+                let operation = operation.to_ascii_lowercase();
+                if operation != action {
+                    return Err((
+                        403,
+                        format!("wrong action: expected {action}, got {operation}"),
+                    ));
+                }
+                if !public_resource_covers(&resource, uri) {
+                    return Err((
+                        403,
+                        format!("wrong resource: expected {resource}, got {uri}"),
+                    ));
+                }
+            }
+            _ => return Err((400, "invoke presentation is incomplete".to_owned())),
+        }
+        if duration == "once" {
             self.grants[index].life = Life::Exhausted;
         }
         Ok(())
@@ -1137,10 +1186,11 @@ impl StandIn {
     ///
     /// The one hostcall. A `request_capability` line copies every key of
     /// `request` except `type` and calls `post_capability_request` for
-    /// `capsule_id`. A `resource_invoke` line calls `authorise` for that
-    /// capsule id with the token and no plan hash, so a bound grant stays
-    /// live. The principal argument does not choose the caller. This method
-    /// mints no grant.
+    /// `capsule_id`. A `resource_invoke` line reads `token`, then `uri`, then
+    /// `operation`, and calls `authorise_presented` for that capsule id with
+    /// the token, no plan hash, and those two strings. `body` stays unread.
+    /// The principal argument does not choose the caller. This method mints
+    /// no grant.
     pub fn bridge_envelope(
         &mut self,
         line: &str,
@@ -1206,12 +1256,24 @@ impl StandIn {
                     Some(Value::String(text)) => text.as_str(),
                     Some(_) => return Err("invoke token must be a string".to_owned()),
                 };
-                match self.authorise(
+                let uri = match request.get("uri") {
+                    Some(Value::String(text)) => text.as_str(),
+                    Some(_) => return Err("invoke uri must be a string".to_owned()),
+                    None => return Err("invoke uri must be a string".to_owned()),
+                };
+                let operation = match request.get("operation") {
+                    Some(Value::String(text)) => text.as_str(),
+                    Some(_) => return Err("invoke operation must be a string".to_owned()),
+                    None => return Err("invoke operation must be a string".to_owned()),
+                };
+                match self.authorise_presented(
                     Caller::Client {
                         session_id: capsule_id,
                     },
                     token,
                     None,
+                    Some(uri),
+                    Some(operation),
                 ) {
                     Ok(()) => Ok(ok_line(id, Value::Null)),
                     Err((_, message)) => Ok(error_line(id, &message)),
@@ -1956,6 +2018,43 @@ fn plan_accepts(binding: Option<&PlanBinding>, plan_sha256: Option<&str>) -> boo
 /// The one bound-grant refusal (M1 check A15a).
 fn plan_not_bound() -> (u16, String) {
     (403, "grant is not bound to this plan".to_owned())
+}
+
+/// The one resource compare.
+///
+/// After `://`, empty segments and `.` segments are dropped and `..` is
+/// kept. A stored resource whose normalized form ends in `/*` matches a
+/// presented resource that starts with that prefix without the final `*`,
+/// and fails when the suffix contains `..`. Any other stored resource
+/// matches only the normalized presented resource. This function reads no
+/// disk and no principal.
+fn public_resource_covers(stored: &str, presented: &str) -> bool {
+    fn normalize(resource: &str) -> String {
+        let Some(scheme_end) = resource.find("://") else {
+            return resource.to_owned();
+        };
+        let (scheme, rest) = resource.split_at(scheme_end + 3);
+        let mut parts = Vec::new();
+        for segment in rest.split('/') {
+            if segment.is_empty() || segment == "." {
+                continue;
+            }
+            parts.push(segment);
+        }
+        format!("{scheme}{}", parts.join("/"))
+    }
+
+    let stored_norm = normalize(stored);
+    let presented_norm = normalize(presented);
+    if stored_norm.ends_with("/*") {
+        let prefix = &stored_norm[..stored_norm.len() - 1];
+        if !presented_norm.starts_with(prefix) {
+            return false;
+        }
+        let suffix = &presented_norm[prefix.len()..];
+        return !suffix.split('/').any(|segment| segment == "..");
+    }
+    presented_norm == stored_norm
 }
 
 /// The one owner-hash refusal (M1 check A15a). The plan the owner approved is
@@ -10183,6 +10282,441 @@ mod tests {
             "running",
             "",
             "the stand-in did the work: component-2 stays running",
+        );
+    }
+
+    #[test]
+    fn standin_invoke_covers_one_operation() {
+        const PLAN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let shared = Shared::new();
+        let mut standin = StandIn::new();
+        launch_two_running(&shared, &mut standin);
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 is running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 is running",
+        );
+        standin.seed_grant(
+            "req-once",
+            "component-1",
+            "localhost://Public/resident-instances/shared.txt",
+            "read",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-star",
+            "component-2",
+            "localhost://Public/resident-instances/*",
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-exact",
+            "component-1",
+            "localhost://Public/a/../b",
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+
+        let bad_token = r#"{"id":1,"request":{"type":"resource_invoke","token":1}}"#;
+        let err = standin
+            .bridge_envelope(bad_token, "component-1", None)
+            .expect_err("the stand-in did the work: a non-string token is refused");
+        assert_eq!(
+            err, "invoke token must be a string",
+            "the stand-in did the work: the invoke token must be a string"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Live, false),
+            "the stand-in did the work: a bad token leaves req-once live"
+        );
+
+        let missing_uri = r#"{"id":2,"request":{"type":"resource_invoke","token":"req-once","operation":"read"}}"#;
+        let err = standin
+            .bridge_envelope(missing_uri, "component-1", None)
+            .expect_err("the stand-in did the work: a missing uri is refused");
+        assert_eq!(
+            err, "invoke uri must be a string",
+            "the stand-in did the work: the invoke uri must be a string"
+        );
+        let bad_operation = r#"{"id":3,"request":{"type":"resource_invoke","token":"req-once","uri":"localhost://Public/resident-instances/shared.txt","operation":1}}"#;
+        let err = standin
+            .bridge_envelope(bad_operation, "component-1", None)
+            .expect_err("the stand-in did the work: a non-string operation is refused");
+        assert_eq!(
+            err, "invoke operation must be a string",
+            "the stand-in did the work: the invoke operation must be a string"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Live, false),
+            "the stand-in did the work: a bad operation leaves req-once live"
+        );
+
+        let owner = r#"{"id":4,"request":{"type":"resource_invoke","uri":"localhost://Public/resident-instances/shared.txt","operation":"read","token":"req-once"}}"#;
+        let denied = standin
+            .bridge_envelope(owner, "component-2", None)
+            .expect("the stand-in did the work: the sibling invoke is an envelope");
+        assert_bridge_error(
+            &bridge_value(&denied),
+            4,
+            "wrong capsule: expected component-1, got component-2",
+            "the sibling invoke spends nothing",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Live, false),
+            "the stand-in did the work: the sibling invoke leaves req-once live"
+        );
+
+        let write = r#"{"id":4,"request":{"type":"resource_invoke","uri":"localhost://Public/resident-instances/shared.txt","operation":"write","token":"req-once"}}"#;
+        let denied = standin
+            .bridge_envelope(write, "component-1", None)
+            .expect("the stand-in did the work: a write invoke is an envelope");
+        assert_bridge_error(
+            &bridge_value(&denied),
+            4,
+            "wrong action: expected read, got write",
+            "write is the wrong action",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Live, false),
+            "the stand-in did the work: the wrong action leaves req-once live"
+        );
+        let write_upper = r#"{"id":4,"request":{"type":"resource_invoke","uri":"localhost://Public/resident-instances/shared.txt","operation":"Write","token":"req-once"}}"#;
+        let denied = standin
+            .bridge_envelope(write_upper, "component-1", None)
+            .expect("the stand-in did the work: a Write invoke is an envelope");
+        assert_bridge_error(
+            &bridge_value(&denied),
+            4,
+            "wrong action: expected read, got write",
+            "Write lowercases to the same wrong action",
+        );
+        let other = r#"{"id":4,"request":{"type":"resource_invoke","uri":"localhost://Public/other/shared.txt","operation":"read","token":"req-once"}}"#;
+        let denied = standin
+            .bridge_envelope(other, "component-1", None)
+            .expect("the stand-in did the work: another file is an envelope");
+        assert_bridge_error(
+            &bridge_value(&denied),
+            4,
+            "wrong resource: expected localhost://Public/resident-instances/shared.txt, got localhost://Public/other/shared.txt",
+            "another file is the wrong resource",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Live, false),
+            "the stand-in did the work: the wrong resource leaves req-once live"
+        );
+
+        let dotted = r#"{"id":4,"request":{"type":"resource_invoke","uri":"localhost://Public/resident-instances/./shared.txt","operation":"read","token":"req-once"}}"#;
+        let spent = standin
+            .bridge_envelope(dotted, "component-1", None)
+            .expect("the stand-in did the work: the dotted uri is an envelope");
+        assert_bridge_ok(
+            &bridge_value(&spent),
+            4,
+            Value::Null,
+            "the dotted uri returns data null",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: the dotted uri spends req-once"
+        );
+        let again = standin
+            .bridge_envelope(dotted, "component-1", None)
+            .expect("the stand-in did the work: the second dotted uri is an envelope");
+        assert_bridge_error(
+            &bridge_value(&again),
+            4,
+            "grant is not live: Exhausted",
+            "the second dotted uri finds the grant exhausted",
+        );
+
+        let star = r#"{"id":5,"request":{"type":"resource_invoke","uri":"localhost://Public/resident-instances/shared.txt","operation":"read","token":"req-star"}}"#;
+        let covered = standin
+            .bridge_envelope(star, "component-2", None)
+            .expect("the stand-in did the work: the star invoke is an envelope");
+        assert_bridge_ok(
+            &bridge_value(&covered),
+            5,
+            Value::Null,
+            "the star prefix returns data null",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-star"),
+            (Life::Live, false),
+            "the stand-in did the work: the star invoke leaves req-star live"
+        );
+        let dotdot = r#"{"id":5,"request":{"type":"resource_invoke","uri":"localhost://Public/resident-instances/nested/../shared.txt","operation":"read","token":"req-star"}}"#;
+        let denied = standin
+            .bridge_envelope(dotdot, "component-2", None)
+            .expect("the stand-in did the work: a dotdot suffix is an envelope");
+        assert_bridge_error(
+            &bridge_value(&denied),
+            5,
+            "wrong resource: expected localhost://Public/resident-instances/*, got localhost://Public/resident-instances/nested/../shared.txt",
+            "a dotdot suffix is outside the star",
+        );
+        let extra = r#"{"id":5,"request":{"type":"resource_invoke","uri":"localhost://Public/resident-instances-extra/file","operation":"read","token":"req-star"}}"#;
+        let denied = standin
+            .bridge_envelope(extra, "component-2", None)
+            .expect("the stand-in did the work: the extra prefix is an envelope");
+        assert_bridge_error(
+            &bridge_value(&denied),
+            5,
+            "wrong resource: expected localhost://Public/resident-instances/*, got localhost://Public/resident-instances-extra/file",
+            "the text before the slash is not the prefix",
+        );
+        let other_star = r#"{"id":5,"request":{"type":"resource_invoke","uri":"localhost://Public/other/shared.txt","operation":"read","token":"req-star"}}"#;
+        let denied = standin
+            .bridge_envelope(other_star, "component-2", None)
+            .expect("the stand-in did the work: another star file is an envelope");
+        assert_bridge_error(
+            &bridge_value(&denied),
+            5,
+            "wrong resource: expected localhost://Public/resident-instances/*, got localhost://Public/other/shared.txt",
+            "another file is outside the star",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-star"),
+            (Life::Live, false),
+            "the stand-in did the work: the star mismatches leave req-star live"
+        );
+
+        let exact = r#"{"id":6,"request":{"type":"resource_invoke","uri":"localhost://Public/a/../b","operation":"read","token":"req-exact"}}"#;
+        let kept = standin
+            .bridge_envelope(exact, "component-1", None)
+            .expect("the stand-in did the work: the exact dotdot uri is an envelope");
+        assert_bridge_ok(
+            &bridge_value(&kept),
+            6,
+            Value::Null,
+            "the stored dotdot uri returns data null",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-exact"),
+            (Life::Live, false),
+            "the stand-in did the work: the exact uri leaves req-exact live"
+        );
+        let collapsed = r#"{"id":7,"request":{"type":"resource_invoke","uri":"localhost://Public/b","operation":"read","token":"req-exact"}}"#;
+        let denied = standin
+            .bridge_envelope(collapsed, "component-1", None)
+            .expect("the stand-in did the work: the collapsed uri is an envelope");
+        assert_bridge_error(
+            &bridge_value(&denied),
+            7,
+            "wrong resource: expected localhost://Public/a/../b, got localhost://Public/b",
+            "a stored dotdot segment stays",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-exact"),
+            (Life::Live, false),
+            "the stand-in did the work: the collapsed uri leaves req-exact live"
+        );
+
+        let requested = standin
+            .post_capability_request(
+                Caller::Client {
+                    session_id: "component-1",
+                },
+                &json!({
+                    "resource": "localhost://Public/resident-instances/shared.txt",
+                    "action": "read",
+                    "reason": "read shared",
+                    "plan": PLAN,
+                }),
+            )
+            .expect("the stand-in did the work: the capsule request is pending");
+        assert_eq!(
+            requested,
+            json!({"status":"pending","request_id":"request-1"}),
+            "the stand-in did the work: the request id is request-1"
+        );
+        let granted = standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({
+                    "request_id": "request-1",
+                    "duration": "once",
+                    "rationale": "grant the plan",
+                    "plan_sha256": PLAN,
+                }),
+            )
+            .expect("the stand-in did the work: the shell grants request-1");
+        assert_eq!(
+            granted,
+            json!({ "success": true }),
+            "the stand-in did the work: the shell grant is success true"
+        );
+        let bound = r#"{"id":8,"request":{"type":"resource_invoke","uri":"localhost://Public/resident-instances/shared.txt","operation":"read","token":"request-1"}}"#;
+        let denied = standin
+            .bridge_envelope(bound, "component-1", None)
+            .expect("the stand-in did the work: the bound invoke is an envelope");
+        assert_bridge_error(
+            &bridge_value(&denied),
+            8,
+            "grant is not bound to this plan",
+            "a matching uri still leaves the bound grant live",
+        );
+        assert_eq!(
+            grant_record(&standin, "request-1"),
+            (Life::Live, false),
+            "the stand-in did the work: the unbound invoke leaves request-1 live"
+        );
+
+        let mut fresh = StandIn::new();
+        launch_two_running(&shared, &mut fresh);
+        fresh.seed_grant(
+            "req-val",
+            "component-1",
+            "localhost://Public/resident-instances/shared.txt",
+            "read",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        let valid = fresh
+            .post_capability_validate(
+                Caller::Client {
+                    session_id: "component-1",
+                },
+                &json!({ "request_id": "req-val" }),
+            )
+            .expect("the stand-in did the work: validate of req-val succeeds");
+        assert_eq!(
+            valid,
+            json!({ "valid": true }),
+            "the stand-in did the work: validate of request_id is valid true"
+        );
+        assert_eq!(
+            grant_record(&fresh, "req-val"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: validate spends the once grant"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 stays running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running",
+        );
+    }
+
+    #[test]
+    fn standin_public_resource_covers_matches_runtime() {
+        assert!(
+            public_resource_covers(
+                "localhost://Public/resident-instances/shared.txt",
+                "localhost://Public//resident-instances///shared.txt",
+            ),
+            "the stand-in did the work: empty segments are dropped"
+        );
+        assert!(
+            public_resource_covers(
+                "localhost://Public/resident-instances/shared.txt",
+                "localhost://Public/./resident-instances/shared.txt",
+            ),
+            "the stand-in did the work: a dot segment is dropped"
+        );
+        assert!(
+            public_resource_covers("localhost://Public/a/../b", "localhost://Public/a/../b"),
+            "the stand-in did the work: a stored dotdot segment matches itself"
+        );
+        assert!(
+            !public_resource_covers("localhost://Public/a/../b", "localhost://Public/b"),
+            "the stand-in did the work: a stored dotdot segment does not collapse"
+        );
+        assert!(
+            public_resource_covers(
+                "localhost://Public/resident-instances/*",
+                "localhost://Public/resident-instances/nested/file",
+            ),
+            "the stand-in did the work: a star matches one path under the prefix"
+        );
+        assert!(
+            !public_resource_covers(
+                "localhost://Public/resident-instances/*",
+                "localhost://Public/resident-instances/nested/../file",
+            ),
+            "the stand-in did the work: a star rejects a dotdot suffix"
+        );
+        assert!(
+            !public_resource_covers(
+                "localhost://Public/resident-instances/*",
+                "localhost://Public/resident-instances-extra/file",
+            ),
+            "the stand-in did the work: a star keeps the slash before the star"
+        );
+        assert!(
+            public_resource_covers("elastos://peer/*", "elastos://peer/one"),
+            "the stand-in did the work: an elastos star matches one path"
+        );
+        assert!(
+            !public_resource_covers("elastos://peer/*", "elastos://did/one"),
+            "the stand-in did the work: an elastos star stays on its host"
+        );
+
+        let mut standin = StandIn::new();
+        standin.seed_grant(
+            "req-half",
+            "component-1",
+            "localhost://Public/resident-instances/shared.txt",
+            "read",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        let half = standin.authorise_presented(
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "req-half",
+            None,
+            Some("localhost://Public/resident-instances/shared.txt"),
+            None,
+        );
+        assert!(
+            matches!(
+                half,
+                Err((400, ref reason)) if reason == "invoke presentation is incomplete"
+            ),
+            "the stand-in did the work: a half presentation is incomplete: {half:?}"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-half"),
+            (Life::Live, false),
+            "the stand-in did the work: a half presentation leaves the once grant live"
         );
     }
 }

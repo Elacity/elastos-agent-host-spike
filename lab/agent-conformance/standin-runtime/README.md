@@ -67,6 +67,8 @@ A request may carry `plan`, the `sha256` that `plan_approval::preview` returned;
 
 `StandIn::bridge_envelope` is the one hostcall. A capability line calls `post_capability_request` for the capsule id. An invoke line calls `authorise` for that capsule id with no plan hash. The principal argument does not choose the caller. A bound grant stays live. Two-capsule-run passes the line, the capsule id, and the principal, and this lane does not run the component bytes. A PASS gives the Runtime no A3 credit.
 
+A `resource_invoke` presents the uri and the operation to `authorise_presented`. `authorise` still passes no presented resource. A mismatch is `wrong action` or `wrong resource` and spends nothing. A stored `/*` resource matches one path under that prefix and rejects a `..` suffix. A `.` segment is dropped and a `..` segment in an exact resource is kept. `post_capability_validate` with only `request_id` stays the existing use route. There is no protected-path branch on this check. A PASS gives the Runtime no A6 credit.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.
