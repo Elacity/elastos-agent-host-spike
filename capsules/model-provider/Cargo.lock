@@ -975,6 +975,7 @@ dependencies = [
  "libc",
  "rand 0.8.8",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
