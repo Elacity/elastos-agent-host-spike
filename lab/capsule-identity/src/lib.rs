@@ -1143,9 +1143,11 @@ fn file_root(content: &[u8]) -> (Vec<u8>, u64) {
 /// smallest `d` with `MAX_FILE_LINKS^d` at least the leaf count; a file of
 /// 175 leaves is a root of two depth-1 nodes, 174 leaves then one leaf, and a
 /// level of exactly 174 nodes is still one group, so its file node is the
-/// root. The root's Tsize is its block's length plus its children's. A file of one
-/// leaf is that leaf. A file with no leaves is never here: its callers
-/// refuse it.
+/// root. A file of exactly 30276 full leaves (174 squared, every leaf 262144
+/// bytes) is two levels: 174 depth-1 nodes, each over 174 leaves, then one
+/// root over those nodes. The root's Tsize is its block's length plus its
+/// children's. A file of one leaf is that leaf. A file with no leaves is
+/// never here: its callers refuse it.
 fn file_from_digests(leaves: impl Iterator<Item = ([u8; 32], u64)>) -> (Vec<u8>, u64) {
     let mut level: Vec<FileTreeNode> = leaves
         .map(|(digest, filesize)| {

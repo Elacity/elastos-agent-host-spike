@@ -104,7 +104,12 @@ To recompute a lab CID by hand:
    those 174 nodes, and one over that node of one link), then the root's two
    children. `file_past_174_squared_leaves_keeps_a_third_tree_level` pins that
    file (`THREE_LEVEL_FILE_LAB_CID`) and catches F-CI72a (the level loop stops
-   after two passes).
+   after two passes). A file of exactly 30276 leaves, every one a full 262144
+   bytes (7936671744 bytes), is two levels: 174 depth-1 nodes, each over 174
+   leaves, then one root over those 174 nodes.
+   `exactly_174_squared_leaves_stay_two_levels` pins that file
+   (`SQUARE_174_LAB_CID`) and catches F-CI95a (the level loop breaks at a
+   level of 174 nodes whose first child holds more than 262144 bytes).
 4. Each path part but the last is a **directory**: `browser/app.js` is a
    directory `browser` with a link named `app.js`. The root is the directory
    of the bundle's entries. A path part that starts with `.` is refused as
@@ -381,6 +386,7 @@ rules and not from the Rust code, in
 | A file of exactly 174 full leaves, 45613056 bytes (174 chunks of 262144 bytes), is one depth-1 file node that names every leaf | `a_file_of_174_full_leaves_has_the_pinned_cid` | F-CI92a (a splitter drops one full chunk when the length is 174 times 262144) |
 | The file tree's depth is the smallest `d` with `174^d` at least the leaf count: each level groups up to 174 children, left to right, each group full before the next starts, one file node per group, and a group of one child is a one-link node | `file_past_174_leaves_keeps_a_second_tree_level`, `file_past_174_squared_leaves_keeps_a_third_tree_level` | F-CI18e (the level loop runs only once), F-CI48e (the limit is 175), F-CI76a (a one-child group linked directly), F-CI76b (a child's Tsize as its blocksize), F-CI72a (the level loop stops after two passes) |
 | A file of 30277 leaves needs a third tree level: 175 depth-1 nodes, then 2, then the root's two children; 30276 full leaves still finish in two passes | `file_past_174_squared_leaves_keeps_a_third_tree_level` | F-CI72a (the level loop stops after two passes) |
+| A file of exactly 30276 full leaves, 7936671744 bytes, is two levels: 174 depth-1 nodes, each over 174 leaves, then one root over those nodes | `exactly_174_squared_leaves_stay_two_levels` | F-CI95a (the level loop breaks at a level of 174 nodes whose first child holds more than 262144 bytes) |
 | The listing call names a file of at most one leaf; a listed file over one chunk is refused and named from its bytes instead | `listed_file_over_the_chunk_limit_is_refused`, `listed_file_over_one_leaf_names_the_bytes_call` | F-CI47c (`encode_listed_files` has no size refusal) |
 | Links sorted by name bytes | `lab_cid_matches_the_pinned_value_for_each_fixture`, `lab_cid_does_not_depend_on_listing_order` | F-CI18f (reverse), F-CI1a (no sort) |
 | Directory type 1 | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18g (5) |
@@ -437,8 +443,8 @@ whose 30277 leaves are leaf `i`'s SHA-256 of `i` as 8 little-endian bytes,
 30276 of 262144 bytes and one of 1 byte (7936671745 bytes), is
 `bafybeig3p6lebveuwcqolitt4bzbmr2mbidjzw3tqzmq6vrc5otgrp5bea`, first printed
 by README's Python rule before any Rust code named it. The 30276-leaf file of
-262144-byte chunks still finishes in two passes, with another CID, and is not
-pinned.
+262144-byte chunks, 7936671744 bytes, still finishes in two passes, with
+another CID, and task 095 pins it as `SQUARE_174_LAB_CID`.
 Task 077 adds three more, built in a temp dir and never committed; the one
 helper measures the name it lengthens, so no length is hardcoded:
 `content-sample` plus empty files whose links estimate is exactly 262144 (one
@@ -2121,7 +2127,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 300 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 301 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a

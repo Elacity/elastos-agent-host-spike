@@ -489,13 +489,55 @@ fn file_past_174_squared_leaves_keeps_a_third_tree_level() {
     assert_eq!(pin.len(), 59, "{pin}");
 
     // 30276 full leaves still finish in two passes, with another CID. That
-    // CID is not pinned.
+    // CID is pinned by `exactly_174_squared_leaves_stay_two_levels`.
     let mut full = leaves;
     full.pop();
     assert_eq!(full.len(), 30_276, "the two-pass file's leaf count");
     let two_levels = encode_chunked_files(&[chunked(full)])
         .unwrap_or_else(|refusal| panic!("30276 leaves: {refusal}"));
     assert_ne!(two_levels.to_string(), pin, "30276 leaves has another CID");
+}
+
+#[test]
+fn exactly_174_squared_leaves_stay_two_levels() {
+    // 30276 leaves, every one a full 262144 bytes (7936671744 bytes): 174
+    // squared. Two passes: 174 depth-1 nodes, each over 174 leaves, then one
+    // root over those 174 nodes. The pin was first printed by README's Python
+    // rule through the same driver; Kubo is not run, because the file is
+    // 7936671744 bytes and is never written.
+    let mut leaves = three_level_leaves();
+    leaves.pop();
+    assert_eq!(leaves.len(), 174 * 174, "the file's leaf count");
+    assert_eq!(
+        leaves.iter().map(|(_, size)| *size).sum::<u64>(),
+        7_936_671_744,
+        "the file's size"
+    );
+    assert!(
+        leaves.iter().all(|(_, size)| *size == 262_144),
+        "every leaf is full"
+    );
+    let pin = SQUARE_174_LAB_CID;
+    let python = readme_python_square_file().unwrap_or_else(|reason| panic!("{reason}"));
+    assert_eq!(python, pin, "README's Python rule against the pin");
+    let named = encode_chunked_files(&[chunked(leaves)])
+        .unwrap_or_else(|refusal| panic!("30276 leaves: {refusal}"));
+    assert_eq!(
+        named.to_string(),
+        pin,
+        "encode_chunked_files against the pin"
+    );
+    assert!(pin.starts_with("bafybei"), "{pin}");
+    assert_eq!(pin.len(), 59, "{pin}");
+    for other in [
+        THREE_LEVEL_FILE_LAB_CID,
+        SECOND_LEVEL_FILE_LAB_CID,
+        EXACT_174_LEAF_LAB_CID,
+        TWO_FULL_CHUNK_LAB_CID,
+        FULL_174_LEAF_LAB_CID,
+    ] {
+        assert_ne!(pin, other, "the square-leaf pin is another bundle's");
+    }
 }
 
 #[test]

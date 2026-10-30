@@ -113,6 +113,12 @@ pub const FULL_174_LEAF_LAB_CID: &str =
 /// README's Python rule.
 pub const THREE_LEVEL_FILE_LAB_CID: &str =
     "bafybeig3p6lebveuwcqolitt4bzbmr2mbidjzw3tqzmq6vrc5otgrp5bea";
+/// The lab CID of one file `sample.example` whose 30276 leaves are leaf `i`'s
+/// SHA-256 of `i` as 8 little-endian bytes, every one a full 262144 bytes
+/// (7936671744 bytes): 174 depth-1 nodes, each over 174 leaves, then one root
+/// over those nodes. Built in memory and never written; task 095 printed it
+/// first with README's Python rule.
+pub const SQUARE_174_LAB_CID: &str = "bafybeibzne46afh5ubanikwvmcnboq24qthjyalxzjopvgnxdusbgma5xa";
 /// content-sample with one more file, `core/big.bin`, holding
 /// [`big_bin_bytes`]: a file root over three raw leaves (262144, 262144 and
 /// 75712 bytes) one directory down, so its Tsize reaches the root through
@@ -1042,18 +1048,28 @@ pub fn readme_python_three_level_file() -> Result<String, String> {
     run_python(&format!("{block}{THREE_LEVEL_FILE_DRIVER}"), b"")
 }
 
-/// The driver run after README's block for task 072's file: it builds its
-/// 30277 leaves, calls the block's `directory` on one file at
-/// `sample.example`, and prints the answer with the block's `printed`. It
-/// holds no grouping, varint, CID prefix or base32 of its own.
+/// README's Python rule with [`THREE_LEVEL_FILE_DRIVER`] on task 095's file:
+/// one `python3 -I` run in a fresh, empty folder over the 30276-leaf prefix
+/// of task 072's leaves, every one a full 262144 bytes, its one line.
+pub fn readme_python_square_file() -> Result<String, String> {
+    let block = readme_python_block()?;
+    run_python(&format!("{block}{THREE_LEVEL_FILE_DRIVER}"), b"30276")
+}
+
+/// The driver run after README's block for task 072's file: it reads one
+/// integer from stdin (30277 when stdin is empty) and builds that many
+/// leaves, calls the block's `directory` on one file at `sample.example`,
+/// and prints the answer with the block's `printed`. It holds no grouping,
+/// varint, CID prefix or base32 of its own.
 pub const THREE_LEVEL_FILE_DRIVER: &str = r#"
 import hashlib, os, sys
 if not sys.flags.isolated:
     sys.exit("the driver must run under python3 -I")
 if os.listdir("."):
     sys.exit("the driver must run in a fresh, empty folder")
+count = int(sys.stdin.read() or "30277")
 leaves = []
-for index in range(30277):
+for index in range(count):
     size = 262144 if index < 30276 else 1
     leaves.append((hashlib.sha256(index.to_bytes(8, "little")).digest(), size))
 print(printed(directory({"sample.example": leaves})[0]))
