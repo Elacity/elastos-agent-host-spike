@@ -71,6 +71,7 @@ pub(crate) struct GrantRecord {
     expiry: Option<u64>,
     effect_limit: Option<u64>,
     effects: u64,
+    parent: Option<Handle>,
 }
 
 /// The binding copied out after a successful check.
@@ -106,6 +107,7 @@ pub enum Refuse {
     HomeMint,
     Expired,
     EffectLimit,
+    IssuingLimit,
 }
 
 impl std::fmt::Display for Refuse {
@@ -124,6 +126,7 @@ impl std::fmt::Display for Refuse {
             Refuse::HomeMint => "home does not mint an app capability",
             Refuse::Expired => "grant has expired",
             Refuse::EffectLimit => "effect limit is reached",
+            Refuse::IssuingLimit => "effect limit stays on the issuing grant",
         })
     }
 }
@@ -145,6 +148,7 @@ pub struct Verifier {
     ledger: std::sync::Mutex<ledger::Ledger>,
     pending_once: bool,
     pending_expiry: Option<u64>,
+    pending_parent: Option<Handle>,
     verifier_now: u64,
 }
 
@@ -159,6 +163,7 @@ impl Verifier {
             ledger: std::sync::Mutex::new(ledger::Ledger::new()),
             pending_once: false,
             pending_expiry: None,
+            pending_parent: None,
             verifier_now: 0,
         }
     }
@@ -192,6 +197,7 @@ impl Verifier {
     ) -> Result<Handle, Refuse> {
         let once = self.pending_once;
         let expiry = self.pending_expiry.take();
+        let parent = self.pending_parent.take();
         self.pending_once = false;
         let record = self
             .registry
@@ -215,6 +221,7 @@ impl Verifier {
                 expiry,
                 effect_limit: None,
                 effects: 0,
+                parent,
             },
         );
         Ok(handle)
@@ -283,6 +290,9 @@ impl Verifier {
 
     pub fn set_effect_limit(&mut self, handle: Handle, limit: u64) -> Result<(), Refuse> {
         let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+        if grant.parent.is_some() {
+            return Err(Refuse::IssuingLimit);
+        }
         grant.effect_limit = Some(limit);
         Ok(())
     }
