@@ -8,6 +8,11 @@
 - PR #730 (task 035), merge 1503ac6f4: Verdict: FOLLOWUP, and PR #757 (task 036), merge b7c613a10: Verdict: PASS (added by task 041; runner at 9bd839491: F-CI35 `summary: 3 CAUGHT of 3`, F-CI36 `summary: 2 CAUGHT of 2`)
 - PR #782 (task 037), head dd84ef2fe: Verdict: PASS, and PR #842 (task 044), head 1421a5ec6: Verdict: FOLLOWUP (added by task 046; runner at c59703a06: F-CI37 `summary: 3 CAUGHT of 3`, F-CI44 `summary: 3 CAUGHT of 3`, F-CI35 `summary: 3 CAUGHT of 3`)
 
+Scope correction (29 Oct, task 059): tasks 037 through 049 (PRs #782 through #894) landed on one reviewer, so B1
+and naming credit stay uncredited until a second reviewer of another family passes. This migration does not itself
+clear that hold. Acceptance of the current candidate requires two independent non-author review verdicts, each
+naming its reviewer identity and the tested head; an unavailable reviewer remains a pending gate.
+
 Why: Flint's 27 Oct 12:06 note (Sasha's "nothing idle", to reopen and close S1 after
 Rong's review rong-20261027-1010) asks the claude and cursor pair to re-read three merges
 of this lane that had Codex as their only reviewer. cx-wasm-audit declined the ask at

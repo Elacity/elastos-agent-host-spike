@@ -16,12 +16,21 @@ use capsule_identity::{
 };
 use common::*;
 use ed25519_dalek::{Signature, Verifier};
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+use std::process::Command;
 
 /// How many pinned bundles the check covers: seven fixtures, the recipe,
 /// the three bundles built for the profile tests, the photo stand-in
-/// consumer copy (task 047) and the two bundles with a file over one leaf
-/// (task 048).
-const PINNED_BUNDLES: usize = 14;
+/// consumer copy (task 047), the three bundles with a file over one leaf
+/// (tasks 048 and 076), the two-full-chunk, exactly-174-leaf and
+/// 174-full-leaf bundles (tasks 085, 086 and 092), the three HAMT-threshold
+/// bundles (task 077), the shard with a file root (task 082), the two
+/// shared-prefix bundles (task 071), the 127-byte file bundle (task 091),
+/// the exact 262144-byte basic block bundle (task 093), the 128-byte
+/// file bundle (task 094), the 16384-byte file bundle (task 097) and the
+/// nine-byte-name shard (task 098).
+const PINNED_BUNDLES: usize = 29;
 
 /// How many committed fixtures have a pin: all but wc001-core.
 const PINNED_FIXTURES: usize = 7;
@@ -116,6 +125,21 @@ fn pinned_bundles() -> Vec<Pinned> {
         entries: content_sample_with(|entries| entries.push(entry("empty", b""))),
     });
     bundles.push(Pinned {
+        what: "127-byte file bundle".to_owned(),
+        pin: VARINT_127_LAB_CID,
+        entries: content_sample_with(|entries| entries.push(entry("b127", &[0; 127]))),
+    });
+    bundles.push(Pinned {
+        what: "128-byte file bundle".to_owned(),
+        pin: VARINT_128_LAB_CID,
+        entries: content_sample_with(|entries| entries.push(entry("b128", &[0; 128]))),
+    });
+    bundles.push(Pinned {
+        what: "16384-byte file bundle".to_owned(),
+        pin: VARINT_16384_LAB_CID,
+        entries: content_sample_with(|entries| entries.push(entry("b16384", &[0; 16384]))),
+    });
+    bundles.push(Pinned {
         what: "long UTF-8 name bundle".to_owned(),
         pin: LONG_UTF8_NAME_LAB_CID,
         entries: content_sample_with(|entries| {
@@ -142,6 +166,87 @@ fn pinned_bundles() -> Vec<Pinned> {
         what: "three-leaf nested file bundle".to_owned(),
         pin: THREE_LEAF_NESTED_LAB_CID,
         entries: content_sample_with(|entries| entries.push(entry(BIG_BIN, &big_bin_bytes()))),
+    });
+    bundles.push(Pinned {
+        what: "second-level file bundle".to_owned(),
+        pin: SECOND_LEVEL_FILE_LAB_CID,
+        entries: content_sample_with(|entries| {
+            let sample = entries
+                .iter_mut()
+                .find(|entry| entry.path == "sample.example")
+                .expect("content-sample holds sample.example");
+            sample.content = vec![0; 45_613_057];
+        }),
+    });
+    bundles.push(Pinned {
+        what: "two-full-chunk file bundle".to_owned(),
+        pin: TWO_FULL_CHUNK_LAB_CID,
+        entries: content_sample_with(|entries| {
+            let sample = entries
+                .iter_mut()
+                .find(|entry| entry.path == "sample.example")
+                .expect("content-sample holds sample.example");
+            sample.content = vec![0; 524_288];
+        }),
+    });
+    bundles.push(Pinned {
+        what: "exactly 174-leaf file bundle".to_owned(),
+        pin: EXACT_174_LEAF_LAB_CID,
+        entries: content_sample_with(|entries| {
+            let sample = entries
+                .iter_mut()
+                .find(|entry| entry.path == "sample.example")
+                .expect("content-sample holds sample.example");
+            sample.content = vec![0; 45_350_913];
+        }),
+    });
+    bundles.push(Pinned {
+        what: "174-full-leaf file bundle".to_owned(),
+        pin: FULL_174_LEAF_LAB_CID,
+        entries: content_sample_with(|entries| {
+            let sample = entries
+                .iter_mut()
+                .find(|entry| entry.path == "sample.example")
+                .expect("content-sample holds sample.example");
+            sample.content = vec![0; 45_613_056];
+        }),
+    });
+    bundles.push(Pinned {
+        what: "directory at the HAMT threshold".to_owned(),
+        pin: HAMT_THRESHOLD_LAB_CID,
+        entries: flat_bundle_at("", 262_144).0,
+    });
+    bundles.push(Pinned {
+        what: "directory over the HAMT threshold".to_owned(),
+        pin: HAMT_OVER_THRESHOLD_LAB_CID,
+        entries: flat_bundle_at("", 262_145).0,
+    });
+    bundles.push(Pinned {
+        what: "child directory over the HAMT threshold".to_owned(),
+        pin: HAMT_CHILD_LAB_CID,
+        entries: flat_bundle_at("photos/", 262_145).0,
+    });
+    bundles.push(Pinned {
+        what: "shard with a file root".to_owned(),
+        pin: FILE_ROOT_SHARD_LAB_CID,
+        entries: shard_with_a_file_root().0,
+    });
+    bundles.push(Pinned {
+        what: "nine-byte-name shard".to_owned(),
+        pin: NINE_BYTE_NAME_LAB_CID,
+        entries: nine_byte_shard(),
+    });
+    for row in shared_prefix_rows() {
+        bundles.push(Pinned {
+            what: format!("shared-prefix bundle at link {}", row.link),
+            pin: row.pin,
+            entries: shared_prefix_bundle(&row),
+        });
+    }
+    bundles.push(Pinned {
+        what: "exact 262144-byte basic block".to_owned(),
+        pin: EXACT_BASIC_BLOCK_LAB_CID,
+        entries: three_byte_bundle(5_575),
     });
     bundles
 }
@@ -195,6 +300,16 @@ fn readme_python_recomputes_every_lab_cid_pin() {
         );
     }
     assert_eq!(README_PYTHON_DRIVER.matches("lab_cid(").count(), 1);
+
+    // README names the count this test checks, in the Python sentences and
+    // in the Kubo cross-check, and the three say one count.
+    let counts = readme_pinned_bundle_counts().unwrap_or_else(|reason| panic!("{reason}"));
+    for count in counts {
+        assert_eq!(
+            count, PINNED_BUNDLES,
+            "README names a count of pinned bundles that this test does not check"
+        );
+    }
 
     // Python, the pin and the Rust encoder agree on every pinned bundle.
     let bundles = pinned_bundles();
@@ -397,4 +512,245 @@ fn readme_python_matches_the_package_record_bytes() {
     }
     assert_eq!(checked, SIGNED_RECORDS, "checked {checked} records");
     assert_eq!(python.len(), signed.len());
+}
+
+/// The flags one hash-only import adds to `add`: the profile settings from
+/// the provider's `ADD_OPTIONS`, offline, hash only, and no wrapping
+/// directory, so the printed value is the bundle root's own CID.
+const KUBO_ADD_FLAGS: [&str; 25] = [
+    "add",
+    "--offline",
+    "--only-hash",
+    "--recursive=true",
+    "--wrap-with-directory=false",
+    "--pin=false",
+    "--cid-version=1",
+    "--hash=sha2-256",
+    "--raw-leaves=true",
+    "--chunker=size-262144",
+    "--trickle=false",
+    "--max-file-links=174",
+    "--max-directory-links=0",
+    "--max-hamt-fanout=256",
+    "--inline=false",
+    "--inline-limit=32",
+    "--nocopy=false",
+    "--fscache=false",
+    "--preserve-mode=false",
+    "--preserve-mtime=false",
+    "--empty-dirs=false",
+    "--progress=false",
+    "--fast-provide-root=false",
+    "--fast-provide-wait=false",
+    "--quieter=true",
+];
+
+/// One `kubo` command with `IPFS_PATH` at `repo`, returning its stdout, or a
+/// refusal that names the command, its exit status or signal, and its stderr.
+fn kubo_run(kubo: &Path, repo: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new(kubo)
+        .args(args)
+        .env("IPFS_PATH", repo)
+        .output()
+        .map_err(|error| format!("{} {args:?} could not run: {error}", kubo.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "{} {args:?} failed with {}: {stderr}",
+            kubo.display(),
+            output.status
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// One offline hash-only import of every pinned bundle, in a fresh temp repo
+/// that takes the provider's `Import` HAMT values through `kubo config`, so
+/// the repo's config and its node key are never read. Each bundle is its own
+/// `add` in its own temp folder.
+fn kubo_roots(kubo: &Path) -> Result<Vec<String>, String> {
+    let work = temp_dir();
+    let repo = work.path().join("repo");
+    kubo_run(kubo, &repo, &["init", "--empty-repo"])?;
+    const IMPORT: &str = concat!(
+        r#"{"CidVersion":1,"UnixFSRawLeaves":true,"UnixFSChunker":"size-262144","#,
+        r#""HashFunction":"sha2-256","UnixFSFileMaxLinks":174,"#,
+        r#""UnixFSDirectoryMaxLinks":0,"UnixFSHAMTDirectoryMaxFanout":256,"#,
+        r#""UnixFSHAMTDirectorySizeThreshold":"256KiB","#,
+        r#""UnixFSHAMTDirectorySizeEstimation":"links","UnixFSDAGLayout":"balanced","#,
+        r#""FastProvideRoot":false,"FastProvideWait":false}"#
+    );
+    for (key, value) in [
+        ("Import", IMPORT),
+        ("Bootstrap", "[]"),
+        ("Routing.Type", r#""none""#),
+    ] {
+        kubo_run(kubo, &repo, &["config", "--json", key, value])?;
+    }
+    let mut roots = Vec::new();
+    for bundle in pinned_bundles() {
+        let tree = temp_dir();
+        for entry in &bundle.entries {
+            write_file(tree.path(), &entry.path, &entry.content);
+        }
+        let mut args: Vec<String> = KUBO_ADD_FLAGS
+            .iter()
+            .map(|flag| (*flag).to_owned())
+            .collect();
+        args.push(tree.path().display().to_string());
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let printed = kubo_run(kubo, &repo, &arg_refs)?;
+        let root = printed.trim().to_owned();
+        if root.is_empty() {
+            return Err(format!("{}: add printed no CID", bundle.what));
+        }
+        roots.push(root);
+    }
+    Ok(roots)
+}
+
+/// The third implementation, run only when asked. Set `LAB_KUBO` to a Kubo
+/// v0.40.1 binary and run:
+///
+/// ```text
+/// LAB_KUBO=<kubo> cargo test --offline --locked \
+///   --manifest-path lab/capsule-identity/Cargo.toml \
+///   --test cross_implementation kubo_hash_only_import -- --ignored
+/// ```
+///
+/// Every pinned bundle's Kubo root, its pin and `encode_entries` must be one
+/// value, and the test asserts it checked all 23.
+#[test]
+#[ignore = "needs LAB_KUBO naming a Kubo v0.40.1 binary"]
+fn kubo_hash_only_import_prints_every_lab_cid_pin() {
+    let kubo = kubo_binary().unwrap_or_else(|reason| panic!("{reason}"));
+    let roots = kubo_roots(&kubo).unwrap_or_else(|reason| panic!("{reason}"));
+    let bundles = pinned_bundles();
+    assert_eq!(roots.len(), bundles.len(), "one root per bundle");
+    let mut checked = 0;
+    for (bundle, root) in bundles.iter().zip(&roots) {
+        let rust = encode_entries(&bundle.entries)
+            .unwrap_or_else(|refusal| panic!("{}: {refusal}", bundle.what))
+            .to_string();
+        println!(
+            "{}: Kubo {root}, pin {}, encode_entries {rust}",
+            bundle.what, bundle.pin
+        );
+        assert_eq!(
+            (root.as_str(), rust.as_str()),
+            (bundle.pin, bundle.pin),
+            "{}: (Kubo, encode_entries) against its pin",
+            bundle.what
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, PINNED_BUNDLES, "checked {checked} bundles");
+}
+
+/// The helper's setup refusals, checked without Kubo: an unset name, another
+/// version, a name that is no binary, and a failed version command each fail
+/// with their own reason.
+#[test]
+fn kubo_helper_refuses_bad_setup() {
+    assert_eq!(
+        kubo_binary_from(None),
+        Err("LAB_KUBO is unset: the Kubo cross-check names the binary to run".to_owned()),
+        "an unset name is refused with its reason"
+    );
+    let work = temp_dir();
+    let wrong = work.path().join("kubo-not-0.40.1");
+    std::fs::write(&wrong, "#!/bin/sh\necho 0.39.0\n").expect("write the stand-in");
+    std::fs::set_permissions(&wrong, std::fs::Permissions::from_mode(0o755))
+        .expect("make the stand-in run");
+    assert_eq!(
+        kubo_binary_from(Some(wrong.as_os_str())),
+        Err(format!(
+            "LAB_KUBO {} printed \"0.39.0\" for version --number, not 0.40.1",
+            wrong.display()
+        )),
+        "another version is refused with what it printed"
+    );
+    let missing = work.path().join("no-such-kubo");
+    match kubo_binary_from(Some(missing.as_os_str())) {
+        Err(reason) => {
+            assert_eq!(
+                reason,
+                format!(
+                    "LAB_KUBO {} could not run: {}",
+                    missing.display(),
+                    std::io::Error::from_raw_os_error(2)
+                )
+            );
+            assert!(
+                reason.starts_with(&format!("LAB_KUBO {} could not run: ", missing.display())),
+                "{reason}"
+            );
+        }
+        Ok(path) => assert!(false, "{} is no binary", path.display()),
+    }
+    let stub = work.path().join("kubo-version-stub");
+    for (script, result) in [
+        (
+            "#!/bin/sh\necho 0.40.1\nprintf 'version command failed' >&2\nexit 1\n",
+            Err(format!(
+                "LAB_KUBO {} version --number failed with exit status: 1: version command failed",
+                stub.display()
+            )),
+        ),
+        (
+            "#!/bin/sh\necho 0.40.1\nkill -TERM $$\n",
+            Err(format!(
+                "LAB_KUBO {} version --number failed with signal: 15 (SIGTERM): ",
+                stub.display()
+            )),
+        ),
+        ("#!/bin/sh\necho 0.40.1\n", Ok(stub.clone())),
+    ] {
+        std::fs::write(&stub, script).expect("write the version stand-in");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("make the version stand-in run");
+        assert_eq!(kubo_binary_from(Some(stub.as_os_str())), result);
+    }
+}
+
+#[test]
+fn kubo_run_refuses_failed_commands() {
+    let work = temp_dir();
+    let missing = work.path().join("no-such-kubo");
+    let args = ["version", "--number"];
+    assert_eq!(
+        kubo_run(&missing, work.path(), &args),
+        Err(format!(
+            "{} {args:?} could not run: {}",
+            missing.display(),
+            std::io::Error::from_raw_os_error(2)
+        ))
+    );
+    assert_eq!(
+        kubo_run(Path::new("/usr/bin/false"), work.path(), &args),
+        Err("/usr/bin/false [\"version\", \"--number\"] failed with exit status: 1: ".to_owned())
+    );
+    let stub = work.path().join("kubo-command-stub");
+    for (script, result) in [
+        (
+            "#!/bin/sh\nprintf 'command failed' >&2\nexit 7\n",
+            Err(format!(
+                "{} {args:?} failed with exit status: 7: command failed",
+                stub.display()
+            )),
+        ),
+        (
+            "#!/bin/sh\nkill -TERM $$\n",
+            Err(format!(
+                "{} {args:?} failed with signal: 15 (SIGTERM): ",
+                stub.display()
+            )),
+        ),
+        ("#!/bin/sh\necho 0.40.1\n", Ok("0.40.1\n".to_owned())),
+    ] {
+        std::fs::write(&stub, script).expect("write the command stand-in");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("make the command stand-in run");
+        assert_eq!(kubo_run(&stub, work.path(), &args), result);
+    }
 }

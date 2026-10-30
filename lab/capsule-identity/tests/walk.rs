@@ -9,7 +9,7 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 
-use capsule_identity::{lab_cid, Moment, Refusal};
+use capsule_identity::{checked_bundle, lab_cid, Moment, Refusal};
 use common::*;
 use tempfile::TempDir;
 
@@ -314,4 +314,81 @@ fn lab_cid_and_the_seam_run_one_walk() {
             "the library reaches a file by path: {call}"
         );
     }
+}
+
+#[test]
+fn a_folder_with_no_file_is_refused_with_its_reason() {
+    // Kubo with --empty-dirs=false drops a folder that holds no file, and it
+    // keeps a folder of empty folders as nothing. The lab refuses the bundle
+    // for that folder instead of naming it with the folder absent. The root
+    // is not this check: a bundle with no capsule.json stays NoManifest.
+    fn reason(path: &str) -> String {
+        format!(
+            "{path} holds no file: the lab refuses a folder with no file at any depth, because Kubo with --empty-dirs=false drops an empty folder and keeps a folder of empty folders"
+        )
+    }
+
+    let empty = assemble(&WEB_APP);
+    fs::create_dir(empty.path().join("e")).expect("make an empty folder");
+    let answers = [
+        lab_cid(empty.path()).map(|cid| cid.to_string()),
+        checked_bundle(empty.path()).map(|bundle| bundle.cid().to_string()),
+    ];
+    for answer in answers {
+        let refusal = answer.expect_err("an empty folder gets no name");
+        assert_eq!(
+            refusal,
+            Refusal::EmptyFolder {
+                path: "e".to_owned()
+            }
+        );
+        assert_eq!(refusal.to_string(), reason("e"));
+    }
+
+    let nested = assemble(&WEB_APP);
+    fs::create_dir(nested.path().join("f")).expect("make f");
+    fs::create_dir(nested.path().join("f/g")).expect("make f/g");
+    let refusal = lab_cid(nested.path()).expect_err("a folder of empty folders");
+    assert_eq!(
+        refusal,
+        Refusal::EmptyFolder {
+            path: "f/g".to_owned()
+        }
+    );
+    assert_eq!(refusal.to_string(), reason("f/g"));
+
+    // A folder that holds a file at depth is named, and the added file's
+    // path changes the name. The result is asserted before it is read.
+    let filled = assemble(&WEB_APP);
+    write_file(filled.path(), "f/g/a.txt", b"a");
+    let result = lab_cid(filled.path());
+    assert!(
+        result.is_ok(),
+        "a folder holding a file is named: {:?}",
+        result.err()
+    );
+    if let Ok(named) = result {
+        assert_ne!(
+            named.to_string(),
+            WEB_APP_LAB_CID,
+            "the added file did not change the name"
+        );
+    }
+
+    // One walk, one deciding condition: the folder's file count at the pop
+    // is still the count at its push. The library holds no second one.
+    let code = library_code();
+    let walk = library_item(&code, "fn collect_entries(");
+    assert_eq!(
+        walk.matches("entries.len() == folder.files_at_push")
+            .count(),
+        1,
+        "the one empty-folder rule:\n{walk}"
+    );
+    assert_eq!(
+        code.matches("entries.len() == folder.files_at_push")
+            .count(),
+        1,
+        "a second empty-folder check"
+    );
 }
