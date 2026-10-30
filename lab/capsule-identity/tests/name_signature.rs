@@ -330,7 +330,12 @@ fn signature_paths_share_one_implementation() {
     );
     // Task 048: the file rule hashes leaves and file root blocks with
     // naming_hash, never a hasher of its own.
-    for item in ["fn file_node(", "fn file_root(", "fn raw_leaf("] {
+    for item in [
+        "fn file_node(",
+        "fn file_root(",
+        "fn file_from_digests(",
+        "fn raw_leaf(",
+    ] {
         let body = library_item(&code, item);
         assert!(!body.contains("Sha256"), "{body}");
     }
