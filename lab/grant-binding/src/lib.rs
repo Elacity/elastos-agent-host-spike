@@ -14,6 +14,7 @@ mod ops;
 // Placed here as this slice requires; rustfmt would sort it before `ledger`.
 #[rustfmt::skip]
 mod ask;
+pub use ask::{AdmitRefuse, BudgetAsk};
 
 #[cfg(test)]
 mod plant;
@@ -383,10 +384,7 @@ fn manifests_that_link_this_crate(root: &std::path::Path) -> Vec<std::path::Path
     walk_manifests(root, &mut manifests);
     let mut linked = Vec::new();
     for path in manifests {
-        if path == own {
-            continue;
-        }
-        if link::manifest_depends_on_grant_binding(&path) {
+        if links_this_crate(root, &own, &path) {
             linked.push(path);
         }
     }
@@ -1624,6 +1622,31 @@ fn model_detects_a_path_dependency_on_this_crate() {
     assert!(!link::cargo_toml_path_depends_on_grant_binding(
         "[package]\nname = \"grant-binding\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
     ));
+}
+
+/// The one manifest this crate's path dependency may name: the lab
+/// stand-in's crate (M1 check A7).
+#[cfg(test)]
+const ALLOWED_LINK: &str = "lab/agent-conformance";
+
+/// Whether `manifest` is a link outside this crate itself. One named path,
+/// `lab/agent-conformance`, is the allowed link, and the crate's own manifest
+/// is not a link.
+#[cfg(test)]
+fn links_this_crate(
+    root: &std::path::Path,
+    own: &std::path::Path,
+    manifest: &std::path::Path,
+) -> bool {
+    if manifest == own {
+        return false;
+    }
+    let allowed = std::fs::canonicalize(root.join(ALLOWED_LINK).join("Cargo.toml")).ok();
+    let links = std::fs::canonicalize(manifest).ok();
+    if allowed.is_some() && allowed == links {
+        return false;
+    }
+    link::manifest_depends_on_grant_binding(manifest)
 }
 
 #[test]
