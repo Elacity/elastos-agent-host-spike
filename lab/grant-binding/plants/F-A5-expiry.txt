@@ -1,0 +1,15 @@
+id: F-A5-expiry
+file: src/lib.rs
+test: model_expired_grant_is_refused
+--- old
+        if let Some(expiry) = grant.expiry {
+            if self.verifier_now >= expiry {
+                return Err(Refuse::Expired);
+            }
+        }
+--- new
+        if let Some(expiry) = grant.expiry {
+            let _ = expiry;
+            let _ = self.verifier_now;
+        }
+--- end
