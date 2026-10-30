@@ -738,6 +738,8 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 
 `standin_guest_reads_its_request_later` is this stand-in, and a PASS there gives the Runtime no A11 credit for a later read.
 
+`standin_pending_cap_refuses_the_33rd` and `standin_pending_cap_refuses_the_1025th` are this stand-in, and a PASS there gives the Runtime no A11 credit.
+
 ## Content capsule named by its CID (M2 exit (e), PH6)
 
 - `requires_cid_is_refused_today` stages the viewer probe through the staging route and records the refusal the manifest reader gives now (`unknown field cid`). It goes red when the Runtime reads `requires[].cid`.
