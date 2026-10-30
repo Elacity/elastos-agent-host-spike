@@ -27,6 +27,7 @@ sign that printed lab CID, and a check can say whether that key did.
   is parsed as `elastos_common::CapsuleManifest`, which refuses an unknown
   field, and then checked with its `validate()`. Each refusal keeps the
   Runtime's own text. The lab adds no field, no schema and no parser.
+- The provider's encoder names deployed content. The lab encoder is a test oracle only.
 
 ## The encoding
 
@@ -1471,22 +1472,30 @@ release records.
 
 ## Lab stand-in launcher (M1 check B1)
 
-`StandInRuntime` in `tests/common/mod.rs` is a lab stand-in for the Runtime's
-launch route, not the Runtime. It lives in test code, so the library stays
-identity only (`the_harness_exports_only_identity_checks` still lists only
-identity checks; task 036 added `CheckedBundle::manifest_name`, which hands
-out the checked manifest's `name`), and the falsifier runner restores its file
-after a killed run.
-A launch names the bundle by its lab CID only. The stand-in recomputes the CID
-from the stored bytes and checks the publisher's signed package record before
-anything is launched. It holds a store (printed lab CID -> bundle folder,
-filled at publish time by `published`, from `lab_cid` of the folder), the
-package records and an explicit list of accepted publisher DIDs.
+The shared `StandIn` in `lab/agent-conformance/standin-runtime/mod.rs` owns
+instances, session ids, lifecycle and grants. `StandInRuntime` in
+`tests/common/mod.rs` is this lane's fixture store and CID entry point; it
+keeps the identity check and the planted seams, and it holds no instance list,
+no grant list, no status string and no session counter (P10).
+`tests/stand_in.rs` imports the shared module once, with
+`#[path = "../../agent-conformance/standin-runtime/mod.rs"]`, and passes
+closures that call `post_capsules`, `get_capability_list` and
+`delete_capsule` on that one value. The shared module's own tests compile only
+into that one test binary.
 
-`post_capsules` checks in this order, and the first refusal is the answer,
-with status 400 and nothing launched. Each library refusal is its `Refusal`'s
-own text, unchanged, and the stand-in calls the lane's one parse, one walk,
-one name compare and one record check, never a copy (P10):
+A launch names the bundle by its lab CID only. The shared `post_capsules`
+takes `path`; this lane's `cid` body is a lab fixture entry point, not that
+route. `commit_launch` runs the checks below, then calls the closure with
+`{"path": <the stored folder>}`. A fixture registration through
+`admit_resident` supplies a `Start` outcome; it neither verifies a publisher
+nor executes the bundle. The lane holds a store (printed lab CID -> bundle
+folder, filled at publish time by `published`, from `lab_cid` of the folder),
+the package records and an explicit list of accepted publisher DIDs.
+
+The checks run in this order, and the first refusal is the answer, with status
+400 and nothing launched. Each library refusal is its `Refusal`'s own text,
+unchanged, and the lane calls the lane's one parse, one walk, one name compare
+and one record check, never a copy (P10):
 
 | Check | Refused when | Reason | Named test |
 | --- | --- | --- | --- |
@@ -1511,38 +1520,45 @@ text; with no record at all, the answer is the "unsigned:" text.
 records by two unaccepted signers with the first one's "not in the accepted
 list" text, listing no instance.
 
-Only then it adds one instance and answers `{"id", "name", "status":
-"launched", "session_id"}`, with `name` from `CheckedBundle::manifest_name()`,
-the checked manifest's `name` from the one manifest check: the stand-in never
-parses `capsule.json` itself.
-`get_capsules` answers `{"capsules": [...]}`, one entry per launched instance
-with `id`, `name`, `status`, `session_id` and `cause` (`null`); a refused
-launch never appears. `standin_launches_a_signed_bundle_by_its_cid` runs the
+Only then `commit_launch` calls the shared `post_capsules` with the stored
+folder as `path`, and the answer is the shared answer, unchanged: `id`,
+`name`, `status: starting` and `session_id`, with `session_id` equal to `id`.
+The shared `finish_start` applies the registered `Start` and moves that
+instance to `running`; `Start::Ok` is the test's supplied outcome, so it
+proves no real start and no execution. `get_capsules` answers
+`{"capsules": [...]}` with `id`, `name`, `status`, `session_id` and `cause`
+(`""` while the instance starts or runs), sorted by `id`. The stopped cause is
+`stopped: <reason>`. A refused launch leaves the shared instance and grant
+lists unchanged. `standin_launches_a_signed_bundle_by_its_cid` runs the
 journey on the `agent-host` fixture: published under its pin, its record
-signed by a fresh test key whose DID is accepted, launched by CID, listed once
-with the same `id` and `session_id`, and its lab CID and its parent's listing
-unchanged after. Ids and session ids come from a counter.
+signed by a fresh test key whose DID is accepted, registered once at its path,
+launched by CID, listed once as `starting`, then moved to `running` by
+`finish_start`. Its lab CID and its parent's listing stay unchanged, and a
+repeat of the same signed CID uses the same registered path and creates a
+second shared instance.
 
-A valid signature alone yields no grant. The stand-in's grant view,
-`get_capability_list_all_sessions_live` (for #309 RA-1's
-`GET /api/capability/list?scope=all_sessions_live`), answers
+A valid signature alone yields no grant. The shared shell grant view,
+`get_capability_list(Caller::Shell, Some("all_sessions_live"))`, answers
 `{"scope": "all_sessions_live", "capabilities": [...]}`, one entry per held
-grant with today's five keys (`request_id`, `resource`, `action`, `duration`,
-`granted_at`) and `session_id`. A launch adds no grant, although the
-`agent-host` manifest asks for one in `capabilities` and its record verifies.
-The one way a grant exists is `seed_grant(session_id, resource, action,
-duration)`, a lab test seam, not a route: it holds one grant with the next
-`request_id` and `granted_at` from a counter. The seed is there only to show
-that the view lists what is held, so the empty view after a launch is not a
-constant. The launch answer and the `get_capsules` entry keep exactly the
-keys above, with no grant or token key.
-`standin_valid_signature_alone_yields_no_grant` launches the signed bundle as
-in the journey above, twice: each launch gives its own session, and after each
-the view lists no entry for that session and none at all.
-`standin_grant_view_lists_a_seeded_grant` seeds one grant for the launched
-session and finds it listed with all six keys and the seeded values. Task 007's
-`valid_signature_grants_nothing_by_itself` shows the library leaves no standing
-approval; this shows the stand-in's launch adds no grant. Both stay.
+live grant with `request_id`, `session_id`, `resource`, `action`, `duration`
+and `granted_at`. No launch adds a grant, although the `agent-host` manifest
+asks for one in `capabilities` and its record verifies. The lane calls that
+view and the shared seed through one seam each: `live_grants` answers the
+closure's value unchanged, and `grant_request_id(n)` gives the shared
+`seed_grant` its `grant-{n}` request id. A stop through `apply_stop` calls the
+shared `delete_capsule`, which stores `stopped` and revokes that session's
+live grants; the sibling instance and its grant stay.
+`standin_valid_signature_alone_yields_no_grant` launches the signed bundle
+twice: each launch gives its own instance and session, and the view lists no
+entry. `standin_grant_view_lists_a_seeded_grant` seeds one grant for the
+launched session and finds it listed with all six keys and the seeded values.
+`standin_shared_stop_updates_the_same_instances_and_grants` launches two,
+seeds one live grant for each, stops one through `apply_stop`, and reads the
+same shared object: the stopped instance is listed as `stopped` with its
+reason, its grant has gone, and the sibling stays `running` with its grant.
+Task 007's `valid_signature_grants_nothing_by_itself` shows the library leaves
+no standing approval; these tests show the shared stand-in's launch adds no
+grant and its stop removes one.
 
 Each route, field and state, and where it comes from. #309 is draft PR #309,
 `lab/runtime-asks/` at `513988ebd` (branch `cursor/runtime-asks-ad52`);
@@ -1550,43 +1566,50 @@ Each route, field and state, and where it comes from. #309 is draft PR #309,
 
 | Route, field or state | Source |
 | --- | --- |
-| `POST /api/capsules` (`post_capsules`) | #309 `06-resident-instances-core.md:24` (RI-2) |
-| `GET /api/capsules` (`get_capsules`) | #309 `06-resident-instances-core.md:25` (RI-3); today's `list_capsules`, `routes.rs:47` |
-| request field `cid` | lab field, not in #309; today's route takes `path` (`routes.rs:65-66`) |
-| answer `id`, `name`, `status` | `LaunchResponse`, `routes.rs:74-78` |
-| answer and list `session_id` | #309 `06-resident-instances-core.md:24` (RI-2) |
+| `POST /api/capsules` (`post_capsules` on the shared `StandIn`) | #309 `06-resident-instances-core.md:24` (RI-2) |
+| `GET /api/capsules` (`get_capsules` on the shared `StandIn`) | #309 `06-resident-instances-core.md:25` (RI-3); today's `list_capsules`, `routes.rs:47` |
+| request field `cid` | lab fixture entry point, not the shared route; the shared body's only field is `path`, and today's Runtime route also takes `path` (`routes.rs:65-66`) |
+| answer `id`, `name`, `status`, `session_id` | shared `post_capsules`, which answers `starting` before `finish_start`; `LaunchResponse`, `routes.rs:74-78` |
+| answer and list `session_id` | #309 `06-resident-instances-core.md:24` (RI-2); the shared instance id |
 | list `status` and `cause` | #309 `06-resident-instances-core.md:25` (RI-3) |
-| state "launched" | `routes.rs:102` |
-| state "refused": status 400 and the reason | `routes.rs:116`, `Err((StatusCode::BAD_REQUEST, e.to_string()))` |
-| grant view `GET /api/capability/list?scope=all_sessions_live` (`get_capability_list_all_sessions_live`): `scope` `all_sessions_live`, `capabilities` entries with `request_id`, `resource`, `action`, `duration`, `granted_at` and `session_id` | #309 `01-live-grant-view.md:11` (a shell session reads every session's live grants) and `:83` (the `scope` marker and the session id per entry), at `513988ebd`; entry keys and `capabilities` from `CapabilityOutput` and `ListCapabilitiesOutput`, `elastos/crates/elastos-server/src/api/handlers/capability.rs:411-423` |
-| grant seed `seed_grant` | lab test seam, not a route; #309 and this lab model no shell approval |
-| asks read `asks_of` | lab test seam, not a route; #309 has no asks field on any route (RA-1 to RA-7) |
+| states `starting`, `running`, `stopped`, `failed` | shared `StandIn`; `finish_start` moves a started instance to `running` |
+| state "refused": status 400 and the reason | the lane's CID checks; `routes.rs:116`, `Err((StatusCode::BAD_REQUEST, e.to_string()))` |
+| grant view `GET /api/capability/list?scope=all_sessions_live` (`get_capability_list(Caller::Shell, Some("all_sessions_live"))` on the shared `StandIn`): `scope` `all_sessions_live`, `capabilities` entries with `request_id`, `resource`, `action`, `duration`, `granted_at` and `session_id` | #309 `01-live-grant-view.md:11` (a shell session reads every session's live grants) and `:83` (the `scope` marker and the session id per entry), at `513988ebd`; entry keys and `capabilities` from `CapabilityOutput` and `ListCapabilitiesOutput`, `elastos/crates/elastos-server/src/api/handlers/capability.rs:411-423` |
+| grant seed `seed_grant` | shared lab test seam, not a route; #309 and this lab model no shell approval |
+| asks read `asks_of` | lane lab test seam, not a route; #309 has no asks field on any route (RA-1 to RA-7) |
+| CID launch `commit_launch` | lane lab test seam, not a route: the fixture-only composition from a verified CID to the shared `path` body |
+| grant view seam `live_grants` | lane lab test seam, not a route |
+| request id `grant_request_id` | lane lab test seam, not a route |
+| stop `apply_stop` | lane lab test seam, not a route; the shared `delete_capsule` does the work |
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
-| A launch runs every check; a stub that answers launched at once fails | `standin_launches_by_cid_only`, `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32a (the planted stub) |
+| A launch runs every check; a stub that answers a launch at once fails | `standin_launches_by_cid_only`, `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32a (the planted stub) |
 | (e) bytes changed after publish are refused by the name compare | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32b ((e) removed; the case then fails at (g) with another reason) |
 | (g) the record check refuses before launch | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32c ((g) removed) |
 | (f) a CID with no record is refused as unsigned | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32d (a missing record launches) |
 | (f) and (g) every record for the CID is checked, so the launch does not depend on the records' order | `standin_launch_does_not_depend_on_record_order` | F-CI36b (only the first record for the CID is checked) |
 | (a) `path` is never a fallback | `standin_launches_by_cid_only` | F-CI32e (a body with `path` is looked up by its folder) |
-| A refused launch leaves no instance | `standin_launches_by_cid_only`, `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32f (the instance is added before the checks) |
-| A launched answer has its listed instance | `standin_launches_a_signed_bundle_by_its_cid` | F-CI32g (answers launched, adds no instance) |
-| A valid signature alone yields no grant: a launch adds none, and the answer and the list hold no grant key | `standin_valid_signature_alone_yields_no_grant` | F-CI33a (a launch grants each `capabilities` entry of the manifest) |
+| A refused launch leaves the shared list with no instance | `standin_launches_by_cid_only`, `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32f (a fixture is launched before the checks) |
+| A launch answer has its listed shared instance | `standin_launches_a_signed_bundle_by_its_cid` | F-CI32g (answers a launch body, calls no shared launch) |
+| A valid signature alone yields no grant: no launch adds one, and the answer and the list hold no grant key | `standin_valid_signature_alone_yields_no_grant` | shared-owned: the shared `StandIn` creates no grant on launch; F-CI33a is retired with that disposition |
 | The grant view lists every held grant of every session, so it is not a constant | `standin_grant_view_lists_a_seeded_grant`, `standin_grant_view_lists_every_held_grant_of_every_session` | F-CI33b (the view answers no entries whatever is held), F-CI37a (only the first held grant), F-CI37b (only the first held grant's session), F-CI37c (one `request_id` for every grant) |
 | The grant view answers under the `all_sessions_live` marker | `standin_valid_signature_alone_yields_no_grant`, `standin_grant_view_lists_a_seeded_grant` | F-CI33c (the marker dropped) |
+| A stop through the seam updates the same shared instances and grants: the stopped entry carries its reason, its grant goes, and the sibling stays running with its own grant | `standin_shared_stop_updates_the_same_instances_and_grants` | F-CI59a (the seam answers null and calls no shared stop) |
 
 Not shown:
 
 - The real Runtime ran nothing here, and it still launches by path
   (`routes.rs:65-66`, `LaunchRequest { path, ... }`). No sentence here says
   the Runtime launched, checked, refused or granted anything. The empty grant
-  view is the stand-in's, not the Runtime's.
+  view is the shared stand-in's, not the Runtime's.
 - No code is executed: a launched instance is a record. There is no HTTP
-  server, socket, process start or wasm execution.
-- No shell approval is modelled; a grant exists only through the test seam
-  `seed_grant`. There is no pending request, token, revocation, expiry or
-  capability check, and no grant route.
+  server, socket, process start or wasm execution. `Start::Ok` is supplied by
+  the test at registration and applied by `finish_start`; it proves no start,
+  no publisher verification and no execution.
+- No shell approval is modelled; a grant exists only through the shared test
+  seam `seed_grant`. A stop revokes that session's live grants. There is no
+  pending request, token, expiry or capability check, and no grant route.
 - `principal_id` and `launch_grant` (`routes.rs:65-71`) are left out.
 
 Claim scope: one Mac, the `agent-host` fixture, test keys only, records in
@@ -1596,18 +1619,18 @@ memory.
 
 A launched instance is handed its asks only as the `asks.json` bytes of the
 checked bundle that passed every check above. `checked_launch` takes the
-manifest's `name` (`CheckedBundle::manifest_name()`) and the content of the
-`asks.json` entry (`CheckedBundle::entries()`) from the same `CheckedBundle`,
-the one walk (P10), and the launch keeps that content in the instance, once: `Some(bytes)`, or `None` when
+content of the `asks.json` entry (`CheckedBundle::entries()`) from the one
+`CheckedBundle`, the one walk (P10), and `commit_launch` keeps that content
+under the shared launch's `session_id`, once: `Some(bytes)`, or `None` when
 the bundle has no `asks.json`. Nothing reads the folder again. Task 044 shows
 that for the launch itself: `set_after_walk`, a lab test seam, not a route,
 gives `checked_launch` a hook that it calls once on the stored folder, right
 after the one walk and before (e), so a test can change the bytes on disk
 between the walk and the launch. With no hook set, nothing is called.
 `asks_of(session_id)`, a lab test seam, not a route (#309 has no asks field on
-any route), answers that instance's bytes, and `None` for an unknown session.
-The launch answer, the `get_capsules` entry and the grant view keep exactly
-the keys above, with no asks key, and the launch body stays `{"cid"}`.
+any route), answers that snapshot, and `None` for an unknown session.
+The launch answer, the shared list entry and the grant view keep exactly the
+keys above, with no asks key, and the CID launch body stays `{"cid"}`.
 
 `standin_hands_an_instance_only_its_signed_asks_bytes` launches the signed
 `agent-host` bundle as in the journey above: its session answers the
@@ -1621,7 +1644,7 @@ the `agent-host` session answers its bytes, the `web-app` session answers
 `None`, and so does an unknown session.
 `standin_takes_the_asks_from_the_walk_not_the_folder` launches the same signed
 bundle with a hook that changes one byte of the stored `asks.json`: the launch
-answers `launched`, the stored `asks.json` no longer equals the committed
+answers `starting`, the stored `asks.json` no longer equals the committed
 fixture bytes (so the hook ran), and the session answers the committed fixture
 bytes, which the test reads itself. Before task 044, a launch that read
 `asks.json` from the folder after the walk passed both tests above, because
@@ -1630,18 +1653,18 @@ neither changes the folder between the walk and the launch.
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
 | The instance keeps the signed bytes from launch; a change on disk after launch does not reach it | `standin_hands_an_instance_only_its_signed_asks_bytes` | F-CI35a (the planted accept-anything stub: `asks_of` reads `asks.json` from the stored folder at call time) |
-| Each session answers its own asks | `standin_gives_each_session_its_own_asks` | F-CI35b (`asks_of` ignores the session and answers the first instance's asks) |
+| Each session answers its own asks | `standin_gives_each_session_its_own_asks` | F-CI35b (`asks_of` ignores the session and answers the first snapshot's asks) |
 | A bundle with no `asks.json` is handed `None`, not empty bytes | `standin_gives_each_session_its_own_asks` | F-CI35c (`Some(Vec::new())` for a bundle with no `asks.json`) |
 | A change on disk between the walk and the launch does not reach the instance | `standin_takes_the_asks_from_the_walk_not_the_folder` | F-CI44a (the 041 review's stub: `checked_launch` reads `asks.json` from the stored folder at launch), F-CI44b (the hook is never called), F-CI44c (the hook runs before the walk, so (e) refuses) |
 
 Not shown:
 
 - No ask schema, provisional or not, and no parse or field read of
-  `asks.json`: to the stand-in it is bytes.
+  `asks.json`: to the lane it is bytes.
 - No mapping of an ask to an operation; that is `lab/bus-v2-proposal/`, and
   this lane writes no B2 encoding.
 - No grant from an ask: a launch still adds none (the grant view above).
-- The Runtime hands no asks to anything here; `asks_of` is the stand-in's.
+- The Runtime hands no asks to anything here; `asks_of` is the lane's.
 
 ## Why a lab CID and not the Runtime's CID
 
@@ -1769,8 +1792,11 @@ tests/common/mod.rs      assembly, pins, the bounded call, observers, wc-001 dri
                          key-material scan, the python3 -I run of README's blocks,
                          the cargo metadata scan for lab crates that use this one,
                          the claim scan of the lane's docs and src/, the check
-                         of the falsifier list's inventory, the lab stand-in
-                         launcher (StandInRuntime)
+                         of the falsifier list's inventory, and the lab stand-in
+                         launcher's fixture store and CID entry point (the seams
+                         commit_launch, live_grants, grant_request_id and
+                         apply_stop; the shared StandIn owns instances, sessions,
+                         lifecycle and grants)
 tests/adoption.rs        the adoption note lists every lab CID consumer; Cargo's
                          reader decides; the scan writes nothing
 tests/bytes.rs           every byte is the name: manifest, payload, asks.json, files
@@ -1795,9 +1821,10 @@ tests/not_admission.rs   verify is not admit: a valid signature grants nothing
 tests/package_record.rs  the lab package record outside the bundle binds the CID
 tests/parse.rs           a printed lab CID is read with the one claim check
 tests/refusals.rs        each refusal and its reason
-tests/stand_in.rs        the lab stand-in launches by CID after the publisher check;
-                         a valid signature alone yields no grant; an instance
-                         is handed only its signed asks.json bytes
+tests/stand_in.rs        the shared StandIn, imported once; a launch by CID after
+                         the publisher check; a valid signature alone yields no
+                         grant; an instance keeps only its signed asks.json bytes;
+                         a stop updates the same instances and grants
 tests/variant_binding.rs the signed variant binding outside the bundles
 tests/walk.rs            changes made while a bundle is named; one walk
 falsifiers.json          planted bugs, each caught by named tests
@@ -1805,7 +1832,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 276 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 278 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1838,7 +1865,7 @@ F-CI24a to F-CI24e (see
 029's F-CI29a to F-CI29e (see [the inventory check](#the-inventory-check)),
 and task 030's F-CI30a and F-CI30b (see [claim scope](#claim-scope)), and
 task 031's F-CI31a and F-CI31b (see [the inventory check](#the-inventory-check)),
-and task 032's F-CI32a to F-CI32g, task 033's F-CI33a to F-CI33c and task
+and task 032's F-CI32a to F-CI32g, task 033's F-CI33b and F-CI33c and task
 035's F-CI35a to F-CI35c (all three: see
 [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)), and task 036's
 F-CI36a (see [the checked bundle](#checked-bundle-the-name-and-the-bytes-it-covers))
@@ -1851,14 +1878,18 @@ and task 047's F-CI47a to F-CI47c (see
 [naming a closure listing](#naming-a-closure-listing)), and task 048's
 F-CI48a to F-CI48e (see [the encoding](#the-encoding)), and task 049's
 F-CI49a to F-CI49c (see
-[the lab package record](#lab-package-record-outside-the-bundle)).
+[the lab package record](#lab-package-record-outside-the-bundle)), and task
+059's F-CI59a to F-CI59c (F-CI59a: see
+[the stand-in launcher](#lab-stand-in-launcher-m1-check-b1); F-CI59b and
+F-CI59c: see [what it is](#what-it-is-and-what-it-is-not)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
 recovery list (`PROVIDER_TARGETS` in `examples/agent-host/falsify.py`) names
 five files of this lane: `src/lib.rs`, `tests/common/mod.rs`,
 `fixtures/wc001-core/capsule.json`, `.gitignore` and `README.md`. F-CI4h
-edits this lane's `.gitignore`, F-CI4i edits this file, and every other entry
+edits this lane's `.gitignore`, F-CI4i, F-CI59b and F-CI59c edit this file,
+and every other entry
 edits one of the first three. Task 014 moved the key-material scan, byte for
 byte except for `pub(super)`, from `tests/name_signature.rs` into
 `tests/common/mod.rs`, so F-CI4z now edits a restored file, with its `old`,
@@ -1908,26 +1939,31 @@ it does not change: F-CI30a removes the `'_'` line of `WORD_MARKS`, and
 F-CI30b shares F-CI28a's anchor, the `>`-run line of `comment_body`, and
 removes one `>` where F-CI28a removes none. Each anchor is found exactly once.
 Task 030 added two cases to the named test and changed no older edit's text.
-Task 032's entries all edit `tests/common/mod.rs`, in `StandInRuntime`:
+Task 032's entries all edit `tests/common/mod.rs`, in the lane's stand-in:
 F-CI32a and F-CI32f in `post_capsules`, F-CI32b to F-CI32d in
 `checked_launch`, F-CI32e in `launch_cid` and F-CI32g in `launch`. Each anchor
 is a line task 032 added, found exactly once (F-CI32a and F-CI32f share the
 check line, and F-CI32c and F-CI32d the record-check line). Task 032 changed no
-older edit's text.
-Task 033's entries also edit `tests/common/mod.rs`, in `StandInRuntime`:
-F-CI33a in `post_capsules` (its anchor, the `Ok(self.launch(name))` line, is
+older edit's text. Task 059 moved F-CI32a, F-CI32f and F-CI32g onto
+`commit_launch`; their ids, bugs and named tests stay.
+Task 033's entries also edit `tests/common/mod.rs`, in the lane's stand-in:
+F-CI33a in `post_capsules` (its anchor, the `Ok(self.launch(name))` line, was
 part of F-CI32f's anchor and found exactly once), and F-CI33b and F-CI33c in
 `get_capability_list_all_sessions_live`, each anchor a line task 033 added,
-found exactly once. Task 033 changed no older edit's text.
-Task 035's entries also edit `tests/common/mod.rs`, in `StandInRuntime`:
+found exactly once. Task 033 changed no older edit's text. Task 059 retired
+F-CI33a, because the shared `StandIn` now owns the rule it broke, and moved
+F-CI33b and F-CI33c onto `live_grants`; their ids, bugs and named tests stay.
+Task 035's entries also edit `tests/common/mod.rs`, in the lane's stand-in:
 F-CI35a and F-CI35b in `asks_of`, and F-CI35c in `signed_asks`, each anchor a
 line task 035 added, found exactly once. Task 035 made `checked_launch` answer
-the name and the asks together, so `post_capsules` now reads
+the name and the asks together, so `post_capsules` read
 `let (name, asks) = ...` and `Ok(self.launch(name, asks))`. The anchors and
 replacements of F-CI32a, F-CI32f and F-CI33a changed only by that: F-CI32a's
-stub is now `(String::from("stub"), None)`, and F-CI32f's and F-CI33a's
-`launch` calls take `asks` (F-CI32f's early call takes `None`). Their titles
-and tests are unchanged, and each anchor is still found exactly once.
+stub was `(String::from("stub"), None)`, and F-CI32f's and F-CI33a's
+`launch` calls took `asks` (F-CI32f's early call took `None`). Their titles
+and tests were unchanged, and each anchor was still found exactly once. Task
+059 changed F-CI35a's and F-CI35b's anchors with the asks map; both keep their
+bug and named test.
 Task 036's F-CI36a edits `src/lib.rs`, in `CheckedBundle::manifest_name`, and
 F-CI36b edits `tests/common/mod.rs`, in the stand-in's `check_records`; each
 anchor is a line task 036 added, found exactly once. Task 036 moved seventeen
@@ -1941,17 +1977,32 @@ F-CI9a, F-CI9b, F-CI9d, F-CI9e and F-CI9j build or define it with that field.
 The stand-in's record lookup moved into `check_records`, so F-CI32c now
 replaces the record check there and F-CI32d answers `Ok(())` where no record
 binds the CID. The stand-in imports neither `CapsuleManifest` nor
-`MANIFEST_FILE` now, so F-CI33a's planted code names both by their paths.
-Task 037's entries also edit `tests/common/mod.rs`, in `StandInRuntime`:
+`MANIFEST_FILE`.
+Task 037's entries also edit `tests/common/mod.rs`, in the lane's stand-in:
 F-CI37a and F-CI37b in `get_capability_list_all_sessions_live`, on F-CI33b's
 anchor line (found exactly once; entries may share an anchor), and F-CI37c in
 `seed_grant`, its anchor a line task 033 added, found exactly once. Task 037
-changed no older edit's text.
+changed no older edit's text. Task 059 moved F-CI37a and F-CI37b onto
+`live_grants` and F-CI37c onto `grant_request_id`; their ids, bugs and named
+tests stay.
 Task 044's entries also edit `tests/common/mod.rs`, in `checked_launch`:
 F-CI44a on the answer line, F-CI44b on the hook call, and F-CI44c on the walk
 line and the hook call together. Each anchor is found exactly once (F-CI44b's
 line is part of F-CI44c's anchor). Task 044 changed no older edit's text, and
 F-CI35a to F-CI35c's anchor lines stay byte for byte.
+Task 059's entries move the stand-in plants onto the lane's four seams and
+record one retirement. F-CI32a, F-CI32f and F-CI32g edit `commit_launch`;
+F-CI33b, F-CI33c, F-CI37a and F-CI37b edit `live_grants`; F-CI37c edits
+`grant_request_id`; F-CI59a edits `apply_stop`; and F-CI35a and F-CI35b edit
+the asks map lookup in `asks_of`. F-CI59b and F-CI59c edit this file, each
+deleting one of the two encoder sentences, and both name only
+`the_lab_encoder_is_a_test_oracle`. F-CI33a is retired: the shared `StandIn`
+now owns the rule that a launch adds no grant, so this lane has no seam where
+that old bug could be planted; `standin_valid_signature_alone_yields_no_grant`
+still checks the rule, and this paragraph is the disposition, outside the
+count below. F-CI32b to F-CI32e, F-CI36b, F-CI35c and F-CI44a to F-CI44c keep
+their ids, bugs and named tests; F-CI44a's answer line text changed with the
+shared `path`, and F-CI35a's and F-CI35b's anchors changed with the asks map.
 Task 047's entries all edit `src/lib.rs`, in `encode_listed_files`: F-CI47a on
 the root line (`encode_directory(&root, "", &naming_hash)`), F-CI47b on the
 leaf's `tsize` line, and F-CI47c on the size refusal. Each anchor is a line
