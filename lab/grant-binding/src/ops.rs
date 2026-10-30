@@ -1089,67 +1089,6 @@ fn model_owned_root_needs_a_resource_segment() {
 }
 
 #[test]
-fn model_allow_once_ends_after_one_effect() {
-    let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
-    let library = verifier
-        .bind_once(photo, "UsersAI/photo/library", crate::rights())
-        .expect("allow once");
-    let call = verifier.open_call(photo);
-    verifier
-        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
-        .expect("child journal does not end the grant");
-    verifier
-        .operate(&call, &guest(library), Operation::Append)
-        .expect("one append");
-    let refusal = verifier
-        .operate(&call, &guest(library), Operation::Append)
-        .expect_err("the allow-once grant has ended");
-    assert_eq!(refusal, OperateRefuse::Binding(Refuse::UnknownHandle));
-    assert_eq!(refusal.to_string(), "unknown handle");
-}
-
-#[test]
-fn model_session_grant_allows_a_second_effect() {
-    let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
-    let home = verifier.register_instance("home", "session-a");
-    let public = verifier
-        .bind_once(photo, "Public/photo/desk", crate::rights())
-        .expect_err("public storage does not bind");
-    assert_eq!(public, Refuse::PublicRead);
-    let home_mint = verifier
-        .bind_once(home, "UsersAI/home/desk", crate::rights())
-        .expect_err("home does not mint");
-    assert_eq!(home_mint, Refuse::HomeMint);
-    let library = verifier
-        .bind_grant(
-            photo,
-            "UsersAI/photo/library",
-            Rights {
-                append: true,
-                overwrite: true,
-                child_journal: false,
-            },
-        )
-        .expect("session grant");
-    let call = verifier.open_call(photo);
-    verifier
-        .operate(&call, &guest(library), Operation::Append)
-        .expect("first append");
-    verifier
-        .operate(&call, &guest(library), Operation::Overwrite)
-        .expect("a session grant allows a second effect");
-    let refused = verifier
-        .operate(&call, &guest(library), Operation::ChildJournal)
-        .expect_err("a refused effect does not remove the grant");
-    assert_eq!(refused, OperateRefuse::ChildJournalNotGranted);
-    verifier
-        .operate(&call, &guest(library), Operation::Append)
-        .expect("the grant is still there");
-}
-
-#[test]
 fn model_effect_limit_stops_the_next_effect() {
     let mut verifier = Verifier::new();
     let photo = verifier.register_instance("photo", "session-a");
@@ -1552,4 +1491,65 @@ fn model_standing_child_allows_another_effect() {
     verifier
         .use_grant(call, &guest(roll))
         .expect("the child journal stays");
+}
+
+#[test]
+fn model_allow_once_ends_after_one_effect() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_once(photo, "UsersAI/photo/library", crate::rights())
+        .expect("allow once");
+    let call = verifier.open_call(photo);
+    verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal does not end the grant");
+    verifier
+        .operate(&call, &guest(library), Operation::Append)
+        .expect("one append");
+    let refusal = verifier
+        .operate(&call, &guest(library), Operation::Append)
+        .expect_err("the allow-once grant has ended");
+    assert_eq!(refusal, OperateRefuse::Binding(Refuse::UnknownHandle));
+    assert_eq!(refusal.to_string(), "unknown handle");
+}
+
+#[test]
+fn model_session_grant_allows_a_second_effect() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let home = verifier.register_instance("home", "session-a");
+    let public = verifier
+        .bind_once(photo, "Public/photo/desk", crate::rights())
+        .expect_err("public storage does not bind");
+    assert_eq!(public, Refuse::PublicRead);
+    let home_mint = verifier
+        .bind_once(home, "UsersAI/home/desk", crate::rights())
+        .expect_err("home does not mint");
+    assert_eq!(home_mint, Refuse::HomeMint);
+    let library = verifier
+        .bind_grant(
+            photo,
+            "UsersAI/photo/library",
+            Rights {
+                append: true,
+                overwrite: true,
+                child_journal: false,
+            },
+        )
+        .expect("standing grant");
+    let call = verifier.open_call(photo);
+    verifier
+        .operate(&call, &guest(library), Operation::Append)
+        .expect("first append");
+    verifier
+        .operate(&call, &guest(library), Operation::Overwrite)
+        .expect("a standing grant allows a second effect");
+    let refused = verifier
+        .operate(&call, &guest(library), Operation::ChildJournal)
+        .expect_err("a refused effect does not remove the grant");
+    assert_eq!(refused, OperateRefuse::ChildJournalNotGranted);
+    verifier
+        .operate(&call, &guest(library), Operation::Append)
+        .expect("the grant is still there");
 }
