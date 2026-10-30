@@ -921,12 +921,11 @@ INDENT_LINE_SPANS = (
     "lab/grant-binding/src/lib.rs:244",
 )
 
-# The only target list: one entry per line decision, in source order, then one
-# None-quoter entry per FUNCTION_QUOTE_SPANS entry, then one per
-# INDENT_LINE_SPANS entry. A range's two endpoints share one marker. The
-# quoter name is looked up at call time so a test can plant a neighbouring
-# remainder through the production path.
-QUOTE_TARGETS = (
+# The one fixed prefix of the target list: one entry per line decision, in
+# source order before the function spans and the indent line spans. A range's
+# two endpoints share one marker. The quoter name is looked up at call time so
+# a test can plant a neighbouring remainder through the production path.
+_QUOTE_TARGETS_PREFIX = (
     (OBSERVE_SPAN, OBSERVE_MARKER, "observe_quote"),
     (EDIT_START_SPAN, EDIT_RANGE_MARKER, "edit_start_quote"),
     (EDIT_END_SPAN, EDIT_RANGE_MARKER, "edit_end_quote"),
@@ -1045,16 +1044,46 @@ QUOTE_TARGETS = (
     ("lab/grant-binding/src/lib.rs:280", "`lab/grant-binding/src/lib.rs:280`", None),
     ("lab/grant-binding/src/lib.rs:23", "`lab/grant-binding/src/lib.rs:23`", None),
     ("lab/grant-binding/src/lib.rs:25", "`lab/grant-binding/src/lib.rs:25`", None),
-) + tuple(
-    (span, "`" + span + "`", None) for span in FUNCTION_QUOTE_SPANS
-) + tuple(
-    (span, "`" + span + "`", None) for span in INDENT_LINE_SPANS
 )
 
-# The built list. The walker re-reads INDENT_LINE_SPANS onto this prefix when
-# the list has not been replaced, so planting that tuple empty drops its spans.
-_QUOTE_TARGETS_BUILT = QUOTE_TARGETS
-_INDENT_LINE_SPANS_BUILT = len(INDENT_LINE_SPANS)
+def _quote_target_tail(spans):
+    return tuple((span, "`" + span + "`", None) for span in spans)
+
+
+def _build_quote_targets():
+    """Return the one target list from the current span tuples."""
+    return (
+        _QUOTE_TARGETS_PREFIX
+        + _quote_target_tail(FUNCTION_QUOTE_SPANS)
+        + _quote_target_tail(INDENT_LINE_SPANS)
+    )
+
+
+class _QuoteTargets:
+    """Tuple-like view of the one target list."""
+
+    def _built(self):
+        return _build_quote_targets()
+
+    def __iter__(self):
+        return iter(self._built())
+
+    def __len__(self):
+        return len(self._built())
+
+    def __getitem__(self, index):
+        return self._built()[index]
+
+    def __eq__(self, other):
+        return self._built() == other
+
+    def __repr__(self):
+        return repr(self._built())
+
+
+# The only target list: one entry per line decision, then one None-quoter entry
+# per FUNCTION_QUOTE_SPANS entry, then one per INDENT_LINE_SPANS entry.
+QUOTE_TARGETS = _QuoteTargets()
 
 
 def quoted_line_matches(quoted, source):
@@ -1106,24 +1135,9 @@ def _quote_refusal(root, text, sha, target, refused_spans=frozenset()):
     return None
 
 
-def _quote_targets():
-    """Return the one target list.
-
-    INDENT_LINE_SPANS is read when QUOTE_TARGETS is still the built list, so
-    planting that tuple empty drops its spans from this walk. A test that
-    replaces QUOTE_TARGETS keeps the replacement.
-    """
-    if QUOTE_TARGETS is _QUOTE_TARGETS_BUILT:
-        head = _QUOTE_TARGETS_BUILT[:-_INDENT_LINE_SPANS_BUILT]
-        return head + tuple(
-            (span, "`" + span + "`", None) for span in INDENT_LINE_SPANS
-        )
-    return QUOTE_TARGETS
-
-
 def _quote_refusals(root, text, sha, refused_spans=frozenset()):
     """Return at most one quote refusal, walking the one target list in order."""
-    for target in _quote_targets():
+    for target in QUOTE_TARGETS:
         reason = _quote_refusal(root, text, sha, target, refused_spans)
         if reason is not None:
             return [reason]

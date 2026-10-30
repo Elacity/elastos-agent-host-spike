@@ -10427,6 +10427,23 @@ class CitationCheckTests(unittest.TestCase):
         for span in UNMATCHED_FUNCTION_SPANS:
             self.assertNotIn(span, check.FUNCTION_QUOTE_SPANS, span)
 
+    def test_quote_targets_follow_indent_line_spans(self):
+        # QUOTE_TARGETS is the published list the checker walks, so dropping
+        # the indent spans drops only that suffix from the same list.
+        original = check.INDENT_LINE_SPANS
+        try:
+            check.INDENT_LINE_SPANS = ()
+            expected = BASE_QUOTE_TARGETS + tuple(
+                (span, "`" + span + "`", None) for span in FUNCTION_QUOTE_SPAN_ORDER
+            )
+            self.assertEqual(check.QUOTE_TARGETS, expected)
+            self.assertNotIn(
+                "elastos/crates/elastos-compute/src/providers/component.rs:352",
+                tuple(target[0] for target in check.QUOTE_TARGETS),
+            )
+        finally:
+            check.INDENT_LINE_SPANS = original
+
     def test_changed_function_remainder_does_not_match(self):
         # One changed character of the remainder that stands for the declaring
         # line refuses that function span and no other reason.
