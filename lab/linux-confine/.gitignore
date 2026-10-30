@@ -1,0 +1,12 @@
+# Rebuildable guest images and cross artifacts. Evidence text stays tracked.
+/evidence/aarch64-qemu-system-6.18-fail-closed/
+/guest-work/
+/guest-bins/
+/guest-plants/
+*.cpio
+*.cpio.gz
+*.img
+*.apk
+vmlinuz-virt
+initramfs-virt
+alpine-minirootfs-*.tar.gz

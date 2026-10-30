@@ -1,0 +1,24 @@
+{
+  "label": "aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)",
+  "suites": {
+    "elf": { "passed": 6, "failed": 0, "ignored": 0 },
+    "aarch64": { "passed": 2, "failed": 0, "ignored": 1 },
+    "confine": { "passed": 25, "failed": 0, "ignored": 0 },
+    "providers": { "passed": 4, "failed": 0, "ignored": 0 }
+  },
+  "plants_caught": [
+    "F-LC-CAPBND",
+    "F-LC-BLOCK",
+    "F-LC-STORAGE",
+    "F-LC-PROVIDER-SOCKET",
+    "F-LC-SOCKET",
+    "F-LC-ANY-ERRNO",
+    "F-LC-SKIP-NETNS",
+    "F-LC-DROP-SECCOMP",
+    "F-LC-WIDE-ROOT"
+  ],
+  "plants_not_run": [
+    "F-LC-WRONG-ARCH-CC",
+    "F-LC-QEMU-USER-LANDLOCK"
+  ]
+}
