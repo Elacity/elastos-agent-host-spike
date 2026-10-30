@@ -589,12 +589,44 @@ through `execute`. This crate stores no copy of `end_instance`. `preview`,
 slice. The crate does not copy the stand-in, and it names no planner. A passing
 run gives the Runtime no A15 credit.
 
+A shown run pair is a read, not the grant. The request flow states:
+
+> The result returns to the Agent Host and Home without exposing provider
+> credentials or broader authority
+
+`read_shown_run` is the only pair read. It passes the caller and the request id
+to the stand-in's own pair route unchanged and does not judge either, so that
+route's lookup, life check and caller check decide the answer. A pending
+request is `unknown grant`, whoever asks. A live pair is `run_id` of `run-` plus
+the request id, and `request_id` is that same id; the body carries no plan, no
+token, no status and no session. The shell and another session are refused
+while the grant is live: the shell gets the expected session alone, and another
+session gets the expected session and its own. A second read spends nothing and
+mints nothing, so the once grant stays live. `execute` of that once grant then
+makes the read `grant is not live: Exhausted` for the owner and for the shell.
+A session grant stays readable after one `execute`. A stop revokes that
+session's grant, so its read is `grant is not live: Revoked`. The grant answer,
+the status body and the live grant omit `run_id`.
+
+`shown_run_pair_is_not_the_grant` drives two sessions through `running_agent`,
+submits two requests through `request`, grants through `approve`, reads the pair
+through `read_shown_run`, reads the status through `read_shown_request`, reads
+every live list through `read_shown_grants`, reads the capsule list through
+`get_capsules`, stops through `stop_shown_session` and spends through
+`execute`. This crate stores no copy of `run_id_for` or `mint_run_binding`, and
+its pair helper holds no `run-` text. `preview`, `plan_sha256`, `approve`,
+`execute`, `deny_shown_plan`, `age_shown_plan`, `stop_shown_session`,
+`read_shown_request`, `read_shown_grants`, `read_shown_requests`,
+`shown_worker_exited`, `running_agent` and `request` are unchanged by this
+slice. The crate does not copy the stand-in, and it names no planner. A passing
+run gives the Runtime no A15 credit.
+
 ## Layout
 
 - `src/lib.rs`: `Preview`, `preview`, `plan_sha256`, `approve`,
   `age_shown_plan`, `deny_shown_plan`, `stop_shown_session`,
   `shown_worker_exited`, `read_shown_request`, `read_shown_grants`,
-  `read_shown_requests`, `execute`,
+  `read_shown_requests`, `read_shown_run`, `execute`,
   `preview_makes_no_effect`, `plan_sha256_hashes_the_exact_bytes`,
   `deny_one_shown_step`, `unanswered_shown_step_expires`,
   `stop_settles_that_sessions_shown_steps`, `shown_allow_once_expires`,
@@ -613,12 +645,14 @@ run gives the Runtime no A15 credit.
   `shown_grant_rationale_is_not_the_grant`,
   `shown_deny_reason_is_not_the_grant`,
   `shown_stop_reason_is_not_the_grant`,
-  `shown_worker_exit_is_not_the_grant` and the bound-plan journey.
+  `shown_worker_exit_is_not_the_grant`,
+  `shown_run_pair_is_not_the_grant` and the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_run_pair_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_worker_exit_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_stop_reason_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_deny_reason_is_not_the_grant -- --exact

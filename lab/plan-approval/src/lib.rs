@@ -277,6 +277,34 @@ pub fn read_shown_requests(
     stand_in.get_capability_requests(caller, session)
 }
 
+/// One read of the pair the grant route minted, through the stand-in's own
+/// pair route.
+///
+/// `caller` and `request_id` are method arguments. This helper passes both to
+/// the stand-in's own pair route unchanged and does not judge either, so that
+/// route's own lookup, life check and caller check decide the answer. The
+/// lookup runs first: an id with no grant is status 400 `unknown grant` for the
+/// owning session, for another session and for the shell. A grant that is not
+/// live is status 400 `grant is not live: ` with its own word, and that answer
+/// is the same for the shell as for the owning session. A live grant then
+/// checks the session: the shell is status 403 naming only the expected
+/// session, and another session is that same refusal with `, got ` and its own
+/// session. The owning session's Ok is `run_id` and `request_id` only: the id
+/// the grant route minted under its owner, and the request id itself. That body
+/// carries no plan, no token, no status and no session.
+///
+/// A read stores nothing and spends nothing: a second read returns the same
+/// pair and a `once` grant stays live until `execute`. This helper does not
+/// check the grant clock, does not copy the stand-in's pair builder, and does
+/// not post an effect. The pair names the grant; it is not a second grant.
+pub fn read_shown_run(
+    stand_in: &StandIn,
+    caller: Caller<'_>,
+    request_id: &str,
+) -> Result<Value, (u16, String)> {
+    stand_in.get_run_binding(caller, request_id)
+}
+
 #[cfg(test)]
 mod fixtures {
     pub const PLAN_A: &[u8] =
@@ -11215,5 +11243,466 @@ fn shown_worker_exit_is_not_the_grant() {
         shell_live(&stand_in),
         empty_shell,
         "a shown worker exit is not the grant: the refused use leaves the empty live list"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn shown_run_pair_is_not_the_grant() {
+    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use fixtures::{PLAN_A, PLAN_B};
+    use journeys::{request, running_agent};
+    use serde_json::{json, Value};
+
+    fn shell_capsules(stand_in: &StandIn) -> Vec<Value> {
+        stand_in
+            .get_capsules(Caller::Shell)
+            .expect("shell capsules")["capsules"]
+            .as_array()
+            .cloned()
+            .expect("the shell capsule list holds a capsules array")
+    }
+
+    fn capsule_state(stand_in: &StandIn, id: &str) -> Value {
+        let listed = shell_capsules(stand_in)
+            .into_iter()
+            .find(|entry| entry["id"] == id)
+            .expect("the shell capsule list holds that id");
+        json!({ "id": listed["id"], "status": listed["status"], "cause": listed["cause"] })
+    }
+
+    fn shell_live(stand_in: &StandIn) -> Value {
+        read_shown_grants(stand_in, Caller::Shell, None).expect("the shell reads the live list")
+    }
+
+    let client_one = Caller::Client {
+        session_id: "component-1",
+    };
+    let client_two = Caller::Client {
+        session_id: "component-2",
+    };
+    let resource_a = "localhost://Public/plan-approval/a.txt";
+    let unknown: Result<Value, (u16, String)> = Err((400, "unknown grant".to_owned()));
+    let once_spent: Result<Value, (u16, String)> =
+        Err((400, "grant is not live: Exhausted".to_owned()));
+    let revoked: Result<Value, (u16, String)> = Err((400, "grant is not live: Revoked".to_owned()));
+    let pair_one = json!({ "run_id": "run-request-1", "request_id": "request-1" });
+    let pair_two = json!({ "run_id": "run-request-2", "request_id": "request-2" });
+    let entry_one = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": resource_a,
+        "action": "read",
+        "duration": "once",
+        "granted_at": 0,
+    });
+    let entry_two = json!({
+        "request_id": "request-2",
+        "session_id": "component-2",
+        "resource": resource_a,
+        "action": "write",
+        "duration": "session",
+        "granted_at": 0,
+    });
+    let empty_shell: Value = json!({ "scope": "all_sessions_live", "capabilities": [] });
+    let one_live = json!({
+        "scope": "all_sessions_live",
+        "capabilities": [entry_one.clone()],
+    });
+    let two_live = json!({
+        "scope": "all_sessions_live",
+        "capabilities": [entry_one.clone(), entry_two.clone()],
+    });
+    let plan_a = plan_sha256(PLAN_A);
+    let plan_b = plan_sha256(PLAN_B);
+
+    let mut stand_in = StandIn::new();
+
+    // No grant exists yet: the pair read is the unknown-grant answer, not a
+    // request lookup and not a caller refusal, and it stores nothing.
+    assert_eq!(
+        read_shown_run(&mut stand_in, client_one, "request-1"),
+        unknown,
+        "a shown run pair is not the grant: a pair read with no grant is unknown grant"
+    );
+    assert_ne!(
+        read_shown_run(&mut stand_in, client_one, "request-1"),
+        Err((404, "Request not found: request-1".to_owned())),
+        "a shown run pair is not the grant: the pair read is not the request lookup"
+    );
+    assert_ne!(
+        read_shown_run(&mut stand_in, client_one, "request-1"),
+        Err((403, "wrong capsule: expected component-1".to_owned())),
+        "a shown run pair is not the grant: the unknown-grant answer is not a caller refusal"
+    );
+    assert_eq!(
+        shell_capsules(&stand_in),
+        Vec::<Value>::new(),
+        "a shown run pair is not the grant: the refused pair read stores no capsule"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown run pair is not the grant: the refused pair read mints no grant"
+    );
+
+    // Two sessions run with no cause.
+    let first = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    let second = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    assert_eq!(
+        first, "component-1",
+        "a shown run pair is not the grant: the fresh stand-in names the first session component-1"
+    );
+    assert_eq!(
+        second, "component-2",
+        "a shown run pair is not the grant: the second running session is component-2"
+    );
+    for id in [&first, &second] {
+        assert_eq!(
+            capsule_state(&stand_in, id),
+            json!({ "id": id, "status": "running", "cause": "" }),
+            "a shown run pair is not the grant: each launched session runs with no cause"
+        );
+    }
+
+    // The first session submits one pending step.
+    let first_step = request(
+        &mut stand_in,
+        client_one,
+        PLAN_A,
+        resource_a,
+        "read",
+        "show this step",
+    )
+    .expect("the agent's request route stores one pending request");
+    assert_eq!(
+        first_step, "request-1",
+        "a shown run pair is not the grant: the first stored request is request-1"
+    );
+    assert_eq!(
+        plan_a.len(),
+        64,
+        "a shown run pair is not the grant: the hash of plan A has length 64"
+    );
+
+    // A pending request has no pair, whoever asks.
+    assert_eq!(
+        read_shown_run(&mut stand_in, client_one, "request-1"),
+        unknown,
+        "a shown run pair is not the grant: the owning session's pending step has no pair"
+    );
+    assert_eq!(
+        read_shown_run(&mut stand_in, Caller::Shell, "request-1"),
+        unknown,
+        "a shown run pair is not the grant: the shell's pending step read is unknown grant"
+    );
+    assert_eq!(
+        read_shown_run(&mut stand_in, client_two, "request-1"),
+        unknown,
+        "a shown run pair is not the grant: the other session's pending step read is unknown grant"
+    );
+    assert_eq!(
+        read_shown_request(&stand_in, client_one, "request-1"),
+        Ok(json!({ "status": "pending" })),
+        "a shown run pair is not the grant: a pending step stays pending when the pair is read"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown run pair is not the grant: a pending step is not a live grant"
+    );
+
+    // The owner grants the first step once.
+    let approved_one = approve(
+        &mut stand_in,
+        Caller::Shell,
+        "request-1",
+        "once",
+        &plan_a,
+        "show this grant",
+    );
+    assert_eq!(
+        approved_one,
+        Ok(json!({ "success": true })),
+        "a shown run pair is not the grant: the shell approval of the first step succeeds"
+    );
+    assert!(
+        approved_one
+            .as_ref()
+            .expect("the grant route answers")
+            .get("run_id")
+            .is_none(),
+        "a shown run pair is not the grant: the grant answer carries no run_id key"
+    );
+
+    // The shell and another session are refused while the grant is live.
+    let shell_read = read_shown_run(&mut stand_in, Caller::Shell, "request-1");
+    assert_eq!(
+        shell_read,
+        Err((403, "wrong capsule: expected component-1".to_owned())),
+        "a shown run pair is not the grant: the shell is refused the live pair"
+    );
+    assert_ne!(
+        shell_read,
+        Err((
+            403,
+            "wrong capsule: expected component-1, got component-1".to_owned()
+        )),
+        "a shown run pair is not the grant: the shell refusal names no got session"
+    );
+    assert_ne!(
+        shell_read, unknown,
+        "a shown run pair is not the grant: the live shell refusal is not unknown grant"
+    );
+    assert_eq!(
+        read_shown_run(&mut stand_in, client_two, "request-1"),
+        Err((
+            403,
+            "wrong capsule: expected component-1, got component-2".to_owned()
+        )),
+        "a shown run pair is not the grant: another session is refused the live pair"
+    );
+    assert_eq!(
+        read_shown_run(
+            &mut stand_in,
+            Caller::Client { session_id: "" },
+            "request-1",
+        ),
+        Err((403, "wrong capsule: expected component-1, got ".to_owned())),
+        "a shown run pair is not the grant: the empty session is refused the live pair"
+    );
+
+    // The owning session reads the pair, twice, and spends nothing.
+    let first_read = read_shown_run(&mut stand_in, client_one, "request-1");
+    assert_eq!(
+        first_read,
+        Ok(pair_one.clone()),
+        "a shown run pair is not the grant: the owning session reads the minted pair"
+    );
+    let pair_value = first_read.expect("the owning session reads the pair");
+    for absent in [
+        "status",
+        "plan",
+        "token",
+        "session_id",
+        "reason",
+        "rationale",
+    ] {
+        assert!(
+            pair_value.get(absent).is_none(),
+            "a shown run pair is not the grant: the pair body has no {absent} key"
+        );
+    }
+    assert_eq!(
+        read_shown_run(&mut stand_in, client_one, "request-1"),
+        Ok(pair_one.clone()),
+        "a shown run pair is not the grant: a second pair read returns the same pair"
+    );
+
+    let one_list = shell_live(&stand_in);
+    assert_eq!(
+        one_list, one_live,
+        "a shown run pair is not the grant: the paired step is the live list"
+    );
+    assert!(
+        one_list["capabilities"][0].get("run_id").is_none(),
+        "a shown run pair is not the grant: the live grant entry has no run_id key"
+    );
+    let granted_one = read_shown_request(&stand_in, client_one, "request-1")
+        .expect("the owning session reads the granted step");
+    assert_eq!(
+        granted_one,
+        json!({ "status": "granted" }),
+        "a shown run pair is not the grant: the granted status body is the status word alone"
+    );
+    assert!(
+        granted_one.get("run_id").is_none(),
+        "a shown run pair is not the grant: the status body carries no run_id key"
+    );
+
+    // The second session submits a write and the owner keeps a session grant.
+    let second_step = request(
+        &mut stand_in,
+        client_two,
+        PLAN_B,
+        resource_a,
+        "write",
+        "show this step",
+    )
+    .expect("the other session's request route stores its plan");
+    assert_eq!(
+        second_step, "request-2",
+        "a shown run pair is not the grant: the second stored request is request-2"
+    );
+    assert_eq!(
+        plan_b.len(),
+        64,
+        "a shown run pair is not the grant: the hash of plan B has length 64"
+    );
+    let approved_two = approve(
+        &mut stand_in,
+        Caller::Shell,
+        "request-2",
+        "session",
+        &plan_b,
+        "keep the session",
+    );
+    assert_eq!(
+        approved_two,
+        Ok(json!({ "success": true })),
+        "a shown run pair is not the grant: the shell approval of the second step succeeds"
+    );
+    assert!(
+        approved_two
+            .as_ref()
+            .expect("the grant route answers")
+            .get("run_id")
+            .is_none(),
+        "a shown run pair is not the grant: the second grant answer carries no run_id key"
+    );
+
+    assert_eq!(
+        read_shown_run(&mut stand_in, client_two, "request-2"),
+        Ok(pair_two.clone()),
+        "a shown run pair is not the grant: the second session reads its own pair"
+    );
+    assert_eq!(
+        read_shown_run(&mut stand_in, client_two, "request-1"),
+        Err((
+            403,
+            "wrong capsule: expected component-1, got component-2".to_owned()
+        )),
+        "a shown run pair is not the grant: the second session is refused the first pair"
+    );
+    assert_eq!(
+        read_shown_run(&mut stand_in, client_one, "request-2"),
+        Err((
+            403,
+            "wrong capsule: expected component-2, got component-1".to_owned()
+        )),
+        "a shown run pair is not the grant: the first session is refused the second pair"
+    );
+
+    let both_list = shell_live(&stand_in);
+    assert_eq!(
+        both_list, two_live,
+        "a shown run pair is not the grant: the two paired steps are the live list"
+    );
+    for index in 0..2 {
+        assert!(
+            both_list["capabilities"][index].get("run_id").is_none(),
+            "a shown run pair is not the grant: each live entry has no run_id key"
+        );
+    }
+
+    // A use of the once grant exhausts it: the pair stops being live.
+    assert_eq!(
+        execute(&mut stand_in, client_one, "request-1", PLAN_A),
+        Ok(json!({ "valid": true })),
+        "a shown run pair is not the grant: the once grant authorises its one use"
+    );
+    let spent_read = read_shown_run(&mut stand_in, client_one, "request-1");
+    assert_eq!(
+        spent_read, once_spent,
+        "a shown run pair is not the grant: the spent once grant has no live pair"
+    );
+    assert_ne!(
+        spent_read, unknown,
+        "a shown run pair is not the grant: the spent grant is not an unknown grant"
+    );
+    assert_ne!(
+        spent_read,
+        Err((403, "wrong capsule: expected component-1".to_owned())),
+        "a shown run pair is not the grant: the spent grant read is not a caller refusal"
+    );
+    assert_eq!(
+        read_shown_run(&mut stand_in, Caller::Shell, "request-1"),
+        once_spent,
+        "a shown run pair is not the grant: the shell reads the same spent-grant answer"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        json!({
+            "scope": "all_sessions_live",
+            "capabilities": [entry_two.clone()],
+        }),
+        "a shown run pair is not the grant: only the session grant stays live"
+    );
+
+    // A session grant stays readable after one use.
+    assert_eq!(
+        execute(&mut stand_in, client_two, "request-2", PLAN_B),
+        Ok(json!({ "valid": true })),
+        "a shown run pair is not the grant: the session grant authorises its use"
+    );
+    assert_eq!(
+        read_shown_run(&mut stand_in, client_two, "request-2"),
+        Ok(pair_two.clone()),
+        "a shown run pair is not the grant: the session grant stays readable after one use"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        json!({
+            "scope": "all_sessions_live",
+            "capabilities": [entry_two.clone()],
+        }),
+        "a shown run pair is not the grant: the used session grant stays live"
+    );
+
+    // A stop revokes that session's grant: the pair stops being live.
+    assert_eq!(
+        stop_shown_session(
+            &mut stand_in,
+            Caller::Shell,
+            "component-2",
+            "stop the shown session",
+        ),
+        Ok(Value::Null),
+        "a shown run pair is not the grant: the stop reports its settlement"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-2"),
+        json!({
+            "id": "component-2",
+            "status": "stopped",
+            "cause": "stopped: stop the shown session",
+        }),
+        "a shown run pair is not the grant: the stop stores the stated cause"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-1"),
+        json!({ "id": "component-1", "status": "running", "cause": "" }),
+        "a shown run pair is not the grant: the stop leaves the other session running"
+    );
+    let revoked_read = read_shown_run(&mut stand_in, client_two, "request-2");
+    assert_eq!(
+        revoked_read, revoked,
+        "a shown run pair is not the grant: the stopped session's grant has no live pair"
+    );
+    assert_ne!(
+        revoked_read, once_spent,
+        "a shown run pair is not the grant: the revoked grant is not an exhausted grant"
+    );
+    assert_ne!(
+        revoked_read,
+        Ok(pair_two.clone()),
+        "a shown run pair is not the grant: the revoked grant returns no pair"
+    );
+    assert_eq!(
+        read_shown_run(&mut stand_in, Caller::Shell, "request-2"),
+        revoked,
+        "a shown run pair is not the grant: the shell reads the same revoked-grant answer"
+    );
+    assert_eq!(
+        read_shown_run(&mut stand_in, client_one, "request-1"),
+        once_spent,
+        "a shown run pair is not the grant: the other session's spent grant stays exhausted"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown run pair is not the grant: the stop leaves the empty live list"
     );
 }

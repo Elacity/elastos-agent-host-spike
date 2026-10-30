@@ -1687,3 +1687,152 @@ restored proof command set (the fmt check and the twenty-six test commands in
 the task) took 4.46 s real. This lane has no `falsifiers.json`; no id is added.
 
 033: `shown_worker_exited(stand_in, session_id)` is the one reap call and passes only the session id to the stand-in's own seam; `shown_worker_exit_is_not_the_grant` proves the fixed cause `worker exited` is the capsule cause and the pending step's decision reason with `settled_by` `runtime`, that the granted step and the other session's live grant stay, that a second reap and a later shell stop and submit are `instance is not live: failed`, and that a use of either failed session's once grant is revoked; two hand-run plants caught and restored.
+
+## 034
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md), Request flow step 10:
+
+> The result returns to the Agent Host and Home without exposing provider
+> credentials or broader authority
+
+This task proves the pair the grant route stores beside its answer is a read for
+the owning session, and that the pair is not the grant. `read_shown_run(stand_in,
+caller, request_id)` is the one pair read: it passes the caller and the request
+id to the stand-in's own `get_run_binding` and returns that result. It takes
+`&StandIn`, matches no caller and no id, holds no `run-` text, and calls no
+store, seed, validate, effect or capsule seam. The lookup runs before the life
+check and before the caller check: a pending or absent id is `unknown grant`
+for the owner, another session and the shell; a grant that is not live is
+`grant is not live: ` with its own word for the owner and the shell alike; a
+live grant then refuses the shell with the expected session alone and another
+session with `, got ` and its own session. Ok is `run_id` and `request_id` only.
+No existing helper and no existing assertion changed.
+
+`shown_run_pair_is_not_the_grant` drives two sessions through `running_agent`.
+A pair read before any launch is `unknown grant`, not the request lookup and not
+a caller refusal, and stores no capsule or grant. Two sessions then run with no
+cause. The first session submits `request-1` (read); its pair read as the owner,
+as the shell and as the other session is `unknown grant`, and its status stays
+`pending`. The owner grants `request-1` once with the hash of `PLAN_A`; the
+answer is `{"success": true}` with no `run_id` key. The shell is `wrong
+capsule: expected component-1` with no `, got`; `component-2` is `wrong capsule:
+expected component-1, got component-2`; the empty session is `wrong capsule:
+expected component-1, got `. The owner reads `{"run_id":"run-request-1",
+"request_id":"request-1"}` with no status, plan, token, session, reason or
+rationale key, and a second read returns the same pair. The live list holds one
+entry without `run_id`, and the status is `granted` without `run_id`. The other
+session submits `request-2` (write of `PLAN_B`) and the owner grants it for a
+session with the hash of `PLAN_B`. Its pair read is `run-request-2`; the cross
+reads are `wrong capsule` each. The live list holds both entries without
+`run_id`. `execute` of `request-1` then makes its pair read `grant is not live:
+Exhausted` for the owner and for the shell, and only `request-2` stays live. A
+use of `request-2` leaves the session grant readable and listed. A shell stop of
+`component-2` stores `stopped: stop the shown session`, leaves `component-1`
+running with no cause, and makes `request-2`'s pair read `grant is not live:
+Revoked` for the owner and the shell, while `request-1` stays `Exhausted`. The
+shell live list is empty.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_run_pair_is_not_the_grant -- --exact
+```
+
+### F-run-read-spends
+
+Old parameter bytes, 23:
+
+```rust
+    stand_in: &StandIn,
+```
+
+New parameter bytes, 27:
+
+```rust
+    stand_in: &mut StandIn,
+```
+
+Old body bytes, 48:
+
+```rust
+    stand_in.get_run_binding(caller, request_id)
+```
+
+New body bytes, 357:
+
+```rust
+    let read = stand_in.get_run_binding(caller, request_id);
+    if read.is_ok() {
+        let _ = stand_in.post_capability_validate(
+            caller,
+            &json!({
+                "request_id": request_id,
+                "plan_sha256": "156e544f8e98e81c5e504dfd7ed21d2adb703b8f9dafa8701b064255b69f85ae",
+            }),
+        );
+    }
+    read
+```
+
+The planted crate compiled. `shown_run_pair_is_not_the_grant` failed at
+`src/lib.rs:11508:5` (planted tree) on the second pair read of `request-1`:
+`assertion left == right failed: a shown run pair is not the grant: a second
+pair read returns the same pair`; left held `Err((400, "grant is not live:
+Exhausted"))`, right expected the pair `{"run_id":"run-request-1",
+"request_id":"request-1"}`. The read spent the once grant it read. Restored, the
+test passes.
+
+### F-run-read-mints
+
+Old parameter bytes, 23:
+
+```rust
+    stand_in: &StandIn,
+```
+
+New parameter bytes, 27:
+
+```rust
+    stand_in: &mut StandIn,
+```
+
+Old body bytes, 48:
+
+```rust
+    stand_in.get_run_binding(caller, request_id)
+```
+
+New body bytes, 381:
+
+```rust
+    let read = stand_in.get_run_binding(caller, request_id);
+    if read.is_ok() {
+        stand_in.seed_grant(
+            "request-plant",
+            "component-2",
+            "localhost://Public/plan-approval/a.txt",
+            "read",
+            "once",
+            0,
+            agent_conformance::standin_runtime::Life::Live,
+            false,
+        );
+    }
+    read
+```
+
+The planted crate compiled. `shown_run_pair_is_not_the_grant` failed at
+`src/lib.rs:11518:5` (planted tree) on the shell live list after the two owner
+reads: `assertion left == right failed: a shown run pair is not the grant: the
+paired step is the live list`; left held the `request-1` entry plus two
+`request-plant` entries and right expected the `request-1` entry alone. The read
+minted a grant. Restored, the test passes.
+
+Neither plant calls `seed_request`; the first plant calls
+`post_capability_validate` and the second calls `seed_grant`. After both
+restores, `git diff -- lab/plan-approval/src/lib.rs` holds no `request-plant` and
+no plant validate call inside `read_shown_run`. The restored proof command set
+(the fmt check and the twenty-seven test commands in the task) took 4.39 s real.
+This lane has no `falsifiers.json`; no id is added.
+
+034: `read_shown_run(stand_in, caller, request_id)` is the one pair read and passes the caller and the request id to the stand-in's own pair route; `shown_run_pair_is_not_the_grant` proves a pending request is `unknown grant`, the shell and another session are refused while the grant is live, a second read keeps the once grant live, `execute` makes the owner's and the shell's read `grant is not live: Exhausted`, a session grant stays readable after one `execute`, a stop makes that session's read `grant is not live: Revoked`, and the grant answer, status body and live entry omit `run_id`; two hand-run plants caught and restored.
