@@ -72,6 +72,7 @@ LINK_NAME = "redteam_manifest_is_not_a_grant_link"
 TIMEOUT_NAME = "test_immediate_timeout_after_unknown_is_refused"
 TIMEOUT_FINDING = REPO / "lab" / "redteam" / "findings" / "grant-binding-003.md"
 TIMEOUT_LEDGER = "lab/grant-binding/src/ledger.rs"
+TIMEOUT_DEADLINE = " because no deadline was set"
 TIMEOUT_OK_PANIC = "immediate timeout returned Ok"
 TIMEOUT_FREED_PANIC = "immediate timeout freed the hold"
 TIMEOUT_OK_OBSERVED = "timeout_hold returned Ok"
@@ -551,6 +552,89 @@ def timeout_pin_line():
     return f"grant-binding-003 {TIMEOUT_LEDGER} {commit} sha256 {digest}"
 
 
+def timeout_shape(ledger_text):
+    """The live ``timeout_hold`` parameter list, checked against the two forms this probe calls.
+
+    A three-argument list holds ``reservation: Reservation`` and no
+    ``now: u64``. A four-argument list also holds ``now: u64``. Any other
+    list raises ``ProbeError`` with the parameter list, and writes nothing.
+    """
+    start = ledger_text.find("pub fn timeout_hold")
+    if start < 0:
+        raise ProbeError("the live ledger has no pub fn timeout_hold")
+    open_at = ledger_text.find("(", start)
+    if open_at < 0:
+        raise ProbeError("pub fn timeout_hold has no parameter list")
+    depth = 0
+    close_at = None
+    for index in range(open_at, len(ledger_text)):
+        char = ledger_text[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                close_at = index
+                break
+    if close_at is None:
+        raise ProbeError("pub fn timeout_hold parameter list is unclosed")
+    params = ledger_text[open_at + 1:close_at]
+    if "reservation: Reservation" in params and "now: u64" not in params:
+        return params
+    if "reservation: Reservation" in params and "now: u64" in params:
+        return params
+    raise ProbeError(
+        "timeout_hold signature is not a form this probe calls: " + params
+    )
+
+
+def timeout_test_body(source):
+    """The immediate-timeout test body in ``source``, or ``ProbeError``."""
+    start = source.find("fn test_immediate_timeout_after_unknown_is_refused")
+    if start < 0:
+        raise ProbeError("the replay source has no immediate-timeout test")
+    end = source.find("\nfn ", start + 1)
+    if end < 0:
+        raise ProbeError("the immediate-timeout test is not followed by a function")
+    return source[start:end]
+
+
+def timeout_source(source, ledger_text):
+    """The replay source whose one timeout call matches the live signature.
+
+    A four-argument list renders ``, 0`` on the call, ``Ok(_)`` on the arm,
+    and the deadline panic sentence, each once. A three-argument list returns
+    ``source`` unchanged. A missing anchor or a second copy raises.
+    """
+    shape = timeout_shape(ledger_text)
+    if "now: u64" not in shape:
+        return source
+    call = "verifier.timeout_hold(&call, &request, reservation)"
+    deadline_call = "verifier.timeout_hold(&call, &request, reservation, 0)"
+    body = timeout_test_body(source)
+    for anchor in (call, "Ok(())", "immediate timeout returned Ok"):
+        count = body.count(anchor)
+        if count != 1:
+            raise ProbeError(f"the timeout test holds {count} copies of {anchor}, not one")
+    body = body.replace(call, deadline_call, 1)
+    body = body.replace("Ok(())", "Ok(_)", 1)
+    body = body.replace(
+        "immediate timeout returned Ok",
+        "immediate timeout returned Ok" + TIMEOUT_DEADLINE,
+        1,
+    )
+    return source.replace(timeout_test_body(source), body, 1)
+
+
+# The ledger is read once. The panic and observed lines follow the rendered
+# call: the deadline sentence only when the live list takes ``now``.
+_LIVE_TIMEOUT_TEXT = LEDGER.read_text()
+_LIVE_TIMEOUT_PARAMS = timeout_shape(_LIVE_TIMEOUT_TEXT)
+if "now: u64" in _LIVE_TIMEOUT_PARAMS:
+    TIMEOUT_OK_PANIC = TIMEOUT_OK_PANIC + TIMEOUT_DEADLINE
+    TIMEOUT_OK_OBSERVED = TIMEOUT_OK_OBSERVED + TIMEOUT_DEADLINE
+
+
 def timeout_finding_text(observed):
     """grant-binding-003 from the live ledger file and one observed line."""
     if observed not in (TIMEOUT_OK_OBSERVED, TIMEOUT_FREED_OBSERVED):
@@ -574,9 +658,11 @@ def handle_timeout(real_error, outcome, finding):
     """Classify one immediate-timeout result.
 
     A set ``real_error`` is raised and writes nothing. A pass deletes a
-    stale finding. An Ok panic writes ``timeout_hold returned Ok``. A freed
-    hold writes ``timeout_hold freed the hold``. Both panics, any other
-    failure, and an error raise and leave the destination unchanged.
+    stale finding. An Ok panic writes the observed line for this shape:
+    ``timeout_hold returned Ok``, with ``because no deadline was set`` when
+    the rendered call takes ``now``. A freed hold writes ``timeout_hold
+    freed the hold``. Both panics, any other failure, and an error raise and
+    leave the destination unchanged.
     """
     if real_error is not None:
         raise real_error
@@ -899,7 +985,9 @@ def write_probe(pkg, crate):
     (pkg / "src").mkdir(parents=True)
     (pkg / "tests").mkdir()
     (pkg / "src" / "lib.rs").write_text("//! External probe package. The tests call grant-binding.\n")
-    (pkg / "tests" / "replay.rs").write_text(render_replay(REPLAY_RS, REPO))
+    (pkg / "tests" / "replay.rs").write_text(
+        render_replay(timeout_source(REPLAY_RS, _LIVE_TIMEOUT_TEXT), REPO)
+    )
     manifest = (
         "[package]\n"
         "name = \"grant-replay-probe\"\n"
@@ -1176,6 +1264,13 @@ class GrantReplayProbe(unittest.TestCase):
         if self.real_error is not None:
             handle_timeout(self.real_error, None, TIMEOUT_FINDING)
         outcome = outcome_for(TIMEOUT_NAME, self.real.code, self.real.output)
+        shape = timeout_shape(_LIVE_TIMEOUT_TEXT)
+        print(
+            "timeout shape: "
+            + ("four arguments" if "now: u64" in shape else "three arguments"),
+            file=sys.stderr,
+            flush=True,
+        )
         status, text = handle_timeout(None, outcome, TIMEOUT_FINDING)
         for name in PROBE_NAMES:
             self.assertEqual(
@@ -1201,8 +1296,10 @@ class GrantReplayProbe(unittest.TestCase):
     def test_timeout_probe_calls_settle_before_timeout(self):
         """Unknown settle, then one timeout_hold, then reserve again.
 
-        ``release`` does not occur. This test launches nothing and does not
-        read the ledger for a deadline.
+        The rendered source the probe compiles matches the live signature:
+        the four-argument call and its ``Ok(_)`` arm once when the live list
+        takes ``now``, the three-argument form once otherwise. ``release``
+        does not occur. This test launches nothing.
         """
         source = inspect.getsource(
             GrantReplayProbe.test_timeout_probe_calls_settle_before_timeout
@@ -1211,12 +1308,17 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertNotIn("run" + "_suite", source)
         self.assertNotIn(".pl" + "ant(", source)
         self.assertNotIn("ledger" + ".rs", source)
-        start = REPLAY_RS.find("fn test_immediate_timeout_after_unknown_is_refused")
-        identity = REPLAY_RS.find("fn test_stale_call_identity_replay_is_refused")
+        shape = timeout_shape(_LIVE_TIMEOUT_TEXT)
+        self.assertIn("reservation: Reservation", shape)
+        rendered = render_replay(
+            timeout_source(REPLAY_RS, _LIVE_TIMEOUT_TEXT), REPO
+        )
+        start = rendered.find("fn test_immediate_timeout_after_unknown_is_refused")
+        identity = rendered.find("fn test_stale_call_identity_replay_is_refused")
         self.assertGreater(start, identity)
-        end = REPLAY_RS.find("fn redteam_manifest_is_not_a_grant_link", start)
+        end = rendered.find("fn redteam_manifest_is_not_a_grant_link", start)
         self.assertGreater(end, start)
-        body = REPLAY_RS[start:end]
+        body = rendered[start:end]
         self.assertNotIn("\nfn ", body)
         reserve = body.find("reserve")
         unknown = body.find("SettleOutcome::Unknown")
@@ -1239,6 +1341,87 @@ class GrantReplayProbe(unittest.TestCase):
             "use grant_binding::{GuestRequest, Handle, Refuse, Rights, Verifier};",
             REPLAY_RS,
         )
+        three_ledger = (
+            "pub fn timeout_hold(\n"
+            "    &self,\n"
+            "    call: &Call,\n"
+            "    request: &GuestRequest,\n"
+            "    reservation: Reservation,\n"
+            ") -> Result<(), TimeoutRefuse> {\n"
+        )
+        four_ledger = (
+            "pub fn timeout_hold(\n"
+            "    &self,\n"
+            "    call: &Call,\n"
+            "    request: &GuestRequest,\n"
+            "    reservation: Reservation,\n"
+            "    now: u64,\n"
+            ") -> Result<(), TimeoutRefuse> {\n"
+        )
+        self.assertNotIn("now: u64", timeout_shape(three_ledger))
+        self.assertIn("now: u64", timeout_shape(four_ledger))
+        self.assertEqual(timeout_source(REPLAY_RS, three_ledger), REPLAY_RS)
+        three_body = timeout_test_body(REPLAY_RS)
+        self.assertEqual(three_body.count("timeout_hold"), 1)
+        self.assertEqual(
+            three_body.count("timeout_hold(&call, &request, reservation, 0)"), 0
+        )
+        self.assertEqual(
+            three_body.count("timeout_hold(&call, &request, reservation)"), 1
+        )
+        self.assertEqual(three_body.count("Ok(())"), 1)
+        self.assertNotIn(TIMEOUT_DEADLINE, three_body)
+        self.assertNotIn("reservation, 0", three_body)
+        four_body = timeout_test_body(timeout_source(REPLAY_RS, four_ledger))
+        self.assertEqual(four_body.count("timeout_hold"), 1)
+        self.assertEqual(
+            four_body.count("timeout_hold(&call, &request, reservation, 0)"), 1
+        )
+        self.assertIn(TIMEOUT_DEADLINE, four_body)
+        self.assertNotIn("Ok(())", four_body)
+        self.assertNotIn("set_verifier_deadline", four_body)
+        if "now: u64" in shape:
+            self.assertEqual(timeout_source(REPLAY_RS, _LIVE_TIMEOUT_TEXT), rendered)
+            self.assertEqual(
+                body.count("timeout_hold(&call, &request, reservation, 0)"), 1
+            )
+            self.assertIn(TIMEOUT_DEADLINE, body)
+            self.assertNotIn("Ok(())", body)
+            self.assertNotIn("set_verifier_deadline", body)
+        else:
+            self.assertEqual(
+                timeout_source(REPLAY_RS, _LIVE_TIMEOUT_TEXT), REPLAY_RS
+            )
+            self.assertEqual(
+                body.count("timeout_hold(&call, &request, reservation, 0)"), 0
+            )
+            self.assertEqual(
+                body.count("timeout_hold(&call, &request, reservation)"), 1
+            )
+            self.assertEqual(body.count("Ok(())"), 1)
+            self.assertNotIn(TIMEOUT_DEADLINE, body)
+            self.assertNotIn("reservation, 0", body)
+        with self.assertRaises(ProbeError):
+            timeout_shape("pub fn timeout_hold is absent\n")
+        with self.assertRaises(ProbeError):
+            timeout_shape("pub fn timeout_hold(&self, call: &Call\n")
+        with self.assertRaises(ProbeError) as caught:
+            timeout_shape("pub fn timeout_hold(&self, call: &Call) {}\n")
+        self.assertEqual(
+            str(caught.exception),
+            "timeout_hold signature is not a form this probe calls: &self, call: &Call",
+        )
+        twice = REPLAY_RS.replace(
+            "match verifier.timeout_hold(&call, &request, reservation) {",
+            "let _again = verifier.timeout_hold(&call, &request, reservation);\n"
+            "    match verifier.timeout_hold(&call, &request, reservation) {",
+            1,
+        )
+        self.assertNotEqual(twice, REPLAY_RS)
+        with self.assertRaises(ProbeError):
+            timeout_source(twice, four_ledger)
+        with self.assertRaises(ProbeError):
+            timeout_source("fn other() {}\n", four_ledger)
 
     def test_timeout_probe_errors_write_nothing(self):
         """Each timeout error is its own ProbeError and writes nothing.
@@ -1921,7 +2104,10 @@ class GrantReplayProbe(unittest.TestCase):
         if self.real_error is not None:
             raise self.real_error
         text = (self.real_pkg / "tests" / "replay.rs").read_text()
-        self.assertEqual(text, render_replay(REPLAY_RS, REPO))
+        expected = render_replay(
+            timeout_source(REPLAY_RS, _LIVE_TIMEOUT_TEXT), REPO
+        )
+        self.assertEqual(text, expected)
         self.assertNotIn(REPO_MARKER, text)
         self.assertIn(str(REPO), text)
         self.assertIn(
