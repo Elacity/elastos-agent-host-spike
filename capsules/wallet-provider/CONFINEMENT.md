@@ -499,7 +499,14 @@ reads each ordinary row's Inputs cell against the fields its `Request` arm
 declares, in declaration order, and reads a `wallet_contract` row's Inputs cell
 against that operation's declared `params`.
 `operations_table_row_check_refuses_each_bad_table` refuses a bad
-`wallet_contract` Inputs cell. A refusal under `(deny default)` is a denial,
+`wallet_contract` Inputs cell. The same check reads each row's Outputs cell
+against what its handler answers: the error side is the `Response` serde tag
+and its `Error` fields, and `data`'s children are the keys of that handler's
+one `json!`, or the fields `WalletProviderResponseV2` declares on a
+`wallet_contract` row, in declaration order.
+`operations_table_row_check_refuses_each_bad_table` refuses an Outputs cell
+that leaves a key out, adds one, or writes another error name. A refusal under
+`(deny default)` is a denial,
 not a grant, and no row writes it as a right. A refusal from a `kind` comes back as an outer
 `status` `ok` whose `data.result` holds `status` `error`, `code` and `message`;
 the outer `status`/`code`/`message` error covers envelope failures only. A
@@ -1495,6 +1502,15 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - WP217: The file row's bound-executable probe read names wallet's binary for
   both providers, so did's probe would read the wrong program.
   `landlock_probe_paths_follow_the_bound_parameters` checks this rule.
+- WP218: The Outputs compare ignores the children of `data`, so a literal key
+  the cell omits passes.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP219: The ordinary ok side accepts the cell's own names and does not read
+  the handler `json!`, so a key the literal does not write passes.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP220: The `wallet_contract` compare does not read
+  `WalletProviderResponseV2`, so an extra envelope name passes.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

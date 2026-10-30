@@ -118,7 +118,13 @@ cell names a declared id or `none: needs no declared right`, a right row cites
 both sides, and every Linux cell stays `designed, not enforced`. The same check
 reads each ordinary row's Inputs cell against the fields its `Request` arm
 declares, in declaration order, and reads a `wallet_contract` row. This table
-has none. A refusal under `(deny default)` is a denial, not a grant, and no
+has none. The same check reads each row's Outputs cell against what its handler
+answers: the error side is the `Response` serde tag and its `Error` fields, and
+`data`'s children are the keys of that handler's one `json!`, in declaration
+order. `operations_table_row_check_refuses_each_bad_table`, in
+`../wallet-provider/tests/confine.rs`, refuses an Outputs cell that leaves a
+key out, adds one, or writes another error name. A refusal under
+`(deny default)` is a denial, not a grant, and no
 row writes it as a right. The
 startup grants stay in "What the profile allows". A `storage` row cites both
 sides of its right: `permitted:` names the test that shows the operation under

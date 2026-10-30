@@ -277,7 +277,7 @@ use std::process::Command;
 /// makes the file row's bound-executable probe read name wallet's binary for
 /// both providers, so did's probe would read the wrong program; it is CAUGHT on
 /// the Mac by `landlock_probe_paths_follow_the_bound_parameters`.
-const EXPECTED_FALSIFIERS: usize = 197;
+const EXPECTED_FALSIFIERS: usize = 200;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

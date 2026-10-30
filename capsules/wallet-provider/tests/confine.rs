@@ -12673,10 +12673,42 @@ const REQUEST_ARM: &str = "Request::";
 /// The one contract operation type wallet's dispatch expands.
 const WALLET_OPERATION_ARM: &str = "WalletProviderOperationV2::";
 
+/// The one row whose answer is an arm of `fn handle` rather than a function
+/// body.
+const SHUTDOWN_ARM: &str = "Request::Shutdown";
+
+/// The wire name of `SHUTDOWN_ARM`, and the row that names it.
+const SHUTDOWN_OPERATION: &str = "shutdown";
+
+/// The call one handler makes when it answers without data.
+const EMPTY_OK_CALL: &str = "Response::empty_ok()";
+
+/// The one text an `EMPTY_OK_CALL` row writes as its ok side.
+const EMPTY_OK_TEXT: &str = "`{\"status\":\"ok\"}` only";
+
+/// The macro one handler writes its ok answer with, also inside
+/// `serde_json::json!`.
+const OK_JSON_MACRO: &str = "json!";
+
+/// The wire field one handler's ok `json!` answers as its key list.
+const OK_DATA_NAME: &str = "data";
+
+/// The two markers that split an Outputs cell into its ok and error sides.
+const OUTPUTS_OK_MARKER: &str = "ok: ";
+const OUTPUTS_ERROR_MARKER: &str = ". error: ";
+
+/// The two fixed markers one `wallet_contract` row's ok side writes.
+const WALLET_RESPONSE_MARKER: &str = " from `WalletProviderResponseV2`";
+const WALLET_RESPONSE_NAMES_ONLY: &str = ", names only";
+
+/// The contract type one `wallet_contract` row answers as `data`.
+const RESPONSE_CONTRACT_ITEM: &str = "WalletProviderResponseV2";
+
 /// One operations table row, reduced to the cells the row check reads.
 struct OperationsRow {
     operation: String,
     inputs: String,
+    outputs: String,
     right: String,
     macos: String,
     linux: String,
@@ -12787,6 +12819,7 @@ fn operations_table_rows(
         rows.push(OperationsRow {
             operation: cells[0].to_string(),
             inputs: cells[1].to_string(),
+            outputs: cells[2].to_string(),
             right: cells[3].to_string(),
             macos: cells[5].to_string(),
             linux: cells[6].to_string(),
@@ -14099,6 +14132,552 @@ fn declared_right_cell(right: &str) -> bool {
         .is_some_and(|id| CONTRACT_RIGHTS.contains(&id) || PLATFORM_BASELINE_IDS.contains(&id))
 }
 
+/// The one answer a row's handler writes, or the reason it cannot be read.
+enum RowAnswer {
+    /// One ok `json!` object body and the label its keys come from.
+    Json { body: String, label: String },
+    /// The one arm that calls `EMPTY_OK_CALL` and writes no `json!`.
+    Empty { label: String },
+    /// One `WalletProviderResponseV2` value, read from the contract file.
+    Contract,
+}
+
+/// Every problem with one row's Outputs cell, each naming the document, the
+/// row and the value it read.
+///
+/// The cell is read once, from the two markers that split it into its ok side
+/// and its error side; a cell without either marker is one refusal. The error
+/// side goes through `input_items` and must be the serde tag of the provider's
+/// `Response` enum, then `wire_field_names` of its `Error` variant, in
+/// declaration order, with no children. A renamed tag, a renamed field and a
+/// reordered side are each a refusal, and there is no second list of error
+/// envelope names.
+///
+/// An ordinary ok side is the backticked `status` and `data`, and `data`'s
+/// children are the top-level keys of the one ok `json!` in that row's handler,
+/// in source order. The handler region is the `fn <operation>(` body, except
+/// `SHUTDOWN_OPERATION`, whose region is the `SHUTDOWN_ARM` arm of `fn handle`.
+/// A region with no such `json!`, or with two, is a refusal that names the
+/// document, the row and the function. A key the literal writes and the cell
+/// omits, or a key the cell names and the literal does not write, is a refusal.
+///
+/// The one row whose handler region calls `EMPTY_OK_CALL` writes no `data`: its
+/// ok side is `EMPTY_OK_TEXT`, compared as that text, and that text on a row
+/// that writes `data` or a `data` side on an `EMPTY_OK_CALL` row is a refusal.
+///
+/// A `wallet_contract` ok side holds `WALLET_RESPONSE_MARKER` and ends with
+/// `WALLET_RESPONSE_NAMES_ONLY`; both markers are stripped and the rest goes
+/// through the same cell reader. Its `data`'s children are `wire_field_names`
+/// of `WalletProviderResponseV2` in the contract file, in declaration order. A
+/// missing marker, a reordered field and an extra child are each a refusal, and
+/// an ordinary row is not given those markers.
+///
+/// A row whose operation has no arm in `fn handle` or in
+/// `fn dispatch_wallet_operation` is left to `row_set_problems`, which already
+/// refuses it, so this rule names no second reason for it.
+///
+/// Honesty limits: the rule reads a handler's `json!` keys and a declaration's
+/// fields as source text. It does not read a serialized value, a key a helper
+/// adds at run time, or a key inside a nested value, so `resolve`'s `document`
+/// is one key, and a `wallet_contract` row checks the envelope fields and never
+/// the keys of `result`.
+fn outputs_cell_problems(
+    document_name: &str,
+    row: &OperationsRow,
+    sources: &WireSources<'_>,
+) -> Vec<String> {
+    let answer = match row_answer(row, sources) {
+        Ok(Some(answer)) => answer,
+        Ok(None) => return Vec::new(),
+        Err(reason) => return vec![outputs_refusal(document_name, row, &reason)],
+    };
+    let Some((ok_side, error_side)) = row.outputs.split_once(OUTPUTS_ERROR_MARKER) else {
+        return vec![outputs_refusal(
+            document_name,
+            row,
+            &format!("every Outputs cell holds {OUTPUTS_ERROR_MARKER:?}"),
+        )];
+    };
+    let Some(ok_side) = ok_side.strip_prefix(OUTPUTS_OK_MARKER) else {
+        return vec![outputs_refusal(
+            document_name,
+            row,
+            &format!("every Outputs cell starts its ok side with {OUTPUTS_OK_MARKER:?}"),
+        )];
+    };
+    let mut problems = error_side_problems(document_name, row, error_side, sources);
+    problems.extend(ok_side_problems(document_name, row, ok_side, &answer));
+    problems
+}
+
+/// Every problem with every row's Outputs cell, in row order.
+fn outputs_cell_problems_rows(
+    document_name: &str,
+    rows: &[OperationsRow],
+    sources: &WireSources<'_>,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    for row in rows {
+        problems.extend(outputs_cell_problems(document_name, row, sources));
+    }
+    problems
+}
+
+/// One Outputs-cell refusal naming the document, the row, the whole cell and
+/// the rule that refused it.
+fn outputs_refusal(document_name: &str, row: &OperationsRow, reason: &str) -> String {
+    format!(
+        "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the Outputs cell {}, \
+         and {reason}",
+        row.operation, row.outputs
+    )
+}
+
+/// The answer one row's handler writes, `None` when the dispatch holds no arm
+/// for that row, or the reason the region cannot be read.
+///
+/// An ordinary row is answered by the one `json!` in its handler region, or by
+/// `EMPTY_OK_CALL` alone. A `wallet_contract` row is answered by one
+/// `WalletProviderResponseV2` value, which no per-kind `json!` describes.
+///
+/// A dispatch with no `fn handle`, and one that answers `wallet_contract` with
+/// no `fn dispatch_wallet_operation`, return `None` for every row:
+/// `row_set_problems` and `inputs_cell_problems` already refuse each of those
+/// sources once, so this rule names no third reason for them.
+fn row_answer(row: &OperationsRow, sources: &WireSources<'_>) -> Result<Option<RowAnswer>, String> {
+    let contract_prefix = format!("{WALLET_CONTRACT_ARM} ");
+    if let Some(kind) = row.operation.strip_prefix(&contract_prefix) {
+        let Some(kinds) = dispatch_arm_variants(
+            sources.dispatch,
+            "fn dispatch_wallet_operation(",
+            WALLET_OPERATION_ARM,
+        ) else {
+            return Ok(None);
+        };
+        if !kinds.iter().any(|arm| variant_snake_case(arm) == kind) {
+            return Ok(None);
+        }
+        return Ok(Some(RowAnswer::Contract));
+    }
+    let Some(arms) = dispatch_arm_variants(sources.dispatch, "fn handle(", REQUEST_ARM) else {
+        return Ok(None);
+    };
+    if !arms
+        .iter()
+        .any(|arm| variant_snake_case(arm) == row.operation)
+    {
+        return Ok(None);
+    }
+    let (region, label) = handler_region(row, sources)?;
+    match ok_json_literals(&region).as_slice() {
+        [only] => Ok(Some(RowAnswer::Json {
+            body: only.clone(),
+            label,
+        })),
+        [] if region.contains(EMPTY_OK_CALL) => Ok(Some(RowAnswer::Empty { label })),
+        [] => Err(format!("{label} writes no {OK_JSON_MACRO} answer")),
+        many => Err(format!(
+            "{label} writes {} {OK_JSON_MACRO} answers, and one handler writes one",
+            many.len()
+        )),
+    }
+}
+
+/// Every problem with one Outputs cell's error side.
+///
+/// The side goes through the one cell reader and must be the backticked serde
+/// tag of `Response`, then the wire field names of its `Error` variant, in
+/// declaration order, with no children.
+fn error_side_problems(
+    document_name: &str,
+    row: &OperationsRow,
+    error_side: &str,
+    sources: &WireSources<'_>,
+) -> Vec<String> {
+    let path = sources.declarations_path.display();
+    let tag = match serde_tag_name(sources.declarations, "Response") {
+        Ok(tag) => tag,
+        Err(reason) => {
+            return vec![outputs_refusal(
+                document_name,
+                row,
+                &format!("the error side cannot be read because {reason}"),
+            )]
+        }
+    };
+    // Every cell ends its sentence with a full stop, which is not a name.
+    let error_side = error_side.trim().trim_end_matches('.').trim_end();
+    let fields = match wire_field_names(sources.declarations, "Error") {
+        WireFieldNames::Names(fields) => fields,
+        WireFieldNames::NoDeclaration => {
+            return vec![outputs_refusal(
+                document_name,
+                row,
+                &format!("{path} declares no Error variant"),
+            )]
+        }
+        WireFieldNames::Unsupported(reason) => {
+            return vec![outputs_refusal(
+                document_name,
+                row,
+                &format!("the Error variant of {path} cannot be read: {reason}"),
+            )]
+        }
+    };
+    let mut expected = vec![input_leaf(&tag, true)];
+    expected.extend(fields.iter().map(|name| input_leaf(name, true)));
+    if input_items(error_side).is_some_and(|observed| inputs_match(&observed, &expected)) {
+        return Vec::new();
+    }
+    vec![outputs_refusal(
+        document_name,
+        row,
+        &format!("{path} names the error side {}", render_inputs(&expected)),
+    )]
+}
+
+/// Every problem with one Outputs cell's ok side, read against `answer`.
+fn ok_side_problems(
+    document_name: &str,
+    row: &OperationsRow,
+    ok_side: &str,
+    answer: &RowAnswer,
+) -> Vec<String> {
+    match answer {
+        RowAnswer::Empty { label } => {
+            if ok_side == EMPTY_OK_TEXT {
+                return Vec::new();
+            }
+            vec![outputs_refusal(
+                document_name,
+                row,
+                &format!(
+                    "{label} calls {EMPTY_OK_CALL} and writes no data, so its ok side is \
+                     {EMPTY_OK_TEXT}"
+                ),
+            )]
+        }
+        RowAnswer::Json { body, label } => {
+            if ok_side == EMPTY_OK_TEXT {
+                return vec![outputs_refusal(
+                    document_name,
+                    row,
+                    &format!(
+                        "{label} writes data, and {EMPTY_OK_TEXT} belongs to the row whose \
+                         handler calls {EMPTY_OK_CALL}"
+                    ),
+                )];
+            }
+            let keys = match object_keys(body) {
+                Ok(keys) => keys,
+                Err(reason) => {
+                    return vec![outputs_refusal(
+                        document_name,
+                        row,
+                        &format!("the {OK_JSON_MACRO} of {label} {reason}"),
+                    )]
+                }
+            };
+            ok_names_problems(
+                document_name,
+                row,
+                ok_side,
+                &keys,
+                &format!("{label} names"),
+            )
+        }
+        RowAnswer::Contract => {
+            if ok_side == EMPTY_OK_TEXT {
+                return vec![outputs_refusal(
+                    document_name,
+                    row,
+                    &format!(
+                        "a {WALLET_CONTRACT_ARM} row answers one {RESPONSE_CONTRACT_ITEM} as data"
+                    ),
+                )];
+            }
+            let stripped = match contract_ok_side(ok_side) {
+                Ok(stripped) => stripped,
+                Err(reason) => return vec![outputs_refusal(document_name, row, &reason)],
+            };
+            let path = wallet_operation_contract_path();
+            let fields = match contract_response_fields(&path) {
+                Ok(fields) => fields,
+                Err(reason) => return vec![outputs_refusal(document_name, row, &reason)],
+            };
+            ok_names_problems(
+                document_name,
+                row,
+                &stripped,
+                &fields,
+                &format!("{} names", path.display()),
+            )
+        }
+    }
+}
+
+/// Every problem with one ok side read against the `data` children `keys`.
+fn ok_names_problems(
+    document_name: &str,
+    row: &OperationsRow,
+    ok_side: &str,
+    keys: &[String],
+    label: &str,
+) -> Vec<String> {
+    let expected = ok_row_items(keys);
+    if input_items(ok_side).is_some_and(|observed| inputs_match(&observed, &expected)) {
+        return Vec::new();
+    }
+    vec![outputs_refusal(
+        document_name,
+        row,
+        &format!("{label} {}", render_inputs(&expected)),
+    )]
+}
+
+/// The backticked `status` and `data` items whose `data` children are `keys`,
+/// in order.
+fn ok_row_items(keys: &[String]) -> Vec<InputsItem> {
+    let mut data = input_leaf(OK_DATA_NAME, true);
+    data.children = keys.iter().map(|key| input_leaf(key, true)).collect();
+    vec![input_leaf("status", true), data]
+}
+
+/// One `wallet_contract` ok side with its two fixed markers removed, or the
+/// reason a marker is missing.
+///
+/// `WALLET_RESPONSE_MARKER` sits inside the `data` group, directly before its
+/// closing parenthesis, and `WALLET_RESPONSE_NAMES_ONLY` ends the cell. Both are
+/// fixed text, so the rest of the side is the same `status` and `data` list
+/// every other row writes, and the one cell reader reads it.
+fn contract_ok_side(ok_side: &str) -> Result<String, String> {
+    let Some(names_only_stripped) = ok_side.strip_suffix(WALLET_RESPONSE_NAMES_ONLY) else {
+        return Err(format!(
+            "a {WALLET_CONTRACT_ARM} ok side ends with {WALLET_RESPONSE_NAMES_ONLY:?}"
+        ));
+    };
+    let Some((names, group_end)) = names_only_stripped.split_once(WALLET_RESPONSE_MARKER) else {
+        return Err(format!(
+            "a {WALLET_CONTRACT_ARM} ok side names {WALLET_RESPONSE_MARKER:?}"
+        ));
+    };
+    if group_end.trim() != ")" {
+        return Err(format!(
+            "a {WALLET_CONTRACT_ARM} ok side closes its data group directly after \
+             {WALLET_RESPONSE_MARKER:?}"
+        ));
+    }
+    Ok(format!("{names})"))
+}
+
+/// The wire field names of `WalletProviderResponseV2` in the contract file, in
+/// declaration order, or the reason they cannot be read.
+fn contract_response_fields(path: &Path) -> Result<Vec<String>, String> {
+    let source = fs::read_to_string(path)
+        .map_err(|err| format!("{} is not readable: {err}", path.display()))?;
+    match wire_field_names(&source, RESPONSE_CONTRACT_ITEM) {
+        WireFieldNames::Names(fields) => Ok(fields),
+        WireFieldNames::NoDeclaration => Err(format!(
+            "{} declares no {RESPONSE_CONTRACT_ITEM}",
+            path.display()
+        )),
+        WireFieldNames::Unsupported(reason) => Err(format!(
+            "the {RESPONSE_CONTRACT_ITEM} declaration of {} cannot be read: {reason}",
+            path.display()
+        )),
+    }
+}
+
+/// The handler text one row's ok answer comes from, and the label a refusal
+/// names for it.
+///
+/// An ordinary row's region is the `fn <operation>(` body of the dispatch
+/// file. `SHUTDOWN_OPERATION`'s region is the `SHUTDOWN_ARM` arm of `fn handle`
+/// in that same file.
+fn handler_region(
+    row: &OperationsRow,
+    sources: &WireSources<'_>,
+) -> Result<(String, String), String> {
+    let path = sources.dispatch_path.display();
+    if row.operation == SHUTDOWN_OPERATION {
+        let region = shutdown_arm_body(sources.dispatch)
+            .ok_or_else(|| format!("{path} holds no {SHUTDOWN_ARM} arm of fn handle"))?;
+        return Ok((
+            region,
+            format!("the {SHUTDOWN_ARM} arm of fn handle of {path}"),
+        ));
+    }
+    let signature = format!("fn {}(", row.operation);
+    let body = function_body(sources.dispatch, &signature)
+        .ok_or_else(|| format!("{path} holds no fn {}", row.operation))?;
+    Ok((body, format!("fn {} of {path}", row.operation)))
+}
+
+/// The top-level keys of one `json!` object body, in source order, or the
+/// reason a key cannot be read.
+///
+/// Each entry is one comma-separated item, split by `declaration_items`, and
+/// its key is the Rust string literal that starts it. A nested object or array
+/// is a value, so its keys stay one level down.
+fn object_keys(body: &str) -> Result<Vec<String>, String> {
+    let mut keys = Vec::new();
+    for entry in declaration_items(body).map_err(|reason| format!("cannot be read: {reason}"))? {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (name, length) = rust_string_literal(entry)
+            .map_err(|reason| format!("holds a key it cannot read: {reason}"))?;
+        if !entry[length..].trim_start().starts_with(':') {
+            return Err(format!("holds the key {name} before its value"));
+        }
+        keys.push(name);
+    }
+    Ok(keys)
+}
+
+/// The object bodies of every `json!(...)` call whose argument is an object
+/// literal in `region`, in source order. `serde_json::json!` holds the same
+/// macro name, so both read the same way.
+///
+/// A macro name inside a string literal, and a call whose argument is not a
+/// braced object, is not an answer this rule reads.
+fn ok_json_literals(region: &str) -> Vec<String> {
+    let normalized = without_comments(region);
+    let mut literals = Vec::new();
+    let mut from = 0;
+    while let Some(offset) = normalized[from..].find(OK_JSON_MACRO) {
+        let at = from + offset;
+        from = at + OK_JSON_MACRO.len();
+        if inside_string(&normalized, at) {
+            continue;
+        }
+        let rest = normalized[from..].trim_start();
+        let Some(rest) = rest
+            .strip_prefix('(')
+            .map(str::trim_start)
+            .and_then(|rest| rest.strip_prefix('{'))
+        else {
+            continue;
+        };
+        if let Some(end) = declaration_end(rest) {
+            literals.push(rest[..end].to_string());
+        }
+    }
+    literals
+}
+
+/// The text of the `fn <signature>` body in `source`, or `None` when no line
+/// starts with `signature`.
+///
+/// The body is every line after the signature line, up to the next line that
+/// starts a `fn` at the signature's own indentation, or the end of the file, so
+/// the function after it is not part of the body. `dispatch_arm_variants` reads
+/// the same body for an indented method (P10).
+fn function_body(source: &str, signature: &str) -> Option<String> {
+    let mut body: Option<String> = None;
+    let mut indent = 0;
+    for line in source.lines() {
+        match body.as_mut() {
+            None => {
+                if line.trim_start().starts_with(signature) {
+                    indent = line.len() - line.trim_start().len();
+                    body = Some(String::new());
+                }
+            }
+            Some(text) => {
+                let trimmed = line.trim_start();
+                let starts_function =
+                    trimmed.starts_with("fn ") && line.len() - trimmed.len() == indent;
+                if starts_function {
+                    break;
+                }
+                text.push_str(line);
+                text.push('\n');
+            }
+        }
+    }
+    body
+}
+
+/// The text of the `SHUTDOWN_ARM` arm inside `fn handle`'s body, or `None` when
+/// that body holds no such arm.
+fn shutdown_arm_body(source: &str) -> Option<String> {
+    let body = function_body(source, "fn handle(")?;
+    let start = body.find(SHUTDOWN_ARM)?;
+    Some(body[start..].to_string())
+}
+
+/// The wire name of the `tag = "..."` entry in the `#[serde(...)]` attribute
+/// above the `enum <item> {` declaration in `source`, or the reason it cannot
+/// be read.
+///
+/// The declaration is selected by the same qualifier rule `item_body` and
+/// `wire_field_names` use, and its attribute is read with the same field-list
+/// reader, so a renamed tag is a different name rather than a second list of
+/// envelope fields. A declaration with no attribute above it, and an attribute
+/// with no `tag`, are each a refusal.
+fn serde_tag_name(source: &str, item: &str) -> Result<String, String> {
+    let normalized = without_comments(source);
+    let declaration = format!("enum {item} {{");
+    let mut from = 0;
+    while let Some(offset) = normalized[from..].find(&declaration) {
+        let start = from + offset;
+        from = start + declaration.len();
+        if inside_string(&normalized, start) {
+            continue;
+        }
+        let line_start = normalized[..start].rfind('\n').map_or(0, |index| index + 1);
+        if !declaration_qualifier(normalized[line_start..start].trim()) {
+            continue;
+        }
+        let attributes = attributes_above(&normalized, line_start)
+            .ok_or_else(|| format!("the enum {item} declaration holds no attribute above it"))?;
+        for attribute in attributes.split("#[") {
+            let Some(arguments) = attribute.trim_start().strip_prefix("serde(") else {
+                continue;
+            };
+            for entry in declaration_items(arguments)
+                .map_err(|reason| format!("the serde attribute of enum {item} {reason}"))?
+            {
+                let Some(rest) = entry.trim().strip_prefix("tag") else {
+                    continue;
+                };
+                let Some(literal) = rest.trim_start().strip_prefix('=') else {
+                    continue;
+                };
+                let (name, _) = rust_string_literal(literal.trim_start())
+                    .map_err(|reason| format!("the serde tag of enum {item} {reason}"))?;
+                return Ok(name);
+            }
+        }
+        return Err(format!(
+            "the serde attribute of enum {item} holds no tag = entry"
+        ));
+    }
+    Err(format!("the source declares no enum {item}"))
+}
+
+/// The attribute lines directly above the line at `line_start` in `text`,
+/// joined in source order, or `None` when no attribute sits above it.
+fn attributes_above(text: &str, line_start: usize) -> Option<String> {
+    let mut lines: Vec<&str> = Vec::new();
+    let mut cursor = line_start;
+    while let Some(previous_end) = cursor.checked_sub(1) {
+        let previous_start = text[..previous_end]
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
+        let line = text[previous_start..previous_end].trim();
+        if !line.starts_with("#[") {
+            break;
+        }
+        lines.push(line);
+        cursor = previous_start;
+    }
+    lines.reverse();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
 /// Every problem with one row's Right value, naming the document, the row and
 /// the value.
 fn right_vocabulary_problems(document_name: &str, row: &OperationsRow) -> Vec<String> {
@@ -14165,24 +14744,29 @@ fn linux_status_problems(document_name: &str, row: &OperationsRow) -> Vec<String
 /// The section under `OPERATIONS_HEADING` must hold a table whose first line is
 /// complete `TABLE_HEADER` and whose second is the dash separator. Every later
 /// nonempty line is a row, including repeated headers and rows with leading
-/// whitespace or omitted outer bars. Then the section must hold five things. Its row set,
-/// in table order, must equal the operations `<provider_dir>/src/main.rs`
-/// answers through `fn handle`, with a `wallet_contract` arm expanded to one
-/// `wallet_contract <kind>` row per `fn dispatch_wallet_operation` arm. An
-/// ordinary row's Inputs cell must name the backticked `op` and then the wire
-/// field names its `Request` arm declares, in declaration order, from the file
-/// `request_declaration_file` names. Each
+/// whitespace or omitted outer bars. Then the section must hold six things. Its
+/// row set, in table order, must equal the operations
+/// `<provider_dir>/src/main.rs` answers through `fn handle`, with a
+/// `wallet_contract` arm expanded to one `wallet_contract <kind>` row per
+/// `fn dispatch_wallet_operation` arm. An ordinary row's Inputs cell must name
+/// the backticked `op` and then the wire field names its `Request` arm
+/// declares, in declaration order, from the file `request_declaration_file`
+/// names. Each
 /// Right cell must be exactly `NO_DECLARED_RIGHT` or one backtick span holding
 /// an id `CONTRACT_RIGHTS` or `PLATFORM_BASELINE_IDS` declares. A row whose
 /// Right is a declared right must cite `permitted:` and `nearest outside
 /// refused:` in its macOS cell, and a `none:` row must cite neither. Every
-/// Linux cell must be `LINUX_STATUS`.
+/// Linux cell must be `LINUX_STATUS`. Every Outputs cell must name its error
+/// side as the provider's serde tag and `Error` fields, and its ok side's
+/// `data` children as its handler's own `json!` keys, or as
+/// `WalletProviderResponseV2`'s declared fields on a `wallet_contract` row.
 ///
 /// Honesty limits: rule 1 reads the dispatch arms as text, so it shows the row
 /// set matches the arms, not that every arm is reachable; rule 2 reads a
 /// `wallet_contract` row's Inputs cell against that kind's declared `params`;
-/// and the check says nothing about the Outputs keys, which stay held in
-/// BACKLOG item 21.
+/// and rule 6 reads a handler's `json!` keys and a declaration's fields as
+/// source text, so it does not read a serialized value, a key a helper adds at
+/// run time, or a key inside a nested value.
 fn operations_table_row_problems(
     document_name: &str,
     document: &str,
@@ -14227,16 +14811,16 @@ fn operations_table_row_problems(
             fs::read_to_string(&declaration_path)
         };
         match declarations {
-            Ok(declarations) => problems.extend(inputs_cell_problems(
-                document_name,
-                &rows,
-                &WireSources {
+            Ok(declarations) => {
+                let wire = WireSources {
                     dispatch: source,
                     dispatch_path: &provider_path,
                     declarations: &declarations,
                     declarations_path: &declaration_path,
-                },
-            )),
+                };
+                problems.extend(inputs_cell_problems(document_name, &rows, &wire));
+                problems.extend(outputs_cell_problems_rows(document_name, &rows, &wire));
+            }
             Err(err) => problems.push(format!(
                 "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} Inputs cells cannot be \
                  checked because {} is not readable: {err}",
@@ -16020,6 +16604,18 @@ enum Request {
     Shutdown,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(tag = \"status\", rename_all = \"snake_case\")]
+enum Response {
+    Ok {
+        data: Option<Value>,
+    },
+    Error {
+        code: String,
+        message: String,
+    },
+}
+
 fn handle(&mut self, request: Request) -> Response {
     match request {
         Request::Init { config } => self.init(config),
@@ -16030,12 +16626,63 @@ fn handle(&mut self, request: Request) -> Response {
     }
 }
 
+fn init(&mut self, config: Value) -> Response {
+    Response::ok(json!({
+        \"provider\": \"fixture\",
+        \"wire_name\": config,
+    }))
+}
+
+fn status(&self) -> Response {
+    Response::ok(json!({ \"supported_operations\": [\"status\"] }))
+}
+
+fn echo(&mut self, message: String, retry: u64) -> Response {
+    Response::ok(json!({
+        \"message\": message,
+        \"retry\": retry,
+    }))
+}
+
 fn dispatch_wallet_operation(&mut self, request: &WalletProviderRequestV2) -> Response {
     match &request.operation {
         WalletProviderOperationV2::ListAccounts { include_revoked } => self.accounts(*include_revoked),
     }
 }
 ";
+
+/// The Outputs cell of one fixture operation's row.
+///
+/// An ordinary row's ok side names `status` and `data`, and `data`'s children
+/// are the keys the fixture handler's one `json!` writes. `shutdown` writes
+/// `EMPTY_OK_TEXT`, because its arm calls `EMPTY_OK_CALL`. Every row's error
+/// side is the fixture `Response` tag and `Error` fields.
+fn fixture_outputs(operation: &str) -> String {
+    if operation == SHUTDOWN_OPERATION {
+        return format!(
+            "{OUTPUTS_OK_MARKER}{EMPTY_OK_TEXT}{OUTPUTS_ERROR_MARKER}`status`, `code`, \
+                        `message`"
+        );
+    }
+    let keys = match operation {
+        "init" => "`provider`, `wire_name`",
+        "status" => "`supported_operations`",
+        "echo" => "`message`, `retry`",
+        _ => {
+            "`schema`, `protocol_version`, `request_id`, `operation`, `audit_id`, `lifecycle_id`, \
+             `session_binding`, `account_binding`, `approval_binding`, `result`"
+        }
+    };
+    let response = if operation.starts_with(&format!("{WALLET_CONTRACT_ARM} ")) {
+        format!("{WALLET_RESPONSE_MARKER}){WALLET_RESPONSE_NAMES_ONLY}")
+    } else {
+        ")".to_string()
+    };
+    format!(
+        "{OUTPUTS_OK_MARKER}`status`, `data` ({keys}{response}{OUTPUTS_ERROR_MARKER}`status`, \
+         `code`, `message`"
+    )
+}
 
 /// The Inputs cell of one fixture operation's row: the backticked `op` and then
 /// the wire names the fixture `Request` arm declares, in declaration order. The
@@ -16055,21 +16702,28 @@ fn fixture_inputs(operation: &str) -> String {
     }
 }
 
-/// One fixture operations row. The Outputs and Effect cells are unread by the
-/// row check, so every row carries the same filler there.
-fn fixture_row(operation: &str, inputs: &str, right: &str, macos: &str, linux: &str) -> String {
+/// One fixture operations row.
+fn fixture_row(
+    operation: &str,
+    inputs: &str,
+    outputs: &str,
+    right: &str,
+    macos: &str,
+    linux: &str,
+) -> String {
     format!(
-        "| {operation} | {inputs} | ok: `status` | {right} | answers in memory | {macos} | {linux} |\n"
+        "| {operation} | {inputs} | {outputs} | {right} | answers in memory | {macos} | {linux} |\n"
     )
 }
 
-/// One fixture operations row whose rows are in the fixture dispatch order and
-/// whose Inputs, Right, macOS and Linux cells follow all five rules.
+/// One fixture operations row whose Inputs, Outputs, Right, macOS and Linux
+/// cells follow every rule.
 fn passing_fixture_row(operation: &str) -> String {
     if operation == "init" {
         fixture_row(
             operation,
             &fixture_inputs(operation),
+            &fixture_outputs(operation),
             "`storage`",
             "permitted: `tests/confine.rs::present_case` shows the write. \
              nearest outside refused: `tests/confine.rs::present_case` shows the refusal.",
@@ -16079,6 +16733,7 @@ fn passing_fixture_row(operation: &str) -> String {
         fixture_row(
             operation,
             &fixture_inputs(operation),
+            &fixture_outputs(operation),
             NO_DECLARED_RIGHT,
             "`tests/confine.rs::present_case` shows the answer.",
             LINUX_STATUS,
@@ -16984,6 +17639,7 @@ enum WalletProviderOperationV2 {
         let changed = fixture_row(
             operation,
             cell,
+            &fixture_outputs(operation),
             NO_DECLARED_RIGHT,
             "`tests/confine.rs::present_case` shows the answer.",
             LINUX_STATUS,
@@ -17091,6 +17747,7 @@ enum WalletProviderOperationV2 {
         contract_document.push_str(&fixture_row(
             &format!("wallet_contract {kind}"),
             &contract_cell(kind, params),
+            &fixture_outputs(&format!("wallet_contract {kind}")),
             NO_DECLARED_RIGHT,
             "`tests/confine.rs::present_case` shows the answer.",
             LINUX_STATUS,
@@ -17295,6 +17952,134 @@ enum WalletProviderOperationV2 {
         "an unreadable dispatch file must keep its exact refusal"
     );
     fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
+    // Rule 6: the Outputs cell follows the handler. One case per refusal: a key
+    // the literal writes and the cell omits, a key the cell names and the
+    // literal does not write, two `json!` answers in one handler, a wrong error
+    // envelope name, the `empty_ok` text on a `data` row and a `data` side on
+    // the `empty_ok` row.
+    for (case, operation, cell) in [
+        (
+            "a literal key the cell omits",
+            "init",
+            "ok: `status`, `data` (`provider`). error: `status`, `code`, `message`",
+        ),
+        (
+            "a key the cell names and the literal omits",
+            "init",
+            "ok: `status`, `data` (`provider`, `wire_name`, `phantom`). error: `status`, `code`, \
+             `message`",
+        ),
+        (
+            "a wrong error name",
+            "status",
+            "ok: `status`, `data` (`supported_operations`). error: `status`, `error`, `message`",
+        ),
+        (
+            "the empty_ok text on a data row",
+            "status",
+            "ok: `{\"status\":\"ok\"}` only. error: `status`, `code`, `message`",
+        ),
+        (
+            "a data side on the empty_ok row",
+            SHUTDOWN_OPERATION,
+            "ok: `status`, `data` (`message`). error: `status`, `code`, `message`",
+        ),
+    ] {
+        let document = passing.replacen(&fixture_outputs(operation), cell, 1);
+        assert_ne!(document, passing, "{case} must change the Outputs cell");
+        let problems =
+            operations_table_row_problems("fixture-provider", &document, provider.path());
+        assert_eq!(
+            problems.len(),
+            1,
+            "{case} must be one refusal: {problems:?}"
+        );
+        assert!(
+            problems[0].contains(&format!("row {operation} holds the Outputs cell {cell}")),
+            "{case} must name the row and the cell: {}",
+            problems[0]
+        );
+    }
+
+    // Rule 6: two `json!` answers in one handler region are a refusal that names
+    // the region, because the rule cannot tell which one answers the call.
+    let two_literals = ROW_FIXTURE_PROVIDER.replacen(
+        "fn status(&self) -> Response {\n    Response::ok(json!({ \"supported_operations\": [\"status\"] }))\n}",
+        "fn status(&self) -> Response {\n    let _first = json!({ \"supported_operations\": \
+         [\"status\"] });\n    Response::ok(json!({ \"supported_operations\": [\"status\"] }))\n}",
+        1,
+    );
+    assert_ne!(
+        two_literals, ROW_FIXTURE_PROVIDER,
+        "the fixture must change"
+    );
+    fs::write(&provider_source, &two_literals).expect("two-literal fixture provider source");
+    let problems = operations_table_row_problems("fixture-provider", &passing, provider.path());
+    assert_eq!(
+        problems,
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status holds the Outputs \
+             cell {}, and fn status of {provider_paths} writes 2 json! answers, and one handler \
+             writes one",
+            fixture_outputs("status")
+        )],
+        "two json! answers in one handler must be one refusal naming the region"
+    );
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
+    // Rule 6: a renamed serde tag is a refusal, because the expected error side
+    // is the tag the `Response` declaration names.
+    let renamed_tag = ROW_FIXTURE_PROVIDER.replacen(
+        "#[serde(tag = \"status\", rename_all = \"snake_case\")]",
+        "#[serde(tag = \"outcome\", rename_all = \"snake_case\")]",
+        1,
+    );
+    assert_ne!(renamed_tag, ROW_FIXTURE_PROVIDER, "the tag must change");
+    fs::write(&provider_source, &renamed_tag).expect("renamed-tag fixture provider source");
+    let problems = operations_table_row_problems("fixture-provider", &passing, provider.path());
+    assert_eq!(
+        problems.len(),
+        FIXTURE_OPERATIONS.len(),
+        "a renamed tag must be refused on every row: {problems:?}"
+    );
+    for (problem, operation) in problems.iter().zip(FIXTURE_OPERATIONS.iter()) {
+        assert_eq!(
+            problem,
+            &format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {operation} holds the \
+                 Outputs cell {}, and {provider_paths} names the error side `outcome`, `code`, \
+                 `message`",
+                fixture_outputs(operation)
+            ),
+            "the refusal must name the rule, the row and the renamed tag"
+        );
+    }
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
+    // Rule 6: a `wallet_contract` field the struct does not declare is refused,
+    // and the struct's own declaration order is the one expected list.
+    let contract_path = wallet_operation_contract_path();
+    let listed = fixture_outputs("wallet_contract list_accounts");
+    let extra_field = listed.replacen(
+        "`result` from `WalletProviderResponseV2`",
+        "`phantom` from `WalletProviderResponseV2`",
+        1,
+    );
+    assert_ne!(extra_field, listed, "the contract Outputs cell must change");
+    let document = passing.replacen(&listed, &extra_field, 1);
+    assert_ne!(document, passing, "the contract row must change");
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row wallet_contract \
+             list_accounts holds the Outputs cell {extra_field}, and {} names `status`, `data` \
+             (`schema`, `protocol_version`, `request_id`, `operation`, `audit_id`, `lifecycle_id`, \
+             `session_binding`, `account_binding`, `approval_binding`, `result`)",
+            contract_path.display()
+        )],
+        "a wallet_contract field the struct does not declare must be refused"
+    );
 
     // Rule 4: a Linux cell that is not `designed, not enforced`, one per row.
     let enforced = passing.replace(LINUX_STATUS, "enforced by Landlock");
