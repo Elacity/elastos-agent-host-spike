@@ -158,25 +158,24 @@ pub fn age_shown_plan(stand_in: &mut StandIn, secs: u64) {
 /// session, is refused and stops nothing, even for an id that was never
 /// stored or an empty id.
 ///
-/// A shell stop calls `delete_capsule` with that id and the one body key
-/// `reason`, `stop the shown session`, and returns that result. The call is
-/// the cancel settlement the design names: "an explicit interrupt or cancel
-/// operation that reports its settlement". The stand-in stores `stopped` with
-/// the cause `stopped: stop the shown session`, denies that session's pending
-/// requests with `runtime` as settler, and revokes that session's `Live`
-/// grants. A granted record stays `granted`. Another session's pending request
-/// stays pending. Ok is JSON null. The helper takes no plan and no approved
-/// flag.
+/// `reason` is the text the owner states with this stop, a method argument.
+/// This helper passes it unchanged as the route's only body key `reason` and
+/// returns that route's result. The call is the cancel settlement the design
+/// names: "an explicit interrupt or cancel operation that reports its
+/// settlement". The stand-in stores that text as the capsule cause and as the
+/// decision reason of that session's pending requests, with `runtime` as
+/// settler, and revokes that session's `Live` grants. The text is the
+/// settlement record and is not a grant: a reason that reads like an allow
+/// word still stops, and the empty string reaches the route's own reason
+/// refusal. A granted record stays `granted`, another session stays as it was,
+/// and Ok is JSON null. The helper takes no plan and no approved flag.
 pub fn stop_shown_session(
     stand_in: &mut StandIn,
     caller: Caller<'_>,
     session_id: &str,
+    reason: &str,
 ) -> Result<Value, (u16, String)> {
-    stand_in.delete_capsule(
-        caller,
-        session_id,
-        &json!({ "reason": "stop the shown session" }),
-    )
+    stand_in.delete_capsule(caller, session_id, &json!({ "reason": reason }))
 }
 
 /// One status read of a shown request through
@@ -1622,7 +1621,12 @@ fn stop_settles_that_sessions_shown_steps() {
     // A stop of an absent session refuses with the stand-in's own reason and
     // settles nothing.
     assert_eq!(
-        stop_shown_session(&mut stand_in, Caller::Shell, "component-absent"),
+        stop_shown_session(
+            &mut stand_in,
+            Caller::Shell,
+            "component-absent",
+            "stop the shown session"
+        ),
         Err((400, "unknown instance: component-absent".to_owned())),
         "a stop of an absent session refuses with the id it named"
     );
@@ -1734,7 +1738,12 @@ fn stop_settles_that_sessions_shown_steps() {
 
     // The stop reports its settlement as JSON null.
     assert_eq!(
-        stop_shown_session(&mut stand_in, Caller::Shell, &first),
+        stop_shown_session(
+            &mut stand_in,
+            Caller::Shell,
+            &first,
+            "stop the shown session"
+        ),
         Ok(Value::Null),
         "a stop reports its settlement"
     );
@@ -1881,7 +1890,12 @@ fn stop_settles_that_sessions_shown_steps() {
     );
 
     assert_eq!(
-        stop_shown_session(&mut stand_in, Caller::Shell, &first),
+        stop_shown_session(
+            &mut stand_in,
+            Caller::Shell,
+            &first,
+            "stop the shown session"
+        ),
         Err((400, "instance is not live: stopped".to_owned())),
         "a stop of an already stopped session refuses with its status"
     );
@@ -2481,7 +2495,12 @@ fn shown_session_lasts_until_stop() {
 
     // The stop revokes that session's live grant; the record stays granted.
     assert_eq!(
-        stop_shown_session(&mut stand_in, Caller::Shell, "component-1"),
+        stop_shown_session(
+            &mut stand_in,
+            Caller::Shell,
+            "component-1",
+            "stop the shown session"
+        ),
         Ok(Value::Null),
         "the stop of that session reports its settlement"
     );
@@ -3963,7 +3982,12 @@ fn only_a_live_session_submits_a_shown_plan() {
 
     // The owner stops the first session. It stays listed as stopped.
     assert_eq!(
-        stop_shown_session(&mut stand_in, Caller::Shell, &first),
+        stop_shown_session(
+            &mut stand_in,
+            Caller::Shell,
+            &first,
+            "stop the shown session"
+        ),
         Ok(json!(null)),
         "only a live session submits a shown plan: the owner's stop of component-1 is accepted"
     );
@@ -4261,7 +4285,12 @@ fn agent_cannot_stop_a_shown_session() {
 
     // A client stop of an absent id and of an empty id is the shell refusal,
     // because the stop route checks the caller before any lookup or body read.
-    let absent_stop = stop_shown_session(&mut stand_in, posting_session, "component-absent");
+    let absent_stop = stop_shown_session(
+        &mut stand_in,
+        posting_session,
+        "component-absent",
+        "stop the shown session",
+    );
     assert_eq!(
         absent_stop,
         shell_refusal(),
@@ -4282,7 +4311,8 @@ fn agent_cannot_stop_a_shown_session() {
         Err((400, "stop body needs reason".to_owned())),
         "the agent that showed the plan cannot stop its session: a client stop of an absent id reads no stop body"
     );
-    let empty_stop = stop_shown_session(&mut stand_in, posting_session, "");
+    let empty_stop =
+        stop_shown_session(&mut stand_in, posting_session, "", "stop the shown session");
     assert_eq!(
         empty_stop,
         shell_refusal(),
@@ -4436,7 +4466,7 @@ fn agent_cannot_stop_a_shown_session() {
         (posting_session, "component-absent"),
     ];
     for (caller, id) in client_stops {
-        let refused = stop_shown_session(&mut stand_in, caller, id);
+        let refused = stop_shown_session(&mut stand_in, caller, id, "stop the shown session");
         assert_eq!(
             refused,
             shell_refusal(),
@@ -4486,7 +4516,12 @@ fn agent_cannot_stop_a_shown_session() {
 
     // The shell's own stop settles that session.
     assert_eq!(
-        stop_shown_session(&mut stand_in, Caller::Shell, &first),
+        stop_shown_session(
+            &mut stand_in,
+            Caller::Shell,
+            &first,
+            "stop the shown session"
+        ),
         Ok(Value::Null),
         "the shell stop of the shown session reports its settlement"
     );
@@ -4537,7 +4572,12 @@ fn agent_cannot_stop_a_shown_session() {
     );
 
     // A client stop of the stopped session is still the shell refusal.
-    let after_stop = stop_shown_session(&mut stand_in, posting_session, &first);
+    let after_stop = stop_shown_session(
+        &mut stand_in,
+        posting_session,
+        &first,
+        "stop the shown session",
+    );
     assert_eq!(
         after_stop,
         shell_refusal(),
@@ -6302,7 +6342,12 @@ fn shown_live_list_is_not_another_sessions_grant() {
 
     // The stop drops that session's live grant and leaves the other session.
     assert_eq!(
-        stop_shown_session(&mut stand_in, Caller::Shell, &second),
+        stop_shown_session(
+            &mut stand_in,
+            Caller::Shell,
+            &second,
+            "stop the shown session"
+        ),
         Ok(Value::Null),
         "a shown live list is not another session's grant: the shell stops the shown session"
     );
@@ -9752,5 +9797,743 @@ fn shown_deny_reason_is_not_the_grant() {
         shell_live(&stand_in),
         empty_shell,
         "a shown deny reason is not the grant: the refused second use leaves the live list"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn shown_stop_reason_is_not_the_grant() {
+    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use fixtures::{PLAN_A, PLAN_B};
+    use journeys::{request, running_agent};
+    use serde_json::{json, Value};
+
+    fn shell_requests(stand_in: &StandIn, session: Option<&str>) -> Value {
+        read_shown_requests(stand_in, Caller::Shell, session)
+            .expect("the shell reads a session's request list")
+    }
+
+    fn shell_live(stand_in: &StandIn) -> Value {
+        read_shown_grants(stand_in, Caller::Shell, None).expect("the shell reads the live list")
+    }
+
+    fn shell_capsules(stand_in: &StandIn) -> Vec<Value> {
+        stand_in
+            .get_capsules(Caller::Shell)
+            .expect("shell capsules")["capsules"]
+            .as_array()
+            .cloned()
+            .expect("the shell capsule list holds a capsules array")
+    }
+
+    fn capsule_state(stand_in: &StandIn, id: &str) -> Value {
+        let listed = shell_capsules(stand_in)
+            .into_iter()
+            .find(|entry| entry["id"] == id)
+            .expect("the shell capsule list holds that id");
+        json!({ "id": listed["id"], "status": listed["status"], "cause": listed["cause"] })
+    }
+
+    let plan_a = plan_sha256(PLAN_A);
+    let plan_b = plan_sha256(PLAN_B);
+    let resource_a = "localhost://Public/plan-approval/a.txt";
+    let empty_requests: Value = json!({ "requests": [] });
+    let empty_shell: Value = json!({ "scope": "all_sessions_live", "capabilities": [] });
+    let shell_refusal: Result<Value, (u16, String)> =
+        Err((403, "This endpoint requires shell privileges".to_owned()));
+
+    let mut stand_in = StandIn::new();
+
+    // A client stop never reaches the stop body, even before any session runs.
+    let early_client = stop_shown_session(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        "component-1",
+        "granted",
+    );
+    assert_eq!(
+        early_client, shell_refusal,
+        "a shown stop reason is not the grant: a client stop is the shell-only refusal"
+    );
+    assert_ne!(
+        early_client,
+        Err((400, "stop needs a reason".to_owned())),
+        "a shown stop reason is not the grant: the client refusal does not read the stop reason"
+    );
+    assert_ne!(
+        early_client,
+        Err((400, "unknown instance: component-1".to_owned())),
+        "a shown stop reason is not the grant: the client refusal does not read the instance"
+    );
+    assert_eq!(
+        shell_capsules(&stand_in),
+        Vec::<Value>::new(),
+        "a shown stop reason is not the grant: a refused client stop stores no capsule"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        empty_requests,
+        "a shown stop reason is not the grant: a refused client stop stores no request"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown stop reason is not the grant: a refused client stop mints no grant"
+    );
+
+    // An empty reason is refused before the instance is read.
+    let empty_absent = stop_shown_session(&mut stand_in, Caller::Shell, "component-absent", "");
+    assert_eq!(
+        empty_absent,
+        Err((400, "stop needs a reason".to_owned())),
+        "a shown stop reason is not the grant: an empty reason is the route's reason refusal"
+    );
+    assert_ne!(
+        empty_absent,
+        Err((400, "unknown instance: component-absent".to_owned())),
+        "a shown stop reason is not the grant: the empty-reason refusal runs before the instance lookup"
+    );
+    assert_eq!(
+        shell_capsules(&stand_in),
+        Vec::<Value>::new(),
+        "a shown stop reason is not the grant: the empty-reason refusal stores no capsule"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown stop reason is not the grant: the empty-reason refusal mints no grant"
+    );
+
+    // Two sessions run, and the first posts the plans the owner will see.
+    let first = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    let second = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    assert_eq!(
+        first, "component-1",
+        "a shown stop reason is not the grant: the fresh stand-in names the first session component-1"
+    );
+    assert_eq!(
+        second, "component-2",
+        "a shown stop reason is not the grant: the second running session is component-2"
+    );
+    for id in [&first, &second] {
+        assert_eq!(
+            capsule_state(&stand_in, id),
+            json!({ "id": id, "status": "running", "cause": "" }),
+            "a shown stop reason is not the grant: each launched session runs with no cause"
+        );
+    }
+
+    // A client stop with an empty reason is still the shell refusal.
+    let empty_client = stop_shown_session(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        "component-1",
+        "",
+    );
+    assert_eq!(
+        empty_client, shell_refusal,
+        "a shown stop reason is not the grant: a client stop with an empty reason is the shell-only refusal"
+    );
+    assert_ne!(
+        empty_client,
+        Err((400, "stop needs a reason".to_owned())),
+        "a shown stop reason is not the grant: the client refusal is not the empty-reason refusal"
+    );
+    for id in [&first, &second] {
+        assert_eq!(
+            capsule_state(&stand_in, id),
+            json!({ "id": id, "status": "running", "cause": "" }),
+            "a shown stop reason is not the grant: the refused client stop leaves each session running with no cause"
+        );
+    }
+
+    let first_step = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        PLAN_A,
+        resource_a,
+        "read",
+        "show this step",
+    )
+    .expect("the agent's request route stores one pending request");
+    assert_eq!(
+        first_step, "request-1",
+        "a shown stop reason is not the grant: the first stored request is request-1"
+    );
+    assert_eq!(
+        plan_a.len(),
+        64,
+        "a shown stop reason is not the grant: the hash of plan A has length 64"
+    );
+
+    // A shell stop with an empty reason stores nothing.
+    assert_eq!(
+        stop_shown_session(&mut stand_in, Caller::Shell, "component-1", ""),
+        Err((400, "stop needs a reason".to_owned())),
+        "a shown stop reason is not the grant: a shell stop with an empty reason is refused"
+    );
+    let pending_a = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": resource_a,
+        "action": "read",
+        "reason": "show this step",
+        "status": "pending",
+        "decision_reason": "",
+        "settled_by": null,
+        "plan": plan_a,
+    });
+    let one_pending = json!({ "requests": [pending_a.clone()] });
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        one_pending,
+        "a shown stop reason is not the grant: the empty-reason stop leaves the step pending"
+    );
+    for id in [&first, &second] {
+        assert_eq!(
+            capsule_state(&stand_in, id),
+            json!({ "id": id, "status": "running", "cause": "" }),
+            "a shown stop reason is not the grant: the empty-reason stop leaves each session running with no cause"
+        );
+    }
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown stop reason is not the grant: the empty-reason stop mints no grant"
+    );
+
+    // The owner grants the first step once and the second session's write once.
+    assert_eq!(
+        approve(
+            &mut stand_in,
+            Caller::Shell,
+            "request-1",
+            "once",
+            &plan_a,
+            "show this grant"
+        ),
+        Ok(json!({ "success": true })),
+        "a shown stop reason is not the grant: the shell approval of the first step succeeds"
+    );
+    let second_step = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        PLAN_B,
+        resource_a,
+        "read",
+        "approved",
+    )
+    .expect("the agent's request route stores the second pending request");
+    assert_eq!(
+        second_step, "request-2",
+        "a shown stop reason is not the grant: the second stored request is request-2"
+    );
+    assert_eq!(
+        plan_b.len(),
+        64,
+        "a shown stop reason is not the grant: the hash of plan B has length 64"
+    );
+    let third_step = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-2",
+        },
+        PLAN_A,
+        resource_a,
+        "write",
+        "",
+    )
+    .expect("the agent's request route stores the empty-reason request");
+    assert_eq!(
+        third_step, "request-3",
+        "a shown stop reason is not the grant: the third stored request is request-3"
+    );
+    assert_eq!(
+        approve(
+            &mut stand_in,
+            Caller::Shell,
+            "request-3",
+            "once",
+            &plan_a,
+            "keep the other"
+        ),
+        Ok(json!({ "success": true })),
+        "a shown stop reason is not the grant: the shell approval of the other session's write succeeds"
+    );
+    let fourth_step = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-2",
+        },
+        PLAN_B,
+        resource_a,
+        "read",
+        "show this step",
+    )
+    .expect("the agent's request route stores the fourth pending request");
+    assert_eq!(
+        fourth_step, "request-4",
+        "a shown stop reason is not the grant: the fourth stored request is request-4"
+    );
+
+    let shell_entry_a = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": resource_a,
+        "action": "read",
+        "duration": "once",
+        "granted_at": 0,
+    });
+    let shell_entry_c = json!({
+        "request_id": "request-3",
+        "session_id": "component-2",
+        "resource": resource_a,
+        "action": "write",
+        "duration": "once",
+        "granted_at": 0,
+    });
+    let two_shell_grants = json!({
+        "scope": "all_sessions_live",
+        "capabilities": [shell_entry_a.clone(), shell_entry_c.clone()],
+    });
+    let two_live = shell_live(&stand_in);
+    assert_eq!(
+        two_live, two_shell_grants,
+        "a shown stop reason is not the grant: the two granted steps are the live list"
+    );
+    for index in 0..2 {
+        assert!(
+            two_live["capabilities"][index].get("reason").is_none(),
+            "a shown stop reason is not the grant: the live entry has no reason key"
+        );
+        assert!(
+            two_live["capabilities"][index].get("rationale").is_none(),
+            "a shown stop reason is not the grant: the live entry has no rationale key"
+        );
+    }
+
+    // A client stop of either session is the shell refusal and changes nothing.
+    let cancel_client = stop_shown_session(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        "component-1",
+        "cancel this session",
+    );
+    assert_eq!(
+        cancel_client, shell_refusal,
+        "a shown stop reason is not the grant: the asking session's stop is the shell-only refusal"
+    );
+    for id in [&first, &second] {
+        assert_eq!(
+            capsule_state(&stand_in, id),
+            json!({ "id": id, "status": "running", "cause": "" }),
+            "a shown stop reason is not the grant: the refused client stop leaves each session running"
+        );
+    }
+    let granted_a = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": resource_a,
+        "action": "read",
+        "reason": "show this step",
+        "status": "granted",
+        "decision_reason": "show this grant",
+        "settled_by": "shell",
+        "plan": plan_a,
+    });
+    let pending_b = json!({
+        "request_id": "request-2",
+        "session_id": "component-1",
+        "resource": resource_a,
+        "action": "read",
+        "reason": "approved",
+        "status": "pending",
+        "decision_reason": "",
+        "settled_by": null,
+        "plan": plan_b,
+    });
+    let granted_and_pending_a = json!({ "requests": [granted_a.clone(), pending_b.clone()] });
+    let rows_a = shell_requests(&stand_in, Some("component-1"));
+    assert_eq!(
+        rows_a, granted_and_pending_a,
+        "a shown stop reason is not the grant: the refused client stop leaves the granted step and the sibling pending"
+    );
+    assert_eq!(
+        rows_a["requests"][1]["reason"],
+        json!("approved"),
+        "a shown stop reason is not the grant: the pending step keeps its own reason"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        two_shell_grants,
+        "a shown stop reason is not the grant: the refused client stop leaves both live grants"
+    );
+
+    // An unknown instance with a stated reason is refused by that id.
+    let cancel_absent = stop_shown_session(
+        &mut stand_in,
+        Caller::Shell,
+        "component-absent",
+        "cancel this session",
+    );
+    assert_eq!(
+        cancel_absent,
+        Err((400, "unknown instance: component-absent".to_owned())),
+        "a shown stop reason is not the grant: the shell stop of an absent id is refused by that id"
+    );
+    assert_ne!(
+        cancel_absent,
+        Err((400, "stop needs a reason".to_owned())),
+        "a shown stop reason is not the grant: the absent-id refusal is not the empty-reason refusal"
+    );
+    for id in [&first, &second] {
+        assert_eq!(
+            capsule_state(&stand_in, id),
+            json!({ "id": id, "status": "running", "cause": "" }),
+            "a shown stop reason is not the grant: the absent-id stop leaves each session running"
+        );
+    }
+    assert_eq!(
+        shell_live(&stand_in),
+        two_shell_grants,
+        "a shown stop reason is not the grant: the absent-id stop leaves both live grants"
+    );
+
+    // The owner's stated cancel reason stops the first session and is the settlement.
+    assert_eq!(
+        stop_shown_session(
+            &mut stand_in,
+            Caller::Shell,
+            "component-1",
+            "cancel this session"
+        ),
+        Ok(Value::Null),
+        "a shown stop reason is not the grant: the shell stop reports its settlement"
+    );
+    let stopped_a = capsule_state(&stand_in, "component-1");
+    assert_eq!(
+        stopped_a,
+        json!({ "id": "component-1", "status": "stopped", "cause": "stopped: cancel this session" }),
+        "a shown stop reason is not the grant: the stated cancel reason is the capsule cause"
+    );
+    assert_ne!(
+        stopped_a,
+        json!({ "id": "component-1", "status": "stopped", "cause": "stopped: stop the shown session" }),
+        "a shown stop reason is not the grant: the cause is not an earlier default"
+    );
+    assert_ne!(
+        stopped_a,
+        json!({ "id": "component-1", "status": "stopped", "cause": "stopped: granted" }),
+        "a shown stop reason is not the grant: the cause is not a grant word"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-2"),
+        json!({ "id": "component-2", "status": "running", "cause": "" }),
+        "a shown stop reason is not the grant: the other session stays running with no cause"
+    );
+
+    let denied_b = json!({
+        "request_id": "request-2",
+        "session_id": "component-1",
+        "resource": resource_a,
+        "action": "read",
+        "reason": "approved",
+        "status": "denied",
+        "decision_reason": "stopped: cancel this session",
+        "settled_by": "runtime",
+        "plan": plan_b,
+    });
+    let settled_a = json!({ "requests": [granted_a.clone(), denied_b.clone()] });
+    let rows_after_stop = shell_requests(&stand_in, Some("component-1"));
+    assert_eq!(
+        rows_after_stop, settled_a,
+        "a shown stop reason is not the grant: the stated reason settles the pending step and keeps the granted step"
+    );
+    assert_eq!(
+        rows_after_stop["requests"][0]["decision_reason"],
+        json!("show this grant"),
+        "a shown stop reason is not the grant: the granted step keeps its approval rationale"
+    );
+    assert_eq!(
+        rows_after_stop["requests"][1]["settled_by"],
+        json!("runtime"),
+        "a shown stop reason is not the grant: the runtime settles the pending step"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "request-2",
+        ),
+        Ok(json!({ "status": "denied", "reason": "stopped: cancel this session" })),
+        "a shown stop reason is not the grant: the denied status body carries the stop cause"
+    );
+    assert_ne!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "request-2",
+        ),
+        Ok(json!({ "status": "granted" })),
+        "a shown stop reason is not the grant: the stopped pending step is not a grant"
+    );
+    assert_ne!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "request-2",
+        ),
+        Ok(json!({ "status": "denied", "reason": "approved" })),
+        "a shown stop reason is not the grant: the status reason is the stop cause, not the request reason"
+    );
+
+    let granted_c = json!({
+        "request_id": "request-3",
+        "session_id": "component-2",
+        "resource": resource_a,
+        "action": "write",
+        "reason": "",
+        "status": "granted",
+        "decision_reason": "keep the other",
+        "settled_by": "shell",
+        "plan": plan_a,
+    });
+    let pending_d = json!({
+        "request_id": "request-4",
+        "session_id": "component-2",
+        "resource": resource_a,
+        "action": "read",
+        "reason": "show this step",
+        "status": "pending",
+        "decision_reason": "",
+        "settled_by": null,
+        "plan": plan_b,
+    });
+    let rows_b = shell_requests(&stand_in, Some("component-2"));
+    assert_eq!(
+        rows_b,
+        json!({ "requests": [granted_c.clone(), pending_d.clone()] }),
+        "a shown stop reason is not the grant: the other session's granted and pending steps stay"
+    );
+
+    let one_shell_grant = json!({
+        "scope": "all_sessions_live",
+        "capabilities": [shell_entry_c.clone()],
+    });
+    assert_eq!(
+        shell_live(&stand_in),
+        one_shell_grant,
+        "a shown stop reason is not the grant: the stop revokes only the stopped session's live grant"
+    );
+
+    let revoked_a = execute(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        "request-1",
+        PLAN_A,
+    );
+    assert_eq!(
+        revoked_a,
+        Err((400, "grant is not live: Revoked".to_owned())),
+        "a shown stop reason is not the grant: the stopped session's once grant is revoked"
+    );
+    assert_ne!(
+        revoked_a,
+        Err((400, "grant is not live: Exhausted".to_owned())),
+        "a shown stop reason is not the grant: the refused use is not an exhausted grant"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        settled_a,
+        "a shown stop reason is not the grant: the refused use leaves the two rows"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1"))["requests"][0]["decision_reason"],
+        json!("show this grant"),
+        "a shown stop reason is not the grant: the refused use keeps the approval rationale"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        one_shell_grant,
+        "a shown stop reason is not the grant: the refused use leaves the other session's live grant"
+    );
+
+    // A later reason on the stopped session is the not-live refusal, not a second stop.
+    assert_eq!(
+        stop_shown_session(&mut stand_in, Caller::Shell, "component-1", "granted"),
+        Err((400, "instance is not live: stopped".to_owned())),
+        "a shown stop reason is not the grant: a second stop of the stopped session is refused"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-1"),
+        json!({ "id": "component-1", "status": "stopped", "cause": "stopped: cancel this session" }),
+        "a shown stop reason is not the grant: the refused second stop keeps the first cause"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        settled_a,
+        "a shown stop reason is not the grant: the refused second stop keeps the two rows"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1"))["requests"][1]["decision_reason"],
+        json!("stopped: cancel this session"),
+        "a shown stop reason is not the grant: the refused second stop keeps the stop cause"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1"))["requests"][1]["status"],
+        json!("denied"),
+        "a shown stop reason is not the grant: the refused second stop leaves the step denied"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-2"))["requests"][1],
+        pending_d,
+        "a shown stop reason is not the grant: the other session's pending step keeps its empty decision reason"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        one_shell_grant,
+        "a shown stop reason is not the grant: the refused second stop leaves the live grant"
+    );
+
+    // A grant word is text on the running session's stop, not a grant.
+    assert_eq!(
+        stop_shown_session(&mut stand_in, Caller::Shell, "component-2", "granted"),
+        Ok(Value::Null),
+        "a shown stop reason is not the grant: the shell stop with reason granted reports its settlement"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-2"),
+        json!({ "id": "component-2", "status": "stopped", "cause": "stopped: granted" }),
+        "a shown stop reason is not the grant: the grant word is stored as the capsule cause"
+    );
+    assert_eq!(
+        capsule_state(&stand_in, "component-1"),
+        json!({ "id": "component-1", "status": "stopped", "cause": "stopped: cancel this session" }),
+        "a shown stop reason is not the grant: the first session keeps its own cause"
+    );
+
+    let denied_d = json!({
+        "request_id": "request-4",
+        "session_id": "component-2",
+        "resource": resource_a,
+        "action": "read",
+        "reason": "show this step",
+        "status": "denied",
+        "decision_reason": "stopped: granted",
+        "settled_by": "runtime",
+        "plan": plan_b,
+    });
+    let settled_b = json!({ "requests": [granted_c.clone(), denied_d.clone()] });
+    let rows_after_second_stop = shell_requests(&stand_in, Some("component-2"));
+    assert_eq!(
+        rows_after_second_stop, settled_b,
+        "a shown stop reason is not the grant: the grant-word stop settles the pending step and keeps the granted step"
+    );
+    assert_eq!(
+        rows_after_second_stop["requests"][0]["decision_reason"],
+        json!("keep the other"),
+        "a shown stop reason is not the grant: the other session's granted step keeps its rationale"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "request-4",
+        ),
+        Ok(json!({ "status": "denied", "reason": "stopped: granted" })),
+        "a shown stop reason is not the grant: the second denied status body carries the stop cause"
+    );
+    assert_ne!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "request-4",
+        ),
+        Ok(json!({ "status": "granted" })),
+        "a shown stop reason is not the grant: the stop cause is not a granted status"
+    );
+    assert_ne!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "request-4",
+        ),
+        Ok(json!({ "status": "denied", "reason": "show this step" })),
+        "a shown stop reason is not the grant: the status reason is the stop cause, not the request reason"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown stop reason is not the grant: the second stop revokes the last live grant"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        settled_a,
+        "a shown stop reason is not the grant: the first session's two rows stay"
+    );
+
+    let revoked_c = execute(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-2",
+        },
+        "request-3",
+        PLAN_A,
+    );
+    assert_eq!(
+        revoked_c,
+        Err((400, "grant is not live: Revoked".to_owned())),
+        "a shown stop reason is not the grant: the second stopped session's once grant is revoked"
+    );
+    assert_ne!(
+        revoked_c,
+        Ok(json!({ "valid": true })),
+        "a shown stop reason is not the grant: the grant-word stop mints no use"
+    );
+    assert_ne!(
+        revoked_c,
+        Err((400, "grant is not live: Exhausted".to_owned())),
+        "a shown stop reason is not the grant: the refused use is not an exhausted grant"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-2")),
+        settled_b,
+        "a shown stop reason is not the grant: the refused use leaves the two rows"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-2"))["requests"][0]["decision_reason"],
+        json!("keep the other"),
+        "a shown stop reason is not the grant: the refused use keeps the other rationale"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown stop reason is not the grant: the refused use leaves the empty live list"
     );
 }

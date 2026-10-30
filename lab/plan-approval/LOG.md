@@ -1463,3 +1463,117 @@ check and the twenty-four test commands in the task) took 3.02 s real. This lane
 `falsifiers.json`; no id is added.
 
 031: `deny_shown_plan` takes the reason it is given and sends it on the one deny call; `shown_deny_reason_is_not_the_grant` proves the stated reason is the decision reason on the request, a denied status body carries it, a sibling stays pending, `granted` and `""` store as text and mint nothing, and a deny of a granted request leaves the grant; two hand-run plants caught and restored.
+
+## 032
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md), Session and interaction contract:
+
+> an explicit interrupt or cancel operation that reports its settlement
+
+This task proves the reason the owner states with the stop. `stop_shown_session`
+gains `reason: &str` after `session_id`, sends it unchanged as the route's only
+body key, and returns that route's result. It matches no `Caller` and no
+reason, contains no `stop the shown session` or `stopped:`, and adds no
+function. Every existing call passes `"stop the shown session"`; no other
+argument and no assertion changed.
+
+`shown_stop_reason_is_not_the_grant` drives two sessions through
+`running_agent`. A client stop before any session runs is the shell-only
+refusal and stores no capsule, request or grant. A shell stop of an absent id
+with an empty reason is `stop needs a reason`, before the instance lookup. Two
+sessions then run with no cause; a client stop with an empty reason is still
+the shell refusal. The first session submits `request-1`, and a shell stop with
+an empty reason leaves it pending. The shell grants `request-1` once and the
+other session's write once. The first session then submits `request-2` with
+reason `approved`, and the other session submits `request-4`. A client stop of
+the first session with reason `cancel this session` is the shell refusal and
+leaves everything. A shell stop of an absent id with the same reason is
+`unknown instance: component-absent`. The shell stop of `component-1` with
+reason `cancel this session` stores the cause `stopped: cancel this session`,
+denies `request-2` under `runtime` with that cause, revokes `request-1`'s once
+grant, and leaves the other session's pending step and its live grant. `execute`
+then returns `grant is not live: Revoked`. A later stop of that stopped session
+with reason `granted` is `instance is not live: stopped` and leaves the first
+cause. The shell stop of `component-2` with reason `granted` stores the cause
+`stopped: granted`, denies `request-4` with that cause, revokes its once grant
+and mints nothing; `execute` returns `grant is not live: Revoked` and the shell
+live list is empty.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_stop_reason_is_not_the_grant -- --exact
+```
+
+### F-stated-stop-reason-is-hardcoded
+
+Old bytes, 77:
+
+```rust
+    stand_in.delete_capsule(caller, session_id, &json!({ "reason": reason }))
+```
+
+New bytes, 261:
+
+```rust
+    stand_in.delete_capsule(
+        caller,
+        session_id,
+        &json!({
+            "reason": if reason == "stop the shown session" {
+                reason
+            } else {
+                "stop the shown session"
+            },
+        }),
+    )
+```
+
+The planted crate compiled. `shown_stop_reason_is_not_the_grant` failed at
+`src/lib.rs:9898:5` (planted tree) on the empty-reason stop of an absent id:
+`assertion left == right failed: a shown stop reason is not the grant: an empty
+reason is the route's reason refusal`; left held `unknown instance:
+component-absent`, right expected `stop needs a reason`. The stated reason was
+replaced before the route read it. Restored, the test passes.
+
+### F-granted-stop-mints
+
+Old bytes, 77:
+
+```rust
+    stand_in.delete_capsule(caller, session_id, &json!({ "reason": reason }))
+```
+
+New bytes, 423:
+
+```rust
+    let stopped = stand_in.delete_capsule(caller, session_id, &json!({ "reason": reason }));
+    if reason == "granted" {
+        stand_in.seed_grant(
+            "request-plant",
+            "component-2",
+            "localhost://Public/plan-approval/a.txt",
+            "read",
+            "once",
+            0,
+            agent_conformance::standin_runtime::Life::Live,
+            false,
+        );
+    }
+    stopped
+```
+
+The planted crate compiled. `shown_stop_reason_is_not_the_grant` failed at
+`src/lib.rs:9893:5` (planted tree) on the shell live list after the refused
+client stop: `assertion left == right failed: a shown stop reason is not the
+grant: a refused client stop mints no grant`; left held the seeded
+`request-plant` grant, right expected the empty shell body. A stop reason of
+`granted` minted a grant. Restored, the test passes.
+
+Neither plant calls `seed_request`; the second plant calls `seed_grant`. After both
+restores, `git diff -- lab/plan-approval/src/lib.rs` holds no `request-plant` and no
+plant `seed_grant` inside `stop_shown_session`. The restored proof command set (the
+fmt check and the twenty-five test commands in the task) took 1.91 s real. This
+lane has no `falsifiers.json`; no id is added.
+
+032: `stop_shown_session` takes the reason it is given and sends it on the one stop call; `shown_stop_reason_is_not_the_grant` proves the stated reason is the capsule cause and the pending step's decision reason, that `granted` and `""` are text and mint nothing, and that a use of either stopped session's once grant is revoked; two hand-run plants caught and restored.

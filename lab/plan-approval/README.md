@@ -527,6 +527,37 @@ copy of `deny_body`. Every earlier deny still passes `deny the shown plan`.
 slice. The crate does not copy the stand-in, and it names no planner. A passing
 run gives the Runtime no A15 credit.
 
+A shown stop reason is the settlement record, not the grant. The session
+contract states:
+
+> an explicit interrupt or cancel operation that reports its settlement
+
+`stop_shown_session` is the only stop call, and it passes the reason it is
+given unchanged as the route's only body key. The stated reason `cancel this
+session` is stored as the capsule cause `stopped: cancel this session` and as
+the pending step's `decision_reason` with `settled_by` `runtime`, while the
+granted step keeps `decision_reason` `show this grant`. The other session's
+pending step and its live grant stay. The empty reason is `stop needs a
+reason`, which runs before the instance lookup and stores nothing. A later
+reason of `granted` on that stopped session is `instance is not live: stopped`
+and leaves the first cause. A reason of `granted` on a running session stores
+the cause `stopped: granted`, denies that session's pending step with that
+cause, revokes its live grant and mints nothing. A use of either stopped
+session's once grant is `grant is not live: Revoked`.
+
+`shown_stop_reason_is_not_the_grant` drives two sessions through
+`running_agent`, submits four requests through `request`, grants through
+`approve`, stops through `stop_shown_session`, reads every request list and
+status through `read_shown_requests` and `read_shown_request`, reads every live
+list through `read_shown_grants`, reads the capsule list through `get_capsules`
+and spends through `execute`. This crate stores no copy of `stop_reason`.
+Every earlier stop still passes `stop the shown session`. `preview`,
+`plan_sha256`, `approve`, `execute`, `deny_shown_plan`, `age_shown_plan`,
+`read_shown_request`, `read_shown_grants`, `read_shown_requests`,
+`running_agent` and `request` are unchanged by this slice. The crate does not
+copy the stand-in, and it names no planner. A passing run gives the Runtime no
+A15 credit.
+
 ## Layout
 
 - `src/lib.rs`: `Preview`, `preview`, `plan_sha256`, `approve`,
@@ -548,12 +579,14 @@ run gives the Runtime no A15 credit.
   `shown_request_list_does_not_submit_again`,
   `shown_request_reason_is_not_the_grant`,
   `shown_grant_rationale_is_not_the_grant`,
-  `shown_deny_reason_is_not_the_grant` and the bound-plan journey.
+  `shown_deny_reason_is_not_the_grant`,
+  `shown_stop_reason_is_not_the_grant` and the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_stop_reason_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_deny_reason_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_grant_rationale_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_request_reason_is_not_the_grant -- --exact
