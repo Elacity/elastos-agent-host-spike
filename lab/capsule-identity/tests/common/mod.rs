@@ -115,6 +115,13 @@ pub const BIG_BIN: &str = "core/big.bin";
 /// first with README's Python rule.
 pub const HAMT_THRESHOLD_LAB_CID: &str =
     "bafybeidofifnoh4qecocbt2qksv2bbvg5ocyggix6gdsr5wvnlxlw6erui";
+/// content-sample's two files plus the first 5575 empty three-byte names,
+/// `aaa` through `ek4`: one basic directory block of exactly 262144 bytes
+/// while the links estimate is 217523, under the threshold. Built in a temp
+/// dir and never committed; task 093 printed its length and pin first with
+/// README's Python rule.
+pub const EXACT_BASIC_BLOCK_LAB_CID: &str =
+    "bafybeiacqzkjxt5uzn2tvo4iph5gojqaukyp5u5hj563dnmdmipnbrluxm";
 /// The same file set with an estimate of 262145: a HAMT shard. Built in a
 /// temp dir and never committed.
 pub const HAMT_OVER_THRESHOLD_LAB_CID: &str =
@@ -193,6 +200,43 @@ pub fn flat_bundle_at(prefix: &str, estimate: usize) -> (Vec<BundleEntry>, Vec<S
         });
     }
     (entries, names, extra)
+}
+
+/// The first `count` three-byte names, in order: base 36 on
+/// `abcdefghijklmnopqrstuvwxyz0123456789`, high digit first, so index `0` is
+/// `aaa` and index `1` is `aab`.
+pub fn three_byte_names(count: usize) -> Vec<String> {
+    const DIGITS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    (0..count)
+        .map(|index| {
+            [36 * 36, 36, 1]
+                .iter()
+                .map(|place| DIGITS[(index / place) % 36] as char)
+                .collect()
+        })
+        .collect()
+}
+
+/// The entries of content-sample's two files plus the first `count` empty
+/// three-byte names of [`three_byte_names`]. At 5575 the root's basic
+/// directory block is exactly 262144 bytes while its links estimate is
+/// 217523, under the threshold, so it stays basic.
+pub fn three_byte_bundle(count: usize) -> Vec<BundleEntry> {
+    let mut entries: Vec<BundleEntry> = CONTENT_SAMPLE
+        .files
+        .iter()
+        .map(|name| BundleEntry {
+            path: (*name).to_owned(),
+            content: read_fixture(&CONTENT_SAMPLE, name),
+        })
+        .collect();
+    for name in three_byte_names(count) {
+        entries.push(BundleEntry {
+            path: name,
+            content: Vec::new(),
+        });
+    }
+    entries
 }
 
 /// The over-threshold bundle of [`flat_bundle_at`] at 262145 with the first

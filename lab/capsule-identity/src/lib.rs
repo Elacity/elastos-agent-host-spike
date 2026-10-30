@@ -1269,7 +1269,9 @@ struct Link<'a> {
 /// links are sorted by name bytes. Kubo's links estimate decides the block:
 /// at most [`HAMT_THRESHOLD`] is one basic directory block, which may be
 /// longer than the threshold; a greater estimate is this HAMT shard over the
-/// same links. `sha256` is the one naming hash.
+/// same links. A basic block of exactly [`HAMT_THRESHOLD`] bytes stays one
+/// basic directory while the estimate is under the threshold. `sha256` is
+/// the one naming hash.
 fn encode_directory(
     directory: &Directory,
     path: &str,

@@ -548,6 +548,53 @@ fn directory_at_the_hamt_threshold_stays_basic() {
 }
 
 #[test]
+fn basic_block_of_exactly_262144_bytes_is_named() {
+    // content-sample's two files plus the first 5575 empty three-byte names:
+    // the links estimate is 217523, under the threshold, so the root stays
+    // one basic directory block. That block is exactly 262144 bytes long, so
+    // the exact length must not decide a shard; only the estimate does.
+    // README's Python rule printed the length and the pin first.
+    let entries = three_byte_bundle(5_575);
+    assert_eq!(entries.len(), 5_577, "two files and 5575 empty names");
+    assert_eq!(
+        estimate(entries.iter().map(|entry| entry.path.len())),
+        217_523,
+        "the bundle's links estimate"
+    );
+    let pin = EXACT_BASIC_BLOCK_LAB_CID;
+    let bundle = bundled(&entries);
+    let encoded = encode_entries(&entries)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    let listed: Vec<ListedFile> = entries
+        .iter()
+        .map(|entry| ListedFile {
+            path: entry.path.clone(),
+            size: entry.content.len() as u64,
+            sha256: Sha256::digest(&entry.content).into(),
+        })
+        .collect();
+    let by_listing = encode_listed_files(&listed)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    assert_eq!(
+        (name(&bundle), encoded.as_str(), by_listing.as_str()),
+        (pin.to_owned(), pin, pin),
+        "(lab_cid, encode_entries, encode_listed_files) against the exact-length pin"
+    );
+    assert!(pin.starts_with("bafybei"), "{pin}");
+    assert_eq!(pin.len(), 59, "{pin}");
+    for other in [
+        HAMT_THRESHOLD_LAB_CID,
+        HAMT_OVER_THRESHOLD_LAB_CID,
+        HAMT_CHILD_LAB_CID,
+        CONTENT_SAMPLE_LAB_CID,
+    ] {
+        assert_ne!(pin, other, "the exact-length pin is another bundle's");
+    }
+}
+
+#[test]
 fn directory_over_the_hamt_threshold_is_a_shard() {
     // One byte more in one name takes the estimate to 262145, so the same
     // directory is a HAMT shard with another pin.
