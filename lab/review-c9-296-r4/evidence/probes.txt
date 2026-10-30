@@ -1,0 +1,30 @@
+head=c7c07e3b5ed970929c5154e21406e47721757889
+repo=/tmp/review-c9-296-r4-src
+work=/tmp/review-c9-296-r4-work
+FULL_HOST_EXIT=0
+FAIL_CLOSED_HOST_EXIT=1
+TIMEOUT_HOST_EXIT=1
+qemu_exit_timeout=137
+--- live isolation ---
+tmp_mount=tmpfs+baked
+worktree_under_tmp=1
+guest_nics=dummy0 eth0 lo
+landlock_abi=7
+nonce_file_mode=400
+env_has_nonce=0
+evidence_nonce_during_run=0
+tester_nonce_readable=0
+REVIEW_guest_date=1793061233
+REVIEW_guest_date_iso=2026-10-27T00:33:53+00:00
+REVIEW_9p_dotdot_write=1  # guest /host-preboot.txt on initramfs, not host $WORK
+REVIEW_guest_abs_work_write=0
+REVIEW_9p_symlink_to_work=1
+REVIEW_9p_symlink_write=0
+REVIEW_9p_future_touch=1
+REVIEW_9p_future_mtime=1893456000
+--- host-preboot WORK (unchanged after guest) ---
+nonce_sha256=9a2ef20fded65d56479249dafb42df9f92c3e89ed4c3df6d3191eeea0eb08d96
+run_start=1793061133
+nonce=f25f7a4dabeefdc5b9cda513c019fd89
+--- 9p host-preboot.txt contents (mapped symlink target text) ---
+/tmp/linux-confine-aarch64/host-preboot.txt

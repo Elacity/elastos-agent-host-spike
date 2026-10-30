@@ -1,0 +1,147 @@
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded itoa v1.0.18
+  Downloaded block-buffer v0.10.4
+  Downloaded crypto-common v0.1.7
+  Downloaded cpufeatures v0.2.17
+  Downloaded quote v1.0.47
+  Downloaded hex v0.4.3
+  Downloaded generic-array v0.14.7
+  Downloaded cfg-if v1.0.5
+  Downloaded version_check v0.9.5
+  Downloaded digest v0.10.7
+  Downloaded sha2 v0.10.9
+  Downloaded zmij v1.0.23
+  Downloaded unicode-ident v1.0.27
+  Downloaded serde_core v1.0.229
+  Downloaded serde_derive v1.0.229
+  Downloaded serde v1.0.229
+  Downloaded typenum v1.20.1
+  Downloaded memchr v2.8.3
+  Downloaded proc-macro2 v1.0.107
+  Downloaded syn v3.0.9
+  Downloaded serde_json v1.0.154
+   Compiling version_check v0.9.5
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling typenum v1.20.1
+   Compiling generic-array v0.14.7
+   Compiling unicode-ident v1.0.27
+   Compiling serde_core v1.0.229
+   Compiling zmij v1.0.23
+   Compiling serde_json v1.0.154
+   Compiling serde v1.0.229
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling digest v0.10.7
+   Compiling syn v3.0.9
+   Compiling cpufeatures v0.2.17
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling cfg-if v1.0.5
+   Compiling sha2 v0.10.9
+   Compiling linux-confine v0.0.0 (/tmp/review-c9-296-r4-src/lab/linux-confine)
+   Compiling hex v0.4.3
+   Compiling serde_derive v1.0.229
+   Compiling elastos-model-contract v0.1.0 (/tmp/review-c9-296-r4-src/elastos/crates/elastos-model-contract)
+   Compiling elastos-wallet-contract v0.2.0 (/tmp/review-c9-296-r4-src/elastos/crates/elastos-wallet-contract)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.68s
+     Running unittests src/lib.rs (target-build/debug/deps/linux_confine-cebf561203addf43)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/aarch64.rs (target-build/debug/deps/aarch64-963a233b1d714dd7)
+
+running 3 tests
+test aarch64_qemu_user_host_kernel ... ignored, needs aarch64-linux-gnu-gcc and qemu-aarch64; aarch64 build + qemu-user (host kernel); never native/Jetson
+test parse_errno_line_reads_ret_and_errno ... ok
+test qemu_user_mode_label_is_not_native_or_jetson ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/confine.rs (target-build/debug/deps/confine-b85ef52019b3288e)
+
+running 25 tests
+test a_low_landlock_abi_refuses_the_start ... ok
+test a_wider_root_read_is_refused ... ok
+test did_profile_permits_its_operations_and_refuses_the_rest ... ok
+test landlock_absence_refuses_the_start ... ok
+test model_profile_permits_its_operations_and_refuses_the_rest ... ok
+test production_launcher_rejects_block_switches ... ok
+test profiles_match_their_declared_rights ... ok
+test provider_filter_refuses_abstract_unix ... ok
+test provider_filter_refuses_bpf ... ok
+test provider_filter_refuses_clone_process ... ok
+test provider_filter_refuses_dev_nodes ... ok
+test provider_filter_refuses_io_uring ... ok
+test provider_filter_refuses_keyctl ... ok
+test provider_filter_refuses_proc_self_mem ... ok
+test provider_filter_refuses_ptrace ... ok
+test provider_filter_refuses_setns ... ok
+test provider_filter_refuses_socket ... ok
+test provider_filter_refuses_socketpair_inet ... ok
+test provider_filter_refuses_unshare ... ok
+test removing_the_socket_denial_lets_the_call_succeed ... ok
+test seccomp_absence_refuses_the_start ... ok
+test unknown_allow_is_refused ... ok
+test user_namespace_absence_refuses_the_start ... ok
+test wallet_profile_permits_its_operations_and_refuses_the_rest ... ok
+test withheld_storage_rights_are_landlock_eacces ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/elf.rs (target-build/debug/deps/elf-fdd06e9f541d389c)
+
+running 6 tests
+test expected_machine_maps_aarch64_and_x86_64 ... ok
+test host_helper_is_refused_for_the_other_arch ... ok
+test host_helpers_match_host_elf_machine ... ok
+test matching_object_is_accepted ... ok
+test reads_archive_member_and_refuses_a_mixed_archive ... ok
+test reads_elf64_le_be_and_elf32_le ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/providers.rs (target-build/debug/deps/providers-d8053989e708ce4a)
+
+running 4 tests
+test confined_process_cap_bnd_is_zero ... FAILED
+test did_provider_binary_under_its_profile ... FAILED
+test model_provider_binary_under_its_profile ... FAILED
+test wallet_provider_binary_under_its_profile ... FAILED
+
+failures:
+
+---- confined_process_cap_bnd_is_zero stdout ----
+
+thread 'confined_process_cap_bnd_is_zero' (5666) panicked at tests/providers.rs:42:5:
+build the shipping binary first: cargo build --manifest-path capsules/did-provider/Cargo.toml --bin did-provider
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- did_provider_binary_under_its_profile stdout ----
+
+thread 'did_provider_binary_under_its_profile' (5667) panicked at tests/providers.rs:42:5:
+build the shipping binary first: cargo build --manifest-path capsules/did-provider/Cargo.toml --bin did-provider
+
+---- model_provider_binary_under_its_profile stdout ----
+
+thread 'model_provider_binary_under_its_profile' (5668) panicked at tests/providers.rs:42:5:
+build the shipping binary first: cargo build --manifest-path capsules/model-provider/Cargo.toml --bin model-provider
+
+---- wallet_provider_binary_under_its_profile stdout ----
+
+thread 'wallet_provider_binary_under_its_profile' (5669) panicked at tests/providers.rs:42:5:
+build the shipping binary first: cargo build --manifest-path capsules/wallet-provider/Cargo.toml --bin wallet-provider
+
+
+failures:
+    confined_process_cap_bnd_is_zero
+    did_provider_binary_under_its_profile
+    model_provider_binary_under_its_profile
+    wallet_provider_binary_under_its_profile
+
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test providers`
