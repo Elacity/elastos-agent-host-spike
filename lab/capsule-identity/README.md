@@ -139,7 +139,9 @@ To recompute a lab CID by hand:
    unsigned varints: 7 bits per byte, low bits first, so 127 is one byte
    (`0x7f`) and 128, the first value over 127, takes two (`0x80 0x01`). The
    file `b127` of 127 zero bytes makes a link Tsize of 127, and
-   `a_value_of_127_stays_one_varint_byte` pins that boundary (F-CI91a).
+   `a_value_of_127_stays_one_varint_byte` pins that boundary (F-CI91a);
+   the file `b128` of 128 zero bytes makes a link Tsize of 128, and
+   `a_value_of_128_takes_two_varint_bytes` pins that boundary (F-CI94a).
 6. An estimate greater than 262144 is a **HAMT shard**, fanout 256: bucket
    `n` is byte `n` of the name's murmur3 x64-128 digest (seed 0, its first
    64 bits big-endian; `hello` gives `cb d8 a7 b3 41 bd 9b 02`). A bucket
@@ -396,7 +398,8 @@ rules and not from the Rust code, in
 | A directory link's Tsize includes its child's links | `lab_cid_matches_the_pinned_value_for_each_fixture` (`web-app` has `browser/`) | F-CI18m |
 | An empty file is an empty raw leaf | `empty_file_has_the_pinned_cid` | F-CI18n (dag-pb file node) |
 | Lengths over 127 take two varint bytes | `long_utf8_name_has_the_pinned_cid` (a 154-byte name) | F-CI18o (one byte) |
-| A value of 127 is one varint byte (`0x7f`) and 128 is the first two-byte value (`0x80 0x01`): the file `b127` of 127 zero bytes pins it | `a_value_of_127_stays_one_varint_byte` | F-CI91a (the condition becomes `>= 0x7f`) |
+| A value of 127 is one varint byte (`0x7f`): the file `b127` of 127 zero bytes pins it | `a_value_of_127_stays_one_varint_byte` | F-CI91a (the condition becomes `>= 0x7f`) |
+| A value of 128 is the first two-byte varint (`0x80 0x01`): the file `b128` of 128 zero bytes pins it | `a_value_of_128_takes_two_varint_bytes` | F-CI94a (the condition becomes `> 0x80`) |
 | A name and a file's length are written with their lengths | `path_and_content_boundaries_cannot_collide` | F-CI1b, F-CI1p (name), F-CI1q (Tsize) |
 | A file and a directory at one path are refused | `encoder_refuses_file_directory_conflict` | F-CI18p, F-CI18q (one silently replaces the other) |
 | An empty, `.` or `..` path part is refused | `encoder_refuses_a_path_with_an_empty_or_dot_part` | F-CI18s |
@@ -487,13 +490,14 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    (`python3 -I could not run: <error>`), a non-zero exit (even after it
    printed a valid CID), no output, or more than one line is refused with its
    own reason, and the test asserts each of these reasons.
-5. For each of the 26 pins, the Python answer, the pin constant and the
+5. For each of the 27 pins, the Python answer, the pin constant and the
    printed `encode_entries` result for the same files must be equal, and the
-   test asserts that it checked exactly 26 bundles. The 26 are the seven
+   test asserts that it checked exactly 27 bundles. The 27 are the seven
    pinned fixtures (`content-sample`, `web-app`, `agent-host`, `provider`,
    `model`, `provider-variant-a`, `provider-variant-b`), the recipe, the
    chunk-limit, empty-file and long-name bundles above, which are built as
-   entries in memory, the 127-byte file bundle (task 091), the photo
+   entries in memory, the 127-byte file bundle (task 091), the 128-byte
+   file bundle (task 094), the photo
    stand-in consumer copy (task 047, see
    [naming a closure listing](#naming-a-closure-listing)), the two-leaf
    and three-leaf file bundles (task 048), the second-level file bundle
@@ -504,7 +508,7 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    shared-prefix bundles (task 071), and the exact 262144-byte basic block
    bundle (task 093), also built in memory. `wc001-core` has
    no pin, because its `capsule.wasm` is built on each machine, so it is not
-   checked here. Task 072's third-level file is not one of the 26 either: it
+   checked here. Task 072's third-level file is not one of the 27 either: it
    is 7936671745 bytes and is never written, so
    `file_past_174_squared_leaves_keeps_a_third_tree_level` runs the second
    driver, `THREE_LEVEL_FILE_DRIVER`, which builds its 30277 leaves and calls
@@ -515,7 +519,7 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
 | --- | --- | --- |
 | README's rule agrees with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19a (the block's `0x55` becomes `0x70` before it runs) |
 | Rust agrees with README's rule, not only with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19b (the encoder's `RAW_CODEC` becomes `0x56`) |
-| A missing block is no pass: exactly 26 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
+| A missing block is no pass: exactly 27 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
 | README states the count this test checks, and three sentences say one count | `readme_python_recomputes_every_lab_cid_pin` | F-CI71c (the pins sentence drifts), F-CI71d (the checked sentence drifts), F-CI71e (the rows sentence drifts) |
 | An interpreter that cannot start fails the test | `readme_python_recomputes_every_lab_cid_pin` | F-CI19d (a program that does not exist) |
 | A non-zero exit is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19e (exit status not checked) |
@@ -2117,7 +2121,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 299 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 300 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
