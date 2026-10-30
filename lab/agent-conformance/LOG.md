@@ -10044,3 +10044,107 @@ New:
 
 A passing row gives the real Runtime no A6 credit.
 
+## 108 — A10: seed seams are not a request route
+
+108: `seed_grant` and `seed_request` are private to the stand-in module. `post_capability_request` stays the only public store of a new pending request, and it still refuses an instance that is not starting or running. `post_capability_grant` still calls `seed_grant` and gains no live-instance branch.
+
+Checkout before the first edit: `git rev-parse HEAD` is `a0a985536db47c0929af99a53bf45248230a9d2b`. `git merge-base --is-ancestor b2eccab68f03ce9a0ced0c8afea96b496dbfd15f HEAD` is true. `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false. `pub fn seed_grant` and `pub fn seed_request` were present. HEAD did not move.
+
+### Quote from the architecture (read only)
+
+`docs/AGENT_ARCHITECTURE.md`, section "Session and interaction contract":
+
+```text
+- an explicit interrupt or cancel operation that reports its settlement;
+```
+
+This task is the store after that end. It does not add an interrupt.
+
+### Code
+
+`seed_grant` at `standin-runtime/mod.rs:312` and `seed_request` at `:346` are `fn`, not `pub fn` and not `pub(crate) fn`. They stay methods on `StandIn`. `post_capability_request` at `:495` still calls `seed_request` at `:538` only after the live-instance check at `:532`, which returns `not_live` at `:533`. `post_capability_grant` at `:663` still calls `seed_grant` at `:699` through `settle_record` and gains no live-instance branch. `post_capability_deny`, `deny_body` at `:1615`, `settle_pending` at `:1075`, `settle_record` at `:1053` and `not_live` at `:1604` are unchanged. No new method and no new request store.
+
+`tests/effects.rs` and `tests/standin_contract.rs` no longer call either seam. A live grant the census must see is stored by `post_capability_request` then `post_capability_grant` while the instance is running (`standin_grant_shared`). A pending request on a starting instance is stored by `post_capability_request` (`standin_post_shared_request`). The `req-left` plant on a stopped session moved into `mod tests`.
+
+### Tests
+
+`seed_seams_are_not_routes` at `standin-runtime/mod.rs:8634`, in the module's `#[cfg(test)]`. It passes with no operator and no probe build. Assertion text says the stand-in did the work. It reads `include_str!("mod.rs")`, takes the slice before `#[cfg(test)]`, and requires `fn seed_request(` and `fn seed_grant(` in that slice. That slice must not contain `pub fn seed_request`, `pub fn seed_grant`, `pub(crate) fn seed_request` or `pub(crate) fn seed_grant`. `include_str!("../tests/effects.rs")` and `include_str!("../tests/standin_contract.rs")` contain neither `seed_request(` nor `seed_grant(`.
+
+`standin_shell_list_shows_the_live_grant_and_omits_exhausted` at `:8490` is the moved Live and Exhausted pair. The shell list shows `req-live` and omits `req-dead`. `standin_stopped_session_keeps_a_planted_pending_request` at `:8583` plants `req-left` on stopped `component-1`. `get_capability_requests` shows that record `pending`. `post_capability_request` as that client is `instance is not live: stopped` and the record list is unchanged.
+
+### Hand-run falsifiers
+
+The plants ran by hand, one at a time, each restored before the next. Each planted crate compiled (`Finished`, then the test failed on its assertion). No `falsifiers.json` id was added. After the restore, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` shows the candidate only, and no plant remains. `RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`.
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::seed_seams_are_not_routes -- --exact`.
+
+F-seed-pub. `fn seed_request(` in the slice before `#[cfg(test)]` becomes `pub fn seed_request(`. Planted exit 101 in 3.71 s. Restored exit 0 in 2.19 s. Assertion: `src/../standin-runtime/mod.rs:8648:9` `the stand-in did the work: seed_request is private`.
+
+Old:
+
+```text
+    fn seed_request(
+```
+
+New:
+
+```text
+    pub fn seed_request(
+```
+
+F-seed-crate. `fn seed_grant(` in that same slice becomes `pub(crate) fn seed_grant(`. Planted exit 101 in 2.68 s. Restored exit 0 in 1.70 s. Assertion: `src/../standin-runtime/mod.rs:8660:9` `the stand-in did the work: seed_grant is not crate-visible`.
+
+Old:
+
+```text
+    fn seed_grant(
+```
+
+New:
+
+```text
+    pub(crate) fn seed_grant(
+```
+
+F-seed-effects. `tests/effects.rs` gains one call after the first `let mut standin = StandIn::new();` in `standin_cancel_survivor_reaches_running`. Planted exit 101 in 1.39 s. Restored exit 0 in 1.47 s. Assertion: `src/../standin-runtime/mod.rs:8666:9` `the stand-in did the work: effects.rs does not call the seed seams`.
+
+Old: that call is absent.
+
+New:
+
+```text
+    standin.seed_request("req-plant", "component-1", "res", "read", "plant");
+```
+
+### Docs
+
+`standin-runtime/README.md` keeps the grant paragraph. One sentence is added to it: `seed_grant` and `seed_request` are private to this module, and the only public store of a new pending request is `post_capability_request`, which refuses an instance that is not starting or running. A PASS gives the Runtime no A10 credit. `RUNBOOK.md` gains one paragraph after the last stand-in paragraph: `seed_seams_are_not_routes` is this stand-in, and a PASS there gives the Runtime no A10 credit. Every other paragraph keeps its bytes, including the paragraphs 105 and 107 added.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged. `git diff` for `src/harness.rs`, `src/census.rs`, `src/report.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. The changed files are `standin-runtime/mod.rs`, `tests/effects.rs`, `tests/standin_contract.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.33 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 303.77 seconds, inside the 600-second bound. Targets in order: lib 84 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; content_cid 2 passed; effects 63 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 13 passed; standin_plan 8 passed; standin_residents 2 passed; probe 3 passed; doc-tests 0 and 0. No census leftover and no rerun.
+
+### Proof
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.17 seconds, after the plants were restored.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::seed_seams_are_not_routes -- --exact`: exit 0, 1 passed and 0 failed, real 0.13 seconds, after the plants were restored.
+- `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false. HEAD is still `a0a985536db47c0929af99a53bf45248230a9d2b`.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `seed_request` at `standin-runtime/mod.rs:346` stores the caller's resource text. The visibility change adds no code or content identity. |
+| 2. Capsule, Home or UI gains ungranted access? | No | The public store stays `post_capability_request` at `:495`. A stopped or failed instance returns `not_live` at `:533` and stores nothing. |
+| 3. A second path or a second copy of one rule? | No | `seed_request` at `:346` and `seed_grant` at `:312` are private. `post_capability_grant` at `:663` still calls `seed_grant` at `:699` and gains no live-instance branch. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`. `elastos/` is untouched. |
+| 5. Refusals deny by default with a clear reason? | Yes | A stopped, failed or ended instance is `instance is not live` through `not_live` at `:1604`, returned at `:533`, and the call stores nothing. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The seams stay inside the stand-in module. No capsule code, import or world changes. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `:8634`. F-seed-pub fails at `:8648`, F-seed-crate fails at `:8660`, and F-seed-effects fails at `:8666`. Restored, the test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | `post_capability_grant` at `:663` still grants a pending request of a starting or running instance and does not read the instance phase. `started_cid` stays the instance identity. |
+
+A passing row gives the real Runtime no A10 credit.
+

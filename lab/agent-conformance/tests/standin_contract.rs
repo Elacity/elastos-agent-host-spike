@@ -8,7 +8,7 @@
 #[path = "common/signed_bundle.rs"]
 mod signed_bundle;
 
-use agent_conformance::standin_runtime::{Caller, Life, StandIn, Start};
+use agent_conformance::standin_runtime::{Caller, StandIn, Start};
 use serde_json::{json, Value};
 use signed_bundle::{SignedBundle, SHARED_NAME};
 use std::collections::BTreeSet;
@@ -58,7 +58,7 @@ fn request_ids(body: &Value) -> BTreeSet<String> {
 
 #[test]
 fn standin_matches_ra1_fields() {
-    let mut standin = StandIn::new();
+    let standin = StandIn::new();
 
     let plain = standin
         .get_capability_list(Caller::Shell, None)
@@ -119,98 +119,6 @@ fn standin_matches_ra1_fields() {
             Err((400, reason)) if reason == "unknown capability list scope: session"
         ),
         "the stand-in did the work: an unknown scope is refused: {unknown:?}"
-    );
-
-    standin.seed_grant(
-        "req-live",
-        "component-1",
-        SHARED_RESOURCE,
-        "read",
-        "session",
-        0,
-        Life::Live,
-        false,
-    );
-    standin.seed_grant(
-        "req-dead",
-        "component-1",
-        SHARED_RESOURCE,
-        "read",
-        "session",
-        0,
-        Life::Exhausted,
-        false,
-    );
-
-    let shell = standin
-        .get_capability_list(Caller::Shell, None)
-        .expect("the stand-in returns the seeded shell list");
-    assert_eq!(
-        request_ids(&shell),
-        BTreeSet::from(["req-live".to_owned()]),
-        "the stand-in did the work: the shell list leaves the exhausted grant out"
-    );
-    let entry = &shell["capabilities"][0];
-    assert_keys(
-        entry,
-        &[
-            "request_id",
-            "session_id",
-            "resource",
-            "action",
-            "duration",
-            "granted_at",
-        ],
-        "the stand-in did the work: the shell entry carries the six RA-1 fields",
-    );
-    assert_eq!(
-        entry["session_id"], "component-1",
-        "the stand-in did the work: the shell entry names the grant's session"
-    );
-    assert_eq!(
-        *entry,
-        json!({
-            "request_id": "req-live",
-            "session_id": "component-1",
-            "resource": SHARED_RESOURCE,
-            "action": "read",
-            "duration": "session",
-            "granted_at": 0,
-        }),
-        "the stand-in did the work: the shell entry carries the seeded grant values"
-    );
-
-    let sibling = standin
-        .get_capability_list(
-            Caller::Client {
-                session_id: "component-2",
-            },
-            None,
-        )
-        .expect("the stand-in returns the sibling client list");
-    assert_eq!(
-        sibling["capabilities"],
-        json!([]),
-        "the stand-in did the work: a sibling client lists no grant"
-    );
-
-    let own = standin
-        .get_capability_list(
-            Caller::Client {
-                session_id: "component-1",
-            },
-            None,
-        )
-        .expect("the stand-in returns the client's own list");
-    assert_eq!(
-        request_ids(&own),
-        BTreeSet::from(["req-live".to_owned()]),
-        "the stand-in did the work: the client lists its own live grant only"
-    );
-    assert_keys(
-        &own["capabilities"][0],
-        &["request_id", "resource", "action", "duration", "granted_at"],
-        "the stand-in did the work: the client entry carries the five RA-1 fields",
     );
 }
 

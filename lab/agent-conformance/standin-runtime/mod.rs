@@ -303,13 +303,13 @@ impl StandIn {
         }
     }
 
-    /// Lab test seam, not a route.
+    /// Lab test seam, not a route. Private to this module.
     ///
     /// `granted_at` is the seeded value. This method reads no clock. A seeded
     /// grant is unbound: the plan binding is minted only by
     /// `post_capability_grant`, so this seam can never create one.
     #[allow(clippy::too_many_arguments)]
-    pub fn seed_grant(
+    fn seed_grant(
         &mut self,
         request_id: &str,
         session_id: &str,
@@ -334,7 +334,7 @@ impl StandIn {
         });
     }
 
-    /// Lab test seam, not a route.
+    /// Lab test seam, not a route. Private to this module.
     ///
     /// Stores one pending request at the current instant. This method reads no
     /// clock and no disk. After the empty-field and duplicate-id refusals, it
@@ -343,7 +343,7 @@ impl StandIn {
     /// this session it returns `Too many pending requests for this session`.
     /// Either refusal pushes nothing. A granted, denied or expired record does
     /// not count and is not removed.
-    pub fn seed_request(
+    fn seed_request(
         &mut self,
         request_id: &str,
         session_id: &str,
@@ -8483,6 +8483,193 @@ mod tests {
         assert!(
             body.contains("unlisted_pending"),
             "the stand-in did the work: standin_a12_census calls unlisted_pending"
+        );
+    }
+
+    #[test]
+    fn standin_shell_list_shows_the_live_grant_and_omits_exhausted() {
+        let mut standin = StandIn::new();
+        standin.seed_grant(
+            "req-live",
+            "component-1",
+            SHARED_RESOURCE,
+            "read",
+            "session",
+            0,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-dead",
+            "component-1",
+            SHARED_RESOURCE,
+            "read",
+            "session",
+            0,
+            Life::Exhausted,
+            false,
+        );
+        let shell = standin
+            .get_capability_list(Caller::Shell, None)
+            .expect("the stand-in did the work: the shell list answers");
+        assert_eq!(
+            request_ids(&shell),
+            BTreeSet::from(["req-live".to_owned()]),
+            "the stand-in did the work: the shell list leaves the exhausted grant out"
+        );
+        let entry = &shell["capabilities"][0];
+        assert_keys(
+            entry,
+            &[
+                "request_id",
+                "session_id",
+                "resource",
+                "action",
+                "duration",
+                "granted_at",
+            ],
+            "the stand-in did the work: the shell entry carries the six RA-1 fields",
+        );
+        assert_eq!(
+            entry["session_id"], "component-1",
+            "the stand-in did the work: the shell entry names the grant's session"
+        );
+        assert_eq!(
+            *entry,
+            json!({
+                "request_id": "req-live",
+                "session_id": "component-1",
+                "resource": SHARED_RESOURCE,
+                "action": "read",
+                "duration": "session",
+                "granted_at": 0,
+            }),
+            "the stand-in did the work: the shell entry carries the seeded grant values"
+        );
+        let sibling = standin
+            .get_capability_list(
+                Caller::Client {
+                    session_id: "component-2",
+                },
+                None,
+            )
+            .expect("the stand-in did the work: the sibling client list answers");
+        assert_eq!(
+            sibling["capabilities"],
+            json!([]),
+            "the stand-in did the work: a sibling client lists no grant"
+        );
+        let own = standin
+            .get_capability_list(
+                Caller::Client {
+                    session_id: "component-1",
+                },
+                None,
+            )
+            .expect("the stand-in did the work: the client's own list answers");
+        assert_eq!(
+            request_ids(&own),
+            BTreeSet::from(["req-live".to_owned()]),
+            "the stand-in did the work: the client lists its own live grant only"
+        );
+        assert_keys(
+            &own["capabilities"][0],
+            &["request_id", "resource", "action", "duration", "granted_at"],
+            "the stand-in did the work: the client entry carries the five RA-1 fields",
+        );
+    }
+
+    #[test]
+    fn standin_stopped_session_keeps_a_planted_pending_request() {
+        let shared = Shared::new();
+        let mut standin = StandIn::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let id = launch_finished(&shared, &mut standin);
+        assert_eq!(
+            id, "component-1",
+            "the stand-in did the work: the launch is component-1"
+        );
+        standin
+            .delete_capsule(Caller::Shell, "component-1", &stop_body())
+            .expect("the stand-in did the work: it stops component-1");
+        standin
+            .seed_request(
+                "req-left",
+                "component-1",
+                SHARED_RESOURCE,
+                "read",
+                "read shared",
+            )
+            .expect("the stand-in did the work: it stores req-left on the stopped session");
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![pending_request("req-left", "component-1")],
+            "the stand-in did the work: req-left stays pending"
+        );
+        let refused = standin.post_capability_request(
+            Caller::Client {
+                session_id: "component-1",
+            },
+            &json!({
+                "resource": SHARED_RESOURCE,
+                "action": "read",
+                "reason": "read shared",
+            }),
+        );
+        assert!(
+            matches!(
+                &refused,
+                Err((400, reason)) if reason == "instance is not live: stopped"
+            ),
+            "the stand-in did the work: a stopped session's request is instance is not live: {refused:?}"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![pending_request("req-left", "component-1")],
+            "the stand-in did the work: the refused request stores nothing"
+        );
+    }
+
+    #[test]
+    fn seed_seams_are_not_routes() {
+        let source = include_str!("mod.rs");
+        let slice = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the stand-in source has a test module");
+        assert!(
+            slice.contains("fn seed_request("),
+            "the stand-in did the work: seed_request stays in this module"
+        );
+        assert!(
+            slice.contains("fn seed_grant("),
+            "the stand-in did the work: seed_grant stays in this module"
+        );
+        assert!(
+            !slice.contains("pub fn seed_request"),
+            "the stand-in did the work: seed_request is private"
+        );
+        assert!(
+            !slice.contains("pub fn seed_grant"),
+            "the stand-in did the work: seed_grant is private"
+        );
+        assert!(
+            !slice.contains("pub(crate) fn seed_request"),
+            "the stand-in did the work: seed_request is not crate-visible"
+        );
+        assert!(
+            !slice.contains("pub(crate) fn seed_grant"),
+            "the stand-in did the work: seed_grant is not crate-visible"
+        );
+        let effects = include_str!("../tests/effects.rs");
+        let contract = include_str!("../tests/standin_contract.rs");
+        assert!(
+            !effects.contains("seed_request(") && !effects.contains("seed_grant("),
+            "the stand-in did the work: effects.rs does not call the seed seams"
+        );
+        assert!(
+            !contract.contains("seed_request(") && !contract.contains("seed_grant("),
+            "the stand-in did the work: standin_contract.rs does not call the seed seams"
         );
     }
 }
