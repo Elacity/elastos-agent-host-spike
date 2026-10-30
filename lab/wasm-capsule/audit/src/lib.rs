@@ -2,11 +2,30 @@
 
 use std::fmt;
 use wasmparser::{
-    ComponentExternalKind, Encoding, Import, ImportSectionReader, MemoryType, Parser, Payload,
-    TypeRef, Validator,
+    ComponentExternalKind, ComponentType, ComponentTypeDeclaration, CoreType, Encoding, Import,
+    ImportSectionReader, InstanceTypeDeclaration, MemoryType, ModuleTypeDeclaration, Parser,
+    Payload, TypeRef, Validator,
 };
 
 pub const AUDIT_API: u32 = 1;
+
+// The five Bus interfaces of the capsule kernel's imported surface. Copied
+// read-only from `ALLOWED_BUS_IMPORTS` in
+// `elastos/crates/elastos-server/src/component.rs`; this crate adds no sixth
+// name. `elastos:bus/lifecycle@1.0.0` stays off the list.
+const ALLOWED_BUS_IMPORTS: [&str; 5] = [
+    "elastos:bus/types@1.0.0",
+    "elastos:bus/runtime@1.0.0",
+    "elastos:bus/identity@1.0.0",
+    "elastos:bus/capabilities@1.0.0",
+    "elastos:bus/providers@1.0.0",
+];
+
+// The pinned wit-bindgen 0.57.1 encoding of the `product-capsule-v1` world:
+// 1,382 bytes, SHA-256
+// 439929eb565421a1de4791c7e5b278ae105687eb0f12d4a965d6a6adabce24a8.
+const PRODUCT_CAPSULE_V1_COMPONENT_TYPE: &[u8] =
+    include_bytes!("../tests/fixtures/wit-bindgen-0.57.1-component-type.bin");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclaredImport {
@@ -136,8 +155,14 @@ fn inspect(
     encoding: Encoding,
     read_imports: impl FnMut(Payload<'_>) -> Result<(), Refusal>,
 ) -> Result<(), Refusal> {
-    let mut validator = Validator::new();
+    let mut validator = new_validator();
     inspect_with_validator(wasm, encoding, &mut validator, false, read_imports)
+}
+
+// The crate's one validator constructor. A nested type-only check takes its
+// validator from here too.
+fn new_validator() -> Validator {
+    Validator::new()
 }
 
 // The crate's one parse. A `component-type` section reuses it on its own data.
@@ -164,6 +189,7 @@ fn inspect_with_validator(
     }
 
     let mut depth = 0;
+    let mut component_type_sections = 0;
     for payload in payloads(wasm) {
         match payload.map_err(|_| invalid.clone())? {
             Payload::Version { .. } => depth += 1,
@@ -176,7 +202,12 @@ fn inspect_with_validator(
                     return Err(Refusal::CodeInCustomSection);
                 }
                 if component_type {
-                    type_only_component(section.data(), validator)?;
+                    // One signed artifact carries exactly one such section.
+                    component_type_sections += 1;
+                    if component_type_sections > 1 {
+                        return Err(Refusal::CodeInCustomSection);
+                    }
+                    type_only_component(section.data())?;
                 } else {
                     let range = section.range();
                     let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;
@@ -196,21 +227,41 @@ fn inspect_with_validator(
 }
 
 // wit-bindgen names its encoded world `component-type:...`. That data is a
-// component of type definitions and type exports, never code.
-fn type_only_component(data: &[u8], validator: &mut Validator) -> Result<(), Refusal> {
-    inspect_with_validator(
-        data,
-        Encoding::Component,
-        validator,
-        true,
-        type_only_payload,
-    )
-    .map_err(|_| Refusal::CodeInCustomSection)
+// component of type definitions and type exports, never code. The committed
+// product-capsule-v1 world passes by byte identity; any other type-only data
+// carries at least one type-level import, and each is one of the five granted
+// Bus interfaces.
+fn type_only_component(data: &[u8]) -> Result<(), Refusal> {
+    if data == PRODUCT_CAPSULE_V1_COMPONENT_TYPE {
+        return Ok(());
+    }
+    let mut validator = new_validator();
+    let mut type_imports = Vec::new();
+    inspect_with_validator(data, Encoding::Component, &mut validator, true, |payload| {
+        type_only_payload(payload, &mut type_imports)
+    })
+    .map_err(|_| Refusal::CodeInCustomSection)?;
+    if type_imports.is_empty() {
+        return Err(Refusal::CodeInCustomSection);
+    }
+    if type_imports
+        .iter()
+        .any(|name| !ALLOWED_BUS_IMPORTS.contains(&name.as_str()))
+    {
+        return Err(Refusal::CodeInCustomSection);
+    }
+    Ok(())
 }
 
-fn type_only_payload(payload: Payload<'_>) -> Result<(), Refusal> {
+fn type_only_payload(payload: Payload<'_>, type_imports: &mut Vec<String>) -> Result<(), Refusal> {
     match payload {
-        Payload::ComponentTypeSection(_) => Ok(()),
+        Payload::ComponentTypeSection(section) => {
+            for ty in section {
+                let ty = ty.map_err(|_| Refusal::CodeInCustomSection)?;
+                collect_type_imports(&ty, type_imports);
+            }
+            Ok(())
+        }
         Payload::ComponentExportSection(section) => {
             // Defence in depth: a non-type export needs a definition section
             // (module, instance, component, function or value), and the final
@@ -224,5 +275,61 @@ fn type_only_payload(payload: Payload<'_>) -> Result<(), Refusal> {
             Ok(())
         }
         _ => Err(Refusal::CodeInCustomSection),
+    }
+}
+
+// A core module type inside the one type-only section carries no capsule
+// kernel import. Each of its core imports is still forbidden, so it is joined
+// under a fixed `core:` prefix: a joined name can never equal a Bus string,
+// even when the module and item names together spell one.
+const CORE_IMPORT_PREFIX: &str = "core:";
+
+fn collect_core_type_imports(core_type: &CoreType<'_>, names: &mut Vec<String>) {
+    let CoreType::Module(declarations) = core_type else {
+        // `CoreType::Rec` declares no module import.
+        return;
+    };
+    for declaration in declarations {
+        if let ModuleTypeDeclaration::Import(import) = declaration {
+            names.push(format!(
+                "{CORE_IMPORT_PREFIX}{}.{}",
+                import.module, import.name
+            ));
+        }
+    }
+}
+
+// A type-level import is `ComponentImport.name.name` in a component type, one
+// or more nested type declarations down, or a core module import under a core
+// type in either the component or the instance walk. Every name is collected,
+// not only the first level.
+fn collect_type_imports(ty: &ComponentType<'_>, names: &mut Vec<String>) {
+    match ty {
+        ComponentType::Component(declarations) => {
+            for declaration in declarations.iter() {
+                match declaration {
+                    ComponentTypeDeclaration::Import(import) => {
+                        names.push(import.name.name.to_owned());
+                    }
+                    ComponentTypeDeclaration::Type(nested) => collect_type_imports(nested, names),
+                    ComponentTypeDeclaration::CoreType(core_type) => {
+                        collect_core_type_imports(core_type, names);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        ComponentType::Instance(declarations) => {
+            for declaration in declarations.iter() {
+                match declaration {
+                    InstanceTypeDeclaration::Type(nested) => collect_type_imports(nested, names),
+                    InstanceTypeDeclaration::CoreType(core_type) => {
+                        collect_core_type_imports(core_type, names);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
     }
 }
