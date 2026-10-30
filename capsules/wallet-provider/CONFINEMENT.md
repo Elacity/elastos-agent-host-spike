@@ -559,10 +559,17 @@ that test exists (P10, P11). The status change lands when the Runtime side
 does.
 
 Future Linux enforcement tests for this lab contract are designed in
-`CONFINEMENT-LINUX.md`: it is the one Linux mapping, its tests do not exist
-yet, and it claims no current behaviour. The existing source-only check
-`both_file_profiles_bind_one_storage_parameter_contract` reads the three
-oracles and supplies contract evidence, not Linux execution evidence.
+`CONFINEMENT-LINUX.md`. One part of that design exists today as source: a
+seccomp allow list generated from this provider's declared rights, with the one
+builder, the one mapping table and the one step sequencer that file names, and
+five named tests that read the built program and call no kernel
+(`seccomp_allow_list_from_declared_rights`, `SECCOMP_RULE_SYSCALLS`,
+`install_seccomp_with`). No Linux start has been proven yet: the filter's two
+kernel calls, the launch under it and the four denied calls are the next task's
+work, and `linux` stays out of `DECLARED_CONFINED_OS` until that run passes. The
+existing source-only check `both_file_profiles_bind_one_storage_parameter_contract`
+reads the three oracles and supplies contract evidence, not Linux execution
+evidence.
 
 ## Tests
 
@@ -1306,6 +1313,49 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` fails
   at its final wallet directory compare after `shutdown`, which finds
   `shutdown-falsifier.hex`, a name the setup did not leave.
+- Make the allow-list decision the 0710 deny list: refuse `socket`, `connect`
+  and `execve` and permit every other call (WP146):
+  `seccomp_program_denies_by_default_and_lists_no_undeclared_call` fails on its
+  final-decision assertion, which reads `ALLOW` where the deny marker belongs.
+- Make the builder return a fixed list and ignore its declared input (WP147):
+  `seccomp_allow_list_follows_the_declared_rights` fails because removing the
+  `storage` right changes no syscall of the list.
+- Skip an allow form the mapping table does not hold instead of refusing it
+  (WP148): `seccomp_rejects_unmapped_allow_form` fails on all three spellings,
+  because the list is built and no refusal comes.
+- Require a space after the operator in the one allow-form recogniser (WP149):
+  `seccomp_rejects_unmapped_allow_form` fails on `(allow)` and
+  `(allow(file-read*))`, which are then read as head forms instead of refused.
+- Admit both branches of the audit-architecture guard (WP150):
+  `seccomp_program_denies_by_default_and_lists_no_undeclared_call` fails on its
+  guard assertion, because a foreign architecture reaches the number load.
+- Make a false equality test fall into its own `ALLOW` (WP151): the same test
+  fails on its jump assertions, because an unlisted call is admitted.
+- Run the two install steps in the reverse order (WP152):
+  `seccomp_install_refuses_each_failed_step` fails on its recorded order,
+  because the filter runs before `no_new_privs`.
+- Answer both install steps with one fixed reason and errno (WP153): the same
+  test fails because the filter step's refusal names the first step.
+- Continue after a failed first install step (WP154): the same test fails on its
+  recorded order, because the filter runs after a step that failed.
+- Stop the write loop at the first short write (WP155):
+  `seccomp_launch_refuses_each_reporting_failure` fails on the record it
+  expects, because the loop stops early.
+- Report an interrupted write instead of retrying it (WP156): the same test
+  fails because the `EINTR` case comes back as a failure.
+- Answer both reporting failures with one fixed reason (WP157): the same test
+  fails because the two reasons are equal.
+- Accept a `linux` host under a `Seatbelt` policy (WP158):
+  `standin_host_refusal_decides_each_policy` fails because today's exact Linux
+  refusal is lost.
+- Bypass the launcher's `Seccomp` seat (WP159): the same test fails because the
+  `Seccomp` start returns Started instead of its own refusal.
+- Add one unconditional syscall beside the rows (WP160):
+  `seccomp_allow_list_follows_the_declared_rights` fails on its empty case,
+  because a declaration with no allow form still admits that call.
+- Test `ptrace`'s number where an admitted syscall's belongs (WP161):
+  `seccomp_program_denies_by_default_and_lists_no_undeclared_call` fails on its
+  number-set comparison, because the program tests a number no row names.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

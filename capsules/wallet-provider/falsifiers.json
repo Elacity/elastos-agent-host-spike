@@ -172,7 +172,7 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "fn is_network_allow(form: &str) -> bool {\n    form.starts_with(\"(allow \") && form.contains(\"network\")\n}",
+          "old": "fn is_network_allow(form: &str) -> bool {\n    is_allow_form(form) && form.contains(\"network\")\n}",
           "new": "fn is_network_allow(form: &str) -> bool {\n    form == \"(allow network*)\"\n}"
         }
       ],
@@ -1241,7 +1241,7 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "    let Some(rest) = form.strip_prefix(\"(allow\") else {\n        return false;\n    };\n    if !rest.starts_with([' ', '(']) {\n        return false;\n    }",
+          "old": "    let Some(rest) = allow_form_rest(form) else {\n        return false;\n    };\n    if !rest.is_empty() && !rest.starts_with([' ', '(']) {\n        return false;\n    }",
           "new": "    let Some(rest) = form.strip_prefix(\"(allow \") else {\n        return false;\n    };"
         }
       ],
@@ -1802,8 +1802,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "    standin_host_refusal(name, host)?;",
-          "new": "    if standin_host_refusal(name, host).is_err() {\n        return Ok(ConfinedProvider::spawn(Command::new(binary_path)));\n    }"
+          "old": "    standin_host_refusal(name, host, policy)?;",
+          "new": "    if standin_host_refusal(name, host, policy).is_err() {\n        return Ok(ConfinedProvider::spawn(Command::new(binary_path)));\n    }"
         }
       ],
       "tests": [
@@ -1898,8 +1898,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "    if sandbox_exec != Path::new(SANDBOX_EXEC) {\n        return Err(format!(\n            \"{name} start on {os} is refused: the confinement tool {} is not {SANDBOX_EXEC}, \\\n             which is the one the stand-in runs\",\n            sandbox_exec.display()\n        ));\n    }",
-          "new": "    // WP118 removed the check that the tool is SANDBOX_EXEC."
+          "old": "        if sandbox_exec != Path::new(SANDBOX_EXEC) {\n            return Err(format!(\n                \"{name} start on {os} is refused: the confinement tool {} is not {SANDBOX_EXEC}, \\\n                 which is the one the stand-in runs\",\n                sandbox_exec.display()\n            ));\n        }",
+          "new": "        // WP118 removed the check that the tool is SANDBOX_EXEC."
         }
       ],
       "tests": [
@@ -2026,8 +2026,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "    if sandbox_exec != Path::new(SANDBOX_EXEC) {\n        return Err(format!(\n            \"{name} start on {os} is refused: the confinement tool {} is not {SANDBOX_EXEC}, \\\n             which is the one the stand-in runs\",\n            sandbox_exec.display()\n        ));\n    }",
-          "new": "    if sandbox_exec != Path::new(SANDBOX_EXEC) {\n        return Err(format!(\n            \"{name} start is refused: the confinement tool {} is not {SANDBOX_EXEC}, \\\n             which is the one the stand-in runs\",\n            sandbox_exec.display()\n        ));\n    }"
+          "old": "        if sandbox_exec != Path::new(SANDBOX_EXEC) {\n            return Err(format!(\n                \"{name} start on {os} is refused: the confinement tool {} is not {SANDBOX_EXEC}, \\\n                 which is the one the stand-in runs\",\n                sandbox_exec.display()\n            ));\n        }",
+          "new": "        if sandbox_exec != Path::new(SANDBOX_EXEC) {\n            return Err(format!(\n                \"{name} start is refused: the confinement tool {} is not {SANDBOX_EXEC}, \\\n                 which is the one the stand-in runs\",\n                sandbox_exec.display()\n            ));\n        }"
         }
       ],
       "tests": [
@@ -2106,8 +2106,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "    standin_host_refusal(name, host)?;",
-          "new": "    if standin_host_refusal(name, host).is_err() && host.unavailable.is_some() {\n        return Ok(ConfinedProvider::spawn(Command::new(binary_path)));\n    }\n    standin_host_refusal(name, host)?;"
+          "old": "    standin_host_refusal(name, host, policy)?;",
+          "new": "    if standin_host_refusal(name, host, policy).is_err() && host.unavailable.is_some() {\n        return Ok(ConfinedProvider::spawn(Command::new(binary_path)));\n    }\n    standin_host_refusal(name, host, policy)?;"
         }
       ],
       "tests": [
@@ -2170,8 +2170,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "    if let Some(primitive) = host.unavailable {\n        let reason = primitive.design_refusal();\n        return Err(format!(\"{name} start on {} is refused: {reason}\", host.os));\n    }\n    if DECLARED_CONFINED_OS.contains(&host.os) {\n        return Ok(());\n    }\n",
-          "new": "    if DECLARED_CONFINED_OS.contains(&host.os) {\n        return Ok(());\n    }\n    if let Some(primitive) = host.unavailable {\n        let reason = primitive.design_refusal();\n        return Err(format!(\"{name} start on {} is refused: {reason}\", host.os));\n    }\n"
+          "old": "    if let Some(primitive) = host.unavailable {\n        let reason = primitive.design_refusal();\n        return Err(format!(\"{name} start on {} is refused: {reason}\", host.os));\n    }\n    match policy {\n        StandinPolicy::Seatbelt(_) => {\n            if DECLARED_CONFINED_OS.contains(&host.os) {\n                return Ok(());\n            }",
+          "new": "    if let StandinPolicy::Seatbelt(_) = policy {\n        if DECLARED_CONFINED_OS.contains(&host.os) {\n            return Ok(());\n        }\n    }\n    if let Some(primitive) = host.unavailable {\n        let reason = primitive.design_refusal();\n        return Err(format!(\"{name} start on {} is refused: {reason}\", host.os));\n    }\n    match policy {\n        StandinPolicy::Seatbelt(_) => {\n            if DECLARED_CONFINED_OS.contains(&host.os) {\n                return Ok(());\n            }"
         }
       ],
       "tests": [
@@ -2202,8 +2202,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "    Err(format!(\"{name} start on {} is refused: {reason}\", host.os))\n}\n",
-          "new": "    Err(reason)\n}\n"
+          "old": "            Err(format!(\"{name} start on {} is refused: {reason}\", host.os))\n        }\n",
+          "new": "            Err(format!(\"{reason}\"))\n        }\n"
         }
       ],
       "tests": [
@@ -2336,6 +2336,262 @@
       ],
       "tests": [
         "no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged"
+      ]
+    },
+    {
+      "id": "WP146",
+      "title": "the allow-list decision becomes a deny list, so the default arm permits",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    program.push(SeccompInstruction::stmt(\n        SECCOMP_BPF_RET_K,\n        seccomp_deny_return(),\n    ));\n    program\n}",
+          "new": "    // WP146 keeps the ABI guards, drops every allow pair and refuses only\n    // socket, connect and execve, so every other call reaches ALLOW.\n    program.truncate(6);\n    for (x86_64, aarch64) in [(41u32, 198u32), (42, 203), (59, 221)] {\n        let number = if audit_arch == 0xc000_003e { x86_64 } else { aarch64 };\n        program.push(SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number, 0, 1));\n        program.push(SeccompInstruction::stmt(SECCOMP_BPF_RET_K, seccomp_deny_return()));\n    }\n    program.push(SeccompInstruction::stmt(SECCOMP_BPF_RET_K, SECCOMP_RET_ALLOW));\n    program\n}"
+        }
+      ],
+      "tests": [
+        "seccomp_program_denies_by_default_and_lists_no_undeclared_call"
+      ]
+    },
+    {
+      "id": "WP147",
+      "title": "the builder returns a fixed list and ignores its declared input",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let rendered = generate_profile(name, declared)?;\n    let mut syscalls: Vec<&'static str> = Vec::new();\n    for form in profile_forms(&rendered) {\n        if !is_allow_form(&form) {",
+          "new": "    // WP147 renders every table row and never reads the generated profile.\n    let rendered = generate_profile(name, declared)?;\n    let _ = &rendered;\n    let mut syscalls: Vec<&'static str> = Vec::new();\n    for form in SECCOMP_RULE_SYSCALLS.iter().map(|(form, _)| form.to_string()) {\n        if !is_allow_form(&form) {"
+        }
+      ],
+      "tests": [
+        "seccomp_allow_list_follows_the_declared_rights"
+      ]
+    },
+    {
+      "id": "WP148",
+      "title": "an allow form with no syscall row is skipped instead of refused",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        else {\n            return Err(format!(\n                \"{name} seccomp allow list refuses the allow form {form}: \\\n                 the mapping table has no syscall row for it, so no filter is built\"\n            ));\n        };",
+          "new": "        else {\n            continue;\n        };"
+        }
+      ],
+      "tests": [
+        "seccomp_rejects_unmapped_allow_form"
+      ]
+    },
+    {
+      "id": "WP149",
+      "title": "the recogniser requires a space after the operator, so (allow) and (allow(file-read*)) are not allow forms",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let rest = form.strip_prefix('(')?.trim_start();\n    let operation = rest.split([' ', '(', ')']).next().unwrap_or_default();\n    if operation != \"allow\" {\n        return None;\n    }\n    Some(&rest[operation.len()..])",
+          "new": "    let rest = form.strip_prefix(\"(allow \")?;\n    Some(rest)"
+        }
+      ],
+      "tests": [
+        "seccomp_rejects_unmapped_allow_form"
+      ]
+    },
+    {
+      "id": "WP150",
+      "title": "the architecture guard admits both branches, so a foreign architecture reaches the number load",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, audit_arch, 1, 0),",
+          "new": "        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, audit_arch, 1, 1),"
+        }
+      ],
+      "tests": [
+        "seccomp_program_denies_by_default_and_lists_no_undeclared_call"
+      ]
+    },
+    {
+      "id": "WP151",
+      "title": "a false equality test falls into its own ALLOW, so an unlisted call is admitted",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        program.push(SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number, 0, 1));",
+          "new": "        program.push(SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number, 0, 0));"
+        }
+      ],
+      "tests": [
+        "seccomp_program_denies_by_default_and_lists_no_undeclared_call"
+      ]
+    },
+    {
+      "id": "WP152",
+      "title": "the two install steps run in the reverse order",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    for step in [SeccompStep::NoNewPrivileges, SeccompStep::Filter] {",
+          "new": "    for step in [SeccompStep::Filter, SeccompStep::NoNewPrivileges] {"
+        }
+      ],
+      "tests": [
+        "seccomp_install_refuses_each_failed_step"
+      ]
+    },
+    {
+      "id": "WP153",
+      "title": "one fixed reason and errno answer both install steps",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        steps(step).map_err(|errno| SeccompInstallFailure::Step(step, errno))?;",
+          "new": "        steps(step)\n            .map_err(|_| SeccompInstallFailure::Step(SeccompStep::NoNewPrivileges, libc::EPERM))?;"
+        }
+      ],
+      "tests": [
+        "seccomp_install_refuses_each_failed_step"
+      ]
+    },
+    {
+      "id": "WP154",
+      "title": "the sequencer continues after a failed first step and answers Ok",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        steps(step).map_err(|errno| SeccompInstallFailure::Step(step, errno))?;",
+          "new": "        steps(step)\n            .map_err(|errno| SeccompInstallFailure::Step(step, errno))\n            .ok();"
+        }
+      ],
+      "tests": [
+        "seccomp_install_refuses_each_failed_step"
+      ]
+    },
+    {
+      "id": "WP155",
+      "title": "the write loop stops at the first short write instead of completing the record",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            Ok(count) => written += count,",
+          "new": "            Ok(count) => {\n                written += count;\n                return if written == record.len() {\n                    Ok(())\n                } else {\n                    Err(SeccompLaunchWriteFailure::Failed(libc::EIO))\n                };\n            }"
+        }
+      ],
+      "tests": [
+        "seccomp_launch_refuses_each_reporting_failure"
+      ]
+    },
+    {
+      "id": "WP156",
+      "title": "the write loop reports an interrupted write instead of retrying it",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            Err(errno) if errno == libc::EINTR => continue,",
+          "new": "            Err(errno) if errno == libc::EINTR => {\n                return Err(SeccompLaunchWriteFailure::Failed(errno))\n            }"
+        }
+      ],
+      "tests": [
+        "seccomp_launch_refuses_each_reporting_failure"
+      ]
+    },
+    {
+      "id": "WP157",
+      "title": "one fixed reason answers both reporting failures",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            Self::Failed(errno) => write!(\n                f,\n                \"seccomp launch refused: the install record could not be written, errno {errno}\"\n            ),",
+          "new": "            Self::Failed(errno) => {\n                let _ = errno;\n                write!(f, \"seccomp launch refused: the install record wrote no bytes\")\n            }"
+        }
+      ],
+      "tests": [
+        "seccomp_launch_refuses_each_reporting_failure"
+      ]
+    },
+    {
+      "id": "WP158",
+      "title": "a linux host is accepted under a Seatbelt policy, so the unchanged refusal is lost",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        StandinPolicy::Seatbelt(_) => {\n            if DECLARED_CONFINED_OS.contains(&host.os) {\n                return Ok(());\n            }",
+          "new": "        StandinPolicy::Seatbelt(_) => {\n            if DECLARED_CONFINED_OS.contains(&host.os) || host.os == \"linux\" {\n                return Ok(());\n            }"
+        }
+      ],
+      "tests": [
+        "standin_host_refusal_decides_each_policy"
+      ]
+    },
+    {
+      "id": "WP159",
+      "title": "the launcher bypasses its Seccomp seat, so a seccomp policy starts a provider",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    if let StandinPolicy::Seccomp(allow) = policy {\n        return Err(standin_seccomp_seat_refusal(allow));\n    }",
+          "new": "    let _ = &policy;"
+        }
+      ],
+      "tests": [
+        "standin_host_refusal_decides_each_policy"
+      ]
+    },
+    {
+      "id": "WP160",
+      "title": "the builder adds one unconditional syscall beside the rows, so a declaration with no allow form still admits it",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    if SECCOMP_AUDIT_ARCH == 0 {",
+          "new": "    // WP160 admits close without any allow form selecting it.\n    syscalls.push(\"close\");\n    if SECCOMP_AUDIT_ARCH == 0 {"
+        }
+      ],
+      "tests": [
+        "seccomp_allow_list_follows_the_declared_rights"
+      ]
+    },
+    {
+      "id": "WP161",
+      "title": "an admitted syscall's number is replaced by an undeclared call's, so the program tests a number no row names",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        program.push(SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number, 0, 1));",
+          "new": "        // WP161 tests ptrace's number where an admitted syscall's belongs.\n        let number = if *syscall == \"execve\" {\n            seccomp_syscall_number(\"ptrace\", audit_arch).expect(\"ptrace has a number\")\n        } else {\n            number\n        };\n        program.push(SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number, 0, 1));"
+        }
+      ],
+      "tests": [
+        "seccomp_program_denies_by_default_and_lists_no_undeclared_call"
       ]
     }
   ]
