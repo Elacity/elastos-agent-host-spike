@@ -1,0 +1,8 @@
+id: F-A5-issueexpiry
+file: src/lib.rs
+test: model_child_use_follows_the_issuing_expiry
+--- old
+                parent = ancestor.parent;
+--- new
+                parent = None;
+--- end

@@ -1,0 +1,8 @@
+id: F-A5-oncechild
+file: src/ops.rs
+test: ops::model_child_effect_ends_the_allow_once_grant
+--- old
+                        let ending = counted;
+--- new
+                        let ending = request.handle;
+--- end

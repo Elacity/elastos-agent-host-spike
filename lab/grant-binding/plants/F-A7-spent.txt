@@ -1,0 +1,13 @@
+id: F-A7-spent
+file: src/ledger.rs
+test: ledger::model_settled_charge_stays_spent_on_that_grant
+--- old
+            if amount > remaining {
+                return Err(ReserveRefuse::Spent {
+                    remaining,
+                    asked: amount,
+                });
+            }
+--- new
+            let _remaining = remaining;
+--- end

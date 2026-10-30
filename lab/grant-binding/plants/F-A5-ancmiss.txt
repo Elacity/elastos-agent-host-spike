@@ -1,0 +1,8 @@
+id: F-A5-ancmiss
+file: src/lib.rs
+test: model_missing_ancestor_is_refused
+--- old
+                let ancestor = self.grants.get(&handle).ok_or(Refuse::UnknownHandle)?;
+--- new
+                let Some(ancestor) = self.grants.get(&handle) else { break; };
+--- end
