@@ -27,6 +27,7 @@ sign that printed lab CID, and a check can say whether that key did.
   is parsed as `elastos_common::CapsuleManifest`, which refuses an unknown
   field, and then checked with its `validate()`. Each refusal keeps the
   Runtime's own text. The lab adds no field, no schema and no parser.
+- The provider's encoder names deployed content. The lab encoder is a test oracle only.
 
 ## The encoding
 
@@ -38,16 +39,18 @@ lines 21-43, and the HAMT defaults at lines 507-517): CIDv1, `sha2-256`, raw
 leaves, chunker `size-262144`, trickle off (balanced layout), `max-file-links`
 174, `max-directory-links` 0, HAMT fanout 256 and size threshold 256KiB, no
 inline (inline limit 32 unused), no preserved mode or mtime, no empty
-directories. This crate runs no Kubo, and no Kubo is installed on this Mac.
-So the lab CID follows the Kubo v0.40.1 profile, computed by the lab: no Kubo has
-computed any pin, and [Claim scope](#claim-scope) states the gate before the
-lab CID may be called more than that.
-The tests pin only the non-sharded subset of that profile with files of up to
-one tree level: a file of one raw leaf, a file of 2 to 174 raw leaves under one
-balanced file root (trickle off, `max-file-links` 174; task 048), and one
-block per directory. Anything bigger is refused, not named another way. The
-file root's bytes are the lab's reading of the profile, which no Kubo has
-checked (see [Claim scope](#claim-scope)).
+directories. This crate runs no Kubo; the offline cross-check named in
+[Claim scope](#claim-scope) runs one separately. So the lab CID follows the
+Kubo v0.40.1 profile, computed by the lab: one offline Kubo v0.40.1
+hash-only import, with the Runtime's profile flags, was run on this Mac and
+printed every committed pin, and the lab CID is not called equal to the
+Runtime's CID or to Kubo's output.
+The tests pin the balanced file layout at one and two levels (a file of one
+raw leaf; a file of 2 to 174 raw leaves under one balanced file root, trickle
+off and `max-file-links` 174, task 048; and a file of 175 leaves under a
+two-level root, task 076), a basic directory on both sides of the 256KiB
+links estimate, and the HAMT shard above it (task 077). The same grouping
+gives the file layout at any deeper depth, which no pin covers.
 
 To recompute a lab CID by hand:
 
@@ -61,41 +64,85 @@ To recompute a lab CID by hand:
 3. A file of more than 262144 bytes is split into 262144-byte chunks, and
    each chunk is a raw leaf as in step 2. Every chunk but the last is 262144
    bytes; the last chunk is shorter only when the length is not an exact
-   multiple of 262144, so a file of 524288 bytes (two full chunks) keeps two
-   full 262144-byte raw leaves. `two_full_chunks_keep_both_leaves` pins that
-   file and catches F-CI85a (a splitter drops the last byte when the length
-   is an exact multiple). One dag-pb
-   **file root** links them all (the balanced layout, one level). Its block
-   is, for each leaf in order, field 2 (`0x12`, length) holding a link: field
-   1 (`0x0a`, length) the leaf's CID bytes, field 2 with an empty name
-   (`12 00`), field 3 (`0x18`) the leaf's length as a varint. Then field 1
+   multiple of 262144, so a file of exactly two full chunks keeps two full
+   leaves. `two_full_chunks_keep_both_leaves` pins that file and catches
+   F-CI85a (a splitter drops the last byte when the length is an exact
+   multiple). The leaves make a balanced dag-pb **file tree** (trickle off).
+   Each level groups its nodes left to right into groups of up to 174
+   (`max-file-links`), each full before the next starts, so only a level's
+   last group can be short, and wraps each group in one **file node**; a
+   group of one child is still a node with one link. The depth is the
+   smallest `d` with `174^d` at least the leaf count: a file of 175 leaves is
+   a root of two depth-1 nodes, the first over 174 leaves and the second over
+   one leaf. A file of exactly 174 leaves is one depth-1 file node:
+   `exactly_174_leaves_stay_one_file_node` pins a 45350913-byte file (173
+   chunks of 262144 bytes and a last chunk of 1 byte) and catches F-CI86a (a
+   loop that skips a full group of 174). A file node's block
+   is, for each child in order, field 2 (`0x12`, length) holding a link:
+   field 1 (`0x0a`, length) the child's CID bytes, field 2 with an empty name
+   (`12 00`), field 3 (`0x18`) the child's Tsize as a varint. Then field 1
    (`0x0a`, length) holds the UnixFS data: `08 02` (type 2, a file), `18` and
-   the file's length as a varint (filesize, field 3), and for each leaf `20`
-   and its length as a varint (blocksizes, field 4, one tag per value, not
-   packed). There is no Data field (field 2). The root's CID is
-   `01 70 12 20` and the SHA-256 of its block, and the Tsize of a link to it
-   is its block's length plus its leaves' lengths. A file needing more than
-   174 leaves (`max-file-links`), so more than 45613056 bytes, would need a
-   second tree level and is refused with its path, its length and the limit.
+   the bytes under the node as a varint (filesize, field 3), and for each
+   child `20` and its file size as a varint (blocksizes, field 4, one tag per
+   value, not packed). A raw leaf's file size is its length; a file node's is
+   the bytes under it, not its Tsize. There is no Data field (field 2). A
+   node's CID is `01 70 12 20` and the SHA-256 of its block, and the Tsize of
+   a link to it is its block's length plus its children's Tsizes. A file of
+   one leaf stays that raw leaf, never a file node.
+   `file_past_174_leaves_keeps_a_second_tree_level` pins the 175-leaf bundle
+   (`SECOND_LEVEL_FILE_LAB_CID`) and catches F-CI76a (a one-child group
+   linked directly) and F-CI76b (a child's Tsize as its blocksize). A file of
+   30277 leaves (30276 of 262144 bytes and one of 1 byte, 7936671745 bytes)
+   is the smallest at depth 3: 175 depth-1 nodes (174 over 174 leaves, and the
+   node of one link over the single leaf), then 2 depth-2 nodes (one over
+   those 174 nodes, and one over that node of one link), then the root's two
+   children. `file_past_174_squared_leaves_keeps_a_third_tree_level` pins that
+   file (`THREE_LEVEL_FILE_LAB_CID`) and catches F-CI72a (the level loop stops
+   after two passes).
 4. Each path part but the last is a **directory**: `browser/app.js` is a
    directory `browser` with a link named `app.js`. The root is the directory
    of the bundle's entries. No empty directory is ever made.
-5. A directory's **block** is dag-pb. Sort its children by name bytes. For each
-   child, write protobuf field 2 (tag `0x12`, then the length as a varint)
+5. Each directory's **links estimate** is the sum, over its direct children,
+   of the child's name in bytes plus 36. It is not the block's length and not
+   a child's Tsize; a child directory counts through its own name and is
+   judged on its own estimate. An estimate of at most 262144 is one **basic
+   directory block**, dag-pb: sort its children by name bytes, and for each
+   child write protobuf field 2 (tag `0x12`, then the length as a varint)
    holding a link: field 1 (`0x0a`, length) the child's CID bytes, field 2
-   (`0x12`, length) its name in UTF-8, field 3 (`0x18`) its Tsize as a varint.
-   Then write field 1 (`0x0a 0x02`) holding the UnixFS data `08 01`: type
-   (field 1) = 1, a directory. Lengths and Tsizes are ordinary unsigned
-   varints: 7 bits per byte, low bits first, so a value over 127 takes two
-   bytes. A block over 262144 bytes is refused with the directory's path (`.`
-   is the root) and the limit: there is no HAMT shard. Kubo shards later, by
-   an estimate of its links' size, so this refusal comes first and fails
-   closed.
-6. A directory's CID is `01 70 12 20` and the SHA-256 of its block (the dag-pb
-   codec `0x70`). The Tsize of a link to a directory is the length of its
-   block plus the Tsizes of its own links. Every varint inside a CID here is
-   one byte.
-7. **Print** the root's 36 CID bytes as `b` (the multibase prefix) and their
+   (`0x12`, length) its name in UTF-8, field 3 (`0x18`) its Tsize as a
+   varint. Then write field 1 (`0x0a 0x02`) holding the UnixFS data `08 01`:
+   type (field 1) = 1, a directory. That block may be longer than 262144
+   bytes; the estimate alone decides. Lengths and Tsizes are ordinary
+   unsigned varints: 7 bits per byte, low bits first, so a value over 127
+   takes two bytes.
+6. An estimate greater than 262144 is a **HAMT shard**, fanout 256: bucket
+   `n` is byte `n` of the name's murmur3 x64-128 digest (seed 0, its first
+   64 bits big-endian; `hello` gives `cb d8 a7 b3 41 bd 9b 02`). A bucket
+   with one child is one link whose name is the bucket's two uppercase hex
+   digits and then the child's own name, to that child. That link stores the
+   child's node Tsize, so a file over one leaf in a one-child bucket
+   contributes its file-root Tsize and not its byte length;
+   `shard_with_a_file_root_has_the_pinned_cid` pins one such shard and
+   catches F-CI82a (the one-child Tsize capped at 262144). A bucket with two or
+   more children is one link whose name is only the prefix, to a child shard
+   built the same way from the next digest byte; that child shard may itself
+   hold one link. Links go out in bucket order, each as field 2 holding the
+   same link shape as a basic directory. Then field 1 (`0x0a`, length) holds
+   the UnixFS data: `08 05` (type 5, a HAMT shard directory), field 2
+   (`0x12`, length) the bitmap with bucket `i` set in byte `31 - i/8` at mask
+   `1 << (i % 8)` after its leading zero bytes are dropped, `28 22` (hash
+   type `0x22`) and `30 80 02` (fanout 256). There is no filesize,
+   blocksizes, mode or mtime. A ninth digest byte is refused: the murmur
+   digest has eight. One table, `shared_prefix_rows`, still gives a child
+   shard from the sixth digest byte and from the seventh: its six-byte row
+   and seven-byte row each keep the next shard, and
+   `shared_digest_prefixes_keep_the_next_shard` pins both (F-CI71a puts a
+   leaf at depth 5, F-CI71b at depth 6). Each level takes one digest byte.
+7. A directory's CID is `01 70 12 20` and the SHA-256 of its block (the dag-pb
+   codec `0x70`). The Tsize of a link to a directory, basic or shard, is the
+   length of its block plus the Tsizes of its own links. Every varint inside
+   a CID here is one byte.
+8. **Print** the root's 36 CID bytes as `b` (the multibase prefix) and their
    RFC 4648 base32, in the lowercase alphabet
    `abcdefghijklmnopqrstuvwxyz234567`, with no `=` padding: 288 bits make 58
    characters, the last one padded with two zero bits. The result is 59
@@ -131,38 +178,125 @@ def varint(n):
 def field(number, data):  # protobuf, wire type 2
     return bytes([number << 3 | 2]) + varint(len(data)) + data
 
-def cid(codec, block):
-    return bytes([0x01, codec, 0x12, 0x20]) + hashlib.sha256(block).digest()
+def cid(codec, block):  # a CIDv1 sha2-256 of a block
+    return cid_for(codec, hashlib.sha256(block).digest())
+
+def cid_for(codec, digest):  # the same CID from the block's digest
+    return bytes([0x01, codec, 0x12, 0x20]) + digest
+
+def total(block, tsizes):  # the Tsize of a node's block
+    return len(block) + sum(tsizes)
+
+def file_tree(level):  # (CID, Tsize, filesize) nodes of one level; the root
+    while len(level) > 1:
+        groups = [level[at:at + 174] for at in range(0, len(level), 174)]
+        level = []
+        for group in groups:
+            filesize = sum(child[2] for child in group)
+            links = b""
+            unixfs = b"\x08\x02\x18" + varint(filesize)
+            for child in group:
+                link = field(1, child[0]) + field(2, b"")
+                links += field(2, link + b"\x18" + varint(child[1]))
+                unixfs += b"\x20" + varint(child[2])
+            block = links + field(1, unixfs)
+            level.append((cid(0x70, block), total(block, [child[1] for child in group]), filesize))
+    return level[0][0], level[0][1]
+
+def file_from_digests(leaves):  # (digest, size) pairs; returns (CID bytes, Tsize)
+    return file_tree([(cid_for(0x55, digest), size, size) for digest, size in leaves])
 
 def file_node(data):  # a file's bytes; returns (CID bytes, Tsize)
     if len(data) <= 262144:
         return cid(0x55, data), len(data)
-    chunks = [data[at:at + 262144] for at in range(0, len(data), 262144)]
-    assert len(chunks) <= 174
-    links = b""
-    unixfs = b"\x08\x02\x18" + varint(len(data))
-    for chunk in chunks:
-        link = field(1, cid(0x55, chunk)) + field(2, b"")
-        links += field(2, link + b"\x18" + varint(len(chunk)))
-        unixfs += b"\x20" + varint(len(chunk))
-    block = links + field(1, unixfs)
-    return cid(0x70, block), len(block) + len(data)
+    leaves = []
+    for at in range(0, len(data), 262144):
+        chunk = data[at:at + 262144]
+        leaves.append((hashlib.sha256(chunk).digest(), len(chunk)))
+    return file_from_digests(leaves)
+
+def murmur(data):  # murmur3 x64-128, seed 0; its first 64 bits, big-endian
+    mask = (1 << 64) - 1
+    c1, c2 = 0x87C37B91114253D5, 0x4CF5AD432745937F
+    def rotl(value, bits):
+        return ((value << bits) | (value >> (64 - bits))) & mask
+    def fmix(value):
+        value ^= value >> 33
+        value = value * 0xFF51AFD7ED558CCD & mask
+        value ^= value >> 33
+        value = value * 0xC4CEB9FE1A85EC53 & mask
+        return value ^ (value >> 33)
+    h1 = h2 = 0
+    for at in range(0, len(data) // 16 * 16, 16):
+        k1 = int.from_bytes(data[at:at + 8], "little")
+        k2 = int.from_bytes(data[at + 8:at + 16], "little")
+        k1 = k1 * c1 & mask
+        h1 ^= rotl(k1, 31) * c2 & mask
+        h1 = ((rotl(h1, 27) + h2) * 5 + 0x52DCE729) & mask
+        k2 = k2 * c2 & mask
+        h2 ^= rotl(k2, 33) * c1 & mask
+        h2 = ((rotl(h2, 31) + h1) * 5 + 0x38495AB5) & mask
+    tail = data[len(data) // 16 * 16:]
+    k1 = int.from_bytes(tail[:8].ljust(8, b"\x00"), "little")
+    k2 = int.from_bytes(tail[8:].ljust(8, b"\x00"), "little")
+    if len(tail) > 8:
+        h2 ^= rotl(k2 * c2 & mask, 33) * c1 & mask
+    if tail:
+        h1 ^= rotl(k1 * c1 & mask, 31) * c2 & mask
+    h1 ^= len(data)
+    h2 ^= len(data)
+    h1 = (h1 + h2) & mask
+    h2 = (h2 + h1) & mask
+    return ((fmix(h1) + fmix(h2)) & mask).to_bytes(8, "big")
+
+def shard(links, level):  # links of one directory; returns (CID bytes, Tsize)
+    if level == 8:
+        raise ValueError("a HAMT shard needs a ninth digest byte")
+    buckets = {}
+    for name, child, tsize in links:
+        buckets.setdefault(murmur(name.encode("utf-8"))[level], []).append((name, child, tsize))
+    bitmap = bytearray(32)
+    written = b""
+    tsizes = []
+    for bucket in sorted(buckets):
+        bitmap[31 - bucket // 8] |= 1 << (bucket % 8)
+        prefix = f"{bucket:02X}"
+        group = buckets[bucket]
+        if len(group) == 1:
+            name, child, tsize = group[0]
+            link = field(1, child) + field(2, (prefix + name).encode("utf-8"))
+        else:
+            child, tsize = shard(group, level + 1)
+            link = field(1, child) + field(2, prefix.encode("utf-8"))
+        tsizes.append(tsize)
+        written += field(2, link + b"\x18" + varint(tsize))
+    first = next((at for at, byte in enumerate(bitmap) if byte), 32)
+    unixfs = b"\x08\x05" + field(2, bytes(bitmap[first:])) + b"\x28\x22" + b"\x30" + varint(256)
+    block = written + field(1, unixfs)
+    return cid(0x70, block), total(block, tsizes)
 
 def directory(tree):  # {name: bytes or a dict}; returns (CID bytes, Tsize)
-    links = b""
-    total = 0
+    links = []
     for name in sorted(tree, key=lambda n: n.encode("utf-8")):
         child = tree[name]
         if isinstance(child, dict):
             child_cid, tsize = directory(child)
+        elif isinstance(child, list):
+            child_cid, tsize = file_from_digests(child)
         else:
             child_cid, tsize = file_node(child)
-        link = field(1, child_cid) + field(2, name.encode("utf-8"))
-        links += field(2, link + b"\x18" + varint(tsize))
-        total += tsize
-    block = links + field(1, b"\x08\x01")
-    assert len(block) <= 262144
-    return cid(0x70, block), len(block) + total
+        links.append((name, child_cid, tsize))
+    if sum(len(name.encode("utf-8")) + 36 for name, _, _ in links) > 262144:
+        return shard(links, 0)
+    written = b""
+    for name, child_cid, tsize in links:
+        written += field(2, field(1, child_cid) + field(2, name.encode("utf-8")) + b"\x18" + varint(tsize))
+    block = written + field(1, b"\x08\x01")
+    return cid(0x70, block), total(block, [tsize for _, _, tsize in links])
+
+def printed(cid_bytes):  # the root's CID bytes as the 59-character text
+    bits = "".join(f"{byte:08b}" for byte in cid_bytes) + "00"
+    return "b" + "".join(B32[int(bits[i:i + 5], 2)] for i in range(0, 290, 5))
 
 def lab_cid(files):  # {bundle path: bytes}
     root = {}
@@ -172,8 +306,7 @@ def lab_cid(files):  # {bundle path: bytes}
         for folder in folders:
             node = node.setdefault(folder, {})
         node[name] = data
-    bits = "".join(f"{byte:08b}" for byte in directory(root)[0]) + "00"
-    return "b" + "".join(B32[int(bits[i:i + 5], 2)] for i in range(0, 290, 5))
+    return printed(directory(root)[0])
 ```
 
 In Rust, the walk (`checked_bundle`, which `lab_cid` runs too) reads a bundle,
@@ -182,10 +315,14 @@ and `encode_entries` makes each file's node from its bytes with `file_node`
 `encode_tree`, the one tree builder. `encode_listed_files` (task 047; see
 [naming a closure listing](#naming-a-closure-listing)) makes one raw leaf per
 listed file and hands them to the same `encode_tree` (task 048). Every leaf is
-made by `raw_leaf`, and directory blocks and file roots write their links with
-one `put_links`. They are the only code that names a bundle; tests call them
-and copy none. `naming_hash` holds the one naming hash, and leaves, file roots
-and directory blocks share it. The encoder also
+made by `raw_leaf`, and directory blocks, file roots and shard blocks write
+their links with one `put_links`. They are the only code that names a bundle;
+tests call them and copy none. `naming_hash` holds the one naming hash, and
+leaves, file roots, directory blocks and shard blocks share it. `tsize` holds
+the one Tsize rule, block length plus children's Tsizes. `encode_directory`
+is the one directory encoder: `links_estimate` decides a basic block or a
+`hamt_shard`, and `hamt_digest` holds the one marked copy of the HAMT hash.
+The encoder also
 refuses what the walk can never give but a caller of the encoder could: a path
 with an empty, `.` or `..` part, two entries with one path, and one path that
 is both a file and a directory (`a` and `a/b`, in either order). `check_name` checks a
@@ -212,11 +349,20 @@ rules and not from the Rust code, in
 | Chunk size 262144: a file of exactly that size is one block | `single_block_at_the_chunk_limit_has_the_pinned_cid` | F-CI18d (262143) |
 | A file over one leaf is a balanced root of raw leaves: empty link names, type 2, filesize, blocksizes, and a Tsize of its block and its leaves | `file_over_one_leaf_has_the_pinned_cid` | F-CI48a (no name field), F-CI48b (no blocksizes), F-CI48c (no filesize), F-CI48d (Tsize without the root block) |
 | A file of exactly two chunks keeps both full leaves, so a short-last-chunk pin cannot hide a splitter that drops the last byte | `two_full_chunks_keep_both_leaves` | F-CI85a (a splitter drops the last byte when the length is an exact multiple) |
-| At most 174 leaves; one more is refused | `file_of_174_leaves_is_named_and_one_byte_more_is_refused` | F-CI18e (no leaf-limit refusal), F-CI48e (the limit is 175) |
+| A file of exactly 174 leaves is one depth-1 file node, and 45350913 bytes (173 chunks of 262144 bytes and a last chunk of 1 byte) groups once | `exactly_174_leaves_stay_one_file_node` | F-CI86a (the level loop skips a full group of 174) |
+| The file tree's depth is the smallest `d` with `174^d` at least the leaf count: each level groups up to 174 children, left to right, each group full before the next starts, one file node per group, and a group of one child is a one-link node | `file_past_174_leaves_keeps_a_second_tree_level`, `file_past_174_squared_leaves_keeps_a_third_tree_level` | F-CI18e (the level loop runs only once), F-CI48e (the limit is 175), F-CI76a (a one-child group linked directly), F-CI76b (a child's Tsize as its blocksize), F-CI72a (the level loop stops after two passes) |
+| A file of 30277 leaves needs a third tree level: 175 depth-1 nodes, then 2, then the root's two children; 30276 full leaves still finish in two passes | `file_past_174_squared_leaves_keeps_a_third_tree_level` | F-CI72a (the level loop stops after two passes) |
 | The listing call names a file of at most one leaf; a listed file over one chunk is refused and named from its bytes instead | `listed_file_over_the_chunk_limit_is_refused`, `listed_file_over_one_leaf_names_the_bytes_call` | F-CI47c (`encode_listed_files` has no size refusal) |
 | Links sorted by name bytes | `lab_cid_matches_the_pinned_value_for_each_fixture`, `lab_cid_does_not_depend_on_listing_order` | F-CI18f (reverse), F-CI1a (no sort) |
 | Directory type 1 | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18g (5) |
-| A directory block over 262144 bytes is refused, no HAMT | `directory_over_the_hamt_threshold_is_refused` | F-CI18h (no refusal) |
+| The links estimate decides a directory's block: at most 262144 is one basic directory, which may be larger than 262144 bytes; a greater estimate is a HAMT shard | `directory_at_the_hamt_threshold_stays_basic`, `directory_over_the_hamt_threshold_is_a_shard` | F-CI18h (never shards) |
+| A HAMT shard takes digest byte `n` as bucket `n`: a one-child bucket is one link named the prefix and the child's name; a bucket of two or more is one prefix link to a child shard over the next byte; links in bucket order | `directory_over_the_hamt_threshold_is_a_shard`, `tests::two_names_in_one_bucket_get_a_child_shard` | — |
+| A shared digest prefix still makes a child shard from the sixth byte and from the seventh: `shared_prefix_rows` holds the six-byte and seven-byte pairs | `shared_digest_prefixes_keep_the_next_shard` | F-CI71a (a leaf at depth 5), F-CI71b (a leaf at depth 6) |
+| The shard's bitmap is 32 bytes with bucket `i` in byte `31 - i/8`, leading zeros dropped, then `28 22` and `30 80 02` | `tests::hamt_bitmap_drops_leading_zero_bytes`, `directory_over_the_hamt_threshold_is_a_shard` | — |
+| A shard's Tsize is its block plus the Tsizes of the links it writes | `directory_over_the_hamt_threshold_is_a_shard`, `child_directory_over_the_hamt_threshold_is_a_shard` | F-CI48d (the shared Tsize rule without the block) |
+| A child directory is judged on its own estimate; its parent counts only its name | `child_directory_over_the_hamt_threshold_is_a_shard` | — |
+| A ninth digest byte is refused | `tests::hamt_depth_exhaustion_is_refused` | — |
+| The HAMT hash is murmur3 x64-128, seed 0, first 64 bits big-endian | `hamt_digest_is_the_marked_murmur3_copy` | — |
 | No inline: no identity multihash | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18i (inline at most 32 bytes) |
 | The printed form, `b` and lowercase base32 | `lab_cid_prints_with_the_lab_label`, `the_library_names_a_bundle_one_way`, `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18j (old prefix), F-CI18k (uppercase), F-CI1d (no `b`) |
 | A directory link's Tsize includes its child's links | `lab_cid_matches_the_pinned_value_for_each_fixture` (`web-app` has `browser/`) | F-CI18m |
@@ -245,10 +391,47 @@ leaves, 262144 and 1 bytes) is
 is `bafybeidpgwbsi22cbsmthqupvn37xphujhs6fnzyuy64uc6nsauc6bftqe`. Both were
 first computed by a `python3 -I` script written from the hand rules above,
 before any Rust code named them; that script used Python's own `base64` for
-the printed form and gave `content-sample`'s pin too. The 174-leaf test builds
-a 45613056-byte file and one of 45613057 bytes in memory and pins no value.
-The directory-block test builds 1100 empty files with 200-byte names in a temp
-dir.
+the printed form and gave `content-sample`'s pin too. Task 076 adds one more,
+in memory and never committed: `content-sample` with `sample.example` as
+45613057 zero bytes (175 leaves, 174 of 262144 bytes and one of 1 byte, so a
+root of two depth-1 file nodes) is
+`bafybeifdbtqkw5q2ayypyajkbxd4wrctavgxpagjbugk5nddz53igm6xta`, first printed
+by README's Python rule before any Rust code named it. The 174-leaf file of
+45613056 zero bytes still encodes, with another CID, and is not pinned.
+Task 072 adds one more, in memory and never written: one file `sample.example`
+whose 30277 leaves are leaf `i`'s SHA-256 of `i` as 8 little-endian bytes,
+30276 of 262144 bytes and one of 1 byte (7936671745 bytes), is
+`bafybeig3p6lebveuwcqolitt4bzbmr2mbidjzw3tqzmq6vrc5otgrp5bea`, first printed
+by README's Python rule before any Rust code named it. The 30276-leaf file of
+262144-byte chunks still finishes in two passes, with another CID, and is not
+pinned.
+Task 077 adds three more, built in a temp dir and never committed; the one
+helper measures the name it lengthens, so no length is hardcoded:
+`content-sample` plus empty files whose links estimate is exactly 262144 (one
+name lengthened to 210 bytes, and the block 279500 bytes, so a basic
+directory may be larger than the threshold) is
+`bafybeidofifnoh4qecocbt2qksv2bbvg5ocyggix6gdsr5wvnlxlw6erui`; the same with
+an estimate of 262145 (211 bytes) is
+`bafybeiapjks5bqeaeeuhrestfwx3tskokvzjvy5kltdidb24gnyyzkn2rm`; and the
+262145 file set under `photos/`, with `content-sample`'s two files left at the
+root (whose own estimate is 140), is
+`bafybeihmck6tdzcctrlvqlyl35xkja36ogb2qwts7qofk5abrlzb7jr3zi`. Each was first
+printed by README's Python rule before any Rust code named it. The helper
+builds the empty files from `content-sample`'s entries and one measured
+lengthened name.
+Task 071 adds two more, built in a temp dir and never committed: one table,
+`shared_prefix_rows` holds both pairs. Its six-byte row replaces two 100-byte
+fillers of the 077 file set at estimate 261945 with the 200-byte names
+`format!("f6-{:0>197}", 67_618_900)` and
+`format!("f6-{:0>197}", 192_452_893)`, whose digests share bytes 0 through 5,
+so the estimate is 262145 and the bundle is
+`bafybeihe5tbuj3b3bh76xcrd4hklsombul7skdeurbuwb5steypvasqrjm`. Its
+seven-byte row does the same with `format!("f7-{:0>197}", 2_731_584_490)` and
+`format!("f7-{:0>197}", 3_825_277_504)`, whose digests share bytes 0 through
+6, and its bundle is
+`bafybeie2vvrtsognxi7rnvjpzbzerrk73zfzakxdr6eoxmzgkzvtphnmeu`. Each was first
+printed by README's Python rule before any Rust code named it; the one helper
+reads a row from that table and replaces the two fillers the row names.
 
 ### The cross-implementation check
 
@@ -273,22 +456,33 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    (`python3 -I could not run: <error>`), a non-zero exit (even after it
    printed a valid CID), no output, or more than one line is refused with its
    own reason, and the test asserts each of these reasons.
-5. For each of the 15 pins, the Python answer, the pin constant and the
+5. For each of the 23 pins, the Python answer, the pin constant and the
    printed `encode_entries` result for the same files must be equal, and the
-   test asserts that it checked exactly 15 bundles. The 15 are the seven
+   test asserts that it checked exactly 23 bundles. The 23 are the seven
    pinned fixtures (`content-sample`, `web-app`, `agent-host`, `provider`,
    `model`, `provider-variant-a`, `provider-variant-b`), the recipe, the
    chunk-limit, empty-file and long-name bundles above, which are built as
    entries in memory, the photo stand-in consumer copy (task 047, see
-   [naming a closure listing](#naming-a-closure-listing)), the two-leaf,
-   three-leaf and two-full-chunk file bundles (tasks 048 and 085), also built in memory. `wc001-core` has no pin, because its `capsule.wasm` is
-   built on each machine, so it is not checked here.
+   [naming a closure listing](#naming-a-closure-listing)), the two-leaf
+   and three-leaf file bundles (task 048), the second-level file bundle
+   (task 076), the two-full-chunk file bundle (task 085), the
+   exactly-174-leaf file bundle (task 086), the three HAMT-threshold bundles
+   (task 077), the shard with a file root (task 082) and the two
+   shared-prefix bundles (task 071), also built in memory. `wc001-core` has
+   no pin, because its `capsule.wasm` is built on each machine, so it is not
+   checked here. Task 072's third-level file is not one of the 23 either: it
+   is 7936671745 bytes and is never written, so
+   `file_past_174_squared_leaves_keeps_a_third_tree_level` runs the second
+   driver, `THREE_LEVEL_FILE_DRIVER`, which builds its 30277 leaves and calls
+   the block's `directory` and `printed`; that test holds the driver to no
+   grouping, varint, CID prefix or base32 of its own.
 
 | Rule | Named test | Falsifier |
 | --- | --- | --- |
 | README's rule agrees with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19a (the block's `0x55` becomes `0x70` before it runs) |
 | Rust agrees with README's rule, not only with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19b (the encoder's `RAW_CODEC` becomes `0x56`) |
-| A missing block is no pass: exactly 15 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
+| A missing block is no pass: exactly 23 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
+| README states the count this test checks, and three sentences say one count | `readme_python_recomputes_every_lab_cid_pin` | F-CI71c (the pins sentence drifts), F-CI71d (the checked sentence drifts), F-CI71e (the rows sentence drifts) |
 | An interpreter that cannot start fails the test | `readme_python_recomputes_every_lab_cid_pin` | F-CI19d (a program that does not exist) |
 | A non-zero exit is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19e (exit status not checked) |
 | No output is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19f (empty answer taken) |
@@ -331,8 +525,26 @@ no answers fails.
 | A block never closed before the next section is refused | `readme_python_matches_the_name_signature_digest`, `readme_python_matches_the_package_record_bytes` | F-CI24e (the block runs to the end of its section) |
 | An interpreter that cannot start fails all three tests | all three tests above | F-CI19d (a program that does not exist) |
 
-Not shown: Kubo itself, and Python on another machine. The check is two
-implementations on one Mac (Python 3.9.6 here), not an outside IPFS tool.
+Not shown: Python on another machine. The check is two implementations on one
+Mac (Python 3.9.6 here), and a third one runs only when asked: the ignored
+test `kubo_hash_only_import_prints_every_lab_cid_pin` names the Kubo binary in
+`LAB_KUBO`, makes a fresh temp repo, writes the provider's `Import` HAMT
+values, and runs one `add --offline --only-hash --recursive=true
+--wrap-with-directory=false` with the profile flags for each pinned bundle.
+Kubo's root, the pin and `encode_entries` are one value for all 21, and the
+test asserts it checked 21. A missing `LAB_KUBO`, a binary that is not
+0.40.1, and any row that differs are refused with their reason;
+`kubo_helper_refuses_bad_setup` checks the setup refusals with local stubs,
+including a version command that prints `0.40.1` and then fails.
+`kubo_run_refuses_failed_commands` checks command refusals, including
+`/usr/bin/false` with empty stderr. Both helpers report startup errors or
+the failed command's exit status or signal and stderr, with exact-message
+assertions for each refusal.
+
+| Rule | Named test | Falsifier |
+| --- | --- | --- |
+| A missing `LAB_KUBO` is refused with its reason | `kubo_helper_refuses_bad_setup` | — |
+| A Kubo that is not 0.40.1 is refused with its reason | `kubo_helper_refuses_bad_setup` | — |
 
 ## Fixtures and their pinned lab CIDs
 
@@ -368,8 +580,8 @@ The agent-host lane may change its files later; these copies stay as they are,
 so the pin holds. The manifest's entrypoint, `agent-host.component.wasm`, is
 build output and is never committed (HANDOFF rule 7), so the module is not in
 the fixture: this lab CID covers the two files only and is not the whole
-capsule's name. The lab never parses `asks.json`: to the lab CID it is one more
-payload file. The manifest is a component manifest, so the Runtime's
+capsule's name. The lab CID encoder never parses `asks.json`: to the lab CID it
+is one more payload file. The manifest is a component manifest, so the Runtime's
 `validate()` also requires its `wit_world_sha256` to equal the SHA-256 of
 `elastos/wit/elastos-bus-v1.wit`, which `elastos-common` compiles in
 (`elastos/crates/elastos-common/src/manifest.rs:412` and `:794-800`).
@@ -1482,22 +1694,30 @@ release records.
 
 ## Lab stand-in launcher (M1 check B1)
 
-`StandInRuntime` in `tests/common/mod.rs` is a lab stand-in for the Runtime's
-launch route, not the Runtime. It lives in test code, so the library stays
-identity only (`the_harness_exports_only_identity_checks` still lists only
-identity checks; task 036 added `CheckedBundle::manifest_name`, which hands
-out the checked manifest's `name`), and the falsifier runner restores its file
-after a killed run.
-A launch names the bundle by its lab CID only. The stand-in recomputes the CID
-from the stored bytes and checks the publisher's signed package record before
-anything is launched. It holds a store (printed lab CID -> bundle folder,
-filled at publish time by `published`, from `lab_cid` of the folder), the
-package records and an explicit list of accepted publisher DIDs.
+The shared `StandIn` in `lab/agent-conformance/standin-runtime/mod.rs` owns
+instances, session ids, lifecycle and grants. `StandInRuntime` in
+`tests/common/mod.rs` is this lane's fixture store and CID entry point; it
+keeps the identity check and the planted seams, and it holds no instance list,
+no grant list, no status string and no session counter (P10).
+`tests/stand_in.rs` imports the shared module once, with
+`#[path = "../../agent-conformance/standin-runtime/mod.rs"]`, and passes
+closures that call `post_capsules`, `get_capability_list` and
+`delete_capsule` on that one value. The shared module's own tests compile only
+into that one test binary.
 
-`post_capsules` checks in this order, and the first refusal is the answer,
-with status 400 and nothing launched. Each library refusal is its `Refusal`'s
-own text, unchanged, and the stand-in calls the lane's one parse, one walk,
-one name compare and one record check, never a copy (P10):
+A launch names the bundle by its lab CID only. The shared `post_capsules`
+takes `path`; this lane's `cid` body is a lab fixture entry point, not that
+route. `commit_launch` runs the checks below, then calls the closure with
+`{"path": <the stored folder>}`. A fixture registration through
+`admit_resident` supplies a `Start` outcome; it neither verifies a publisher
+nor executes the bundle. The lane holds a store (printed lab CID -> bundle
+folder, filled at publish time by `published`, from `lab_cid` of the folder),
+the package records and an explicit list of accepted publisher DIDs.
+
+The checks run in this order, and the first refusal is the answer, with status
+400 and nothing launched. Each library refusal is its `Refusal`'s own text,
+unchanged, and the lane calls the lane's one parse, one walk, one name compare
+and one record check, never a copy (P10):
 
 | Check | Refused when | Reason | Named test |
 | --- | --- | --- | --- |
@@ -1522,38 +1742,45 @@ text; with no record at all, the answer is the "unsigned:" text.
 records by two unaccepted signers with the first one's "not in the accepted
 list" text, listing no instance.
 
-Only then it adds one instance and answers `{"id", "name", "status":
-"launched", "session_id"}`, with `name` from `CheckedBundle::manifest_name()`,
-the checked manifest's `name` from the one manifest check: the stand-in never
-parses `capsule.json` itself.
-`get_capsules` answers `{"capsules": [...]}`, one entry per launched instance
-with `id`, `name`, `status`, `session_id` and `cause` (`null`); a refused
-launch never appears. `standin_launches_a_signed_bundle_by_its_cid` runs the
+Only then `commit_launch` calls the shared `post_capsules` with the stored
+folder as `path`, and the answer is the shared answer, unchanged: `id`,
+`name`, `status: starting` and `session_id`, with `session_id` equal to `id`.
+The shared `finish_start` applies the registered `Start` and moves that
+instance to `running`; `Start::Ok` is the test's supplied outcome, so it
+proves no real start and no execution. `get_capsules` answers
+`{"capsules": [...]}` with `id`, `name`, `status`, `session_id` and `cause`
+(`""` while the instance starts or runs), sorted by `id`. The stopped cause is
+`stopped: <reason>`. A refused launch leaves the shared instance and grant
+lists unchanged. `standin_launches_a_signed_bundle_by_its_cid` runs the
 journey on the `agent-host` fixture: published under its pin, its record
-signed by a fresh test key whose DID is accepted, launched by CID, listed once
-with the same `id` and `session_id`, and its lab CID and its parent's listing
-unchanged after. Ids and session ids come from a counter.
+signed by a fresh test key whose DID is accepted, registered once at its path,
+launched by CID, listed once as `starting`, then moved to `running` by
+`finish_start`. Its lab CID and its parent's listing stay unchanged, and a
+repeat of the same signed CID uses the same registered path and creates a
+second shared instance.
 
-A valid signature alone yields no grant. The stand-in's grant view,
-`get_capability_list_all_sessions_live` (for #309 RA-1's
-`GET /api/capability/list?scope=all_sessions_live`), answers
+A valid signature alone yields no grant. The shared shell grant view,
+`get_capability_list(Caller::Shell, Some("all_sessions_live"))`, answers
 `{"scope": "all_sessions_live", "capabilities": [...]}`, one entry per held
-grant with today's five keys (`request_id`, `resource`, `action`, `duration`,
-`granted_at`) and `session_id`. A launch adds no grant, although the
-`agent-host` manifest asks for one in `capabilities` and its record verifies.
-The one way a grant exists is `seed_grant(session_id, resource, action,
-duration)`, a lab test seam, not a route: it holds one grant with the next
-`request_id` and `granted_at` from a counter. The seed is there only to show
-that the view lists what is held, so the empty view after a launch is not a
-constant. The launch answer and the `get_capsules` entry keep exactly the
-keys above, with no grant or token key.
-`standin_valid_signature_alone_yields_no_grant` launches the signed bundle as
-in the journey above, twice: each launch gives its own session, and after each
-the view lists no entry for that session and none at all.
-`standin_grant_view_lists_a_seeded_grant` seeds one grant for the launched
-session and finds it listed with all six keys and the seeded values. Task 007's
-`valid_signature_grants_nothing_by_itself` shows the library leaves no standing
-approval; this shows the stand-in's launch adds no grant. Both stay.
+live grant with `request_id`, `session_id`, `resource`, `action`, `duration`
+and `granted_at`. No launch adds a grant, although the `agent-host` manifest
+asks for one in `capabilities` and its record verifies. The lane calls that
+view and the shared seed through one seam each: `live_grants` answers the
+closure's value unchanged, and `grant_request_id(n)` gives the shared
+`seed_grant` its `grant-{n}` request id. A stop through `apply_stop` calls the
+shared `delete_capsule`, which stores `stopped` and revokes that session's
+live grants; the sibling instance and its grant stay.
+`standin_valid_signature_alone_yields_no_grant` launches the signed bundle
+twice: each launch gives its own instance and session, and the view lists no
+entry. `standin_grant_view_lists_a_seeded_grant` seeds one grant for the
+launched session and finds it listed with all six keys and the seeded values.
+`standin_shared_stop_updates_the_same_instances_and_grants` launches two,
+seeds one live grant for each, stops one through `apply_stop`, and reads the
+same shared object: the stopped instance is listed as `stopped` with its
+reason, its grant has gone, and the sibling stays `running` with its grant.
+Task 007's `valid_signature_grants_nothing_by_itself` shows the library leaves
+no standing approval; these tests show the shared stand-in's launch adds no
+grant and its stop removes one.
 
 Each route, field and state, and where it comes from. #309 is draft PR #309,
 `lab/runtime-asks/` at `513988ebd` (branch `cursor/runtime-asks-ad52`);
@@ -1561,43 +1788,50 @@ Each route, field and state, and where it comes from. #309 is draft PR #309,
 
 | Route, field or state | Source |
 | --- | --- |
-| `POST /api/capsules` (`post_capsules`) | #309 `06-resident-instances-core.md:24` (RI-2) |
-| `GET /api/capsules` (`get_capsules`) | #309 `06-resident-instances-core.md:25` (RI-3); today's `list_capsules`, `routes.rs:47` |
-| request field `cid` | lab field, not in #309; today's route takes `path` (`routes.rs:65-66`) |
-| answer `id`, `name`, `status` | `LaunchResponse`, `routes.rs:74-78` |
-| answer and list `session_id` | #309 `06-resident-instances-core.md:24` (RI-2) |
+| `POST /api/capsules` (`post_capsules` on the shared `StandIn`) | #309 `06-resident-instances-core.md:24` (RI-2) |
+| `GET /api/capsules` (`get_capsules` on the shared `StandIn`) | #309 `06-resident-instances-core.md:25` (RI-3); today's `list_capsules`, `routes.rs:47` |
+| request field `cid` | lab fixture entry point, not the shared route; the shared body's only field is `path`, and today's Runtime route also takes `path` (`routes.rs:65-66`) |
+| answer `id`, `name`, `status`, `session_id` | shared `post_capsules`, which answers `starting` before `finish_start`; `LaunchResponse`, `routes.rs:74-78` |
+| answer and list `session_id` | #309 `06-resident-instances-core.md:24` (RI-2); the shared instance id |
 | list `status` and `cause` | #309 `06-resident-instances-core.md:25` (RI-3) |
-| state "launched" | `routes.rs:102` |
-| state "refused": status 400 and the reason | `routes.rs:116`, `Err((StatusCode::BAD_REQUEST, e.to_string()))` |
-| grant view `GET /api/capability/list?scope=all_sessions_live` (`get_capability_list_all_sessions_live`): `scope` `all_sessions_live`, `capabilities` entries with `request_id`, `resource`, `action`, `duration`, `granted_at` and `session_id` | #309 `01-live-grant-view.md:11` (a shell session reads every session's live grants) and `:83` (the `scope` marker and the session id per entry), at `513988ebd`; entry keys and `capabilities` from `CapabilityOutput` and `ListCapabilitiesOutput`, `elastos/crates/elastos-server/src/api/handlers/capability.rs:411-423` |
-| grant seed `seed_grant` | lab test seam, not a route; #309 and this lab model no shell approval |
-| asks read `asks_of` | lab test seam, not a route; #309 has no asks field on any route (RA-1 to RA-7) |
+| states `starting`, `running`, `stopped`, `failed` | shared `StandIn`; `finish_start` moves a started instance to `running` |
+| state "refused": status 400 and the reason | the lane's CID checks; `routes.rs:116`, `Err((StatusCode::BAD_REQUEST, e.to_string()))` |
+| grant view `GET /api/capability/list?scope=all_sessions_live` (`get_capability_list(Caller::Shell, Some("all_sessions_live"))` on the shared `StandIn`): `scope` `all_sessions_live`, `capabilities` entries with `request_id`, `resource`, `action`, `duration`, `granted_at` and `session_id` | #309 `01-live-grant-view.md:11` (a shell session reads every session's live grants) and `:83` (the `scope` marker and the session id per entry), at `513988ebd`; entry keys and `capabilities` from `CapabilityOutput` and `ListCapabilitiesOutput`, `elastos/crates/elastos-server/src/api/handlers/capability.rs:411-423` |
+| grant seed `seed_grant` | shared lab test seam, not a route; #309 and this lab model no shell approval |
+| asks read `asks_of` | lane lab test seam, not a route; #309 has no asks field on any route (RA-1 to RA-7) |
+| CID launch `commit_launch` | lane lab test seam, not a route: the fixture-only composition from a verified CID to the shared `path` body |
+| grant view seam `live_grants` | lane lab test seam, not a route |
+| request id `grant_request_id` | lane lab test seam, not a route |
+| stop `apply_stop` | lane lab test seam, not a route; the shared `delete_capsule` does the work |
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
-| A launch runs every check; a stub that answers launched at once fails | `standin_launches_by_cid_only`, `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32a (the planted stub) |
+| A launch runs every check; a stub that answers a launch at once fails | `standin_launches_by_cid_only`, `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32a (the planted stub) |
 | (e) bytes changed after publish are refused by the name compare | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32b ((e) removed; the case then fails at (g) with another reason) |
 | (g) the record check refuses before launch | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32c ((g) removed) |
 | (f) a CID with no record is refused as unsigned | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32d (a missing record launches) |
 | (f) and (g) every record for the CID is checked, so the launch does not depend on the records' order | `standin_launch_does_not_depend_on_record_order` | F-CI36b (only the first record for the CID is checked) |
 | (a) `path` is never a fallback | `standin_launches_by_cid_only` | F-CI32e (a body with `path` is looked up by its folder) |
-| A refused launch leaves no instance | `standin_launches_by_cid_only`, `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32f (the instance is added before the checks) |
-| A launched answer has its listed instance | `standin_launches_a_signed_bundle_by_its_cid` | F-CI32g (answers launched, adds no instance) |
-| A valid signature alone yields no grant: a launch adds none, and the answer and the list hold no grant key | `standin_valid_signature_alone_yields_no_grant` | F-CI33a (a launch grants each `capabilities` entry of the manifest) |
+| A refused launch leaves the shared list with no instance | `standin_launches_by_cid_only`, `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32f (a fixture is launched before the checks) |
+| A launch answer has its listed shared instance | `standin_launches_a_signed_bundle_by_its_cid` | F-CI32g (answers a launch body, calls no shared launch) |
+| A valid signature alone yields no grant: no launch adds one, and the answer and the list hold no grant key | `standin_valid_signature_alone_yields_no_grant` | shared-owned: the shared `StandIn` creates no grant on launch; F-CI33a is retired with that disposition |
 | The grant view lists every held grant of every session, so it is not a constant | `standin_grant_view_lists_a_seeded_grant`, `standin_grant_view_lists_every_held_grant_of_every_session` | F-CI33b (the view answers no entries whatever is held), F-CI37a (only the first held grant), F-CI37b (only the first held grant's session), F-CI37c (one `request_id` for every grant) |
 | The grant view answers under the `all_sessions_live` marker | `standin_valid_signature_alone_yields_no_grant`, `standin_grant_view_lists_a_seeded_grant` | F-CI33c (the marker dropped) |
+| A stop through the seam updates the same shared instances and grants: the stopped entry carries its reason, its grant goes, and the sibling stays running with its own grant | `standin_shared_stop_updates_the_same_instances_and_grants` | — |
 
 Not shown:
 
 - The real Runtime ran nothing here, and it still launches by path
   (`routes.rs:65-66`, `LaunchRequest { path, ... }`). No sentence here says
   the Runtime launched, checked, refused or granted anything. The empty grant
-  view is the stand-in's, not the Runtime's.
+  view is the shared stand-in's, not the Runtime's.
 - No code is executed: a launched instance is a record. There is no HTTP
-  server, socket, process start or wasm execution.
-- No shell approval is modelled; a grant exists only through the test seam
-  `seed_grant`. There is no pending request, token, revocation, expiry or
-  capability check, and no grant route.
+  server, socket, process start or wasm execution. `Start::Ok` is supplied by
+  the test at registration and applied by `finish_start`; it proves no start,
+  no publisher verification and no execution.
+- No shell approval is modelled; a grant exists only through the shared test
+  seam `seed_grant`. A stop revokes that session's live grants. There is no
+  pending request, token, expiry or capability check, and no grant route.
 - `principal_id` and `launch_grant` (`routes.rs:65-71`) are left out.
 
 Claim scope: one Mac, the `agent-host` fixture, test keys only, records in
@@ -1607,18 +1841,32 @@ memory.
 
 A launched instance is handed its asks only as the `asks.json` bytes of the
 checked bundle that passed every check above. `checked_launch` takes the
-manifest's `name` (`CheckedBundle::manifest_name()`) and the content of the
-`asks.json` entry (`CheckedBundle::entries()`) from the same `CheckedBundle`,
-the one walk (P10), and the launch keeps that content in the instance, once: `Some(bytes)`, or `None` when
+content of the `asks.json` entry (`CheckedBundle::entries()`) from the one
+`CheckedBundle`, the one walk (P10), and `commit_launch` keeps that content
+under the shared launch's `session_id`, once: `Some(bytes)`, or `None` when
 the bundle has no `asks.json`. Nothing reads the folder again. Task 044 shows
 that for the launch itself: `set_after_walk`, a lab test seam, not a route,
 gives `checked_launch` a hook that it calls once on the stored folder, right
 after the one walk and before (e), so a test can change the bytes on disk
 between the walk and the launch. With no hook set, nothing is called.
 `asks_of(session_id)`, a lab test seam, not a route (#309 has no asks field on
-any route), answers that instance's bytes, and `None` for an unknown session.
-The launch answer, the `get_capsules` entry and the grant view keep exactly
-the keys above, with no asks key, and the launch body stays `{"cid"}`.
+any route), answers that snapshot, and `None` for an unknown session.
+The launch answer, the shared list entry and the grant view keep exactly the
+keys above, with no asks key, and the CID launch body stays `{"cid"}`.
+
+After those checks and before the shared launch, `commit_launch` parses those
+bytes once with `provisional_asks`, the lane's provisional lab stand-in schema,
+not the Runtime manifest: a JSON object whose only keys are `schema`
+(`elastos.agent-host.asks/v1`) and `asks`, an array whose elements are objects
+with only `kind` and `resource`, both non-empty strings. It keeps the
+`(kind, resource)` pairs in file order beside the bytes under the same
+`session_id`. `declared_asks_of(session_id)`, a lab test seam, not a route,
+answers those pairs without parsing again or reading the folder. A declaration
+that fails this parse refuses the launch with its own reason and status 400, so
+the shared instance and grant lists do not change. The library encoder still
+does not parse those bytes: for the lab CID, `asks.json` is one more payload
+file. A matching signature adds no grant; the declaration is part of the named
+artifact, not a permission.
 
 `standin_hands_an_instance_only_its_signed_asks_bytes` launches the signed
 `agent-host` bundle as in the journey above: its session answers the
@@ -1632,27 +1880,43 @@ the `agent-host` session answers its bytes, the `web-app` session answers
 `None`, and so does an unknown session.
 `standin_takes_the_asks_from_the_walk_not_the_folder` launches the same signed
 bundle with a hook that changes one byte of the stored `asks.json`: the launch
-answers `launched`, the stored `asks.json` no longer equals the committed
+answers `starting`, the stored `asks.json` no longer equals the committed
 fixture bytes (so the hook ran), and the session answers the committed fixture
 bytes, which the test reads itself. Before task 044, a launch that read
 `asks.json` from the folder after the walk passed both tests above, because
 neither changes the folder between the walk and the launch.
+`standin_reads_declared_asks_from_the_signed_manifest` launches the signed
+`agent-host` bundle through the same entry point: the answer is the shared
+`starting` status, `declared_asks_of` equals the pairs read from the committed
+`fixtures/agent-host/asks.json` with `serde_json::Value`, in file order, with
+`read` and `<principal>/` first, `asks_of` equals those fixture bytes, and the
+grant view's `capabilities` is empty. Changing the stored `read` kind to `reed`
+leaves the first session's declaration and refuses the same CID by (e). Signed
+sibling bundles from one fresh accepted test key refuse each malformed
+declaration with its own reason and no instance: a wrong schema, an extra root
+field, an extra ask field, an empty kind, an empty resource, JSON that does not
+parse, a missing or untyped `schema`, a missing or non-array `asks`, a
+non-object ask, and a missing or untyped `kind` or `resource`. A signed unknown
+kind launches and is declared as it is, a signed `web-app` bundle launches and
+declares nothing, and an unknown session declares nothing.
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
 | The instance keeps the signed bytes from launch; a change on disk after launch does not reach it | `standin_hands_an_instance_only_its_signed_asks_bytes` | F-CI35a (the planted accept-anything stub: `asks_of` reads `asks.json` from the stored folder at call time) |
-| Each session answers its own asks | `standin_gives_each_session_its_own_asks` | F-CI35b (`asks_of` ignores the session and answers the first instance's asks) |
+| Each session answers its own asks | `standin_gives_each_session_its_own_asks` | F-CI35b (`asks_of` ignores the session and answers the first snapshot's asks) |
 | A bundle with no `asks.json` is handed `None`, not empty bytes | `standin_gives_each_session_its_own_asks` | F-CI35c (`Some(Vec::new())` for a bundle with no `asks.json`) |
 | A change on disk between the walk and the launch does not reach the instance | `standin_takes_the_asks_from_the_walk_not_the_folder` | F-CI44a (the 041 review's stub: `checked_launch` reads `asks.json` from the stored folder at launch), F-CI44b (the hook is never called), F-CI44c (the hook runs before the walk, so (e) refuses) |
+| The declaration is parsed once from the checked bytes with the provisional schema, refusing each wrong shape | `standin_reads_declared_asks_from_the_signed_manifest` | F-CI78a (the schema id is never compared), F-CI78b (an empty kind counts as present), F-CI78c (the root unknown-field check is skipped) |
 
 Not shown:
 
-- No ask schema, provisional or not, and no parse or field read of
-  `asks.json`: to the stand-in it is bytes.
+- The stand-in parses the provisional declaration described above; the library
+  encoder still does not parse `asks.json` for the lab CID, where it is one
+  more payload file.
 - No mapping of an ask to an operation; that is `lab/bus-v2-proposal/`, and
   this lane writes no B2 encoding.
 - No grant from an ask: a launch still adds none (the grant view above).
-- The Runtime hands no asks to anything here; `asks_of` is the stand-in's.
+- The Runtime hands no asks to anything here; `asks_of` is the lane's.
 
 ## Why a lab CID and not the Runtime's CID
 
@@ -1686,21 +1950,20 @@ second identity scheme sits beside it (task 018, the carry of blocked task
 One Mac, these fixtures: macOS 26.5.2 on arm64 (APFS), rustc 1.91.0
 (f8297e351 2025-10-28). The swap tests make each change happen at a chosen
 moment through the observer; they do not prove the walk against every timing
-on every filesystem. Not checked here: Linux, the Runtime's IPFS CID, and
-Kubo itself (none is installed on this Mac). The outside check is the
+on every filesystem. Not checked here: Linux and the Runtime's IPFS CID. The outside check is the
 README's Python block, written from the byte rules: the committed test
 `readme_python_recomputes_every_lab_cid_pin` runs it with `python3 -I` (Python
 3.9.6 on this Mac) and requires it to give every pin and the Rust encoder's
-value for the same files. The tests pin the non-sharded subset of the
-profile only, with files of up to one tree level (one raw leaf, or since task
-048 a balanced file root over 2 to 174 raw leaves). The file root's bytes are
-the lab's reading of the profile, and Kubo has not checked them either.
+value for the same files. The tests pin the balanced file layout at one and
+two levels (one raw leaf; a balanced file root over 2 to 174 raw leaves since
+task 048; and since task 076 a two-level root, such as the 175-leaf file of a
+174-leaf node and a one-leaf node), a basic directory on both sides of the
+256KiB links estimate and the HAMT shard above it (task 077).
 
 The claim is "Kubo v0.40.1 profile, computed by the lab", and nothing more.
-No offline Kubo cross-check has been run (Kubo v0.40.1, the same profile
-flags, hash-only import, no network). Until one prints the same value as a
-committed pin, the lab CID is not called equal to the Runtime's CID or to
-Kubo's output. The Runtime's CID names a release archive, not the bundle's
+One offline Kubo v0.40.1 hash-only import, with the Runtime's profile flags,
+was run on this Mac and printed every committed pin, and the lab CID is not
+called equal to the Runtime's CID or to Kubo's output. The Runtime's CID names a release archive, not the bundle's
 files (see [Why a lab CID](#why-a-lab-cid-and-not-the-runtimes-cid)). The test
 `the_lab_cid_claim_stays_computed_by_the_lab` keeps this: these two sections
 and the module doc of `src/lib.rs` say the claim word for word, this section
@@ -1780,8 +2043,11 @@ tests/common/mod.rs      assembly, pins, the bounded call, observers, wc-001 dri
                          key-material scan, the python3 -I run of README's blocks,
                          the cargo metadata scan for lab crates that use this one,
                          the claim scan of the lane's docs and src/, the check
-                         of the falsifier list's inventory, the lab stand-in
-                         launcher (StandInRuntime)
+                         of the falsifier list's inventory, and the lab stand-in
+                         launcher's fixture store and CID entry point (the seams
+                         commit_launch, live_grants, grant_request_id and
+                         apply_stop; the shared StandIn owns instances, sessions,
+                         lifecycle and grants)
 tests/adoption.rs        the adoption note lists every lab CID consumer; Cargo's
                          reader decides; the scan writes nothing
 tests/bytes.rs           every byte is the name: manifest, payload, asks.json, files
@@ -1806,9 +2072,10 @@ tests/not_admission.rs   verify is not admit: a valid signature grants nothing
 tests/package_record.rs  the lab package record outside the bundle binds the CID
 tests/parse.rs           a printed lab CID is read with the one claim check
 tests/refusals.rs        each refusal and its reason
-tests/stand_in.rs        the lab stand-in launches by CID after the publisher check;
-                         a valid signature alone yields no grant; an instance
-                         is handed only its signed asks.json bytes
+tests/stand_in.rs        the shared StandIn, imported once; a launch by CID after
+                         the publisher check; a valid signature alone yields no
+                         grant; an instance keeps only its signed asks.json bytes;
+                         a stop updates the same instances and grants
 tests/variant_binding.rs the signed variant binding outside the bundles
 tests/walk.rs            changes made while a bundle is named; one walk
 falsifiers.json          planted bugs, each caught by named tests
@@ -1816,7 +2083,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 277 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 289 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1849,7 +2116,7 @@ F-CI24a to F-CI24e (see
 029's F-CI29a to F-CI29e (see [the inventory check](#the-inventory-check)),
 and task 030's F-CI30a and F-CI30b (see [claim scope](#claim-scope)), and
 task 031's F-CI31a and F-CI31b (see [the inventory check](#the-inventory-check)),
-and task 032's F-CI32a to F-CI32g, task 033's F-CI33a to F-CI33c and task
+and task 032's F-CI32a to F-CI32g, task 033's F-CI33b and F-CI33c and task
 035's F-CI35a to F-CI35c (all three: see
 [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)), and task 036's
 F-CI36a (see [the checked bundle](#checked-bundle-the-name-and-the-bytes-it-covers))
@@ -1862,7 +2129,17 @@ and task 047's F-CI47a to F-CI47c (see
 [naming a closure listing](#naming-a-closure-listing)), and task 048's
 F-CI48a to F-CI48e (see [the encoding](#the-encoding)), and task 049's
 F-CI49a to F-CI49c (see
-[the lab package record](#lab-package-record-outside-the-bundle)).
+[the lab package record](#lab-package-record-outside-the-bundle)), and task 076's
+F-CI76a and F-CI76b (see [the encoding](#the-encoding)), and
+task 071's F-CI71a and F-CI71b (see [the encoding](#the-encoding)) and
+F-CI71c to F-CI71e (see
+[the cross-implementation check](#the-cross-implementation-check)), and task
+072's F-CI72a and task 082's F-CI82a (see [the encoding](#the-encoding)).
+Task 077 moves F-CI18h to the links estimate, F-CI18m to the shared Tsize
+rule, F-CI19c to the missing-block empty result caught by the 23-bundle count,
+F-CI23b to the new module-doc sentence,
+and F-CI48c and F-CI48d to the shared Tsize rule's one place. Task 077's own
+plants stay with that task's lane; the moves above retarget older ids.
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -1919,26 +2196,31 @@ it does not change: F-CI30a removes the `'_'` line of `WORD_MARKS`, and
 F-CI30b shares F-CI28a's anchor, the `>`-run line of `comment_body`, and
 removes one `>` where F-CI28a removes none. Each anchor is found exactly once.
 Task 030 added two cases to the named test and changed no older edit's text.
-Task 032's entries all edit `tests/common/mod.rs`, in `StandInRuntime`:
+Task 032's entries all edit `tests/common/mod.rs`, in the lane's stand-in:
 F-CI32a and F-CI32f in `post_capsules`, F-CI32b to F-CI32d in
 `checked_launch`, F-CI32e in `launch_cid` and F-CI32g in `launch`. Each anchor
 is a line task 032 added, found exactly once (F-CI32a and F-CI32f share the
 check line, and F-CI32c and F-CI32d the record-check line). Task 032 changed no
-older edit's text.
-Task 033's entries also edit `tests/common/mod.rs`, in `StandInRuntime`:
-F-CI33a in `post_capsules` (its anchor, the `Ok(self.launch(name))` line, is
+older edit's text. Task 059 moved F-CI32a, F-CI32f and F-CI32g onto
+`commit_launch`; their ids, bugs and named tests stay.
+Task 033's entries also edit `tests/common/mod.rs`, in the lane's stand-in:
+F-CI33a in `post_capsules` (its anchor, the `Ok(self.launch(name))` line, was
 part of F-CI32f's anchor and found exactly once), and F-CI33b and F-CI33c in
 `get_capability_list_all_sessions_live`, each anchor a line task 033 added,
-found exactly once. Task 033 changed no older edit's text.
-Task 035's entries also edit `tests/common/mod.rs`, in `StandInRuntime`:
+found exactly once. Task 033 changed no older edit's text. Task 059 retired
+F-CI33a, because the shared `StandIn` now owns the rule it broke, and moved
+F-CI33b and F-CI33c onto `live_grants`; their ids, bugs and named tests stay.
+Task 035's entries also edit `tests/common/mod.rs`, in the lane's stand-in:
 F-CI35a and F-CI35b in `asks_of`, and F-CI35c in `signed_asks`, each anchor a
 line task 035 added, found exactly once. Task 035 made `checked_launch` answer
-the name and the asks together, so `post_capsules` now reads
+the name and the asks together, so `post_capsules` read
 `let (name, asks) = ...` and `Ok(self.launch(name, asks))`. The anchors and
 replacements of F-CI32a, F-CI32f and F-CI33a changed only by that: F-CI32a's
-stub is now `(String::from("stub"), None)`, and F-CI32f's and F-CI33a's
-`launch` calls take `asks` (F-CI32f's early call takes `None`). Their titles
-and tests are unchanged, and each anchor is still found exactly once.
+stub was `(String::from("stub"), None)`, and F-CI32f's and F-CI33a's
+`launch` calls took `asks` (F-CI32f's early call took `None`). Their titles
+and tests were unchanged, and each anchor was still found exactly once. Task
+059 changed F-CI35a's and F-CI35b's anchors with the asks map; both keep their
+bug and named test.
 Task 036's F-CI36a edits `src/lib.rs`, in `CheckedBundle::manifest_name`, and
 F-CI36b edits `tests/common/mod.rs`, in the stand-in's `check_records`; each
 anchor is a line task 036 added, found exactly once. Task 036 moved seventeen
@@ -1952,8 +2234,8 @@ F-CI9a, F-CI9b, F-CI9d, F-CI9e and F-CI9j build or define it with that field.
 The stand-in's record lookup moved into `check_records`, so F-CI32c now
 replaces the record check there and F-CI32d answers `Ok(())` where no record
 binds the CID. The stand-in imports neither `CapsuleManifest` nor
-`MANIFEST_FILE` now, so F-CI33a's planted code names both by their paths.
-Task 037's entries also edit `tests/common/mod.rs`, in `StandInRuntime`:
+`MANIFEST_FILE`.
+Task 037's entries also edit `tests/common/mod.rs`, in the lane's stand-in:
 F-CI37a and F-CI37b in `get_capability_list_all_sessions_live`, on F-CI33b's
 anchor line (found exactly once; entries may share an anchor), and F-CI37c in
 `seed_grant`, its anchor a line task 033 added, found exactly once. Task 037
@@ -1963,6 +2245,17 @@ F-CI44a on the answer line, F-CI44b on the hook call, and F-CI44c on the walk
 line and the hook call together. Each anchor is found exactly once (F-CI44b's
 line is part of F-CI44c's anchor). Task 044 changed no older edit's text, and
 F-CI35a to F-CI35c's anchor lines stay byte for byte.
+Task 059's entries move the stand-in plants onto the lane's four seams and
+record one retirement. F-CI32a, F-CI32f and F-CI32g edit `commit_launch`;
+F-CI33b, F-CI33c, F-CI37a and F-CI37b edit `live_grants`; F-CI37c edits
+`grant_request_id`; and F-CI35a and F-CI35b edit
+the asks map lookup in `asks_of`. F-CI33a is retired: the shared `StandIn`
+now owns the rule that a launch adds no grant, so this lane has no seam where
+that old bug could be planted; `standin_valid_signature_alone_yields_no_grant`
+still checks the rule, and this paragraph is the disposition, outside the
+count below. F-CI32b to F-CI32e, F-CI36b, F-CI35c and F-CI44a to F-CI44c keep
+their ids, bugs and named tests; F-CI44a's answer line text changed with the
+shared `path`, and F-CI35a's and F-CI35b's anchors changed with the asks map.
 Task 047's entries all edit `src/lib.rs`, in `encode_listed_files`: F-CI47a on
 the root line (`encode_directory(&root, "", &naming_hash)`), F-CI47b on the
 leaf's `tsize` line, and F-CI47c on the size refusal. Each anchor is a line
@@ -1992,9 +2285,14 @@ see them. The root line F-CI47a anchors on is now in `encode_tree`, where no
 `ListedFile` is in scope, so its planted code lists the tree's files (path,
 the leaf CID's digest, Tsize) itself; its title, bug and tests are the same.
 The one-leaf refusal F-CI18e removed is now only the listing call's (F-CI47c
-removes it), so F-CI18e, keeping its id, now removes the 174-leaf refusal and
-names `file_of_174_leaves_is_named_and_one_byte_more_is_refused`; its title
-says so. F-CI47c also names `listed_file_over_one_leaf_names_the_bytes_call`.
+removes it). Task 076 removed the 174-leaf refusal and made the file tree any
+depth, so F-CI18e, keeping its id, is retargeted: it changes the level loop to
+run once (`if` in place of `while`) and names
+`file_past_174_leaves_keeps_a_second_tree_level`; its title says so. F-CI48e's
+`MAX_FILE_LINKS` edit stays and names that test. Task 076 moved
+`file_root_block`'s blocksize write from a leaf's Tsize to its file size, so
+F-CI48b's anchor is that loop. F-CI47c also names
+`listed_file_over_one_leaf_names_the_bytes_call`.
 Task 048 split `directory_block`'s link loop into `put_links` with the same
 lines, so F-CI1b, F-CI1p and F-CI1q keep their text, and every other older
 edit's text is still found exactly once.
