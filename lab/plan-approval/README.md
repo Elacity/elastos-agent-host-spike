@@ -53,9 +53,10 @@ The design keeps this pending state for every settlement kind:
 
 > an explicit interrupt or cancel operation that reports its settlement
 
-A stop is that cancel. It only calls the stand-in's `delete_capsule` as the
-shell with the reason `stop the shown session`, takes no plan and no approved
-flag, and returns that result; Ok is JSON null. The shown steps come from
+A stop is that cancel. `stop_shown_session` is the only stop call and passes
+the caller it is given to the stand-in's `delete_capsule`, with the reason
+`stop the shown session`; it takes no plan and no approved flag, and returns
+that result, so Ok is JSON null. The shown steps come from
 `journeys::request`, and the allowed step comes from `approve`. The stopped
 session's pending step is denied by the runtime with the cause
 `stopped: stop the shown session`, and that session's allow-once grant is
@@ -237,6 +238,32 @@ check; the stand-in's deny route makes it. `preview`, `plan_sha256`, `approve`,
 slice. The crate does not copy the stand-in, and it names no planner. A
 passing run gives the Runtime no A15 credit.
 
+A client call through `stop_shown_session` is refused before the stop body is
+read, so the agent that showed the plan cannot stop its session.
+`stop_shown_session` is the only stop call and passes the caller it is given.
+The session that posted the shown plan and the other running session are each
+refused with status 403 and `This endpoint requires shell privileges`; an
+absent id and an empty id are that same refusal, because the shell check runs
+before the instance lookup and the body check. Each refusal stops nothing: both
+sessions stay `running` with no cause, the granted step stays `granted` under
+`shell` with `owner approved`, the pending step stays pending with its stored
+hash, and the live list keeps its one grant. The design names the cancellation
+this refusal withholds:
+
+> an explicit interrupt or cancel operation that reports its settlement
+
+The shell's stop of that session then stores `stopped` with the cause
+`stopped: stop the shown session`, denies that session's pending step under
+`runtime`, and revokes its live grant, so `execute` returns `grant is not
+live: Revoked`; the granted record stays `granted` and the other session stays
+`running`. A client stop after that settlement is still the shell refusal, and
+not `instance is not live: stopped`. The other session can then submit, be
+granted `once` and spend that one use. This crate stores no copy of the shell
+check; the stand-in's stop route makes it. `preview`, `plan_sha256`, `approve`,
+`execute`, `deny_shown_plan`, `age_shown_plan` and `running_agent` are
+unchanged by this slice. The crate does not copy the stand-in, and it names no
+planner. A passing run gives the Runtime no A15 credit.
+
 `preview`, `plan_sha256`, `execute`, `deny_shown_plan`, `age_shown_plan` and
 `stop_shown_session` are unchanged by this slice; `approve` gains the duration
 argument and remains the only grant call. This crate calls
@@ -264,12 +291,14 @@ open.
   `agent_cannot_approve_its_own_shown_plan`,
   `agent_cannot_deny_its_own_shown_plan`,
   `shell_cannot_spend_a_shown_grant`, `shell_cannot_submit_a_shown_plan`,
-  `only_a_live_session_submits_a_shown_plan` and the bound-plan journey.
+  `only_a_live_session_submits_a_shown_plan`,
+  `agent_cannot_stop_a_shown_session` and the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_cannot_stop_a_shown_session -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_cannot_deny_its_own_shown_plan -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib only_a_live_session_submits_a_shown_plan -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shell_cannot_submit_a_shown_plan -- --exact

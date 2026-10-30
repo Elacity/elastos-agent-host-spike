@@ -571,3 +571,85 @@ cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_can
 After both restores, `git diff -- lab/plan-approval/src/lib.rs` shows no plant. The restored proof
 command set (the fmt check and the fifteen test commands in the task) took 2.66 s real. This lane
 has no `falsifiers.json`; no id is added.
+
+## 021
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md), Session and
+interaction contract:
+
+> an explicit interrupt or cancel operation that reports its settlement
+
+This task proves the stop-caller half of that sentence: the agent that posted the shown plan, and
+the other running session, cannot stop it, while the shell's own stop settles exactly that session
+and leaves the other one able to submit, be granted and spend one use. `stop_shown_session` stays
+the one stop call and gains `caller: Caller<'_>` after `stand_in`; it passes that value to
+`delete_capsule`, contains no match on `Caller` and no copy of the shell check. Every existing call
+now passes `Caller::Shell` and keeps its other arguments and assertions.
+`agent_cannot_stop_a_shown_session` asserts a fresh client stop of `component-absent` and of an
+empty id is the 403 shell refusal, not an unknown instance or a missing stop body, with an empty
+capsule list and an empty live list; two `running_agent` calls return `component-1` and
+`component-2`, both running with no cause; `request` of `PLAN_A` and `PLAN_B` as the `component-1`
+client returns `request-1` and `request-2` with 64-character hashes; `approve` of `request-1` as the
+shell with `once` stores the one live entry; four client stops (the posting session on its own id,
+the other session on `component-1`, the posting session on `component-2` and on the absent id) are
+each the same 403 refusal, never an unknown-instance, not-live or stop-body error, and leave both
+sessions running, `request-1` granted under `shell` with `owner approved`, `request-2` pending and
+the live list unchanged; the shell's stop of `component-1` reports JSON null and stores `stopped`
+with `stopped: stop the shown session`, leaves `component-2` running, denies `request-2` under
+`runtime`, keeps `request-1` granted and leaves the live list empty; `execute` of `request-1` is
+`grant is not live: Revoked`; a client stop after that settlement is still the shell refusal and
+not `instance is not live: stopped`; `component-2` then submits `request-3`, the shell grants it
+`once`, and its own `execute` spends it. This test calls no `seed_request` and no
+`post_capability_*` method. This crate stores no copy of the shell check, does not copy the
+stand-in and names no planner. A passing run gives the Runtime no A15 credit.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib agent_cannot_stop_a_shown_session -- --exact
+```
+
+### F-stop-forces-shell
+
+- old bytes, 65:
+  ```
+      stand_in.delete_capsule(
+          caller,
+          session_id,
+  ```
+- new bytes, 72:
+  ```
+      stand_in.delete_capsule(
+          Caller::Shell,
+          session_id,
+  ```
+- planted crate compiled; `agent_cannot_stop_a_shown_session` failed at `src/lib.rs:3909:5`
+  (planted tree) on the first client stop: `assertion left == right failed: the agent that showed
+  the plan cannot stop its session: a client stop of an absent id is the shell refusal, not an
+  unknown instance`; left held `Err((400, "unknown instance: component-absent"))`, right expected
+  `Err((403, "This endpoint requires shell privileges"))`. The forced shell caller ran the stop
+  route for the client caller.
+- restored, the test passes.
+
+### F-absent-before-shell
+
+- old bytes, 65: the same `old bytes` block as F-stop-forces-shell.
+- new bytes, 183:
+  ```
+      if session_id == "component-absent" {
+          return Err((400, format!("unknown instance: {session_id}")));
+      }
+      stand_in.delete_capsule(
+          caller,
+          session_id,
+  ```
+- planted crate compiled; `agent_cannot_stop_a_shown_session` failed at `src/lib.rs:3912:5`
+  (planted tree) on the first client stop: the same assertion, left held
+  `Err((400, "unknown instance: component-absent"))`, right expected
+  `Err((403, "This endpoint requires shell privileges"))`. The absent-id branch ran before the
+  shell check.
+- restored, the test passes.
+
+After both restores, `git diff -- lab/plan-approval/src/lib.rs` shows no plant. The restored proof
+command set (the fmt check and the sixteen test commands in the task) took 2 s real. This lane has
+no `falsifiers.json`; no id is added.

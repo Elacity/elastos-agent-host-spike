@@ -135,23 +135,31 @@ pub fn age_shown_plan(stand_in: &mut StandIn, secs: u64) {
     stand_in.set_instant(secs);
 }
 
-/// The owner stops one shown session through `DELETE /api/capsules/:id`.
+/// One session stop through `DELETE /api/capsules/:id`.
 ///
-/// It calls `delete_capsule` as `Caller::Shell` with that id and the one body
-/// key `reason`, `stop the shown session`, and returns that result. The call
-/// is the cancel settlement the design names: "an explicit interrupt or
-/// cancel operation that reports its settlement". The stand-in stores
-/// `stopped` with the cause `stopped: stop the shown session`, denies that
-/// session's pending requests with `runtime` as settler, and revokes that
-/// session's `Live` grants. A granted record stays `granted`. Another
-/// session's pending request stays pending. Ok is JSON null. The helper takes
-/// no plan and no approved flag.
+/// `caller` is the authenticated caller, a method argument. This helper passes
+/// it to the stop route unchanged and does not judge it, so the route's own
+/// shell-only check runs before the stop body is read: a client caller,
+/// including the session that posted the shown plan and the other running
+/// session, is refused and stops nothing, even for an id that was never
+/// stored or an empty id.
+///
+/// A shell stop calls `delete_capsule` with that id and the one body key
+/// `reason`, `stop the shown session`, and returns that result. The call is
+/// the cancel settlement the design names: "an explicit interrupt or cancel
+/// operation that reports its settlement". The stand-in stores `stopped` with
+/// the cause `stopped: stop the shown session`, denies that session's pending
+/// requests with `runtime` as settler, and revokes that session's `Live`
+/// grants. A granted record stays `granted`. Another session's pending request
+/// stays pending. Ok is JSON null. The helper takes no plan and no approved
+/// flag.
 pub fn stop_shown_session(
     stand_in: &mut StandIn,
+    caller: Caller<'_>,
     session_id: &str,
 ) -> Result<Value, (u16, String)> {
     stand_in.delete_capsule(
-        Caller::Shell,
+        caller,
         session_id,
         &json!({ "reason": "stop the shown session" }),
     )
@@ -1412,7 +1420,7 @@ fn stop_settles_that_sessions_shown_steps() {
     // A stop of an absent session refuses with the stand-in's own reason and
     // settles nothing.
     assert_eq!(
-        stop_shown_session(&mut stand_in, "component-absent"),
+        stop_shown_session(&mut stand_in, Caller::Shell, "component-absent"),
         Err((400, "unknown instance: component-absent".to_owned())),
         "a stop of an absent session refuses with the id it named"
     );
@@ -1498,7 +1506,7 @@ fn stop_settles_that_sessions_shown_steps() {
 
     // The stop reports its settlement as JSON null.
     assert_eq!(
-        stop_shown_session(&mut stand_in, &first),
+        stop_shown_session(&mut stand_in, Caller::Shell, &first),
         Ok(Value::Null),
         "a stop reports its settlement"
     );
@@ -1638,7 +1646,7 @@ fn stop_settles_that_sessions_shown_steps() {
     );
 
     assert_eq!(
-        stop_shown_session(&mut stand_in, &first),
+        stop_shown_session(&mut stand_in, Caller::Shell, &first),
         Err((400, "instance is not live: stopped".to_owned())),
         "a stop of an already stopped session refuses with its status"
     );
@@ -2198,7 +2206,7 @@ fn shown_session_lasts_until_stop() {
 
     // The stop revokes that session's live grant; the record stays granted.
     assert_eq!(
-        stop_shown_session(&mut stand_in, "component-1"),
+        stop_shown_session(&mut stand_in, Caller::Shell, "component-1"),
         Ok(Value::Null),
         "the stop of that session reports its settlement"
     );
@@ -3613,7 +3621,7 @@ fn only_a_live_session_submits_a_shown_plan() {
 
     // The owner stops the first session. It stays listed as stopped.
     assert_eq!(
-        stop_shown_session(&mut stand_in, &first),
+        stop_shown_session(&mut stand_in, Caller::Shell, &first),
         Ok(json!(null)),
         "only a live session submits a shown plan: the owner's stop of component-1 is accepted"
     );
@@ -3847,5 +3855,376 @@ fn only_a_live_session_submits_a_shown_plan() {
         live(&stand_in),
         Vec::<Value>::new(),
         "only a live session submits a shown plan: the refused submit after the spend leaves the live list empty"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn agent_cannot_stop_a_shown_session() {
+    use agent_conformance::standin_runtime::Caller;
+    use fixtures::{PLAN_A, PLAN_B};
+    use journeys::{request, running_agent};
+    use serde_json::{json, Value};
+
+    fn live(stand_in: &StandIn) -> Vec<Value> {
+        stand_in
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
+            .expect("shell live list")["capabilities"]
+            .as_array()
+            .cloned()
+            .expect("the shell live list holds a capabilities array")
+    }
+
+    fn shown(stand_in: &StandIn, session: &str) -> Vec<Value> {
+        stand_in
+            .get_capability_requests(Caller::Shell, Some(session))
+            .expect("the shell reads the session's requests")["requests"]
+            .as_array()
+            .cloned()
+            .expect("the shell request view holds a requests array")
+    }
+
+    fn capsule(stand_in: &StandIn, id: &str) -> Value {
+        let listed = stand_in
+            .get_capsules(Caller::Shell)
+            .expect("shell capsules");
+        listed["capsules"]
+            .as_array()
+            .and_then(|capsules| capsules.iter().find(|entry| entry["id"] == id))
+            .cloned()
+            .unwrap_or_else(|| panic!("the capsule list names {id}: {listed}"))
+    }
+
+    fn shell_refusal() -> Result<Value, (u16, String)> {
+        Err((403, "This endpoint requires shell privileges".to_owned()))
+    }
+
+    let mut stand_in = StandIn::new();
+    let posting_session = Caller::Client {
+        session_id: "component-1",
+    };
+
+    // A client stop of an absent id and of an empty id is the shell refusal,
+    // because the stop route checks the caller before any lookup or body read.
+    let absent_stop = stop_shown_session(&mut stand_in, posting_session, "component-absent");
+    assert_eq!(
+        absent_stop,
+        shell_refusal(),
+        "the agent that showed the plan cannot stop its session: a client stop of an absent id is the shell refusal, not an unknown instance"
+    );
+    assert_ne!(
+        absent_stop,
+        Err((400, "unknown instance: component-absent".to_owned())),
+        "the agent that showed the plan cannot stop its session: a client stop of an absent id runs no instance lookup"
+    );
+    assert_ne!(
+        absent_stop,
+        Err((400, "instance is not live: stopped".to_owned())),
+        "the agent that showed the plan cannot stop its session: a client stop of an absent id finds no stopped instance"
+    );
+    assert_ne!(
+        absent_stop,
+        Err((400, "stop body needs reason".to_owned())),
+        "the agent that showed the plan cannot stop its session: a client stop of an absent id reads no stop body"
+    );
+    let empty_stop = stop_shown_session(&mut stand_in, posting_session, "");
+    assert_eq!(
+        empty_stop,
+        shell_refusal(),
+        "the agent that showed the plan cannot stop its session: a client stop of an empty id is the shell refusal, not a missing stop body"
+    );
+    assert_ne!(
+        empty_stop,
+        Err((400, "unknown instance: ".to_owned())),
+        "the agent that showed the plan cannot stop its session: a client stop of an empty id runs no instance lookup"
+    );
+    assert_ne!(
+        empty_stop,
+        Err((400, "instance is not live: stopped".to_owned())),
+        "the agent that showed the plan cannot stop its session: a client stop of an empty id finds no stopped instance"
+    );
+    assert_ne!(
+        empty_stop,
+        Err((400, "stop body needs reason".to_owned())),
+        "the agent that showed the plan cannot stop its session: a client stop of an empty id reads no stop body"
+    );
+    assert_eq!(
+        stand_in.get_capsules(Caller::Shell).expect("shell capsules"),
+        json!({ "capsules": [] }),
+        "the agent that showed the plan cannot stop its session: the refused client stops mint no instance"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "the agent that showed the plan cannot stop its session: the refused client stops mint no grant"
+    );
+
+    // Two sessions come from the one launch journey.
+    let first = running_agent(&mut stand_in);
+    let second = running_agent(&mut stand_in);
+    assert_eq!(first, "component-1", "the first launch is component-1");
+    assert_eq!(second, "component-2", "the second launch is component-2");
+    for id in [&first, &second] {
+        assert_eq!(
+            {
+                let running = capsule(&stand_in, id);
+                json!({ "status": running["status"], "cause": running["cause"] })
+            },
+            json!({ "status": "running", "cause": "" }),
+            "{id} starts running with no cause"
+        );
+    }
+
+    // The agent that posted the plan asks for it and the owner allows it once.
+    let shown_step = request(&mut stand_in, posting_session, PLAN_A)
+        .expect("the agent's request route stores the shown plan");
+    assert_eq!(
+        shown_step, "request-1",
+        "the shown plan is the stand-in's first request"
+    );
+    let plan_a = plan_sha256(PLAN_A);
+    let plan_b = plan_sha256(PLAN_B);
+    assert_eq!(plan_a.len(), 64, "the shown plan hash is SHA-256 hex");
+    assert_eq!(plan_b.len(), 64, "the next plan hash is SHA-256 hex");
+
+    assert_eq!(
+        approve(&mut stand_in, Caller::Shell, &shown_step, "once", &plan_a),
+        Ok(json!({ "success": true })),
+        "the owner allows the shown plan once with the hash it saw"
+    );
+
+    let one_live = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "duration": "once",
+        "granted_at": 0,
+    });
+    assert_eq!(
+        live(&stand_in),
+        vec![one_live.clone()],
+        "the owner's approval stores one live grant for the shown step"
+    );
+
+    // The session's next step stays pending while the client stops are refused.
+    let next_step = request(&mut stand_in, posting_session, PLAN_B)
+        .expect("the agent's request route stores the next pending step");
+    assert_eq!(
+        next_step, "request-2",
+        "the next shown step is the stand-in's second request"
+    );
+
+    let granted = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "granted",
+        "decision_reason": "owner approved",
+        "settled_by": "shell",
+        "plan": plan_a,
+    });
+    let pending = json!({
+        "request_id": "request-2",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "pending",
+        "decision_reason": "",
+        "settled_by": null,
+        "plan": plan_b,
+    });
+    assert_eq!(
+        shown(&stand_in, &first),
+        vec![granted.clone(), pending.clone()],
+        "the shown session holds its granted step and its pending step"
+    );
+
+    // Each client stop is refused before the stop body is read and changes
+    // nothing: both sessions run, the granted step stays granted, the pending
+    // step stays pending, and the live grant stays live.
+    let client_stops = [
+        (posting_session, "component-1"),
+        (
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "component-1",
+        ),
+        (posting_session, "component-2"),
+        (posting_session, "component-absent"),
+    ];
+    for (caller, id) in client_stops {
+        let refused = stop_shown_session(&mut stand_in, caller, id);
+        assert_eq!(
+            refused,
+            shell_refusal(),
+            "the agent that showed the plan cannot stop its session: the client stop of {id} is the shell refusal"
+        );
+        assert_ne!(
+            refused,
+            Err((400, "unknown instance: component-absent".to_owned())),
+            "the agent that showed the plan cannot stop its session: the client stop of {id} runs no instance lookup"
+        );
+        assert_ne!(
+            refused,
+            Err((400, "instance is not live: stopped".to_owned())),
+            "the agent that showed the plan cannot stop its session: the client stop of {id} finds no stopped instance"
+        );
+        assert_ne!(
+            refused,
+            Err((400, "stop body needs reason".to_owned())),
+            "the agent that showed the plan cannot stop its session: the client stop of {id} reads no stop body"
+        );
+        assert_ne!(
+            refused,
+            Err((400, "stop body misses reason".to_owned())),
+            "the agent that showed the plan cannot stop its session: the client stop of {id} reads no stop body"
+        );
+        for running in [&first, &second] {
+            assert_eq!(
+                {
+                    let held = capsule(&stand_in, running);
+                    json!({ "status": held["status"], "cause": held["cause"] })
+                },
+                json!({ "status": "running", "cause": "" }),
+                "the agent that showed the plan cannot stop its session: {running} stays running with no cause after the client stop of {id}"
+            );
+        }
+        assert_eq!(
+            shown(&stand_in, &first),
+            vec![granted.clone(), pending.clone()],
+            "the agent that showed the plan cannot stop its session: the refused client stop of {id} leaves the granted step granted and the pending step pending"
+        );
+        assert_eq!(
+            live(&stand_in),
+            vec![one_live.clone()],
+            "the agent that showed the plan cannot stop its session: the refused client stop of {id} leaves the live grant live"
+        );
+    }
+
+    // The shell's own stop settles that session.
+    assert_eq!(
+        stop_shown_session(&mut stand_in, Caller::Shell, &first),
+        Ok(Value::Null),
+        "the shell stop of the shown session reports its settlement"
+    );
+    assert_eq!(
+        {
+            let stopped = capsule(&stand_in, &first);
+            json!({ "status": stopped["status"], "cause": stopped["cause"] })
+        },
+        json!({ "status": "stopped", "cause": "stopped: stop the shown session" }),
+        "the shell stop stores the shown session as stopped with the stop cause"
+    );
+    assert_eq!(
+        {
+            let other = capsule(&stand_in, &second);
+            json!({ "status": other["status"], "cause": other["cause"] })
+        },
+        json!({ "status": "running", "cause": "" }),
+        "the shell stop leaves the other session running"
+    );
+
+    let settled = json!({
+        "request_id": "request-2",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "denied",
+        "decision_reason": "stopped: stop the shown session",
+        "settled_by": "runtime",
+        "plan": plan_b,
+    });
+    assert_eq!(
+        shown(&stand_in, &first),
+        vec![granted.clone(), settled.clone()],
+        "the shell stop denies that session's pending step with the runtime settler and keeps its plan hash"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "the shell stop revokes that session's live grant"
+    );
+
+    // The revoked grant is refused through the existing use path.
+    assert_eq!(
+        execute(&mut stand_in, posting_session, &shown_step, PLAN_A),
+        Err((400, "grant is not live: Revoked".to_owned())),
+        "the shell stop's revoked grant refuses its own plan's use"
+    );
+
+    // A client stop of the stopped session is still the shell refusal.
+    let after_stop = stop_shown_session(&mut stand_in, posting_session, &first);
+    assert_eq!(
+        after_stop,
+        shell_refusal(),
+        "the agent that showed the plan cannot stop its session: a client stop after the settlement is the shell refusal"
+    );
+    assert_ne!(
+        after_stop,
+        Err((400, "instance is not live: stopped".to_owned())),
+        "the agent that showed the plan cannot stop its session: a client stop after the settlement never reaches the instance state"
+    );
+    assert_eq!(
+        {
+            let stopped = capsule(&stand_in, &first);
+            json!({ "status": stopped["status"], "cause": stopped["cause"] })
+        },
+        json!({ "status": "stopped", "cause": "stopped: stop the shown session" }),
+        "the refused client stop leaves the shown session stopped with the stop cause"
+    );
+    assert_eq!(
+        shown(&stand_in, &first),
+        vec![granted.clone(), settled.clone()],
+        "the refused client stop leaves the denied step denied by the runtime"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "the refused client stop leaves the live list empty"
+    );
+
+    // The other session can still submit, be granted and spend one use.
+    let other_session = Caller::Client {
+        session_id: "component-2",
+    };
+    let other_step = request(&mut stand_in, other_session, PLAN_A)
+        .expect("the other session's request route stores its plan");
+    assert_eq!(
+        other_step, "request-3",
+        "the other session's plan is the stand-in's third request"
+    );
+    assert_eq!(
+        approve(&mut stand_in, Caller::Shell, &other_step, "once", &plan_a),
+        Ok(json!({ "success": true })),
+        "the owner allows the other session's plan once with the hash it saw"
+    );
+    let other_live = json!({
+        "request_id": "request-3",
+        "session_id": "component-2",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "duration": "once",
+        "granted_at": 0,
+    });
+    assert_eq!(
+        live(&stand_in),
+        vec![other_live.clone()],
+        "the other session's approval stores one live grant"
+    );
+    assert_eq!(
+        execute(&mut stand_in, other_session, &other_step, PLAN_A),
+        Ok(json!({ "valid": true })),
+        "the other session's allow-once grant authorises its own use"
+    );
+    assert_eq!(
+        live(&stand_in),
+        Vec::<Value>::new(),
+        "the other session's once grant is spent by its one use"
     );
 }
