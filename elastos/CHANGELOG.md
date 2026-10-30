@@ -35,6 +35,11 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Fixed
 
+- Home, `elastos identity show` and Chat say when the stored nickname cannot be
+  read, as "nickname unreadable" with the file path, including in Home State
+  Probe. Before, a storage error looked the same as a Home with no nickname. A
+  nickname change on such a Home is refused with the same reason and keeps the
+  stored file.
 - Marketplace keeps its title clear of Home window controls in narrow windows.
   Phone detail controls have full touch targets, and Tab skips closed detail
   content.
