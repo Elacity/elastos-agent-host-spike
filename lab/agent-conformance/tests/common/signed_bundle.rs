@@ -7,9 +7,10 @@
 //!
 //! The bundle also declares its asks in `asks.json`, inside the signed bytes
 //! (M1 check B2). The fixture replaces the committed file with one set: a
-//! `read` and a `write` of `localhost://Public/resident-instances/shared.txt`,
-//! the resource these journeys request, beside the committed file's asks. A
-//! test that needs another declared set writes `asks.json` before it signs.
+//! `read` and a `write` of `localhost://Public/resident-instances/shared.txt`
+//! and of `localhost://Public/plan-approval/a.txt`, the resources these
+//! journeys request, beside the committed file's asks. A test that needs
+//! another declared set writes `asks.json` before it signs.
 
 #![allow(dead_code)]
 
@@ -21,8 +22,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-/// The resource the shared journeys request through the route.
-const SHARED_ASKS_RESOURCE: &str = "localhost://Public/resident-instances/shared.txt";
+/// The resources the shared journeys request through the route. Both are
+/// declared in `asks.json` before the fixture is signed, so the B2 check
+/// (`declared_ask`) admits them.
+const SHARED_ASKS_RESOURCES: [&str; 2] = [
+    "localhost://Public/resident-instances/shared.txt",
+    "localhost://Public/plan-approval/a.txt",
+];
 
 /// The committed `agent-host` fixture: a real bundle the walk accepts.
 const AGENT_HOST_FILES: [(&str, &[u8]); 2] = [
@@ -36,8 +42,24 @@ const AGENT_HOST_FILES: [(&str, &[u8]); 2] = [
     ),
 ];
 
+/// The committed `content-sample` fixture: a real bundle the walk accepts
+/// whose manifest `role` is `content`.
+const CONTENT_FILES: [(&str, &[u8]); 2] = [
+    (
+        "capsule.json",
+        include_bytes!("../../../capsule-identity/fixtures/content-sample/capsule.json"),
+    ),
+    (
+        "sample.example",
+        include_bytes!("../../../capsule-identity/fixtures/content-sample/sample.example"),
+    ),
+];
+
 /// The manifest `name` of `AGENT_HOST_FILES`.
 pub const SHARED_NAME: &str = "agent-host";
+
+/// The manifest `name` of `CONTENT_FILES`.
+pub const CONTENT_NAME: &str = "example-content";
 
 /// One signed fixture bundle in a fresh tempdir, its accepted publisher and
 /// the key that signed it.
@@ -49,8 +71,18 @@ pub struct SignedBundle {
 
 impl SignedBundle {
     pub fn new() -> Self {
+        Self::from_files(&AGENT_HOST_FILES)
+    }
+
+    /// The `content` bundle: `CONTENT_FILES`, signed by its own key, its
+    /// accepted list holding that key alone.
+    pub fn content() -> Self {
+        Self::from_files(&CONTENT_FILES)
+    }
+
+    fn from_files(files: &[(&str, &[u8])]) -> Self {
         let bundle = TempDir::new().expect("make a bundle tempdir");
-        write_agent_host(bundle.path());
+        write_files(bundle.path(), files);
         let key = SigningKey::generate(&mut OsRng);
         let accepted = vec![elastos_identity::encode_signing_key_did(&key)];
         SignedBundle {
@@ -107,21 +139,28 @@ impl SignedBundle {
     }
 }
 
-fn write_agent_host(root: &Path) {
-    for (path, bytes) in AGENT_HOST_FILES {
+fn write_files(root: &Path, files: &[(&str, &[u8])]) {
+    for &(path, bytes) in files {
         let target: PathBuf = root.join(path);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).expect("make a bundle folder");
         }
         fs::write(&target, bytes).expect("write a bundle file");
     }
+    // The content fixture declares no asks: it never runs as code, so the one
+    // admission refuses it on its role and the asks file does not apply.
+    if !root.join("asks.json").is_file() {
+        return;
+    }
     let committed = fs::read(root.join("asks.json")).expect("read the committed asks");
     let mut asks: Value = serde_json::from_slice(&committed).expect("parse the committed asks");
     let listed = asks["asks"]
         .as_array_mut()
         .expect("the committed asks list asks");
-    for kind in ["read", "write"] {
-        listed.push(json!({ "kind": kind, "resource": SHARED_ASKS_RESOURCE }));
+    for resource in SHARED_ASKS_RESOURCES {
+        for kind in ["read", "write"] {
+            listed.push(json!({ "kind": kind, "resource": resource }));
+        }
     }
     fs::write(
         root.join("asks.json"),
