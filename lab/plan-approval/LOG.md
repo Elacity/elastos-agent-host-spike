@@ -12,6 +12,7 @@
 - 015: `owner_approves_only_the_shown_hash` proves the owner's grant mints only the hash the shown request stored; another plan, an empty hash and a 63-character hash are refused with `approved plan does not match the requested plan` and mint nothing while the request stays pending, and the exact hash then grants one use that `execute` spends; two hand-run plants caught and restored; 1 test, 2 plants.
 - 016: `approve` gains `caller: Caller<'_>` after `stand_in` and passes that value to `post_capability_grant`, staying the one grant call; `agent_cannot_approve_its_own_shown_plan` proves the session that posted a plan and the other running session are refused with `This endpoint requires shell privileges` before the body is read, for another hash, an empty hash, a 63-character hash and the duration word `standing` too, and that the shell's call with the exact hash then grants one use which `execute` spends; two hand-run plants caught and restored; 1 test, 2 plants.
 - 017: `execute` gains `caller: Caller<'_>` after `stand_in` and passes that value to `post_capability_validate`, staying the one use call; `shell_cannot_spend_a_shown_grant` proves a shell caller is refused for the bound plan, a different plan and empty plan bytes before the plan check, the grant stays live, the other session is refused as `wrong capsule` without a spend, the owning session's use then runs once, and a shell call after that spend is still the session refusal; two hand-run plants caught and restored; 1 test, 2 plants.
+- 023: `deny_one_shown_step` stores both shown steps through `journeys::request` after `running_agent`; the shell deny of `request-1` for `PLAN_A` settles it as denied and leaves `request-2` for `PLAN_B` pending, whose allow-once `approve` lets `execute` spend `PLAN_B`; the test calls no `seed_request` and the helpers stay unchanged; two hand-run plants caught and restored; 1 test, 2 plants.
 
 ## 001
 
@@ -367,3 +368,33 @@ cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shell_can
 - restored, the test passes.
 
 After both restores, `git diff -- lab/plan-approval/src/lib.rs` shows no plant. The restored proof command set (the fmt check and the thirteen test commands in the task) took 1.52 s real. This lane has no `falsifiers.json`; no id is added.
+
+## 023
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md), Request flow step 8:
+
+> The UI does not mint the grant itself.
+
+This task proves that sentence for a shell deny on the public request route: the deny settles one shown step and leaves the sibling grantable, while Home or Inbox mints nothing. The two steps now come from `journeys::running_agent` and `journeys::request`, so the crate no longer calls `seed_request` and compiles where that method is `pub(crate)`. The absent-id refusal runs before any launch. `deny_one_shown_step` asserts the fresh deny `unknown request: req-absent` with an empty capsule list and an empty live list, `running_agent` returns `component-1` as `running` with cause `""`, both submits return `request-1` and `request-2` with 64-character plan hashes, the deny stores `request-1` as `denied` under `shell` with `deny the shown plan` while `request-2` stays pending, `execute` of `request-1` refuses as `unknown grant`, `approve` of `request-1` refuses as `request is not pending: request-1`, `approve` of `request-2` with `plan_sha256(PLAN_B)` stores one `once` grant at `granted_at` 0 on resource `localhost://Public/plan-approval/a.txt`, and `execute` of `request-2` spends `PLAN_B` and leaves the live list empty. The test calls only `journeys::running_agent`, `journeys::request`, `deny_shown_plan`, `approve` and `execute`; it does not call `seed_request`, `post_capability_request`, `post_capability_grant`, `post_capability_deny`, `post_capability_validate`, `admit_resident`, `post_capsules`, `finish_start`, `set_instant` or `delete_capsule`. `deny_shown_plan`, `approve`, `execute`, `running_agent` and `request` are unchanged, no function is added, and `request` stays the only caller of `post_capability_request`, `approve` the only caller of `post_capability_grant`, and `deny_shown_plan` the only caller of `post_capability_deny`. The sibling settle is 009, the session check is 018, a standing mandate stays BACKLOG item 11, an audit record stays item 16, and full A15 stays item 4.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib deny_one_shown_step -- --exact
+```
+
+### F-fake-request-id
+
+- old bytes, 51: `        let hash = preview(stand_in, plan).sha256;\n`
+- new bytes, 90: `        return Ok("req-a".to_owned());\n        let hash = preview(stand_in, plan).sha256;\n`
+- planted crate compiled with an `unused variable: plan` warning; `deny_one_shown_step` failed at `src/lib.rs:663:5` (planted tree) on the first submit assertion: `assertion left == right failed: the session's first shown step is the stand-in's first request`; left held `"req-a"`, right expected `"request-1"`. The fake id never reached the request route.
+- restored, the test passes.
+
+### F-deny-sibling
+
+- old bytes, 176: `    stand_in.post_capability_deny(\n        Caller::Shell,\n        &json!({\n            "request_id": request_id,\n            "reason": "deny the shown plan",\n        }),\n    )\n`
+- new bytes, 355: `    stand_in.post_capability_deny(\n        Caller::Shell,\n        &json!({\n            "request_id": request_id,\n            "reason": "deny the shown plan",\n        }),\n    )?;\n    stand_in.post_capability_deny(\n        Caller::Shell,\n        &json!({\n            "request_id": "request-2",\n            "reason": "deny the shown plan",\n        }),\n    )\n`
+- planted crate compiled; `deny_one_shown_step` failed at `src/lib.rs:744:5` (planted tree) on the sibling assertion: `assertion left == right failed: a shell deny settles one shown step and the sibling stays pending`; left held `request-2` with `status` `denied`, `settled_by` `shell` and `decision_reason` `deny the shown plan`, right expected `status` `pending` with `settled_by` null and `decision_reason` empty. The deny settled a second step.
+- restored, the test passes.
+
+After both restores, `git diff -- lab/plan-approval/src/lib.rs` shows no plant. The restored proof command set (the fmt check and the thirteen test commands in the task) took 3.39 s real. This lane has no `falsifiers.json`; no id is added.

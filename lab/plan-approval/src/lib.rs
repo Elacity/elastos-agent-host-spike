@@ -559,7 +559,8 @@ fn a_grant_bound_to_one_plan_is_refused_for_another_plan() {
 #[test]
 fn deny_one_shown_step() {
     use agent_conformance::standin_runtime::{Caller, StandIn};
-    use fixtures::PLAN_A;
+    use fixtures::{PLAN_A, PLAN_B};
+    use journeys::{request, running_agent};
     use serde_json::{json, Value};
 
     fn live(stand_in: &StandIn) -> Vec<Value> {
@@ -571,10 +572,36 @@ fn deny_one_shown_step() {
             .expect("the shell live list holds a capabilities array")
     }
 
-    fn requests(stand_in: &StandIn, session: &str) -> Value {
+    fn shown(stand_in: &StandIn, session: &str) -> Vec<Value> {
         stand_in
             .get_capability_requests(Caller::Shell, Some(session))
-            .expect("the shell reads the session's requests")
+            .expect("the shell reads the session's requests")["requests"]
+            .as_array()
+            .cloned()
+            .expect("the shell request view holds a requests array")
+    }
+
+    fn record(stand_in: &StandIn, session: &str, request_id: &str) -> Value {
+        shown(stand_in, session)
+            .into_iter()
+            .find(|entry| entry["request_id"] == request_id)
+            .expect("the session's request view holds that id")
+    }
+
+    fn capsule(stand_in: &StandIn, id: &str) -> Value {
+        let listed = stand_in
+            .get_capsules(Caller::Shell)
+            .expect("shell capsules");
+        listed["capsules"]
+            .as_array()
+            .and_then(|capsules| capsules.iter().find(|entry| entry["id"] == id))
+            .cloned()
+            .unwrap_or_else(|| panic!("the capsule list names {id}: {listed}"))
+    }
+
+    fn running_without_cause(stand_in: &StandIn, id: &str) -> Value {
+        let listed = capsule(stand_in, id);
+        json!({ "id": listed["id"], "status": listed["status"], "cause": listed["cause"] })
     }
 
     let mut stand_in = StandIn::new();
@@ -585,32 +612,101 @@ fn deny_one_shown_step() {
         "a deny of an absent request settles nothing and names the id"
     );
     assert_eq!(
+        stand_in
+            .get_capsules(Caller::Shell)
+            .expect("shell capsules"),
+        json!({ "capsules": [] }),
+        "the refused deny leaves no instance in the capsule list"
+    );
+    assert_eq!(
         live(&stand_in),
         Vec::<Value>::new(),
         "the refused deny mints no grant"
     );
 
+    // The one launch journey makes the running session the shown steps come
+    // from. It mints no grant.
+    let session = running_agent(&mut stand_in);
     assert_eq!(
-        stand_in.seed_request(
-            "req-a",
-            "component-1",
-            "localhost://Public/plan-approval/a.txt",
-            "read",
-            "shown step a",
-        ),
-        Ok(()),
-        "the stand-in stores the first shown step"
+        session, "component-1",
+        "the fresh stand-in names the one running session component-1"
     );
     assert_eq!(
-        stand_in.seed_request(
-            "req-b",
-            "component-1",
-            "localhost://Public/plan-approval/b.txt",
-            "read",
-            "shown step b",
-        ),
-        Ok(()),
-        "the stand-in stores the second shown step"
+        running_without_cause(&stand_in, &session),
+        json!({ "id": "component-1", "status": "running", "cause": "" }),
+        "the shown plan comes from a running session with no cause"
+    );
+
+    let plan_a = plan_sha256(PLAN_A);
+    let plan_b = plan_sha256(PLAN_B);
+    assert_eq!(
+        plan_a.len(),
+        64,
+        "the shown hash of plan A is 64 lowercase hex characters"
+    );
+    assert_eq!(
+        plan_b.len(),
+        64,
+        "the shown hash of plan B is 64 lowercase hex characters"
+    );
+
+    // Both steps come from the one submit call, as the session.
+    let denied = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: &session,
+        },
+        PLAN_A,
+    )
+    .expect("the agent's submit stores the first pending request");
+    assert_eq!(
+        denied, "request-1",
+        "the session's first shown step is the stand-in's first request"
+    );
+    let sibling = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: &session,
+        },
+        PLAN_B,
+    )
+    .expect("the agent's submit stores the second pending request");
+    assert_eq!(
+        sibling, "request-2",
+        "the session's second shown step is the stand-in's second request"
+    );
+
+    let denied_pending = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "pending",
+        "decision_reason": "",
+        "settled_by": null,
+        "plan": plan_a,
+    });
+    assert_eq!(
+        record(&stand_in, &session, &denied),
+        denied_pending,
+        "the first shown step is pending with its plan hash and no decision"
+    );
+    let sibling_pending = json!({
+        "request_id": "request-2",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "reason": "",
+        "status": "pending",
+        "decision_reason": "",
+        "settled_by": null,
+        "plan": plan_b,
+    });
+    assert_eq!(
+        record(&stand_in, &session, &sibling),
+        sibling_pending,
+        "the second shown step is pending with its plan hash and no decision"
     );
     assert_eq!(
         live(&stand_in),
@@ -618,74 +714,35 @@ fn deny_one_shown_step() {
         "a pending shown step is not a live grant"
     );
 
-    let shown = requests(&stand_in, "component-1");
-    let shown = shown["requests"]
-        .as_array()
-        .expect("the shell request view holds a requests array");
-    assert_eq!(shown.len(), 2, "both shown steps are pending: {shown:?}");
     assert_eq!(
-        shown[0],
-        json!({
-            "request_id": "req-a",
-            "session_id": "component-1",
-            "resource": "localhost://Public/plan-approval/a.txt",
-            "action": "read",
-            "reason": "shown step a",
-            "status": "pending",
-            "decision_reason": "",
-            "settled_by": null,
-            "plan": null,
-        }),
-        "the first shown step is pending with no settler and no plan"
-    );
-    assert_eq!(
-        shown[1],
-        json!({
-            "request_id": "req-b",
-            "session_id": "component-1",
-            "resource": "localhost://Public/plan-approval/b.txt",
-            "action": "read",
-            "reason": "shown step b",
-            "status": "pending",
-            "decision_reason": "",
-            "settled_by": null,
-            "plan": null,
-        }),
-        "the second shown step is pending with no settler and no plan"
-    );
-
-    assert_eq!(
-        deny_shown_plan(&mut stand_in, "req-a"),
+        deny_shown_plan(&mut stand_in, &denied),
         Ok(json!({ "success": true })),
         "the shell denies the first shown step"
     );
-    let after_deny = requests(&stand_in, "component-1");
-    let after_deny = after_deny["requests"]
-        .as_array()
-        .expect("the shell request view holds a requests array");
     assert_eq!(
-        after_deny[0],
+        record(&stand_in, &session, &denied),
         json!({
-            "request_id": "req-a",
+            "request_id": "request-1",
             "session_id": "component-1",
             "resource": "localhost://Public/plan-approval/a.txt",
             "action": "read",
-            "reason": "shown step a",
+            "reason": "",
             "status": "denied",
             "decision_reason": "deny the shown plan",
             "settled_by": "shell",
-            "plan": null,
+            "plan": plan_a,
         }),
         "the denied step stores the shell reason and settler"
     );
     assert_eq!(
-        after_deny[1]["status"], "pending",
-        "a shell deny settles one step and the sibling stays pending"
+        record(&stand_in, &session, &sibling),
+        sibling_pending,
+        "a shell deny settles one shown step and the sibling stays pending"
     );
     assert_eq!(
-        after_deny[1]["settled_by"],
-        Value::Null,
-        "a shell deny settles one step and the sibling stays pending"
+        running_without_cause(&stand_in, &session),
+        json!({ "id": "component-1", "status": "running", "cause": "" }),
+        "a shell deny leaves the session running with no cause"
     );
     assert_eq!(
         live(&stand_in),
@@ -697,31 +754,24 @@ fn deny_one_shown_step() {
         execute(
             &mut stand_in,
             Caller::Client {
-                session_id: "component-1"
+                session_id: &session
             },
-            "req-a",
+            &denied,
             PLAN_A
         ),
         Err((400, "unknown grant".to_owned())),
         "running a denied step is refused with unknown grant, without an id"
     );
-    assert_eq!(
-        live(&stand_in),
-        Vec::<Value>::new(),
-        "the refused use of the denied step mints nothing"
-    );
 
     assert_eq!(
-        stand_in.post_capability_grant(
-            Caller::Shell,
-            &json!({
-                "request_id": "req-a",
-                "duration": "once",
-                "rationale": "owner approved",
-            }),
-        ),
-        Err((400, "request is not pending: req-a".to_owned())),
+        approve(&mut stand_in, Caller::Shell, &denied, "once", &plan_a),
+        Err((400, "request is not pending: request-1".to_owned())),
         "a denied step cannot be granted later"
+    );
+    assert_eq!(
+        record(&stand_in, &session, &sibling),
+        sibling_pending,
+        "the refused late grant leaves the sibling pending"
     );
     assert_eq!(
         live(&stand_in),
@@ -730,48 +780,27 @@ fn deny_one_shown_step() {
     );
 
     assert_eq!(
-        stand_in.post_capability_grant(
-            Caller::Shell,
-            &json!({
-                "request_id": "req-b",
-                "duration": "once",
-                "rationale": "owner approved",
-            }),
-        ),
+        approve(&mut stand_in, Caller::Shell, &sibling, "once", &plan_b),
         Ok(json!({ "success": true })),
         "the sibling stays pending, so its own allow-once grant succeeds"
     );
-    let sibling = live(&stand_in);
-    assert_eq!(
-        sibling.len(),
-        1,
-        "only the sibling grant is live: {sibling:?}"
-    );
-    assert_eq!(
-        sibling[0]["request_id"], "req-b",
-        "the live grant belongs to the sibling request"
-    );
-    assert_eq!(
-        sibling[0]["session_id"], "component-1",
-        "the live grant belongs to the one session"
-    );
-    assert_eq!(
-        sibling[0]["resource"], "localhost://Public/plan-approval/b.txt",
-        "the live grant names the sibling resource"
-    );
-    assert_eq!(sibling[0]["action"], "read", "the live grant names read");
-    assert_eq!(
-        sibling[0]["duration"], "once",
-        "the sibling grant authorises one use"
-    );
+    let allowed = vec![json!({
+        "request_id": "request-2",
+        "session_id": "component-1",
+        "resource": "localhost://Public/plan-approval/a.txt",
+        "action": "read",
+        "duration": "once",
+        "granted_at": 0,
+    })];
+    assert_eq!(live(&stand_in), allowed, "only the sibling grant is live");
 
     assert_eq!(
         execute(
             &mut stand_in,
             Caller::Client {
-                session_id: "component-1"
+                session_id: &session
             },
-            "req-a",
+            &denied,
             PLAN_A
         ),
         Err((400, "unknown grant".to_owned())),
@@ -779,7 +808,7 @@ fn deny_one_shown_step() {
     );
     assert_eq!(
         live(&stand_in),
-        sibling,
+        allowed,
         "the refused denied-step use leaves the sibling grant live"
     );
 
@@ -787,10 +816,10 @@ fn deny_one_shown_step() {
         execute(
             &mut stand_in,
             Caller::Client {
-                session_id: "component-1"
+                session_id: &session
             },
-            "req-b",
-            PLAN_A
+            &sibling,
+            PLAN_B
         ),
         Ok(json!({ "valid": true })),
         "the sibling grant authorises its own one use"

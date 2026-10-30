@@ -26,6 +26,17 @@ capsule list stay as they were.
 later. `execute` of a step with no live grant is refused with the reason
 `unknown grant`, and that reason omits the id. A deny settles one request, so
 the sibling request stays pending for its own allow-once grant.
+`deny_one_shown_step` stores both steps through `journeys::request` after
+`running_agent` names the running session. The denied step is `request-1` for
+`PLAN_A`, and the sibling is `request-2` for `PLAN_B`; both use resource
+`localhost://Public/plan-approval/a.txt`. A shell deny of `request-1` refuses
+`execute` with `unknown grant` and leaves a later `approve` of it refused as
+`request is not pending: request-1`, while the sibling allow-once is `approve`
+with that plan hash, and `execute` spends `PLAN_B` so the live list ends empty.
+The session stays `running` with no cause. This test does not call
+`seed_request`. `deny_shown_plan`, `approve`, `execute`, `running_agent` and
+`request` are unchanged by this slice. The crate does not copy the stand-in,
+and it names no planner. A passing run gives the Runtime no A15 credit.
 
 `age_shown_plan` only calls the stand-in's `set_instant`. The shown steps come
 from `journeys::request`, and the allowed step comes from `approve`. A pending
