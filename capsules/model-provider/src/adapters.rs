@@ -5112,6 +5112,138 @@ mod tests {
         assert!(format!("{delivered}{result:?}").contains(" upon"));
     }
 
+    /// A hosted effect sends only headers the Runtime egress allowlist admits:
+    /// elastos/crates/elastos-server/src/api/model_provider_egress.rs:584-600
+    /// (read_request) refuses any other name or a repeated name, and
+    /// authorises by its own (run_id, request_id) binding. So no grant-id
+    /// header goes out, and host stays `runtime.invalid`.
+    #[cfg(unix)]
+    #[test]
+    fn hosted_effect_sends_only_admitted_headers() {
+        use std::os::unix::net::UnixListener;
+        // Copy of the Runtime egress header allowlist at
+        // elastos/crates/elastos-server/src/api/model_provider_egress.rs:584-600.
+        const ADMITTED_HEADERS: [&str; 11] = [
+            "host",
+            "accept",
+            "accept-encoding",
+            "user-agent",
+            "content-type",
+            "content-length",
+            "x-elastos-offer-id",
+            "x-elastos-effect",
+            "x-elastos-run-id",
+            "x-elastos-request-id",
+            "x-elastos-job-id",
+        ];
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (captured_tx, captured_rx) = std_mpsc::channel();
+        let outcome = runtime.block_on(async move {
+            let path = std::env::temp_dir().join(format!(
+                "elastos-hosted-grant-{}-{}",
+                std::process::id(),
+                now_ms()
+            ));
+            let listener = UnixListener::bind(&path).unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = stream.read(&mut chunk).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                }
+                captured_tx.send(String::from_utf8_lossy(&request).into_owned()).unwrap();
+                let body = sse_body(&[], true);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:X}\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+                stream.write_all(b"\r\n0\r\n\r\n").unwrap();
+            });
+            let (update_tx, _update_rx) = mpsc::channel(1);
+            let (_cancel_tx, cancel_rx) = watch::channel(false);
+            let task = LocalTextWorkerTask {
+                request_id: "request:1".into(),
+                hosted_socket: Some(path.to_string_lossy().into_owned()),
+                run_id: "run-hosted-grant".into(),
+                generation: 1,
+                backend: LocalTextBackend::OpenAiCompatible {
+                    api_url: "https://example.invalid/chat".into(),
+                    api_key: None,
+                    model: "fixture-model".into(),
+                },
+                offer: openai_offer("https://example.invalid/chat"),
+                deadline_ms: now_ms().saturating_add(30_000),
+                messages: vec![json!({"role": "user", "content": "hello"})],
+                cancel_rx,
+                updates: update_tx,
+            };
+            let worker = tokio::spawn(async move {
+                let mut task = task;
+                run_local_text_worker_inner(&mut task).await
+            });
+            let runtime = Handle::current();
+            let captured = tokio::task::spawn_blocking(move || {
+                runtime.block_on(async {
+                    captured_rx
+                        .recv_timeout(Duration::from_secs(10))
+                        .unwrap_or_default()
+                })
+            })
+            .await
+            .unwrap();
+            let _ = worker.await.unwrap();
+            server.join().unwrap();
+            std::fs::remove_file(&path).unwrap();
+            captured
+        });
+        // Parse the live request head, keeping every header line with its
+        // original spelling so a repeated name is visible.
+        let head = outcome
+            .split_once("\r\n\r\n")
+            .map(|(head, _)| head)
+            .unwrap_or(outcome.as_str());
+        let mut lines = head.split("\r\n");
+        let request_line = lines.next().unwrap_or_default().to_ascii_lowercase();
+        assert_eq!(request_line, "post /v1/hosted-effect http/1.1", "{outcome}");
+        let mut names: Vec<String> = Vec::new();
+        let mut host = None;
+        let mut request_id = None;
+        for line in lines {
+            let (name, value) = line.split_once(':').expect("header line");
+            let name = name.to_ascii_lowercase();
+            let value = value.trim();
+            assert!(
+                ADMITTED_HEADERS.contains(&name.as_str()),
+                "header {name:?} is outside the Runtime egress allowlist: {outcome}"
+            );
+            match name.as_str() {
+                "host" => host = Some(value.to_string()),
+                "x-elastos-request-id" => request_id = Some(value.to_string()),
+                _ => {}
+            }
+            names.push(name);
+        }
+        let mut unique = names.clone();
+        unique.sort();
+        unique.dedup();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(unique, sorted, "a header name repeats: {outcome}");
+        assert_eq!(host.as_deref(), Some("runtime.invalid"), "{outcome}");
+        assert_eq!(request_id.as_deref(), Some("request:1"), "{outcome}");
+    }
+
     #[test]
     fn hosted_openai_compatible_429_is_rate_limited() {
         let fault = hosted_openai_status_fault("429 Too Many Requests");

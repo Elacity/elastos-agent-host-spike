@@ -196,6 +196,9 @@ fn run_test(crate_dir: &Path, plant_id: &str, test: &str) -> String {
         .arg("--exact")
         .arg(test)
         .env("GRANT_BINDING_PLANT_CHILD", "1")
+        // A plant leaves the guarded value unused on purpose. The child must
+        // judge the named test, not fail the build under the gate's -D warnings.
+        .env_remove("RUSTFLAGS")
         .env("CARGO_TARGET_DIR", &target_dir)
         .output()
         .unwrap_or_else(|error| panic!("plant {plant_id}: cannot run cargo for {test}: {error}"));

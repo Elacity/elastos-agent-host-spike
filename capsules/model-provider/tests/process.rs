@@ -1063,7 +1063,9 @@ fn shell_view_lists_live_grant(grants: &Mutex<StandIn>, request_id: &str) -> boo
 /// stand-in bound with `bind_granting` answers only an effect whose request id
 /// holds a live entry in the shared stand-in's shell view for the session that
 /// stand-in serves, and records the named reason for every refusal in this
-/// stand-in.
+/// stand-in. That check is the shared stand-in's `authorise`, which spends a
+/// `once` grant it admits (`lab/agent-conformance/standin-runtime/mod.rs:581-583`),
+/// so the shell live view that was listed before the effect omits it after.
 struct HostedEffectStandIn {
     path: PathBuf,
     listener: Arc<UnixListener>,
@@ -1408,15 +1410,17 @@ fn serve_hosted_effect(
                 return;
             }
             // The same check's session tie is the shared stand-in's one
-            // admission rule, `StandIn::authorise`
-            // (`lab/agent-conformance/standin-runtime/mod.rs:146-161`): the
-            // grant must be for the session this stand-in serves, or it refuses
-            // with its own reason, which names both sessions (`:504-510`).
-            if let Err((_, reason)) = grants.lock().unwrap().authorise(
+            // admission rule, behind its use route
+            // `StandIn::post_capability_validate`
+            // (`lab/agent-conformance/standin-runtime/mod.rs:554-563`): the
+            // grant must be for the session this stand-in serves, or the route
+            // refuses with its own reason, which names both sessions.
+            let use_body = json!({ "request_id": request_id });
+            if let Err((_, reason)) = grants.lock().unwrap().post_capability_validate(
                 Caller::Client {
                     session_id: &served_session,
                 },
-                &request_id,
+                &use_body,
             ) {
                 refusals.lock().unwrap().push(reason);
                 let _ = (&stream).write_all(RUNTIME_HOSTED_REFUSAL);
@@ -3482,9 +3486,10 @@ fn a_hosted_tool_call_or_reasoning_never_reaches_the_caller() {
 /// `access_refused`. One `Live` grant for run B's request id is then listed
 /// with every entry field, and run B completes with `ready` and reported
 /// usage. The loopback backend counts exactly one request, so only B reached
-/// the model (`MP36`). The shared stand-in has no seam that spends a grant
-/// (`lab/agent-conformance/standin-runtime/README.md`), so this lane models no
-/// spending and the entry stays listed.
+/// the model (`MP36`). The granting stand-in admits run B through the shared
+/// stand-in's `authorise`, which spends a `once` grant on that one use
+/// (`lab/agent-conformance/standin-runtime/mod.rs:581-583`), so the shell
+/// live view lists the entry before run B and no longer lists it after.
 ///
 /// This is stand-in lab evidence for M1's A4 only: the stand-ins are not the
 /// Runtime, the loopback backend is not a hosted connection, and it books no
@@ -3622,15 +3627,15 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
         }
     }
 
-    // The shared stand-in has no seam that spends a grant and this lane adds
-    // none, so the entry stays listed after run B.
+    // The granting stand-in admitted run B through the shared stand-in's
+    // `authorise`, which stores `Exhausted` for a `once` grant on that one use
+    // (`lab/agent-conformance/standin-runtime/mod.rs:581-583`). The one life
+    // filter then drops it, so the view lists nothing, and the listed entry
+    // asserted before run B was what admitted it.
     assert_eq!(
         shell_live_grant_view(&grants),
-        json!({
-            "scope": SHELL_LIVE_GRANT_SCOPE,
-            "capabilities": [expected_entry],
-        }),
-        "the shared stand-in shell view must keep the live grant because this lane models no spending"
+        json!({"scope": SHELL_LIVE_GRANT_SCOPE, "capabilities": []}),
+        "the shared stand-in shell view must omit the once grant that the granted run spent"
     );
 
     // Only run B reached the model: the backend counted exactly one request.
@@ -3861,6 +3866,17 @@ fn granted_model_turn_binding(session_id: &str, prompt: &str) -> RuntimeCreateBi
     serde_json::from_value(request["runtime_binding"].clone()).unwrap()
 }
 
+/// The shell's one `Live` grant for a model turn, stored through the shared
+/// stand-in's `seed_grant` seam
+/// (`lab/agent-conformance/standin-runtime/mod.rs:270`). No journey in this
+/// file depends on a plan binding (M1 check A15b): `seed_grant` stores a grant
+/// with no plan (`plan: None`, `lab/agent-conformance/standin-runtime/mod.rs:291`),
+/// the provider's hosted effect names no `plan_sha256`, and `plan_accepts`
+/// accepts every use of an unbound grant
+/// (`lab/agent-conformance/standin-runtime/mod.rs:1130-1135`). A `StandIn::new()`
+/// here therefore reaches "ready" over an unbound grant, and the plan-bound
+/// path is proven in `lab/agent-conformance/tests/standin_plan.rs` and in
+/// `lab/plan-approval/src/lib.rs`.
 fn seed_live_model_grant(grants: &Arc<Mutex<StandIn>>, request_id: &str, session_id: &str) {
     grants.lock().unwrap().seed_grant(
         request_id,

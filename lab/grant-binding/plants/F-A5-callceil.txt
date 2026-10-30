@@ -1,0 +1,17 @@
+id: F-A5-callceil
+file: src/lib.rs
+test: model_forged_ceiling_does_not_move_the_use_call
+--- old
+        let record = self.resolve(*call, request.handle)?;
+--- new
+        let mut instance = call.instance;
+        if request.forged_ceiling > 0 {
+            for id in self.registry.keys() {
+                if *id != call.instance {
+                    instance = *id;
+                    break;
+                }
+            }
+        }
+        let record = self.resolve(Call { instance }, request.handle)?;
+--- end

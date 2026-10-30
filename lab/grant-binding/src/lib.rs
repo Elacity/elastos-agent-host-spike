@@ -92,6 +92,7 @@ pub enum Refuse {
     SymlinkShaped,
     OutsideRoot,
     PublicRead,
+    HomeMint,
 }
 
 impl std::fmt::Display for Refuse {
@@ -107,6 +108,7 @@ impl std::fmt::Display for Refuse {
             Refuse::SymlinkShaped => "use path has a symlink-shaped segment",
             Refuse::OutsideRoot => "use path leaves the owned root",
             Refuse::PublicRead => "public storage read does not bind",
+            Refuse::HomeMint => "home does not mint an app capability",
         })
     }
 }
@@ -171,6 +173,9 @@ impl Verifier {
             .registry
             .get(&instance)
             .ok_or(Refuse::UnknownInstance)?;
+        if record.identity == "home" {
+            return Err(Refuse::HomeMint);
+        }
         let owned_root = resource_name(&record.identity, resource, None)?;
         self.next_handle += 1;
         let handle = Handle(self.next_handle);
@@ -369,6 +374,23 @@ fn walk_manifests(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
             found.push(path);
         }
     }
+}
+
+#[cfg(test)]
+fn manifests_that_link_this_crate(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let own = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let mut manifests = Vec::new();
+    walk_manifests(root, &mut manifests);
+    let mut linked = Vec::new();
+    for path in manifests {
+        if path == own {
+            continue;
+        }
+        if link::manifest_depends_on_grant_binding(&path) {
+            linked.push(path);
+        }
+    }
+    linked
 }
 
 #[test]
@@ -773,12 +795,40 @@ fn model_public_prefix_is_not_a_public_read() {
 }
 
 #[test]
+fn model_case_different_public_segment_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let refusal = verifier
+        .bind_grant(instance, "public/notes", rights())
+        .expect_err("case-different Public segment");
+    assert_eq!(refusal, Refuse::OutsidePrincipal);
+    assert_eq!(
+        refusal.to_string(),
+        "owned root is outside the agent principal"
+    );
+}
+
+#[test]
 fn model_extended_usersai_segment_is_refused() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
     let refusal = verifier
         .bind_grant(instance, "UsersAIextra/agent-1/notes", rights())
         .expect_err("extended UsersAI segment");
+    assert_eq!(refusal, Refuse::OutsidePrincipal);
+    assert_eq!(
+        refusal.to_string(),
+        "owned root is outside the agent principal"
+    );
+}
+
+#[test]
+fn model_case_different_usersai_segment_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let refusal = verifier
+        .bind_grant(instance, "usersai/agent-1/notes", rights())
+        .expect_err("case-different UsersAI segment");
     assert_eq!(refusal, Refuse::OutsidePrincipal);
     assert_eq!(
         refusal.to_string(),
@@ -972,6 +1022,323 @@ fn model_forged_child_journal_does_not_widen_the_use_path() {
 }
 
 #[test]
+fn model_forged_append_does_not_move_the_use_call() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    verifier
+        .use_path(&call, &request, "UsersAI/agent-1/notes/page.md")
+        .expect("forged append does not move the use call");
+    let decision = verifier.use_grant(call, &guest(handle)).expect("grant");
+    assert_eq!(decision.instance, instance);
+}
+
+#[test]
+fn model_forged_overwrite_does_not_move_the_use_call() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_overwrite: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_overwrite);
+    verifier
+        .use_path(&call, &request, "UsersAI/agent-1/notes/page.md")
+        .expect("forged overwrite does not move the use call");
+    let decision = verifier.use_grant(call, &guest(handle)).expect("grant");
+    assert_eq!(decision.instance, instance);
+}
+
+#[test]
+fn model_forged_child_journal_does_not_move_the_use_call() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    verifier
+        .use_path(&call, &request, "UsersAI/agent-1/notes/page.md")
+        .expect("forged child journal does not move the use call");
+    let decision = verifier.use_grant(call, &guest(handle)).expect("grant");
+    assert_eq!(decision.instance, instance);
+}
+
+#[test]
+fn model_forged_identity_does_not_move_the_use_call() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    verifier
+        .use_path(&call, &request, "UsersAI/agent-1/notes/page.md")
+        .expect("forged identity does not move the use call");
+    let decision = verifier.use_grant(call, &guest(handle)).expect("grant");
+    assert_eq!(decision.instance, instance);
+    assert_eq!(decision.identity, "agent-1");
+}
+
+#[test]
+fn model_forged_session_does_not_move_the_use_call() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_session: Some("session-b".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_session.as_deref(), Some("session-b"));
+    verifier
+        .use_path(&call, &request, "UsersAI/agent-1/notes/page.md")
+        .expect("forged session does not move the use call");
+    let decision = verifier.use_grant(call, &guest(handle)).expect("grant");
+    assert_eq!(decision.instance, instance);
+    assert_eq!(decision.session, "session-a");
+}
+
+#[test]
+fn model_forged_ceiling_does_not_move_the_use_call() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_ceiling: 1,
+        ..guest(handle)
+    };
+    assert!(request.forged_ceiling > 0);
+    verifier
+        .use_path(&call, &request, "UsersAI/agent-1/notes/page.md")
+        .expect("forged ceiling does not move the use call");
+    let decision = verifier.use_grant(call, &guest(handle)).expect("grant");
+    assert_eq!(decision.instance, instance);
+}
+
+#[test]
+fn model_reported_usage_does_not_move_the_use_call() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..guest(handle)
+    };
+    assert!(request.reported_usage > 0);
+    verifier
+        .use_path(&call, &request, "UsersAI/agent-1/notes/page.md")
+        .expect("reported usage does not move the use call");
+    let decision = verifier.use_grant(call, &guest(handle)).expect("grant");
+    assert_eq!(decision.instance, instance);
+}
+
+#[test]
+fn model_forged_append_does_not_move_the_use_grant() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    let decision = verifier
+        .use_grant(call, &request)
+        .expect("forged append does not move the use grant");
+    assert_eq!(decision.instance, instance);
+    assert_eq!(decision.identity, "agent-1");
+    assert_eq!(decision.session, "session-a");
+}
+
+#[test]
+fn model_forged_child_journal_does_not_move_the_use_grant() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    let decision = verifier
+        .use_grant(call, &request)
+        .expect("forged child journal does not move the use grant");
+    assert_eq!(decision.instance, instance);
+    assert_eq!(decision.identity, "agent-1");
+    assert_eq!(decision.session, "session-a");
+}
+
+#[test]
+fn model_forged_overwrite_does_not_move_the_use_grant() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_overwrite: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_overwrite);
+    let decision = verifier
+        .use_grant(call, &request)
+        .expect("forged overwrite does not move the use grant");
+    assert_eq!(decision.instance, instance);
+    assert_eq!(decision.identity, "agent-1");
+    assert_eq!(decision.session, "session-a");
+}
+
+#[test]
+fn model_forged_identity_does_not_move_the_use_grant() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    let decision = verifier
+        .use_grant(call, &request)
+        .expect("forged identity does not move the use grant");
+    assert_eq!(decision.instance, instance);
+    assert_eq!(decision.identity, "agent-1");
+    assert_eq!(decision.session, "session-a");
+}
+
+#[test]
+fn model_forged_session_does_not_move_the_use_grant() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_session: Some("session-b".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_session.as_deref(), Some("session-b"));
+    let decision = verifier
+        .use_grant(call, &request)
+        .expect("forged session does not move the use grant");
+    assert_eq!(decision.instance, instance);
+    assert_eq!(decision.identity, "agent-1");
+    assert_eq!(decision.session, "session-a");
+}
+
+#[test]
+fn model_forged_ceiling_does_not_move_the_use_grant() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_ceiling: 1,
+        ..guest(handle)
+    };
+    assert!(request.forged_ceiling > 0);
+    let decision = verifier
+        .use_grant(call, &request)
+        .expect("forged ceiling does not move the use grant");
+    assert_eq!(decision.instance, instance);
+    assert_eq!(decision.identity, "agent-1");
+    assert_eq!(decision.session, "session-a");
+}
+
+#[test]
+fn model_reported_usage_does_not_move_the_use_grant() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..guest(handle)
+    };
+    assert!(request.reported_usage > 0);
+    let decision = verifier
+        .use_grant(call, &request)
+        .expect("reported usage does not move the use grant");
+    assert_eq!(decision.instance, instance);
+    assert_eq!(decision.identity, "agent-1");
+    assert_eq!(decision.session, "session-a");
+}
+
+#[test]
 fn model_use_path_dotdot_is_refused() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
@@ -990,6 +1357,54 @@ fn model_use_path_dotdot_is_refused() {
 }
 
 #[test]
+fn model_dotdot_prefix_segment_is_a_plain_name() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier
+        .use_path(
+            &verifier.open_call(instance),
+            &guest(handle),
+            "UsersAI/agent-1/notes/..hidden",
+        )
+        .expect("a segment that only starts with dotdot stays inside the root");
+}
+
+#[test]
+fn model_dot_prefix_segment_is_a_plain_name() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier
+        .use_path(
+            &verifier.open_call(instance),
+            &guest(handle),
+            "UsersAI/agent-1/notes/.hidden",
+        )
+        .expect("a segment that only starts with one dot stays inside the root");
+}
+
+#[test]
+fn model_underscore_segment_is_a_plain_name() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier
+        .use_path(
+            &verifier.open_call(instance),
+            &guest(handle),
+            "UsersAI/agent-1/notes/my_page",
+        )
+        .expect("a segment with an underscore stays inside the root");
+}
+
+#[test]
 fn model_use_path_outside_the_owned_root_is_refused() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
@@ -1005,6 +1420,24 @@ fn model_use_path_outside_the_owned_root_is_refused() {
         assert_eq!(refusal, Refuse::OutsideRoot);
         assert_eq!(refusal.to_string(), "use path leaves the owned root");
     }
+}
+
+#[test]
+fn model_case_different_use_path_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let refusal = verifier
+        .use_path(
+            &verifier.open_call(instance),
+            &guest(handle),
+            "UsersAI/agent-1/Notes/page.md",
+        )
+        .expect_err("case-different use path");
+    assert_eq!(refusal, Refuse::OutsideRoot);
+    assert_eq!(refusal.to_string(), "use path leaves the owned root");
 }
 
 #[test]
@@ -1092,6 +1525,90 @@ fn model_grant_keeps_bound_rights() {
 }
 
 #[test]
+fn model_forged_append_does_not_widen_the_returned_grant() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let bound = Rights {
+        append: false,
+        overwrite: true,
+        child_journal: false,
+    };
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", bound)
+        .expect("bind");
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    let decision = verifier
+        .use_grant(verifier.open_call(instance), &request)
+        .expect("forged append does not widen the returned grant");
+    assert_eq!(decision.rights, bound);
+    assert!(!decision.rights.append);
+}
+
+#[test]
+fn model_forged_child_journal_does_not_widen_the_returned_grant() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let bound = Rights {
+        append: true,
+        overwrite: false,
+        child_journal: false,
+    };
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", bound)
+        .expect("bind");
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    let decision = verifier
+        .use_grant(verifier.open_call(instance), &request)
+        .expect("forged child journal does not widen the returned grant");
+    assert_eq!(decision.rights, bound);
+    assert!(!decision.rights.child_journal);
+}
+
+#[test]
+fn model_forged_append_does_not_replace_the_returned_root() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    let decision = verifier
+        .use_grant(verifier.open_call(instance), &request)
+        .expect("forged append does not replace the returned root");
+    assert_eq!(decision.owned_root, "UsersAI/agent-1/notes");
+}
+
+#[test]
+fn model_forged_child_journal_does_not_replace_the_returned_root() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    let decision = verifier
+        .use_grant(verifier.open_call(instance), &request)
+        .expect("forged child journal does not replace the returned root");
+    assert_eq!(decision.owned_root, "UsersAI/agent-1/notes");
+}
+
+#[test]
 fn model_readme_states_the_reference_model_boundary() {
     let readme = include_str!("../README.md");
     assert!(readme.contains(
@@ -1102,34 +1619,26 @@ fn model_readme_states_the_reference_model_boundary() {
 #[test]
 fn model_detects_a_path_dependency_on_this_crate() {
     assert!(link::cargo_toml_path_depends_on_grant_binding(
-        r#"grant-binding = { path = "lab/grant-binding" }"#
+        "[package]\nname = \"fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\ngrant-binding = { path = \"missing-gb\" }\n"
     ));
     assert!(!link::cargo_toml_path_depends_on_grant_binding(
-        r#"name = "grant-binding""#
+        "[package]\nname = \"grant-binding\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
     ));
 }
 
 #[test]
 fn model_no_other_cargo_toml_path_depends_on_this_crate() {
     let _guard = source_reads();
-    let own = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let root = repo_root();
     let mut manifests = Vec::new();
-    walk_manifests(&repo_root(), &mut manifests);
-    let mut checked = 0;
-    for path in manifests {
-        if path == own {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
-        assert!(
-            !link::cargo_toml_path_depends_on_grant_binding(&text),
-            "{} has a path dependency on grant-binding",
-            path.display()
-        );
-        checked += 1;
-    }
-    assert!(checked > 0, "no other Cargo.toml was read");
+    walk_manifests(&root, &mut manifests);
+    assert!(
+        manifests.len() > 1,
+        "walk saw {} Cargo.toml files",
+        manifests.len()
+    );
+    let linked = manifests_that_link_this_crate(&root);
+    assert!(linked.is_empty(), "{linked:?}");
 }
 
 #[test]
@@ -1152,4 +1661,105 @@ fn model_crate_has_no_dependencies_and_forbids_unsafe() {
 fn model_planted_bugs_are_caught() {
     let _guard = source_reads();
     plant::run_all();
+}
+
+#[test]
+fn model_workspace_dependency_is_a_link_in_place() {
+    let _guard = source_reads();
+    let root = std::env::temp_dir().join(format!("gb-walk-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("app/src")).unwrap();
+    std::fs::create_dir_all(root.join("vendor/grant-binding/src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n\n[workspace.dependencies]\ngrant-binding = { path = \"vendor/grant-binding\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("app/Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\ngrant-binding = { workspace = true }\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("app/src/lib.rs"), "").unwrap();
+    std::fs::write(
+        root.join("vendor/grant-binding/Cargo.toml"),
+        "[package]\nname = \"grant-binding\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("vendor/grant-binding/src/lib.rs"), "").unwrap();
+    let app = root.join("app/Cargo.toml");
+    let vendor = root.join("vendor/grant-binding/Cargo.toml");
+    let linked = manifests_that_link_this_crate(&root);
+    let same = |left: &std::path::Path, right: &std::path::Path| {
+        std::fs::canonicalize(left).ok() == std::fs::canonicalize(right).ok()
+    };
+    assert!(
+        link::manifest_depends_on_grant_binding(&app),
+        "detector sees the workspace dependency"
+    );
+    assert!(
+        linked.iter().any(|path| same(path, &app)),
+        "walk sees the workspace dependency"
+    );
+    assert!(
+        !link::manifest_depends_on_grant_binding(&vendor),
+        "own manifest"
+    );
+    assert!(
+        !linked.iter().any(|path| same(path, &vendor)),
+        "walk skips the crate manifest"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn model_registered_home_ask_is_refused() {
+    let mut verifier = Verifier::new();
+    let home = verifier.register_instance("home", "session-a");
+    let photo = verifier.register_instance("photo", "session-a");
+    let handle = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("photo ask");
+    let call = verifier.open_call(photo);
+    let decision = verifier
+        .use_grant(call, &guest(handle))
+        .expect("photo effect");
+    assert_eq!(decision.identity, "photo");
+    assert_eq!(decision.owned_root, "UsersAI/photo/library");
+    let refusal = verifier
+        .bind_grant(home, "UsersAI/home/desk", rights())
+        .expect_err("home ask");
+    assert_eq!(refusal, Refuse::HomeMint);
+    assert_eq!(refusal.to_string(), "home does not mint an app capability");
+    let again = verifier
+        .use_grant(call, &guest(handle))
+        .expect("photo effect remains");
+    assert_eq!(again.owned_root, "UsersAI/photo/library");
+    let for_home = verifier
+        .bind_grant(photo, "UsersAI/home/desk", rights())
+        .expect_err("photo ask for a home root");
+    assert_eq!(for_home, Refuse::OutsidePrincipal);
+    assert_eq!(
+        for_home.to_string(),
+        "owned root is outside the agent principal"
+    );
+}
+
+#[test]
+fn model_home_direct_mint_is_refused() {
+    let mut verifier = Verifier::new();
+    let home = verifier.register_instance("home", "session-a");
+    let photo = verifier.register_instance("photo", "session-a");
+    let direct = verifier
+        .bind_grant(home, "UsersAI/home/desk", rights())
+        .expect_err("home calls the mint");
+    assert_eq!(direct, Refuse::HomeMint);
+    assert_eq!(direct.to_string(), "home does not mint an app capability");
+    let handle = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("app mint");
+    let decision = verifier
+        .use_grant(verifier.open_call(photo), &guest(handle))
+        .expect("photo effect");
+    assert_eq!(decision.identity, "photo");
 }

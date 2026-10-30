@@ -1,0 +1,11 @@
+id: F-GB-case
+file: src/link.rs
+test: link::model_case_different_manifest_is_not_a_link
+test: link::model_git_or_registry_dependency_is_a_link
+test: link::model_table_or_dotted_dependency_is_a_link
+test: link::model_workspace_member_is_a_link
+--- old
+    metadata_names(manifest).iter().any(|name| name == "grant-binding")
+--- new
+    true
+--- end

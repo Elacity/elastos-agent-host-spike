@@ -1198,8 +1198,8 @@ fn wasm_type_comes_from_the_one_manifest_check() {
     );
     let seam = library_item(&code, "pub fn checked_bundle_observed(");
     for text in [
-        "let (wasm, name) = check_manifest(",
-        "CheckedBundle {\n            cid,\n            entries,\n            wasm,\n            name,\n        }",
+        "let (wasm, name, role) = check_manifest(",
+        "CheckedBundle {\n            cid,\n            entries,\n            wasm,\n            name,\n            role,\n        }",
     ] {
         assert_eq!(seam.matches(text).count(), 1, "{text}:\n{seam}");
     }

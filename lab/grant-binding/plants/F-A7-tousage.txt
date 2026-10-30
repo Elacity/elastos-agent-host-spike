@@ -1,0 +1,19 @@
+id: F-A7-tousage
+file: src/ledger.rs
+test: ledger::model_reported_usage_does_not_move_the_timeout
+--- old
+        self.resolve(*call, request.handle)
+            .map_err(TimeoutRefuse::Binding)?;
+--- new
+        let mut instance = call.instance;
+        if request.reported_usage > 0 {
+            for id in self.registry.keys() {
+                if *id != call.instance {
+                    instance = *id;
+                    break;
+                }
+            }
+        }
+        self.resolve(Call { instance }, request.handle)
+            .map_err(TimeoutRefuse::Binding)?;
+--- end
