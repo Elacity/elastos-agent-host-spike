@@ -189,6 +189,18 @@ claims no other Linux behaviour. The existing source-only check
 `../wallet-provider/tests/confine.rs`, reads the three oracles and supplies
 contract evidence, not Linux execution evidence.
 
+The file row has a did caller, `linux_did_file_row_is_refused_outside_storage_root`,
+which is `linux_wallet_file_row_is_refused_outside_storage_root`'s one body with
+did's own binary, did's own declared rights, did's own bindings and
+`did_standin_permitted_operations` driven whole. `landlock_probe_paths_follow_the_bound_parameters`
+holds on every OS that did's probe reads `<base>/did`, `<base>` and did's own
+binary. The did half of that row is GAP. Task 160 ran it on `spark1.local`
+(`aarch64`, Ubuntu 24.04.4, kernel `6.17.0-1029-nvidia`, Landlock ABI 7) and
+recorded the cause in `../wallet-provider/CONFINEMENT-LINUX.md`: a launch needs
+`READ_FILE` on `PROVIDER_EXECUTABLE` as well as `EXECUTE`, and the journey
+requires the read of that file to be refused, so the shipped row starts
+neither provider. Did's loader measurement against the one list is GAP too.
+
 ## What the profile allows
 
 - `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))`: start only the

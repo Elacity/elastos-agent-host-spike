@@ -400,16 +400,72 @@ is decided here. `install_landlock` is the one kernel caller of that order.
 
 ## The file row
 
-The file row is GAP. This session did not reach the spark1 host, so it recorded
-no run that names the host, the kernel and the ABI the kernel reported. The
-two rows this installer is for — `(deny default)`, files, and
+The file row is GAP, and this pass measured why: no ruleset this installer can
+build both starts the provider and refuses every path outside `STORAGE_ROOT`.
+
+Task 160 reached the spark1 host and ran both file-row journeys there, with
+cargo 1.91.0 from `~/.cargo/bin` on a fresh `rsync` copy. The run named
+`linux/aarch64`, Ubuntu 24.04.4, kernel `6.17.0-1029-nvidia`, and Landlock ABI
+7 once `PR_SET_NO_NEW_PRIVS` is set. Its label printed:
+
+    linux landlock file row: applicable, host linux/aarch64, kernel 6.17.0-1029-nvidia, Landlock ABI 7
+
+Both journeys reported red on that host, for one measured cause. With the
+shipped row, `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))`
+carrying `EXECUTE` alone, the confined start is refused by the kernel and the
+provider never runs:
+
+    test linux_wallet_file_row_is_refused_outside_storage_root ... FAILED
+    thread 'linux_wallet_file_row_is_refused_outside_storage_root' (3297519) panicked at tests/confine.rs:11589:27:
+    the linux wallet-provider start must be confined: the test child must start: Permission denied (os error 13)
+
+    test linux_did_file_row_is_refused_outside_storage_root ... FAILED
+    thread 'linux_did_file_row_is_refused_outside_storage_root' (3297509) panicked at tests/confine.rs:11589:27:
+    the linux did-provider start must be confined: the test child must start: Permission denied (os error 13)
+
+`strace` on that host shows the child's own calls and the refusal:
+
+    3259854 openat(AT_FDCWD, "/tmp/.../ElastOS/SystemServices/Wallet", O_RDONLY|O_CLOEXEC|O_PATH) = 13
+    3259854 openat(AT_FDCWD, "/home/spark1/w160/capsules/wallet-provider/target/debug/wallet-provider", O_RDONLY|O_CLOEXEC|O_PATH) = 13
+    3259854 execve("/home/spark1/w160/capsules/wallet-provider/target/debug/wallet-provider", ...) = -1 EACCES (Permission denied)
+
+Granting `READ_FILE` as well, and leaving everything else as shipped, starts
+both providers and leaves exactly one assertion unmet:
+
+    confined read-bound-executable: control ok:256, ruleset ok:256
+
+That is the conflict the row states and this task does not decide. 153's
+journey requires the read of the bound executable to answer `EACCES`; the
+kernel's `execve` also reads the program file, so a rule that lets the provider
+start answers that read with its bytes. The positive control, the two inside
+calls, the refusal of the read beneath `STORAGE_PARENT`, of the write beside
+it, of the truncation beside it and of all three listings, and the outside
+`Init` refused `storage_error` with `Permission denied`, were each observed in
+that grant-`READ_FILE` run:
+
+    confined read-beneath-storage-parent: control ok:26, ruleset errno:13
+    confined write-beside-storage-parent: control ok:26, ruleset errno:13
+    confined truncate-beside-storage-parent: control ok:0, ruleset errno:13
+    confined list-storage-parent: control ok:6, ruleset errno:13
+    confined list-sibling: control ok:3, ruleset errno:13
+    confined list-sibling-private: control ok:3, ruleset errno:13
+    launch outside Init: {"code":"storage_error","message":"failed to create wallet storage directory: Permission denied (os error 13)","status":"error"}
+
+The did caller was measured the same way. Its rule named did's own binary:
+
+    DEBUG rule PROVIDER_EXECUTABLE "/home/spark1/w160/capsules/did-provider/target/debug/did-provider" rights=0x5
+
+so `landlock_probe_paths_follow_the_bound_parameters` holds the paths, and the
+did start answered the same way wallet's did.
+
+The two rows this installer is for — `(deny default)`, files, and
 `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` — are not
 written as passing. Every other row of "The contract on Linux" was not run.
 `linux` stays out of `DECLARED_CONFINED_OS`. Nothing here says the Runtime
-installed a ruleset. The ruleset test
-`landlock_ruleset_follows_the_declared_rights` now derives did's and wallet's
-rulesets on the Mac, each on its own storage root, and neither provider's
-kernel run exists yet.
+installed a ruleset. The two callers are
+`linux_wallet_file_row_is_refused_outside_storage_root` and
+`linux_did_file_row_is_refused_outside_storage_root`, both one body with two
+thin callers, and neither provider's kernel run is accepted yet.
 
 What the harness holds, and what a later host run would record:
 
@@ -429,10 +485,12 @@ The nine probe calls, in report order, are `read-inside-storage-root`,
 `write-inside-storage-root`, `read-bound-executable`,
 `read-beneath-storage-parent`, `write-beside-storage-parent`,
 `truncate-beside-storage-parent`, `list-storage-parent`, `list-sibling` and
-`list-sibling-private`. This session has no control answer and no confined
-errno for any of them. A passing run would show every control call succeeding,
-the two inside calls succeeding under the ruleset, and the other seven
-answering `EACCES` (13).
+`list-sibling-private`. This pass recorded a control answer and a confined errno
+for each of them on spark1, under the grant-`READ_FILE` measurement above: every
+control call succeeded, the two inside calls succeeded, and the other seven
+answered `EACCES` (13) except the bound-executable read, which answered its
+bytes because `execve` needs that read. A passing run of the shipped row would
+also show that read answering `EACCES`, and no such run exists.
 
 `LANDLOCK_LOADER_PATHS` is the aarch64 loader and the three libraries a
 dynamically linked wallet maps. Each rule carries `EXECUTE | READ_FILE`. The
@@ -446,26 +504,36 @@ alone was dropped, is:
 | `/lib/aarch64-linux-gnu/libgcc_s.so.1` | the loader exits with `error while loading shared libraries: libgcc_s.so.1: cannot open shared object file` |
 | `/lib/aarch64-linux-gnu/libm.so.6` | the loader exits with `error while loading shared libraries: libm.so.6: cannot open shared object file` |
 
-This session did not drop each entry again against the wallet binary on
-spark1. Those four lines are the earlier measurement the constant carries.
-They are not this session's recorded run, and they do not name a host, a
-kernel and a reported ABI together, so they do not lift the GAP.
+This pass did not drop each entry again against the wallet binary on spark1,
+and it did not measure the loader list against the did binary. The grant-
+`READ_FILE` run started both providers with the one list unchanged, which says
+the four entries are enough for both. Those four lines are the earlier
+measurement the constant carries; they are not this pass's loader measurement,
+and the list stays the one constant (P10). The did loader measurement is GAP.
 
 Two Linux-only plants are not in `falsifiers.json`. A `#[cfg(target_os = "linux")]`
-test cannot print a CAUGHT line on the Mac. Each still needs one red run on
-the host. This session did not run either.
+test cannot print a CAUGHT line on the Mac. Each needs one red run on the host,
+and both callers' bodies are red on that host today, so neither plant's own red
+output exists yet. A plant cannot be quoted red until the row itself passes.
 
 - Skip only the launcher's Landlock install: in `start_under_linux_policy`,
   replace `install_landlock(ruleset).map_err(SeccompInstallFailure::Landlock)`
-  with `Ok(())`. `linux_wallet_file_row_is_refused_outside_storage_root` must
-  fail on the outside `Init`, which would no longer be `storage_error` with
+  with `Ok(())`. `linux_wallet_file_row_is_refused_outside_storage_root` and
+  `linux_did_file_row_is_refused_outside_storage_root` must fail on the
+  outside `Init`, which would no longer be `storage_error` with
   `Permission denied`. Rerun:
   `~/.cargo/bin/cargo test --locked --manifest-path capsules/wallet-provider/Cargo.toml -- linux_wallet_file_row_is_refused_outside_storage_root --exact --nocapture`.
-  This session has no red output to quote.
+  This pass has no red output to quote.
 - Grant `READ_FILE` on the `STORAGE_PARENT` row: change `(SHARED_RULES[1], 0)`
-  to `(SHARED_RULES[1], LANDLOCK_ACCESS_FS_READ_FILE)`. The same journey must
+  to `(SHARED_RULES[1], LANDLOCK_ACCESS_FS_READ_FILE)`. The same journeys must
   fail because `read-beneath-storage-parent` no longer answers `EACCES` (13).
-  The same command reruns it. This session has no red output to quote.
+  The same command reruns them. This pass has no red output to quote.
+
+The bound-executable row is the open decision, and it is not this task's. A
+launch needs `READ_FILE` on `PROVIDER_EXECUTABLE` as well as `EXECUTE` on this
+kernel, and the journey requires the read of that same file to be refused. The
+row cannot hold both. Rong or the policy owner decides which right the oracle
+grants; until then the file row stays GAP.
 
 ## The frame
 

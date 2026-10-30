@@ -1492,6 +1492,9 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `STORAGE_ROOT` binding for both, so the did iteration fails on the expected
   root.
   `landlock_ruleset_follows_the_declared_rights` checks this rule.
+- WP217: The file row's bound-executable probe read names wallet's binary for
+  both providers, so did's probe would read the wrong program.
+  `landlock_probe_paths_follow_the_bound_parameters` checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

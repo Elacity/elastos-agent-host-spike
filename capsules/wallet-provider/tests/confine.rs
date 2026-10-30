@@ -10774,9 +10774,12 @@ fn linux_landlock_journey_is_not_applicable_off_linux() {
     eprintln!("{line}");
 }
 
-/// One file call the Landlock probe makes and the path it makes it on. Only the
-/// Linux journey and its probe child read it.
-#[cfg(target_os = "linux")]
+/// One file call the Landlock probe makes and the path it makes it on.
+///
+/// The calls are plain names and paths, so the rule that each provider's probe
+/// reads its own root, its own parent and its own executable is checked on
+/// every OS by `landlock_probe_paths_follow_the_bound_parameters`. Only the
+/// Linux journey and its probe child make the calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LandlockProbeCall {
     ReadInside,
@@ -10790,20 +10793,51 @@ enum LandlockProbeCall {
     ListSiblingPrivate,
 }
 
-#[cfg(target_os = "linux")]
+/// The file calls the probe makes, so a caller that reads them names the one
+/// list rather than restating it.
+const LANDLOCK_PROBE_CALLS: [LandlockProbeCall; 9] = [
+    LandlockProbeCall::ReadInside,
+    LandlockProbeCall::WriteInside,
+    LandlockProbeCall::ReadExecutable,
+    LandlockProbeCall::ReadBeneathParent,
+    LandlockProbeCall::WriteBesideParent,
+    LandlockProbeCall::TruncateBesideParent,
+    LandlockProbeCall::ListParent,
+    LandlockProbeCall::ListSibling,
+    LandlockProbeCall::ListSiblingPrivate,
+];
+
 impl LandlockProbeCall {
-    /// Every call the journey requires, in report order.
-    const ALL: [Self; 9] = [
-        Self::ReadInside,
-        Self::WriteInside,
-        Self::ReadExecutable,
-        Self::ReadBeneathParent,
-        Self::WriteBesideParent,
-        Self::TruncateBesideParent,
-        Self::ListParent,
-        Self::ListSibling,
-        Self::ListSiblingPrivate,
-    ];
+    /// The path this call uses, derived from the three parameter bindings the
+    /// launch carries. The read of the bound executable and the two inside
+    /// calls name that launch's own program and root, so the probe and the
+    /// ruleset cannot drift and a second provider's probe reads its own paths.
+    fn path(self, bindings: &[(&'static str, PathBuf)]) -> PathBuf {
+        let bound = |parameter: &str| {
+            bindings
+                .iter()
+                .find(|(binding, _)| *binding == parameter)
+                .unwrap_or_else(|| panic!("the launch must bind {parameter}"))
+                .1
+                .clone()
+        };
+        let root = bound("STORAGE_ROOT");
+        let parent = bound("STORAGE_PARENT");
+        match self {
+            Self::ReadInside => root.join(LANDLOCK_PROBE_INSIDE_FILE),
+            Self::WriteInside => root.join(LANDLOCK_PROBE_INSIDE_WRITE),
+            Self::ReadExecutable => bound("PROVIDER_EXECUTABLE"),
+            Self::ReadBeneathParent => parent
+                .join(LANDLOCK_PROBE_PARENT_SIBLING)
+                .join("private")
+                .join(LANDLOCK_PROBE_BENEATH_FILE),
+            Self::WriteBesideParent => parent.join(LANDLOCK_PROBE_BESIDE_PARENT_WRITE),
+            Self::TruncateBesideParent => parent.join(LANDLOCK_PROBE_BESIDE_PARENT_TRUNCATE),
+            Self::ListParent => parent,
+            Self::ListSibling => parent.join(LANDLOCK_PROBE_PARENT_SIBLING),
+            Self::ListSiblingPrivate => parent.join(LANDLOCK_PROBE_PARENT_SIBLING).join("private"),
+        }
+    }
 
     /// The name the probe writes in its report and the test reads back.
     fn name(self) -> &'static str {
@@ -10819,46 +10853,81 @@ impl LandlockProbeCall {
             Self::ListSiblingPrivate => "list-sibling-private",
         }
     }
+}
 
-    /// The path this call uses under `base`, derived from the one storage-root
-    /// and parent derivation so the probe and the ruleset cannot drift.
-    fn path(self, base: &Path) -> PathBuf {
-        let root = provider_storage_root(WALLET_PROVIDER, base);
-        let parent = storage_parent(WALLET_PROVIDER, base);
-        match self {
-            Self::ReadInside => root.join(LANDLOCK_PROBE_INSIDE_FILE),
-            Self::WriteInside => root.join(LANDLOCK_PROBE_INSIDE_WRITE),
-            Self::ReadExecutable => resolved(Path::new(PROVIDER_BINARY)),
-            Self::ReadBeneathParent => parent
-                .join(LANDLOCK_PROBE_PARENT_SIBLING)
-                .join("private")
-                .join(LANDLOCK_PROBE_BENEATH_FILE),
-            Self::WriteBesideParent => parent.join(LANDLOCK_PROBE_BESIDE_PARENT_WRITE),
-            Self::TruncateBesideParent => parent.join(LANDLOCK_PROBE_BESIDE_PARENT_TRUNCATE),
-            Self::ListParent => parent,
-            Self::ListSibling => parent.join(LANDLOCK_PROBE_PARENT_SIBLING),
-            Self::ListSiblingPrivate => parent.join(LANDLOCK_PROBE_PARENT_SIBLING).join("private"),
+/// Each provider's probe reads its own root, its own parent and its own
+/// executable: every inside call is under that provider's `STORAGE_ROOT`, every
+/// parent call is under its `STORAGE_PARENT`, and the bound-executable read is
+/// the binary that provider's launch binds. One body runs over `DID_PROVIDER`
+/// and `WALLET_PROVIDER`, each through `provider_ruleset_inputs`, so the probe
+/// and the ruleset cannot drift and did's probe cannot read wallet's binary.
+///
+/// The test builds each provider's inputs and reads the nine paths. It makes no
+/// file call, starts no process and calls no kernel, so it runs on every OS: the
+/// journey that makes the calls is Linux-only, and the rule about whose paths
+/// they are is not.
+///
+/// Falsifier: WP217 reads `PROVIDER_BINARY` for the bound-executable call
+/// instead of the launch's own binding, so did's probe would read wallet's
+/// binary and the did iteration fails on that path.
+#[test]
+fn landlock_probe_paths_follow_the_bound_parameters() {
+    for name in [DID_PROVIDER, WALLET_PROVIDER] {
+        let fixture = tempfile::tempdir().expect("temporary provider base");
+        let base = resolved(fixture.path());
+        let inputs = provider_ruleset_inputs(name, &base).unwrap_or_else(|err| panic!("{err}"));
+        let bindings = &inputs.bindings;
+        let bound = |parameter: &str| {
+            bindings
+                .iter()
+                .find(|(binding, _)| *binding == parameter)
+                .unwrap_or_else(|| panic!("{name}: the launch must bind {parameter}"))
+                .1
+                .clone()
+        };
+        let root = bound("STORAGE_ROOT");
+        let parent = bound("STORAGE_PARENT");
+
+        for call in LANDLOCK_PROBE_CALLS {
+            let path = call.path(bindings);
+            let expected_owner = match call {
+                LandlockProbeCall::ReadInside | LandlockProbeCall::WriteInside => &root,
+                LandlockProbeCall::ReadExecutable => &bound("PROVIDER_EXECUTABLE"),
+                LandlockProbeCall::ReadBeneathParent
+                | LandlockProbeCall::WriteBesideParent
+                | LandlockProbeCall::TruncateBesideParent
+                | LandlockProbeCall::ListParent
+                | LandlockProbeCall::ListSibling
+                | LandlockProbeCall::ListSiblingPrivate => &parent,
+            };
+            assert!(
+                path.starts_with(expected_owner),
+                "{name}: {} must use a path under the parameter it names, and it used {} \
+                 outside {}",
+                call.name(),
+                path.display(),
+                expected_owner.display()
+            );
         }
+        assert_eq!(
+            LandlockProbeCall::ReadExecutable.path(bindings),
+            resolved(inputs.binary),
+            "{name}: the bound-executable read must use this provider's own binary"
+        );
     }
 }
 
-/// The fixture names the file-row journey plants under the wallet root and its
+/// The fixture names the file-row journey plants under a provider's root and its
 /// parent. The files are planted by the parent, outside the ruleset, so a write
 /// the probe is refused cannot be mistaken for a file it could not create.
-#[cfg(target_os = "linux")]
 const LANDLOCK_PROBE_INSIDE_FILE: &str = "landlock-inside-read.txt";
-#[cfg(target_os = "linux")]
 const LANDLOCK_PROBE_INSIDE_WRITE: &str = "landlock-inside-write.txt";
-#[cfg(target_os = "linux")]
 const LANDLOCK_PROBE_PARENT_SIBLING: &str = "sibling";
-#[cfg(target_os = "linux")]
 const LANDLOCK_PROBE_BENEATH_FILE: &str = "marker";
-#[cfg(target_os = "linux")]
 const LANDLOCK_PROBE_BESIDE_PARENT_WRITE: &str = "landlock-beside-write.txt";
 /// The file the probe truncates outside `STORAGE_ROOT`. The parent plants it
 /// with content before each run, so a truncation that succeeds is visible in its
 /// bytes afterwards and not only in the probe's answer.
-#[cfg(target_os = "linux")]
 const LANDLOCK_PROBE_BESIDE_PARENT_TRUNCATE: &str = "landlock-beside-truncate.txt";
 /// The exact bytes the planted read and write fixtures hold.
 #[cfg(target_os = "linux")]
@@ -10876,11 +10945,11 @@ const LANDLOCK_PROBE_REFUSED: &[u8] = b"landlock-probe-refused:";
 #[cfg(target_os = "linux")]
 type LandlockAnswer = SeccompAnswer;
 
-/// The answers one probe child recorded, in `LandlockProbeCall::ALL` order.
+/// The answers one probe child recorded, in `LANDLOCK_PROBE_CALLS` order.
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LandlockProbeReport {
-    answers: [LandlockAnswer; LandlockProbeCall::ALL.len()],
+    answers: [LandlockAnswer; LANDLOCK_PROBE_CALLS.len()],
 }
 
 /// What the Landlock probe child is asked to do.
@@ -11096,7 +11165,7 @@ fn run_landlock_probe_child(
         unsafe { libc::_exit(73) }
     }
     let mut buffer = [0u8; 256];
-    for (call, path) in LandlockProbeCall::ALL.into_iter().zip(paths) {
+    for (call, path) in LANDLOCK_PROBE_CALLS.into_iter().zip(paths) {
         let answer = landlock_probe_call(call, path);
         let mut written = copy_bytes(&mut buffer, LANDLOCK_PROBE_MARKER.as_bytes());
         written += copy_bytes(&mut buffer[written..], b" ");
@@ -11130,21 +11199,25 @@ fn landlock_probe_allow_all() -> SeccompAllowList {
 /// naming what happened. The child is a fork of this process, so its ruleset
 /// reaches only itself. The child is reaped on every result, including a
 /// timeout, so a repeated journey leaves no probe behind.
+///
+/// `bindings` are the three parameter paths the launch carries, so the probe
+/// reads the same root, parent and executable the ruleset binds and the
+/// calling provider's own paths, never a second derivation.
 #[cfg(target_os = "linux")]
 fn landlock_file_probe(
     ruleset: &LandlockRuleset,
     run: LandlockProbeRun,
-    base: &Path,
+    bindings: &[(&'static str, PathBuf)],
 ) -> Result<LandlockProbeReport, String> {
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
     use std::os::unix::ffi::OsStrExt as _;
     let mut prepared =
         PreparedLandlockRuleset::new(ruleset).map_err(|failure| failure.to_string())?;
     prepared.skip_no_new_privileges = run == LandlockProbeRun::WithoutNoNewPrivileges;
-    let paths = LandlockProbeCall::ALL
+    let paths = LANDLOCK_PROBE_CALLS
         .into_iter()
         .map(|call| {
-            std::ffi::CString::new(call.path(base).as_os_str().as_bytes())
+            std::ffi::CString::new(call.path(bindings).as_os_str().as_bytes())
                 .map_err(|_| format!("landlock probe refused: {} path contains NUL", call.name()))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -11234,8 +11307,8 @@ fn landlock_file_probe(
 /// early cannot pass the journey.
 #[cfg(target_os = "linux")]
 fn parse_landlock_probe_report(text: &str) -> Result<LandlockProbeReport, String> {
-    let mut answers = [LandlockAnswer::Returned(0); LandlockProbeCall::ALL.len()];
-    for (slot, call) in answers.iter_mut().zip(LandlockProbeCall::ALL) {
+    let mut answers = [LandlockAnswer::Returned(0); LANDLOCK_PROBE_CALLS.len()];
+    for (slot, call) in answers.iter_mut().zip(LANDLOCK_PROBE_CALLS) {
         let marker = format!("{LANDLOCK_PROBE_MARKER} {} ", call.name());
         let line = text
             .lines()
@@ -11248,38 +11321,54 @@ fn parse_landlock_probe_report(text: &str) -> Result<LandlockProbeReport, String
     Ok(LandlockProbeReport { answers })
 }
 
-/// One fixture for all file-row probes. Paths and marker bytes are prepared
-/// before fork; only the child receives the ruleset.
+/// One file-row journey's prepared inputs: the temporary directory the run
+/// keeps alive, that run's base, the three parameter bindings its launch
+/// carries and the ruleset built from that provider's own declared rights.
+///
+/// One builder serves both providers, so the did journey and the wallet journey
+/// plant the same fixtures and install the same shape of ruleset (P10).
+#[cfg(target_os = "linux")]
+struct LandlockFileFixture {
+    _root: tempfile::TempDir,
+    base: PathBuf,
+    declared: Value,
+    bindings: [(&'static str, PathBuf); 3],
+    ruleset: LandlockRuleset,
+}
+
+/// One fixture for all file-row probes, for `name` and that provider's own
+/// `binary`. Paths and marker bytes are prepared before fork; only the child
+/// receives the ruleset.
+///
+/// The declared rights come from that provider's own committed file, the
+/// bindings from `canonical_bindings` for that name and binary, and the ruleset
+/// from `landlock_path_rules` with those bindings and `loader`, so a caller
+/// cannot plant one provider's paths under another provider's ruleset.
 #[cfg(target_os = "linux")]
 fn landlock_file_fixture(
+    name: &str,
+    binary: &Path,
     loader: &[(&str, &str)],
-) -> (tempfile::TempDir, PathBuf, Value, LandlockRuleset) {
-    let declared_rights =
-        read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
-            .unwrap_or_else(|err| panic!("{err}"));
-    let fixture = tempfile::tempdir().expect("temporary wallet base");
+) -> LandlockFileFixture {
+    let declared = read_declared_rights(name, &declared_rights_path(name))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let fixture = tempfile::tempdir().expect("temporary provider base");
     let base = resolved(fixture.path());
 
-    let bindings = canonical_bindings(WALLET_PROVIDER, &base, Path::new(PROVIDER_BINARY));
+    let bindings = canonical_bindings(name, &base, binary);
     create_shared_ancestors(&bindings);
-    let root = provider_storage_root(WALLET_PROVIDER, &base);
-    fs::create_dir_all(&root).expect("the wallet root must be creatable");
+    let root = provider_storage_root(name, &base);
+    fs::create_dir_all(&root).expect("the provider root must be creatable");
 
     let reported_abi = landlock_abi().unwrap_or_else(|failure| {
         panic!("the host must report a Landlock ABI for this row: {failure}")
     });
     eprintln!("{}", linux_landlock_journey_label(Some(reported_abi)));
-    let ruleset = landlock_path_rules(
-        WALLET_PROVIDER,
-        &declared_rights,
-        &bindings,
-        reported_abi,
-        loader,
-    )
-    .unwrap_or_else(|err| panic!("{err}"));
+    let ruleset = landlock_path_rules(name, &declared, &bindings, reported_abi, loader)
+        .unwrap_or_else(|err| panic!("{err}"));
 
-    let inside_read = LandlockProbeCall::ReadInside.path(&base);
-    let beneath_read = LandlockProbeCall::ReadBeneathParent.path(&base);
+    let inside_read = LandlockProbeCall::ReadInside.path(&bindings);
+    let beneath_read = LandlockProbeCall::ReadBeneathParent.path(&bindings);
     fs::write(&inside_read, LANDLOCK_PROBE_FIXTURE_BYTES).unwrap_or_else(|err| {
         panic!(
             "the inside fixture {} must be writable: {err}",
@@ -11303,9 +11392,15 @@ fn landlock_file_fixture(
         LANDLOCK_PROBE_FIXTURE_BYTES,
         "the planted file beneath STORAGE_PARENT must hold its bytes before the confined run"
     );
-    plant_landlock_probe_truncate_fixture(&base);
+    plant_landlock_probe_truncate_fixture(&bindings);
 
-    (fixture, base, declared_rights, ruleset)
+    LandlockFileFixture {
+        _root: fixture,
+        base,
+        declared,
+        bindings,
+        ruleset,
+    }
 }
 
 /// Plants the file the probe truncates beside `STORAGE_PARENT`, outside every
@@ -11313,8 +11408,8 @@ fn landlock_file_fixture(
 /// empty, so the test reads its length on both sides of a run and a permitted
 /// truncation cannot hide behind a file the parent never wrote.
 #[cfg(target_os = "linux")]
-fn plant_landlock_probe_truncate_fixture(base: &Path) {
-    let path = LandlockProbeCall::TruncateBesideParent.path(base);
+fn plant_landlock_probe_truncate_fixture(bindings: &[(&'static str, PathBuf)]) {
+    let path = LandlockProbeCall::TruncateBesideParent.path(bindings);
     fs::write(&path, LANDLOCK_PROBE_FIXTURE_BYTES).unwrap_or_else(|err| {
         panic!(
             "the truncate fixture {} must be writable: {err}",
@@ -11329,12 +11424,12 @@ fn plant_landlock_probe_truncate_fixture(base: &Path) {
 }
 
 #[cfg(target_os = "linux")]
-fn clear_landlock_probe_writes(base: &Path) {
+fn clear_landlock_probe_writes(bindings: &[(&'static str, PathBuf)]) {
     for call in [
         LandlockProbeCall::WriteInside,
         LandlockProbeCall::WriteBesideParent,
     ] {
-        match fs::remove_file(call.path(base)) {
+        match fs::remove_file(call.path(bindings)) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => panic!("the probe write fixture must be removable: {err}"),
@@ -11348,16 +11443,24 @@ fn clear_landlock_probe_writes(base: &Path) {
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_landlock_requires_no_new_privs() {
-    let (_fixture, base, _, ruleset) = landlock_file_fixture(&[]);
-    let refusal = landlock_file_probe(&ruleset, LandlockProbeRun::WithoutNoNewPrivileges, &base)
-        .expect_err("restrict_self must refuse when no_new_privs is clear");
+    let fixture = landlock_file_fixture(WALLET_PROVIDER, Path::new(PROVIDER_BINARY), &[]);
+    let refusal = landlock_file_probe(
+        &fixture.ruleset,
+        LandlockProbeRun::WithoutNoNewPrivileges,
+        &fixture.bindings,
+    )
+    .expect_err("restrict_self must refuse when no_new_privs is clear");
     assert_eq!(
         refusal,
         "landlock probe refused: the probe child must install the ruleset: landlock install refused: landlock_restrict_self failed with errno 1"
     );
-    let report = landlock_file_probe(&ruleset, LandlockProbeRun::RequireNoNewPrivileges, &base)
-        .expect("Landlock must set no_new_privs from a clear flag and install successfully");
-    for (call, answer) in LandlockProbeCall::ALL.into_iter().zip(report.answers) {
+    let report = landlock_file_probe(
+        &fixture.ruleset,
+        LandlockProbeRun::RequireNoNewPrivileges,
+        &fixture.bindings,
+    )
+    .expect("Landlock must set no_new_privs from a clear flag and install successfully");
+    for (call, answer) in LANDLOCK_PROBE_CALLS.into_iter().zip(report.answers) {
         if matches!(
             call,
             LandlockProbeCall::ReadInside | LandlockProbeCall::WriteInside
@@ -11378,50 +11481,66 @@ fn linux_landlock_requires_no_new_privs() {
     }
 }
 
-/// The journey: wallet starts under the generated Landlock file row and the
-/// generated seccomp list, and one probe child under the same ruleset shows the
-/// file row refusing every path outside `STORAGE_ROOT` while the same calls
+/// The journey: `name` starts under the Landlock file row built from that
+/// provider's own declared rights and under the seccomp list built the same
+/// way, and one probe child under the same ruleset shows the file row refusing
+/// every path outside that provider's `STORAGE_ROOT` while the same calls
 /// succeed without it.
+///
+/// `binary` is that provider's own binary, `declared` its own declared rights,
+/// `bindings` the three paths its launch carries and `base` the temporary root
+/// both the launch and the probe use. The permitted calls are the caller's own:
+/// `permitted` drives them on the started provider and returns the number of
+/// answers the caller then judges, so this one body serves both providers
+/// without a per-provider launcher, list builder or probe (P10).
 ///
 /// The positive control uses the same uid and the same fixtures and no ruleset,
 /// and every control call must succeed. The confined run requires `EACCES` (13),
 /// never `EPERM`, for the read of the bound executable, the read beneath
 /// `STORAGE_PARENT`, the write beside it, the truncation beside it, and the
 /// listings of `STORAGE_PARENT`, `sibling` and `sibling/private`. The inside
-/// read and write succeed. The wallet start answers `init` `ok`, `status` `ok`
-/// and an empty `list_accounts`. An `Init` for a base outside `STORAGE_ROOT` is
-/// refused `storage_error` with `Permission denied` and creates nothing. The
-/// truncate fixture keeps its bytes. A start on a non-Linux host, and a start
-/// on a host that reports Landlock missing, are refused.
+/// read and write succeed. The caller drives its own permitted calls through
+/// `permitted`, because `status` is wallet's and did's `handle` has no such
+/// arm. An `Init` for a base outside `STORAGE_ROOT` is refused `storage_error`
+/// with `Permission denied` and creates nothing. The truncate fixture keeps its
+/// bytes. A start on a non-Linux host, and a start on a host that reports
+/// Landlock missing, are refused.
 ///
 /// The two Linux-only plants are recorded in `CONFINEMENT-LINUX.md` and are not
 /// registered: a launcher that skips only its own Landlock install fails the
 /// outside `Init`, and a `STORAGE_PARENT` row that grants a read fails the
 /// planted read beneath the parent.
 #[cfg(target_os = "linux")]
-#[test]
-fn linux_wallet_file_row_is_refused_outside_storage_root() {
-    let (_fixture, base, declared_rights, ruleset) = landlock_file_fixture(LANDLOCK_LOADER_PATHS);
+fn landlock_file_row_journey(
+    name: &str,
+    binary: &Path,
+    declared: &Value,
+    base: &Path,
+    bindings: &[(&'static str, PathBuf)],
+    ruleset: &LandlockRuleset,
+    permitted: impl FnOnce(&mut ConfinedProvider),
+) {
     let profile_fixture = tempfile::tempdir().expect("temporary profile root");
     let profile_dir = resolved(profile_fixture.path());
-    let root = provider_storage_root(WALLET_PROVIDER, &base);
-    let inside_read = LandlockProbeCall::ReadInside.path(&base);
-    let allow = seccomp_probe_list(WALLET_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+    let root = provider_storage_root(name, base);
+    let inside_read = LandlockProbeCall::ReadInside.path(bindings);
+    let allow = seccomp_probe_list(name).unwrap_or_else(|err| panic!("{err}"));
     let policy = StandinPolicy::Landlock {
         allow: &allow,
-        ruleset: &ruleset,
+        ruleset,
     };
 
     let missing = standin_spawn_confined_provider(
         StandinHost::linux_missing(StandinPrimitive::Landlock),
         policy,
-        WALLET_PROVIDER,
-        Path::new(PROVIDER_BINARY),
-        &base,
-        &declared_rights,
+        name,
+        binary,
+        base,
+        declared,
         &profile_dir,
     )
-    .expect_err("a host that reports Landlock missing must refuse the start");
+    .err()
+    .expect("a host that reports Landlock missing must refuse the start");
     assert!(
         missing.contains("linux confinement refused: the kernel has no Landlock"),
         "a missing Landlock report must keep the design's words: {missing}"
@@ -11429,62 +11548,57 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
     let other_os = standin_spawn_confined_provider(
         StandinHost::reporting("macos"),
         policy,
-        WALLET_PROVIDER,
-        Path::new(PROVIDER_BINARY),
-        &base,
-        &declared_rights,
+        name,
+        binary,
+        base,
+        declared,
         &profile_dir,
     )
-    .expect_err("a non-linux host must refuse the start");
+    .err()
+    .expect("a non-linux host must refuse the start");
     assert!(
         other_os.contains("the seccomp allow list is the linux policy")
             && other_os.contains("macos is not linux"),
         "a non-linux host must be refused by name: {other_os}"
     );
 
-    let control = landlock_file_probe(&ruleset, LandlockProbeRun::Control, &base)
+    let control = landlock_file_probe(ruleset, LandlockProbeRun::Control, bindings)
         .unwrap_or_else(|failure| panic!("the positive control must run: {failure}"));
-    for (call, answer) in LandlockProbeCall::ALL.iter().zip(control.answers) {
+    for (call, answer) in LANDLOCK_PROBE_CALLS.iter().zip(control.answers) {
         assert!(
             matches!(answer, LandlockAnswer::Returned(_)),
             "the control must show {} succeeding without the ruleset, and it answered {answer:?} \
              ({call:?} on {}), so this run has no evidence for that call",
             call.name(),
-            call.path(&base).display()
+            call.path(bindings).display()
         );
         eprintln!("control {}: {}", call.name(), answer.text());
     }
-    clear_landlock_probe_writes(&base);
-    plant_landlock_probe_truncate_fixture(&base);
+    clear_landlock_probe_writes(bindings);
+    plant_landlock_probe_truncate_fixture(bindings);
 
     let mut provider = standin_spawn_confined_provider(
         StandinHost::reporting("linux"),
         policy,
-        WALLET_PROVIDER,
-        Path::new(PROVIDER_BINARY),
-        &base,
-        &declared_rights,
+        name,
+        binary,
+        base,
+        declared,
         &profile_dir,
     )
-    .unwrap_or_else(|err| panic!("the linux wallet start must be confined: {err}"));
+    .unwrap_or_else(|err| panic!("the linux {name} start must be confined: {err}"));
 
-    let status = provider.send(&json!({ "op": "status" }));
-    assert_eq!(status["status"], "ok", "status must answer: {status}");
-    let accounts = provider.wallet(WalletProviderOperationV2::ListAccounts {
-        include_revoked: false,
-    });
-    assert_eq!(
-        ok_data(accounts)["accounts"],
-        json!([]),
-        "a fresh wallet lists no account"
-    );
+    // The `status` call belongs to wallet's own permitted calls: did's `handle`
+    // names no `status` arm, so the shared body sends only what the caller
+    // drives and wallet's caller sends `status` itself.
+    permitted(&mut provider);
     assert!(
         profile_dir_entries(&profile_dir).is_empty(),
         "a landlock start writes no profile: {}",
         profile_dir.display()
     );
 
-    let outside_base = storage_parent(WALLET_PROVIDER, &base).join("landlock-outside-base");
+    let outside_base = storage_parent(name, base).join("landlock-outside-base");
     let outside_init = provider.init(&outside_base);
     assert_eq!(
         outside_init["status"], "error",
@@ -11502,26 +11616,22 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
         "the outside Init must be refused by the kernel's own denial, and it answered: {reason}"
     );
     assert!(
-        !outside_base.exists() && !provider_storage_root(WALLET_PROVIDER, &outside_base).exists(),
+        !outside_base.exists() && !provider_storage_root(name, &outside_base).exists(),
         "a refused outside Init must create nothing: {}",
         outside_base.display()
     );
     eprintln!("launch outside Init: {outside_init}");
     provider.shutdown();
 
-    assert!(
-        root.join(WALLET_KEY_FILE).exists(),
-        "the confined launch must create its storage key under STORAGE_ROOT"
-    );
     assert_eq!(
         fs::read(&inside_read).expect("the inside fixture must stay readable"),
         LANDLOCK_PROBE_FIXTURE_BYTES,
         "the launch must leave the inside fixture's bytes unchanged"
     );
 
-    let confined = landlock_file_probe(&ruleset, LandlockProbeRun::Confined, &base)
+    let confined = landlock_file_probe(ruleset, LandlockProbeRun::Confined, bindings)
         .unwrap_or_else(|failure| panic!("{failure}"));
-    for ((call, control_answer), confined_answer) in LandlockProbeCall::ALL
+    for ((call, control_answer), confined_answer) in LANDLOCK_PROBE_CALLS
         .iter()
         .zip(control.answers)
         .zip(confined.answers)
@@ -11534,7 +11644,7 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
         );
     }
     let refused = |call: LandlockProbeCall| {
-        let index = LandlockProbeCall::ALL
+        let index = LANDLOCK_PROBE_CALLS
             .iter()
             .position(|candidate| *candidate == call)
             .expect("the call is one of the probe's own");
@@ -11569,21 +11679,99 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
         );
     }
     assert_eq!(
-        fs::read(LandlockProbeCall::WriteInside.path(&base))
+        fs::read(LandlockProbeCall::WriteInside.path(bindings))
             .expect("the confined write must have created the file inside the root"),
         LANDLOCK_PROBE_FIXTURE_BYTES,
         "the confined write inside the root must hold its bytes"
     );
     assert!(
-        !LandlockProbeCall::WriteBesideParent.path(&base).exists(),
+        !LandlockProbeCall::WriteBesideParent.path(bindings).exists(),
         "a refused write beside the parent must leave no file: {}",
-        LandlockProbeCall::WriteBesideParent.path(&base).display()
+        LandlockProbeCall::WriteBesideParent
+            .path(bindings)
+            .display()
     );
     assert_eq!(
-        fs::read(LandlockProbeCall::TruncateBesideParent.path(&base))
+        fs::read(LandlockProbeCall::TruncateBesideParent.path(bindings))
             .expect("a refused truncation must leave the planted file in place"),
         LANDLOCK_PROBE_FIXTURE_BYTES,
         "a refused truncation beside the parent must leave its bytes unchanged"
+    );
+    eprintln!("{name} launched storage root: {}", root.display());
+}
+
+/// The wallet caller of the file row: wallet's own binary, its own declared
+/// rights, its own bindings and its own permitted calls. Wallet's assertions,
+/// fixtures and plants are `landlock_file_row_journey`'s, unchanged.
+///
+/// The test keeps its name, because wallet's `CONFINEMENT-LINUX.md` and the
+/// falsifier list name it.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_wallet_file_row_is_refused_outside_storage_root() {
+    let binary = Path::new(PROVIDER_BINARY);
+    let fixture = landlock_file_fixture(WALLET_PROVIDER, binary, LANDLOCK_LOADER_PATHS);
+    landlock_file_row_journey(
+        WALLET_PROVIDER,
+        binary,
+        &fixture.declared,
+        &fixture.base,
+        &fixture.bindings,
+        &fixture.ruleset,
+        |provider| {
+            let status = provider.send(&json!({ "op": "status" }));
+            assert_eq!(status["status"], "ok", "status must answer: {status}");
+            let accounts = provider.wallet(WalletProviderOperationV2::ListAccounts {
+                include_revoked: false,
+            });
+            assert_eq!(
+                ok_data(accounts)["accounts"],
+                json!([]),
+                "a fresh wallet lists no account"
+            );
+        },
+    );
+    assert!(
+        provider_storage_root(WALLET_PROVIDER, &fixture.base)
+            .join(WALLET_KEY_FILE)
+            .exists(),
+        "the confined launch must create its storage key under STORAGE_ROOT"
+    );
+}
+
+/// The did caller of the one file row. The same body, the same installer, the
+/// same `StandinPolicy::Landlock` variant and the same `pre_exec` start did's
+/// own binary, with did's own committed declared-rights file, did's own
+/// `canonical_bindings` for its `STORAGE_ROOT` (`<base>/did`) and its
+/// `STORAGE_PARENT` (`<base>`), and the one `LANDLOCK_LOADER_PATHS`.
+///
+/// The permitted calls are `did_standin_permitted_operations` driven whole: the
+/// six calls `init`, `get_did`, `resolve`, `set_nickname`, `get_nickname` and
+/// `get_persona_did`, judged against `DID_SUITE_CASES`' permitted prefix, so
+/// the did run proves its own operations answer under did's ruleset.
+///
+/// The two Linux-only plants are the wallet caller's: a did launcher that skips
+/// only its own Landlock install fails the outside `Init`, and a
+/// `STORAGE_PARENT` row that grants a read fails the planted read beneath did's
+/// parent. Both reach a Linux-only test, so neither is registered in
+/// `falsifiers.json`; `CONFINEMENT-LINUX.md` records them with the red run.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_did_file_row_is_refused_outside_storage_root() {
+    let binary = did_provider_binary();
+    let fixture = landlock_file_fixture(DID_PROVIDER, binary, LANDLOCK_LOADER_PATHS);
+    let label = "did-provider landlock file row";
+    landlock_file_row_journey(
+        DID_PROVIDER,
+        binary,
+        &fixture.declared,
+        &fixture.base,
+        &fixture.bindings,
+        &fixture.ruleset,
+        |provider| {
+            let record = did_standin_permitted_operations(provider, &fixture.base, label);
+            assert_suite_outcomes(label, &record, &DID_SUITE_CASES[..DID_PERMITTED_CASES]);
+        },
     );
 }
 

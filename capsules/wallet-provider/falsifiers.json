@@ -3185,6 +3185,22 @@
       "tests": [
         "landlock_ruleset_follows_the_declared_rights"
       ]
+    },
+    {
+      "id": "WP217",
+      "title": "the file row's bound-executable probe read names wallet's binary for both providers",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            Self::ReadExecutable => bound(\"PROVIDER_EXECUTABLE\"),",
+          "new": "            Self::ReadExecutable => resolved(Path::new(PROVIDER_BINARY)),"
+        }
+      ],
+      "tests": [
+        "landlock_probe_paths_follow_the_bound_parameters"
+      ]
     }
   ]
 }
