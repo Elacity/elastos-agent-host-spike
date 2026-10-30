@@ -104,6 +104,20 @@ impl Verifier {
                         self.note_effect(counted).map_err(OperateRefuse::Binding)?;
                     }
                 }
+                #[rustfmt::skip]
+                let () = {
+                    if operation != Operation::ChildJournal && counted != request.handle {
+                        let ending = counted;
+                        if self
+                            .grants
+                            .get(&ending)
+                            .map(|stored| stored.once)
+                            .unwrap_or(false)
+                        {
+                            self.revoke_grant(ending);
+                        }
+                    }
+                };
                 if grant.once && operation != Operation::ChildJournal {
                     self.grants.remove(&request.handle);
                 }
@@ -1460,4 +1474,82 @@ fn model_unset_rate_does_not_stop() {
     verifier
         .use_grant(call, &guest(frames))
         .expect("a refused effect leaves the grant");
+}
+
+#[test]
+fn model_child_effect_ends_the_allow_once_grant() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_once(photo, "UsersAI/photo/library", crate::rights())
+        .expect("allow once");
+    let album = verifier
+        .bind_grant(photo, "UsersAI/photo/album", crate::rights())
+        .expect("standing album");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal does not end the grant");
+    let frame = verifier
+        .create_child_journal(&call, &guest(roll), "UsersAI/photo/library/roll/frame")
+        .expect("nested journal does not end the grant");
+    let other = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/other")
+        .expect("sibling journal does not end the grant");
+    let refused = verifier
+        .operate(&call, &guest(frame), Operation::Overwrite)
+        .expect_err("a refused right does not end the grant");
+    assert_eq!(refused, OperateRefuse::OverwriteNotGranted);
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the issuing grant is still there");
+    verifier
+        .operate(&call, &guest(frame), Operation::Append)
+        .expect("one nested effect ends the issuing grant");
+    let sibling = verifier
+        .operate(&call, &guest(other), Operation::Append)
+        .expect_err("the sibling ended with the issuing grant");
+    assert_eq!(sibling, OperateRefuse::Binding(Refuse::UnknownHandle));
+    assert_eq!(sibling.to_string(), "unknown handle");
+    let parent = verifier
+        .operate(&call, &guest(library), Operation::Append)
+        .expect_err("the issuing grant has ended");
+    assert_eq!(parent, OperateRefuse::Binding(Refuse::UnknownHandle));
+    let child_stopped = verifier
+        .use_grant(call, &guest(roll))
+        .expect_err("the child journal has ended");
+    assert_eq!(child_stopped, Refuse::UnknownHandle);
+    let frame_stopped = verifier
+        .use_grant(call, &guest(frame))
+        .expect_err("the nested journal has ended");
+    assert_eq!(frame_stopped, Refuse::UnknownHandle);
+    let album_kept = verifier
+        .use_grant(call, &guest(album))
+        .expect("a standing grant stays");
+    assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
+}
+
+#[test]
+fn model_standing_child_allows_another_effect() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", crate::rights())
+        .expect("standing library");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    verifier
+        .operate(&call, &guest(roll), Operation::Append)
+        .expect("first child effect");
+    verifier
+        .operate(&call, &guest(roll), Operation::Append)
+        .expect("a standing grant allows another child effect");
+    verifier
+        .operate(&call, &guest(library), Operation::Append)
+        .expect("the issuing grant stays");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("the child journal stays");
 }

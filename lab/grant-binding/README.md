@@ -27,6 +27,8 @@ reference model, not the Runtime; counts toward no M1 check; the Runtime half is
 
 `resolve` reads the issuing grant's expiry for a derived journal. The child keeps no expiry of its own. A use of that journal is refused when `verifier_now` is at or after the issuing expiry. An unset issuing expiry is not due. This is the same one expiry check `model_expired_grant_is_refused` already uses. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
 
+`Verifier::operate` on a derived journal ends an allow-once issuing grant through the one `revoke_grant`. The journals minted from that grant end with it. A direct append or overwrite on the issuing grant still removes only that handle. A child-journal mint does not end the grant. A standing grant stays. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
 `Verifier::admit_ask` caps one agent's budget ask and stores the granted amount through the one `admit`. This is a lab stand-in for that admission. It is not the Runtime. It does not count toward A7 or M1-R.
 
 A forged identity, session, instance, usage, ceiling or set of rights changes
