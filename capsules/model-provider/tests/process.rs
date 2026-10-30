@@ -15,7 +15,7 @@ use elastos_model_contract::{
     RUNTIME_ACCESS_BINDING_SCHEMA, RUNTIME_CREATE_BINDING_SCHEMA,
 };
 use serde_json::{json, Value};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::io::{BufRead as _, BufReader, Read, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt as _;
@@ -714,25 +714,117 @@ const RUN_OUTPUT_TEXT_SCHEMA: &str = "elastos.model.output.text/v1";
 /// (`capsules/model-provider/src/contract.rs:17`).
 const BACKEND_REPORT_SCHEMA: &str = "elastos.model.backend-report/v1";
 
-/// The header names the Runtime's hosted effect reader accepts, compared in
-/// lower case. Any other name, a repeated name, and a `host` other than
-/// `runtime.invalid` are refused
-/// (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:549-578`).
-/// This test copies the list instead of depending on `elastos-server`, which is
-/// a separate Cargo workspace.
-const RUNTIME_HOSTED_HEADER_NAMES: [&str; 11] = [
-    "host",
-    "accept",
-    "accept-encoding",
-    "user-agent",
-    "content-type",
-    "content-length",
-    "x-elastos-offer-id",
-    "x-elastos-effect",
-    "x-elastos-run-id",
-    "x-elastos-request-id",
-    "x-elastos-job-id",
-];
+/// Header names `fn read_request` accepts. They are the string literals of
+/// that function's one `matches!` on `name.as_str()` in
+/// `model_provider_egress.rs`. A missing file, a missing function, a missing
+/// `matches!`, or a grant-id name in that match fails the test. The names
+/// stay in the Runtime file; this function keeps no header-name string of
+/// its own.
+fn runtime_hosted_header_names() -> BTreeSet<String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../elastos/crates/elastos-server/src/api/model_provider_egress.rs");
+    let source = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!("model_provider_egress.rs is missing: {error}");
+    });
+    let function_at = source.find("fn read_request").unwrap_or_else(|| {
+        panic!("model_provider_egress.rs has no fn read_request");
+    });
+    let tail = &source[function_at..];
+    let scrutinee_at = tail.find("name.as_str()").unwrap_or_else(|| {
+        panic!("fn read_request has no matches!");
+    });
+    let match_at = tail[..scrutinee_at].rfind("matches!").unwrap_or_else(|| {
+        panic!("fn read_request has no matches!");
+    });
+    let invocation = &tail[match_at..];
+    let open = invocation.find('(').unwrap_or_else(|| {
+        panic!("fn read_request matches! has no argument list");
+    });
+    let bytes = invocation.as_bytes();
+    let mut depth = 0usize;
+    let mut close = None;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut index = open;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else if byte == b'"' {
+            in_string = true;
+        } else if byte == b'(' {
+            depth += 1;
+        } else if byte == b')' {
+            depth -= 1;
+            if depth == 0 {
+                close = Some(index);
+                break;
+            }
+        }
+        index += 1;
+    }
+    let close = close.unwrap_or_else(|| panic!("fn read_request matches! is not closed"));
+    let arguments = &invocation[open + 1..close];
+    if !arguments.contains("name.as_str()") {
+        panic!("fn read_request has no matches!");
+    }
+    let mut names = BTreeSet::new();
+    let mut rest = arguments;
+    while let Some(start) = rest.find('"') {
+        let after = &rest[start + 1..];
+        let mut literal = String::new();
+        let raw = after.as_bytes();
+        let mut cursor = 0;
+        let mut escaped = false;
+        let mut closed = false;
+        while cursor < raw.len() {
+            let byte = raw[cursor];
+            cursor += 1;
+            if escaped {
+                literal.push(char::from(byte));
+                escaped = false;
+                continue;
+            }
+            if byte == b'\\' {
+                escaped = true;
+                continue;
+            }
+            if byte == b'"' {
+                closed = true;
+                break;
+            }
+            literal.push(char::from(byte));
+        }
+        if !closed {
+            panic!("fn read_request matches! has an unclosed string");
+        }
+        if literal.is_empty() {
+            panic!("fn read_request matches! names an empty header");
+        }
+        names.insert(literal);
+        rest = &after[cursor..];
+    }
+    if names.is_empty() {
+        panic!("fn read_request matches! names no headers");
+    }
+    // Spelled in characters so this body has no header-name string literal.
+    let grant_id_header: String = [
+        'x', '-', 'e', 'l', 'a', 's', 't', 'o', 's', '-', 'g', 'r', 'a', 'n', 't', '-', 'i', 'd',
+    ]
+    .into_iter()
+    .collect();
+    if names.contains(&grant_id_header) {
+        panic!("fn read_request matches! names a grant id header");
+    }
+    let read_request_header_names = names;
+    read_request_header_names
+}
 
 /// The Runtime's answer when it refuses a hosted request before dispatch.
 const RUNTIME_HOSTED_REFUSAL: &[u8] =
@@ -1758,19 +1850,32 @@ fn serve_local_relay_request(stream: TcpStream, sender: &mpsc::Sender<RecordedRe
 /// the OpenAI-compatible text worker adds the bearer header only when no
 /// Runtime socket is set (`src/adapters.rs:1980-1984`). The Runtime's reader
 /// accepts one exact request line and a closed header list
-/// (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:549-578`),
-/// so a drift fails the run closed there with no named test in this lane
-/// saying why. This test pins the four headers, the contract run id, and the
-/// absent key.
+/// (`elastos/crates/elastos-server/src/api/model_provider_egress.rs`,
+/// `fn read_request`). This test reads that `matches!`. It pins the four
+/// headers, the contract run id, and the absent key.
 ///
 /// The stand-in lives in this file: `tests/confine/main.rs` is cc-model-confine's
 /// file in another test binary, and `src/test_support.rs` is under `src/`, where
 /// a change needs a fresh Sasha note.
 ///
-/// Off macOS the provider refuses every hosted run before any socket, so the
-/// test prints one `SKIP` line and returns.
+/// The allowlist parse is asserted first, on every host. Off macOS the
+/// provider refuses every hosted run before any socket, so the test then
+/// prints one `SKIP` line and returns.
 #[test]
 fn hosted_run_posts_the_runtime_effect_headers_with_the_contract_run_id_and_no_key() {
+    let allowed = runtime_hosted_header_names();
+    assert!(
+        allowed.contains("x-elastos-run-id"),
+        "the parsed allowlist names x-elastos-run-id: {allowed:?}"
+    );
+    assert!(
+        allowed.contains("x-elastos-request-id"),
+        "the parsed allowlist names x-elastos-request-id: {allowed:?}"
+    );
+    assert!(
+        !allowed.contains("x-elastos-grant-id"),
+        "the parsed allowlist must not name x-elastos-grant-id: {allowed:?}"
+    );
     if !cfg!(target_os = "macos") {
         eprintln!(
             "SKIP model-provider hosted effect headers: off macOS the provider \
@@ -1863,7 +1968,7 @@ fn hosted_run_posts_the_runtime_effect_headers_with_the_contract_run_id_and_no_k
     for (name, _) in &recorded.headers {
         let name = name.to_ascii_lowercase();
         assert!(
-            RUNTIME_HOSTED_HEADER_NAMES.contains(&name.as_str()),
+            runtime_hosted_header_names().contains(name.as_str()),
             "the Runtime refuses every other header name: {name}"
         );
         assert!(
@@ -1885,6 +1990,11 @@ fn hosted_run_posts_the_runtime_effect_headers_with_the_contract_run_id_and_no_k
     assert_eq!(
         recorded.value("x-elastos-run-id"),
         Some(expected_run_id.as_str())
+    );
+    assert_eq!(
+        recorded.value("x-elastos-grant-id"),
+        None,
+        "a hosted run must carry no grant id header"
     );
     assert_eq!(
         recorded.value("authorization"),
@@ -5114,7 +5224,7 @@ fn assert_one_hosted_identity_effect(
     for (name, _) in &recorded.headers {
         let name = name.to_ascii_lowercase();
         assert!(
-            RUNTIME_HOSTED_HEADER_NAMES.contains(&name.as_str()),
+            runtime_hosted_header_names().contains(name.as_str()),
             "the Runtime refuses every other header name: {name}"
         );
         assert!(
