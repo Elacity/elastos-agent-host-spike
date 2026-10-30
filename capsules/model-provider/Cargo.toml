@@ -26,13 +26,7 @@ url = "2.5"
 [dev-dependencies]
 # Paused Tokio clock for tests that hold a deadline until a fixture engine has started.
 tokio = { version = "1.0", features = ["test-util"] }
-# The shared stand-in's own tests compile into this binary, so its fixture
-# signing needs the same crates as `lab/agent-conformance`'s dev-dependencies.
-capsule-identity = { path = "../../lab/capsule-identity" }
-ed25519-dalek = "2.1"
-elastos-identity = { path = "../../elastos/crates/elastos-identity" }
-rand = "0.8"
-# The stand-in opens and checks each storage file by handle; this crate's
-# `tests/process.rs` includes its source, so it needs the same crate.
-rustix = { version = "=1.1.4", features = ["fs"] }
+# `tests/process.rs` drives the shared live-grant stand-in through the crate
+# that owns it, instead of compiling a second copy of its source.
+agent-conformance = { path = "../../lab/agent-conformance" }
 tempfile = "3"
