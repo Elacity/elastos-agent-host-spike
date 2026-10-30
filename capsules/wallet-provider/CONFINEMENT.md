@@ -1520,6 +1520,12 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - WP222: A `none:` row's allow quote is not read, so the subpath form on that
   row passes.
   `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP223: `socket` is added to the `STORAGE_ROOT` row, so an allow-form row
+  admits a network call.
+  `seccomp_program_denies_by_default_and_lists_no_undeclared_call` checks this
+  rule.
+- WP224: The socket sweep judge accepts a returned descriptor for one family.
+  `socket_sweep_reports_every_family_and_type_refused` checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

@@ -6450,9 +6450,10 @@ fn read_declared_rights(name: &str, path: &Path) -> Result<Value, String> {
 /// callers make. The startup rows carry the loader's start reads and the kernel
 /// facts `sysctl-read` names.
 ///
-/// `ptrace`, `mount`, `bpf` and `keyctl` appear in no row, so the program's
-/// default decision is the only answer they receive. Adding one of them to a
-/// row would grant it and turn
+/// `ptrace`, `mount`, `bpf`, `keyctl`, `socket`, `socketpair`, `connect`,
+/// `sendmsg`, `recvmsg`, `process_vm_readv`, `process_vm_writev` and
+/// `pidfd_getfd` appear in no row, so the program's default decision is the only
+/// answer they receive. Adding one of them to a row would grant it and turn
 /// `seccomp_program_denies_by_default_and_lists_no_undeclared_call` red.
 ///
 /// This table is the only source of the list's syscalls: the builder adds none
@@ -6527,9 +6528,16 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
 
 /// The system call numbers the filter tests against, per audit architecture:
 /// x86-64 first, then aarch64. `None` marks a call the target does not have.
+///
+/// The socket rows carry the number `libc::SYS_*` gives that architecture:
+/// `socket`, `socketpair`, `connect`, `sendmsg`, `recvmsg`, `process_vm_readv`,
+/// `process_vm_writev` and `pidfd_getfd`. No allow-form row names one of them,
+/// so each keeps the default decision, and the journey's sweep proves the
+/// refusal on the Linux host.
 const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("bpf", Some(321), Some(280)),
     ("close", Some(3), Some(57)),
+    ("connect", Some(42), Some(203)),
     ("execve", Some(59), Some(221)),
     ("execveat", Some(322), Some(281)),
     ("exit_group", Some(231), Some(94)),
@@ -6551,15 +6559,22 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("newfstatat", Some(262), Some(79)),
     ("openat", Some(257), Some(56)),
     ("openat2", Some(437), Some(437)),
+    ("pidfd_getfd", Some(438), Some(438)),
     ("ppoll", Some(271), Some(73)),
     ("pread64", Some(17), Some(67)),
+    ("process_vm_readv", Some(310), Some(270)),
+    ("process_vm_writev", Some(311), Some(271)),
     ("ptrace", Some(101), Some(117)),
     ("pwrite64", Some(18), Some(68)),
     ("read", Some(0), Some(63)),
     ("readlinkat", Some(267), Some(78)),
     ("readv", Some(19), Some(65)),
+    ("recvmsg", Some(47), Some(212)),
     ("renameat2", Some(316), Some(276)),
     ("rt_sigaction", Some(13), Some(134)),
+    ("sendmsg", Some(46), Some(211)),
+    ("socket", Some(41), Some(198)),
+    ("socketpair", Some(53), Some(199)),
     ("statx", Some(332), Some(291)),
     ("sysinfo", Some(99), Some(179)),
     ("uname", Some(63), Some(160)),
@@ -6658,7 +6673,8 @@ impl SeccompAllowList {
     /// The launch set is measured, not declared: no declared right covers a
     /// runtime's own plumbing, and a launch that loses one cannot speak its
     /// protocol. `LAUNCH_ESSENTIALS` holds none of the four calls the default
-    /// decision refuses, so adding the set leaves their answer unchanged.
+    /// decision refuses, and none of the socket calls either, so adding the set
+    /// leaves every one of their answers unchanged.
     ///
     /// It makes no kernel call and reads no file, so it runs on every OS: the
     /// journey that installs the result is Linux-only, and the list a launch
@@ -8666,12 +8682,23 @@ fn seccomp_probe_answers(call: &str) -> SeccompAnswer {
 /// The test reads the built program, starts no process and calls no kernel, so
 /// it runs on every OS.
 ///
+/// It holds two sets of calls that are in no allow-list entry. `ptrace`,
+/// `mount`, `bpf` and `keyctl` are the calls the kernel proof measures, and the
+/// socket calls are the network row's whole-call refusal: `socket`,
+/// `socketpair`, `connect`, `sendmsg`, `recvmsg`, `process_vm_readv`,
+/// `process_vm_writev` and `pidfd_getfd`. Each socket call must have a number row
+/// on this target, and a call whose row is `None` here is reported as not covered
+/// on this target rather than skipped silently. On a Linux target each of those
+/// rows must also equal the number `libc::SYS_*` gives the call, so the table
+/// cannot drift from the header it was written from.
+///
 /// Falsifier: WP146 replaces the default decision with `ALLOW` and refuses only
 /// `socket`, `connect` and `execve`, so the last instruction allows. WP150
 /// admits both architecture branches. WP151 makes a false jump land on its own
 /// `ALLOW`, so a call the test does not name is admitted. WP161 tests `ptrace`'s
 /// number where an admitted syscall's belongs, so the program tests a number no
-/// row names and admits a call the list never derived.
+/// row names and admits a call the list never derived. WP223 adds `socket` to the
+/// `STORAGE_ROOT` row, so an allow-form row admits a network call.
 #[test]
 fn seccomp_program_denies_by_default_and_lists_no_undeclared_call() {
     let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
@@ -8755,13 +8782,26 @@ fn seccomp_program_denies_by_default_and_lists_no_undeclared_call() {
         allow.syscalls
     );
 
-    for denied in ["bpf", "keyctl", "mount", "ptrace"] {
+    for denied in [
+        "bpf",
+        "connect",
+        "keyctl",
+        "mount",
+        "pidfd_getfd",
+        "process_vm_readv",
+        "process_vm_writev",
+        "ptrace",
+        "recvmsg",
+        "sendmsg",
+        "socket",
+        "socketpair",
+    ] {
         assert!(
             !allow.admits(denied),
             "{denied} must be in no allow-list entry, so the default decision refuses it"
         );
         let Some(number) = seccomp_syscall_number(denied, SECCOMP_AUDIT_ARCH) else {
-            continue;
+            panic!("{denied} has no syscall number row on this target, so it is not covered here");
         };
         assert!(
             !program
@@ -8769,6 +8809,26 @@ fn seccomp_program_denies_by_default_and_lists_no_undeclared_call() {
                 .any(|instruction| instruction.code == SECCOMP_BPF_JEQ_K
                     && instruction.k == number),
             "the program must test no equality against {denied}'s number {number}"
+        );
+    }
+    // On the target the numbers describe, each socket row must equal the number
+    // this crate's `libc` gives that call, so the table cannot drift from the
+    // kernel header it was written from.
+    #[cfg(target_os = "linux")]
+    for (name, libc_number) in [
+        ("socket", libc::SYS_socket),
+        ("socketpair", libc::SYS_socketpair),
+        ("connect", libc::SYS_connect),
+        ("sendmsg", libc::SYS_sendmsg),
+        ("recvmsg", libc::SYS_recvmsg),
+        ("process_vm_readv", libc::SYS_process_vm_readv),
+        ("process_vm_writev", libc::SYS_process_vm_writev),
+        ("pidfd_getfd", libc::SYS_pidfd_getfd),
+    ] {
+        assert_eq!(
+            seccomp_syscall_number(name, SECCOMP_AUDIT_ARCH),
+            Some(libc_number as u32),
+            "{name}'s row must be the number libc gives this target"
         );
     }
 
@@ -9530,6 +9590,126 @@ fn running_programs(program: &Path) -> Vec<libc::pid_t> {
     pids
 }
 
+/// What one socket type's sweep reported: the type's name, the family bound the
+/// child walked, how many families answered the deny marker before the filter,
+/// how many answered it after, and the first family that answered something
+/// else after it.
+///
+/// It is a plain value, so the Mac can hold fixture sweeps and the journey can
+/// hold the child's. The family bound is the sweep's own number and never a
+/// `libc` constant here, so the judge names none and runs on every OS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SocketSweep {
+    name: &'static str,
+    families: usize,
+    refused_before: usize,
+    refused_after: usize,
+    first_unrefused: Option<usize>,
+}
+
+/// Judges the socket sweeps the probe reported against the types the one type
+/// table names. It reads the values it is given, so it makes no kernel call,
+/// reads no file and starts no process, and it runs on every OS.
+///
+/// It refuses, with a reason that names the type and the family where there is
+/// one: a type the table names and the report omits; an after-count below the
+/// family bound, which means the filter admitted at least one family, and the
+/// family that was not refused when the line names one; a before-count that
+/// covers every family, which is missing evidence rather than a pass, because a
+/// host that already refuses a call cannot stand in for the filter; and a family
+/// named as not refused at or above the sweep's own family bound, which means
+/// the line does not describe the sweep it claims.
+fn socket_sweep_problem(sweeps: &[SocketSweep], types: &[&'static str]) -> Result<(), String> {
+    for name in types {
+        let sweep = sweeps
+            .iter()
+            .find(|sweep| sweep.name == *name)
+            .ok_or_else(|| format!("socket sweep: the report records no line for {name}"))?;
+        if sweep.refused_after < sweep.families {
+            return Err(match sweep.first_unrefused {
+                Some(family) => format!(
+                    "socket sweep: {name} refused only {} of {} families after the filter, and \
+                     family {family} was not refused",
+                    sweep.refused_after, sweep.families
+                ),
+                None => format!(
+                    "socket sweep: {name} refused only {} of {} families after the filter, so the \
+                     filter does not refuse the whole call",
+                    sweep.refused_after, sweep.families
+                ),
+            });
+        }
+        if sweep.refused_before >= sweep.families {
+            return Err(format!(
+                "socket sweep: {name} was refused for every one of its {} families before the \
+                 filter, so this host cannot stand in for the filter",
+                sweep.families
+            ));
+        }
+        if let Some(family) = sweep.first_unrefused {
+            if family >= sweep.families {
+                return Err(format!(
+                    "socket sweep: {name} names family {family} as not refused, and its family \
+                     count is {}",
+                    sweep.families
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The prefix every probe socket-sweep line starts with.
+#[cfg(target_os = "linux")]
+const SECCOMP_PROBE_SOCKETS: &str = "seccomp-probe-socket:";
+
+/// The marker a sweep line writes in place of a family number when every family
+/// was refused.
+#[cfg(target_os = "linux")]
+const SECCOMP_SOCKET_UNREFUSED_NONE: &str = "none";
+
+/// The socket types the sweep walks for every family, one row per type the
+/// crate defines for this target. The name is the crate's own constant name, so
+/// a report line says which type it swept and the document can name it.
+///
+/// `SOCK_PACKET` is deprecated in `libc` because `AF_PACKET` replaces it, and the
+/// sweep still walks it because the design names it among the types a filter
+/// must refuse; the deprecation note is silenced for this table alone.
+#[cfg(target_os = "linux")]
+#[allow(deprecated)]
+const SECCOMP_SOCKET_SWEEP_TYPES: &[(&str, libc::c_int)] = &[
+    ("SOCK_STREAM", libc::SOCK_STREAM),
+    ("SOCK_DGRAM", libc::SOCK_DGRAM),
+    ("SOCK_SEQPACKET", libc::SOCK_SEQPACKET),
+    ("SOCK_RAW", libc::SOCK_RAW),
+    ("SOCK_RDM", libc::SOCK_RDM),
+    ("SOCK_DCCP", libc::SOCK_DCCP),
+    ("SOCK_PACKET", libc::SOCK_PACKET),
+];
+
+/// The name the `socketpair` sweep reports under. `socketpair` is swept over the
+/// same family bound as every type row, so it is one more line and not a fourth
+/// kind of probe.
+#[cfg(target_os = "linux")]
+const SECCOMP_SOCKET_PAIR_NAME: &str = "socketpair";
+
+/// The socket type the `socketpair` sweep asks for: `SOCK_STREAM`, the type a
+/// Unix-domain socket pair is made with. The filter refuses `socketpair` by
+/// number whatever the type is.
+#[cfg(target_os = "linux")]
+const SECCOMP_SOCKET_PAIR_TYPE: libc::c_int = libc::SOCK_STREAM;
+
+/// The family bound the child sweeps: every family number the crate defines,
+/// plus one, so family `44` (`AF_XDP`, the highest this crate defines for
+/// Linux) is swept and nothing above it is claimed.
+///
+/// This target's `libc` defines no `AF_MAX`, so the bound is built from the
+/// highest family constant it does define. `CONFINEMENT-LINUX.md` names the
+/// bound it produced. The judge never reads it: it reads each sweep's own
+/// count.
+#[cfg(target_os = "linux")]
+const SECCOMP_SOCKET_FAMILY_BOUND: libc::c_int = libc::AF_XDP + 1;
+
 /// The prefix every probe record line starts with.
 #[cfg(target_os = "linux")]
 const SECCOMP_PROBE_MARKER: &str = "seccomp-probe:";
@@ -9544,12 +9724,15 @@ const SECCOMP_PROBE_ALLOCATIONS: &str = "seccomp-probe-allocations:";
 #[cfg(target_os = "linux")]
 const SECCOMP_MODE_FILTER: u32 = 2;
 
-/// The probe child's report: one `(call, before, after)` per refused call, and
-/// the number of times the child allocated after its fork.
+/// The probe child's report: one `(call, before, after)` per refused call, one
+/// `SocketSweep` per socket type the sweep walked, and the number of times the
+/// child allocated after its fork.
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SeccompProbeReport {
     records: Vec<(&'static str, SeccompAnswer, SeccompAnswer)>,
+    /// The socket sweeps, in the type table's order.
+    sweeps: Vec<SocketSweep>,
     /// The child's own allocation count after the fork, which must be zero.
     allocations: usize,
 }
@@ -9559,8 +9742,8 @@ struct SeccompProbeReport {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SeccompProbeRun {
-    /// The kernel proof: record the four calls, install the filter, record them
-    /// again and report.
+    /// The kernel proof: record the four calls and the socket sweeps, install
+    /// the filter, record them again and report.
     Filter,
     /// Exit at once with no report, so a complete report is required to pass.
     WithoutReport,
@@ -9577,9 +9760,131 @@ enum SeccompProbeRun {
     CheckInheritedDescriptors([std::os::fd::RawFd; 2]),
 }
 
-/// The probe child's own body: record the four calls, install the filter through
-/// `install_seccomp`, record them again, write one line per call and end the
-/// process at once.
+/// What one socket family answers for one type: how many families the sweep
+/// walked, how many answered the deny marker, and the first family that did
+/// not.
+///
+/// The child allocates nothing after its fork, so every answer it counts lives
+/// in a fixed value and the report is written from a fixed buffer.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SocketSweepCount {
+    families: usize,
+    refused: usize,
+    first_unrefused: Option<usize>,
+}
+
+#[cfg(target_os = "linux")]
+impl SocketSweepCount {
+    const EMPTY: Self = Self {
+        families: 0,
+        refused: 0,
+        first_unrefused: None,
+    };
+}
+
+/// Whether `result` is the deny marker, without formatting it.
+#[cfg(target_os = "linux")]
+fn socket_refused(result: libc::c_int) -> bool {
+    result == -1 && unsafe { *libc::__errno_location() } == SECCOMP_DENY_ERRNO
+}
+
+/// Sweeps one socket type over every family below `SECCOMP_SOCKET_FAMILY_BOUND`
+/// and counts the families that answered the deny marker.
+///
+/// Every descriptor the sweep opened is closed before it returns, whether its
+/// socket call succeeded or not, so a descriptor never leaves a type's sweep
+/// and never reaches the filtered run. Nothing here allocates: the counters are
+/// fixed values and the loop reads no table.
+#[cfg(target_os = "linux")]
+fn sweep_socket_type(socket_type: libc::c_int) -> SocketSweepCount {
+    let mut count = SocketSweepCount::EMPTY;
+    for family in 0..SECCOMP_SOCKET_FAMILY_BOUND {
+        count.families += 1;
+        let descriptor = unsafe { libc::socket(family, socket_type, 0) };
+        if socket_refused(descriptor) {
+            count.refused += 1;
+        } else {
+            if count.first_unrefused.is_none() {
+                count.first_unrefused = Some(family as usize);
+            }
+            if descriptor >= 0 {
+                unsafe { libc::close(descriptor) };
+            }
+        }
+    }
+    count
+}
+
+/// Sweeps `socketpair` over every family below the same bound and counts the
+/// families that answered the deny marker. A pair that was made is closed
+/// before the sweep moves on, so no descriptor is left behind.
+#[cfg(target_os = "linux")]
+fn sweep_socket_pair() -> SocketSweepCount {
+    let mut count = SocketSweepCount::EMPTY;
+    let mut pair = [0 as libc::c_int; 2];
+    for family in 0..SECCOMP_SOCKET_FAMILY_BOUND {
+        count.families += 1;
+        let result =
+            unsafe { libc::socketpair(family, SECCOMP_SOCKET_PAIR_TYPE, 0, pair.as_mut_ptr()) };
+        if socket_refused(result) {
+            count.refused += 1;
+        } else {
+            if count.first_unrefused.is_none() {
+                count.first_unrefused = Some(family as usize);
+            }
+            for descriptor in pair {
+                if descriptor >= 0 {
+                    unsafe { libc::close(descriptor) };
+                }
+            }
+        }
+        pair = [0 as libc::c_int; 2];
+    }
+    count
+}
+
+/// One socket line of the report: the type's name, the family bound, the count
+/// refused before the filter, the count refused after it, and the number of the
+/// first family not refused after it, or `none`.
+///
+/// It is written into a fixed buffer with `copy_bytes` and `copy_number`, so
+/// the child formats nothing and allocates nothing. One line is under 80 bytes,
+/// so nine lines fit beside the five record lines inside `PIPE_BUF`.
+#[cfg(target_os = "linux")]
+fn write_socket_sweep_line(
+    report: std::os::fd::RawFd,
+    name: &str,
+    before: SocketSweepCount,
+    after: SocketSweepCount,
+) {
+    let mut buffer = [0u8; 96];
+    let mut written = 0usize;
+    written += copy_bytes(&mut buffer[written..], SECCOMP_PROBE_SOCKETS.as_bytes());
+    written += copy_bytes(&mut buffer[written..], name.as_bytes());
+    written += copy_bytes(&mut buffer[written..], b" ");
+    written += copy_number(&mut buffer[written..], after.families as i64);
+    written += copy_bytes(&mut buffer[written..], b" ");
+    written += copy_number(&mut buffer[written..], before.refused as i64);
+    written += copy_bytes(&mut buffer[written..], b" ");
+    written += copy_number(&mut buffer[written..], after.refused as i64);
+    written += copy_bytes(&mut buffer[written..], b" ");
+    match after.first_unrefused {
+        Some(family) => written += copy_number(&mut buffer[written..], family as i64),
+        None => {
+            written += copy_bytes(
+                &mut buffer[written..],
+                SECCOMP_SOCKET_UNREFUSED_NONE.as_bytes(),
+            )
+        }
+    }
+    written += copy_bytes(&mut buffer[written..], b"\n");
+    write_all(report, &buffer[..written]);
+}
+
+/// The probe child's own body: record the four calls and sweep every socket
+/// type, install the filter through `install_seccomp`, record them again, write
+/// one line per call and per socket type and end the process at once.
 ///
 /// It runs in a forked child before any exec, so its filter reaches only that
 /// child and the harness above it stays unfiltered. It allocates nothing and
@@ -9658,6 +9963,14 @@ fn run_seccomp_probe_child(
     for (slot, call) in before.iter_mut().zip(SECCOMP_PROBE_CALLS) {
         *slot = seccomp_probe_answers(call);
     }
+    // The socket sweep, before the filter: one count per type table row, and one
+    // for `socketpair`. Every descriptor a family opened is closed inside its own
+    // sweep, so the filtered run below inherits no socket and no descriptor.
+    let mut sweep_before = [SocketSweepCount::EMPTY; SECCOMP_SOCKET_SWEEP_TYPES.len()];
+    for (slot, (_, socket_type)) in sweep_before.iter_mut().zip(SECCOMP_SOCKET_SWEEP_TYPES) {
+        *slot = sweep_socket_type(*socket_type);
+    }
+    let pair_before = sweep_socket_pair();
     // The probe installs the same filter the launcher installs, so it proves
     // that filter and not a second one. `LAUNCH_ESSENTIALS` holds none of the
     // four refused calls, so their answer is still the default decision.
@@ -9670,6 +9983,11 @@ fn run_seccomp_probe_child(
     for (slot, call) in after.iter_mut().zip(SECCOMP_PROBE_CALLS) {
         *slot = seccomp_probe_answers(call);
     }
+    let mut sweep_after = [SocketSweepCount::EMPTY; SECCOMP_SOCKET_SWEEP_TYPES.len()];
+    for (slot, (_, socket_type)) in sweep_after.iter_mut().zip(SECCOMP_SOCKET_SWEEP_TYPES) {
+        *slot = sweep_socket_type(*socket_type);
+    }
+    let pair_after = sweep_socket_pair();
     let mut buffer = [0u8; 512];
     for ((call, before), after) in SECCOMP_PROBE_CALLS.iter().zip(before).zip(after) {
         let mut written = 0usize;
@@ -9683,6 +10001,13 @@ fn run_seccomp_probe_child(
         written += copy_bytes(&mut buffer[written..], b"\n");
         write_all(report, &buffer[..written]);
     }
+    // One summary line per socket type and one for `socketpair`, so the sweep
+    // reaches the parent without a line per family: dozens of families times
+    // eight types would not fit `PIPE_BUF`.
+    for (index, (name, _)) in SECCOMP_SOCKET_SWEEP_TYPES.iter().enumerate() {
+        write_socket_sweep_line(report, name, sweep_before[index], sweep_after[index]);
+    }
+    write_socket_sweep_line(report, SECCOMP_SOCKET_PAIR_NAME, pair_before, pair_after);
     // The guard: this child writes how many times it allocated after the fork,
     // and the test that decides the rule requires the count to be zero. The
     // line is written whatever the count, so a child that allocated still
@@ -9843,6 +10168,90 @@ fn seccomp_allow_list_names_the_provider_it_was_built_for() {
     );
 }
 
+/// The one judge of the socket sweep accepts a report where every type swept
+/// every family and every family was refused after the filter, and refuses each
+/// way a report can fall short, with its own reason.
+///
+/// The fixtures are plain values, so this test makes no kernel call, reads no
+/// file and starts no process: it runs on every OS, and the Linux child that
+/// produces the real numbers is the only part gated on that host.
+///
+/// Falsifier: WP224 makes the judge accept a returned descriptor for one
+/// family, so the family 2 case passes and this test fails on that case's
+/// reason.
+#[test]
+fn socket_sweep_reports_every_family_and_type_refused() {
+    const TYPES: [&str; 2] = ["SOCK_STREAM", "socketpair"];
+    const FAMILIES: usize = 45;
+    let refused = |name: &'static str| SocketSweep {
+        name,
+        families: FAMILIES,
+        refused_before: 1,
+        refused_after: FAMILIES,
+        first_unrefused: None,
+    };
+    let clean = [refused(TYPES[0]), refused(TYPES[1])];
+    socket_sweep_problem(&clean, &TYPES)
+        .unwrap_or_else(|problem| panic!("a fully refused sweep must pass: {problem}"));
+
+    let omitted = [refused(TYPES[0])];
+    assert_eq!(
+        socket_sweep_problem(&omitted, &TYPES).unwrap_err(),
+        "socket sweep: the report records no line for socketpair",
+        "a type the table names and the report omits must be refused by name"
+    );
+
+    let short = [
+        refused(TYPES[0]),
+        SocketSweep {
+            refused_after: FAMILIES - 1,
+            first_unrefused: Some(2),
+            ..refused(TYPES[1])
+        },
+    ];
+    assert_eq!(
+        socket_sweep_problem(&short, &TYPES).unwrap_err(),
+        format!(
+            "socket sweep: socketpair refused only {} of {FAMILIES} families after the filter, \
+             and family 2 was not refused",
+            FAMILIES - 1
+        ),
+        "a type whose after-count is below the family count must name the family"
+    );
+
+    let control = [
+        refused(TYPES[0]),
+        SocketSweep {
+            refused_before: FAMILIES,
+            ..refused(TYPES[1])
+        },
+    ];
+    assert_eq!(
+        socket_sweep_problem(&control, &TYPES).unwrap_err(),
+        format!(
+            "socket sweep: socketpair was refused for every one of its {FAMILIES} families before \
+             the filter, so this host cannot stand in for the filter"
+        ),
+        "a before-count that covers every family is missing evidence, not a pass"
+    );
+
+    let outside = [
+        refused(TYPES[0]),
+        SocketSweep {
+            first_unrefused: Some(FAMILIES),
+            ..refused(TYPES[1])
+        },
+    ];
+    assert_eq!(
+        socket_sweep_problem(&outside, &TYPES).unwrap_err(),
+        format!(
+            "socket sweep: socketpair names family {FAMILIES} as not refused, and its family \
+             count is {FAMILIES}"
+        ),
+        "a family named as unrefused at or above the family count must be refused"
+    );
+}
+
 /// Copies `bytes` into `into` and returns how much it wrote. The probe's report
 /// is built in a fixed buffer after the filter is installed, where no allocator
 /// may be called.
@@ -9860,7 +10269,15 @@ fn copy_answer(into: &mut [u8], answer: SeccompAnswer) -> usize {
         SeccompAnswer::Errno(errno) => (&b"errno:"[..], i64::from(errno)),
         SeccompAnswer::Returned(value) => (&b"ok:"[..], value),
     };
-    let mut written = copy_bytes(into, prefix);
+    let written = copy_bytes(into, prefix);
+    written + copy_number(&mut into[written..], value)
+}
+
+/// Writes `value` in decimal into `into` and returns how much it wrote, without
+/// formatting a `String`. The answer line and the socket sweep line both use it,
+/// so the report has one number writer (P10).
+#[cfg(target_os = "linux")]
+fn copy_number(into: &mut [u8], value: i64) -> usize {
     let mut digits = [0u8; 20];
     let mut count = 0usize;
     let negative = value < 0;
@@ -9873,6 +10290,7 @@ fn copy_answer(into: &mut [u8], answer: SeccompAnswer) -> usize {
             break;
         }
     }
+    let mut written = 0usize;
     if negative {
         written += copy_bytes(&mut into[written..], b"-");
     }
@@ -9970,6 +10388,21 @@ fn seccomp_denied_call_probe_with_pipe(
                         SeccompAnswer::Errno(libc::EPERM),
                         SeccompAnswer::Errno(SECCOMP_DENY_ERRNO),
                     )
+                })
+                .collect(),
+            // A complete fixture report carries one sweep line per swept type,
+            // so a parser that required them still reads this one. The numbers
+            // are fixtures: only the bounded wait decides this run.
+            sweeps: SECCOMP_SOCKET_SWEEP_TYPES
+                .iter()
+                .map(|(name, _)| *name)
+                .chain(std::iter::once(SECCOMP_SOCKET_PAIR_NAME))
+                .map(|name| SocketSweep {
+                    name,
+                    families: SECCOMP_SOCKET_FAMILY_BOUND as usize,
+                    refused_before: 0,
+                    refused_after: SECCOMP_SOCKET_FAMILY_BOUND as usize,
+                    first_unrefused: None,
                 })
                 .collect(),
             allocations: 0,
@@ -10186,6 +10619,16 @@ fn probe_report_text(report: &SeccompProbeReport) -> String {
             )
         })
         .collect();
+    for sweep in &report.sweeps {
+        let first_unrefused = match sweep.first_unrefused {
+            Some(family) => family.to_string(),
+            None => SECCOMP_SOCKET_UNREFUSED_NONE.to_string(),
+        };
+        text.push_str(&format!(
+            "{SECCOMP_PROBE_SOCKETS}{} {} {} {} {first_unrefused}\n",
+            sweep.name, sweep.families, sweep.refused_before, sweep.refused_after
+        ));
+    }
     text.push_str(&format!(
         "{SECCOMP_PROBE_ALLOCATIONS}{}\n",
         report.allocations
@@ -10194,9 +10637,15 @@ fn probe_report_text(report: &SeccompProbeReport) -> String {
 }
 
 /// The four records the probe child wrote, each with its unfiltered and filtered
-/// answer, and the child's own allocation count. A missing or unreadable record
-/// is a refusal that names the call, so a child that stopped early cannot pass
-/// the journey, and a missing count is its own refusal.
+/// answer, the socket sweep lines, and the child's own allocation count. A
+/// missing or unreadable record is a refusal that names the call, so a child
+/// that stopped early cannot pass the journey, and a missing count is its own
+/// refusal.
+///
+/// Every socket type the one type table names must have its own line; a report
+/// with no sweep line at all is a refusal, so an older child can never be read
+/// as a passing sweep. A missing type, a count that is not a number and a line
+/// with no known prefix each get their own reason.
 #[cfg(target_os = "linux")]
 fn parse_seccomp_probe_report(text: &str) -> Result<SeccompProbeReport, String> {
     let mut records = Vec::new();
@@ -10215,6 +10664,47 @@ fn parse_seccomp_probe_report(text: &str) -> Result<SeccompProbeReport, String> 
             .ok_or_else(|| format!("{call}: {after} is not an answer"))?;
         records.push((*call, before, after));
     }
+    let mut sweeps = Vec::new();
+    for name in SECCOMP_SOCKET_SWEEP_TYPES
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(std::iter::once(SECCOMP_SOCKET_PAIR_NAME))
+    {
+        let marker = format!("{SECCOMP_PROBE_SOCKETS}{name} ");
+        let line = text
+            .lines()
+            .find(|line| line.starts_with(&marker))
+            .ok_or_else(|| format!("the probe swept no socket type {name}: {text}"))?;
+        let mut fields = line[marker.len()..].split(' ');
+        let mut count = |label: &str| -> Result<usize, String> {
+            let field = fields
+                .next()
+                .ok_or_else(|| format!("{name} must report its {label}: {line}"))?;
+            field
+                .parse::<usize>()
+                .map_err(|err| format!("{name}: {field} is not its {label}: {err}"))
+        };
+        let families = count("family count")?;
+        let refused_before = count("before count")?;
+        let refused_after = count("after count")?;
+        let first_unrefused = fields
+            .next()
+            .ok_or_else(|| format!("{name} must report its first unrefused family: {line}"))?;
+        let first_unrefused = if first_unrefused == SECCOMP_SOCKET_UNREFUSED_NONE {
+            None
+        } else {
+            Some(first_unrefused.parse::<usize>().map_err(|err| {
+                format!("{name}: {first_unrefused} is not its first unrefused family: {err}")
+            })?)
+        };
+        sweeps.push(SocketSweep {
+            name,
+            families,
+            refused_before,
+            refused_after,
+            first_unrefused,
+        });
+    }
     let line = text
         .lines()
         .find(|line| line.starts_with(SECCOMP_PROBE_ALLOCATIONS))
@@ -10223,8 +10713,19 @@ fn parse_seccomp_probe_report(text: &str) -> Result<SeccompProbeReport, String> 
         .trim()
         .parse::<usize>()
         .map_err(|err| format!("the probe's allocation count is not a number: {line}: {err}"))?;
+    for line in text.lines() {
+        let known = line.starts_with(SECCOMP_PROBE_MARKER)
+            || line.starts_with(SECCOMP_PROBE_SOCKETS)
+            || line.starts_with(SECCOMP_PROBE_ALLOCATIONS);
+        if !known {
+            return Err(format!(
+                "the probe wrote a line with no known prefix: {line}"
+            ));
+        }
+    }
     Ok(SeccompProbeReport {
         records,
+        sweeps,
         allocations,
     })
 }
@@ -10350,6 +10851,43 @@ fn linux_seccomp_probe_reaps_failures_and_repeated_journeys() {
     assert_eq!(
         first.allocations, 0,
         "both kernel-proof children must allocate nothing after their forks"
+    );
+    assert_eq!(
+        first.sweeps.len(),
+        SECCOMP_SOCKET_SWEEP_TYPES.len() + 1,
+        "both kernel-proof children must sweep every socket type and socketpair"
+    );
+    // A report whose sweep lines are missing, unreadable or prefixed by a name
+    // no line uses is refused with its own reason, so an older child can never
+    // be read as a passing sweep.
+    let text = probe_report_text(&first);
+    let no_sweeps: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.starts_with(SECCOMP_PROBE_SOCKETS))
+        .collect();
+    let refusal = parse_seccomp_probe_report(&no_sweeps.join("\n"))
+        .expect_err("a report with no sweep line must be refused");
+    assert!(
+        refusal.starts_with("the probe swept no socket type SOCK_STREAM:"),
+        "a report with no sweep must name the first type: {refusal}"
+    );
+    let bad_count = text.replacen(
+        &format!("{SECCOMP_PROBE_SOCKETS}SOCK_STREAM "),
+        &format!("{SECCOMP_PROBE_SOCKETS}SOCK_STREAM not-a-number "),
+        1,
+    );
+    let refusal = parse_seccomp_probe_report(&bad_count)
+        .expect_err("a sweep count that is not a number must be refused");
+    assert!(
+        refusal.starts_with("SOCK_STREAM: not-a-number is not its family count:"),
+        "an unreadable count must name the type and the field: {refusal}"
+    );
+    let unknown = format!("{text}not-a-probe-line\n");
+    let refusal = parse_seccomp_probe_report(&unknown)
+        .expect_err("a line with no known prefix must be refused");
+    assert_eq!(
+        refusal, "the probe wrote a line with no known prefix: not-a-probe-line",
+        "an unknown line prefix must be refused with its own reason"
     );
     assert!(
         started.elapsed() < CHILD_EXIT_DEADLINE * 8,
@@ -12154,6 +12692,28 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
             probe.allocations, 0,
             "the probe child must allocate nothing after its fork"
         );
+        // The socket half of the network row: the same child swept every family
+        // for every type before and after the filter, and the one portable judge
+        // decides what it reported.
+        let types: Vec<&'static str> = SECCOMP_SOCKET_SWEEP_TYPES
+            .iter()
+            .map(|(name, _)| *name)
+            .chain(std::iter::once(SECCOMP_SOCKET_PAIR_NAME))
+            .collect();
+        socket_sweep_problem(&probe.sweeps, &types).unwrap_or_else(|problem| panic!("{problem}"));
+        for sweep in &probe.sweeps {
+            eprintln!(
+                "{}: {} families, refused before {}, after {}, first unrefused {}",
+                sweep.name,
+                sweep.families,
+                sweep.refused_before,
+                sweep.refused_after,
+                sweep.first_unrefused.map_or_else(
+                    || SECCOMP_SOCKET_UNREFUSED_NONE.to_string(),
+                    |family| family.to_string()
+                )
+            );
+        }
     }
 }
 

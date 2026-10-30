@@ -107,10 +107,16 @@ wallet's preserved policy. Both providers use the same launch table:
 | `rt_sigaction` | `rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[PIPE], sa_flags=SA_RESTART}, 0xffffea09ff80, 8)` in the loader |
 
 Four calls are in no row and in no launch entry, so the default decision is the
-only answer they receive: `ptrace`, `mount`, `bpf` and `keyctl`. The named test
+only answer they receive: `ptrace`, `mount`, `bpf` and `keyctl`. Eight socket
+calls are in no row and in no launch entry for the same reason: `socket`,
+`socketpair`, `connect`, `sendmsg`, `recvmsg`, `process_vm_readv`,
+`process_vm_writev` and `pidfd_getfd`. The named test
 `seccomp_program_denies_by_default_and_lists_no_undeclared_call` asserts each of
-the four is in no list entry and no table row and is tested by no equality in
-the program, so adding one to a row turns it red. The filter's marker errno is
+the twelve is in no list entry and no table row and is tested by no equality in
+the program, so adding one to a row turns it red. Each socket call has its own
+row in `SECCOMP_SYSCALL_NUMBERS`, taken from `libc::SYS_*` for x86-64 and
+aarch64, and a call whose row is `None` on a target is reported as not covered
+there instead of being skipped silently. The filter's marker errno is
 `EACCES` rather than `EPERM` on purpose: a host can already answer `EPERM` for a
 call an unprivileged process may not make, so a plain `EPERM` assertion would
 pass with no filter installed.
@@ -154,6 +160,16 @@ permission, as described below. Each test builds the list from its own
 provider's committed declared-rights file through `seccomp_probe_list` and starts
 that provider through `standin_spawn_confined_provider` with a `Seccomp` policy,
 which reaches `ConfinedProvider::start_under_seccomp` and its one `spawn`.
+
+The socket sweep was recorded on that host on 2026-10-31, on `aarch64` under
+kernel `6.17.0-1029-nvidia`. The wallet caller printed one line per socket type
+after `install_seccomp`: `SOCK_STREAM`, `SOCK_DGRAM`, `SOCK_SEQPACKET`,
+`SOCK_RAW`, `SOCK_RDM`, `SOCK_DCCP`, `SOCK_PACKET` and `socketpair` each answered
+the deny marker for all 45 families, and each answered something other than the
+marker for none of them before the filter. The did caller did not reach the probe
+in that run: it failed at `the confined provider must return the stored
+nickname`, which is the `fchmodat` block recorded below, so the sweep is claimed
+from the wallet caller alone.
 
 The wallet run requires `init` `ok`, one read-only wallet call `ok`, a
 `wallet-key.hex` of 64 hex digits and a newline under `STORAGE_ROOT`, no profile
@@ -223,8 +239,9 @@ both callers, so the did caller takes the same fixture by its own test name
 instead of a second copy of the technique. The parent returns after checking
 the child result, so each caller launches its provider once.
 
-Only the wallet journey runs the forked probe child, which records the four calls before the filter, installs
-the same filter through `install_seccomp`, and records them again:
+Only the wallet journey runs the forked probe child, which records the four calls
+and sweeps every socket type before the filter, installs the same filter through
+`install_seccomp`, and records and sweeps them again:
 
 | Call | Before the filter | After the filter |
 | --- | --- | --- |
@@ -582,7 +599,7 @@ design each row already stated.
 | `(deny default)`, processes and signals | A PID namespace; the empty capability set; a seccomp filter that refuses process creation other than the provider's own threads and every cross-process operation (`ptrace`, `process_vm_*`, `pidfd_getfd`). Landlock `EXECUTE` on `PROVIDER_EXECUTABLE` alone carries exec of any other file. | Exact for signals: a PID namespace contains no PID outside itself, so a signal to a host process cannot be expressed. Narrower for process creation because the provider's threads must start: the filter admits the thread form of `clone` and refuses a new process. The filter adds no exec rule: it sees only the syscall number and cannot read the path behind `execve`'s pointer, so it cannot separate the granted binary from another file, and a refusal by number would also refuse the provider's own launch, which the oracle permits. The Linux test decides the exact flag set. | `confined_provider_denies_process_and_signal_boundaries` |
 | `(deny default)`, IPC | An IPC namespace; seccomp refusing every `socket` and `socketpair` call, SysV IPC creation (`msgget` and `shmget` when the key is `IPC_PRIVATE` or the flags carry `IPC_CREAT`, both plain integer arguments the filter can read) and POSIX message queue creation (`mq_open` with `O_CREAT`); Landlock's default denial refusing reads and writes to shared-memory files. | Exact for host IPC objects: a private IPC namespace cannot name them, and the one SysV creation rule refuses every form including the private key. The `mq_open` rule refuses the `O_CREAT` form of the call, and the create also passes through the message queue filesystem ([mq_overview(7)](https://man7.org/linux/man-pages/man7/mq_overview.7.html)). Landlock's default denial would refuse that create only if the ruleset reaches the queue's internal mount; [Landlock's documentation](https://docs.kernel.org/userspace-api/landlock.html) does not settle that reach, and if it does not, no other layer refuses the create. The outcome is open, so the design leaves the `mq_open` falsifier unclaimed: a future isolated probe that drops only the `mq_open` `O_CREAT` refusal and records the outcome would settle it. Wider for a lookup of an existing object: `msgget(key, 0)` and `shmget(key, 0, 0)` are not refused, and inside the namespace they find nothing. Narrower for new objects if the provider needs none. The Linux test decides. | `confined_provider_denies_ipc_boundaries` |
 | `(deny default)`, kernel facts | A private, read-only `/proc` mount limited to the provider's own PID namespace and a hidden host `/sys`; Landlock denying reads outside the granted paths, with no `/proc` or `/sys` rule; seccomp refusing syscalls that read host kernel state (`bpf`, `perf_event_open`). | No exact match: the oracle denies every kernel-fact operation except `sysctl-read`, and Linux splits kernel facts across `/proc`, `/sys` and syscalls, so the map is wider in one place and narrower in another. The Linux test decides. | `confined_provider_denies_kernel_fact_boundaries` |
-| `(deny network*)`, with no network allow | A network namespace with no interface and no route; the empty capability set; seccomp refusing every `socket` and `socketpair` call by syscall number, with no family list, and refusing `connect`, `sendmsg`, `recvmsg`, `pidfd_getfd` and `process_vm_*` so no descriptor can arrive from outside. | Exact for every family the oracle refuses: the filter refuses the whole call instead of naming families, so no family is left out, Unix-domain included, and the namespace removes every interface. macOS puts a Unix-domain connect under `network*` (cc-model-confine 010, macOS 26.5.2), so this row covers it too. | `profile_denies_network` (the oracle text) and `linux_profile_denies_every_socket_family` (the policy) |
+| `(deny network*)`, with no network allow | A network namespace with no interface and no route; the empty capability set; seccomp refusing every `socket` and `socketpair` call by syscall number, with no family list, and refusing `connect`, `sendmsg`, `recvmsg`, `pidfd_getfd` and `process_vm_*` so no descriptor can arrive from outside. | Exact for every family the oracle refuses: the filter refuses the whole call instead of naming families, so no family is left out, Unix-domain included, and the namespace removes every interface. macOS puts a Unix-domain connect under `network*` (cc-model-confine 010, macOS 26.5.2), so this row covers it too. The policy half is claimed from a recorded run: on `spark1.local` (`aarch64`, kernel `6.17.0-1029-nvidia`, 2026-10-31) the wallet caller swept 45 families for `SOCK_STREAM`, `SOCK_DGRAM`, `SOCK_SEQPACKET`, `SOCK_RAW`, `SOCK_RDM`, `SOCK_DCCP`, `SOCK_PACKET` and `socketpair`, and every family answered the deny marker. The did caller did not reach the probe, so its sweep is not claimed. The namespace half stays unclaimed: no network namespace is built on this host. | `profile_denies_network` (the oracle text), `socket_sweep_reports_every_family_and_type_refused` (the policy check, which runs on every OS) and the two journey callers `linux_wallet_journey_runs_under_the_seccomp_allow_list` and `linux_did_journey_runs_under_the_seccomp_allow_list` (the sweep on a Linux host) |
 | no `(allow default)` | The generator emits only the rights the oracle grants; the launch adds no permissive rule. | Exact: the Linux policy has no permissive term, and the one contract check refuses one in the oracle. | `both_file_profiles_bind_one_storage_parameter_contract` and `file_profile_contract_rejects_an_allow_default` |
 | Only `PROVIDER_EXECUTABLE`, `STORAGE_ROOT` and `STORAGE_PARENT` | The same three parameters, bound to the same paths; the parent takes no path rule, and its row says why. The launch specification accepts no other path. | Exact: no other path enters the policy. | `both_file_profiles_bind_one_storage_parameter_contract` and `file_profile_contract_rejects_a_non_canonical_token` |
 | `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))` | Landlock `EXECUTE` on the file named by `PROVIDER_EXECUTABLE`; no other layer carries exec, because a seccomp filter sees only the syscall number and cannot read the path behind `execve`'s pointer. | Exact: a Landlock rule on a file grants only that file, the oracle's `literal` names only that file, and the design gives the whole exec rule to Landlock. | `confined_provider_serves_did_operations_under_its_root` and `confined_provider_serves_wallet_operations_under_its_root` |
@@ -913,18 +930,47 @@ no macOS counterpart is named here for the first time.
   start the provider unconfined when a primitive is missing (the provider
   answers and the test fails), or return a fixed reason that names no primitive
   (each test fails on the reason).
-- `profile_denies_network` runs on Linux today and checks the oracle text.
-  `linux_profile_denies_every_socket_family` (new) starts a test probe under the
-  same Linux policy and calls `socket(family, type)` for every address family
-  number from 0 to `AF_MAX` and every socket type (`SOCK_STREAM`, `SOCK_DGRAM`,
-  `SOCK_SEQPACKET`, `SOCK_RAW`, `SOCK_RDM`, `SOCK_DCCP`, `SOCK_PACKET`), and
-  `socketpair` for each type, and requires every call to fail with `EPERM`. It
-  also requires a `connect` to a Unix-domain stand-in to fail, and the provider
-  to stay in service. Falsifier:
-  replace the whole-call refusal with a family list that omits `AF_VSOCK`;
-  `socket(AF_VSOCK, SOCK_STREAM)` succeeds and the test fails. Because the test
-  covers every family number and every type, a list that omits any one of them
-  fails.
+- `profile_denies_network` runs on Linux today and checks the oracle text. Its
+  policy half is split in two, as the backlog's item 51 requires: the rule is a
+  pure function the Mac drives, and only the child that produces real numbers and
+  its parser are `#[cfg(target_os = "linux")]`.
+  `socket_sweep_reports_every_family_and_type_refused` runs on every OS and
+  drives `socket_sweep_problem(sweeps, types)` with plain `SocketSweep` values.
+  It accepts a sweep where every type was refused for every family after the
+  filter, and it refuses, with its own reason, a type the table names and the
+  report omits, a type whose after-count is below its family count, a type whose
+  before-count covers every family (missing evidence, not a pass), and a family
+  named as not refused at or above that sweep's own family bound. The judge names
+  no `libc` constant, makes no kernel call, reads no file and starts no process.
+  On a Linux host the one probe child sweeps every family below
+  `SECCOMP_SOCKET_FAMILY_BOUND` for each type of `SECCOMP_SOCKET_SWEEP_TYPES`
+  (`SOCK_STREAM`, `SOCK_DGRAM`, `SOCK_SEQPACKET`, `SOCK_RAW`, `SOCK_RDM`,
+  `SOCK_DCCP`, `SOCK_PACKET`) and `socketpair` with `SOCK_STREAM`, once before
+  `install_seccomp` and once after, closes every descriptor each family opened,
+  and writes one summary line per type with `copy_bytes` and `copy_number` into a
+  fixed buffer, through the existing `write_all`. This target's `libc` defines no
+  `AF_MAX`, so the bound is the highest family constant it does define plus one:
+  `AF_XDP` is 44, so the bound is 45 and families 0 to 44 are swept. A type this
+  target's `libc` does not define has no row in the type table and is not run;
+  `SOCK_DCCP` and `SOCK_PACKET` are defined for Linux, so all seven types run
+  there. `parse_seccomp_probe_report` reads those lines into `SocketSweep` values
+  and refuses a missing type, a count that is not a number and a line with no
+  known prefix, so a report with no sweep line is never read as a passing sweep.
+  Both journey callers judge the parsed sweep with the one portable judge and
+  print one line per type with its before and after counts.
+  The recorded run on `spark1.local` (2026-10-31, `aarch64`, kernel
+  `6.17.0-1029-nvidia`) printed, for the wallet caller, `45 families, refused
+  before 0, after 45, first unrefused none` for `SOCK_STREAM`, `SOCK_DGRAM`,
+  `SOCK_SEQPACKET`, `SOCK_RAW`, `SOCK_RDM`, `SOCK_DCCP`, `SOCK_PACKET` and
+  `socketpair`. The did caller did not reach the probe in that run, because the
+  `fchmodat` block above stops it before the sweep, so the policy check exists and
+  the sweep is claimed from the wallet caller alone.
+  Falsifier: replace the whole-call refusal with a family list that omits
+  `AF_VSOCK`; `socket(AF_VSOCK, SOCK_STREAM)` succeeds and the sweep's
+  after-count falls below its family count, so the journey's judge refuses it.
+  WP224 plants the Mac half of the same rule by making the judge accept a
+  returned descriptor for one family, and
+  `socket_sweep_reports_every_family_and_type_refused` catches it on the Mac.
 - `linux_file_operations_landlock_cannot_restrict` (new) uses an isolated
   fixture file and an isolated fixture directory outside every path grant.
   The probe runs under the mapped uid and mapped gids of the policy; the

@@ -281,7 +281,12 @@ use std::process::Command;
 /// form on the fixture `init` row passes; and WP222, which does not read a
 /// `none:` row's allow quote, so the subpath form on that row passes. Both are
 /// CAUGHT on the Mac by `operations_table_row_check_refuses_each_bad_table`.
-const EXPECTED_FALSIFIERS: usize = 202;
+/// Task 161 adds WP223, which adds `socket` to the `STORAGE_ROOT` row so an
+/// allow-form row admits a network call; and WP224, which makes the socket sweep
+/// judge accept a returned descriptor for one family. Both are CAUGHT on the Mac,
+/// by `seccomp_program_denies_by_default_and_lists_no_undeclared_call` and
+/// `socket_sweep_reports_every_family_and_type_refused`.
+const EXPECTED_FALSIFIERS: usize = 204;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
