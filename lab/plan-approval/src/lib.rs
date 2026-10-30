@@ -91,18 +91,25 @@ pub fn approve(
 ///
 /// The call is the shell's refusal of the pending request the owner saw. It
 /// stores `denied` with `shell` as settler and mints no grant, so a denied
-/// step is not live and cannot be granted later. The reason is the one this
-/// helper sends, `deny the shown plan`.
+/// step is not live and cannot be granted later.
+///
+/// `reason` is the text the owner states with that refusal, a method argument.
+/// This helper passes it unchanged as the route's `reason` key and does not
+/// judge it, so the route stores it on the shown request as `decision_reason`;
+/// that text is the settlement record and is not the grant. A reason that
+/// reads like an allow word still denies and mints nothing, and the empty
+/// string stays the empty string.
 pub fn deny_shown_plan(
     stand_in: &mut StandIn,
     caller: Caller<'_>,
     request_id: &str,
+    reason: &str,
 ) -> Result<Value, (u16, String)> {
     stand_in.post_capability_deny(
         caller,
         &json!({
             "request_id": request_id,
-            "reason": "deny the shown plan",
+            "reason": reason,
         }),
     )
 }
@@ -739,7 +746,12 @@ fn deny_one_shown_step() {
     let mut stand_in = StandIn::new();
 
     assert_eq!(
-        deny_shown_plan(&mut stand_in, Caller::Shell, "req-absent"),
+        deny_shown_plan(
+            &mut stand_in,
+            Caller::Shell,
+            "req-absent",
+            "deny the shown plan"
+        ),
         Err((400, "unknown request: req-absent".to_owned())),
         "a deny of an absent request settles nothing and names the id"
     );
@@ -854,7 +866,7 @@ fn deny_one_shown_step() {
     );
 
     assert_eq!(
-        deny_shown_plan(&mut stand_in, Caller::Shell, &denied),
+        deny_shown_plan(&mut stand_in, Caller::Shell, &denied, "deny the shown plan"),
         Ok(json!({ "success": true })),
         "the shell denies the first shown step"
     );
@@ -1029,6 +1041,7 @@ fn agent_cannot_deny_its_own_shown_plan() {
             session_id: "component-1",
         },
         "request-absent",
+        "deny the shown plan",
     );
     assert_eq!(
         absent,
@@ -1139,7 +1152,12 @@ fn agent_cannot_deny_its_own_shown_plan() {
         ("component-1", "request-2"),
         ("component-1", "request-absent"),
     ] {
-        let refused = deny_shown_plan(&mut stand_in, Caller::Client { session_id }, request_id);
+        let refused = deny_shown_plan(
+            &mut stand_in,
+            Caller::Client { session_id },
+            request_id,
+            "deny the shown plan",
+        );
         assert_eq!(
             refused,
             shell_refusal(),
@@ -1183,7 +1201,12 @@ fn agent_cannot_deny_its_own_shown_plan() {
     }
 
     assert_eq!(
-        deny_shown_plan(&mut stand_in, Caller::Shell, "request-absent"),
+        deny_shown_plan(
+            &mut stand_in,
+            Caller::Shell,
+            "request-absent",
+            "deny the shown plan"
+        ),
         Err((400, "unknown request: request-absent".to_owned())),
         "the shell's deny of an absent request names the id and settles nothing"
     );
@@ -1199,7 +1222,7 @@ fn agent_cannot_deny_its_own_shown_plan() {
     );
 
     assert_eq!(
-        deny_shown_plan(&mut stand_in, Caller::Shell, &denied),
+        deny_shown_plan(&mut stand_in, Caller::Shell, &denied, "deny the shown plan"),
         Ok(json!({ "success": true })),
         "the shell's deny settles the one shown step the agent could not deny"
     );
@@ -1234,6 +1257,7 @@ fn agent_cannot_deny_its_own_shown_plan() {
         &mut stand_in,
         Caller::Client { session_id: &first },
         &denied,
+        "deny the shown plan",
     );
     assert_eq!(
         late,
@@ -5331,7 +5355,12 @@ fn shown_request_status_is_not_the_grant() {
     // The shell's deny settles the record. The owner's later read shows the
     // decision reason and still no plan.
     assert_eq!(
-        deny_shown_plan(&mut stand_in, Caller::Shell, &first_step),
+        deny_shown_plan(
+            &mut stand_in,
+            Caller::Shell,
+            &first_step,
+            "deny the shown plan"
+        ),
         Ok(json!({ "success": true })),
         "a shown request status is not the grant: the shell denies the one shown step"
     );
@@ -6703,7 +6732,12 @@ fn shown_request_list_does_not_submit_again() {
 
     // The owner's deny settles that record; the record stays on the list.
     assert_eq!(
-        deny_shown_plan(&mut stand_in, Caller::Shell, &first_step),
+        deny_shown_plan(
+            &mut stand_in,
+            Caller::Shell,
+            &first_step,
+            "deny the shown plan"
+        ),
         Ok(json!({ "success": true })),
         "a shown request list does not submit again: the shell denies the first pending step"
     );
@@ -8869,5 +8903,854 @@ fn shown_grant_rationale_is_not_the_grant() {
         shell_live(&stand_in),
         two_live_after_spend,
         "a shown grant rationale is not the grant: the refused second use leaves the live list"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn shown_deny_reason_is_not_the_grant() {
+    use agent_conformance::standin_runtime::{Caller, StandIn};
+    use fixtures::{PLAN_A, PLAN_B};
+    use journeys::{request, running_agent};
+    use serde_json::{json, Value};
+
+    fn shell_requests(stand_in: &StandIn, session: Option<&str>) -> Value {
+        read_shown_requests(stand_in, Caller::Shell, session)
+            .expect("the shell reads a session's request list")
+    }
+
+    fn shell_live(stand_in: &StandIn) -> Value {
+        read_shown_grants(stand_in, Caller::Shell, None).expect("the shell reads the live list")
+    }
+
+    fn client_live(stand_in: &StandIn, session: &str) -> Value {
+        read_shown_grants(
+            stand_in,
+            Caller::Client {
+                session_id: session,
+            },
+            None,
+        )
+        .expect("the session reads its live list")
+    }
+
+    fn shell_capsules(stand_in: &StandIn) -> Vec<Value> {
+        stand_in
+            .get_capsules(Caller::Shell)
+            .expect("shell capsules")["capsules"]
+            .as_array()
+            .cloned()
+            .expect("the shell capsule list holds a capsules array")
+    }
+
+    fn running_without_cause(stand_in: &StandIn, id: &str) -> Value {
+        let listed = shell_capsules(stand_in)
+            .into_iter()
+            .find(|entry| entry["id"] == id)
+            .expect("the shell capsule list holds that id");
+        json!({ "id": listed["id"], "status": listed["status"], "cause": listed["cause"] })
+    }
+
+    let plan_a = plan_sha256(PLAN_A);
+    let plan_b = plan_sha256(PLAN_B);
+    let resource_a = "localhost://Public/plan-approval/a.txt";
+    let empty_requests: Value = json!({ "requests": [] });
+    let empty_shell: Value = json!({ "scope": "all_sessions_live", "capabilities": [] });
+    let empty_client: Value = json!({ "capabilities": [] });
+    let shell_refusal: Result<Value, (u16, String)> =
+        Err((403, "This endpoint requires shell privileges".to_owned()));
+
+    let mut stand_in = StandIn::new();
+
+    // A client never reaches the deny body, even before any request exists.
+    let early_client = deny_shown_plan(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        "request-1",
+        "approved",
+    );
+    assert_eq!(
+        early_client, shell_refusal,
+        "a shown deny reason is not the grant: a client deny is the shell-only refusal"
+    );
+    assert_ne!(
+        early_client,
+        Err((400, "unknown request: request-1".to_owned())),
+        "a shown deny reason is not the grant: the client refusal does not consult the request id"
+    );
+    assert_ne!(
+        early_client,
+        Err((400, "Denied by user".to_owned())),
+        "a shown deny reason is not the grant: the client refusal is not a stored deny reason"
+    );
+    assert_eq!(
+        shell_capsules(&stand_in),
+        Vec::<Value>::new(),
+        "a shown deny reason is not the grant: a refused client deny stores no capsule"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        empty_requests,
+        "a shown deny reason is not the grant: a refused client deny stores no request"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown deny reason is not the grant: a refused client deny mints no grant"
+    );
+
+    // Two sessions run, and the first posts the plans the owner will see.
+    let first = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    let second = running_agent(&mut stand_in, Caller::Shell)
+        .expect("the shell launches one running session");
+    assert_eq!(
+        first, "component-1",
+        "a shown deny reason is not the grant: the fresh stand-in names the first session component-1"
+    );
+    assert_eq!(
+        second, "component-2",
+        "a shown deny reason is not the grant: the second running session is component-2"
+    );
+    for id in [&first, &second] {
+        assert_eq!(
+            running_without_cause(&stand_in, id),
+            json!({ "id": id, "status": "running", "cause": "" }),
+            "a shown deny reason is not the grant: each launched session runs with no cause"
+        );
+    }
+
+    // A client deny of an absent id is the same refusal, and stores nothing.
+    let absent_client = deny_shown_plan(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        "request-absent",
+        "approved",
+    );
+    assert_eq!(
+        absent_client, shell_refusal,
+        "a shown deny reason is not the grant: a client deny of an absent id is the shell-only refusal"
+    );
+    assert_ne!(
+        absent_client,
+        Err((400, "unknown request: request-absent".to_owned())),
+        "a shown deny reason is not the grant: the client refusal does not consult an absent id"
+    );
+    assert_eq!(
+        shell_capsules(&stand_in).len(),
+        2,
+        "a shown deny reason is not the grant: the refused client deny leaves both capsules"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        empty_requests,
+        "a shown deny reason is not the grant: the refused absent-id deny stores no request"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown deny reason is not the grant: the refused absent-id deny mints no grant"
+    );
+
+    let first_step = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        PLAN_A,
+        resource_a,
+        "read",
+        "show this step",
+    )
+    .expect("the agent's request route stores one pending request");
+    assert_eq!(
+        first_step, "request-1",
+        "a shown deny reason is not the grant: the first stored request is request-1"
+    );
+    assert_eq!(
+        plan_a.len(),
+        64,
+        "a shown deny reason is not the grant: the hash of plan A has length 64"
+    );
+
+    // The asking session's deny mints nothing and settles nothing.
+    let asking_client = deny_shown_plan(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        "request-1",
+        "approved",
+    );
+    assert_eq!(
+        asking_client, shell_refusal,
+        "a shown deny reason is not the grant: the asking session's deny is the shell-only refusal"
+    );
+    assert_ne!(
+        asking_client,
+        Err((400, "request is not pending: request-1".to_owned())),
+        "a shown deny reason is not the grant: the client refusal is not a settlement refusal"
+    );
+
+    let pending_a = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": resource_a,
+        "action": "read",
+        "reason": "show this step",
+        "status": "pending",
+        "decision_reason": "",
+        "settled_by": null,
+        "plan": plan_a,
+    });
+    let one_pending = json!({ "requests": [pending_a.clone()] });
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        one_pending,
+        "a shown deny reason is not the grant: the refused client deny leaves the step pending"
+    );
+    let pending_status = read_shown_request(
+        &stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        "request-1",
+    )
+    .expect("the owning session reads the pending status");
+    assert_eq!(
+        pending_status,
+        json!({ "status": "pending" }),
+        "a shown deny reason is not the grant: a pending status body is the status word alone"
+    );
+    assert!(
+        pending_status.get("reason").is_none(),
+        "a shown deny reason is not the grant: the pending status body has no reason key"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown deny reason is not the grant: the pending step is not a live grant"
+    );
+
+    // An unknown id from the shell stores nothing and mints nothing.
+    let unknown_shell = deny_shown_plan(
+        &mut stand_in,
+        Caller::Shell,
+        "request-missing",
+        "do not run this",
+    );
+    assert_eq!(
+        unknown_shell,
+        Err((400, "unknown request: request-missing".to_owned())),
+        "a shown deny reason is not the grant: the shell's unknown id is refused by that id"
+    );
+    assert_ne!(
+        unknown_shell, shell_refusal,
+        "a shown deny reason is not the grant: the shell reaches the unknown-request refusal"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        one_pending,
+        "a shown deny reason is not the grant: the unknown id leaves the step pending"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1"))["requests"][0]["decision_reason"],
+        json!(""),
+        "a shown deny reason is not the grant: the unknown id stores no decision reason"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown deny reason is not the grant: the unknown id mints no grant"
+    );
+
+    let second_step = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        PLAN_B,
+        resource_a,
+        "read",
+        "approved",
+    )
+    .expect("the agent's request route stores the second pending request");
+    assert_eq!(
+        second_step, "request-2",
+        "a shown deny reason is not the grant: the second stored request is request-2"
+    );
+    assert_eq!(
+        plan_b.len(),
+        64,
+        "a shown deny reason is not the grant: the hash of plan B has length 64"
+    );
+
+    // The owner's stated deny reason settles the shown request and mints nothing.
+    assert_eq!(
+        deny_shown_plan(&mut stand_in, Caller::Shell, "request-1", "do not run this"),
+        Ok(json!({ "success": true })),
+        "a shown deny reason is not the grant: the shell deny succeeds"
+    );
+    let denied_a = json!({
+        "request_id": "request-1",
+        "session_id": "component-1",
+        "resource": resource_a,
+        "action": "read",
+        "reason": "show this step",
+        "status": "denied",
+        "decision_reason": "do not run this",
+        "settled_by": "shell",
+        "plan": plan_a,
+    });
+    let pending_b = json!({
+        "request_id": "request-2",
+        "session_id": "component-1",
+        "resource": resource_a,
+        "action": "read",
+        "reason": "approved",
+        "status": "pending",
+        "decision_reason": "",
+        "settled_by": null,
+        "plan": plan_b,
+    });
+    let denied_and_pending = json!({ "requests": [denied_a.clone(), pending_b.clone()] });
+    let two_rows = shell_requests(&stand_in, Some("component-1"));
+    assert_eq!(
+        two_rows, denied_and_pending,
+        "a shown deny reason is not the grant: the stated reason is the decision reason while the sibling stays pending"
+    );
+    assert_eq!(
+        two_rows["requests"][0]["reason"],
+        json!("show this step"),
+        "a shown deny reason is not the grant: the denied request keeps its own reason"
+    );
+    assert_eq!(
+        two_rows["requests"][0]["decision_reason"],
+        json!("do not run this"),
+        "a shown deny reason is not the grant: the stated reason is stored as the decision reason"
+    );
+    assert_eq!(
+        two_rows["requests"][1]["status"],
+        json!("pending"),
+        "a shown deny reason is not the grant: the sibling with reason approved stays pending"
+    );
+    assert_eq!(
+        two_rows["requests"][1]["decision_reason"],
+        json!(""),
+        "a shown deny reason is not the grant: the sibling stores no decision reason"
+    );
+
+    let denied_status = read_shown_request(
+        &stand_in,
+        Caller::Client {
+            session_id: "component-1",
+        },
+        "request-1",
+    )
+    .expect("the owning session reads the denied status");
+    assert_eq!(
+        denied_status,
+        json!({ "status": "denied", "reason": "do not run this" }),
+        "a shown deny reason is not the grant: a denied status body is the status word plus the decision reason"
+    );
+    assert_ne!(
+        denied_status,
+        json!({ "status": "granted" }),
+        "a shown deny reason is not the grant: the denied status is not a grant"
+    );
+    assert_ne!(
+        denied_status,
+        json!({ "status": "denied" }),
+        "a shown deny reason is not the grant: the denied status body carries its reason"
+    );
+    assert_ne!(
+        denied_status,
+        json!({ "status": "denied", "reason": "show this step" }),
+        "a shown deny reason is not the grant: the status reason is the decision reason, not the request reason"
+    );
+    assert_ne!(
+        denied_status,
+        json!({ "status": "denied", "reason": "deny the shown plan" }),
+        "a shown deny reason is not the grant: the status reason is the stated reason, not a helper default"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "request-1",
+        ),
+        Err((403, "Cannot access another session's request".to_owned())),
+        "a shown deny reason is not the grant: the other session cannot read the denied status"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown deny reason is not the grant: a denied step is not a live grant"
+    );
+    assert_eq!(
+        client_live(&stand_in, "component-1"),
+        empty_client,
+        "a shown deny reason is not the grant: the asking session holds no live grant"
+    );
+    for id in [&first, &second] {
+        assert_eq!(
+            running_without_cause(&stand_in, id),
+            json!({ "id": id, "status": "running", "cause": "" }),
+            "a shown deny reason is not the grant: the shell deny leaves each session running with no cause"
+        );
+    }
+
+    // A second deny of the settled request stores nothing new.
+    assert_eq!(
+        deny_shown_plan(&mut stand_in, Caller::Shell, "request-1", "approved"),
+        Err((400, "request is not pending: request-1".to_owned())),
+        "a shown deny reason is not the grant: a denied request cannot be denied again"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        denied_and_pending,
+        "a shown deny reason is not the grant: the repeat deny leaves the two rows"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1"))["requests"][0]["decision_reason"],
+        json!("do not run this"),
+        "a shown deny reason is not the grant: the repeat deny keeps the first decision reason"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1"))["requests"][1]["status"],
+        json!("pending"),
+        "a shown deny reason is not the grant: the repeat deny leaves the sibling pending"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown deny reason is not the grant: the repeat deny mints no grant"
+    );
+
+    // A reason that reads like a grant still stores a deny and mints nothing.
+    assert_eq!(
+        deny_shown_plan(&mut stand_in, Caller::Shell, "request-2", "granted"),
+        Ok(json!({ "success": true })),
+        "a shown deny reason is not the grant: a deny with reason granted succeeds"
+    );
+    let denied_b = json!({
+        "request_id": "request-2",
+        "session_id": "component-1",
+        "resource": resource_a,
+        "action": "read",
+        "reason": "approved",
+        "status": "denied",
+        "decision_reason": "granted",
+        "settled_by": "shell",
+        "plan": plan_b,
+    });
+    let two_denied = json!({ "requests": [denied_a.clone(), denied_b.clone()] });
+    let denied_rows = shell_requests(&stand_in, Some("component-1"));
+    assert_eq!(
+        denied_rows["requests"]
+            .as_array()
+            .expect("the shell request list holds a requests array")
+            .len(),
+        2,
+        "a shown deny reason is not the grant: the two denials leave two rows"
+    );
+    assert_eq!(
+        denied_rows, two_denied,
+        "a shown deny reason is not the grant: each denied row keeps its own decision reason"
+    );
+    assert_eq!(
+        denied_rows["requests"][1]["reason"],
+        json!("approved"),
+        "a shown deny reason is not the grant: the second row keeps its request reason"
+    );
+    assert_eq!(
+        denied_rows["requests"][1]["status"],
+        json!("denied"),
+        "a shown deny reason is not the grant: a reason of granted stores status denied"
+    );
+    assert_eq!(
+        denied_rows["requests"][1]["decision_reason"],
+        json!("granted"),
+        "a shown deny reason is not the grant: the reason granted is stored as the decision reason"
+    );
+    assert_eq!(
+        denied_rows["requests"][1]["settled_by"],
+        json!("shell"),
+        "a shown deny reason is not the grant: the shell settles the second row"
+    );
+    assert_eq!(
+        denied_rows["requests"][0]["decision_reason"],
+        json!("do not run this"),
+        "a shown deny reason is not the grant: the first decision reason survives the second deny"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "request-2",
+        ),
+        Ok(json!({ "status": "denied", "reason": "granted" })),
+        "a shown deny reason is not the grant: a deny with reason granted reads as denied"
+    );
+    assert_ne!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "request-2",
+        ),
+        Ok(json!({ "status": "granted" })),
+        "a shown deny reason is not the grant: the reason granted is not a granted status"
+    );
+    assert_ne!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "request-2",
+        ),
+        Ok(json!({ "status": "denied", "reason": "approved" })),
+        "a shown deny reason is not the grant: the status reason is the decision reason, not the request reason"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown deny reason is not the grant: the reason granted mints no grant"
+    );
+
+    // An empty stated reason is stored as the empty string, not a default.
+    let third_step = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-2",
+        },
+        PLAN_A,
+        resource_a,
+        "write",
+        "",
+    )
+    .expect("the agent's request route stores the empty-reason request");
+    assert_eq!(
+        third_step, "request-3",
+        "a shown deny reason is not the grant: the third stored request is request-3"
+    );
+    assert_eq!(
+        deny_shown_plan(&mut stand_in, Caller::Shell, "request-3", ""),
+        Ok(json!({ "success": true })),
+        "a shown deny reason is not the grant: a deny with an empty reason succeeds"
+    );
+    let denied_c = json!({
+        "request_id": "request-3",
+        "session_id": "component-2",
+        "resource": resource_a,
+        "action": "write",
+        "reason": "",
+        "status": "denied",
+        "decision_reason": "",
+        "settled_by": "shell",
+        "plan": plan_a,
+    });
+    let one_denied_c = json!({ "requests": [denied_c] });
+    let second_session_rows = shell_requests(&stand_in, Some("component-2"));
+    assert_eq!(
+        second_session_rows, one_denied_c,
+        "a shown deny reason is not the grant: an empty reason is stored as the empty string"
+    );
+    assert_eq!(
+        second_session_rows["requests"][0]["decision_reason"],
+        json!(""),
+        "a shown deny reason is not the grant: the empty reason stays empty"
+    );
+    assert_ne!(
+        second_session_rows["requests"][0]["decision_reason"],
+        json!("Denied by user"),
+        "a shown deny reason is not the grant: the empty reason is not the route's missing-value default"
+    );
+    assert_ne!(
+        second_session_rows["requests"][0]["decision_reason"],
+        json!("deny the shown plan"),
+        "a shown deny reason is not the grant: the empty reason is not the earlier helper text"
+    );
+    assert_eq!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "request-3",
+        ),
+        Ok(json!({ "status": "denied", "reason": "" })),
+        "a shown deny reason is not the grant: the empty reason is the denied status reason"
+    );
+    assert_ne!(
+        read_shown_request(
+            &stand_in,
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "request-3",
+        ),
+        Ok(json!({ "status": "denied", "reason": "Denied by user" })),
+        "a shown deny reason is not the grant: the empty reason is not the missing-value default"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        two_denied,
+        "a shown deny reason is not the grant: the first session's two rows stay"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown deny reason is not the grant: the empty reason mints no grant"
+    );
+    for id in [&first, &second] {
+        assert_eq!(
+            running_without_cause(&stand_in, id),
+            json!({ "id": id, "status": "running", "cause": "" }),
+            "a shown deny reason is not the grant: the empty-reason deny leaves each session running with no cause"
+        );
+    }
+
+    // A deny of a granted request stores none of it and leaves the live grant.
+    let fourth_step = request(
+        &mut stand_in,
+        Caller::Client {
+            session_id: "component-2",
+        },
+        PLAN_B,
+        resource_a,
+        "read",
+        "show this step",
+    )
+    .expect("the agent's request route stores the grantable request");
+    assert_eq!(
+        fourth_step, "request-4",
+        "a shown deny reason is not the grant: the fourth stored request is request-4"
+    );
+    assert_eq!(
+        approve(
+            &mut stand_in,
+            Caller::Shell,
+            "request-4",
+            "once",
+            &plan_b,
+            "show this grant"
+        ),
+        Ok(json!({ "success": true })),
+        "a shown deny reason is not the grant: the shell approval succeeds"
+    );
+    assert_eq!(
+        deny_shown_plan(&mut stand_in, Caller::Shell, "request-4", "do not run this"),
+        Err((400, "request is not pending: request-4".to_owned())),
+        "a shown deny reason is not the grant: a granted request cannot be denied"
+    );
+    let granted_c = json!({
+        "request_id": "request-3",
+        "session_id": "component-2",
+        "resource": resource_a,
+        "action": "write",
+        "reason": "",
+        "status": "denied",
+        "decision_reason": "",
+        "settled_by": "shell",
+        "plan": plan_a,
+    });
+    let granted_d = json!({
+        "request_id": "request-4",
+        "session_id": "component-2",
+        "resource": resource_a,
+        "action": "read",
+        "reason": "show this step",
+        "status": "granted",
+        "decision_reason": "show this grant",
+        "settled_by": "shell",
+        "plan": plan_b,
+    });
+    let two_second_session = json!({ "requests": [granted_c, granted_d.clone()] });
+    let second_rows = shell_requests(&stand_in, Some("component-2"));
+    assert_eq!(
+        second_rows["requests"]
+            .as_array()
+            .expect("the shell request list holds a requests array")
+            .len(),
+        2,
+        "a shown deny reason is not the grant: the refused deny leaves two rows"
+    );
+    assert_eq!(
+        second_rows, two_second_session,
+        "a shown deny reason is not the grant: the granted row keeps its own decision reason"
+    );
+    assert_eq!(
+        second_rows["requests"][0]["status"],
+        json!("denied"),
+        "a shown deny reason is not the grant: the earlier denied row stays denied"
+    );
+    assert_eq!(
+        second_rows["requests"][0]["decision_reason"],
+        json!(""),
+        "a shown deny reason is not the grant: the earlier denied row keeps its empty decision reason"
+    );
+    assert_eq!(
+        second_rows["requests"][1]["reason"],
+        json!("show this step"),
+        "a shown deny reason is not the grant: the granted row keeps its request reason"
+    );
+    assert_eq!(
+        second_rows["requests"][1]["action"],
+        json!("read"),
+        "a shown deny reason is not the grant: the granted row keeps its action"
+    );
+    assert_eq!(
+        second_rows["requests"][1]["decision_reason"],
+        json!("show this grant"),
+        "a shown deny reason is not the grant: the refused deny leaves the grant rationale"
+    );
+    assert_ne!(
+        second_rows["requests"][1]["decision_reason"],
+        json!("do not run this"),
+        "a shown deny reason is not the grant: the refused deny stores none of its reason"
+    );
+    assert_ne!(
+        second_rows["requests"][1]["status"],
+        json!("denied"),
+        "a shown deny reason is not the grant: the refused deny leaves the row granted"
+    );
+
+    let granted_status = read_shown_request(
+        &stand_in,
+        Caller::Client {
+            session_id: "component-2",
+        },
+        "request-4",
+    )
+    .expect("the owning session reads the granted status");
+    assert_eq!(
+        granted_status,
+        json!({ "status": "granted" }),
+        "a shown deny reason is not the grant: the granted status body is the status word alone"
+    );
+    assert!(
+        granted_status.get("reason").is_none(),
+        "a shown deny reason is not the grant: the granted status body has no reason key"
+    );
+    assert_ne!(
+        granted_status,
+        json!({ "status": "denied", "reason": "do not run this" }),
+        "a shown deny reason is not the grant: the refused deny leaves no denied status"
+    );
+
+    let shell_entry_d = json!({
+        "request_id": "request-4",
+        "session_id": "component-2",
+        "resource": resource_a,
+        "action": "read",
+        "duration": "once",
+        "granted_at": 0,
+    });
+    let one_shell_grant = json!({
+        "scope": "all_sessions_live",
+        "capabilities": [shell_entry_d],
+    });
+    let shell_body = shell_live(&stand_in);
+    assert_eq!(
+        shell_body, one_shell_grant,
+        "a shown deny reason is not the grant: the refused deny leaves the live once grant"
+    );
+    assert!(
+        shell_body["capabilities"][0].get("rationale").is_none(),
+        "a shown deny reason is not the grant: the shell live entry has no rationale key"
+    );
+    assert!(
+        shell_body["capabilities"][0]
+            .get("decision_reason")
+            .is_none(),
+        "a shown deny reason is not the grant: the shell live entry has no decision reason key"
+    );
+    assert_eq!(
+        shell_requests(&stand_in, Some("component-1")),
+        two_denied,
+        "a shown deny reason is not the grant: the first session's two denied rows stay"
+    );
+
+    // One use spends that once grant while the decision reason stays.
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "request-4",
+            PLAN_B,
+        ),
+        Ok(json!({ "valid": true })),
+        "a shown deny reason is not the grant: the live once grant authorises its one use"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown deny reason is not the grant: the spent once grant leaves the live list"
+    );
+    let spent_rows = shell_requests(&stand_in, Some("component-2"));
+    assert_eq!(
+        spent_rows, two_second_session,
+        "a shown deny reason is not the grant: the request rows stay after the spend"
+    );
+    assert_eq!(
+        spent_rows["requests"][1]["status"],
+        json!("granted"),
+        "a shown deny reason is not the grant: the spent request stays granted"
+    );
+    assert_eq!(
+        spent_rows["requests"][1]["decision_reason"],
+        json!("show this grant"),
+        "a shown deny reason is not the grant: the spent grant keeps its decision reason"
+    );
+
+    assert_eq!(
+        execute(
+            &mut stand_in,
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "request-4",
+            PLAN_B,
+        ),
+        Err((400, "grant is not live: Exhausted".to_owned())),
+        "a shown deny reason is not the grant: the next use of the spent once grant is refused"
+    );
+    let after_refusal_rows = shell_requests(&stand_in, Some("component-2"));
+    assert_eq!(
+        after_refusal_rows, two_second_session,
+        "a shown deny reason is not the grant: the refused second use leaves the two rows"
+    );
+    assert_eq!(
+        after_refusal_rows["requests"][1]["status"],
+        json!("granted"),
+        "a shown deny reason is not the grant: the refused second use leaves the row granted"
+    );
+    assert_eq!(
+        after_refusal_rows["requests"][1]["decision_reason"],
+        json!("show this grant"),
+        "a shown deny reason is not the grant: the refused second use keeps the decision reason"
+    );
+    assert_eq!(
+        after_refusal_rows["requests"][1]["reason"],
+        json!("show this step"),
+        "a shown deny reason is not the grant: the refused second use keeps the request reason"
+    );
+    assert_eq!(
+        shell_live(&stand_in),
+        empty_shell,
+        "a shown deny reason is not the grant: the refused second use leaves the live list"
     );
 }

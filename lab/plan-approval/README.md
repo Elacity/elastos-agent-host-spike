@@ -493,6 +493,40 @@ approve still passes `owner approved`. `preview`, `plan_sha256`, `execute`,
 copy the stand-in, and it names no planner. A passing run gives the Runtime no
 A15 credit.
 
+A shown deny reason is the settlement record, not the grant. The design keeps
+the settlement in the Runtime:
+
+> The UI does not mint the grant itself.
+
+`deny_shown_plan` is the only deny call. It passes the caller and the reason it
+is given unchanged, so the route's own shell check and its own store decide the
+answer; this helper judges neither. A shell deny of `request-1` with reason
+`do not run this` stores that text as `decision_reason` while the request's own
+reason stays `show this step`, and the sibling `request-2` with reason
+`approved` stays pending. A reason of `granted` stores status `denied` with
+`decision_reason` `granted` and mints nothing. The empty reason is stored as
+`""`, which is not the route's missing-value default `Denied by user`. A
+reason of `approved` on a client caller, on an unknown id and on a request that
+is not pending stores nothing and mints nothing, because the client refusal
+runs before the body and the settlement refusal runs before the reason is
+stored. A denied status body is the status word plus that decision reason:
+`{"status":"denied","reason":"do not run this"}`. A deny of a request that is
+already granted is `request is not pending: ` plus that id and leaves
+`decision_reason` `show this grant` and the live `once` grant, and one use then
+spends that grant while `decision_reason` stays `show this grant`.
+
+`shown_deny_reason_is_not_the_grant` drives two sessions through
+`running_agent`, submits four requests through `request`, denies and grants
+through `deny_shown_plan` and `approve`, reads every request list and status
+through `read_shown_requests` and `read_shown_request`, reads every live list
+through `read_shown_grants`, and spends through `execute`. This crate stores no
+copy of `deny_body`. Every earlier deny still passes `deny the shown plan`.
+`preview`, `plan_sha256`, `approve`, `execute`, `age_shown_plan`,
+`stop_shown_session`, `read_shown_request`, `read_shown_grants`,
+`read_shown_requests`, `running_agent` and `request` are unchanged by this
+slice. The crate does not copy the stand-in, and it names no planner. A passing
+run gives the Runtime no A15 credit.
+
 ## Layout
 
 - `src/lib.rs`: `Preview`, `preview`, `plan_sha256`, `approve`,
@@ -513,12 +547,14 @@ A15 credit.
   `shown_submit_names_a_declared_ask`,
   `shown_request_list_does_not_submit_again`,
   `shown_request_reason_is_not_the_grant`,
-  `shown_grant_rationale_is_not_the_grant` and the bound-plan journey.
+  `shown_grant_rationale_is_not_the_grant`,
+  `shown_deny_reason_is_not_the_grant` and the bound-plan journey.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_deny_reason_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_grant_rationale_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_request_reason_is_not_the_grant -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_submit_names_a_declared_ask -- --exact

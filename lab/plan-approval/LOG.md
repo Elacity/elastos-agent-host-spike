@@ -1357,3 +1357,109 @@ restores, `git diff -- lab/plan-approval/src/lib.rs` holds no `request-plant`, n
 has no `falsifiers.json`; no id is added.
 
 030: `approve` takes the rationale it is given and sends it on the one grant call; `shown_grant_rationale_is_not_the_grant` proves the rationale is the decision reason on the request, a granted status body and a live grant omit it, four refusals store none, and `""` stays `""`; two hand-run plants caught and restored.
+
+## 031
+
+Design text followed, [docs/AGENT_ARCHITECTURE.md](../../docs/AGENT_ARCHITECTURE.md), Request flow step 8:
+
+> If additional consent is required, Runtime records a pending request and
+> Home or Inbox presents it. The UI does not mint the grant itself.
+
+This task proves the reason the owner states with the deny. `deny_shown_plan`
+gains `reason: &str` after `request_id`, sends it unchanged as the route's
+`reason` key, and returns that route's result. It matches no `Caller` and no
+reason, contains no `deny the shown plan` or `Denied by user`, and adds no
+function. Every existing call passes `"deny the shown plan"`; no other
+argument and no assertion changed.
+
+`shown_deny_reason_is_not_the_grant` drives two sessions through
+`running_agent`. A client deny before any request exists is the shell-only
+refusal and stores no capsule, request or grant. The same refusal covers the
+asking session, an absent id, and the step before it is settled. A shell deny
+of `request-1` with reason `do not run this` stores that text as
+`decision_reason` while the reason stays `show this step`, and the sibling
+`request-2` with reason `approved` stays pending. A reason of `granted` stores
+status `denied` and mints nothing. An empty reason is stored as `""`, not
+`Denied by user`. A deny of a granted request is `request is not pending:
+request-4` and keeps `decision_reason` `show this grant` and the live `once`
+grant; one `execute` spends it while `decision_reason` stays `show this
+grant`, and the next use is `grant is not live: Exhausted`.
+
+Plant command, one plant at a time, each restored before the next:
+
+```bash
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib shown_deny_reason_is_not_the_grant -- --exact
+```
+
+### F-stated-deny-reason-is-hardcoded
+
+Old bytes, 97:
+
+```rust
+        &json!({
+            "request_id": request_id,
+            "reason": reason,
+        }),
+```
+
+New bytes, 223:
+
+```rust
+        &json!({
+            "request_id": request_id,
+            "reason": if reason == "deny the shown plan" {
+                reason
+            } else {
+                "deny the shown plan"
+            },
+        }),
+```
+
+The planted crate compiled. `shown_deny_reason_is_not_the_grant` failed at
+`src/lib.rs:9226:5` (planted tree) on the shell request list: `assertion left == right
+failed: a shown deny reason is not the grant: the stated reason is the decision reason
+while the sibling stays pending`; left held `decision_reason` `deny the shown plan`,
+right expected `do not run this`. The stated reason was replaced before the route
+stored it. Restored, the test passes.
+
+### F-approved-deny-mints
+
+Old bytes, 72:
+
+```rust
+) -> Result<Value, (u16, String)> {
+    stand_in.post_capability_deny(
+```
+
+New bytes, 392:
+
+```rust
+) -> Result<Value, (u16, String)> {
+    if reason == "approved" {
+        stand_in.seed_grant(
+            "request-plant",
+            "component-1",
+            "localhost://Public/plan-approval/a.txt",
+            "read",
+            "once",
+            0,
+            agent_conformance::standin_runtime::Life::Live,
+            false,
+        );
+    }
+    stand_in.post_capability_deny(
+```
+
+The planted crate compiled. `shown_deny_reason_is_not_the_grant` failed at
+`src/lib.rs:9010:5` (planted tree) on the shell live list: `assertion left == right failed:
+a shown deny reason is not the grant: a refused client deny mints no grant`; left held
+the seeded `request-plant` grant, right expected the empty shell body. A deny reason of
+`approved` minted a grant. Restored, the test passes.
+
+Neither plant calls `seed_request`; the second plant calls `seed_grant`. After both
+restores, `git diff -- lab/plan-approval/src/lib.rs` holds no `request-plant` and no
+plant `seed_grant` inside `deny_shown_plan`. The restored proof command set (the fmt
+check and the twenty-four test commands in the task) took 3.02 s real. This lane has no
+`falsifiers.json`; no id is added.
+
+031: `deny_shown_plan` takes the reason it is given and sends it on the one deny call; `shown_deny_reason_is_not_the_grant` proves the stated reason is the decision reason on the request, a denied status body carries it, a sibling stays pending, `granted` and `""` store as text and mint nothing, and a deny of a granted request leaves the grant; two hand-run plants caught and restored.
