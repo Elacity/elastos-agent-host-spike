@@ -1,6 +1,6 @@
 # Core calls proposal
 
-Pinned commit: 2fb2c25d630cf47a5baa108eca21c1eecc9f83d8
+Pinned commit: 1cc3e47b9dcd965d003c504ac79d027b4f2a0d15
 
 LAB DRAFT for Sash and Anders. This file is the proposal. It stays in the lab. It is design input for M1 checks A3, A5, A7 and B2, and it leaves those checks open.
 
@@ -92,21 +92,21 @@ The Runtime resolves `Users/self` to a person principal and a localhost root. Th
 
 `elastos/crates/elastos-server/src/resource_bridge.rs::manifest_bound_users_self_matches_active_principal_root_only_with_context` shows a `Users/self` bound matching the active principal root only when the principal context is present. The body uses the principal id `person:local:abc123`, builds a resource under `principal_localhost_root` of that id, and allows the bound `localhost://Users/self/.AppData/LocalHost/Chat/*` when that principal id is passed in. The same call with no principal id returns false.
 
-    fn manifest_bound_users_self_matches_active_principal_root_only_with_context() {
-        let principal_id = "person:local:abc123";
-        let resource = format!(
-            "{}/.AppData/LocalHost/Chat/state.json",
-            crate::auth::principal_localhost_root(principal_id)
-        );
-        let bounds = vec!["localhost://Users/self/.AppData/LocalHost/Chat/*".to_string()];
+        fn manifest_bound_users_self_matches_active_principal_root_only_with_context() {
+            let principal_id = "person:local:abc123";
+            let resource = format!(
+                "{}/.AppData/LocalHost/Chat/state.json",
+                crate::auth::principal_localhost_root(principal_id)
+            );
+            let bounds = vec!["localhost://Users/self/.AppData/LocalHost/Chat/*".to_string()];
 
-        assert!(manifest_allows_resource(
-            &bounds,
-            &resource,
-            Some(principal_id)
-        ));
-        assert!(!manifest_allows_resource(&bounds, &resource, None));
-    }
+            assert!(manifest_allows_resource(
+                &bounds,
+                &resource,
+                Some(principal_id)
+            ));
+            assert!(!manifest_allows_resource(&bounds, &resource, None));
+        }
 
 The journal path sits under the `Users/self` alias. `examples/agent-host/src/lib.rs:3757` sets `JOURNAL_ROOT` to `localhost://Users/self/.AppData/Agents/`. The constant is compiled in tests and in the wasm32 guest.
 
@@ -151,7 +151,7 @@ This citation is design input for A3. `lab/capsule-identity/tests/encoding.rs::l
         })
     }
 
-This citation is design input for A3. `lab/capsule-identity/tests/encoding.rs::single_block_at_the_chunk_limit_has_the_pinned_cid` writes 262144 zero bytes into sample.example. A file of 262144 zero bytes is named. The fn line is `fn single_block_at_the_chunk_limit_has_the_pinned_cid() {`. The comment says 262144 bytes is the largest file one raw leaf holds, that it is named as one block, and that the big file is made here and never committed. The opening comment is a comment. That comment is a comment. This paragraph does not build that file. This citation does not build that file. The comment line is `    // 262144 bytes is the largest file one raw leaf holds: it is named, as`. The comment line is `    // one block. The big file is made here and never committed.`. The test assembles the content-sample fixture and writes 262144 zero bytes at sample.example. The assemble line inside this test, the one followed by `    write_file(bundle.path(), "sample.example", &vec![0; 262_144]);`, is `    let bundle = assemble(&CONTENT_SAMPLE);`. The write line is `    write_file(bundle.path(), "sample.example", &vec![0; 262_144]);`. The content-sample fixture is named content-sample. Its files are capsule.json and sample.example. The fixture line is `pub const CONTENT_SAMPLE: Fixture = Fixture {`. The name line is `    name: "content-sample",`. The files line is `    files: &["capsule.json", "sample.example"],`. write_file writes those bytes. The fn line is `pub fn write_file(root: &Path, path: &str, bytes: &[u8]) {`. The expect text on the write, which this test does not hit, is `write a file`. The expect line is `    fs::write(&target, bytes).expect("write a file");`. name of that bundle equals the chunk-limit pin. That assert_eq! has no failure message. The pin assert_eq! has no failure message. The assert line is `    assert_eq!(name(&bundle), CHUNK_LIMIT_LAB_CID);`. The pin is `bafybeibt53faomuek2j4yihvseuib2h6fosmkzympgilbnay2xevciasb4`. The pin line is `pub const CHUNK_LIMIT_LAB_CID: &str = "bafybeibt53faomuek2j4yihvseuib2h6fosmkzympgilbnay2xevciasb4";`. The pin's doc says the chunk-limit bundle is built in a temp dir and never committed, that it is content-sample's capsule.json and sample.example as 262144 zero bytes, and that this is the largest file one raw leaf holds. The doc line is `/// The chunk-limit bundle, built in a temp dir and never committed:`. The doc line is `/// content-sample's `capsule.json` and `sample.example` as 262144 zero bytes,`. The doc line is `/// the largest file one raw leaf holds.`. The test calls name. The test does not call lab_cid. The test does not call encode_entries. That length is the raw-leaf limit, and the refusal comparison is greater-than. CHUNK_SIZE is 262144. Its doc says that is the largest file one raw leaf holds, and that a larger file would need a chunked file DAG, which the lab refuses. The doc line is `/// The largest file one raw leaf holds (`chunker: size-262144`). A larger`. The doc line is `/// file would need a chunked file DAG, which the lab refuses.`. The const line is `const CHUNK_SIZE: usize = 262_144;`. The module line says each regular file of at most 262144 bytes is one raw leaf, and that its block is the file's bytes. The same module line says an empty file is an empty block. The module line is `//! 1. Each regular file of at most 262144 bytes (`CHUNK_SIZE`) is one raw`. The module line is `//!    leaf: its block is the file's bytes (an empty file is an empty block),`. That parenthetical is part of the quoted module line. The empty-file parenthetical is part of the quoted module line. This paragraph does not cite a zero-byte file. encode_entries returns when the file's length is greater than CHUNK_SIZE. The comparison is greater-than, so a file whose length equals CHUNK_SIZE is not that return. The fn line is `pub fn encode_entries(entries: &[BundleEntry]) -> Result<LabCid, Refusal> {`. The if line is `        if entry.content.len() > CHUNK_SIZE {`. The statements inside that if do not call sha256. The leaf stands after that if. This paragraph does not quote the leaf. The test does not call encode_entries. name calls lab_cid on the bundle and prints the result. The panic prints the refusal. The fn line is `fn name(bundle: &TempDir) -> String {`. The call line is `    lab_cid(bundle.path())`. The panic line is `        .unwrap_or_else(|refusal| panic!("{refusal}"))`. The string line is `        .to_string()`. These chunk-limit names are the lab reference model, and the lab model is not the Runtime. A file of 262144 bytes is one raw leaf, and it is named. The lab names that file as one block. This paragraph does not answer the agent DID question. A3 stays open.
+This citation is design input for A3. `lab/capsule-identity/tests/encoding.rs::single_block_at_the_chunk_limit_has_the_pinned_cid` writes 262144 zero bytes into sample.example. A file of 262144 zero bytes is named. The fn line is `fn single_block_at_the_chunk_limit_has_the_pinned_cid() {`. The comment says 262144 bytes is the largest file one raw leaf holds, that it is named as one block, and that the big file is made here and never committed. The opening comment is a comment. That comment is a comment. This paragraph does not build that file. This citation does not build that file. The comment line is `    // 262144 bytes is the largest file one raw leaf holds: it is named, as`. The comment line is `    // one block. The big file is made here and never committed.`. The test assembles the content-sample fixture and writes 262144 zero bytes at sample.example. The assemble line inside this test, the one followed by `    write_file(bundle.path(), "sample.example", &vec![0; 262_144]);`, is `    let bundle = assemble(&CONTENT_SAMPLE);`. The write line is `    write_file(bundle.path(), "sample.example", &vec![0; 262_144]);`. The content-sample fixture is named content-sample. Its files are capsule.json and sample.example. The fixture line is `pub const CONTENT_SAMPLE: Fixture = Fixture {`. The name line is `    name: "content-sample",`. The files line is `    files: &["capsule.json", "sample.example"],`. write_file writes those bytes. The fn line is `pub fn write_file(root: &Path, path: &str, bytes: &[u8]) {`. The expect text on the write, which this test does not hit, is `write a file`. The expect line is `    fs::write(&target, bytes).expect("write a file");`. name of that bundle equals the chunk-limit pin. That assert_eq! has no failure message. The pin assert_eq! has no failure message. The assert line is `    assert_eq!(name(&bundle), CHUNK_LIMIT_LAB_CID);`. The pin is `bafybeibt53faomuek2j4yihvseuib2h6fosmkzympgilbnay2xevciasb4`. The pin line is `pub const CHUNK_LIMIT_LAB_CID: &str = "bafybeibt53faomuek2j4yihvseuib2h6fosmkzympgilbnay2xevciasb4";`. The pin's doc says the chunk-limit bundle is built in a temp dir and never committed, that it is content-sample's capsule.json and sample.example as 262144 zero bytes, and that this is the largest file one raw leaf holds. The doc line is `/// The chunk-limit bundle, built in a temp dir and never committed:`. The doc line is `/// content-sample's `capsule.json` and `sample.example` as 262144 zero bytes,`. The doc line is `/// the largest file one raw leaf holds.`. The test calls name. The test does not call lab_cid. The test does not call encode_entries. That length is the raw-leaf limit, and `file_node`'s less-than-or-equal arm chooses one raw leaf for a file of at most `CHUNK_SIZE` bytes, including a file of zero bytes, and sends a larger file to `file_root`. `encode_entries` reaches that arm through `file_node`. The fn line is `fn file_node(entry: &BundleEntry) -> Result<Child, Refusal> {`. The choose line is `    let (cid, tsize) = if content.len() <= CHUNK_SIZE {`. The leaf line is `        raw_leaf(&naming_hash(content), content.len() as u64)`. The fn line is `fn raw_leaf(sha256: &[u8; 32], size: u64) -> (Vec<u8>, u64) {`. The larger-file arm is `        file_root(&entry.path, content)?`. `CHUNK_SIZE` is 262144. Its doc says that is the largest file one raw leaf holds. The const line is `const CHUNK_SIZE: usize = 262_144;`. name calls lab_cid on the bundle and prints the result. The panic prints the refusal. The fn line is `fn name(bundle: &TempDir) -> String {`. The call line is `    lab_cid(bundle.path())`. The panic line is `        .unwrap_or_else(|refusal| panic!("{refusal}"))`. The string line is `        .to_string()`. These chunk-limit names are the lab reference model, and the lab model is not the Runtime. A file of 262144 bytes is one raw leaf, and it is named. The lab names that file as one block. This paragraph does not answer the agent DID question. A3 stays open.
 
 This citation is design input for A3. `lab/capsule-identity/tests/location.rs::file_times_and_modes_do_not_change_the_lab_cid` sets a time and a mode on the bundle root, on browser/, and on each of the three files. The times and the modes change and the lab CID stays. The fn line is `fn file_times_and_modes_do_not_change_the_lab_cid() {`. The test assembles the web-app fixture. The assemble line is `let bundle = assemble(&WEB_APP);`. named of that bundle is the name before the changes. The before line is `let before = named(bundle.path());`. every_path lists the bundle root and every folder and file below it, root first. The comment says the root, browser/, and the three files each get a time and a mode. The comment line is `// The root, browser/ and the three files: each gets its own time and a`. The comment line is `// mode it did not have.`. The paths line is `let paths = every_path(bundle.path());`. The length assert is `2 + WEB_APP.files.len()`. The assert line is `assert_eq!(paths.len(), 2 + WEB_APP.files.len(), "{paths:?}");`. The web-app fixture's files are capsule.json, browser/index.html, and browser/app.js. The fixture line is `pub const WEB_APP: Fixture = Fixture {`. The files line is `files: &["capsule.json", "browser/index.html", "browser/app.js"],`. Each listed path gets its own time, counted from the Unix epoch by `1_000_000_000 + 86_400 * index as u64`, with that time set as both the accessed time and the modified time. The time line is `SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000 + 86_400 * index as u64);`. The set line is `FileTimes::new().set_accessed(time).set_modified(time)`. The panic text, which this test does not hit, is `set the time of`. A directory's mode is `0o750`. A file's mode is one of `0o600`, `0o755`, and `0o400`. The file mode line is `[0o600, 0o755, 0o400][index % 3]`. The expect text is `set a mode`. The permissions line is `fs::set_permissions(path, Permissions::from_mode(mode)).expect("set a mode");`. The test then reads the entry back. The expect text is `read the changed entry`. The read line is `fs::symlink_metadata(path).expect("read the changed entry");`. The modified time equals the time that was set. The expect text on the modified-time read is `an mtime`. The expect text, which this test does not hit as a failure, is `an mtime`. The modified line is `changed.modified().expect("an mtime")`. The permission bits masked with `0o7777` equal the mode that was set. The mode line is `changed.permissions().mode() & 0o7777,`. named of the same bundle then equals the name from before the changes. The after line is `let after = named(bundle.path());`. The assert_eq! failure message, which this test does not hit, is `a file time or mode entered the lab CID`. The assert line is `assert_eq!(after, before, "a file time or mode entered the lab CID");`. The name from before the changes is the web-app pin. The pin line is `assert_eq!(before.to_string(), WEB_APP_LAB_CID);`. The test lists every path and named calls lab_cid. every_path starts with the bundle root and, for each directory, lists that directory, sorts the children, and extends the list. That sort is the test's list. It is not the encoder. The doc line is `/// The bundle root and every folder and file below it, root first.`. The fn line is `fn every_path(root: &Path) -> Vec<PathBuf> {`. The sort line is `inside.sort();`. The extend line is `paths.extend(inside);`. named calls lab_cid and fails the test if that call refuses. The fn line is `pub fn named(bundle: &Path) -> LabCid {`. The call is `lab_cid(bundle).unwrap_or_else(|refusal| panic!("{}: {refusal}", bundle.display()))`. The named entry is the path and the bytes. BundleEntry is one regular file's bundle-relative path and its bytes. Its fields are path and content. The doc line is `/// One regular file of a bundle: its bundle-relative, `/`-separated path and`. The doc line is `/// its bytes.`. The struct line is `pub struct BundleEntry {`. The field line is `pub path: String,`. The field line is `pub content: Vec<u8>,`. checked_bundle_observed reads every regular file once from its checked handle, and the bytes that were checked are what is named. The doc line is `/// never waits on a FIFO. It reads every regular file once, from its checked`. The doc line is `/// handle. Then the root `capsule.json` it read gets the Runtime's own two`. The doc line is `/// checks, and exactly the bytes that were checked are named and kept, with`. The fn line is `pub fn checked_bundle_observed(`. It passes the walk's entries to encode_entries. The entries line is `let entries = collect_entries(bundle, &mut observe)?;`. The encode line is `encode_entries(&entries)`. collect_entries reads each file and pushes BundleEntry of that path and that content. The fn line is `fn collect_entries(`. The content line is `let content = read_file(handle, &path)?;`. The push line is `entries.push(BundleEntry { path, content });`. read_file reads the handle to the end and returns those bytes. The fn line is `fn read_file(handle: OwnedFd, path: &str) -> Result<Vec<u8>, Refusal> {`. The read line is `.read_to_end(&mut content)`. The return line is `Ok(content)`. encode_entries hashes `entry.content` and stores that content's length as Tsize. The fn line is `pub fn encode_entries(entries: &[BundleEntry]) -> Result<LabCid, Refusal> {`. The cid line is `cid: cid_bytes(RAW_CODEC, &sha256(&entry.content)),`. The tsize line is `tsize: entry.content.len() as u64,`. entry_kind classifies a directory or a regular file from the entry's type. The doc line is `/// The kind of one entry, from its own type: as its folder's listing reports`. The doc line is `/// it, or as `fstat` reports its open handle. Only a directory or a regular`. The doc line is `/// file may be in a bundle; everything else is [`EntryKind::Special`].`. The fn line is `pub fn entry_kind(file_type: FileType) -> EntryKind {`. The directory line is `if file_type.is_dir() {`. The file line is `} else if file_type.is_file() {`. open_checked reads `st_mode` only to make that type check. The fn line is `fn open_checked(`. The stat line is `let stat = fstat(&handle).map_err(|error| unreadable(path, error))?;`. The match line is `match entry_kind(FileType::from_raw_mode(stat.st_mode)) {`. The statements inside collect_entries, read_file, and encode_entries do not read `st_mtime` or `st_mode`. lib.rs contains no `st_mtime`. These file times and modes are the lab reference model, and the lab model is not the Runtime. The named entry is the path and the file's bytes, so a file time or a mode is not part of the lab CID. A file time or a mode does not enter the lab CID. This paragraph does not answer the agent DID question. A3 stays open.
 
@@ -159,7 +159,7 @@ This citation is design input for A3. `lab/capsule-identity/tests/encoding.rs::l
 
 This citation is design input for A3. `lab/capsule-identity/tests/encoding.rs::path_and_content_boundaries_cannot_collide` compares `a` holding `bc` with `ab` holding `c`. One file whose bytes carry the next entry's framing differs from two files. A path that carries its own framing differs from a plain path. The fn line is `fn path_and_content_boundaries_cannot_collide() {`. The two splits are different names, and a carried framing is a different name. The first comment says `a` holding `bc` is compared with `ab` holding `c`, that a path is a link name written with its protobuf length, that a file's bytes are its own leaf block, named in the link by CID and with its length as Tsize, so no name runs into bytes, and that each side is pinned. The comment line is `// `a` holding `bc` against `ab` holding `c`. A path is a link name`. The comment line is `// written with its protobuf length, and a file's bytes are its own leaf`. The comment line is `// block, named in the link by CID and with its length as Tsize, so no`. The comment line is `// name runs into bytes. Each side is pinned (both values recomputed by a`. The pin comment says both values were recomputed by a `python3 -I` check from the byte rules, so a name or a length written another way fails here. The comment line is `// python3 -I check from the byte rules), so a name or a length written`. The comment line is `// another way fails here.`. The pin comment is a comment. That comment is a comment. This paragraph does not run that check. This task's citation does not run that `python3 -I` check. The first name is name of a content-sample bundle with extra file `a` holding `bc`. The first name line is `let a_holding_bc = name(&content_sample_with(&[("a", b"bc")]));`. The second name is name of a content-sample bundle with extra file `ab` holding `c`. The second name line is `let ab_holding_c = name(&content_sample_with(&[("ab", b"c")]));`. The two names differ. The assert line is `assert_ne!(a_holding_bc, ab_holding_c);`. `a` holding `bc` equals `bafybeihll4iwwckjxiredqzpnkgeff53cxilm3sm5ks3ttk7wvc2xfem6m`. The pin line is `"bafybeihll4iwwckjxiredqzpnkgeff53cxilm3sm5ks3ttk7wvc2xfem6m"`. `ab` holding `c` equals `bafybeieuilb4vofk4f2lalufn3z6yzfght2zyw6qia57acxpc7bnt46msm`. The pin line is `"bafybeieuilb4vofk4f2lalufn3z6yzfght2zyw6qia57acxpc7bnt46msm"`. Those assert_eq! lines have no failure message. The second comment says one file's bytes cannot carry the next entry's framing: `a` holding `X`, the length 1, `b`, `Y`, against `a` holding `X` and `b` holding `Y`. The comment line is `// One file's bytes cannot carry the next entry's framing: `a` holding`. The comment line is `// `X`, the length 1, `b`, `Y`, against `a` holding `X` and `b` holding`. The comment line is `// `Y`.`. The carried bytes start with `X`, then the big-endian bytes of `1u64`, then `bY`. The start line is `let mut carries_framing = b"X".to_vec();`. The length line is `carries_framing.extend_from_slice(&1u64.to_be_bytes());`. The rest line is `carries_framing.extend_from_slice(b"bY");`. That name differs from the two-file name. The one-file name line is `name(&content_sample_with(&[("a", &carries_framing)])),`. The two-file name line is `name(&content_sample_with(&[("a", b"X"), ("b", b"Y")]))`. The third comment says a path cannot carry its own framing: `a` holding `X`, the length 1, `Y`, against a path made of `a`, the length 10 and `X`, holding `Y`. The comment line is `// A path cannot carry its own framing: `a` holding `X`, the length 1,`. The comment line is `// `Y`, against a path made of `a`, the length 10 and `X`, holding `Y`.`. No folder can hold that name, because it has NUL bytes, so the encoder is given the entries directly. The comment line is `// No folder can hold that name (it has NUL bytes), so the encoder is`. The comment line is `// given the entries directly.`. The content starts with `X`, then the big-endian bytes of `1u64`, then `Y`. The content line is `let mut content = b"X".to_vec();`. The length line is `content.extend_from_slice(&1u64.to_be_bytes());`. The byte line is `content.push(b'Y');`. The path starts with `a`, then the big-endian bytes of `content.len()` as `u64`, then `X`. The path line is `let mut path = b"a".to_vec();`. The length line is `path.extend_from_slice(&(content.len() as u64).to_be_bytes());`. The byte line is `path.push(b'X');`. The expect text on from_utf8 is `NUL and newline bytes are UTF-8`. The from_utf8 line is `let path = String::from_utf8(path).expect("NUL and newline bytes are UTF-8");`. encode_entries of the one entry `a` with that content differs from encode_entries of the one entry at that path holding `Y`. The expect text on both encode_entries calls is `name one entry`. The one-entry line is `encode_entries(&[entry("a", &content)]).expect("name one entry"),`. The path-entry line is `encode_entries(&[entry(&path, b"Y")]).expect("name one entry")`. The third comparison does not call name. The first two comparisons do not call encode_entries. The pinned names are the whole content-sample bundle plus the extra file. content_sample_with writes the fixture's files into a bundle folder and then writes each extra file. The doc line is `/// A content-sample bundle with `extra` files added.`. The fn line is `fn content_sample_with(extra: &[(&str, &[u8])]) -> TempDir {`. The assemble line inside content_sample_with is `let bundle = assemble(&CONTENT_SAMPLE);`. The loop line is `for (path, content) in extra {`. The write line is `write_file(bundle.path(), path, content);`. The content-sample fixture is named content-sample. Its files are capsule.json and sample.example. The fixture line is `pub const CONTENT_SAMPLE: Fixture = Fixture {`. The name line is `name: "content-sample",`. The files line is `files: &["capsule.json", "sample.example"],`. name calls lab_cid on that bundle and prints the result. The panic prints the refusal. The fn line is `fn name(bundle: &TempDir) -> String {`. The call line is `lab_cid(bundle.path())`. The panic line is `.unwrap_or_else(|refusal| panic!("{refusal}"))`. The result line is `.to_string()`. entry builds one BundleEntry from a path and bytes. The third comparison calls entry. The fn line is `fn entry(path: &str, content: &[u8]) -> BundleEntry {`. The name's length and the file's bytes are separate. The module line says a directory link holds the child's CID as field 1, its name as field 2, and its Tsize as field 3, a varint. The module line is `//!    (field 1), its name (field 2) and its Tsize (field 3, a varint); then`. encode_entries's doc says each entry is a raw leaf, and that its CID is CIDv1, raw codec, sha2-256 of its bytes, with its length as Tsize. The doc line is `/// Each entry is a raw leaf: a file over [`CHUNK_SIZE`] bytes is refused,`. The doc line is `/// and its CID is CIDv1, raw codec, sha2-256 of its bytes, with its length as`. The fn line is `pub fn encode_entries(entries: &[BundleEntry]) -> Result<LabCid, Refusal> {`. The leaf stores that CID and that Tsize. The leaf line is `let leaf = Child::File {`, and it has no fn line. The CID line hashes `entry.content`. The cid line is `cid: cid_bytes(RAW_CODEC, &sha256(&entry.content)),`. The Tsize line is `entry.content.len()`. The tsize line is `tsize: entry.content.len() as u64,`. directory_block is a function. directory_block's doc says each link is protobuf field 2 holding the child's CID as field 1, its name as field 2, and its Tsize as field 3, a varint. The doc line is `/// A directory's dag-pb block: each link in the order given, as protobuf`. The doc line is `/// field 2 holding the child's CID (field 1), its name (field 2) and its`. The doc line is `/// Tsize (field 3, a varint); then the UnixFS data as field 1, which is only`. The link doc says one link is the child's name, CID bytes, and Tsize. The doc line is `/// One link of a directory block: the child's name, CID bytes and Tsize.`. The fn line is `fn directory_block(links: &[Link<'_>]) -> Vec<u8> {`. directory_block writes the CID with put_length_delimited field 1, writes the name bytes with put_length_delimited field 2, and writes the Tsize as field 3 with put_varint. The cid write is `put_length_delimited(&mut pb_link, 1, &link.cid);`. The name write is `put_length_delimited(&mut pb_link, 2, link.name.as_bytes());`. The tag line is `pb_link.push(3 << 3);`. The tsize write is `put_varint(&mut pb_link, link.tsize);`. put_length_delimited is a function. put_length_delimited's doc says a protobuf field of wire type 2 is its tag, the length of the bytes as a varint, and the bytes. The doc line is `/// Protobuf field `field` of wire type 2: its tag, the length of `bytes` as a`. The doc line is `/// varint, and `bytes`.`. The fn line is `fn put_length_delimited(out: &mut Vec<u8>, field: u8, bytes: &[u8]) {`. The body writes the tag, then the length, then the bytes. The tag line is `out.push((field << 3) | 2);`. The length line is `put_varint(out, bytes.len() as u64);`. The bytes line is `out.extend_from_slice(bytes);`. The statements inside directory_block do not read `entry.content`. The statements inside put_length_delimited do not read `entry.content`. The statements inside encode_entries do read `entry.content`. These path and content boundaries are the lab reference model, and the lab model is not the Runtime. A link writes the name with its length, and the file's bytes are a separate leaf. A path does not run into the file's bytes. This paragraph does not answer the agent DID question. A3 stays open.
 
-This citation is design input for A3. `lab/capsule-identity/tests/encoding.rs::empty_file_has_the_pinned_cid` writes zero bytes at empty. A zero-byte file is named. The fn line is `fn empty_file_has_the_pinned_cid() {`. The comment says a zero-byte file is a raw leaf whose block is empty, with Tsize 0, and that it is never a dag-pb file node. The opening comment is a comment. That comment is a comment. This paragraph does not build a dag-pb file node. This citation does not build a dag-pb file node. The comment line is `    // A zero-byte file is a raw leaf whose block is empty, with Tsize 0,`. The comment line is `    // never a dag-pb file node.`. The test assembles the content-sample fixture and writes zero bytes at empty. The assemble line inside this test, the one followed by `    write_file(bundle.path(), "empty", b"");`, is `    let bundle = assemble(&CONTENT_SAMPLE);`. The write line is `    write_file(bundle.path(), "empty", b"");`. The content-sample fixture is named content-sample. Its files are capsule.json and sample.example. The fixture line is `pub const CONTENT_SAMPLE: Fixture = Fixture {`. The name line is `    name: "content-sample",`. The files line is `    files: &["capsule.json", "sample.example"],`. write_file writes those bytes. The expect text on the write, which this test does not hit, is `write a file`. The fn line is `pub fn write_file(root: &Path, path: &str, bytes: &[u8]) {`. The write line is `    fs::write(&target, bytes).expect("write a file");`. name of that bundle equals the empty-file pin. That assert_eq! has no failure message. The assert line is `    assert_eq!(name(&bundle), EMPTY_FILE_LAB_CID);`. The pin is `bafybeic2y3c3met6txd62reatxwqjnodhfejchfmltmd6dnpyhtah7l5we`. The pin line is `pub const EMPTY_FILE_LAB_CID: &str = "bafybeic2y3c3met6txd62reatxwqjnodhfejchfmltmd6dnpyhtah7l5we";`. The pin's doc says content-sample has one more file, `empty`, of zero bytes, and that this is a raw leaf whose block is empty. The doc line is `/// content-sample with one more file, `empty`, of zero bytes: a raw leaf`. The doc line is `/// whose block is empty.`. The test calls name. The test does not call lab_cid. The test does not call encode_entries. That file is an empty raw leaf. The module line says an empty file is an empty block. The module line is `//!    leaf: its block is the file's bytes (an empty file is an empty block),`. The next module lines say its CID is the bytes `01 55 12 20` and the SHA-256 of the block, CID version 1, raw codec `0x55`. The module line is `//!    its CID is the bytes `01 55 12 20` and the SHA-256 of the block (CID`. The module line is `//!    version 1, raw codec `0x55`, multihash sha2-256 of 32 bytes), and its`. RAW_CODEC is `0x55`. The constant line is `const RAW_CODEC: u8 = 0x55;`. encode_entries stores the leaf CID as cid_bytes of RAW_CODEC and the SHA-256 of the file's bytes, and stores Tsize as the content length. The fn line is `pub fn encode_entries(entries: &[BundleEntry]) -> Result<LabCid, Refusal> {`. encode_entries returns when the file's length is greater than CHUNK_SIZE. The comparison is greater-than, so a file of zero bytes is not that return. The comparison line is `        if entry.content.len() > CHUNK_SIZE {`. The statements inside that if do not call sha256. The cid line stands after that if, and that line hashes entry.content. The cid line is `            cid: cid_bytes(RAW_CODEC, &sha256(&entry.content)),`. A zero-length content has Tsize 0, and the hashed block is those bytes. The tsize line is `            tsize: entry.content.len() as u64,`. The file-child doc says a raw leaf is its CID bytes and its Tsize, the file's length. The doc line is `    /// A raw leaf: its CID bytes and its Tsize, the file's length.`. This paragraph does not quote that return. The test does not call encode_entries. name calls lab_cid on the bundle and prints the result. The panic prints the refusal. The fn line is `fn name(bundle: &TempDir) -> String {`. The call line is `    lab_cid(bundle.path())`. The panic line is `        .unwrap_or_else(|refusal| panic!("{refusal}"))`. The result line is `        .to_string()`. These empty leaves are the lab reference model, and the lab model is not the Runtime. A zero-byte file is an empty raw leaf, and it is named. The lab names that file as an empty block. This paragraph does not answer the agent DID question. A3 stays open.
+This citation is design input for A3. `lab/capsule-identity/tests/encoding.rs::empty_file_has_the_pinned_cid` writes zero bytes at empty. A zero-byte file is named. The fn line is `fn empty_file_has_the_pinned_cid() {`. The comment says a zero-byte file is a raw leaf whose block is empty, with Tsize 0, and that it is never a dag-pb file node. The opening comment is a comment. That comment is a comment. This paragraph does not build a dag-pb file node. This citation does not build a dag-pb file node. The comment line is `    // A zero-byte file is a raw leaf whose block is empty, with Tsize 0,`. The comment line is `    // never a dag-pb file node.`. The test assembles the content-sample fixture and writes zero bytes at empty. The assemble line inside this test, the one followed by `    write_file(bundle.path(), "empty", b"");`, is `    let bundle = assemble(&CONTENT_SAMPLE);`. The write line is `    write_file(bundle.path(), "empty", b"");`. The content-sample fixture is named content-sample. Its files are capsule.json and sample.example. The fixture line is `pub const CONTENT_SAMPLE: Fixture = Fixture {`. The name line is `    name: "content-sample",`. The files line is `    files: &["capsule.json", "sample.example"],`. write_file writes those bytes. The expect text on the write, which this test does not hit, is `write a file`. The fn line is `pub fn write_file(root: &Path, path: &str, bytes: &[u8]) {`. The write line is `    fs::write(&target, bytes).expect("write a file");`. name of that bundle equals the empty-file pin. That assert_eq! has no failure message. The assert line is `    assert_eq!(name(&bundle), EMPTY_FILE_LAB_CID);`. The pin is `bafybeic2y3c3met6txd62reatxwqjnodhfejchfmltmd6dnpyhtah7l5we`. The pin line is `pub const EMPTY_FILE_LAB_CID: &str = "bafybeic2y3c3met6txd62reatxwqjnodhfejchfmltmd6dnpyhtah7l5we";`. The pin's doc says content-sample has one more file, `empty`, of zero bytes, and that this is a raw leaf whose block is empty. The doc line is `/// content-sample with one more file, `empty`, of zero bytes: a raw leaf`. The doc line is `/// whose block is empty.`. The test calls name. The test does not call lab_cid. The test does not call encode_entries. That file is an empty raw leaf. The module line says an empty file is an empty block. The module line is `//!    leaf: its block is the file's bytes (an empty file is an empty block),`. The next module lines say its CID is the bytes `01 55 12 20` and the SHA-256 of the block, CID version 1, raw codec `0x55`. The module line is `//!    its CID is the bytes `01 55 12 20` and the SHA-256 of the block (CID`. The module line is `//!    version 1, raw codec `0x55`, multihash sha2-256 of 32 bytes), and its`. RAW_CODEC is `0x55`. The constant line is `const RAW_CODEC: u8 = 0x55;`. encode_entries stores the leaf CID through `file_node`, and `encode_entries` reaches `file_node`'s less-than-or-equal arm, which chooses one raw leaf for a file of at most `CHUNK_SIZE` bytes, including a file of zero bytes, and sends a larger file to `file_root`. The content line is `    let content = &entry.content;`. On that arm `file_node` makes the leaf by `raw_leaf` from `naming_hash` of the content and the content's length. `raw_leaf` returns that length as the leaf's Tsize. The leaf body line is `    (cid_bytes(RAW_CODEC, sha256), size)`. `file_node` returns that leaf as `Child::File`. The return line is `    Ok(Child::File { cid, tsize })`. A zero-byte file is therefore one raw leaf whose leaf Tsize is 0. This paragraph does not quote that return. The test does not call encode_entries. name calls lab_cid on the bundle and prints the result. The panic prints the refusal. The fn line is `fn name(bundle: &TempDir) -> String {`. The call line is `    lab_cid(bundle.path())`. The panic line is `        .unwrap_or_else(|refusal| panic!("{refusal}"))`. The result line is `        .to_string()`. These empty leaves are the lab reference model, and the lab model is not the Runtime. A zero-byte file is an empty raw leaf, and it is named. The lab names that file as an empty block. This paragraph does not answer the agent DID question. A3 stays open.
 
 This citation is design input for A3. `lab/capsule-identity/tests/encoding.rs::encoder_refuses_file_directory_conflict` gives encode_entries the pair `a` and `a/b`, and the pair `x/a` and `x/a/b`, each pair in both orders. Both orders of both pairs are refused. The fn line is `fn encoder_refuses_file_directory_conflict() {`. The comment says `a` and `a/b` make `a` a file and a directory, that a UnixFS directory holds one link per name, and that the encoder refuses, in either order, rather than keep one and drop the other. The opening comment is a comment. That comment is a comment. This paragraph does not drop one of the two entries. This citation does not drop one of the two entries. The comment line is `    // `a` and `a/b` make `a` a file and a directory. A UnixFS directory holds`. The comment line is `    // one link per name, so the encoder refuses, in either order, rather`. The comment line is `    // than keep one and drop the other.`. The outer tuple has two pairs. The first pair is file `a`, below `a/b`, and conflict `a`. The second pair is file `x/a`, below `x/a/b`, and conflict `x/a`. The for line is `    for (file, below, conflict) in [("a", "a/b", "a"), ("x/a", "x/a/b", "x/a")] {`. The test builds both as entry of the file path holding `b"file"` and entry of the below path holding `b"below"`. Those bytes are the file content. They are not the path. The bytes `b"file"` and `b"below"` are the file content and are not the path. The both line is `        let both = [entry(file, b"file"), entry(below, b"below")];`. The reversed array swaps that pair. The reversed line is `        let reversed = [both[1].clone(), both[0].clone()];`. The inner loop gives encode_entries the original pair and the reversed pair. The outer tuple has two pairs, the inner loop tries both orders, and that is four calls. The for line is `        for entries in [&both, &reversed] {`. encode_entries of each is an error. encode_entries returns FileAndDirectory. The expect text, which this test does not hit, is `a file and a directory at one path`. The expect text on encode_entries is `a file and a directory at one path`. The refusal line is `            let refusal = encode_entries(entries).expect_err("a file and a directory at one path");`. The refusal is FileAndDirectory. The path is conflict. The expected path is conflict: `a` for the first pair and `x/a` for the second. The variant line is `                Refusal::FileAndDirectory {`. The path line is `                    path: conflict.into()`. The first assert's failure message, which this test does not hit, is `{entries:?}`. The failure line is `                "{entries:?}"`. The string assert compares refusal.to_string() with the format of `{conflict} is both a file and a directory: a bundle path names one or the other`. That format interpolates conflict. That assert_eq! has no failure message. The string assert_eq! has no failure message. The format line is `                format!("{conflict} is both a file and a directory: a bundle path names one or the other")`. The test calls encode_entries and entry. The test calls encode_entries. The test calls entry. The test does not call insert, encode_directory, lab_cid, name, write_file, or assemble. The test does not call insert. The test does not call encode_directory. The test does not call lab_cid. The test does not call name. The test does not call write_file. The test does not call assemble. The test does not walk a bundle. This test does not walk a bundle. The variant doc says one path given to the encoder is both a file and a directory, as `a` and `a/b` would be, and that the walk never makes one. The variant doc is a doc. That doc is a doc. The doc line is `    /// One path given to the encoder is both a file and a directory, as`. The doc line is `    /// `a` and `a/b` would be. The walk never makes one.`. The variant line is `    FileAndDirectory { path: String },`. Display writes the path and says a bundle path names one or the other. The display line is `            Refusal::FileAndDirectory { path } => write!(`. The text line is `                "{path} is both a file and a directory: a bundle path names one or the other"`. The insert doc says a path with an empty, `.` or `..` part is refused, so is a path already given, and so is a path that is a file and a directory, in either order. That doc names three refusals. This paragraph cites the file-and-directory refusal. The doc line is `    /// Put the leaf `file` at the bundle path `path`, making each directory`. The doc line is `    /// on the way. A path with an empty, `.` or `..` part is refused; so is`. The doc line is `    /// a path already given, and a path that is a file and a directory, in`. The doc line is `    /// either order.`. The fn line is `    fn insert(&mut self, path: &str, file: Child) -> Result<(), Refusal> {`. The bad-part check stands before the folder walk, and this paragraph does not quote that check. The paths in this test are `a`, `a/b`, `x/a`, and `x/a/b`. The folder return stands inside the folder walk, before the final-name match. It returns FileAndDirectory with parts joined through that depth by `/`. The return line is `                    return Err(Refusal::FileAndDirectory {`. The path line is `                        path: parts[..=depth].join("/"),`. The duplicate-path arm stands in the final-name match, before the directory arm. The duplicate-path arm stands before the directory arm, the two paths in a pair differ, and this paragraph does not quote that arm. The directory arm returns FileAndDirectory with the whole path. The arm line is `            Some(Child::Directory(_)) => Err(Refusal::FileAndDirectory {`. The path line inside the directory arm, the one immediately after that arm, is `                path: path.to_owned(),`. The file-then-below order hits the folder return, the below-then-file order hits the directory arm, both arms yield that conflict, and the test does not record which arm returned. The file-then-below order hits the folder return. The below-then-file order hits the directory arm. For these pairs both arms yield the tuple's conflict: `a`, or `x/a`. Both arms yield that conflict. The test expects conflict for both orders. The test does not record which arm returned. encode_entries checks the file length, then builds the leaf, then calls insert. The leaf opener stands after that length check and before the insert call. The fn line is `pub fn encode_entries(entries: &[BundleEntry]) -> Result<LabCid, Refusal> {`. The leaf line is `        let leaf = Child::File {`. The cid line stands inside the leaf and before insert, and that line hashes entry.content. The cid line stands inside the leaf and hashes entry.content. The cid line is `            cid: cid_bytes(RAW_CODEC, &sha256(&entry.content)),`. The Tsize line stores the content length. The tsize line is `            tsize: entry.content.len() as u64,`. This paragraph does not quote the length check. The bytes `b"file"` and `b"below"` are not a file over one raw leaf. The statements inside the two FileAndDirectory returns do not call sha256. The FileAndDirectory returns do not call sha256. The insert line is `        root.insert(&entry.path, leaf)?;`. The insert call uses `?`, so an insert error returns before encode_directory and before Ok. The encode_directory call stands after the insert call. The call line is `    let (digest, _) = encode_directory(&root, "", &sha256)?;`. The Ok line stands after the encode_directory call. The Ok line is `    Ok(LabCid(digest))`. The encode_directory call stands after the insert call, and the Ok line stands after the encode_directory call, so an insert error returns no lab CID. encode_entries hashes the file bytes, then insert returns, and encode_directory does not run, so the call returns no lab CID. encode_directory does not run. The test's error is that refusal. This call returns no lab CID. The test does not call lab_cid. insert returns that refusal in either order, and the call returns no lab CID. These path conflicts are the lab reference model, and the lab model is not the Runtime. insert returns that refusal in either order. A path that is both a file and a directory gets no lab CID. This paragraph does not answer the agent DID question. A3 stays open.
 
@@ -191,7 +191,7 @@ This citation is design input for A3. `lab/capsule-identity/tests/encoding.rs::l
 
 This citation is design input for A3. `lab/capsule-identity/tests/encoding.rs::encoder_refuses_a_duplicate_path` gives encode_entries two lists. Both lists are refused. The comment says a folder holds one file per path, and two entries with one path would otherwise be named in the order they were given. That comment is a comment. This paragraph does not keep one of the two entries. The first list clones first and second: `capsule.json` holding `b"{}"`, then `capsule.json` holding `b"[]"`. The second list is second, then other, then first: `capsule.json` holding `b"[]"`, then `sample.example` holding `b"x"`, then `capsule.json` holding `b"{}"`. Those bytes are the file content. They are not the path. That is two calls. This test does not try both orders of a file and a directory. encode_entries of each list is an error. The expect text on encode_entries, which this test does not hit, is `a duplicate path must be refused`. The refusal is DuplicatePath. The path is `capsule.json` for both lists. The first assert_eq! has no failure message. The string assert compares refusal.to_string() with the literal `two entries have the path capsule.json: a bundle holds one file per path`. That literal does not interpolate. That assert_eq! has no failure message. The other entry's path is `sample.example`. The refused path is still `capsule.json`. The distinct path does not make the duplicate allowed. The test calls encode_entries. The test calls entry. The test does not call insert. The test does not call encode_directory. The test does not call lab_cid. The test does not call name. The test does not call write_file. The test does not call assemble. The test does not walk a bundle. The reply quotes `fn encoder_refuses_a_duplicate_path() {`, `    // A folder holds one file per path. Two entries with one path would`, `    // otherwise be named in the order they were given.`, `    let first = entry("capsule.json", b"{}");`, `    let second = entry("capsule.json", b"[]");`, `    let other = entry("sample.example", b"x");`, `    for entries in [`, `        vec![first.clone(), second.clone()],`, `        vec![second, other, first],`, `        let refusal = encode_entries(&entries).expect_err("a duplicate path must be refused");`, `            Refusal::DuplicatePath {`, `                path: "capsule.json".into()`, and `            "two entries have the path capsule.json: a bundle holds one file per path"`. insert returns that refusal when the path is already a file, and the call returns no lab CID. The variant doc says two entries given to the encoder have the same path. That doc is a doc. Display writes the path and says a bundle holds one file per path. The insert doc says a path with an empty, `.` or `..` part is refused, so is a path already given, and so is a path that is a file and a directory, in either order. That doc names three refusals. This paragraph cites the path already given. The line `    /// either order.` is the doc's file-and-directory refusal. This test does not try a file and a directory. The bad-part check stands before the folder walk and before the final-name match. This paragraph does not quote that check. The paths in this test are `capsule.json` and `sample.example`. The folder return stands before the final-name match. This paragraph does not quote the folder return. The duplicate arm stands in the final-name match, before the directory arm. This paragraph does not quote the directory arm. The existing child is a file, so the file arm returns DuplicatePath with the whole path. The statements inside that return do not call sha256. The test expects `capsule.json` for both lists. The test does not record which arm returned. encode_entries checks the file length, then builds the leaf, then calls insert. The leaf opener stands after that length check and before the insert call. The cid line stands inside the leaf, before the insert call, and hashes entry.content. The Tsize line stores the content length. This paragraph does not quote the length check. The bytes `b"{}"`, `b"[]"`, and `b"x"` are not a file over one raw leaf. The encode_directory call stands after the insert call. The Ok line stands after the encode_directory call. The insert call uses `?`, so an insert error returns before encode_directory and before Ok. The test's error is that refusal. This call returns no lab CID. The test does not call lab_cid. The reply quotes `    /// Two entries given to the encoder have the same path.`, `    DuplicatePath { path: String },`, `            Refusal::DuplicatePath { path } => write!(`, `                "two entries have the path {path}: a bundle holds one file per path"`, `    /// Put the leaf `file` at the bundle path `path`, making each directory`, `    /// on the way. A path with an empty, `.` or `..` part is refused; so is`, `    /// a path already given, and a path that is a file and a directory, in`, `    /// either order.`, `    fn insert(&mut self, path: &str, file: Child) -> Result<(), Refusal> {`, `            Some(Child::File { .. }) => Err(Refusal::DuplicatePath {`, `                path: path.to_owned(),`, `pub fn encode_entries(entries: &[BundleEntry]) -> Result<LabCid, Refusal> {`, `        let leaf = Child::File {`, `            cid: cid_bytes(RAW_CODEC, &sha256(&entry.content)),`, `            tsize: entry.content.len() as u64,`, `        root.insert(&entry.path, leaf)?;`, `    let (digest, _) = encode_directory(&root, "", &sha256)?;`, and `    Ok(LabCid(digest))`. These duplicate paths are the lab reference model, and the lab model is not the Runtime. insert returns that refusal when the path is already a file. Two entries with one path get no lab CID. This paragraph does not answer the agent DID question. A3 stays open.
 
-This citation is design input for A3. `lab/capsule-identity/tests/encoding.rs::file_over_the_chunk_limit_is_refused` writes 262145 zero bytes at sample.example. A file one byte over the limit is refused. The fn line is `fn file_over_the_chunk_limit_is_refused() {`. The comment says one byte more would need a chunked file DAG, which the lab never makes. The comment line is `    // One byte more would need a chunked file DAG, which the lab never makes.`. The test assembles the content-sample fixture and writes 262145 zero bytes at sample.example. The assemble line inside this test, the one followed by `    write_file(bundle.path(), "sample.example", &vec![0; 262_145]);`, is `    let bundle = assemble(&CONTENT_SAMPLE);`. The write line is `    write_file(bundle.path(), "sample.example", &vec![0; 262_145]);`. The content-sample fixture is named content-sample. Its files are capsule.json and sample.example. The fixture line is `pub const CONTENT_SAMPLE: Fixture = Fixture {`. The name line is `    name: "content-sample",`. The files line is `    files: &["capsule.json", "sample.example"],`. write_file writes those bytes. The expect text on the write, which this test does not hit, is `write a file`. The fn line is `pub fn write_file(root: &Path, path: &str, bytes: &[u8]) {`. The write line is `    fs::write(&target, bytes).expect("write a file");`. lab_cid of that bundle is an error. The expect text on lab_cid is `a file over one chunk must be refused`. The refusal line is `    let refusal = lab_cid(bundle.path()).expect_err("a file over one chunk must be refused");`. The refusal is FileOverChunkLimit. The path is sample.example. The length is 262145. The variant line is `        Refusal::FileOverChunkLimit {`. The path line is `            path: "sample.example".into(),`. The length line is `            length: 262_145`. The text is `sample.example is 262145 bytes, over the 262144-byte limit of one raw leaf: the lab names no chunked file`. The text line is `        "sample.example is 262145 bytes, over the 262144-byte limit of one raw leaf: the lab names no chunked file"`. The test calls lab_cid. The test does not call name. The test does not call encode_entries. The encoder returns before the leaf. CHUNK_SIZE is 262144. Its doc says that is the largest file one raw leaf holds, and that a larger file would need a chunked file DAG, which the lab refuses. The doc line is `/// The largest file one raw leaf holds (`chunker: size-262144`). A larger`. The doc line is `/// file would need a chunked file DAG, which the lab refuses.`. The constant line is `const CHUNK_SIZE: usize = 262_144;`. The variant doc says a file longer than 262144 bytes is one the lab does not name as a chunked file DAG, and that length is the file's length. The doc line is `    /// A file is longer than one raw leaf holds, 262144 bytes. The lab names`. The doc line is `    /// no chunked file DAG. `length` is the file's length.`. The variant line is `    FileOverChunkLimit { path: String, length: usize },`. encode_entries returns FileOverChunkLimit when the file's length is greater than CHUNK_SIZE. The path is the entry path. The length is the content length. The chunk return stands before the leaf. The statements inside that if do not call sha256. The fn line is `pub fn encode_entries(entries: &[BundleEntry]) -> Result<LabCid, Refusal> {`. The comparison line is `        if entry.content.len() > CHUNK_SIZE {`. The return line is `            return Err(Refusal::FileOverChunkLimit {`. The path line is `                path: entry.path.clone(),`. The length line is `                length: entry.content.len(),`. Display writes the path, the length, and CHUNK_SIZE, and says the lab names no chunked file. The display line is `            Refusal::FileOverChunkLimit { path, length } => write!(`. The text line is `                "{path} is {length} bytes, over the {CHUNK_SIZE}-byte limit of one raw leaf: the lab names no chunked file"`. The module line says a larger file is refused, and that there is no chunked file DAG. The module line is `//!    Tsize is its length. A larger file is refused: no chunked file DAG.`. The module line also says each regular file of at most 262144 bytes is one raw leaf. The module line is `//! 1. Each regular file of at most 262144 bytes (`CHUNK_SIZE`) is one raw`. The comparison is greater-than, so this return is not the file whose length equals CHUNK_SIZE. The refusal is no name. lab_cid's doc says a refusal returns no name. lab_cid calls lab_cid_observed. The test's error is that refusal. The doc line is `/// Name the bundle at `bundle` by its lab CID.`. The doc line is `/// walk, not a second one. A refusal returns no name.`. The fn line is `pub fn lab_cid(bundle: &Path) -> Result<LabCid, Refusal> {`. The body line is `    lab_cid_observed(bundle, |_, _| {})`. These chunk limits are the lab reference model, and the lab model is not the Runtime. encode_entries returns before it hashes a file over one raw leaf. The lab names no chunked file. This paragraph does not answer the agent DID question. A3 stays open.
+This citation is design input for A3. `lab/capsule-identity/tests/encoding.rs::file_over_one_leaf_has_the_pinned_cid` writes 262145 zero bytes at sample.example, and that file is named. A file of at most `CHUNK_SIZE` bytes is one raw leaf, and a longer file is named by one balanced file root. `file_node` chooses that arm with `content.len() <= CHUNK_SIZE`, and `encode_entries` reaches it through `file_node`. `file_root` refuses a file past `MAX_FILE_LINKS` leaves with `FileOverLeafLimit`. `lab/capsule-identity/tests/encoding.rs::file_of_174_leaves_is_named_and_one_byte_more_is_refused` names a file of 174 leaves and refuses one byte more. These file-root names are the lab reference model, and the lab model is not the Runtime. This paragraph does not answer the agent DID question. A3 stays open.
 
 This citation is design input for A3. `lab/capsule-identity/tests/refusals.rs::bundle_without_capsule_json_is_refused` makes a fresh folder with no capsule.json at its root, then writes sample.example there and a copy of the fixture manifest below the root. That folder is refused as a bundle with no manifest at its root. The fn line is `fn bundle_without_capsule_json_is_refused() {`. The comment says a valid manifest below the root is not the bundle's manifest. That comment is a comment. This paragraph does not treat nested/capsule.json as the root manifest. The test calls temp_dir. The expect text on temp_dir, which this test does not hit, is `create a temp dir`. The test does not call assemble, so the fixture is not copied in as a bundle. The content-sample fixture is named content-sample. Its files are capsule.json and sample.example. The test reads both through read_fixture. The panic text on that read, which this test does not hit, is `read {}: {error}`. The test writes the sample bytes at sample.example on the bundle root. The test writes the fixture's capsule.json bytes at nested/capsule.json. That written path is not capsule.json. write_file writes those bytes. The expect text on the write, which this test does not hit, is `write a file`. lab_cid of that folder is an error. The expect text on lab_cid is `a bundle without capsule.json gets no name`. That text contains the word name. That word is not a call to name. The refusal is NoManifest. NoManifest has no path field. The first assert_eq! has no failure message. The string assert compares refusal.to_string() with the literal `no capsule.json file at the bundle root`. That literal does not interpolate. That string assert_eq! has no failure message. The test calls lab_cid, temp_dir, read_fixture, and write_file. The test does not call assemble, encode_entries, collect_entries, checked_bundle_observed, lab_cid_observed, check_manifest, name, or entry_path. The test does not call the helper that builds a folder with no manifest yet. The test line is `    let bundle = temp_dir();`. The read line is `    let sample = read_fixture(&CONTENT_SAMPLE, "sample.example");`. The write line is `    write_file(bundle.path(), "sample.example", &sample);`. The comment line is `    // A valid manifest below the root is not the bundle's manifest.`. The manifest line is `    let manifest = read_fixture(&CONTENT_SAMPLE, "capsule.json");`. The nested line is `    write_file(bundle.path(), "nested/capsule.json", &manifest);`. The refusal line is `    let refusal = lab_cid(bundle.path()).expect_err("a bundle without capsule.json gets no name");`. The variant assert line is `    assert_eq!(refusal, Refusal::NoManifest);`. The text line is `        "no capsule.json file at the bundle root"`. The fixture line is `pub const CONTENT_SAMPLE: Fixture = Fixture {`. The name line is `    name: "content-sample",`. The files line is `    files: &["capsule.json", "sample.example"],`. The read_fixture doc line is `/// The committed bytes of one fixture file.`. The fn line is `pub fn read_fixture(fixture: &Fixture, file: &str) -> Vec<u8> {`. The path line is `    let path = lane_dir().join("fixtures").join(fixture.name).join(file);`. The read line is `    fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))`. The temp_dir doc line is `/// A fresh temp folder.`. The fn line is `pub fn temp_dir() -> TempDir {`. The expect line is `    tempfile::tempdir().expect("create a temp dir")`. The fn line is `pub fn write_file(root: &Path, path: &str, bytes: &[u8]) {`. The write line is `    fs::write(&target, bytes).expect("write a file");`. The manifest find returns that refusal before encode_entries, and the call returns no lab CID. The variant doc says the bundle root holds no regular file `capsule.json`. That doc is a doc. Display writes `no {MANIFEST_FILE} file at the bundle root`. MANIFEST_FILE's doc says it is the manifest every bundle holds at its root. MANIFEST_FILE is `capsule.json`. Display uses `{MANIFEST_FILE}` and does not write the characters `capsule.json` inside that format string. The test's literal is the text with that const in place. checked_bundle_observed's doc says the root capsule.json it read gets the Runtime's own two checks, that this is the one walk and the one manifest check, and that a refusal returns no value. This paragraph quotes those sentences. It does not quote the sentences about the listed type, a link, or a FIFO. The collect_entries call stands before the find. The find compares entry.path with MANIFEST_FILE. The written path nested/capsule.json is not capsule.json. The NoManifest line stands after the find and before the check_manifest call. The check_manifest call stands before the encode_entries call. The `?` on the NoManifest line returns before check_manifest and before encode_entries. The statements on that line do not call sha256. This paragraph does not quote check_manifest's body, its parse, or the refusal that parse returns. This paragraph does not quote the comment after the encode_entries call. This test's error is NoManifest, so the find ran, and encode_entries did not run. This paragraph does not say the nested file's bytes are hashed. The test does not record the entries. lab_cid's doc says a refusal returns no name. lab_cid's body calls lab_cid_observed. lab_cid_observed's doc says it is checked_bundle_observed's lab CID, the same walk and the same manifest check, not a second one, and that a refusal returns no name. The Ok line calls checked_bundle_observed and then cid(). The `?` on that call returns before cid(). This call returns no lab CID. The test does not call encode_entries. The variant doc line is `    /// The bundle root holds no regular file `capsule.json`.`. The variant line is `    NoManifest,`. The display line is `            Refusal::NoManifest => write!(f, "no {MANIFEST_FILE} file at the bundle root"),`. The doc line is `/// The manifest every bundle holds at its root.`. The constant line is `pub const MANIFEST_FILE: &str = "capsule.json";`. The doc line is `/// handle. Then the root `capsule.json` it read gets the Runtime's own two`. The doc line is `/// checks, and exactly the bytes that were checked are named and kept, with`. The doc line is `/// whether that check found `type` to be `wasm`. This is the one walk and the`. The doc line is `/// one manifest check. A refusal returns no value.`. The fn line is `pub fn checked_bundle_observed(`. The collect line is `    let entries = collect_entries(bundle, &mut observe)?;`. The entries line is `    let manifest = entries`. The find line is `        .find(|entry| entry.path == MANIFEST_FILE)`. The refusal line is `        .ok_or(Refusal::NoManifest)?;`. The check line is `    let wasm = check_manifest(&manifest.content)?;`. The encode line is `    encode_entries(&entries)`. The fn line is `fn collect_entries(`. The doc line is `/// Name the bundle at `bundle` by its lab CID.`. The doc line is `/// walk, not a second one. A refusal returns no name.`. The fn line is `pub fn lab_cid(bundle: &Path) -> Result<LabCid, Refusal> {`. The body line is `    lab_cid_observed(bundle, |_, _| {})`. The doc line is `/// This is [`checked_bundle_observed`]'s lab CID: the same walk and the same`. The doc line is `/// manifest check, not a second one. A refusal returns no name.`. The fn line is `pub fn lab_cid_observed(`. The Ok line is `    Ok(checked_bundle_observed(bundle, observe)?.cid())`. These missing manifests are the lab reference model, and the lab model is not the Runtime. The manifest find returns that refusal before encode_entries. A bundle with no capsule.json at the root gets no lab CID. This paragraph does not answer the agent DID question. A3 stays open.
 
@@ -221,13 +221,13 @@ A passing signature is the name check and grants nothing. The signature is a sep
         Ok(())
     }
 
-`lab/capsule-identity/src/lib.rs:1252` states that this result is not a trust, admission or launch.
+`lab/capsule-identity/src/lib.rs:1425` states that this result is not a trust, admission or launch.
 
     /// `Ok(())` means all four passed. It is not a trust, admission or launch
     /// value. A wrong key, a changed signature and a name moved onto other bytes
     /// all fail step 4 with one reason.
 
-The capsule-identity README states M1 check B1. `lab/capsule-identity/README.md:807` states that a valid signature grants nothing by itself. This section cites that statement.
+The capsule-identity README states M1 check B1. `lab/capsule-identity/README.md:946` states that a valid signature grants nothing by itself. This section cites that statement.
 
     The rule: a valid signature grants nothing by itself. A bundle whose test-key
     signature verifies is still not admitted, and it gets no grant. This library
@@ -316,8 +316,8 @@ For the agent identity, a capability request calls `scope_current_user_alias` wi
 
 `elastos/crates/elastos-server/src/resource_bridge.rs:43` is the `principal_id` field on `BridgeContext`. The field holds the Runtime principal used to resolve a capsule-facing `Users/self` alias.
 
-    /// Runtime principal used to resolve capsule-facing `Users/self` aliases.
-    pub principal_id: Option<String>,
+        /// Runtime principal used to resolve capsule-facing `Users/self` aliases.
+        pub principal_id: Option<String>,
 
 `elastos/crates/elastos-server/src/resource_bridge.rs:925` is the call in `handle_request`. The body handles a `request_capability` request. It calls `scope_current_user_alias` with the requested resource and `ctx.principal_id.as_deref()`. When the call returns an error, the body returns `principal_context_required` before it stores a pending request. When the call returns a name, the body runs `agents_area_capability_refusal`, parses the action, runs the wallet check, and runs the manifest check on that name. The body stores a pending request only after those checks pass, and the stored resource is the returned name.
 
@@ -354,97 +354,105 @@ For the session, the pending request's session id is the bridge capsule id. The 
 
 `elastos/crates/elastos-server/src/resource_bridge.rs:984` is the session id stored by that same `handle_request` body. The body builds a resource id from the scoped name and calls `create_request_with_reason`. The session argument is `SessionId` of `ctx.capsule_id.clone()`.
 
-                let resource_id = elastos_runtime::capability::ResourceId::new(resource);
+                    let resource_id = elastos_runtime::capability::ResourceId::new(resource);
 
-                // Create a pending request — the shell decides whether to grant.
-                let pending = ctx
-                    .pending_store
-                    .create_request_with_reason(
-                        elastos_runtime::session::SessionId(ctx.capsule_id.clone()),
-                        resource_id.clone(),
-                        action,
-                        reason,
-                    )
-                    .await;
+                    // Create a pending request — the shell decides whether to grant.
+                    let pending = ctx
+                        .pending_store
+                        .create_request_with_reason(
+                            elastos_runtime::session::SessionId(ctx.capsule_id.clone()),
+                            resource_id.clone(),
+                            action,
+                            reason,
+                        )
+                        .await;
 
 `elastos/crates/elastos-compute/src/providers/component.rs:352` is the `session` field in that same `context` body. The body sets `session` to `self.capsule_id.clone()`.
 
-            session: self.capsule_id.clone(),
+                session: self.capsule_id.clone(),
+
+This citation is design input for resident A3. The `start` body sets the activation running, starts the host call, and removes the activation when the run finishes, whether that run succeeded, failed, or panicked. `elastos/crates/elastos-compute/src/providers/component.rs:218` is that removal.
+            self.instances.write().await.remove(&handle.id);
+`elastos/crates/elastos-compute/src/providers/component.rs:232` is the contract error that `elastos/crates/elastos-compute/src/providers/component.rs::stop` returns for a running activation. That body reads the stored status and returns that error when the activation is running. It does not stop that activation, so a running activation keeps running until its run finishes.
+                    "component/v1 is a bounded activation contract and has no resident stop operation"
+`elastos/wit/elastos-bus-v1.wit:87` is the one export the capsule kernel provides. The capsule exports `lifecycle.run`, and that export returns one result.
+      run: func() -> result<_, bus-error>;
+Resident A3 credit depends on the RA-6 path. `lab/agent-conformance/standin-runtime/mod.rs::delete_capsule` is that path's stop: it stops one resident instance and revokes that instance's live grants. The stand-in is the lab path, and the lab path is not the Runtime. A3 stays open.
 
 `elastos/crates/elastos-server/src/api/handlers/capability.rs:182` is the refusal in `request_status`. The body loads the pending request by id. When `request.session_id` differs from the caller session id, the body returns Forbidden and the text Cannot access another session's request. Otherwise the body returns that request's status.
 
-    // Verify the request belongs to this session
-    if request.session_id != session.id {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Cannot access another session's request".to_string(),
-        ));
-    }
+        // Verify the request belongs to this session
+        if request.session_id != session.id {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Cannot access another session's request".to_string(),
+            ));
+        }
 
 `elastos/crates/elastos-server/src/api/handlers/capability.rs:339` is the comment on the shell grant. `elastos/crates/elastos-server/src/api/handlers/capability.rs:341` is the capsule id passed into `grant`. `grant_request` loads the pending request, requires it to be pending, and calls `capability_manager.grant`. The capsule id argument is `request.session_id.to_string()`. The resource argument is `request.resource`. The body then marks that pending request granted with the token `grant` returns.
 
-    // Use session ID as capsule ID for now
-    let token = state.capability_manager.grant(
-        &request.session_id.to_string(),
-        request.resource.clone(),
-        request.action,
-        constraints,
-        None, // No expiry for now (session-scoped)
-    );
+        // Use session ID as capsule ID for now
+        let token = state.capability_manager.grant(
+            &request.session_id.to_string(),
+            request.resource.clone(),
+            request.action,
+            constraints,
+            None, // No expiry for now (session-scoped)
+        );
 
 For the capsule instance, `grant` stores its capsule id argument on the token. `validate` refuses a caller whose capsule id differs, and `test_wrong_capsule` shows that refusal. The component invoke passes `BridgeContext.capsule_id` as that caller. The bridge comment says this field is the capsule identity for token minting, a session id or a capsule name.
 
 `elastos/crates/elastos-server/src/resource_bridge.rs:40` is that comment on `BridgeContext.capsule_id`.
 
-    /// Capsule identity for token minting (session ID or capsule name)
-    pub capsule_id: String,
+        /// Capsule identity for token minting (session ID or capsule name)
+        pub capsule_id: String,
 
 `elastos/crates/elastos-runtime/src/capability/manager.rs:326` is the capsule argument in `grant`. The body passes `capsule_id.to_string()` to `CapabilityToken::new`, signs the token, and returns the token.
 
-    /// Grant a new capability token
-    pub fn grant(
-        &self,
-        capsule_id: &str,
-        resource: ResourceId,
-        action: Action,
-        constraints: TokenConstraints,
-        expiry: Option<SecureTimestamp>,
-    ) -> CapabilityToken {
-        let issued_at = SecureTimestamp::now();
+        /// Grant a new capability token
+        pub fn grant(
+            &self,
+            capsule_id: &str,
+            resource: ResourceId,
+            action: Action,
+            constraints: TokenConstraints,
+            expiry: Option<SecureTimestamp>,
+        ) -> CapabilityToken {
+            let issued_at = SecureTimestamp::now();
 
-        // Ensure token epoch is at least current epoch
-        let mut constraints = constraints;
-        if constraints.epoch < self.store.current_epoch() {
-            constraints.epoch = self.store.current_epoch();
+            // Ensure token epoch is at least current epoch
+            let mut constraints = constraints;
+            if constraints.epoch < self.store.current_epoch() {
+                constraints.epoch = self.store.current_epoch();
+            }
+
+            let mut token = CapabilityToken::new(
+                capsule_id.to_string(),
+                self.public_key_bytes(),
+                resource.clone(),
+                action,
+                constraints,
+                issued_at,
+                expiry,
+            );
+
+            // Sign the token
+            token.sign(&self.signing_key);
+
+            // Record metrics
+            self.metrics.record_capability_request(capsule_id);
+
+            // Audit log
+            self.audit_log
+                .capability_grant(&token.id, capsule_id, &resource, action, expiry);
+
+            token
         }
-
-        let mut token = CapabilityToken::new(
-            capsule_id.to_string(),
-            self.public_key_bytes(),
-            resource.clone(),
-            action,
-            constraints,
-            issued_at,
-            expiry,
-        );
-
-        // Sign the token
-        token.sign(&self.signing_key);
-
-        // Record metrics
-        self.metrics.record_capability_request(capsule_id);
-
-        // Audit log
-        self.audit_log
-            .capability_grant(&token.id, capsule_id, &resource, action, expiry);
-
-        token
-    }
 
 `elastos/crates/elastos-runtime/src/capability/token.rs:203` is the token field that holds the capsule id. The field is the capsule that can use the token.
 
-    /// Who can use this token (capsule ID)
-    pub(crate) capsule: String,
+        /// Who can use this token (capsule ID)
+        pub(crate) capsule: String,
 
 `elastos/crates/elastos-runtime/src/capability/manager.rs:409` is the caller check. `validate` passes the caller capsule id to `validate_recurring`. That body returns WrongCapsule when `token.capsule` differs from `caller_capsule_id`, and it audits the failure as wrong_capsule.
 
@@ -478,31 +486,31 @@ For the capsule instance, `grant` stores its capsule id argument on the token. `
 
 `elastos/crates/elastos-runtime/src/capability/manager.rs::test_wrong_capsule` shows that refusal. The body grants a token for capsule-a, calls `validate` with capsule-b, and requires WrongCapsule.
 
-    #[tokio::test]
-    async fn test_wrong_capsule() {
-        let manager = create_test_manager();
+        #[tokio::test]
+        async fn test_wrong_capsule() {
+            let manager = create_test_manager();
 
-        let token = manager.grant(
-            "capsule-a",
-            ResourceId::new("localhost://Users/self/Documents/test.txt"),
-            Action::Read,
-            TokenConstraints::default(),
-            None,
-        );
-
-        // Wrong capsule trying to use it
-        let result = manager
-            .validate(
-                &token,
-                "capsule-b",
+            let token = manager.grant(
+                "capsule-a",
+                ResourceId::new("localhost://Users/self/Documents/test.txt"),
                 Action::Read,
-                &ResourceId::new("localhost://Users/self/Documents/test.txt"),
+                TokenConstraints::default(),
                 None,
-            )
-            .await;
+            );
 
-        assert!(matches!(result, Err(ValidationError::WrongCapsule { .. })));
-    }
+            // Wrong capsule trying to use it
+            let result = manager
+                .validate(
+                    &token,
+                    "capsule-b",
+                    Action::Read,
+                    &ResourceId::new("localhost://Users/self/Documents/test.txt"),
+                    None,
+                )
+                .await;
+
+            assert!(matches!(result, Err(ValidationError::WrongCapsule { .. })));
+        }
 
 `elastos/crates/elastos-server/src/resource_bridge.rs:394` is the caller in `authorize_and_dispatch_resource_invoke`. The body decodes the presented token and calls `validate` with `&bridge_ctx.capsule_id`. When `validate` returns an error, the body denies the invoke with `capability_denied`.
 
@@ -667,8 +675,8 @@ The guest proposes. `examples/agent-host/src/lib.rs::propose_hosted` records a h
 
 The asks file declares two hosted resources. `examples/agent-host/asks.json:10` declares `Models/`. `examples/agent-host/asks.json:11` declares `<principal>/.AppData/Models/`.
 
-    {"kind": "hosted", "resource": "Models/"},
-    {"kind": "hosted", "resource": "<principal>/.AppData/Models/"},
+        {"kind": "hosted", "resource": "Models/"},
+        {"kind": "hosted", "resource": "<principal>/.AppData/Models/"},
 
 The caller opens the model URL. `capsules/model-provider/src/adapters.rs::effect_request` is the one function that chooses the URL. A present `runtime_socket` uses `RUNTIME_HOSTED_EFFECT_URL`. The other branch uses `direct_url`. `capsules/model-provider/src/adapters.rs:42` sets that constant to `http://runtime.invalid/v1/hosted-effect`. `capsules/model-provider/src/adapters.rs:58` is the `direct_url` branch. That branch is request construction.
 
@@ -701,50 +709,50 @@ The caller opens the model URL. `capsules/model-provider/src/adapters.rs::effect
 
 The artifact-create worker, `run_http_artifact_create_worker_inner`, calls `require_external_http_containment` before `effect_request`. A production call with no Runtime socket is refused there, and `queued_external_workers_refuse_before_create_status_cancel_or_text_sockets` asserts zero requests in that case. The Runtime hosted transport is the production path. `capsules/model-provider/src/adapters.rs:1670` adds the authorization bearer. That line sits inside `if hosted_socket.is_none()`. The bearer is request construction on the `direct_url` branch.
 
-    require_external_http_containment(hosted_socket)?;
-    let client = backend_client_with_socket(offer.policy.runtime_ms_limit, hosted_socket)?;
-    let request = {
-        let mut builder = effect_request(
-            &client,
-            reqwest::Method::POST,
-            create_url,
-            hosted_socket,
-            &offer.id,
-            &deterministic_run_id(binding),
-            &binding.request_id,
-            "job_create",
-        )
-        .header("content-type", "application/json")
-        .json(&json!({
-            "request_id": binding.request_id,
-            "offer_id": offer.id,
-            "operation": offer.operation,
-            "input": input,
-        }));
-        if hosted_socket.is_none() {
-            if let Some(bearer_token) = bearer_token {
-                builder = builder.header("authorization", format!("Bearer {bearer_token}"));
+        require_external_http_containment(hosted_socket)?;
+        let client = backend_client_with_socket(offer.policy.runtime_ms_limit, hosted_socket)?;
+        let request = {
+            let mut builder = effect_request(
+                &client,
+                reqwest::Method::POST,
+                create_url,
+                hosted_socket,
+                &offer.id,
+                &deterministic_run_id(binding),
+                &binding.request_id,
+                "job_create",
+            )
+            .header("content-type", "application/json")
+            .json(&json!({
+                "request_id": binding.request_id,
+                "offer_id": offer.id,
+                "operation": offer.operation,
+                "input": input,
+            }));
+            if hosted_socket.is_none() {
+                if let Some(bearer_token) = bearer_token {
+                    builder = builder.header("authorization", format!("Bearer {bearer_token}"));
+                }
             }
-        }
-        builder
-    };
+            builder
+        };
 
 The Runtime names the socket. `capsules/model-provider/src/config.rs:111` says the Runtime-owned hosted HTTPS effect socket carries no provider key. `capsules/model-provider/src/config.rs:113` is the field `runtime_hosted_socket`.
 
-    /// Runtime-owned hosted HTTPS effect socket. It carries no provider key.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_hosted_socket: Option<String>,
+        /// Runtime-owned hosted HTTPS effect socket. It carries no provider key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub runtime_hosted_socket: Option<String>,
 
 The macOS bridge writes that field into the provider config in `spawn_confined_model_with_engine_bundle`. `elastos/crates/elastos-runtime/src/provider/bridge.rs:774` is that write.
 
-        config.extra["runtime_hosted_socket"] = serde_json::json!(hosted_socket);
+            config.extra["runtime_hosted_socket"] = serde_json::json!(hosted_socket);
 
 On macOS, apply_local_model_sockets copies the stored hosted socket into the same field. `elastos/crates/elastos-runtime/src/provider/registry.rs:841` is that copy.
 
-        #[cfg(target_os = "macos")]
-        if let Some(socket) = self.hosted_model_socket.read().await.as_deref() {
-            config.extra["runtime_hosted_socket"] = serde_json::json!(socket);
-        }
+            #[cfg(target_os = "macos")]
+            if let Some(socket) = self.hosted_model_socket.read().await.as_deref() {
+                config.extra["runtime_hosted_socket"] = serde_json::json!(socket);
+            }
 
 `capsules/model-provider/src/adapters.rs:125` is the error in require_external_http_containment: Hosted external HTTPS is paused. On macOS, a present runtime socket returns `Ok(())`. The error arm also says Runtime network authority is not available.
 
@@ -998,7 +1006,7 @@ For a new run, the same function stores the run, then compares `active_run_count
             Ok(RunSlot::Reserved)
         })
 
-`elastos/crates/elastos-server/src/api/gateway_model_service.rs:1444-1446` says a create holds its record slot before any model work starts, a retry of an already recorded request is answered from that record, and a full index refuses there.
+`elastos/crates/elastos-server/src/api/gateway_model_service.rs:1452-1454` says a create holds its record slot before any model work starts, a retry of an already recorded request is answered from that record, and a full index refuses there.
 
         // A create holds its record slot before any model work starts. A retry of
         // an already recorded request is answered from that record before another
@@ -1712,7 +1720,7 @@ write_precondition returns an error when `create_only` and `if_revision` are bot
         }
     }
 
-In the write arm of protected_principal_root_resource_response, an agent journal whose request has the append flag returns `append_not_allowed`. `elastos/crates/elastos-server/src/resource_bridge.rs:564` is that code. `elastos/crates/elastos-server/src/resource_bridge.rs:565` is the message that agent journals are written whole with a revision precondition.
+In the write arm of protected_principal_root_resource_response, an agent journal whose request has the append flag returns `append_not_allowed`. `elastos/crates/elastos-server/src/resource_bridge.rs:570` is that code. `elastos/crates/elastos-server/src/resource_bridge.rs:571` is the message that agent journals are written whole with a revision precondition.
 
                 if agent_journal && append {
                     return Some(resource_error_response(
@@ -1721,7 +1729,7 @@ In the write arm of protected_principal_root_resource_response, an agent journal
                     ));
                 }
 
-An agent journal with no precondition returns `revision_required`. `elastos/crates/elastos-server/src/resource_bridge.rs:576` is that code. `elastos/crates/elastos-server/src/resource_bridge.rs:577` is the message that agent journal writes need `create_only` or `if_revision`.
+An agent journal with no precondition returns `revision_required`. `elastos/crates/elastos-server/src/resource_bridge.rs:582` is that code. `elastos/crates/elastos-server/src/resource_bridge.rs:583` is the message that agent journal writes need `create_only` or `if_revision`.
 
                 if agent_journal && precondition.is_none() {
                     return Some(resource_error_response(
@@ -1730,11 +1738,11 @@ An agent journal with no precondition returns `revision_required`. `elastos/crat
                     ));
                 }
 
-When the append flag is false, the bytes are `content.clone()`. `elastos/crates/elastos-server/src/resource_bridge.rs:597` is that line.
+When the append flag is false, the bytes are `content.clone()`. `elastos/crates/elastos-server/src/resource_bridge.rs:603` is that line.
 
                     content.clone()
 
-A precondition that is present calls `write_principal_root_object_if_revision`. `elastos/crates/elastos-server/src/resource_bridge.rs:600` is that call.
+A precondition that is present calls `write_principal_root_object_if_revision`. `elastos/crates/elastos-server/src/resource_bridge.rs:606` is that call.
 
                     Some(precondition) => crate::auth::write_principal_root_object_if_revision(
 
@@ -1811,19 +1819,19 @@ Section 1 shows the guest names `Users/self`. local_person_principal_id builds `
 
 `lab/grant-binding/src/lib.rs::register_instance` stores the identity string and the session string. The body writes `identity: identity.to_owned()` and `session: session.to_owned()`. The body does not parse a DID.
 
-    /// Registers an instance and returns its registry id.
-    pub fn register_instance(&mut self, identity: &str, session: &str) -> InstanceId {
-        self.next_instance += 1;
-        let instance = InstanceId(self.next_instance);
-        self.registry.insert(
-            instance,
-            InstanceRecord {
-                identity: identity.to_owned(),
-                session: session.to_owned(),
-            },
-        );
-        instance
-    }
+        /// Registers an instance and returns its registry id.
+        pub fn register_instance(&mut self, identity: &str, session: &str) -> InstanceId {
+            self.next_instance += 1;
+            let instance = InstanceId(self.next_instance);
+            self.registry.insert(
+                instance,
+                InstanceRecord {
+                    identity: identity.to_owned(),
+                    session: session.to_owned(),
+                },
+            );
+            instance
+        }
 
 `lab/grant-binding/src/lib.rs::resource_name` is the name check. `lab/grant-binding/src/lib.rs:280` is the guard `if parts.len() < 3 || parts[0] != "UsersAI" || parts[1] != agent`. The body returns OutsidePrincipal when that guard is true.
 
@@ -1876,47 +1884,47 @@ Section 3 shows the cited functions return the token string as the grant id. gra
 
 `lab/grant-binding/src/lib.rs::bind_grant` binds the instance's identity and session, the owned root, and the rights to a fresh handle. `lab/grant-binding/src/lib.rs:162` is the doc line for that binding. The body loads the instance record, asks resource_name for the owned root, and stores the identity, the session, the instance, the owned root, and the rights on a new handle.
 
-    /// Binds the instance's identity and session, the owned root and the rights
-    /// to a fresh handle.
-    pub fn bind_grant(
-        &mut self,
-        instance: InstanceId,
-        resource: &str,
-        rights: Rights,
-    ) -> Result<Handle, Refuse> {
-        let record = self
-            .registry
-            .get(&instance)
-            .ok_or(Refuse::UnknownInstance)?;
-        let owned_root = resource_name(&record.identity, resource, None)?;
-        self.next_handle += 1;
-        let handle = Handle(self.next_handle);
-        self.grants.insert(
-            handle,
-            GrantRecord {
-                identity: record.identity.clone(),
-                session: record.session.clone(),
-                instance,
-                owned_root,
-                rights,
-            },
-        );
-        Ok(handle)
-    }
+        /// Binds the instance's identity and session, the owned root and the rights
+        /// to a fresh handle.
+        pub fn bind_grant(
+            &mut self,
+            instance: InstanceId,
+            resource: &str,
+            rights: Rights,
+        ) -> Result<Handle, Refuse> {
+            let record = self
+                .registry
+                .get(&instance)
+                .ok_or(Refuse::UnknownInstance)?;
+            let owned_root = resource_name(&record.identity, resource, None)?;
+            self.next_handle += 1;
+            let handle = Handle(self.next_handle);
+            self.grants.insert(
+                handle,
+                GrantRecord {
+                    identity: record.identity.clone(),
+                    session: record.session.clone(),
+                    instance,
+                    owned_root,
+                    rights,
+                },
+            );
+            Ok(handle)
+        }
 
 `lab/grant-binding/src/lib.rs::use_grant` uses the handle. The guest's claims are not read. `lab/grant-binding/src/lib.rs:244` says the call uses a grant and the guest's claims are not read. The body resolves the handle and returns the stored identity, session, instance, owned root, and rights.
 
-    /// Uses a grant. The guest's claims are not read.
-    pub fn use_grant(&self, call: Call, request: &GuestRequest) -> Result<Decision, Refuse> {
-        let record = self.resolve(call, request.handle)?;
-        Ok(Decision {
-            identity: record.identity,
-            session: record.session,
-            instance: record.instance,
-            owned_root: record.owned_root,
-            rights: record.rights,
-        })
-    }
+        /// Uses a grant. The guest's claims are not read.
+        pub fn use_grant(&self, call: Call, request: &GuestRequest) -> Result<Decision, Refuse> {
+            let record = self.resolve(call, request.handle)?;
+            Ok(Decision {
+                identity: record.identity,
+                session: record.session,
+                instance: record.instance,
+                owned_root: record.owned_root,
+                rights: record.rights,
+            })
+        }
 
 Is the Bus v2 host-side handle the token string, or an opaque handle whose binding the guest does not read?
 
@@ -2071,7 +2079,7 @@ This citation is design input for A7. `lab/grant-binding/src/ledger.rs::model_re
 
 This citation is design input for A7. `lab/grant-binding/src/ledger.rs::model_unknown_from_another_handle_does_not_mark_the_hold` binds two handles, admits 10, and reserves 4 on the first handle. The fn line is `fn model_unknown_from_another_handle_does_not_mark_the_hold() {`. The test registers two instances with identity agent-1 and session session-a. bind_grant of UsersAI/agent-1/notes on each instance returns a handle, and the handles differ. The assert inside this test is `assert_ne!(holder, other);`. The request line inside this test is `let request = guest(holder);`. Admit sets 10. The admit line inside this test is `verifier.admit(10);`. Reserve of 4 runs on the first handle. The reserve line inside this test is `let reservation = verifier.reserve(&call, &request, 4).expect("reserve");`. Settle of Unknown through the second handle returns UnknownOutcome. The text is `unknown outcome keeps the hold`. The call opens on the second instance and the request carries the second handle. The open-call line inside this test is `&verifier.open_call(second),`. The second-handle line inside this test is `&guest(other),`. Those lines stand before `SettleOutcome::Unknown,`. The expect_err line inside this test is `.expect_err("unknown outcome");`. The refusal assert inside this test is `assert_eq!(refusal, SettleRefuse::UnknownOutcome);`. The text assert inside this test is `assert_eq!(refusal.to_string(), "unknown outcome keeps the hold");`. The unknown arm sets the flag only when the presented handle matches the hold, then returns UnknownOutcome. This presented handle does not match, so the arm does not set the flag. The fn line of settle is `pub fn settle(`. The match inside settle is `if handles_match(open.handle, request.handle) {`. The flag assignment inside that match is `open.uncertain = true;`. The return is `return Err(SettleRefuse::UnknownOutcome);`. The release doc line is `bound handle's unknown settle makes a hold uncertain; an uncertain hold`. Held stays 4, charged stays 0, and the open hold stays 4. The held assert inside this test is `assert_eq!(after_refusal.held, 4);`. The charged assert inside this test is `assert_eq!(after_refusal.charged, 0);`. The open assert inside this test is `assert_eq!(after_refusal.open.get(&reservation.id), Some(&4));`. Those asserts follow `let after_refusal = books(&verifier);`. Release of that reservation through the first handle returns Ok(()). Charged stays 0 and held becomes 0. The reservation is no longer open. The fn line of release is `pub fn release(`. The release line inside this test is `assert_eq!(verifier.release(&call, &request, reservation), Ok(()));`. That line follows the unknown-outcome asserts. The books line inside this test is `let after_release = books(&verifier);`. The charged assert inside this test is `assert_eq!(after_release.charged, 0);`. The held assert inside this test is `assert_eq!(after_release.held, 0);`. The open assert inside this test is `assert!(!after_release.open.contains_key(&reservation.id));`. These other-handle unknown settles are the lab reference model, and the lab model is not the Runtime. The unknown arm sets the flag only when the presented handle matches the hold. An unknown settle from another handle does not mark the hold. This paragraph does not answer the budget question. A7 stays open.
 
-This citation is design input for A7. This citation is pending grant-binding deadline fix. `lab/grant-binding/src/ledger.rs::model_timeout_ends_an_uncertain_hold` admits 10, reserves 4 and 3, refuses a timeout while the first hold is fresh, refuses release after an unknown settle, and then ends that hold. The fn line is `fn model_timeout_ends_an_uncertain_hold() {`. A fresh hold is not timed out. The test admits 10. The admit line inside this test is `verifier.admit(10);`. Reserve of 4 and reserve of 3 leave both holds open. The first reserve line inside this test is `let first = verifier.reserve(&call, &request, 4).expect("reserve");`. The second reserve line inside this test is `let second = verifier.reserve(&call, &request, 3).expect("reserve");`. Held is 7 and charged is 0. The first hold is 4 and the second hold is 3. The charged assert inside this test is `assert_eq!(before.charged, 0);`. The held assert inside this test is `assert_eq!(before.held, 7);`. The open assert for the first hold inside this test is `assert_eq!(before.open.get(&first.id), Some(&4));`. The open assert for the second hold inside this test is `assert_eq!(before.open.get(&second.id), Some(&3));`. Timeout of the first hold, before any unknown settle, returns TimeoutRefuse::NotUncertain. The text is `hold is not uncertain`. The expect_err line inside this test is `.expect_err("a fresh hold is not timed out");`. The refusal assert inside this test is `assert_eq!(fresh, TimeoutRefuse::NotUncertain);`. The text assert inside this test is `assert_eq!(fresh.to_string(), "hold is not uncertain");`. timeout_hold returns that refusal when the hold is not uncertain, and that return stands before return_unused_hold. The fn line of timeout_hold is `pub fn timeout_hold(`. The uncertain check is `if !uncertain {`. The NotUncertain return is `return Err(TimeoutRefuse::NotUncertain);`. The Display arm is `formatter.write_str("hold is not uncertain")`. Release of the marked hold stays refused. Settle of Unknown on the first hold returns the unknown outcome. The settle line inside this test is `.settle(&call, &request, first, SettleOutcome::Unknown)`. That line is followed by `.expect_err("unknown outcome");`. Release of that hold returns ReleaseRefuse::Uncertain. The function release returns that refusal. The text is `uncertain hold is not released`. The blocked binding inside this test is `let blocked = verifier`. That binding is followed by `.expect_err("release of an uncertain hold stays refused");`. The refusal assert inside this test is `assert_eq!(blocked, ReleaseRefuse::Uncertain);`. The text assert inside this test is `assert_eq!(blocked.to_string(), "uncertain hold is not released");`. Held stays 7 and charged stays 0. The held assert inside this test is `assert_eq!(books(&verifier).held, 7);`. The charged assert inside this test is `assert_eq!(books(&verifier).charged, 0);`. The timeout ends that hold. timeout_hold of the first hold then returns Ok. The expect text is `timeout ends the uncertain hold`. The expect line inside this test is `.expect("timeout ends the uncertain hold");`. Charged stays 0, held becomes 3, the first id is gone, and the second hold stays at 3. Held drops from 7 to 3. The books line inside this test is `let after = books(&verifier);`. The charged assert inside this test is `assert_eq!(after.charged, 0);`. The held assert inside this test is `assert_eq!(after.held, 3);`. The open assert for the first id inside this test is `assert!(!after.open.contains_key(&first.id));`. The open assert for the second hold inside this test is `assert_eq!(after.open.get(&second.id), Some(&3));`. timeout_hold calls return_unused_hold only after the uncertain check passes. That helper removes the reservation and subtracts the amount. The call inside timeout_hold is `Self::return_unused_hold(&mut ledger, reservation, amount, request);`. That call stands after the NotUncertain return. The fn line of return_unused_hold is `fn return_unused_hold(`. The open removal inside return_unused_hold is `ledger.open.remove(&reservation.id);`. That removal is the statement before the held subtraction. The held subtraction inside return_unused_hold is `ledger.held -= amount;`. These timeouts are the lab reference model, and the lab model is not the Runtime. timeout_hold returns the unused hold only when the hold is uncertain. A timeout ends an uncertain hold. This paragraph does not answer the budget question. A7 stays open.
+This citation is design input for A7. `lab/grant-binding/src/ledger.rs::timeout_hold` takes a `now: u64` and returns `Result<TimeoutRecord, TimeoutRefuse>`. The fn line is `pub fn timeout_hold(`, the now line is `now: u64,`, and the return line is `) -> Result<TimeoutRecord, TimeoutRefuse> {`. It refuses a reservation that is not outstanding with `None => return Err(TimeoutRefuse::NotOutstanding),`, a reservation bound to another handle with `return Err(TimeoutRefuse::OtherHandle);`, a hold that is not uncertain with `if !uncertain {` and `return Err(TimeoutRefuse::NotUncertain);`, and a timeout whose now is before the hold's deadline with `if now < deadline {` and `return Err(TimeoutRefuse::Early);`. The due-timeout arm sets the hold's timed-out flag with `open.timed_out = true;` and returns Ok(TimeoutRecord), and the record's text is `timed out, outcome unknown`, which is the Display line `formatter.write_str("timed out, outcome unknown")`. `lab/grant-binding/src/ledger.rs::model_timeout_ends_an_uncertain_hold` shows that a due timeout keeps the hold: the held total stays 7 with `assert_eq!(after.held, 7);`, and the first hold stays open at 4 with `assert_eq!(after.open.get(&first.id), Some(&4));`. A release of that recorded hold stays refused with ReleaseRefuse::Uncertain and the text `uncertain hold is not released`, which is the Display line `ReleaseRefuse::Uncertain => formatter.write_str("uncertain hold is not released"),`. timeout_hold no longer calls return_unused_hold; release is the only caller, and its one call is `Self::return_unused_hold(&mut ledger, reservation, amount, request);`, which stands after the uncertain return inside the block `if uncertain {`. An unknown settle copies the verifier deadline onto the hold with `open.deadline = ledger.verifier_deadline;`, and `set_verifier_deadline` sets that deadline with `pub fn set_verifier_deadline(&self, deadline: u64) {`. In `lab/grant-binding/src/ledger.rs::model_early_timeout_is_refused`, a reserve of 4 under a deadline of 5 is refused at now 4 with TimeoutRefuse::Early and the text `timeout is before the verifier deadline`: the setter line inside that test is `verifier.set_verifier_deadline(5);`, the expect_err line is `.expect_err("timeout is before the verifier deadline");`, the refusal assert is `assert_eq!(early, TimeoutRefuse::Early);`, the text assert is `assert_eq!(early.to_string(), "timeout is before the verifier deadline");`, and the Display line is `formatter.write_str("timeout is before the verifier deadline")`. The held total stays 4 with `assert_eq!(stayed.held, 4);`, and the hold stays open with `assert_eq!(stayed.open.get(&reservation.id), Some(&4));`. The same hold is accepted at now 5 with `.expect("deadline reached");`, after which the held total is still 4. These timeouts are the lab reference model, and the lab model is not the Runtime. This paragraph does not answer the budget question. A7 stays open.
 
 This citation is design input for A7. `lab/grant-binding/src/ledger.rs::model_forged_instance_does_not_move_the_timeout` reserves 4 with the plain guest handle, settles Unknown with that same plain handle, sets forged_instance to the sibling, and times out that reservation on the reserving call. The fn line is `fn model_forged_instance_does_not_move_the_timeout() {`. The reserving call and the unknown settle use the plain guest handle. The test registers two instances with identity agent-1 and session session-a. The instances differ. bind_grant of UsersAI/agent-1/notes runs on the first instance. Admit sets 10. The call opens on that instance. Reserve of 4 uses the plain guest handle and returns a reservation. That reserve runs before the request sets forged_instance. The sibling line inside this test is `let sibling = verifier.register_instance("agent-1", "session-a");`. The instances assert inside this test is `assert_ne!(sibling, instance);`. The admit line inside this test is `verifier.admit(10);`. The call line inside this test is `let call = verifier.open_call(instance);`. The reserve line inside this test is `let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");`. Settle of Unknown uses that same plain guest handle and returns UnknownOutcome. The expect_err text is `unknown outcome`. That settle runs before the request sets forged_instance. The unknown binding inside this test is `let unknown = verifier`. The settle line inside this test is `.settle(&call, &guest(handle), reservation, SettleOutcome::Unknown)`. The expect_err line inside this test is `.expect_err("unknown outcome");`. The refusal assert inside this test is `assert_eq!(unknown, SettleRefuse::UnknownOutcome);`. The timeout uses the forged request and returns that hold. The request sets forged_instance to the sibling and fills the other fields from the guest handle. timeout_hold of that reservation on the reserving call returns Ok. The expect text is `forged instance does not move the timeout`. Charged stays 0, held becomes 0, and the reservation is gone. The forged_instance field inside this test is `forged_instance: Some(sibling),`. The guest-handle line inside this test is `..guest(handle)`. The forged-instance assert inside this test is `assert_eq!(request.forged_instance, Some(sibling));`. The timeout line inside this test is `.timeout_hold(&call, &request, reservation)`. The expect line inside this test is `.expect("forged instance does not move the timeout");`. The books line inside this test is `let after = books(&verifier);`. The charged assert inside this test is `assert_eq!(after.charged, 0);`. The held assert inside this test is `assert_eq!(after.held, 0);`. The open assert inside this test is `assert!(!after.open.contains_key(&reservation.id));`. The forged field is not the call. The sibling stands on the request. The call stands on the reserving instance. timeout_hold resolves the call and the handle. The not-uncertain arm returns TimeoutRefuse::NotUncertain before return_unused_hold. This call returns Ok, so return_unused_hold removes that reservation and subtracts that amount. The statements inside timeout_hold do not read forged_instance. The statements inside return_unused_hold do not read the request. The fn line of timeout_hold is `pub fn timeout_hold(`. The resolve line inside timeout_hold is `self.resolve(*call, request.handle)`. The map_err line inside timeout_hold is `.map_err(TimeoutRefuse::Binding)?;`. The uncertain check is `if !uncertain {`. The NotUncertain return is `return Err(TimeoutRefuse::NotUncertain);`. The return_unused_hold line inside timeout_hold is `Self::return_unused_hold(&mut ledger, reservation, amount, request);`. That call stands after the NotUncertain return. The fn line of return_unused_hold is `fn return_unused_hold(`. The open removal inside return_unused_hold is `ledger.open.remove(&reservation.id);`. That removal is the statement before the held subtraction. The held subtraction inside return_unused_hold is `ledger.held -= amount;`. These forged-instance timeouts are the lab reference model, and the lab model is not the Runtime. timeout_hold resolves the call and does not read the forged instance. A guest forged instance does not move the timeout. This paragraph does not answer the budget question. A7 stays open.
 
@@ -2079,27 +2087,27 @@ Section 6 contains the sentence Every ask in the asks file is mapped in this sec
 
 `lab/grant-binding/src/ops.rs::operate` performs one operation when the resolved grant carries its right. The doc line says the function performs one operation when the resolved grant carries its right. The match arms are Operation::Append, Operation::Overwrite, and Operation::ChildJournal. The body resolves the grant, refuses an arm whose right is absent, and returns Ok when the grant carries that right.
 
-    /// Performs one operation when the resolved grant carries its right.
-    pub fn operate(
-        &mut self,
-        call: &Call,
-        request: &GuestRequest,
-        operation: Operation,
-    ) -> Result<(), OperateRefuse> {
-        let grant = self
-            .resolve(*call, request.handle)
-            .map_err(OperateRefuse::Binding)?;
-        match operation {
-            Operation::Append if !grant.rights.append => Err(OperateRefuse::AppendNotGranted),
-            Operation::Overwrite if !grant.rights.overwrite => {
-                Err(OperateRefuse::OverwriteNotGranted)
+        /// Performs one operation when the resolved grant carries its right.
+        pub fn operate(
+            &mut self,
+            call: &Call,
+            request: &GuestRequest,
+            operation: Operation,
+        ) -> Result<(), OperateRefuse> {
+            let grant = self
+                .resolve(*call, request.handle)
+                .map_err(OperateRefuse::Binding)?;
+            match operation {
+                Operation::Append if !grant.rights.append => Err(OperateRefuse::AppendNotGranted),
+                Operation::Overwrite if !grant.rights.overwrite => {
+                    Err(OperateRefuse::OverwriteNotGranted)
+                }
+                Operation::ChildJournal if !grant.rights.child_journal => {
+                    Err(OperateRefuse::ChildJournalNotGranted)
+                }
+                _ => Ok(()),
             }
-            Operation::ChildJournal if !grant.rights.child_journal => {
-                Err(OperateRefuse::ChildJournalNotGranted)
-            }
-            _ => Ok(()),
         }
-    }
 
 The Operation enum names Append, Overwrite, and ChildJournal. None of those variant names is the ask string `run`, `child`, `init`, `hosted`, or `journal-append`. ChildJournal is the lab variant. This section does not choose it as the contract name for the child ask. This section does not choose a name for those five asks.
 
