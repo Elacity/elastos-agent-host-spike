@@ -187,6 +187,7 @@ FINITE_OBSERVER_MESSAGES = frozenset({
     'finite journey outside process identity is unavailable',
     'finite journey process census differs',
     'finite journey process changed during pidfd binding',
+    'finite journey process wait is unavailable',
     'finite journey process exit is unavailable',
     'finite journey process identity changed',
     'finite journey process identity is unavailable',
@@ -250,10 +251,12 @@ def same_process(left, right):
                ("pid", "uid", "start_ticks", "executable", "device", "inode"))
 
 
-def pidfd_exited(fd):
+def pidfd_exited(fd, timeout=0):
     poll = select.poll()
     poll.register(fd, select.POLLIN)
-    events = poll.poll(0)
+    if type(timeout) is not int or not 0 <= timeout <= 250:
+        raise RuntimeError("finite journey process wait is unavailable")
+    events = poll.poll(timeout)
     # Reaped processes can also report HUP. Readability still proves the
     # flags=0 pidfd's whole thread group exited; HUP alone proves no exit.
     if events not in ([], [(fd, select.POLLIN)], [(fd, select.POLLIN | select.POLLHUP)]):
@@ -528,7 +531,10 @@ class FiniteRuntime:
                 except ProcessLookupError:
                     continue
                 try:
-                    if pidfd_exited(fd):
+                    # An exiting child loses /proc/<pid>/exe before its
+                    # flags=0 pidfd reports whole-group exit. Wait out that
+                    # short window once; a quiet pidfd still refuses.
+                    if pidfd_exited(fd, timeout=250):
                         continue
                 finally:
                     os.close(fd)
