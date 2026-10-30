@@ -1,0 +1,9 @@
+F-A8-wasm-bus-only agent_host_host_key_read_is_refused: exit 101, caught
+  a8 runtime: elastos sha256 d185ab44586171595d639dd1bdb0aea0cf4bf1abc7dca2c4986f6f0d7fca2be9
+  a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 injected agent-host: sha256 f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737 imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+  a8 receipt cursor: size:0 inode:None path:/tmp/a8-home.Uq8JiJ/home/.local/share/elastos/runtime/capability-requests.jsonl
+  a8 host key read: exit:Some(1) assigned:None guest_hash:f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737 host_records:[CapabilityRequestRecord { action: "write", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied", capsule_id: Some("component-0c35bb2c-29e8-4403-9dca-219ec5654fb8"), principal_id: None, session_id: None, module_hash: None }, CapabilityRequestRecord { action: "read", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied", capsule_id: Some("component-0c35bb2c-29e8-4403-9dca-219ec5654fb8"), principal_id: None, session_id: None, module_hash: None }] marker_absent:true unchanged:true
+restored lab/a1-a8-hardening/tests/a8_agent_host_host_key.rs sha256 1d5e7818c05c665c975839c7c831cf67f6667270ecb1a4ce235e8d6fe0d9c627
+F-A8-wasm-bus-only: CAUGHT (expected caught)

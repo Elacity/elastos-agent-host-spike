@@ -1,0 +1,10 @@
+HEAD 10316585addf30c0f1e6446793cce302c0035acf
+dirty 0
+ccf9fc61b70f4c0e6a9b7c44de03ecfbac9a76595bdf07ddb55e55a84d34f17a  lab/a1-a8-hardening/tests/a1_wasi_import.rs
+1d5e7818c05c665c975839c7c831cf67f6667270ecb1a4ce235e8d6fe0d9c627  lab/a1-a8-hardening/tests/a8_agent_host_host_key.rs
+650f1d3b67c127984b62d8b2b6947ea23bbf652c5dcdf8f258e1e4414d23646a  lab/a1-a8-hardening/src/lib.rs
+0143b15be908fa9eef9bbc9a16e961331f59c80a27be544c2e7a63ec4ae1ee6f  lab/a1-a8-hardening/run.sh
+80f723fd33cd3e818edd75e8430fb318d0f2a2b54f0aaea09cf7e58a1a4f425c  lab/a1-a8-hardening/RUNTIME-ASK.md
+7ef1dea5f1bcb725c08f8e54e347a23caa9856992007a2306b8289896a0da992  elastos/crates/elastos-server/src/component.rs
+d52efcf8754427be26b2c276ae66bb11e8ce521eb84da47fd7128cf2833cf92a  elastos/crates/elastos-server/src/resource_bridge.rs
+e4eedf5538574918fcdddf7ba83660770080ace785c2a7e77ca03f92cd27cf3e  elastos/crates/elastos-server/src/run_cmd.rs
