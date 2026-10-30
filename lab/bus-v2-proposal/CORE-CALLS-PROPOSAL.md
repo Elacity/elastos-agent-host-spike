@@ -92,21 +92,21 @@ The Runtime resolves `Users/self` to a person principal and a localhost root. Th
 
 `elastos/crates/elastos-server/src/resource_bridge.rs::manifest_bound_users_self_matches_active_principal_root_only_with_context` shows a `Users/self` bound matching the active principal root only when the principal context is present. The body uses the principal id `person:local:abc123`, builds a resource under `principal_localhost_root` of that id, and allows the bound `localhost://Users/self/.AppData/LocalHost/Chat/*` when that principal id is passed in. The same call with no principal id returns false.
 
-    fn manifest_bound_users_self_matches_active_principal_root_only_with_context() {
-        let principal_id = "person:local:abc123";
-        let resource = format!(
-            "{}/.AppData/LocalHost/Chat/state.json",
-            crate::auth::principal_localhost_root(principal_id)
-        );
-        let bounds = vec!["localhost://Users/self/.AppData/LocalHost/Chat/*".to_string()];
+        fn manifest_bound_users_self_matches_active_principal_root_only_with_context() {
+            let principal_id = "person:local:abc123";
+            let resource = format!(
+                "{}/.AppData/LocalHost/Chat/state.json",
+                crate::auth::principal_localhost_root(principal_id)
+            );
+            let bounds = vec!["localhost://Users/self/.AppData/LocalHost/Chat/*".to_string()];
 
-        assert!(manifest_allows_resource(
-            &bounds,
-            &resource,
-            Some(principal_id)
-        ));
-        assert!(!manifest_allows_resource(&bounds, &resource, None));
-    }
+            assert!(manifest_allows_resource(
+                &bounds,
+                &resource,
+                Some(principal_id)
+            ));
+            assert!(!manifest_allows_resource(&bounds, &resource, None));
+        }
 
 The journal path sits under the `Users/self` alias. `examples/agent-host/src/lib.rs:3757` sets `JOURNAL_ROOT` to `localhost://Users/self/.AppData/Agents/`. The constant is compiled in tests and in the wasm32 guest.
 
@@ -316,8 +316,8 @@ For the agent identity, a capability request calls `scope_current_user_alias` wi
 
 `elastos/crates/elastos-server/src/resource_bridge.rs:43` is the `principal_id` field on `BridgeContext`. The field holds the Runtime principal used to resolve a capsule-facing `Users/self` alias.
 
-    /// Runtime principal used to resolve capsule-facing `Users/self` aliases.
-    pub principal_id: Option<String>,
+        /// Runtime principal used to resolve capsule-facing `Users/self` aliases.
+        pub principal_id: Option<String>,
 
 `elastos/crates/elastos-server/src/resource_bridge.rs:925` is the call in `handle_request`. The body handles a `request_capability` request. It calls `scope_current_user_alias` with the requested resource and `ctx.principal_id.as_deref()`. When the call returns an error, the body returns `principal_context_required` before it stores a pending request. When the call returns a name, the body runs `agents_area_capability_refusal`, parses the action, runs the wallet check, and runs the manifest check on that name. The body stores a pending request only after those checks pass, and the stored resource is the returned name.
 
@@ -354,22 +354,22 @@ For the session, the pending request's session id is the bridge capsule id. The 
 
 `elastos/crates/elastos-server/src/resource_bridge.rs:984` is the session id stored by that same `handle_request` body. The body builds a resource id from the scoped name and calls `create_request_with_reason`. The session argument is `SessionId` of `ctx.capsule_id.clone()`.
 
-                let resource_id = elastos_runtime::capability::ResourceId::new(resource);
+                    let resource_id = elastos_runtime::capability::ResourceId::new(resource);
 
-                // Create a pending request — the shell decides whether to grant.
-                let pending = ctx
-                    .pending_store
-                    .create_request_with_reason(
-                        elastos_runtime::session::SessionId(ctx.capsule_id.clone()),
-                        resource_id.clone(),
-                        action,
-                        reason,
-                    )
-                    .await;
+                    // Create a pending request — the shell decides whether to grant.
+                    let pending = ctx
+                        .pending_store
+                        .create_request_with_reason(
+                            elastos_runtime::session::SessionId(ctx.capsule_id.clone()),
+                            resource_id.clone(),
+                            action,
+                            reason,
+                        )
+                        .await;
 
 `elastos/crates/elastos-compute/src/providers/component.rs:352` is the `session` field in that same `context` body. The body sets `session` to `self.capsule_id.clone()`.
 
-            session: self.capsule_id.clone(),
+                session: self.capsule_id.clone(),
 
 This citation is design input for resident A3. The `start` body sets the activation running, starts the host call, and removes the activation when the run finishes, whether that run succeeded, failed, or panicked. `elastos/crates/elastos-compute/src/providers/component.rs:218` is that removal.
             self.instances.write().await.remove(&handle.id);
@@ -381,78 +381,78 @@ Resident A3 credit depends on the RA-6 path. `lab/agent-conformance/standin-runt
 
 `elastos/crates/elastos-server/src/api/handlers/capability.rs:182` is the refusal in `request_status`. The body loads the pending request by id. When `request.session_id` differs from the caller session id, the body returns Forbidden and the text Cannot access another session's request. Otherwise the body returns that request's status.
 
-    // Verify the request belongs to this session
-    if request.session_id != session.id {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Cannot access another session's request".to_string(),
-        ));
-    }
+        // Verify the request belongs to this session
+        if request.session_id != session.id {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Cannot access another session's request".to_string(),
+            ));
+        }
 
 `elastos/crates/elastos-server/src/api/handlers/capability.rs:339` is the comment on the shell grant. `elastos/crates/elastos-server/src/api/handlers/capability.rs:341` is the capsule id passed into `grant`. `grant_request` loads the pending request, requires it to be pending, and calls `capability_manager.grant`. The capsule id argument is `request.session_id.to_string()`. The resource argument is `request.resource`. The body then marks that pending request granted with the token `grant` returns.
 
-    // Use session ID as capsule ID for now
-    let token = state.capability_manager.grant(
-        &request.session_id.to_string(),
-        request.resource.clone(),
-        request.action,
-        constraints,
-        None, // No expiry for now (session-scoped)
-    );
+        // Use session ID as capsule ID for now
+        let token = state.capability_manager.grant(
+            &request.session_id.to_string(),
+            request.resource.clone(),
+            request.action,
+            constraints,
+            None, // No expiry for now (session-scoped)
+        );
 
 For the capsule instance, `grant` stores its capsule id argument on the token. `validate` refuses a caller whose capsule id differs, and `test_wrong_capsule` shows that refusal. The component invoke passes `BridgeContext.capsule_id` as that caller. The bridge comment says this field is the capsule identity for token minting, a session id or a capsule name.
 
 `elastos/crates/elastos-server/src/resource_bridge.rs:40` is that comment on `BridgeContext.capsule_id`.
 
-    /// Capsule identity for token minting (session ID or capsule name)
-    pub capsule_id: String,
+        /// Capsule identity for token minting (session ID or capsule name)
+        pub capsule_id: String,
 
 `elastos/crates/elastos-runtime/src/capability/manager.rs:326` is the capsule argument in `grant`. The body passes `capsule_id.to_string()` to `CapabilityToken::new`, signs the token, and returns the token.
 
-    /// Grant a new capability token
-    pub fn grant(
-        &self,
-        capsule_id: &str,
-        resource: ResourceId,
-        action: Action,
-        constraints: TokenConstraints,
-        expiry: Option<SecureTimestamp>,
-    ) -> CapabilityToken {
-        let issued_at = SecureTimestamp::now();
+        /// Grant a new capability token
+        pub fn grant(
+            &self,
+            capsule_id: &str,
+            resource: ResourceId,
+            action: Action,
+            constraints: TokenConstraints,
+            expiry: Option<SecureTimestamp>,
+        ) -> CapabilityToken {
+            let issued_at = SecureTimestamp::now();
 
-        // Ensure token epoch is at least current epoch
-        let mut constraints = constraints;
-        if constraints.epoch < self.store.current_epoch() {
-            constraints.epoch = self.store.current_epoch();
+            // Ensure token epoch is at least current epoch
+            let mut constraints = constraints;
+            if constraints.epoch < self.store.current_epoch() {
+                constraints.epoch = self.store.current_epoch();
+            }
+
+            let mut token = CapabilityToken::new(
+                capsule_id.to_string(),
+                self.public_key_bytes(),
+                resource.clone(),
+                action,
+                constraints,
+                issued_at,
+                expiry,
+            );
+
+            // Sign the token
+            token.sign(&self.signing_key);
+
+            // Record metrics
+            self.metrics.record_capability_request(capsule_id);
+
+            // Audit log
+            self.audit_log
+                .capability_grant(&token.id, capsule_id, &resource, action, expiry);
+
+            token
         }
-
-        let mut token = CapabilityToken::new(
-            capsule_id.to_string(),
-            self.public_key_bytes(),
-            resource.clone(),
-            action,
-            constraints,
-            issued_at,
-            expiry,
-        );
-
-        // Sign the token
-        token.sign(&self.signing_key);
-
-        // Record metrics
-        self.metrics.record_capability_request(capsule_id);
-
-        // Audit log
-        self.audit_log
-            .capability_grant(&token.id, capsule_id, &resource, action, expiry);
-
-        token
-    }
 
 `elastos/crates/elastos-runtime/src/capability/token.rs:203` is the token field that holds the capsule id. The field is the capsule that can use the token.
 
-    /// Who can use this token (capsule ID)
-    pub(crate) capsule: String,
+        /// Who can use this token (capsule ID)
+        pub(crate) capsule: String,
 
 `elastos/crates/elastos-runtime/src/capability/manager.rs:409` is the caller check. `validate` passes the caller capsule id to `validate_recurring`. That body returns WrongCapsule when `token.capsule` differs from `caller_capsule_id`, and it audits the failure as wrong_capsule.
 
@@ -486,31 +486,31 @@ For the capsule instance, `grant` stores its capsule id argument on the token. `
 
 `elastos/crates/elastos-runtime/src/capability/manager.rs::test_wrong_capsule` shows that refusal. The body grants a token for capsule-a, calls `validate` with capsule-b, and requires WrongCapsule.
 
-    #[tokio::test]
-    async fn test_wrong_capsule() {
-        let manager = create_test_manager();
+        #[tokio::test]
+        async fn test_wrong_capsule() {
+            let manager = create_test_manager();
 
-        let token = manager.grant(
-            "capsule-a",
-            ResourceId::new("localhost://Users/self/Documents/test.txt"),
-            Action::Read,
-            TokenConstraints::default(),
-            None,
-        );
-
-        // Wrong capsule trying to use it
-        let result = manager
-            .validate(
-                &token,
-                "capsule-b",
+            let token = manager.grant(
+                "capsule-a",
+                ResourceId::new("localhost://Users/self/Documents/test.txt"),
                 Action::Read,
-                &ResourceId::new("localhost://Users/self/Documents/test.txt"),
+                TokenConstraints::default(),
                 None,
-            )
-            .await;
+            );
 
-        assert!(matches!(result, Err(ValidationError::WrongCapsule { .. })));
-    }
+            // Wrong capsule trying to use it
+            let result = manager
+                .validate(
+                    &token,
+                    "capsule-b",
+                    Action::Read,
+                    &ResourceId::new("localhost://Users/self/Documents/test.txt"),
+                    None,
+                )
+                .await;
+
+            assert!(matches!(result, Err(ValidationError::WrongCapsule { .. })));
+        }
 
 `elastos/crates/elastos-server/src/resource_bridge.rs:394` is the caller in `authorize_and_dispatch_resource_invoke`. The body decodes the presented token and calls `validate` with `&bridge_ctx.capsule_id`. When `validate` returns an error, the body denies the invoke with `capability_denied`.
 
@@ -675,8 +675,8 @@ The guest proposes. `examples/agent-host/src/lib.rs::propose_hosted` records a h
 
 The asks file declares two hosted resources. `examples/agent-host/asks.json:10` declares `Models/`. `examples/agent-host/asks.json:11` declares `<principal>/.AppData/Models/`.
 
-    {"kind": "hosted", "resource": "Models/"},
-    {"kind": "hosted", "resource": "<principal>/.AppData/Models/"},
+        {"kind": "hosted", "resource": "Models/"},
+        {"kind": "hosted", "resource": "<principal>/.AppData/Models/"},
 
 The caller opens the model URL. `capsules/model-provider/src/adapters.rs::effect_request` is the one function that chooses the URL. A present `runtime_socket` uses `RUNTIME_HOSTED_EFFECT_URL`. The other branch uses `direct_url`. `capsules/model-provider/src/adapters.rs:42` sets that constant to `http://runtime.invalid/v1/hosted-effect`. `capsules/model-provider/src/adapters.rs:58` is the `direct_url` branch. That branch is request construction.
 
@@ -709,50 +709,50 @@ The caller opens the model URL. `capsules/model-provider/src/adapters.rs::effect
 
 The artifact-create worker, `run_http_artifact_create_worker_inner`, calls `require_external_http_containment` before `effect_request`. A production call with no Runtime socket is refused there, and `queued_external_workers_refuse_before_create_status_cancel_or_text_sockets` asserts zero requests in that case. The Runtime hosted transport is the production path. `capsules/model-provider/src/adapters.rs:1670` adds the authorization bearer. That line sits inside `if hosted_socket.is_none()`. The bearer is request construction on the `direct_url` branch.
 
-    require_external_http_containment(hosted_socket)?;
-    let client = backend_client_with_socket(offer.policy.runtime_ms_limit, hosted_socket)?;
-    let request = {
-        let mut builder = effect_request(
-            &client,
-            reqwest::Method::POST,
-            create_url,
-            hosted_socket,
-            &offer.id,
-            &deterministic_run_id(binding),
-            &binding.request_id,
-            "job_create",
-        )
-        .header("content-type", "application/json")
-        .json(&json!({
-            "request_id": binding.request_id,
-            "offer_id": offer.id,
-            "operation": offer.operation,
-            "input": input,
-        }));
-        if hosted_socket.is_none() {
-            if let Some(bearer_token) = bearer_token {
-                builder = builder.header("authorization", format!("Bearer {bearer_token}"));
+        require_external_http_containment(hosted_socket)?;
+        let client = backend_client_with_socket(offer.policy.runtime_ms_limit, hosted_socket)?;
+        let request = {
+            let mut builder = effect_request(
+                &client,
+                reqwest::Method::POST,
+                create_url,
+                hosted_socket,
+                &offer.id,
+                &deterministic_run_id(binding),
+                &binding.request_id,
+                "job_create",
+            )
+            .header("content-type", "application/json")
+            .json(&json!({
+                "request_id": binding.request_id,
+                "offer_id": offer.id,
+                "operation": offer.operation,
+                "input": input,
+            }));
+            if hosted_socket.is_none() {
+                if let Some(bearer_token) = bearer_token {
+                    builder = builder.header("authorization", format!("Bearer {bearer_token}"));
+                }
             }
-        }
-        builder
-    };
+            builder
+        };
 
 The Runtime names the socket. `capsules/model-provider/src/config.rs:111` says the Runtime-owned hosted HTTPS effect socket carries no provider key. `capsules/model-provider/src/config.rs:113` is the field `runtime_hosted_socket`.
 
-    /// Runtime-owned hosted HTTPS effect socket. It carries no provider key.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_hosted_socket: Option<String>,
+        /// Runtime-owned hosted HTTPS effect socket. It carries no provider key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub runtime_hosted_socket: Option<String>,
 
 The macOS bridge writes that field into the provider config in `spawn_confined_model_with_engine_bundle`. `elastos/crates/elastos-runtime/src/provider/bridge.rs:774` is that write.
 
-        config.extra["runtime_hosted_socket"] = serde_json::json!(hosted_socket);
+            config.extra["runtime_hosted_socket"] = serde_json::json!(hosted_socket);
 
 On macOS, apply_local_model_sockets copies the stored hosted socket into the same field. `elastos/crates/elastos-runtime/src/provider/registry.rs:841` is that copy.
 
-        #[cfg(target_os = "macos")]
-        if let Some(socket) = self.hosted_model_socket.read().await.as_deref() {
-            config.extra["runtime_hosted_socket"] = serde_json::json!(socket);
-        }
+            #[cfg(target_os = "macos")]
+            if let Some(socket) = self.hosted_model_socket.read().await.as_deref() {
+                config.extra["runtime_hosted_socket"] = serde_json::json!(socket);
+            }
 
 `capsules/model-provider/src/adapters.rs:125` is the error in require_external_http_containment: Hosted external HTTPS is paused. On macOS, a present runtime socket returns `Ok(())`. The error arm also says Runtime network authority is not available.
 
@@ -1819,19 +1819,19 @@ Section 1 shows the guest names `Users/self`. local_person_principal_id builds `
 
 `lab/grant-binding/src/lib.rs::register_instance` stores the identity string and the session string. The body writes `identity: identity.to_owned()` and `session: session.to_owned()`. The body does not parse a DID.
 
-    /// Registers an instance and returns its registry id.
-    pub fn register_instance(&mut self, identity: &str, session: &str) -> InstanceId {
-        self.next_instance += 1;
-        let instance = InstanceId(self.next_instance);
-        self.registry.insert(
-            instance,
-            InstanceRecord {
-                identity: identity.to_owned(),
-                session: session.to_owned(),
-            },
-        );
-        instance
-    }
+        /// Registers an instance and returns its registry id.
+        pub fn register_instance(&mut self, identity: &str, session: &str) -> InstanceId {
+            self.next_instance += 1;
+            let instance = InstanceId(self.next_instance);
+            self.registry.insert(
+                instance,
+                InstanceRecord {
+                    identity: identity.to_owned(),
+                    session: session.to_owned(),
+                },
+            );
+            instance
+        }
 
 `lab/grant-binding/src/lib.rs::resource_name` is the name check. `lab/grant-binding/src/lib.rs:280` is the guard `if parts.len() < 3 || parts[0] != "UsersAI" || parts[1] != agent`. The body returns OutsidePrincipal when that guard is true.
 
@@ -1884,47 +1884,47 @@ Section 3 shows the cited functions return the token string as the grant id. gra
 
 `lab/grant-binding/src/lib.rs::bind_grant` binds the instance's identity and session, the owned root, and the rights to a fresh handle. `lab/grant-binding/src/lib.rs:162` is the doc line for that binding. The body loads the instance record, asks resource_name for the owned root, and stores the identity, the session, the instance, the owned root, and the rights on a new handle.
 
-    /// Binds the instance's identity and session, the owned root and the rights
-    /// to a fresh handle.
-    pub fn bind_grant(
-        &mut self,
-        instance: InstanceId,
-        resource: &str,
-        rights: Rights,
-    ) -> Result<Handle, Refuse> {
-        let record = self
-            .registry
-            .get(&instance)
-            .ok_or(Refuse::UnknownInstance)?;
-        let owned_root = resource_name(&record.identity, resource, None)?;
-        self.next_handle += 1;
-        let handle = Handle(self.next_handle);
-        self.grants.insert(
-            handle,
-            GrantRecord {
-                identity: record.identity.clone(),
-                session: record.session.clone(),
-                instance,
-                owned_root,
-                rights,
-            },
-        );
-        Ok(handle)
-    }
+        /// Binds the instance's identity and session, the owned root and the rights
+        /// to a fresh handle.
+        pub fn bind_grant(
+            &mut self,
+            instance: InstanceId,
+            resource: &str,
+            rights: Rights,
+        ) -> Result<Handle, Refuse> {
+            let record = self
+                .registry
+                .get(&instance)
+                .ok_or(Refuse::UnknownInstance)?;
+            let owned_root = resource_name(&record.identity, resource, None)?;
+            self.next_handle += 1;
+            let handle = Handle(self.next_handle);
+            self.grants.insert(
+                handle,
+                GrantRecord {
+                    identity: record.identity.clone(),
+                    session: record.session.clone(),
+                    instance,
+                    owned_root,
+                    rights,
+                },
+            );
+            Ok(handle)
+        }
 
 `lab/grant-binding/src/lib.rs::use_grant` uses the handle. The guest's claims are not read. `lab/grant-binding/src/lib.rs:244` says the call uses a grant and the guest's claims are not read. The body resolves the handle and returns the stored identity, session, instance, owned root, and rights.
 
-    /// Uses a grant. The guest's claims are not read.
-    pub fn use_grant(&self, call: Call, request: &GuestRequest) -> Result<Decision, Refuse> {
-        let record = self.resolve(call, request.handle)?;
-        Ok(Decision {
-            identity: record.identity,
-            session: record.session,
-            instance: record.instance,
-            owned_root: record.owned_root,
-            rights: record.rights,
-        })
-    }
+        /// Uses a grant. The guest's claims are not read.
+        pub fn use_grant(&self, call: Call, request: &GuestRequest) -> Result<Decision, Refuse> {
+            let record = self.resolve(call, request.handle)?;
+            Ok(Decision {
+                identity: record.identity,
+                session: record.session,
+                instance: record.instance,
+                owned_root: record.owned_root,
+                rights: record.rights,
+            })
+        }
 
 Is the Bus v2 host-side handle the token string, or an opaque handle whose binding the guest does not read?
 
@@ -2087,27 +2087,27 @@ Section 6 contains the sentence Every ask in the asks file is mapped in this sec
 
 `lab/grant-binding/src/ops.rs::operate` performs one operation when the resolved grant carries its right. The doc line says the function performs one operation when the resolved grant carries its right. The match arms are Operation::Append, Operation::Overwrite, and Operation::ChildJournal. The body resolves the grant, refuses an arm whose right is absent, and returns Ok when the grant carries that right.
 
-    /// Performs one operation when the resolved grant carries its right.
-    pub fn operate(
-        &mut self,
-        call: &Call,
-        request: &GuestRequest,
-        operation: Operation,
-    ) -> Result<(), OperateRefuse> {
-        let grant = self
-            .resolve(*call, request.handle)
-            .map_err(OperateRefuse::Binding)?;
-        match operation {
-            Operation::Append if !grant.rights.append => Err(OperateRefuse::AppendNotGranted),
-            Operation::Overwrite if !grant.rights.overwrite => {
-                Err(OperateRefuse::OverwriteNotGranted)
+        /// Performs one operation when the resolved grant carries its right.
+        pub fn operate(
+            &mut self,
+            call: &Call,
+            request: &GuestRequest,
+            operation: Operation,
+        ) -> Result<(), OperateRefuse> {
+            let grant = self
+                .resolve(*call, request.handle)
+                .map_err(OperateRefuse::Binding)?;
+            match operation {
+                Operation::Append if !grant.rights.append => Err(OperateRefuse::AppendNotGranted),
+                Operation::Overwrite if !grant.rights.overwrite => {
+                    Err(OperateRefuse::OverwriteNotGranted)
+                }
+                Operation::ChildJournal if !grant.rights.child_journal => {
+                    Err(OperateRefuse::ChildJournalNotGranted)
+                }
+                _ => Ok(()),
             }
-            Operation::ChildJournal if !grant.rights.child_journal => {
-                Err(OperateRefuse::ChildJournalNotGranted)
-            }
-            _ => Ok(()),
         }
-    }
 
 The Operation enum names Append, Overwrite, and ChildJournal. None of those variant names is the ask string `run`, `child`, `init`, `hosted`, or `journal-append`. ChildJournal is the lab variant. This section does not choose it as the contract name for the child ask. This section does not choose a name for those five asks.
 

@@ -10144,15 +10144,15 @@ class CitationCheckTests(unittest.TestCase):
     def test_aligned_span_set_is_the_65_this_task_decides(self):
         # The 65 spans make 68 endpoint decisions, and 12 of those were already
         # targets, so that task adds 56 entries. The function spans sit after
-        # those 115. A missing span, an extra span and a duplicated span each
-        # fail here.
+        # those 115, and the indent line spans sit after the function spans. A
+        # missing span, an extra span and a duplicated span each fail here.
         self.assertEqual(len(ALIGNED_SPANS_DECIDED), 65)
         self.assertEqual(len(ALIGNED_ENDPOINTS), 68)
         self.assertEqual(len(ALIGNED_ALREADY_DECIDED), 12)
         self.assertEqual(len(ALIGNED_NEW_ENDPOINTS), 56)
         self.assertEqual(
             len(check.QUOTE_TARGETS),
-            115 + len(check.FUNCTION_QUOTE_SPANS),
+            115 + len(check.FUNCTION_QUOTE_SPANS) + len(check.INDENT_LINE_SPANS),
         )
         self.assertEqual(set(ALIGNED_ALREADY_DECIDED) - ALIGNED_ENDPOINT_SET, set())
 
@@ -10194,7 +10194,8 @@ class CitationCheckTests(unittest.TestCase):
             len(entries),
             len(BASELINE_TARGETS)
             + len(ALIGNED_NEW_ENDPOINTS)
-            + len(check.FUNCTION_QUOTE_SPANS),
+            + len(check.FUNCTION_QUOTE_SPANS)
+            + len(check.INDENT_LINE_SPANS),
         )
         # The spans this task adds, read back from the target list as spans, are
         # exactly the 65 names above minus the 12 that already had entries. A
@@ -10212,6 +10213,7 @@ class CitationCheckTests(unittest.TestCase):
             for endpoint in entries
             if endpoint not in BASELINE_TARGETS
             and endpoint not in check.FUNCTION_QUOTE_SPANS
+            and endpoint not in check.INDENT_LINE_SPANS
         ]
         self.assertEqual(len(added), len(ALIGNED_NEW_ENDPOINTS))
         added_spans = {
@@ -10400,18 +10402,27 @@ class CitationCheckTests(unittest.TestCase):
         self.assertIsNone(check.cited_line(span, ["fn other("]))
 
     def test_quote_targets_are_the_base_list_plus_function_spans(self):
-        # Walk order is the base list, then one None quoter per function span.
-        # A missing, extra, or duplicated entry fails this ordered comparison.
+        # Walk order is the base list, then one None quoter per function span,
+        # then one None quoter per indent line span. A missing, extra, or
+        # duplicated entry fails this ordered comparison.
         expected = BASE_QUOTE_TARGETS + tuple(
             (span, "`" + span + "`", None) for span in FUNCTION_QUOTE_SPAN_ORDER
+        ) + tuple(
+            (span, "`" + span + "`", None) for span in INDENT_LINE_SPAN_ORDER
         )
         self.assertEqual(check.QUOTE_TARGETS, expected)
         self.assertEqual(check.FUNCTION_QUOTE_SPANS, FUNCTION_QUOTE_SPAN_ORDER)
-        self.assertEqual(len(FUNCTION_QUOTE_SPAN_ORDER), 45)
-        self.assertEqual(len(expected), 160)
+        self.assertEqual(check.INDENT_LINE_SPANS, INDENT_LINE_SPAN_ORDER)
+        self.assertEqual(len(FUNCTION_QUOTE_SPAN_ORDER), 51)
+        self.assertEqual(len(INDENT_LINE_SPAN_ORDER), 18)
+        self.assertEqual(len(expected), 184)
         self.assertEqual(
             len(check.QUOTE_TARGETS),
             len({target[0] for target in check.QUOTE_TARGETS}),
+        )
+        self.assertEqual(
+            tuple(target[0] for target in check.QUOTE_TARGETS[-18:]),
+            INDENT_LINE_SPAN_ORDER,
         )
         for span in UNMATCHED_FUNCTION_SPANS:
             self.assertNotIn(span, check.FUNCTION_QUOTE_SPANS, span)
@@ -10422,7 +10433,7 @@ class CitationCheckTests(unittest.TestCase):
         root = check.worktree_root()
         text = check.load_draft(root)
         sha = check.pin_sha(text)
-        self.assertEqual(len(check.FUNCTION_QUOTE_SPANS), 45)
+        self.assertEqual(len(check.FUNCTION_QUOTE_SPANS), 51)
         for span in check.FUNCTION_QUOTE_SPANS:
             remainders = check._remainders(text, "`" + span + "`")
             rel = check.CITATION.fullmatch(span).group("path")
@@ -10458,8 +10469,8 @@ class CitationCheckTests(unittest.TestCase):
 
     def test_function_span_outside_the_tuple_adds_no_refusal(self):
         # A function span the tuple does not name is not a quote target, so a
-        # block under it adds no refusal. 129 function spans stay unchecked:
-        # 117 with no block and these 12 whose block does not equal the line.
+        # block under it adds no refusal. 123 function spans stay unchecked:
+        # 117 with no block and these 6 whose block stays short of the line.
         root = check.worktree_root()
         text = check.load_draft(root)
         cited = []
@@ -10472,8 +10483,8 @@ class CitationCheckTests(unittest.TestCase):
         unchecked = [
             span for span in cited if span not in check.FUNCTION_QUOTE_SPANS
         ]
-        self.assertEqual(len(unchecked), 129)
-        self.assertEqual(len(UNMATCHED_FUNCTION_SPANS), 12)
+        self.assertEqual(len(unchecked), 123)
+        self.assertEqual(len(UNMATCHED_FUNCTION_SPANS), 6)
         span = UNMATCHED_FUNCTION_SPANS[0]
         sha = check.pin_sha(text)
         body = (
@@ -10528,6 +10539,94 @@ class CitationCheckTests(unittest.TestCase):
             self.test_added_function_span_cites_its_own_declaration,
             "local_person_principal_id",
             "CAUGHT func-decl-line",
+        )
+
+    def test_changed_indent_remainder_does_not_match(self):
+        # One changed character of the remainder that stands for the cited
+        # line refuses that indent span and no other reason.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        sha = check.pin_sha(text)
+        self.assertEqual(len(check.INDENT_LINE_SPANS), 18)
+        for span in check.INDENT_LINE_SPANS:
+            remainders = check._remainders(text, "`" + span + "`")
+            rel = check.CITATION.fullmatch(span).group("path")
+            pinned = check._pinned_lines(root, sha, rel)
+            number = check.cited_line(span, pinned)
+            index = check._quote_window(remainders, pinned, number)
+            changed = list(remainders)
+            line = changed[index]
+            changed[index] = line[:-1] + ("x" if line[-1] != "x" else "y")
+            block = "".join("    " + row + "\n" for row in changed)
+            body = "Pinned commit: " + sha + "\n`" + span + "`\n\n" + block
+            self.assertEqual(
+                self._problems_for(body),
+                ["refuse: quoted line does not match " + span],
+                span,
+            )
+
+    def test_repeated_indent_marker_is_not_one_line(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        sha = check.pin_sha(text)
+        added = check.INDENT_LINE_SPANS + (
+            "elastos/crates/elastos-server/src/resource_bridge.rs::manifest_bound_users_self_matches_active_principal_root_only_with_context",
+            "elastos/crates/elastos-runtime/src/capability/manager.rs::test_wrong_capsule",
+            "lab/grant-binding/src/lib.rs::register_instance",
+            "lab/grant-binding/src/lib.rs::bind_grant",
+            "lab/grant-binding/src/lib.rs::use_grant",
+            "lab/grant-binding/src/ops.rs::operate",
+        )
+        for span in added:
+            body = (
+                "Pinned commit: " + sha + "\n"
+                "`" + span + "`\n"
+                "`" + span + "`\n"
+                "    kept\n"
+            )
+            self.assertEqual(
+                self._problems_for(body),
+                ["refuse: quoted line is not one line: " + span],
+                span,
+            )
+
+    def test_component_352_short_indent_is_refused(self):
+        # Removing the four repaired spaces from this block refuses that line.
+        span = "elastos/crates/elastos-compute/src/providers/component.rs:352"
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        lines = text.splitlines()
+        marker = "`" + span + "`"
+        index = next(i for i, line in enumerate(lines) if marker in line)
+        changed = False
+        for j in range(index + 1, len(lines)):
+            following = lines[j]
+            if not following:
+                continue
+            if not following.startswith(check.DRAFT_INDENT):
+                break
+            self.assertTrue(
+                following.startswith(check.DRAFT_INDENT + check.DRAFT_INDENT),
+                span,
+            )
+            lines[j] = following[len(check.DRAFT_INDENT):]
+            changed = True
+        self.assertTrue(changed, span)
+        body = "\n".join(lines) + "\n"
+        self.assertEqual(
+            self._problems_for(body),
+            ["refuse: quoted line does not match " + span],
+        )
+
+    def test_falsifier_indent_line_spans(self):
+        # An empty INDENT_LINE_SPANS drops the span, so the short line is not
+        # refused and this test fails.
+        self._caught(
+            "INDENT_LINE_SPANS",
+            (),
+            self.test_component_352_short_indent_is_refused,
+            "component.rs:352",
+            "CAUGHT indent-line-spans",
         )
 
 # The quote-target walk before function spans, in list order.
@@ -10649,16 +10748,18 @@ BASE_QUOTE_TARGETS = (
     ('lab/grant-binding/src/lib.rs:25', '`lab/grant-binding/src/lib.rs:25`', None),
 )
 
-# The 45 function spans spliced after that base, in draft order.
+# The 51 function spans spliced after that base, in draft order.
 FUNCTION_QUOTE_SPAN_ORDER = (
     'elastos/crates/elastos-server/src/auth.rs::local_person_principal_id',
     'elastos/crates/elastos-server/src/auth.rs::principal_localhost_root',
     'elastos/crates/elastos-server/src/resource_bridge.rs::scope_current_user_alias',
+    'elastos/crates/elastos-server/src/resource_bridge.rs::manifest_bound_users_self_matches_active_principal_root_only_with_context',
     'examples/agent-host/src/lib.rs::journal_resource',
     'lab/capsule-identity/src/lib.rs::name_signature_message',
     'lab/capsule-identity/src/lib.rs::sign_bundle',
     'lab/capsule-identity/src/lib.rs::verify_checked_signature',
     'examples/agent-host/src/lib.rs::authorize',
+    'elastos/crates/elastos-runtime/src/capability/manager.rs::test_wrong_capsule',
     'examples/agent-host/src/lib.rs::propose_hosted',
     'capsules/model-provider/src/adapters.rs::effect_request',
     'elastos/crates/elastos-server/src/api/model_provider_egress.rs::handle',
@@ -10693,23 +10794,44 @@ FUNCTION_QUOTE_SPAN_ORDER = (
     'elastos/crates/elastos-server/src/provider_resource.rs::agents_area_refusal',
     'elastos/crates/elastos-server/src/resource_bridge.rs::write_precondition',
     'lab/grant-binding/src/ops.rs::model_overwrite_grant_does_not_permit_append',
+    'lab/grant-binding/src/lib.rs::register_instance',
     'lab/grant-binding/src/lib.rs::resource_name',
+    'lab/grant-binding/src/lib.rs::bind_grant',
+    'lab/grant-binding/src/lib.rs::use_grant',
     'lab/grant-binding/src/ledger.rs::model_reserve_over_the_ceiling_is_refused',
     'lab/grant-binding/src/ledger.rs::model_reported_usage_does_not_lower_the_hold',
+    'lab/grant-binding/src/ops.rs::operate',
 )
 
-# Blocks that do not equal the declaring line. They stay out of the walk.
+# Blocks that stay short of the declaring line after a four-space shift.
+# They stay out of the walk.
 UNMATCHED_FUNCTION_SPANS = (
-    'elastos/crates/elastos-server/src/resource_bridge.rs::manifest_bound_users_self_matches_active_principal_root_only_with_context',
     'elastos/crates/elastos-compute/src/providers/component.rs::stop',
-    'elastos/crates/elastos-runtime/src/capability/manager.rs::test_wrong_capsule',
     'examples/agent-host/src/lib.rs::encode_journal',
     'examples/agent-host/src/lib.rs::decode_step',
     'capsules/model-provider/src/journal.rs::store_run',
     'capsules/model-provider/src/state.rs::handle_runs_create',
-    'lab/grant-binding/src/lib.rs::register_instance',
-    'lab/grant-binding/src/lib.rs::bind_grant',
-    'lab/grant-binding/src/lib.rs::use_grant',
     'lab/grant-binding/src/ledger.rs::reserve',
-    'lab/grant-binding/src/ops.rs::operate',
+)
+
+# The 18 line spans spliced after the function spans, in draft order.
+INDENT_LINE_SPAN_ORDER = (
+    'elastos/crates/elastos-server/src/resource_bridge.rs:43',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:984',
+    'elastos/crates/elastos-compute/src/providers/component.rs:352',
+    'elastos/crates/elastos-server/src/api/handlers/capability.rs:182',
+    'elastos/crates/elastos-server/src/api/handlers/capability.rs:339',
+    'elastos/crates/elastos-server/src/api/handlers/capability.rs:341',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:40',
+    'elastos/crates/elastos-runtime/src/capability/manager.rs:326',
+    'elastos/crates/elastos-runtime/src/capability/token.rs:203',
+    'examples/agent-host/asks.json:10',
+    'examples/agent-host/asks.json:11',
+    'capsules/model-provider/src/adapters.rs:1670',
+    'capsules/model-provider/src/config.rs:111',
+    'capsules/model-provider/src/config.rs:113',
+    'elastos/crates/elastos-runtime/src/provider/bridge.rs:774',
+    'elastos/crates/elastos-runtime/src/provider/registry.rs:841',
+    'lab/grant-binding/src/lib.rs:162',
+    'lab/grant-binding/src/lib.rs:244',
 )

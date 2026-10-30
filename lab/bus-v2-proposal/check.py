@@ -847,11 +847,13 @@ FUNCTION_QUOTE_SPANS = (
     "elastos/crates/elastos-server/src/auth.rs::local_person_principal_id",
     "elastos/crates/elastos-server/src/auth.rs::principal_localhost_root",
     "elastos/crates/elastos-server/src/resource_bridge.rs::scope_current_user_alias",
+    "elastos/crates/elastos-server/src/resource_bridge.rs::manifest_bound_users_self_matches_active_principal_root_only_with_context",
     "examples/agent-host/src/lib.rs::journal_resource",
     "lab/capsule-identity/src/lib.rs::name_signature_message",
     "lab/capsule-identity/src/lib.rs::sign_bundle",
     "lab/capsule-identity/src/lib.rs::verify_checked_signature",
     "examples/agent-host/src/lib.rs::authorize",
+    "elastos/crates/elastos-runtime/src/capability/manager.rs::test_wrong_capsule",
     "examples/agent-host/src/lib.rs::propose_hosted",
     "capsules/model-provider/src/adapters.rs::effect_request",
     "elastos/crates/elastos-server/src/api/model_provider_egress.rs::handle",
@@ -886,15 +888,44 @@ FUNCTION_QUOTE_SPANS = (
     "elastos/crates/elastos-server/src/provider_resource.rs::agents_area_refusal",
     "elastos/crates/elastos-server/src/resource_bridge.rs::write_precondition",
     "lab/grant-binding/src/ops.rs::model_overwrite_grant_does_not_permit_append",
+    "lab/grant-binding/src/lib.rs::register_instance",
     "lab/grant-binding/src/lib.rs::resource_name",
+    "lab/grant-binding/src/lib.rs::bind_grant",
+    "lab/grant-binding/src/lib.rs::use_grant",
     "lab/grant-binding/src/ledger.rs::model_reserve_over_the_ceiling_is_refused",
     "lab/grant-binding/src/ledger.rs::model_reported_usage_does_not_lower_the_hold",
+    "lab/grant-binding/src/ops.rs::operate",
+)
+
+# Line spans whose block equals the pinned window once every remainder gains
+# four spaces, in draft order. Each one is spliced into QUOTE_TARGETS with a
+# None quoter, the same way as FUNCTION_QUOTE_SPANS.
+INDENT_LINE_SPANS = (
+    "elastos/crates/elastos-server/src/resource_bridge.rs:43",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:984",
+    "elastos/crates/elastos-compute/src/providers/component.rs:352",
+    "elastos/crates/elastos-server/src/api/handlers/capability.rs:182",
+    "elastos/crates/elastos-server/src/api/handlers/capability.rs:339",
+    "elastos/crates/elastos-server/src/api/handlers/capability.rs:341",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:40",
+    "elastos/crates/elastos-runtime/src/capability/manager.rs:326",
+    "elastos/crates/elastos-runtime/src/capability/token.rs:203",
+    "examples/agent-host/asks.json:10",
+    "examples/agent-host/asks.json:11",
+    "capsules/model-provider/src/adapters.rs:1670",
+    "capsules/model-provider/src/config.rs:111",
+    "capsules/model-provider/src/config.rs:113",
+    "elastos/crates/elastos-runtime/src/provider/bridge.rs:774",
+    "elastos/crates/elastos-runtime/src/provider/registry.rs:841",
+    "lab/grant-binding/src/lib.rs:162",
+    "lab/grant-binding/src/lib.rs:244",
 )
 
 # The only target list: one entry per line decision, in source order, then one
-# None-quoter entry per FUNCTION_QUOTE_SPANS entry. A range's two endpoints
-# share one marker. The quoter name is looked up at call time so a test can
-# plant a neighbouring remainder through the production path.
+# None-quoter entry per FUNCTION_QUOTE_SPANS entry, then one per
+# INDENT_LINE_SPANS entry. A range's two endpoints share one marker. The
+# quoter name is looked up at call time so a test can plant a neighbouring
+# remainder through the production path.
 QUOTE_TARGETS = (
     (OBSERVE_SPAN, OBSERVE_MARKER, "observe_quote"),
     (EDIT_START_SPAN, EDIT_RANGE_MARKER, "edit_start_quote"),
@@ -1016,7 +1047,14 @@ QUOTE_TARGETS = (
     ("lab/grant-binding/src/lib.rs:25", "`lab/grant-binding/src/lib.rs:25`", None),
 ) + tuple(
     (span, "`" + span + "`", None) for span in FUNCTION_QUOTE_SPANS
+) + tuple(
+    (span, "`" + span + "`", None) for span in INDENT_LINE_SPANS
 )
+
+# The built list. The walker re-reads INDENT_LINE_SPANS onto this prefix when
+# the list has not been replaced, so planting that tuple empty drops its spans.
+_QUOTE_TARGETS_BUILT = QUOTE_TARGETS
+_INDENT_LINE_SPANS_BUILT = len(INDENT_LINE_SPANS)
 
 
 def quoted_line_matches(quoted, source):
@@ -1068,9 +1106,24 @@ def _quote_refusal(root, text, sha, target, refused_spans=frozenset()):
     return None
 
 
+def _quote_targets():
+    """Return the one target list.
+
+    INDENT_LINE_SPANS is read when QUOTE_TARGETS is still the built list, so
+    planting that tuple empty drops its spans from this walk. A test that
+    replaces QUOTE_TARGETS keeps the replacement.
+    """
+    if QUOTE_TARGETS is _QUOTE_TARGETS_BUILT:
+        head = _QUOTE_TARGETS_BUILT[:-_INDENT_LINE_SPANS_BUILT]
+        return head + tuple(
+            (span, "`" + span + "`", None) for span in INDENT_LINE_SPANS
+        )
+    return QUOTE_TARGETS
+
+
 def _quote_refusals(root, text, sha, refused_spans=frozenset()):
-    """Return at most one quote refusal, walking QUOTE_TARGETS in source order."""
-    for target in QUOTE_TARGETS:
+    """Return at most one quote refusal, walking the one target list in order."""
+    for target in _quote_targets():
         reason = _quote_refusal(root, text, sha, target, refused_spans)
         if reason is not None:
             return [reason]
