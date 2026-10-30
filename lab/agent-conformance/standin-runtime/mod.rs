@@ -275,6 +275,12 @@ pub struct StandIn {
     instant: u64,
 }
 
+impl Default for StandIn {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StandIn {
     pub fn new() -> Self {
         Self {

@@ -97,9 +97,7 @@ impl Evidence {
         let mut evidence = Self::default();
         for line in listed.lines() {
             if let Some(name) = line.strip_suffix(": test") {
-                if !test_name(name) {
-                    evidence.duplicate_inventory = true;
-                } else if evidence.rows.insert(name.into(), Vec::new()).is_some() {
+                if !test_name(name) || evidence.rows.insert(name.into(), Vec::new()).is_some() {
                     evidence.duplicate_inventory = true;
                 }
             }
@@ -398,10 +396,10 @@ impl Identities {
         if !hex(&probe.component_sha256, 64) {
             return Err(format!("malformed component SHA-256: {}", probe.effect));
         }
-        if !probe
+        if probe
             .bundle_lab_cid
             .parse::<capsule_identity::LabCid>()
-            .is_ok()
+            .is_err()
         {
             return Err(format!("malformed bundle lab CID: {}", probe.effect));
         }
