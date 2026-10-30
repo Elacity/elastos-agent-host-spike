@@ -28,8 +28,9 @@ use std::process::Command;
 /// bundles (task 077), the shard with a file root (task 082), the two
 /// shared-prefix bundles (task 071), the 127-byte file bundle (task 091),
 /// the exact 262144-byte basic block bundle (task 093), the 128-byte
-/// file bundle (task 094) and the 16384-byte file bundle (task 097).
-const PINNED_BUNDLES: usize = 28;
+/// file bundle (task 094), the 16384-byte file bundle (task 097) and the
+/// nine-byte-name shard (task 098).
+const PINNED_BUNDLES: usize = 29;
 
 /// How many committed fixtures have a pin: all but wc001-core.
 const PINNED_FIXTURES: usize = 7;
@@ -229,6 +230,11 @@ fn pinned_bundles() -> Vec<Pinned> {
         what: "shard with a file root".to_owned(),
         pin: FILE_ROOT_SHARD_LAB_CID,
         entries: shard_with_a_file_root().0,
+    });
+    bundles.push(Pinned {
+        what: "nine-byte-name shard".to_owned(),
+        pin: NINE_BYTE_NAME_LAB_CID,
+        entries: nine_byte_shard(),
     });
     for row in shared_prefix_rows() {
         bundles.push(Pinned {

@@ -1331,7 +1331,9 @@ fn tsize(block: &[u8], children: impl Iterator<Item = u64>) -> u64 {
 /// big-endian. This is the marked lab copy of the one HAMT hash; a separate
 /// x64-64 mix gives another value, so it is the wrong function.
 /// `hamt_digest("hello")` is `cb d8 a7 b3 41 bd 9b 02`. Level `n` of a shard
-/// takes digest byte `n`.
+/// takes digest byte `n`. A name whose tail is longer than 8 bytes mixes its
+/// tail index 8, the second word's first byte: `hamt_digest("photo.jpg")`,
+/// a 9-byte name, is `c8 93 6b cd f7 98 4c 4c`.
 fn hamt_digest(name: &str) -> [u8; HAMT_DIGEST_BYTES] {
     const C1: u64 = 0x87c3_7b91_1142_53d5;
     const C2: u64 = 0x4cf5_ad43_2745_937f;
@@ -2370,6 +2372,19 @@ fn hamt_digest_is_the_marked_murmur3_copy() {
         hamt_digest("hello"),
         [0xcb, 0xd8, 0xa7, 0xb3, 0x41, 0xbd, 0x9b, 0x02],
         "the first 64 bits of murmur3 x64-128 of \"hello\", big-endian"
+    );
+}
+
+/// A tail longer than 8 bytes mixes tail index 8 into the second word: the
+/// 9-byte `photo.jpg` gives this digest, while a tail cut at 8 gives another
+/// first byte and another shard bucket.
+#[cfg(test)]
+#[test]
+fn photo_jpg_mixes_tail_index_8() {
+    assert_eq!(
+        hamt_digest("photo.jpg"),
+        [0xc8, 0x93, 0x6b, 0xcd, 0xf7, 0x98, 0x4c, 0x4c],
+        "the first 64 bits of murmur3 x64-128 of \"photo.jpg\", big-endian"
     );
 }
 

@@ -153,6 +153,12 @@ pub const EXACT_BASIC_BLOCK_LAB_CID: &str =
 /// temp dir and never committed.
 pub const HAMT_OVER_THRESHOLD_LAB_CID: &str =
     "bafybeiapjks5bqeaeeuhrestfwx3tskokvzjvy5kltdidb24gnyyzkn2rm";
+/// The 262145 file set with its longest name shortened to 166 bytes and one
+/// empty file `photo.jpg`: `photo.jpg` is 9 bytes, so its tail index 8 is its
+/// last byte and the second word's first byte. Built in a temp dir and never
+/// committed; task 098 printed it first with README's Python rule.
+pub const NINE_BYTE_NAME_LAB_CID: &str =
+    "bafybeiaoboi4mlbjmgxablteafvzasxtevwtmtumooqwlsc4p4u62f3may";
 /// The 262145 file set under `photos/`, with content-sample's two files left
 /// at the root, whose own estimate is 140: the child directory is a shard and
 /// the root a basic directory. Built in a temp dir and never committed.
@@ -284,6 +290,62 @@ pub fn shard_with_a_file_root() -> (Vec<BundleEntry>, String) {
     let estimate: usize = entries.iter().map(|entry| entry.path.len() + 36).sum();
     assert_eq!(estimate, 262_145, "the file set's links estimate");
     (entries, first)
+}
+
+/// The over-threshold bundle of [`flat_bundle_at`] at 262145 with its longest
+/// name shortened by 45 bytes, to 166 bytes, and one empty file `photo.jpg`
+/// added: 45 is the 9-byte name plus its 36-byte link overhead, so the links
+/// estimate stays 262145 and the directory is still a shard. `photo.jpg` is
+/// the only path whose length modulo 16 is 9, so only its murmur tail has
+/// index 8.
+pub fn nine_byte_shard() -> Vec<BundleEntry> {
+    let (mut entries, names, _extra) = flat_bundle_at("", 262_145);
+    let longest = names
+        .into_iter()
+        .max_by_key(String::len)
+        .expect("the file set has names");
+    assert_eq!(longest.len(), 211, "the lengthened name is 211 bytes");
+    let mut shortened = longest.clone();
+    shortened.truncate(166);
+    let at = entries
+        .iter()
+        .position(|entry| entry.path == longest)
+        .expect("the longest name is an empty file of the bundle");
+    entries[at].path = shortened;
+    entries.push(BundleEntry {
+        path: "photo.jpg".to_owned(),
+        content: Vec::new(),
+    });
+    let longest = entries
+        .iter()
+        .map(|entry| entry.path.len())
+        .max()
+        .expect("the bundle has entries");
+    assert_eq!(longest, 166, "the shortened longest name");
+    let longest_entry = entries
+        .iter()
+        .find(|entry| entry.path.len() == longest)
+        .expect("the longest name is in the bundle");
+    assert!(
+        longest_entry.path.ends_with('x'),
+        "the shortened name ends with x"
+    );
+    let nine: Vec<&str> = entries
+        .iter()
+        .filter(|entry| entry.path.len() % 16 == 9)
+        .map(|entry| entry.path.as_str())
+        .collect();
+    assert_eq!(nine, ["photo.jpg"], "the only 9-byte tail is photo.jpg");
+    let photo = entries
+        .iter()
+        .find(|entry| entry.path == "photo.jpg")
+        .expect("photo.jpg is in the bundle");
+    assert_eq!(photo.path.len(), 9, "photo.jpg is 9 bytes");
+    assert!(photo.path.ends_with('g'), "photo.jpg ends with g");
+    assert!(photo.content.is_empty(), "photo.jpg is empty");
+    let estimate: usize = entries.iter().map(|entry| entry.path.len() + 36).sum();
+    assert_eq!(estimate, 262_145, "the file set's links estimate");
+    entries
 }
 
 /// One row of [`shared_prefix_rows`]: two 200-byte names whose murmur3

@@ -1,5 +1,5 @@
 {
- "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048, 049, 076, 071, 072, 078, 082, 085, 086, 087, 088, 091, 093, 092, 094, 095 and 097). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+ "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048, 049, 076, 071, 072, 078, 082, 085, 086, 087, 088, 091, 093, 092, 094, 095, 097 and 098). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
  "falsifiers": [
   {
    "id": "F-CI1a",
@@ -4629,14 +4629,14 @@
   },
   {
    "id": "F-CI71c",
-   "title": "README's Python pin test names 28 pins while it checks 27 (anchor: the \"For each of the N pins\" sentence)",
+   "title": "README's Python pin test names 30 pins while it checks 29 (anchor: the \"For each of the N pins\" sentence)",
    "command": "capsule-identity",
    "expect": "caught",
    "edits": [
     {
      "file": "../../lab/capsule-identity/README.md",
-     "old": "5. For each of the 28 pins, the Python answer",
-     "new": "5. For each of the 29 pins, the Python answer"
+     "old": "5. For each of the 29 pins, the Python answer",
+     "new": "5. For each of the 30 pins, the Python answer"
     }
    ],
    "tests": [
@@ -4645,14 +4645,14 @@
   },
   {
    "id": "F-CI71d",
-   "title": "README's Python pin test says it checked 28 bundles while it checks 27 (anchor: the \"checked exactly N bundles\" sentence)",
+   "title": "README's Python pin test says it checked 30 bundles while it checks 29 (anchor: the \"checked exactly N bundles\" sentence)",
    "command": "capsule-identity",
    "expect": "caught",
    "edits": [
     {
      "file": "../../lab/capsule-identity/README.md",
-     "old": "checked exactly 28 bundles",
-     "new": "checked exactly 29 bundles"
+     "old": "checked exactly 29 bundles",
+     "new": "checked exactly 30 bundles"
     }
    ],
    "tests": [
@@ -4661,14 +4661,14 @@
   },
   {
    "id": "F-CI71e",
-   "title": "README's list of pinned rows says 28 bundles while it lists 27 (anchor: the \"The N are\" sentence)",
+   "title": "README's list of pinned rows says 30 bundles while it lists 29 (anchor: the \"The N are\" sentence)",
    "command": "capsule-identity",
    "expect": "caught",
    "edits": [
     {
      "file": "../../lab/capsule-identity/README.md",
-     "old": "The 28 are",
-     "new": "The 29 are"
+     "old": "The 29 are",
+     "new": "The 30 are"
     }
    ],
    "tests": [
@@ -4993,6 +4993,22 @@
    ],
    "tests": [
     "a_value_of_16384_takes_three_varint_bytes"
+   ]
+  },
+  {
+   "id": "F-CI98a",
+   "title": "the tail cut is 9 bytes, so a 9-byte name's tail index 8 stays out of the second word and `photo.jpg`'s digest changes (anchor: the one `if tail.len() > 8 {` line)",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/src/lib.rs",
+     "old": "    if tail.len() > 8 {\n",
+     "new": "    if tail.len() > 9 {\n"
+    }
+   ],
+   "tests": [
+    "photo_jpg_mixes_tail_index_8"
    ]
   }
  ]

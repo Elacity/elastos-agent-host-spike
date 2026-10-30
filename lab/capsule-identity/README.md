@@ -168,7 +168,13 @@ To recompute a lab CID by hand:
    `1 << (i % 8)` after its leading zero bytes are dropped, `28 22` (hash
    type `0x22`) and `30 80 02` (fanout 256). There is no filesize,
    blocksizes, mode or mtime. A ninth digest byte is refused: the murmur
-   digest has eight. One table, `shared_prefix_rows`, still gives a child
+   digest has eight. A name whose tail is longer than 8 bytes mixes its tail
+   index 8, the second word's first byte: the 9-byte `photo.jpg` gives
+   `c8 93 6b cd f7 98 4c 4c`, and `photo_jpg_mixes_tail_index_8` pins that
+   digest (F-CI98a cuts the tail at 9 bytes). A shard of the 262145 file set
+   with its longest name shortened to 166 bytes and `photo.jpg` added holds
+   that name, and `nine_byte_name_over_the_hamt_threshold_is_a_shard` pins
+   it. One table, `shared_prefix_rows`, still gives a child
    shard from the sixth digest byte and from the seventh: its six-byte row
    and seven-byte row each keep the next shard, and
    `shared_digest_prefixes_keep_the_next_shard` pins both (F-CI71a puts a
@@ -402,6 +408,7 @@ rules and not from the Rust code, in
 | A child directory is judged on its own estimate; its parent counts only its name | `child_directory_over_the_hamt_threshold_is_a_shard` | — |
 | A ninth digest byte is refused | `tests::hamt_depth_exhaustion_is_refused` | — |
 | The HAMT hash is murmur3 x64-128, seed 0, first 64 bits big-endian | `hamt_digest_is_the_marked_murmur3_copy` | — |
+| A name's tail longer than 8 bytes mixes tail index 8, the second word's first byte: the 9-byte `photo.jpg` | `photo_jpg_mixes_tail_index_8`, `nine_byte_name_over_the_hamt_threshold_is_a_shard` | F-CI98a (the tail cut at 9 bytes) |
 | No inline: no identity multihash | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18i (inline at most 32 bytes) |
 | The printed form, `b` and lowercase base32 | `lab_cid_prints_with_the_lab_label`, `the_library_names_a_bundle_one_way`, `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18j (old prefix), F-CI18k (uppercase), F-CI1d (no `b`) |
 | A directory link's Tsize includes its child's links | `lab_cid_matches_the_pinned_value_for_each_fixture` (`web-app` has `browser/`) | F-CI18m |
@@ -500,9 +507,9 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    (`python3 -I could not run: <error>`), a non-zero exit (even after it
    printed a valid CID), no output, or more than one line is refused with its
    own reason, and the test asserts each of these reasons.
-5. For each of the 28 pins, the Python answer, the pin constant and the
+5. For each of the 29 pins, the Python answer, the pin constant and the
    printed `encode_entries` result for the same files must be equal, and the
-   test asserts that it checked exactly 28 bundles. The 28 are the seven
+   test asserts that it checked exactly 29 bundles. The 29 are the seven
    pinned fixtures (`content-sample`, `web-app`, `agent-host`, `provider`,
    `model`, `provider-variant-a`, `provider-variant-b`), the recipe, the
    chunk-limit, empty-file and long-name bundles above, which are built as
@@ -515,10 +522,11 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    exactly-174-leaf file bundle (task 086), the 174-full-leaf file bundle
    (task 092), the three HAMT-threshold bundles
    (task 077), the shard with a file root (task 082), the two
-   shared-prefix bundles (task 071), and the exact 262144-byte basic block
-   bundle (task 093), also built in memory. `wc001-core` has
+   shared-prefix bundles (task 071), the exact 262144-byte basic block
+   bundle (task 093), and the nine-byte-name shard (task 098), also built
+   in memory. `wc001-core` has
    no pin, because its `capsule.wasm` is built on each machine, so it is not
-   checked here. Task 072's third-level file is not one of the 28 either: it
+   checked here. Task 072's third-level file is not one of the 29 either: it
    is 7936671745 bytes and is never written, so
    `file_past_174_squared_leaves_keeps_a_third_tree_level` runs the second
    driver, `THREE_LEVEL_FILE_DRIVER`, which builds its 30277 leaves and calls
@@ -529,7 +537,7 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
 | --- | --- | --- |
 | README's rule agrees with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19a (the block's `0x55` becomes `0x70` before it runs) |
 | Rust agrees with README's rule, not only with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19b (the encoder's `RAW_CODEC` becomes `0x56`) |
-| A missing block is no pass: exactly 28 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
+| A missing block is no pass: exactly 29 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
 | README states the count this test checks, and three sentences say one count | `readme_python_recomputes_every_lab_cid_pin` | F-CI71c (the pins sentence drifts), F-CI71d (the checked sentence drifts), F-CI71e (the rows sentence drifts) |
 | An interpreter that cannot start fails the test | `readme_python_recomputes_every_lab_cid_pin` | F-CI19d (a program that does not exist) |
 | A non-zero exit is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19e (exit status not checked) |
@@ -2131,7 +2139,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 302 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 303 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
