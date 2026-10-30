@@ -1201,6 +1201,13 @@ enum Child {
     Directory(Directory),
 }
 
+/// The one store of a path part: the part's UTF-8 bytes stay as they are, so
+/// a combining mark stays in the stored name and no name is folded or
+/// normalized.
+fn owned_path_part(part: &str) -> String {
+    part.to_owned()
+}
+
 impl Directory {
     /// Put the file node `file` at the bundle path `path`, making each directory
     /// on the way. A path with an empty, `.` or `..` part is refused, and so
@@ -1225,7 +1232,7 @@ impl Directory {
                 Some(at) => at,
                 None => {
                     let made = Child::Directory(Directory::default());
-                    directory.children.push(((*part).to_owned(), made));
+                    directory.children.push((owned_path_part(part), made));
                     directory.children.len() - 1
                 }
             };
@@ -1240,7 +1247,7 @@ impl Directory {
         }
         match directory.position(name).map(|at| &directory.children[at].1) {
             None => {
-                directory.children.push(((*name).to_owned(), file));
+                directory.children.push((owned_path_part(name), file));
                 Ok(())
             }
             Some(Child::File { .. }) => Err(Refusal::DuplicatePath {

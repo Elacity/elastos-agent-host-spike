@@ -29,9 +29,10 @@ use std::process::Command;
 /// shared-prefix bundles (task 071), the 127-byte file bundle (task 091),
 /// the exact 262144-byte basic block bundle (task 093), the 128-byte
 /// file bundle (task 094), the 16384-byte file bundle (task 097), the
-/// nine-byte-name shard (task 098), the one-byte-name shard (task 099) and
-/// the 2097152-byte file bundle (task 100).
-const PINNED_BUNDLES: usize = 31;
+/// nine-byte-name shard (task 098), the one-byte-name shard (task 099), the
+/// 2097152-byte file bundle (task 100), the multibyte-name shard and the
+/// combining-mark bundle (task 083).
+const PINNED_BUNDLES: usize = 33;
 
 /// How many committed fixtures have a pin: all but wc001-core.
 const PINNED_FIXTURES: usize = 7;
@@ -249,6 +250,16 @@ fn pinned_bundles() -> Vec<Pinned> {
         what: "one-byte-name shard".to_owned(),
         pin: ONE_BYTE_NAME_LAB_CID,
         entries: one_byte_shard(),
+    });
+    bundles.push(Pinned {
+        what: "multibyte-name shard".to_owned(),
+        pin: MULTIBYTE_NAME_LAB_CID,
+        entries: multibyte_shard_bundle(),
+    });
+    bundles.push(Pinned {
+        what: "combining-mark bundle".to_owned(),
+        pin: COMBINING_MARK_LAB_CID,
+        entries: combining_mark_bundle(),
     });
     for row in shared_prefix_rows() {
         bundles.push(Pinned {

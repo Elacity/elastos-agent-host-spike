@@ -118,7 +118,10 @@ To recompute a lab CID by hand:
    (`a.b`, `x.`) is normal. A folder below the root that holds no file at any
    depth is refused as `EmptyFolder`, because Kubo with `--empty-dirs=false`
    drops an empty folder and keeps a folder of empty folders. No empty
-   directory is ever made.
+   directory is ever made. A path part is stored as its UTF-8 bytes, so a
+   combining mark stays in the name: `e\u{0301}.txt` keeps U+0301, and
+   `combining_mark_is_stored_as_bytes` pins that bundle (F-CI83c strips the
+   mark from the stored part).
    `a_hidden_name_is_refused_with_its_reason` and
    `a_folder_with_no_file_is_refused_with_its_reason` pin both refusals and
    catch F-CI87a (no hidden-name check), F-CI87b (a check of only the last
@@ -134,7 +137,12 @@ To recompute a lab CID by hand:
    (`0x12`, length) its name in UTF-8, field 3 (`0x18`) its Tsize as a
    varint. Then write field 1 (`0x0a 0x02`) holding the UnixFS data `08 01`:
    type (field 1) = 1, a directory. That block may be longer than 262144
-   bytes; the estimate alone decides. One basic block of exactly 262144
+   bytes; the estimate alone decides. The estimate counts name bytes, not
+   scalars. The shard bundle's 100-byte name of `名` 33 times and then `a`
+   holds 34 scalars, so its scalar estimate is 262079 and a basic directory;
+   the byte estimate stays 262145 and the directory is a shard.
+   `multibyte_name_over_the_hamt_threshold_is_a_shard` pins that bundle
+   (F-CI83a counts scalars in the estimate). One basic block of exactly 262144
    bytes stays one basic directory while the estimate is 217523, under the
    threshold: content-sample's two files plus the first 5575 empty files
    named `aaa`, `aab`, ... `ek4` in base 36. The test
@@ -156,7 +164,10 @@ To recompute a lab CID by hand:
    `a_value_of_2097152_takes_four_varint_bytes` pins that boundary (F-CI100a).
 6. An estimate greater than 262144 is a **HAMT shard**, fanout 256: bucket
    `n` is byte `n` of the name's murmur3 x64-128 digest (seed 0, its first
-   64 bits big-endian; `hello` gives `cb d8 a7 b3 41 bd 9b 02`). A bucket
+   64 bits big-endian; `hello` gives `cb d8 a7 b3 41 bd 9b 02`). The bucket
+   hash takes those same UTF-8 bytes, so a scalar truncated to one byte is a
+   different bucket, and `multibyte_name_over_the_hamt_threshold_is_a_shard`
+   then names another shard (F-CI83b hashes each scalar as one byte). A bucket
    with one child is one link whose name is the bucket's two uppercase hex
    digits and then the child's own name, to that child. That link stores the
    child's node Tsize, so a file over one leaf in a one-child bucket
@@ -410,6 +421,7 @@ rules and not from the Rust code, in
 | Links sorted by name bytes | `lab_cid_matches_the_pinned_value_for_each_fixture`, `lab_cid_does_not_depend_on_listing_order` | F-CI18f (reverse), F-CI1a (no sort) |
 | Directory type 1 | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18g (5) |
 | The links estimate decides a directory's block: at most 262144 is one basic directory, which may be larger than 262144 bytes; a greater estimate is a HAMT shard | `directory_at_the_hamt_threshold_stays_basic`, `directory_over_the_hamt_threshold_is_a_shard` | F-CI18h (never shards) |
+| The links estimate counts name bytes: the shard bundle's 100-byte name is 34 scalars, so its scalar estimate 262079 would stay basic | `multibyte_name_over_the_hamt_threshold_is_a_shard` | F-CI83a (a scalar count in the estimate) |
 | A basic directory block of exactly 262144 bytes stays one basic directory while the links estimate is under the threshold: content-sample plus the first 5575 empty three-byte names | `basic_block_of_exactly_262144_bytes_is_named` | F-CI93a (a shard decision at that block length) |
 | A HAMT shard takes digest byte `n` as bucket `n`: a one-child bucket is one link named the prefix and the child's name; a bucket of two or more is one prefix link to a child shard over the next byte; links in bucket order | `directory_over_the_hamt_threshold_is_a_shard`, `tests::two_names_in_one_bucket_get_a_child_shard` | — |
 | A shared digest prefix still makes a child shard from the sixth byte and from the seventh: `shared_prefix_rows` holds the six-byte and seven-byte pairs | `shared_digest_prefixes_keep_the_next_shard` | F-CI71a (a leaf at depth 5), F-CI71b (a leaf at depth 6) |
@@ -418,6 +430,7 @@ rules and not from the Rust code, in
 | A child directory is judged on its own estimate; its parent counts only its name | `child_directory_over_the_hamt_threshold_is_a_shard` | — |
 | A ninth digest byte is refused | `tests::hamt_depth_exhaustion_is_refused` | — |
 | The HAMT hash is murmur3 x64-128, seed 0, first 64 bits big-endian | `hamt_digest_is_the_marked_murmur3_copy` | — |
+| The bucket hash takes those same UTF-8 bytes: a scalar truncated to one byte moves the name to another bucket | `multibyte_name_over_the_hamt_threshold_is_a_shard` | F-CI83b (a scalar as one byte) |
 | A 1-byte name mixes its only tail byte, because its tail is not empty: the 1-byte `a` | `a_mixes_its_only_tail_byte`, `one_byte_name_over_the_hamt_threshold_is_a_shard` | F-CI99a (the mix skipped for a tail of 1 byte) |
 | A name's tail longer than 8 bytes mixes tail index 8, the second word's first byte: the 9-byte `photo.jpg` | `photo_jpg_mixes_tail_index_8`, `nine_byte_name_over_the_hamt_threshold_is_a_shard` | F-CI98a (the tail cut at 9 bytes) |
 | No inline: no identity multihash | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18i (inline at most 32 bytes) |
@@ -433,6 +446,7 @@ rules and not from the Rust code, in
 | A file and a directory at one path are refused | `encoder_refuses_file_directory_conflict` | F-CI18p, F-CI18q (one silently replaces the other) |
 | An empty, `.` or `..` path part is refused | `encoder_refuses_a_path_with_an_empty_or_dot_part` | F-CI18s |
 | A path part that starts with `.` is refused: Kubo with the Runtime import flags leaves it out of the CID | `a_hidden_name_is_refused_with_its_reason` | F-CI87a (no check), F-CI87b (only the last part), F-CI87c (any dot) |
+| A path part is stored as its UTF-8 bytes, so U+0301 stays in the name | `combining_mark_is_stored_as_bytes` | F-CI83c (the stored part drops the mark) |
 | A folder below the root that holds no file at any depth is refused: Kubo with `--empty-dirs=false` drops it | `a_folder_with_no_file_is_refused_with_its_reason` | F-CI87d (no check), F-CI87e (every folder refused at its pop) |
 | Two entries with one path are refused | `encoder_refuses_a_duplicate_path` | F-CI1r |
 
@@ -519,9 +533,9 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    (`python3 -I could not run: <error>`), a non-zero exit (even after it
    printed a valid CID), no output, or more than one line is refused with its
    own reason, and the test asserts each of these reasons.
-5. For each of the 31 pins, the Python answer, the pin constant and the
+5. For each of the 33 pins, the Python answer, the pin constant and the
    printed `encode_entries` result for the same files must be equal, and the
-   test asserts that it checked exactly 31 bundles. The 31 are the seven
+   test asserts that it checked exactly 33 bundles. The 33 are the seven
    pinned fixtures (`content-sample`, `web-app`, `agent-host`, `provider`,
    `model`, `provider-variant-a`, `provider-variant-b`), the recipe, the
    chunk-limit, empty-file and long-name bundles above, which are built as
@@ -536,10 +550,11 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    (task 077), the shard with a file root (task 082), the two
    shared-prefix bundles (task 071), the exact 262144-byte basic block
    bundle (task 093), the nine-byte-name shard (task 098), the
-   one-byte-name shard (task 099) and the 2097152-byte file bundle
-   (task 100), also built in memory. `wc001-core` has
+   one-byte-name shard (task 099), the 2097152-byte file bundle
+   (task 100), the multibyte-name shard and the combining-mark bundle
+   (task 083), also built in memory. `wc001-core` has
    no pin, because its `capsule.wasm` is built on each machine, so it is not
-   checked here. Task 072's third-level file is not one of the 31 either: it
+   checked here. Task 072's third-level file is not one of the 33 either: it
    is 7936671745 bytes and is never written, so
    `file_past_174_squared_leaves_keeps_a_third_tree_level` runs the second
    driver, `THREE_LEVEL_FILE_DRIVER`, which builds its 30277 leaves and calls
@@ -550,7 +565,7 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
 | --- | --- | --- |
 | README's rule agrees with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19a (the block's `0x55` becomes `0x70` before it runs) |
 | Rust agrees with README's rule, not only with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19b (the encoder's `RAW_CODEC` becomes `0x56`) |
-| A missing block is no pass: exactly 31 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
+| A missing block is no pass: exactly 33 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
 | README states the count this test checks, and three sentences say one count | `readme_python_recomputes_every_lab_cid_pin` | F-CI71c (the pins sentence drifts), F-CI71d (the checked sentence drifts), F-CI71e (the rows sentence drifts) |
 | An interpreter that cannot start fails the test | `readme_python_recomputes_every_lab_cid_pin` | F-CI19d (a program that does not exist) |
 | A non-zero exit is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19e (exit status not checked) |
@@ -2152,7 +2167,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 305 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 308 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a

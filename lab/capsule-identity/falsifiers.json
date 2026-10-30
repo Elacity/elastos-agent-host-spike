@@ -1,5 +1,5 @@
 {
- "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048, 049, 076, 071, 072, 078, 082, 085, 086, 087, 088, 091, 093, 092, 094, 095, 097, 098, 099 and 100). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+ "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048, 049, 076, 071, 072, 078, 082, 085, 086, 087, 088, 091, 093, 092, 094, 095, 097, 098, 099, 100 and 083). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
  "falsifiers": [
   {
    "id": "F-CI1a",
@@ -4629,14 +4629,14 @@
   },
   {
    "id": "F-CI71c",
-   "title": "README's Python pin test names 32 pins while it checks 31 (anchor: the \"For each of the N pins\" sentence)",
+   "title": "README's Python pin test names 34 pins while it checks 33 (anchor: the \"For each of the N pins\" sentence)",
    "command": "capsule-identity",
    "expect": "caught",
    "edits": [
     {
      "file": "../../lab/capsule-identity/README.md",
-     "old": "5. For each of the 31 pins, the Python answer",
-     "new": "5. For each of the 32 pins, the Python answer"
+     "old": "5. For each of the 33 pins, the Python answer",
+     "new": "5. For each of the 34 pins, the Python answer"
     }
    ],
    "tests": [
@@ -4645,14 +4645,14 @@
   },
   {
    "id": "F-CI71d",
-   "title": "README's Python pin test says it checked 32 bundles while it checks 31 (anchor: the \"checked exactly N bundles\" sentence)",
+   "title": "README's Python pin test says it checked 34 bundles while it checks 33 (anchor: the \"checked exactly N bundles\" sentence)",
    "command": "capsule-identity",
    "expect": "caught",
    "edits": [
     {
      "file": "../../lab/capsule-identity/README.md",
-     "old": "checked exactly 31 bundles",
-     "new": "checked exactly 32 bundles"
+     "old": "checked exactly 33 bundles",
+     "new": "checked exactly 34 bundles"
     }
    ],
    "tests": [
@@ -4661,14 +4661,14 @@
   },
   {
    "id": "F-CI71e",
-   "title": "README's list of pinned rows says 32 bundles while it lists 31 (anchor: the \"The N are\" sentence)",
+   "title": "README's list of pinned rows says 34 bundles while it lists 33 (anchor: the \"The N are\" sentence)",
    "command": "capsule-identity",
    "expect": "caught",
    "edits": [
     {
      "file": "../../lab/capsule-identity/README.md",
-     "old": "The 31 are",
-     "new": "The 32 are"
+     "old": "The 33 are",
+     "new": "The 34 are"
     }
    ],
    "tests": [
@@ -5041,6 +5041,54 @@
    ],
    "tests": [
     "a_value_of_2097152_takes_four_varint_bytes"
+   ]
+  },
+  {
+   "id": "F-CI83a",
+   "title": "the links estimate counts scalars, so the shard bundle's 100-byte name counts 34 and its estimate 262079 stays a basic directory (anchor: the one `link.name.len()` in links_estimate)",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/src/lib.rs",
+     "old": "        .map(|link| link.name.len() + LINK_OVERHEAD)\n",
+     "new": "        .map(|link| link.name.chars().count() + LINK_OVERHEAD)\n"
+    }
+   ],
+   "tests": [
+    "multibyte_name_over_the_hamt_threshold_is_a_shard"
+   ]
+  },
+  {
+   "id": "F-CI83b",
+   "title": "the bucket hash takes each scalar as one byte, so the 100-byte name hashes 34 bytes and moves to another bucket (anchor: the one `let bytes = name.as_bytes();` in hamt_digest)",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/src/lib.rs",
+     "old": "    let bytes = name.as_bytes();\n",
+     "new": "    let scalars: Vec<u8> = name.chars().map(|scalar| scalar as u8).collect();\n    let bytes = &scalars[..];\n"
+    }
+   ],
+   "tests": [
+    "multibyte_name_over_the_hamt_threshold_is_a_shard"
+   ]
+  },
+  {
+   "id": "F-CI83c",
+   "title": "the stored path part drops U+0301, so `e\\u{0301}.txt` is stored as `e.txt` and the combining-mark bundle names another value (anchor: the one `part.to_owned()` in owned_path_part)",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/src/lib.rs",
+     "old": "    part.to_owned()\n",
+     "new": "    part.replace('\\u{0301}', \"\")\n"
+    }
+   ],
+   "tests": [
+    "combining_mark_is_stored_as_bytes"
    ]
   }
  ]

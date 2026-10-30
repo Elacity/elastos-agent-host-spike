@@ -824,6 +824,122 @@ fn one_byte_name_over_the_hamt_threshold_is_a_shard() {
 }
 
 #[test]
+fn multibyte_name_over_the_hamt_threshold_is_a_shard() {
+    // The 262145 file set with its first 100-byte name replaced by `名` 33
+    // times and then `a`: 100 bytes and 34 scalars. The links estimate counts
+    // name bytes, so it stays 262145 and the directory is a shard; a scalar
+    // count would give 262079 and a basic directory. The bucket hash takes
+    // those same 100 bytes, so a scalar truncated to one byte moves the name
+    // to another bucket and names another shard. README's Python rule printed
+    // the pin first.
+    let entries = multibyte_shard_bundle();
+    let pin = MULTIBYTE_NAME_LAB_CID;
+    let bundle = bundled(&entries);
+    let python = readme_python_lab_cids(&[&entries]).unwrap_or_else(|reason| panic!("{reason}"));
+    println!(
+        "README's Python rule printed {} for the multibyte shard",
+        python[0]
+    );
+    assert_eq!(
+        python,
+        [pin.to_owned()],
+        "README's Python rule against the multibyte shard pin"
+    );
+    let encoded = encode_entries(&entries)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    let listed: Vec<ListedFile> = entries
+        .iter()
+        .map(|entry| ListedFile {
+            path: entry.path.clone(),
+            size: entry.content.len() as u64,
+            sha256: Sha256::digest(&entry.content).into(),
+        })
+        .collect();
+    let by_listing = encode_listed_files(&listed)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    assert_eq!(
+        (name(&bundle), encoded.as_str(), by_listing.as_str()),
+        (pin.to_owned(), pin, pin),
+        "(lab_cid, encode_entries, encode_listed_files) against the multibyte pin"
+    );
+    assert!(pin.starts_with("bafybei"), "{pin}");
+    assert_eq!(pin.len(), 59, "{pin}");
+    for other in [
+        HAMT_OVER_THRESHOLD_LAB_CID,
+        LONG_UTF8_NAME_LAB_CID,
+        FILE_ROOT_SHARD_LAB_CID,
+    ] {
+        assert_ne!(pin, other, "the multibyte pin is another bundle's");
+    }
+}
+
+#[test]
+fn combining_mark_is_stored_as_bytes() {
+    // content-sample plus one empty file `e\u{0301}.txt`: U+0301 is a
+    // combining mark, so the name is 7 bytes and 6 scalars, and its byte
+    // estimate is 141, so the root stays one basic directory. A path part is
+    // stored as those bytes, so the mark stays in the name and the pin
+    // differs from content-sample's; a store that strips the mark names
+    // `e.txt` instead. README's Python rule printed the pin first.
+    let entries = combining_mark_bundle();
+    let pin = COMBINING_MARK_LAB_CID;
+    let bundle = bundled(&entries);
+    let python = readme_python_lab_cids(&[&entries]).unwrap_or_else(|reason| panic!("{reason}"));
+    println!(
+        "README's Python rule printed {} for the combining mark",
+        python[0]
+    );
+    assert_eq!(
+        python,
+        [pin.to_owned()],
+        "README's Python rule against the combining-mark pin"
+    );
+    let encoded = encode_entries(&entries)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    let listed: Vec<ListedFile> = entries
+        .iter()
+        .map(|entry| ListedFile {
+            path: entry.path.clone(),
+            size: entry.content.len() as u64,
+            sha256: Sha256::digest(&entry.content).into(),
+        })
+        .collect();
+    let by_listing = encode_listed_files(&listed)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    assert_eq!(
+        (name(&bundle), encoded.as_str(), by_listing.as_str()),
+        (pin.to_owned(), pin, pin),
+        "(lab_cid, encode_entries, encode_listed_files) against the combining-mark pin"
+    );
+    // The same mark in a directory part: `e\u{0301}/n.txt` and `e/n.txt` are
+    // two directories, so a stored part keeps its bytes there too.
+    let marked = encode_entries(&[entry("e\u{0301}/n.txt", b"")])
+        .unwrap_or_else(|refusal| panic!("{refusal}"))
+        .to_string();
+    let plain = encode_entries(&[entry("e/n.txt", b"")])
+        .unwrap_or_else(|refusal| panic!("{refusal}"))
+        .to_string();
+    assert_ne!(
+        marked, plain,
+        "a combining mark in a directory part stays in the stored part"
+    );
+    assert_ne!(
+        pin, CONTENT_SAMPLE_LAB_CID,
+        "the mark is a byte of the name"
+    );
+    assert_ne!(
+        pin, MULTIBYTE_NAME_LAB_CID,
+        "the combining-mark pin is another bundle's"
+    );
+    assert!(pin.starts_with("bafybei"), "{pin}");
+    assert_eq!(pin.len(), 59, "{pin}");
+}
+
+#[test]
 fn child_directory_over_the_hamt_threshold_is_a_shard() {
     // The 262145 file set under `photos/`: the child is judged on its own
     // estimate and is a shard, while the root counts only its three direct

@@ -169,6 +169,19 @@ pub const HAMT_OVER_THRESHOLD_LAB_CID: &str =
 /// first with README's Python rule.
 pub const ONE_BYTE_NAME_LAB_CID: &str =
     "bafybeifcqzll4tyg4ki5m3tigmm6mpx34qgarnwtczxjn54ne4dad3rxam";
+/// The over-threshold bundle of [`multibyte_shard_bundle`]: its first
+/// 100-byte name is `名` 33 times and then `a`, 100 bytes and 34 scalars, so
+/// the byte estimate stays 262145 and the directory is a shard. Built in
+/// memory and never committed; task 083 printed it first with README's
+/// Python rule.
+pub const MULTIBYTE_NAME_LAB_CID: &str =
+    "bafybeiea6kg3uqgkye4lx35wpn2nye6s7pfbgiws74y7gkqrujstn64swa";
+/// The bundle of [`combining_mark_bundle`]: content-sample's two files plus
+/// one empty file `e\u{0301}.txt`. Its 7-byte name keeps the combining mark,
+/// so the pin differs from content-sample's. Built in memory and never
+/// committed; task 083 printed it first with README's Python rule.
+pub const COMBINING_MARK_LAB_CID: &str =
+    "bafybeiaqyq2qa5hyn63qz2eobudkfzlg6ekjv427tqrnt3iekxiomrdp2m";
 /// The 262145 file set with its longest name shortened to 166 bytes and one
 /// empty file `photo.jpg`: `photo.jpg` is 9 bytes, so its tail index 8 is its
 /// last byte and the second word's first byte. Built in a temp dir and never
@@ -249,6 +262,69 @@ pub fn flat_bundle_at(prefix: &str, estimate: usize) -> (Vec<BundleEntry>, Vec<S
         });
     }
     (entries, names, extra)
+}
+
+/// The over-threshold bundle of [`flat_bundle_at`] at 262145 with the first
+/// 100-byte name it returns replaced by `名` 33 times and then `a`, an empty
+/// file: 100 bytes and 34 scalars. The byte estimate stays 262145, so the
+/// directory is a shard; the scalar estimate, each path's `chars().count()`
+/// plus 36, is 262079, under the threshold, so a scalar count would call it
+/// a basic directory. Built in memory and never committed; task 083 printed
+/// its pin first with README's Python rule.
+pub fn multibyte_shard_bundle() -> Vec<BundleEntry> {
+    let (mut entries, names, _extra) = flat_bundle_at("", 262_145);
+    let first = names
+        .iter()
+        .find(|name| name.len() == 100)
+        .cloned()
+        .expect("the file set has a 100-byte name");
+    assert_eq!(first, names[0], "the first returned 100-byte name");
+    assert_ne!(first, "capsule.json");
+    assert_ne!(first, "sample.example");
+    let multibyte = format!("{}a", "\u{540d}".repeat(33));
+    assert_eq!(multibyte.len(), 100, "the multibyte name is 100 bytes");
+    assert_eq!(multibyte.chars().count(), 34, "and 34 scalars");
+    let at = entries
+        .iter()
+        .position(|entry| entry.path == first)
+        .expect("the first 100-byte name is an empty file of the bundle");
+    assert!(entries[at].content.is_empty(), "the name is empty");
+    entries[at].path = multibyte;
+    let bytes: usize = entries.iter().map(|entry| entry.path.len() + 36).sum();
+    assert_eq!(bytes, 262_145, "the bundle's byte estimate");
+    let scalars: usize = entries
+        .iter()
+        .map(|entry| entry.path.chars().count() + 36)
+        .sum();
+    assert_eq!(scalars, 262_079, "the bundle's scalar estimate");
+    entries
+}
+
+/// content-sample's two files plus one empty file `e\u{0301}.txt`: `e`,
+/// U+0301 and `.txt`, 7 bytes and 6 scalars. The byte estimate is 141, so the
+/// root stays one basic directory and the name's bytes are written as they
+/// are, the mark included. Built in memory and never committed; task 083
+/// printed its pin first with README's Python rule.
+pub fn combining_mark_bundle() -> Vec<BundleEntry> {
+    let mut entries: Vec<BundleEntry> = CONTENT_SAMPLE
+        .files
+        .iter()
+        .map(|name| BundleEntry {
+            path: (*name).to_owned(),
+            content: read_fixture(&CONTENT_SAMPLE, name),
+        })
+        .collect();
+    let marked = "e\u{0301}.txt";
+    assert_eq!(marked.len(), 7, "e, U+0301 and .txt");
+    assert_eq!(marked.chars().count(), 6, "the mark is one scalar");
+    entries.push(BundleEntry {
+        path: marked.to_owned(),
+        content: Vec::new(),
+    });
+    let estimate: usize = entries.iter().map(|entry| entry.path.len() + 36).sum();
+    assert_eq!(estimate, 141, "the bundle's byte estimate");
+    assert!(estimate <= 262_144, "the root stays a basic directory");
+    entries
 }
 
 /// The first `count` three-byte names, in order: base 36 on
