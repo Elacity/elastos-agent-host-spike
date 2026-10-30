@@ -32,7 +32,10 @@
 //! from one request store beside the grants. `seed_request` is the store
 //! writer: the only non-test caller is `post_capability_request`, which runs
 //! `declared_ask` before it, so every stored request passed the signed ask
-//! check.
+//! check. After the empty-field and duplicate-id refusals, that writer counts
+//! `Pending` records and pushes nothing past 1024 in the store or 32 in one
+//! session. The store count runs first. A granted, denied or expired record
+//! stays and does not count.
 //! An accepted stop denies that session's pending requests with the stop
 //! cause; a worker kill passes `stopped: worker killed`. A failed
 //! start denies them with the failure cause. One writer stores those three
@@ -68,6 +71,8 @@ const LIVE_SCOPE: &str = "all_sessions_live";
 const RESIDENT_WORLD: &str = "resident-capsule";
 const FAILED_KEEP_SECS: u64 = 60;
 const REQUEST_TIMEOUT_SECS: u64 = 300;
+const MAX_PENDING_REQUESTS: usize = 1024;
+const MAX_PENDING_PER_SESSION: usize = 32;
 const GRANT_LIFETIME_SECS: u64 = 3_600;
 /// The one cause `worker_exited` stores, and the one reason it settles with.
 const WORKER_EXITED: &str = "worker exited";
@@ -683,7 +688,12 @@ impl StandIn {
     ///
     /// Stores one pending request at the current instant. This method reads no
     /// clock and no disk. Its route caller `post_capability_request` runs
-    /// `declared_ask` first, so an id it stores carries a declared ask.
+    /// `declared_ask` first, so an id it stores carries a declared ask. After
+    /// the empty-field refusal and the duplicate-id refusal, the store-wide
+    /// `Pending` count runs, then the count for this `session_id`. At 1024 the
+    /// reason is `Too many pending requests`. At 32 for this session the reason
+    /// is `Too many pending requests for this session`. A granted, denied or
+    /// expired record does not count and is not removed.
     pub(crate) fn seed_request(
         &mut self,
         request_id: &str,
@@ -708,6 +718,24 @@ impl StandIn {
             .any(|request| request.request_id == request_id)
         {
             return Err((400, format!("request already stored: {request_id}")));
+        }
+        let store_pending = self
+            .requests
+            .iter()
+            .filter(|request| request.status == RequestStatus::Pending)
+            .count();
+        if store_pending >= MAX_PENDING_REQUESTS {
+            return Err((400, "Too many pending requests".to_owned()));
+        }
+        let session_pending = self
+            .requests
+            .iter()
+            .filter(|request| {
+                request.status == RequestStatus::Pending && request.session_id == session_id
+            })
+            .count();
+        if session_pending >= MAX_PENDING_PER_SESSION {
+            return Err((400, "Too many pending requests for this session".to_owned()));
         }
         self.requests.push(Request {
             request_id: request_id.to_owned(),
@@ -10169,6 +10197,351 @@ mod tests {
             request_ids(&plain),
             BTreeSet::from(["req-tok".to_owned(), "request-4".to_owned()]),
             "the stand-in did the work: the shell live-grant set is req-tok and request-4"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 stays running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running",
+        );
+    }
+
+    /// How many `Pending` records the one store holds. This reads that store.
+    fn pending_count(standin: &StandIn) -> usize {
+        standin
+            .requests
+            .iter()
+            .filter(|request| request.status == RequestStatus::Pending)
+            .count()
+    }
+
+    fn request_id_set(entries: &[Value]) -> BTreeSet<String> {
+        entries
+            .iter()
+            .map(|entry| {
+                entry["request_id"]
+                    .as_str()
+                    .expect("the stand-in entry names request_id")
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn standin_pending_cap_refuses_the_33rd() {
+        let shared = Shared::new();
+        let mut standin = StandIn::new();
+        launch_two_running(&shared, &mut standin);
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 is running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 is running",
+        );
+        let owner = Caller::Client {
+            session_id: "component-1",
+        };
+        let sibling = Caller::Client {
+            session_id: "component-2",
+        };
+        let body = request_client_body();
+        for n in 1..=32 {
+            let stored = standin.post_capability_request(owner, &body);
+            assert_eq!(
+                stored,
+                Ok(json!({ "status": "pending", "request_id": format!("request-{n}") })),
+                "the stand-in did the work: request-{n} is pending"
+            );
+        }
+        let third = standin.post_capability_request(owner, &body);
+        assert_eq!(
+            third,
+            Err((400, "Too many pending requests for this session".to_owned())),
+            "the stand-in did the work: the 33rd pending request of component-1 is refused"
+        );
+        let owner_ids = request_id_set(&request_entries(&standin, "component-1"));
+        assert!(
+            !owner_ids.contains("request-33"),
+            "the stand-in did the work: the refused call stores no request-33"
+        );
+        assert!(
+            request_entries(&standin, "component-2").is_empty(),
+            "the stand-in did the work: the refused call stores nothing for component-2"
+        );
+        let sibling_stored = standin.post_capability_request(sibling, &body);
+        assert_eq!(
+            sibling_stored,
+            Ok(json!({ "status": "pending", "request_id": "request-33" })),
+            "the stand-in did the work: another session stores request-33"
+        );
+        let granted = standin.post_capability_grant(
+            Caller::Shell,
+            &json!({
+                "request_id": "request-1",
+                "duration": "session",
+                "rationale": "grant shared read",
+            }),
+        );
+        assert_eq!(
+            granted,
+            Ok(json!({ "success": true })),
+            "the stand-in did the work: the shell grants request-1"
+        );
+        let after_grant = standin.post_capability_request(owner, &body);
+        assert_eq!(
+            after_grant,
+            Ok(json!({ "status": "pending", "request_id": "request-34" })),
+            "the stand-in did the work: a granted record does not count, so request-34 is stored"
+        );
+        let past = standin.post_capability_request(owner, &body);
+        assert_eq!(
+            past,
+            Err((400, "Too many pending requests for this session".to_owned())),
+            "the stand-in did the work: the next component-1 request is refused"
+        );
+        let owner_entries = request_entries(&standin, "component-1");
+        assert!(
+            !request_id_set(&owner_entries).contains("request-35"),
+            "the stand-in did the work: the refused call stores no request-35"
+        );
+        let request_1 = owner_entries
+            .iter()
+            .find(|entry| entry["request_id"] == "request-1")
+            .expect("the stand-in did the work: request-1 stays stored");
+        assert_eq!(
+            request_1["status"], "granted",
+            "the stand-in did the work: request-1 stays granted"
+        );
+        let pending: BTreeSet<String> = owner_entries
+            .iter()
+            .filter(|entry| entry["status"] == "pending")
+            .map(|entry| entry["request_id"].as_str().unwrap().to_owned())
+            .collect();
+        let expected: BTreeSet<String> = (2..=32)
+            .map(|n| format!("request-{n}"))
+            .chain(std::iter::once("request-34".to_owned()))
+            .collect();
+        assert_eq!(
+            pending, expected,
+            "the stand-in did the work: component-1 pending is request-2 through request-32 plus request-34"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-2"),
+            vec![pending_request("request-33", "component-2")],
+            "the stand-in did the work: request-33 stays pending"
+        );
+        let (plain, query) = shell_pair(&standin);
+        assert_eq!(
+            request_ids(&plain),
+            request_ids(&query),
+            "the stand-in did the work: the shell live view is one set"
+        );
+        assert_eq!(
+            request_ids(&plain),
+            BTreeSet::from(["request-1".to_owned()]),
+            "the stand-in did the work: the shell live-grant set is request-1"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 stays running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running",
+        );
+    }
+
+    #[test]
+    fn standin_pending_cap_refuses_the_1025th() {
+        let shared = Shared::new();
+        let mut standin = StandIn::new();
+        launch_two_running(&shared, &mut standin);
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 is running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 is running",
+        );
+        let old = standin.seed_request("old", "s-old", SHARED_RESOURCE, "read", "read shared");
+        assert_eq!(
+            old,
+            Ok(()),
+            "the stand-in did the work: old is stored at instant 0"
+        );
+        standin.set_instant(300);
+        assert_eq!(
+            request_entries(&standin, "s-old"),
+            vec![expired_request("old", "s-old")],
+            "the stand-in did the work: old is the one expired record"
+        );
+        for n in 1..=32 {
+            let id = format!("pack-{n}");
+            let stored = standin.seed_request(&id, "packed", "res", "read", "bulk");
+            assert_eq!(
+                stored,
+                Ok(()),
+                "the stand-in did the work: pack-{n} is stored while the store is under 1024"
+            );
+        }
+        let pack_33 = standin.seed_request("pack-33", "packed", "res", "read", "bulk");
+        assert_eq!(
+            pack_33,
+            Err((400, "Too many pending requests for this session".to_owned())),
+            "the stand-in did the work: the 33rd pending record of packed is refused"
+        );
+        let packed = request_entries(&standin, "packed");
+        assert_eq!(
+            packed.len(),
+            32,
+            "the stand-in did the work: packed keeps its 32 pending records"
+        );
+        assert!(
+            !request_id_set(&packed).contains("pack-33"),
+            "the stand-in did the work: pack-33 is not stored"
+        );
+        for n in 1..=992 {
+            let id = format!("fill-{n}");
+            let session = format!("f-{n}");
+            let stored = standin.seed_request(&id, &session, "res", "read", "bulk");
+            assert_eq!(
+                stored,
+                Ok(()),
+                "the stand-in did the work: fill-{n} is stored while old stays expired"
+            );
+        }
+        assert_eq!(
+            pending_count(&standin),
+            1024,
+            "the stand-in did the work: the pending count is 1024"
+        );
+        assert_eq!(
+            request_entries(&standin, "s-old"),
+            vec![expired_request("old", "s-old")],
+            "the stand-in did the work: old stays expired and is not removed"
+        );
+        let over = standin.seed_request("over", "s-over", "res", "read", "bulk");
+        assert_eq!(
+            over,
+            Err((400, "Too many pending requests".to_owned())),
+            "the stand-in did the work: the 1025th pending record is refused"
+        );
+        assert!(
+            request_entries(&standin, "s-over").is_empty(),
+            "the stand-in did the work: over is not stored"
+        );
+        let pack_34 = standin.seed_request("pack-34", "packed", "res", "read", "bulk");
+        assert_eq!(
+            pack_34,
+            Err((400, "Too many pending requests".to_owned())),
+            "the stand-in did the work: at 1024 the store reason wins for a session that is also at 32"
+        );
+        assert!(
+            !request_id_set(&request_entries(&standin, "packed")).contains("pack-34"),
+            "the stand-in did the work: pack-34 is not stored"
+        );
+        let granted = standin.post_capability_grant(
+            Caller::Shell,
+            &json!({
+                "request_id": "fill-1",
+                "duration": "session",
+                "rationale": "grant one",
+            }),
+        );
+        assert_eq!(
+            granted,
+            Ok(json!({ "success": true })),
+            "the stand-in did the work: the shell grants fill-1"
+        );
+        let room = standin.seed_request("room", "s-room", "res", "read", "bulk");
+        assert_eq!(
+            room,
+            Ok(()),
+            "the stand-in did the work: room is stored after one granted record frees a slot"
+        );
+        assert_eq!(
+            pending_count(&standin),
+            1024,
+            "the stand-in did the work: the pending count is 1024 again"
+        );
+        let client = Caller::Client {
+            session_id: "component-2",
+        };
+        let body = request_client_body();
+        let refused = standin.post_capability_request(client, &body);
+        assert_eq!(
+            refused,
+            Err((400, "Too many pending requests".to_owned())),
+            "the stand-in did the work: the client call is refused at 1024"
+        );
+        assert!(
+            request_entries(&standin, "component-2").is_empty(),
+            "the stand-in did the work: the refused client call stores no request-1"
+        );
+        let denied = standin.post_capability_deny(
+            Caller::Shell,
+            &json!({ "request_id": "room", "reason": "deny room" }),
+        );
+        assert_eq!(
+            denied,
+            Ok(json!({ "success": true })),
+            "the stand-in did the work: the shell denies room"
+        );
+        let stored = standin.post_capability_request(client, &body);
+        assert_eq!(
+            stored,
+            Ok(json!({ "status": "pending", "request_id": "request-1" })),
+            "the stand-in did the work: request-1 is stored after the deny"
+        );
+        assert_eq!(
+            pending_count(&standin),
+            1024,
+            "the stand-in did the work: the pending count is 1024 after request-1"
+        );
+        let again = standin.post_capability_request(client, &body);
+        assert_eq!(
+            again,
+            Err((400, "Too many pending requests".to_owned())),
+            "the stand-in did the work: the next client call is refused"
+        );
+        let second = request_entries(&standin, "component-2");
+        assert_eq!(
+            request_id_set(&second),
+            BTreeSet::from(["request-1".to_owned()]),
+            "the stand-in did the work: request-1 stays pending and request-2 is not stored"
+        );
+        assert_eq!(
+            second[0]["status"], "pending",
+            "the stand-in did the work: request-1 stays pending"
         );
         assert_capsule(
             &standin,
