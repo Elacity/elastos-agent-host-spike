@@ -3,20 +3,11 @@
 #[path = "../src/test_support.rs"]
 mod test_support;
 
-#[allow(dead_code)]
-#[path = "../../../lab/agent-conformance/src/harness.rs"]
-mod harness;
-
 /// The shared live-grant stand-in (`lab/agent-conformance/standin-runtime/`),
-/// read here rather than copied: one RA-1 path (P10). The agent-conformance
-/// crate takes the same file in with its own `#[path]` line
-/// (`lab/agent-conformance/src/lib.rs:9-10`). Its `#[cfg(test)] mod tests`
-/// compiles into this binary too, so the shared stand-in's own tests run here.
-#[allow(dead_code)]
-#[path = "../../../lab/agent-conformance/standin-runtime/mod.rs"]
-mod standin_runtime;
-
-use standin_runtime::{Caller, Life, StandIn};
+/// reached through the crate that owns it (`lab/agent-conformance/src/lib.rs`),
+/// so this binary holds no second copy of the source (one RA-1 path, P10).
+/// Its `#[cfg(test)] mod tests` belongs to that crate's own `--lib` target.
+use agent_conformance::standin_runtime::{Caller, Life, StandIn};
 use test_support::FIXTURE_EVENT_TIMEOUT;
 
 use elastos_model_contract::{
