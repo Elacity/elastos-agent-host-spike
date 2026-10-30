@@ -1,0 +1,12 @@
+id: F-A7-unusage
+file: src/ledger.rs
+test: ledger::model_reported_usage_does_not_release_an_uncertain_hold
+--- old
+        if uncertain {
+            return Err(ReleaseRefuse::Uncertain);
+        }
+--- new
+        if uncertain && request.reported_usage == 0 {
+            return Err(ReleaseRefuse::Uncertain);
+        }
+--- end

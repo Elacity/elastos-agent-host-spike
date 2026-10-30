@@ -308,15 +308,17 @@ pub struct BundleEntry {
 /// changes them, so its lab CID always names its entries. It also keeps
 /// whether that manifest check found `type` to be `wasm`, for the variant
 /// binding's check (e2) alone; no accessor hands it out. And it keeps the
-/// manifest's `name` from that same check, which
-/// [`CheckedBundle::manifest_name`] hands out. It holds a name and bytes,
-/// never a decision: it is no trust, admission or launch value.
+/// manifest's `name` and `role` from that same check, which
+/// [`CheckedBundle::manifest_name`] and [`CheckedBundle::manifest_role`] hand
+/// out. It holds a name and bytes, never a decision: it is no trust,
+/// admission or launch value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckedBundle {
     cid: LabCid,
     entries: Vec<BundleEntry>,
     wasm: bool,
     name: String,
+    role: String,
 }
 
 /// A test-key signature over a printed lab CID.
@@ -669,7 +671,7 @@ pub fn checked_bundle_observed(
         .iter()
         .find(|entry| entry.path == MANIFEST_FILE)
         .ok_or(Refusal::NoManifest)?;
-    let (wasm, name) = check_manifest(&manifest.content)?;
+    let (wasm, name, role) = check_manifest(&manifest.content)?;
     encode_entries(&entries)
         // The value keeps the very entries its lab CID names: no second read.
         .map(|cid| CheckedBundle {
@@ -677,6 +679,7 @@ pub fn checked_bundle_observed(
             entries,
             wasm,
             name,
+            role,
         })
 }
 
@@ -713,6 +716,28 @@ impl CheckedBundle {
     /// data, not a decision.
     pub fn manifest_name(&self) -> &str {
         &self.name
+    }
+
+    /// The bytes of one bundle file, as the one walk read them from their
+    /// checked handle.
+    ///
+    /// `path` is a bundle-relative, `/`-separated path. A caller that needs a
+    /// file takes these bytes, so a change on disk after the walk cannot reach
+    /// them and no second folder read runs. `None` means the walk read no such
+    /// file. The bytes are identity data under the signed lab CID, not a
+    /// decision.
+    pub fn entry(&self, path: &str) -> Option<&[u8]> {
+        self.entries
+            .iter()
+            .find(|entry| entry.path == path)
+            .map(|entry| entry.content.as_slice())
+    }
+
+    /// The `role` of the bundle's `capsule.json`, as the one manifest check
+    /// read it from the bytes in [`CheckedBundle::entries`], written the way
+    /// the manifest wrote it. It is identity data, not a decision.
+    pub fn manifest_role(&self) -> &str {
+        &self.role
     }
 
     /// Check the name `claimed` against this bundle's lab CID.
@@ -1312,15 +1337,18 @@ fn read_file(handle: OwnedFd, path: &str) -> Result<Vec<u8>, Refusal> {
 /// The Runtime's own two checks on `capsule.json`, the same two calls it
 /// makes on a fetched bundle's manifest: parse it as `CapsuleManifest`
 /// (which refuses an unknown field), then `validate()`. The lab adds no rule.
-/// It returns whether the parsed manifest's `type` is `wasm` and the
-/// manifest's `name`, both read from that one parse: nothing else parses
-/// `capsule.json`.
-fn check_manifest(bytes: &[u8]) -> Result<(bool, String), Refusal> {
+/// It returns whether the parsed manifest's `type` is `wasm`, and the
+/// manifest's `name` and `role`, all read from that one parse: nothing else
+/// parses `capsule.json`.
+fn check_manifest(bytes: &[u8]) -> Result<(bool, String, String), Refusal> {
     let manifest: CapsuleManifest = serde_json::from_slice(bytes)
         .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;
     let wasm = manifest.capsule_type == CapsuleType::Wasm;
+    // `CapsuleRole::as_str` is total: every role parses to its own spelling,
+    // so this conversion has no failure to default.
+    let role = manifest.role.as_str().to_owned();
     manifest.validate().map_err(Refusal::ManifestInvalid)?;
-    Ok((wasm, manifest.name))
+    Ok((wasm, manifest.name, role))
 }
 
 fn special_name(file_type: FileType) -> &'static str {
