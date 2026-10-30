@@ -1,0 +1,10 @@
+id: F-A7-snapid
+file: src/ledger.rs
+test: ledger::model_settle_after_identity_change_is_refused
+--- old
+        if live.identity != snapshot_identity {
+            return Err(SettleRefuse::Binding(Refuse::Identity));
+        }
+--- new
+        let _same_identity = live.identity == snapshot_identity;
+--- end

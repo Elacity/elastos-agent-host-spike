@@ -1,0 +1,15 @@
+id: F-A7-revokehold
+file: src/ledger.rs
+test: ledger::model_revoked_grant_does_not_free_ceiling_room
+--- old
+        if open_hold.identity != identity {
+            continue;
+        }
+--- new
+        let Some(grant) = grants.get(&open_hold.handle) else {
+            continue;
+        };
+        if grant.identity != identity {
+            continue;
+        }
+--- end
