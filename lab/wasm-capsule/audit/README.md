@@ -10,6 +10,13 @@ A padded size can end in `00`; earlier size bytes are `0x80` or more and cannot
 be part of the magic. Wasm magic `00 61 73 6D` at any offset returns
 `CodeInCustomSection`; a section without that run passes, including padding
 alone. This byte heuristic leaves compressed or encoded content undecoded.
+One `component-type` section is allowed per artifact; a second is refused with
+the same refusal. Its data passes only as the pinned `product-capsule-v1`
+encoding (1,382 bytes, SHA-256
+`439929eb565421a1de4791c7e5b278ae105687eb0f12d4a965d6a6adabce24a8`) or when
+every type-level import name is one of the five granted Bus names and at least
+one is present. `audit` on the core module is a pre-check; the claim that counts
+is the componentized artifact passing `audit_component`.
 [API v1](INTERFACE.md) defines the
 public types, validation rules and exact refusal strings; `AUDIT_API` stays 1.
 
@@ -31,11 +38,11 @@ cargo fmt --manifest-path lab/wasm-capsule/audit/Cargo.toml -- --check
 cargo test --locked --manifest-path lab/wasm-capsule/audit/Cargo.toml
 ```
 
-The sixteen `core_imports` tests cover default features, named refusals, exact
+The twenty-two `core_imports` tests cover default features, named refusals, exact
 declarations, malformed bytes, custom-section content, compact import groups,
 refusal order and API v1, and memory page limits for a defined memory, an absent maximum, an imported memory, a 64-bit memory and a shared memory, in import-then-definition order and with the same validation as `audit`.
 The two retained `skeleton` tests pin the manifest
-and workspace boundary. The nine `component_imports` tests cover exact names
+and workspace boundary. The ten `component_imports` tests cover exact names
 and versions (including same-major, pre-release and build-metadata versions;
 a declared pre-release or build version does not match the release;
 interface names that differ only in letter case are refused on either side;
@@ -128,6 +135,9 @@ apply and verify each entry by hand in this workspace.
 | F-CWA23b | Accept any data under a `component-type` name | `component_type_section_that_does_not_parse_is_refused`, `component_type_section_with_a_core_module_is_refused` |
 | F-CWA23c | Accept any component that parses, whatever its payloads | `component_type_section_with_a_core_module_is_refused` |
 | F-CWA23d | Let nested `component-type` sections keep recursing | `component_type_section_inside_component_type_data_is_refused` |
+| F-CWA24a | The one-section count never runs, so a second section is accepted | `second_component_type_section_is_refused` |
+| F-CWA24b | The allowlist never runs, so a type-only `component-type` name is enough | `type_level_wasi_or_env_import_is_refused` |
+| F-CWA24c | A type-level name passes when it starts with a listed name or with `elastos:bus` | `type_level_wasi_or_env_import_is_refused` |
 
 Start with passing checks. Save the original bytes of the edited file and its
 SHA-256, then apply one entry's exact edits. With the check environment above,

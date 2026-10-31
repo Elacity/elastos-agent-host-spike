@@ -2,11 +2,28 @@
 
 use std::fmt;
 use wasmparser::{
-    ComponentExternalKind, Encoding, Import, ImportSectionReader, MemoryType, Parser, Payload,
-    TypeRef, Validator,
+    ComponentExternalKind, ComponentType, ComponentTypeDeclaration, Encoding, Import,
+    ImportSectionReader, InstanceTypeDeclaration, MemoryType, Parser, Payload, TypeRef, Validator,
 };
 
 pub const AUDIT_API: u32 = 1;
+
+// The five interfaces the Runtime grants to a first-party capsule. Copied
+// read-only from `elastos/crates/elastos-server/src/component.rs`; this crate
+// does not import the Runtime and adds no sixth name.
+const ALLOWED_BUS_IMPORTS: [&str; 5] = [
+    "elastos:bus/types@1.0.0",
+    "elastos:bus/runtime@1.0.0",
+    "elastos:bus/identity@1.0.0",
+    "elastos:bus/capabilities@1.0.0",
+    "elastos:bus/providers@1.0.0",
+];
+
+// The pinned wit-bindgen 0.57.1 encoding of the `product-capsule-v1` world:
+// 1,382 bytes, SHA-256
+// 439929eb565421a1de4791c7e5b278ae105687eb0f12d4a965d6a6adabce24a8.
+const PRODUCT_CAPSULE_V1_COMPONENT_TYPE: &[u8] =
+    include_bytes!("../tests/fixtures/wit-bindgen-0.57.1-component-type.bin");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclaredImport {
@@ -136,8 +153,14 @@ fn inspect(
     encoding: Encoding,
     read_imports: impl FnMut(Payload<'_>) -> Result<(), Refusal>,
 ) -> Result<(), Refusal> {
-    let mut validator = Validator::new();
+    let mut validator = new_validator();
     inspect_with_validator(wasm, encoding, &mut validator, false, read_imports)
+}
+
+// The crate's one validator constructor. Nested type-only data gets its own
+// validator, so its reset cannot use up the outer one.
+fn new_validator() -> Validator {
+    Validator::new()
 }
 
 // The crate's one parse. A `component-type` section reuses it on its own data.
@@ -164,6 +187,7 @@ fn inspect_with_validator(
     }
 
     let mut depth = 0;
+    let mut component_type_sections = 0;
     for payload in payloads(wasm) {
         match payload.map_err(|_| invalid.clone())? {
             Payload::Version { .. } => depth += 1,
@@ -176,7 +200,12 @@ fn inspect_with_validator(
                     return Err(Refusal::CodeInCustomSection);
                 }
                 if component_type {
-                    type_only_component(section.data(), validator)?;
+                    // One signed artifact carries exactly one such section.
+                    component_type_sections += 1;
+                    if component_type_sections > 1 {
+                        return Err(Refusal::CodeInCustomSection);
+                    }
+                    type_only_component(section.data())?;
                 } else {
                     let range = section.range();
                     let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;
@@ -196,21 +225,38 @@ fn inspect_with_validator(
 }
 
 // wit-bindgen names its encoded world `component-type:...`. That data is a
-// component of type definitions and type exports, never code.
-fn type_only_component(data: &[u8], validator: &mut Validator) -> Result<(), Refusal> {
-    inspect_with_validator(
-        data,
-        Encoding::Component,
-        validator,
-        true,
-        type_only_payload,
-    )
-    .map_err(|_| Refusal::CodeInCustomSection)
+// component of type definitions and type exports, never code. The committed
+// product-capsule-v1 world passes by byte identity; any other type-only data
+// carries only type-level imports from the five granted Bus interfaces.
+fn type_only_component(data: &[u8]) -> Result<(), Refusal> {
+    if data == PRODUCT_CAPSULE_V1_COMPONENT_TYPE {
+        return Ok(());
+    }
+    let mut validator = new_validator();
+    let mut type_imports = Vec::new();
+    inspect_with_validator(data, Encoding::Component, &mut validator, true, |payload| {
+        type_only_payload(payload, &mut type_imports)
+    })
+    .map_err(|_| Refusal::CodeInCustomSection)?;
+    if type_imports.is_empty()
+        || type_imports
+            .iter()
+            .any(|name| !ALLOWED_BUS_IMPORTS.contains(&name.as_str()))
+    {
+        return Err(Refusal::CodeInCustomSection);
+    }
+    Ok(())
 }
 
-fn type_only_payload(payload: Payload<'_>) -> Result<(), Refusal> {
+fn type_only_payload(payload: Payload<'_>, type_imports: &mut Vec<String>) -> Result<(), Refusal> {
     match payload {
-        Payload::ComponentTypeSection(_) => Ok(()),
+        Payload::ComponentTypeSection(section) => {
+            for ty in section {
+                let ty = ty.map_err(|_| Refusal::CodeInCustomSection)?;
+                type_import_names(&ty, type_imports);
+            }
+            Ok(())
+        }
         Payload::ComponentExportSection(section) => {
             // Defence in depth: a non-type export needs a definition section
             // (module, instance, component, function or value), and the final
@@ -224,5 +270,31 @@ fn type_only_payload(payload: Payload<'_>) -> Result<(), Refusal> {
             Ok(())
         }
         _ => Err(Refusal::CodeInCustomSection),
+    }
+}
+
+// A type-level import can sit one or more nested `Type(...)` declarations
+// down. Every name is checked, not only the first level.
+fn type_import_names(ty: &ComponentType<'_>, names: &mut Vec<String>) {
+    match ty {
+        ComponentType::Component(declarations) => {
+            for declaration in declarations.iter() {
+                match declaration {
+                    ComponentTypeDeclaration::Import(import) => {
+                        names.push(import.name.name.to_owned());
+                    }
+                    ComponentTypeDeclaration::Type(nested) => type_import_names(nested, names),
+                    _ => {}
+                }
+            }
+        }
+        ComponentType::Instance(declarations) => {
+            for declaration in declarations.iter() {
+                if let InstanceTypeDeclaration::Type(nested) = declaration {
+                    type_import_names(nested, names);
+                }
+            }
+        }
+        _ => {}
     }
 }
