@@ -75,6 +75,23 @@ impl Verifier {
         request: &GuestRequest,
         path: &str,
     ) -> Result<Handle, OperateRefuse> {
+        self.pending_parent = Some(request.handle);
+        match self.mint_child_journal(call, request, path) {
+            Ok(handle) => Ok(handle),
+            Err(refusal) => {
+                self.pending_parent = None;
+                Err(refusal)
+            }
+        }
+    }
+
+    #[rustfmt::skip]
+    fn mint_child_journal(
+        &mut self,
+        call: &Call,
+        request: &GuestRequest,
+        path: &str,
+    ) -> Result<Handle, OperateRefuse> {
         self.operate(call, request, Operation::ChildJournal)?;
         #[rustfmt::skip]
         let grant = self.resolve(*call, request.handle).map_err(OperateRefuse::Binding)?;
