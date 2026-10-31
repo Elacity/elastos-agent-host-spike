@@ -13022,6 +13022,16 @@ const PROFILE_PARAMETERS_HEADING: &str = "## Profile parameters";
 /// which tests hold its rules.
 const TESTS_HEADING: &str = "## Tests";
 
+/// The heading line of the tests section in `CONFINEMENT-LINUX.md`, the one
+/// section a Linux-gated test must be named in.
+const LINUX_TESTS_HEADING: &str = "## The tests";
+
+/// The one crate whose `CONFINEMENT-LINUX.md` may satisfy a Linux-gated test.
+const LINUX_DOCUMENT_CRATE: &str = WALLET_PROVIDER;
+
+/// The attribute line that starts a test function in a `tests/confine.rs`.
+const DECLARED_TEST_ATTRIBUTE: &str = "#[test]";
+
 /// The heading line every confinement document uses for the section that
 /// states the host OSes its confinement tests exercise.
 const HOST_OS_HEADING: &str = "## Host-OS status";
@@ -13066,7 +13076,7 @@ const LINUX_INEXACT_HEADING: &str = "## Rows with no exact Linux match";
 /// of the lane's two test files; a name in none of these sections and in
 /// neither file is the refusal.
 const LINUX_TEST_NAME_SECTIONS: [&str; 3] = [
-    "## The tests",
+    LINUX_TESTS_HEADING,
     LINUX_INEXACT_HEADING,
     "## When a primitive is missing",
 ];
@@ -14841,6 +14851,229 @@ fn tests_section_citation_problems(
              capsules/{sibling_name}/{CONFINEMENT_TEST_FILE}, so it cannot be read as a complete \
              section"
         ));
+    }
+    problems
+}
+
+/// One `#[test]` function a `tests/confine.rs` declares.
+#[derive(Debug, Clone)]
+struct DeclaredTest {
+    /// The function name.
+    name: String,
+    /// The one-based line of the `fn` declaration.
+    line: usize,
+    /// Whether an attribute between `#[test]` and the `fn` line marks it
+    /// `ignore`.
+    ignored: bool,
+    /// Whether the attribute line immediately above `#[test]` gates it to
+    /// Linux.
+    linux_gated: bool,
+}
+
+/// The name of the function a test declaration line names, or `None` when the
+/// line is not a function declaration.
+fn test_declaration_name(line: &str) -> Option<String> {
+    let mut rest = line.trim();
+    loop {
+        let Some(next) = ["pub ", "async ", "unsafe ", "const "]
+            .iter()
+            .find_map(|prefix| rest.strip_prefix(prefix))
+        else {
+            break;
+        };
+        rest = next;
+    }
+    let rest = rest.strip_prefix("fn ")?;
+    let name: String = rest
+        .chars()
+        .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+        .collect();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// Whether `line` is the attribute that gates a test to Linux.
+fn is_linux_gate_attribute(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with("#[cfg(") && trimmed.contains("target_os = \"linux\"")
+}
+
+/// Whether `line` is an attribute that marks a test `ignore`.
+fn is_ignore_attribute(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with("#[ignore")
+        || (trimmed.starts_with("#[cfg_attr") && trimmed.contains("ignore"))
+}
+
+/// Every `#[test]` function `source` declares, in source order, with its line
+/// number and whether it is ignored or gated to Linux.
+///
+/// The Linux gate is the attribute line immediately above `#[test]`, and the
+/// ignore marker is any attribute between `#[test]` and the `fn` line. A source
+/// with no `#[test]` line is a refusal that names the test source, never an
+/// empty list, so a wrong path or a truncated file cannot pass by declaring
+/// nothing. A `#[test]` with no `fn` line before the next item is also a
+/// refusal.
+fn declared_tests(source: &str) -> Result<Vec<DeclaredTest>, String> {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut tests = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if line.trim() != DECLARED_TEST_ATTRIBUTE {
+            continue;
+        }
+        let linux_gated = index > 0 && is_linux_gate_attribute(lines[index - 1]);
+        let mut ignored = false;
+        let mut declaration = None;
+        for (offset, following) in lines[index + 1..].iter().enumerate() {
+            let trimmed = following.trim();
+            if is_ignore_attribute(trimmed) {
+                ignored = true;
+                continue;
+            }
+            if trimmed.is_empty() || trimmed.starts_with("#[") || trimmed.starts_with("//") {
+                continue;
+            }
+            declaration = test_declaration_name(trimmed).map(|name| (name, index + offset + 2));
+            break;
+        }
+        let Some((name, line)) = declaration else {
+            return Err(format!(
+                "{CONFINEMENT_TEST_FILE} must name the function of the #[test] at line {}; found \
+                 no `fn <name>(` line",
+                index + 1
+            ));
+        };
+        tests.push(DeclaredTest {
+            name,
+            line,
+            ignored,
+            linux_gated,
+        });
+    }
+    if tests.is_empty() {
+        return Err(format!(
+            "{CONFINEMENT_TEST_FILE} must declare at least one #[test] function; found none"
+        ));
+    }
+    Ok(tests)
+}
+
+/// Whether `span` names `test` as a whole token.
+///
+/// A span equal to the name names it, and so does a path-qualified span such
+/// as `tests/confine.rs::<name>`, because the document's one citation form for
+/// a test of the other crate carries its path.
+fn span_names_test(span: &str, test: &str) -> bool {
+    span == test
+        || span
+            .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+            .any(|token| token == test)
+}
+
+/// Whether any span of `spans` names `test`.
+fn spans_name_test(spans: &[String], test: &str) -> bool {
+    spans.iter().any(|span| span_names_test(span, test))
+}
+
+/// Every problem with one crate's test citations, each naming the crate, the
+/// document read, the test, its line and the section the rule searched.
+///
+/// The crate's own `CONFINEMENT.md` must hold its `TESTS_HEADING` section, and
+/// every declared test that is not ignored must be named by a backtick span of
+/// that document. A test whose `#[cfg(...)]` line names `target_os = "linux"`
+/// is required in `LINUX_TESTS_HEADING` of `linux_document` instead, because
+/// the document says those tests do not run on this host. The document is
+/// owned by `document_name`: a test is never satisfied by another crate's
+/// document, and only wallet's Linux document may satisfy a Linux-gated test.
+/// `linux_document` is `None` for did, which declares no Linux-gated test.
+///
+/// Two honesty limits, and no more. The rule reads source and documents as
+/// text, so it shows that each declared test has a citation and shows nothing
+/// about a loaded policy, a kernel or whether a test passes. It requires a
+/// name, not a sentence, so a document may cite a test for any reason it likes.
+fn test_citation_problems(
+    crate_name: &str,
+    document_name: &str,
+    document: &str,
+    linux_document: Option<&str>,
+    declared: &[DeclaredTest],
+) -> Vec<String> {
+    if let Err(problems) = section_under_one_heading(crate_name, document, TESTS_HEADING) {
+        return problems;
+    }
+    let own_document = document_name == crate_name;
+    let document_spans: Vec<String> = backtick_spans(document)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let needs_linux = declared
+        .iter()
+        .any(|test| !test.ignored && test.linux_gated);
+    let linux_spans = if needs_linux && crate_name == LINUX_DOCUMENT_CRATE {
+        match linux_document {
+            None => None,
+            Some(linux_document) => {
+                let section = match section_under_one_heading(
+                    crate_name,
+                    linux_document,
+                    LINUX_TESTS_HEADING,
+                ) {
+                    Ok(section) => section,
+                    Err(problems) => {
+                        return problems
+                            .into_iter()
+                            .map(|problem| {
+                                problem.replace("CONFINEMENT.md", "CONFINEMENT-LINUX.md")
+                            })
+                            .collect()
+                    }
+                };
+                Some(
+                    backtick_spans(&section)
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect::<Vec<String>>(),
+                )
+            }
+        }
+    } else {
+        None
+    };
+    let mut problems = Vec::new();
+    for test in declared.iter().filter(|test| !test.ignored) {
+        if test.linux_gated && linux_spans.is_none() {
+            problems.push(format!(
+                "{crate_name} CONFINEMENT-LINUX.md: declared Linux-gated test `{}` at line {} \
+                 needs {LINUX_TESTS_HEADING} in `CONFINEMENT-LINUX.md`, and this crate has no \
+                 Linux document",
+                test.name, test.line
+            ));
+            continue;
+        }
+        let spans: &[String] = linux_spans.as_deref().unwrap_or(&[]);
+        let cited = if test.linux_gated {
+            own_document && spans_name_test(spans, &test.name)
+        } else {
+            own_document && spans_name_test(&document_spans, &test.name)
+        };
+        if !cited {
+            problems.push(if test.linux_gated {
+                format!(
+                    "{crate_name} CONFINEMENT-LINUX.md: declared Linux-gated test `{}` at line {} \
+                     is named in no backtick span of {LINUX_TESTS_HEADING}",
+                    test.name, test.line
+                )
+            } else {
+                format!(
+                    "{crate_name} CONFINEMENT.md: declared test `{}` at line {} is named in no \
+                     backtick span of {document_name} CONFINEMENT.md",
+                    test.name, test.line
+                )
+            });
+        }
     }
     problems
 }
@@ -19840,6 +20073,351 @@ fn tests_section_check_refuses_each_bad_section() {
         Vec::<String>::new(),
         "the same OS named twice is one set"
     );
+}
+
+/// One bad citation case: its label, the problems the rule reports, and the
+/// exact problems the case must report.
+struct CitationCase {
+    label: &'static str,
+    problems: Vec<String>,
+    expected: Vec<String>,
+}
+
+/// The two documents, both test sources and both declaration lists the
+/// citation rule reads, held once so both named tests drive one set of values.
+struct CitationSources {
+    did_document: String,
+    wallet_document: String,
+    linux_document: String,
+    did_declared: Vec<DeclaredTest>,
+    wallet_declared: Vec<DeclaredTest>,
+}
+
+impl CitationSources {
+    /// Reads both documents, both test sources and wallet's Linux document,
+    /// then parses each source's declared tests. A missing or unreadable file
+    /// and a source with no `#[test]` line are refusals that name their path or
+    /// crate, so no provider is skipped.
+    fn read() -> Self {
+        let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("capsules/wallet-provider must sit under capsules/");
+        let did_document =
+            read_confinement_document(capsules, DID_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+        let wallet_document = read_confinement_document(capsules, WALLET_PROVIDER)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let linux_document =
+            read_linux_confinement_document(capsules).unwrap_or_else(|err| panic!("{err}"));
+        let did_source =
+            read_lane_test_source(capsules, DID_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+        let wallet_source =
+            read_lane_test_source(capsules, WALLET_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+        let did_declared =
+            declared_tests(&did_source).unwrap_or_else(|err| panic!("{DID_PROVIDER}: {err}"));
+        let wallet_declared =
+            declared_tests(&wallet_source).unwrap_or_else(|err| panic!("{WALLET_PROVIDER}: {err}"));
+        Self {
+            did_document,
+            wallet_document,
+            linux_document,
+            did_declared,
+            wallet_declared,
+        }
+    }
+
+    /// Every problem the citation rule reports over did's own document.
+    fn did_problems(&self) -> Vec<String> {
+        test_citation_problems(
+            DID_PROVIDER,
+            DID_PROVIDER,
+            &self.did_document,
+            None,
+            &self.did_declared,
+        )
+    }
+
+    /// Every problem the citation rule reports over wallet's own document and
+    /// its Linux document.
+    fn wallet_problems(&self) -> Vec<String> {
+        test_citation_problems(
+            WALLET_PROVIDER,
+            WALLET_PROVIDER,
+            &self.wallet_document,
+            Some(&self.linux_document),
+            &self.wallet_declared,
+        )
+    }
+
+    /// Every problem over both crates.
+    fn problems(&self) -> Vec<String> {
+        let mut problems = self.did_problems();
+        problems.extend(self.wallet_problems());
+        problems
+    }
+
+    /// One bad case per refusal of the reader and the rule, each with its
+    /// exact problem vector.
+    fn bad_cases(&self) -> Vec<CitationCase> {
+        let mut cases = Vec::new();
+
+        let name = "uncited_test";
+        let declared =
+            declared_tests(&citation_source(name)).expect("the fixture source declares one test");
+        let document = citation_document("Nothing is cited here.");
+        let linux_document = citation_linux_document("");
+        cases.push(CitationCase {
+            label: "a source that declares a name neither document names",
+            problems: test_citation_problems(
+                WALLET_PROVIDER,
+                WALLET_PROVIDER,
+                &document,
+                Some(&linux_document),
+                &declared,
+            ),
+            expected: vec![format!(
+                "{WALLET_PROVIDER} CONFINEMENT.md: declared test `{name}` at line 2 is named in \
+                 no backtick span of {WALLET_PROVIDER} CONFINEMENT.md"
+            )],
+        });
+
+        let name = "wallet_only_in_did";
+        let declared =
+            declared_tests(&citation_source(name)).expect("the fixture source declares one test");
+        let did_document = citation_document(&format!("`{name}` is named here."));
+        let linux_document = citation_linux_document("");
+        cases.push(CitationCase {
+            label: "a wallet test named only in did's document",
+            problems: test_citation_problems(
+                WALLET_PROVIDER,
+                DID_PROVIDER,
+                &did_document,
+                Some(&linux_document),
+                &declared,
+            ),
+            expected: vec![format!(
+                "{WALLET_PROVIDER} CONFINEMENT.md: declared test `{name}` at line 2 is named in \
+                 no backtick span of {DID_PROVIDER} CONFINEMENT.md"
+            )],
+        });
+
+        let name = "linux_only_in_tests";
+        let declared = declared_tests(&citation_linux_source(name))
+            .expect("the fixture source declares one Linux-gated test");
+        let wallet_document = citation_document(&format!("`{name}` is named here."));
+        let linux_document = citation_linux_document("Nothing is cited here.");
+        cases.push(CitationCase {
+            label: "a Linux-gated wallet test named only in wallet's Tests section",
+            problems: test_citation_problems(
+                WALLET_PROVIDER,
+                WALLET_PROVIDER,
+                &wallet_document,
+                Some(&linux_document),
+                &declared,
+            ),
+            expected: vec![format!(
+                "{WALLET_PROVIDER} CONFINEMENT-LINUX.md: declared Linux-gated test `{name}` at \
+                 line 3 is named in no backtick span of {LINUX_TESTS_HEADING}"
+            )],
+        });
+
+        let name = "did_only_in_linux";
+        let declared =
+            declared_tests(&citation_source(name)).expect("the fixture source declares one test");
+        let did_document = citation_document("Nothing is cited here.");
+        let linux_document = citation_linux_document(&format!("`{name}` is named here."));
+        cases.push(CitationCase {
+            label: "a did test named only in the Linux document",
+            problems: test_citation_problems(
+                DID_PROVIDER,
+                DID_PROVIDER,
+                &did_document,
+                Some(&linux_document),
+                &declared,
+            ),
+            expected: vec![format!(
+                "{DID_PROVIDER} CONFINEMENT.md: declared test `{name}` at line 2 is named in no \
+                 backtick span of {DID_PROVIDER} CONFINEMENT.md"
+            )],
+        });
+
+        let name = "ignored_fixture";
+        let declared = declared_tests(&citation_ignored_source(name))
+            .expect("the fixture source declares one ignored test");
+        let document = citation_document("Nothing is cited here.");
+        let linux_document = citation_linux_document("");
+        cases.push(CitationCase {
+            label: "an ignored test that no document names",
+            problems: test_citation_problems(
+                WALLET_PROVIDER,
+                WALLET_PROVIDER,
+                &document,
+                Some(&linux_document),
+                &declared,
+            ),
+            expected: Vec::new(),
+        });
+
+        let problems = declared_tests("fn helper() {\n}\n")
+            .err()
+            .map(|reason| vec![reason])
+            .unwrap_or_default();
+        cases.push(CitationCase {
+            label: "a source with no test attribute",
+            problems,
+            expected: vec![format!(
+                "{CONFINEMENT_TEST_FILE} must declare at least one #[test] function; found none"
+            )],
+        });
+
+        let name = "needs_tests_heading";
+        let declared =
+            declared_tests(&citation_source(name)).expect("the fixture source declares one test");
+        let document = "# fixture\n\n## Other\n\nNothing is cited.\n";
+        let linux_document = citation_linux_document("");
+        cases.push(CitationCase {
+            label: "a document with no Tests heading",
+            problems: test_citation_problems(
+                WALLET_PROVIDER,
+                WALLET_PROVIDER,
+                document,
+                Some(&linux_document),
+                &declared,
+            ),
+            expected: vec![format!(
+                "{WALLET_PROVIDER} CONFINEMENT.md must hold one line {TESTS_HEADING}; found none"
+            )],
+        });
+
+        let name = "needs_linux_heading";
+        let declared = declared_tests(&citation_linux_source(name))
+            .expect("the fixture source declares one Linux-gated test");
+        let wallet_document = citation_document(&format!("`{name}` is named here."));
+        let linux_document = "# fixture\n\n## Other\n\nNothing is cited.\n";
+        cases.push(CitationCase {
+            label: "a Linux document with no The tests heading",
+            problems: test_citation_problems(
+                WALLET_PROVIDER,
+                WALLET_PROVIDER,
+                &wallet_document,
+                Some(linux_document),
+                &declared,
+            ),
+            expected: vec![format!(
+                "{WALLET_PROVIDER} CONFINEMENT-LINUX.md must hold one line \
+                 {LINUX_TESTS_HEADING}; found none"
+            )],
+        });
+
+        cases
+    }
+}
+
+/// A test source with one `#[test]` function named `name`.
+fn citation_source(name: &str) -> String {
+    format!("#[test]\nfn {name}() {{\n    assert!(true);\n}}\n")
+}
+
+/// A test source with one Linux-gated `#[test]` function named `name`.
+fn citation_linux_source(name: &str) -> String {
+    format!("#[cfg(target_os = \"linux\")]\n#[test]\nfn {name}() {{\n    assert!(true);\n}}\n")
+}
+
+/// A test source with one ignored `#[test]` function named `name`.
+fn citation_ignored_source(name: &str) -> String {
+    format!("#[test]\n#[ignore = \"fixture\"]\nfn {name}() {{\n    panic!(\"ignored\");\n}}\n")
+}
+
+/// A `CONFINEMENT.md` value holding `body` under `TESTS_HEADING`.
+fn citation_document(body: &str) -> String {
+    format!("# fixture\n\n{TESTS_HEADING}\n\n{body}\n\n## Falsifiers\n\nNothing here.\n")
+}
+
+/// A `CONFINEMENT-LINUX.md` value holding `body` under
+/// `LINUX_TESTS_HEADING`.
+fn citation_linux_document(body: &str) -> String {
+    format!("# fixture\n\n{LINUX_TESTS_HEADING}\n\n{body}\n")
+}
+
+/// Every non-ignored test of either crate is named in its own crate's
+/// `CONFINEMENT.md`, and every Linux-gated wallet test is named in
+/// `CONFINEMENT-LINUX.md`'s `## The tests`.
+///
+/// The check reads both test sources through `read_lane_test_source`, both
+/// `CONFINEMENT.md` files through `read_confinement_document`, wallet's
+/// `CONFINEMENT-LINUX.md` through `read_linux_confinement_document`, and each
+/// source's declared tests through `declared_tests`, then requires no problem
+/// from `test_citation_problems` over either crate. It prints the two
+/// declaration counts, so a run shows how much it read. A missing or unreadable
+/// file and a source with no `#[test]` line are refusals that name their path
+/// or crate, never a skipped provider. It then requires every bad case that must
+/// be refused to report something, so a rule that stops refusing one of them
+/// fails here too.
+/// The check reads files and starts no process, so it runs on every OS. It
+/// shows that each declared test has a citation and says nothing about a loaded
+/// policy, a kernel or whether a test passes.
+///
+/// Falsifier: WP242 makes the rule skip a declared test whose name no document
+/// holds, so the uncited case reports nothing; WP243 makes the rule accept a
+/// wallet test named only in did's document, so the cross-crate case reports
+/// nothing. Both fail this test.
+#[test]
+fn every_declared_test_is_cited_in_its_own_documents() {
+    let sources = CitationSources::read();
+    println!(
+        "test citation check read {} did-provider tests and {} wallet-provider tests",
+        sources.did_declared.len(),
+        sources.wallet_declared.len()
+    );
+    let problems = sources.problems();
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+    for case in sources.bad_cases() {
+        if case.expected.is_empty() {
+            continue;
+        }
+        assert!(
+            !case.problems.is_empty(),
+            "{} must be refused, and the rule reported nothing",
+            case.label
+        );
+    }
+}
+
+/// The citation rule refuses each bad source, over text values.
+///
+/// The passing case is each crate's real source and that crate's real
+/// documents, read through `CitationSources::read`, so a refusal over one of
+/// them means the source and its documents have drifted apart. Then one case
+/// per refusal asserts the exact problem vector: a source that declares a name
+/// neither document names, a wallet test named only in did's document, a
+/// Linux-gated wallet test named only in wallet's `## Tests`, a did test named
+/// only in `CONFINEMENT-LINUX.md`, an ignored test that no document names, a
+/// source with no `#[test]` line, a missing `## Tests` heading and a missing
+/// `## The tests` heading in a Linux document that a Linux-gated test needs.
+/// The documents and sources are values in memory; only the real sources and
+/// the real documents are read, and the test starts no process.
+///
+/// Falsifier: WP242 makes the uncited case report nothing; WP243 makes the
+/// cross-crate case report nothing. Both fail this test.
+#[test]
+fn test_citation_check_refuses_each_bad_source() {
+    let sources = CitationSources::read();
+    assert_eq!(
+        sources.did_problems(),
+        Vec::<String>::new(),
+        "did's real source and document must name every declared test"
+    );
+    assert_eq!(
+        sources.wallet_problems(),
+        Vec::<String>::new(),
+        "wallet's real source and documents must name every declared test"
+    );
+    for case in sources.bad_cases() {
+        assert_eq!(
+            case.problems, case.expected,
+            "{} must be refused with its own reason",
+            case.label
+        );
+    }
 }
 
 /// The journey test the C0 part of every M1 acceptance summary names.

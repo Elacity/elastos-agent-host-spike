@@ -3589,6 +3589,38 @@
       "tests": [
         "model_inline_profile_sections_match_the_bridge"
       ]
+    },
+    {
+      "id": "WP242",
+      "title": "the citation rule skips a declared test whose name no document holds, so an uncited test passes",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        if !cited {\n            problems.push(if test.linux_gated {",
+          "new": "        if !cited && false {\n            problems.push(if test.linux_gated {"
+        }
+      ],
+      "tests": [
+        "every_declared_test_is_cited_in_its_own_documents"
+      ]
+    },
+    {
+      "id": "WP243",
+      "title": "the citation rule accepts a wallet test named only in did's document, so the cross-crate read passes",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let own_document = document_name == crate_name;",
+          "new": "    let own_document = true;"
+        }
+      ],
+      "tests": [
+        "every_declared_test_is_cited_in_its_own_documents"
+      ]
     }
   ]
 }

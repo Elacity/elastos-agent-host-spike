@@ -824,6 +824,9 @@ code: every did and wallet allow form must have one row, every quoted form must
 be a profile's, and every name a row cites must be a function of the lane's two
 test files or a test this document names. It reads the document and the profiles
 as text and makes no claim about a kernel.
+`linux_contract_table_check_refuses_each_bad_table` is the fixture half of
+this rule: it refuses each bad table over text values and runs on the Mac,
+where this lane's gate runs.
 
 - `both_file_profiles_bind_one_storage_parameter_contract` runs on Linux today.
   It proves the head terms, the three tokens and the three shared rules of the
@@ -1164,3 +1167,33 @@ as text and makes no claim about a kernel.
   case) requires a missing Landlock, userns or seccomp on a declared `linux` to
   be an error that names the OS and the primitive. Today the test expects
   `linux` to skip; that expectation changes only with the tests above (027).
+
+The seven tests below carry `#[cfg(target_os = "linux")]`, so the lane's Mac
+gate does not run them; the Linux runs recorded above are their evidence.
+
+- `linux_seccomp_probe_reaps_failures_and_repeated_journeys` starts each probe
+  child and requires every one to end: a failed install is reported rather
+  than left to hang, a stopped child and a child that never exits are killed at
+  a bound, a child that allocated after its fork is refused, and a repeated
+  journey answers the same as the first.
+- `linux_seccomp_probe_descriptors_stay_with_their_owner` holds the report pipe
+  open before its fork while a concurrent launch execs and another fork-only
+  probe runs; both ends belong to the first probe and neither other child may
+  use them or keep its report reader waiting for EOF.
+- `linux_landlock_requires_no_new_privs` is the test of the install step that
+  sets `no_new_privs`: the child enters with the flag clear, `restrict_self`
+  must refuse `EPERM`, and a clear flag must still install a fully confined
+  report once the installer sets the flag itself. It is not run on this host;
+  the Linux run recorded above is its evidence.
+- `linux_wallet_file_row_is_refused_outside_storage_root` is the wallet caller
+  of the one file row: wallet's own binary, declared rights, bindings and
+  permitted calls, with `landlock_file_row_journey`'s assertions unchanged.
+- `linux_did_file_row_is_refused_outside_storage_root` is the did caller of the
+  same file row: the same body, installer and `pre_exec` start with did's own
+  binary, declared rights, bindings and permitted calls.
+- `linux_wallet_journey_runs_under_the_seccomp_allow_list` is the wallet half of
+  the Linux journey: it passes wallet's own binary, file and test name to
+  `seccomp_confined_journey`.
+- `linux_did_journey_runs_under_the_seccomp_allow_list` is the did half of the
+  same journey: the same body, installer and program, with did's own binary,
+  declared rights and operations.

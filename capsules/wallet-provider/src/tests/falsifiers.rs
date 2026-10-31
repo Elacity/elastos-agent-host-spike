@@ -324,8 +324,12 @@ use std::process::Command;
 /// `(param ...)` token passes; and WP241, which makes the copies rule accept two
 /// sections that differ, so a provider-specific sentence added to one copy
 /// passes. Both are CAUGHT on the Mac by
-/// `model_inline_profile_sections_match_the_bridge`.
-const EXPECTED_FALSIFIERS: usize = 221;
+/// `model_inline_profile_sections_match_the_bridge`. Task 170 adds WP242, which
+/// makes the citation rule skip a declared test whose name no document holds,
+/// so an uncited test passes; and WP243, which accepts a wallet test named only
+/// in did's document, so the cross-crate read passes. Both are CAUGHT on the
+/// Mac by `every_declared_test_is_cited_in_its_own_documents`.
+const EXPECTED_FALSIFIERS: usize = 223;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

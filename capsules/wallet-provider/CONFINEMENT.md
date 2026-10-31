@@ -961,6 +961,36 @@ and did's to the crate that declares each test they cite: a cited test that
 lives in the other crate must be named with that crate's
 `tests/confine.rs`, so a reader can tell which crate runs it.
 
+`lab_generator_name_check_refuses_a_non_test_file`,
+`profile_parameter_section_check_refuses_each_bad_section` and
+`tests_section_check_refuses_each_bad_section` are the fixture halves of
+`lab_generator_is_named_only_in_test_code`,
+`every_confinement_document_states_its_bindings_from_the_one_derivation` and
+`tests_sections_name_the_crate_that_holds_each_cited_test`. The first refuses a
+non-test file that names the lab generator while the exempt files and build
+output are not refused; the second refuses each bad parameter section and
+accepts both real ones; the third refuses each bad section over text values.
+
+`m1_summary_check_refuses_each_bad_part` is the fixture half of
+`every_m1_summary_names_its_journey_and_its_falsifiers`: it refuses each bad M1
+part over text values. `model_inline_profile_check_refuses_each_bad_section` is
+the fixture half of `model_inline_profile_sections_match_the_bridge`: it
+refuses each bad inline-profile section, each unread region and each differing
+copy. `seccomp_journey_file_comparison_catches_corruption_for_each_provider`
+changes one provider file, one fixed-byte fixture and one outside sibling in
+turn and requires the journey's one comparison to fail for both provider
+layouts. `linux_contract_table_check_refuses_each_bad_table` is the fixture
+half of `linux_contract_table_covers_every_committed_allow_form`, which
+`CONFINEMENT-LINUX.md` cites: it refuses each bad Linux contract table over
+text values and runs on the Mac, where this section's tests run.
+
+`every_declared_test_is_cited_in_its_own_documents` is the reverse of the
+citation rule: it requires every non-ignored test of either crate to be named
+in its own crate's `CONFINEMENT.md`, and every Linux-gated wallet test to be
+named in `CONFINEMENT-LINUX.md`'s `## The tests`.
+`test_citation_check_refuses_each_bad_source` is its fixture half and refuses
+each bad source over text values.
+
 ## Falsifiers
 
 Falsifier procedure (run against a temporary edit, then restore the profile):
@@ -1620,6 +1650,12 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - WP241: The copies rule accepts two sections that differ, so a
   provider-specific sentence added to one copy passes.
   `model_inline_profile_sections_match_the_bridge` checks this rule.
+- WP242: The citation rule skips a declared test whose name no document holds,
+  so an uncited test passes.
+  `every_declared_test_is_cited_in_its_own_documents` checks this rule.
+- WP243: The citation rule accepts a wallet test named only in did's document,
+  so the cross-crate read passes.
+  `every_declared_test_is_cited_in_its_own_documents` checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,
