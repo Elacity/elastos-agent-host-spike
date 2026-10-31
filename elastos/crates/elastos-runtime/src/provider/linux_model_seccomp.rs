@@ -189,12 +189,6 @@ mod tests {
         rc
     }
 
-    const MMSG_LEN: usize = 64;
-    const CONTROL: usize = 32;
-    /// Counts message rows: the first sends on an empty pair (the unfiltered
-    /// control), every later one finds one byte from it.
-    static MESSAGE_ORDER: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
     /// A Unix socketpair made in this probe, so a message row reaches the
     /// kernel without a network address.
     fn pair() -> Option<[libc::c_int; 2]> {
@@ -203,7 +197,7 @@ mod tests {
             libc::SYS_socketpair,
             [
                 libc::AF_UNIX as _,
-                libc::SOCK_STREAM as _,
+                (libc::SOCK_STREAM | libc::SOCK_NONBLOCK) as _,
                 0,
                 fd.as_mut_ptr() as _,
                 0,
@@ -213,27 +207,169 @@ mod tests {
         (rc >= 0).then_some(fd)
     }
 
-    /// The message at `header`: `payload` bytes from `header` and, when `fd`
-    /// is not negative, its `/dev/null` descriptor in the control space after
-    /// it. A receive asks for the same control space with an empty message.
-    fn message(header: &mut [u8; MMSG_LEN], payload: usize, fd: libc::c_int) -> libc::msghdr {
-        let control = unsafe { header.as_mut_ptr().add(MMSG_LEN - CONTROL) };
-        if fd >= 0 {
-            unsafe { std::ptr::write(control as *mut i32, fd) };
-        }
-        libc::msghdr {
-            msg_name: std::ptr::null_mut(),
-            msg_namelen: 0,
-            msg_iov: &libc::iovec {
-                iov_base: header.as_mut_ptr() as _,
+    /// Counts message rows: the first sends on an empty pair (the unfiltered
+    /// control), every later one finds one byte from it.
+    static MESSAGE_ORDER: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+    /// Header bytes of one message.
+    const MMSG_LEN: usize = 64;
+    /// The ancillary buffer, in `u64` words so it is word-aligned as
+    /// `CMSG_SPACE` asks. `CMSG_SPACE` for one `c_int` is 24 bytes here, so
+    /// three words hold one `SCM_RIGHTS` header and its descriptor.
+    const CONTROL: usize = 6;
+    /// The `MSG_DONTWAIT` flag a queuing send or a draining receive passes to
+    /// the kernel, so a peer that cannot take the message, or an empty queue,
+    /// answers EAGAIN instead of waiting.
+    const MSG_DONTWAIT: u64 = libc::MSG_DONTWAIT as u64;
+
+    /// A whole message in one owner: header bytes, the iovec pointing into
+    /// them, and an ancillary buffer with room for one `SCM_RIGHTS`
+    /// descriptor. Every pointer is taken from this value inside `send`/`recv`,
+    /// so nothing outlives the call.
+    struct Messages {
+        header: [u8; MMSG_LEN],
+        iovec: libc::iovec,
+        control: [u64; CONTROL],
+        /// The header the syscall uses and, for a batched call, the
+        /// one-element array that wraps it.
+        hdr: libc::msghdr,
+        batch: [libc::mmsghdr; 1],
+    }
+
+    impl Messages {
+        /// A message of `payload` header bytes, handing over `fd` as a real
+        /// `SCM_RIGHTS` control message when it is not negative. A receive
+        /// (`fd < 0`) asks for one byte, so it stops after the sent byte.
+        fn fill(&mut self, payload: usize, fd: libc::c_int) {
+            self.iovec = libc::iovec {
+                iov_base: self.header.as_mut_ptr() as _,
                 iov_len: payload,
-            } as *const _ as _,
-            msg_iovlen: 1,
-            msg_control: control as _,
-            msg_controllen: CONTROL as _,
-            // The payload is one byte; a full control buffer silently drops
-            // the descriptor, so only the descriptor's own space is offered.
-            msg_flags: 0,
+            };
+            // Only an earlier receive leaves a header in the leading words;
+            // clearing them keeps the next receive's `msg_controllen` honest.
+            self.control[..2].fill(0);
+            let size = std::mem::size_of::<libc::c_int>();
+            // SAFETY: `CMSG_SPACE` is a pure size computation.
+            let space = unsafe { libc::CMSG_SPACE(size as _) } as usize;
+            let controllen = if fd >= 0 {
+                // A send passes exactly one `CMSG_SPACE`, so its header sits
+                // `space` bytes into `control`: the kernel drops the leading
+                // zero words and reads the header and its descriptor. The same
+                // header in the leading words, cleared before each call, is
+                // the first header a receive offers, so a receive that ends
+                // after the sent byte still answers with its own control.
+                // SAFETY: `control` is word aligned and holds two `space`-sized
+                // extents, so both headers and their descriptors fit.
+                unsafe {
+                    let cmsg =
+                        (self.control.as_mut_ptr() as *mut u8).add(space) as *mut libc::cmsghdr;
+                    (*cmsg).cmsg_len = libc::CMSG_LEN(size as _) as _;
+                    (*cmsg).cmsg_level = libc::SOL_SOCKET;
+                    (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+                    std::ptr::write(libc::CMSG_DATA(cmsg) as *mut libc::c_int, fd);
+                }
+                space
+            } else {
+                // A receive offers its first header and one `CMSG_SPACE`
+                // more, so the answer lands where the next send reads it.
+                space + space
+            };
+            self.iovec.iov_len = payload;
+            self.hdr = libc::msghdr {
+                msg_name: std::ptr::null_mut(),
+                msg_namelen: 0,
+                msg_iov: &mut self.iovec,
+                msg_iovlen: 1,
+                // A send's control pointer starts at its header, a receive's
+                // at the start of the buffer.
+                msg_control: unsafe {
+                    (self.control.as_mut_ptr() as *mut u8).add(if fd >= 0 { space } else { 0 }) as _
+                },
+                msg_controllen: controllen as _,
+                msg_flags: 0,
+            };
+        }
+
+        /// `true` when the received control space holds exactly one
+        /// `SCM_RIGHTS` message carrying one descriptor.
+        fn received_rights(&self) -> bool {
+            // SAFETY: `hdr.msg_control` points at `control` for this value.
+            unsafe {
+                // Only the receive's own `msg_controllen` says whether the
+                // kernel wrote a header here: a previous call may have left
+                // bytes in this buffer.
+                let cmsg = libc::CMSG_FIRSTHDR(&self.hdr);
+                self.hdr.msg_controllen >= std::mem::size_of::<libc::cmsghdr>()
+                    && !cmsg.is_null()
+                    && (*cmsg).cmsg_level == libc::SOL_SOCKET
+                    && (*cmsg).cmsg_type == libc::SCM_RIGHTS
+                    && (*cmsg).cmsg_len
+                        == libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as _) as usize
+            }
+        }
+
+        /// `sendmsg`, or `sendmmsg` on a one-element `mmsghdr` array.
+        /// `flags` is `MSG_DONTWAIT` for a queuing send, so a peer that cannot
+        /// take the message answers EAGAIN instead of waiting.
+        fn send(&mut self, sock: libc::c_int, batched: bool, flags: u64) -> libc::c_long {
+            self.hdr.msg_iov = &mut self.iovec;
+            if batched {
+                self.batch[0] = libc::mmsghdr {
+                    msg_hdr: self.hdr,
+                    msg_len: 0,
+                };
+                let rc = sys(
+                    libc::SYS_sendmmsg,
+                    [sock as _, self.batch.as_mut_ptr() as _, 1, flags, 0, 0],
+                );
+                self.hdr = self.batch[0].msg_hdr;
+                rc
+            } else {
+                sys(
+                    libc::SYS_sendmsg,
+                    [sock as _, &mut self.hdr as *mut _ as _, flags, 0, 0, 0],
+                )
+            }
+        }
+
+        /// `recvmsg`, or `recvmmsg` on a one-element `mmsghdr` array, which is
+        /// where the kernel buffers the received message. The probe socket is
+        /// non-blocking and the draining receive passes `MSG_DONTWAIT`, so a
+        /// receive never waits for a peer.
+        fn recv(&mut self, sock: libc::c_int, batched: bool, flags: u64) -> libc::c_long {
+            self.hdr.msg_iov = &mut self.iovec;
+            if batched {
+                self.batch[0] = libc::mmsghdr {
+                    msg_hdr: self.hdr,
+                    msg_len: 0,
+                };
+                let rc = sys(
+                    libc::SYS_recvmmsg,
+                    [sock as _, self.batch.as_mut_ptr() as _, 1, flags, 0, 0],
+                );
+                self.hdr = self.batch[0].msg_hdr;
+                self.hdr.msg_control = self.control.as_mut_ptr() as _;
+                rc
+            } else {
+                sys(
+                    libc::SYS_recvmsg,
+                    [sock as _, &mut self.hdr as *mut _ as _, flags, 0, 0, 0],
+                )
+            }
+        }
+    }
+
+    /// One empty message with `MMSG_LEN` bytes of header space.
+    fn message() -> Messages {
+        Messages {
+            header: [0u8; MMSG_LEN],
+            iovec: libc::iovec {
+                iov_base: std::ptr::null_mut(),
+                iov_len: 0,
+            },
+            control: [0u64; CONTROL],
+            hdr: unsafe { std::mem::zeroed() },
+            batch: [unsafe { std::mem::zeroed() }],
         }
     }
 
@@ -242,49 +378,109 @@ mod tests {
         MESSAGE_ORDER.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
     }
 
+    /// Sends on `sock`, handing over `fd` when it is `Some`.
+    fn sending(sock: libc::c_int, batched: bool, fd: Option<libc::c_int>) -> libc::c_long {
+        let mut messages = message();
+        messages.fill(1, fd.unwrap_or(-1));
+        messages.send(sock, batched, MSG_DONTWAIT)
+    }
+
     /// One `sendmsg`, or `sendmmsg` when `batched`, of one descriptor-bearing
     /// message on a socketpair made here; the first call sends on an empty
     /// pair, so `MSG_DONTWAIT` answers EAGAIN rather than blocking.
-    fn send_message(batched: bool, first: bool) -> libc::c_long {
+    /// The `first` flag is the caller's, not the send's: either a send row
+    /// hands over a descriptor, or the unfiltered control has already sent.
+    fn send_message(batched: bool, _first: bool) -> libc::c_long {
         let Some(fd) = pair() else {
             return -1;
         };
-        let mut header = [0u8; MMSG_LEN];
-        let (nr, count) = if batched {
-            (libc::SYS_sendmmsg, 1)
-        } else {
-            (libc::SYS_sendmsg, 0)
-        };
         let sender = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
-        let msg = message(&mut header, 1, if first { sender } else { -1 });
-        let rc = sys(nr, [fd[0] as _, &msg as *const _ as _, count, 0, 0, 0]);
+        let rc = sending(fd[0], batched, Some(sender));
         close_all(&[sender]);
         close_all(&fd);
         rc
     }
 
+    /// The pair and the messages a receive row reads: one from `sendto`, then
+    /// one descriptor-bearing `sendmsg`, both already queued in this probe, so
+    /// the receive below never waits for a peer.
+    struct Queued {
+        fds: [libc::c_int; 2],
+        token: libc::c_int,
+        descriptor: libc::c_int,
+        /// One `sendmsg`, unbounded, in this probe. `c_int` is `i32`, which
+        /// `c_long` holds on every target the crate builds for.
+        sent: libc::c_long,
+    }
+
+    impl Drop for Queued {
+        fn drop(&mut self) {
+            close_all(&[self.fds[0], self.fds[1], self.token, self.descriptor]);
+        }
+    }
+
+    /// Queues both messages on a new socketpair. A filtered probe child cannot
+    /// make the second one itself: its deny list answers EPERM to `sendmsg`
+    /// before the row runs.
+    fn queued() -> Option<Queued> {
+        let fds = pair()?;
+        let token = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+        let descriptor = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+        let mut queued = Queued {
+            fds,
+            token,
+            descriptor,
+            sent: 0,
+        };
+        if sys(
+            libc::SYS_sendto,
+            [fds[1] as _, b"x".as_ptr() as _, 1, 0, 0, 0],
+        ) < 0
+        {
+            return None;
+        }
+        // The message goes from the far end, so the receive below is what
+        // meets it.
+        let sent = sending(fds[1], false, Some(descriptor));
+        if sent < 0 {
+            return None;
+        }
+        queued.sent = sent;
+        Some(queued)
+    }
+
     /// One `recvmsg`, or `recvmmsg` when `batched`, on a socketpair made here.
-    /// Later calls find this helper's byte; the first call is the filtered
-    /// probe row, which the deny list answers EPERM before the pair matters.
+    /// Later calls find the descriptor-bearing message; the first call is the
+    /// filtered probe row, which the deny list answers EPERM before the pair
+    /// matters.
     fn recv_message(batched: bool, first: bool) -> libc::c_long {
-        let Some(fd) = pair() else {
+        let Some(queued) = queued() else {
             return -1;
         };
+        let mut messages = message();
+        // Drain the `sendto` byte first, so the row's receive meets the
+        // descriptor-bearing message and its control is what stays checked.
+        let mut drained = message();
+        drained.fill(1, -1);
+        let token = drained.recv(queued.fds[0], false, MSG_DONTWAIT);
+        // The receive overwrote the buffer's first header with its own, so
+        // the send below writes the descriptor's header again.
+        messages.fill(MMSG_LEN, -1);
+        // The row's receive is blocking on a non-blocking socket: the peer
+        // above already queued the descriptor-bearing message, so the queue is
+        // not empty and the call returns. Only the byte drain needs
+        // `MSG_DONTWAIT`, because it can run after the last message.
+        let rc = messages.recv(queued.fds[0], batched, 0);
         if !first {
-            sys(
-                libc::SYS_sendto,
-                [fd[1] as _, b"x".as_ptr() as _, 1, 0, 0, 0],
+            // The unfiltered control proves the receive path answered with the
+            // descriptor the sender handed over: the message's own size, the
+            // descriptor's header and value, then the drained byte.
+            assert!(
+                rc == queued.sent && token == 1 && messages.received_rights(),
+                "control lost SCM_RIGHTS: rc {rc}, token {token}, errno {}",
+                errno()
             );
         }
-        let mut header = [0u8; MMSG_LEN];
-        let mut msg = message(&mut header, MMSG_LEN, -1);
-        let (nr, count) = if batched {
-            (libc::SYS_recvmmsg, 1)
-        } else {
-            (libc::SYS_recvmsg, 0)
-        };
-        let rc = sys(nr, [fd[0] as _, &mut msg as *mut _ as _, count, 0, 0, 0]);
-        close_all(&fd);
         rc
     }
 
@@ -515,12 +711,11 @@ mod tests {
         let all = rows();
         let total = all.len();
         let mut failures = Vec::new();
-        // Control: each EPERM row's call must be accepted by the kernel without
-        // the filter, so only the filter can answer EPERM. On a host with no
-        // loopback address (no network namespace) the message rows still reach
-        // their own syscall over a Unix socketpair, and a kernel without
-        // `sendmsg` returns EINVAL there, so only that errno is tolerated. The
-        // SIGSYS row is killed before any unfiltered call can run.
+        // Control: each EPERM row's call must succeed without the filter, so
+        // only the filter can answer EPERM. The message rows reach their own
+        // syscall over a Unix socketpair made here, and the receive row checks
+        // that the kernel returned the descriptor it was given. The SIGSYS row
+        // is killed before any unfiltered call can run.
         for row in &all {
             let rc = match row.outcome {
                 EPERM => (row.body)(row.domain, row.kind, row.protocol),
@@ -533,9 +728,10 @@ mod tests {
                 unsafe { libc::close(rc as libc::c_int) };
             }
             assert!(
-                rc >= 0 || errno() == libc::EINVAL,
-                "row {} is not valid unfiltered",
-                row.name
+                rc >= 0,
+                "row {} is not valid unfiltered: {rc}, errno {}",
+                row.name,
+                errno()
             );
         }
         for row in all {
