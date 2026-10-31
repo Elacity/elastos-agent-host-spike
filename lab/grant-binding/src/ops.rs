@@ -67,7 +67,7 @@ impl Verifier {
 
     /// Creates a child journal and returns its own handle. The grant must
     /// carry the child-journal right, and the path must be the owned root or
-    /// a child under it. The new handle is `bind_grant` of that path.
+    /// a child under it. The new handle keeps the parent's append and overwrite and does not keep child-journal.
     #[rustfmt::skip]
     pub fn create_child_journal(
         &mut self,
@@ -80,8 +80,16 @@ impl Verifier {
         let grant = self.resolve(*call, request.handle).map_err(OperateRefuse::Binding)?;
         super::resource_name(&grant.identity, path, Some(&grant.owned_root))
             .map_err(OperateRefuse::Binding)?;
-        self.bind_grant(grant.instance, path, grant.rights)
-            .map_err(OperateRefuse::Binding)
+        self.bind_grant(
+            grant.instance,
+            path,
+            crate::Rights {
+                append: grant.rights.append,
+                overwrite: grant.rights.overwrite,
+                child_journal: false,
+            },
+        )
+        .map_err(OperateRefuse::Binding)
     }
 }
 
@@ -594,7 +602,7 @@ fn model_child_journal_returns_its_own_handle() {
         Rights {
             append: false,
             overwrite: false,
-            child_journal: true,
+            child_journal: false,
         }
     );
     verifier
@@ -645,7 +653,7 @@ fn model_forged_rights_do_not_widen_the_child_grant() {
         Rights {
             append: false,
             overwrite: false,
-            child_journal: true,
+            child_journal: false,
         }
     );
     assert_eq!(child_decision.owned_root, "UsersAI/agent-1/journal/page.md");
@@ -779,10 +787,48 @@ fn model_forged_child_journal_does_not_narrow_the_child_grant() {
         Rights {
             append: false,
             overwrite: false,
-            child_journal: true,
+            child_journal: false,
         }
     );
     assert_eq!(child_decision.owned_root, "UsersAI/agent-1/journal/page.md");
+}
+
+#[test]
+fn model_child_journal_does_not_keep_the_mint_right() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: true,
+            child_journal: true,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let child = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/page.md")
+        .expect("child journal");
+    assert_ne!(child, parent);
+    let child_decision = verifier
+        .use_grant(call, &guest(child))
+        .expect("child grant");
+    assert_eq!(
+        child_decision.rights,
+        Rights {
+            append: true,
+            overwrite: true,
+            child_journal: false,
+        }
+    );
+    let nested = verifier
+        .create_child_journal(&call, &guest(child), "UsersAI/agent-1/journal/page.md/line")
+        .expect_err("a child journal does not mint another");
+    assert_eq!(nested, OperateRefuse::ChildJournalNotGranted);
+    assert_eq!(nested.to_string(), "child journal is its own right");
+    let another = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/other")
+        .expect("the parent keeps the mint right");
+    assert_ne!(another, child);
 }
 
 #[test]
