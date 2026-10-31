@@ -210,7 +210,7 @@ async function checkFrontdoor(browser, context, page) {
     assert.ok(policy?.includes('sandbox allow-scripts'), `${path}: document has a response sandbox`);
     assert.ok(!policy.includes('allow-same-origin'), `${path}: sandbox gives an opaque origin`);
     assert.ok(!policy.includes('allow-popups'), `${path}: app documents cannot open popups`);
-    assert.ok(policy.includes("script-src 'self'"), `${path}: scripts keep the document source boundary`);
+    assert.ok(policy.includes(`script-src ${origin} `), `${path}: scripts keep the document source boundary`);
     await assertAppDocument(page, path);
   }
   // App documents have no popup permission: neither a target=_blank click nor

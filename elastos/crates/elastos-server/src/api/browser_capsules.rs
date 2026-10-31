@@ -378,10 +378,12 @@ fn shell_content_security_policy(
     } else {
         "sandbox allow-scripts allow-forms allow-downloads; "
     };
+    // WebKit matches 'self' against a sandboxed frame's opaque origin, so it
+    // blocks the frame's own scripts; the explicit origin matches everywhere.
     let script_source = if is_home_host {
-        "'self'"
+        "'self'".to_string()
     } else {
-        "'self' 'wasm-unsafe-eval'"
+        format!("{home_source} 'wasm-unsafe-eval'")
     };
     Some(format!(
         "{sandbox}default-src {default_source}; script-src {script_source}; style-src {style_source}; img-src {default_source} blob: data:; connect-src {connect_source}; frame-src {default_source}; object-src 'none'; base-uri 'none'; form-action {default_source}{frame_ancestors}"
@@ -1173,7 +1175,7 @@ mod tests {
                 .unwrap();
             assert!(csp.contains("frame-src http://localhost:61180"));
             assert!(csp.contains("frame-ancestors http://localhost:61180"));
-            assert!(csp.contains("script-src 'self'"));
+            assert!(csp.contains("script-src http://localhost:61180 'wasm-unsafe-eval'"));
             assert!(csp.starts_with("sandbox "));
             assert!(!csp.contains("allow-same-origin"));
             assert!(csp.contains("connect-src http://localhost:61180 ws://localhost:61180"));
