@@ -295,7 +295,12 @@ use std::process::Command;
 /// WP229, which treats the contract's catch-all arm as `Read` so the
 /// `Effectful` kind that claims only in-memory work passes. All three are
 /// CAUGHT on the Mac by `operations_table_row_check_refuses_each_bad_table`.
-const EXPECTED_FALSIFIERS: usize = 209;
+/// Task 164 adds WP230, which makes the allow-table compare accept a listed
+/// form the profile does not hold, so a paraphrased row passes; and WP231,
+/// which makes an allow section with no span report no problem, so a document
+/// that lists nothing passes. Both are CAUGHT on the Mac by
+/// `profile_allow_table_check_refuses_each_bad_table`.
+const EXPECTED_FALSIFIERS: usize = 211;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -12962,6 +12962,10 @@ const FALSIFIER_HEADING: &str = "## Falsifiers";
 /// The heading line every operations table uses.
 const OPERATIONS_HEADING: &str = "## Operations and the rights they need";
 
+/// The heading line every confinement document uses for the section that
+/// lists the startup grants its profile holds.
+const PROFILE_ALLOW_HEADING: &str = "## What the profile allows";
+
 /// The providers whose `CONFINEMENT.md` operations table names the tests it
 /// cites.
 const OPERATIONS_TABLES: &[&str] = &["did-provider", "wallet-provider"];
@@ -13094,6 +13098,93 @@ fn falsifier_section_problems(
             "{document_name} CONFINEMENT.md: {FALSIFIER_HEADING} names {token}, which neither \
              falsifier list registers"
         ));
+    }
+    problems
+}
+
+/// Every problem with one document's `PROFILE_ALLOW_HEADING`, each naming the
+/// document, the profile path, the row and the form.
+///
+/// The section under `PROFILE_ALLOW_HEADING` must hold one backticked allow
+/// form per row. The rule reads every backtick span of the section that starts
+/// `(allow ` and compares that list, in order, with `allow_forms(profile)` of
+/// `capsules/<name>/confine.sb`. A span the profile does not hold, a profile
+/// allow form the section does not list, the same form listed twice, a form
+/// out of profile order and a section with no allow span at all are each a
+/// refusal with its own reason. A missing or duplicated heading is the one
+/// section reader's own refusal.
+///
+/// The rule reads one backticked span per row and compares text, so it shows
+/// that the document lists exactly the forms the profile holds, in order. It
+/// does not show that a row's reason is true, and it does not show that a rule
+/// is load-bearing; `unremoved_allow_forms` holds that. The default-denial
+/// sentence after the table is prose and stays unread. The model profile is
+/// outside `allow_rule_profiles`, and its own document is that lane's.
+///
+/// Falsifier: WP230 accepts a span the profile does not hold, so a paraphrased
+/// row passes; WP231 reads no span from the section, so a document that lists
+/// nothing passes. `profile_allow_table_check_refuses_each_bad_table` fails on
+/// each.
+fn profile_allow_table_problems(
+    document_name: &str,
+    document: &str,
+    name: &str,
+    profile: &str,
+) -> Vec<String> {
+    let section = match section_under_one_heading(document_name, document, PROFILE_ALLOW_HEADING) {
+        Ok(section) => section,
+        Err(problems) => return problems,
+    };
+    let path = format!("capsules/{name}/confine.sb");
+    let listed: Vec<&str> = backtick_spans(&section)
+        .into_iter()
+        .filter(|span| span.starts_with("(allow "))
+        .collect();
+    if listed.is_empty() {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md: {PROFILE_ALLOW_HEADING} lists no allow form, so it \
+             cannot show the grants of {path}"
+        )];
+    }
+    let held = allow_forms(profile);
+    let mut problems = Vec::new();
+    let mut first_rows: Vec<(usize, &str)> = Vec::new();
+    let mut last_held: Option<(usize, usize, &str)> = None;
+    for (index, span) in listed.iter().enumerate() {
+        let row = index + 1;
+        if let Some((first, _)) = first_rows.iter().find(|(_, earlier)| earlier == span) {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {PROFILE_ALLOW_HEADING} row {row} lists {span} \
+                 again, which {path} holds once; row {first} already lists it"
+            ));
+            continue;
+        }
+        first_rows.push((row, span));
+        let Some(position) = held.iter().position(|form| form == span) else {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {PROFILE_ALLOW_HEADING} row {row} lists {span}, \
+                 which {path} does not hold"
+            ));
+            continue;
+        };
+        if let Some((earlier_row, earlier_position, earlier)) = last_held {
+            if position < earlier_position {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {PROFILE_ALLOW_HEADING} row {row} lists \
+                     {span}, which {path} holds after row {earlier_row}'s form {earlier}, so the \
+                     rows are out of profile order"
+                ));
+            }
+        }
+        last_held = Some((row, position, span));
+    }
+    for form in &held {
+        if !listed.contains(&form.as_str()) {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {PROFILE_ALLOW_HEADING} does not list {form}, \
+                 which {path} holds"
+            ));
+        }
     }
     problems
 }
@@ -17041,6 +17132,39 @@ fn every_falsifier_id_is_named_in_its_confinement_document() {
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
+/// Each confinement document lists exactly the allow rules of its profile.
+///
+/// The check loops over `allow_rule_profiles`, reads each provider's
+/// `capsules/<name>/CONFINEMENT.md` through `read_confinement_document` and its
+/// profile through `read_allow_rule_profile`, and requires
+/// `profile_allow_table_problems` to report nothing. A missing document or
+/// profile is a refusal that names its path, never a skipped provider. The
+/// check reads files and starts no process, so it runs on every platform.
+///
+/// Falsifier: WP230 accepts a listed form the profile does not hold and WP231
+/// reads no span from the section;
+/// `profile_allow_table_check_refuses_each_bad_table` fails on each, and this
+/// test fails on either because the real wallet document then disagrees with
+/// its profile.
+#[test]
+fn every_confinement_document_lists_its_profiles_allow_rules() {
+    let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("capsules/wallet-provider must sit under capsules/");
+    let mut problems = Vec::new();
+    for name in allow_rule_profiles() {
+        let document =
+            read_confinement_document(capsules, name).unwrap_or_else(|err| panic!("{err}"));
+        let profile_path = capsules.join(name).join("confine.sb");
+        let profile =
+            read_allow_rule_profile(name, &profile_path).unwrap_or_else(|err| panic!("{err}"));
+        problems.extend(profile_allow_table_problems(
+            name, &document, name, &profile,
+        ));
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
 /// Every test cited in an operations table exists where the table says.
 ///
 /// The check reads `capsules/<name>/CONFINEMENT.md` for each name in
@@ -17568,6 +17692,144 @@ fn falsifier_section_check_rejects_a_document_without_its_section() {
                 .to_string()
         ],
         "an id after the next ## heading is outside the section"
+    );
+}
+
+/// The allow-table check refuses each way a document's list can disagree with
+/// its profile, and accepts a list that equals the profile.
+///
+/// The passing case is built from the real wallet profile text and a document
+/// that lists its five allow forms in profile order. Then one case per refusal
+/// asserts the exact problem vector: a paraphrase the profile does not hold, a
+/// profile form the section omits, a form listed twice, two rows out of profile
+/// order, a section with no allow span, and the section reader's own missing
+/// and duplicated heading refusals. The document and profile are values in
+/// memory; no file is read and no process starts.
+///
+/// Falsifier: WP230 accepts a listed span the profile does not hold, so the
+/// paraphrase case reports nothing; WP231 reads no span from the section, so
+/// the empty-section case reports nothing instead of its refusal. Both fail
+/// this test.
+#[test]
+fn profile_allow_table_check_refuses_each_bad_table() {
+    let profile = include_str!("../confine.sb").to_string();
+    let held = allow_forms(&profile);
+    assert_eq!(held.len(), 5, "the real wallet profile holds five forms");
+    let table = |forms: &[&str]| {
+        let mut document = String::from("# fixture\n\n");
+        document.push_str(PROFILE_ALLOW_HEADING);
+        document.push_str("\n\n| Rule | Why |\n| --- | --- |\n");
+        for form in forms {
+            document.push_str(&format!("| `{form}` | a reason |\n"));
+        }
+        document.push_str("\nThe rest stays denied.\n");
+        document
+    };
+    let exact: Vec<&str> = held.iter().map(String::as_str).collect();
+    assert!(
+        profile_allow_table_problems(
+            "wallet-provider",
+            &table(&exact),
+            "wallet-provider",
+            &profile
+        )
+        .is_empty(),
+        "a document that lists the profile's forms in order must report no problem"
+    );
+
+    let mut paraphrased = exact.clone();
+    paraphrased[0] = "(allow process-exec (literal PROVIDER_EXECUTABLE))";
+    assert_eq!(
+        profile_allow_table_problems("wallet-provider", &table(&paraphrased), "wallet-provider", &profile),
+        vec![
+            "wallet-provider CONFINEMENT.md: ## What the profile allows row 1 lists (allow \
+             process-exec (literal PROVIDER_EXECUTABLE)), which capsules/wallet-provider/confine.sb does \
+             not hold"
+                .to_string(),
+            "wallet-provider CONFINEMENT.md: ## What the profile allows does not list (allow \
+             process-exec (literal (param \"PROVIDER_EXECUTABLE\"))), which \
+             capsules/wallet-provider/confine.sb holds"
+                .to_string(),
+        ],
+        "a paraphrased row and the form it displaced must both be refused"
+    );
+
+    let omitted = &exact[1..];
+    assert_eq!(
+        profile_allow_table_problems(
+            "wallet-provider",
+            &table(omitted),
+            "wallet-provider",
+            &profile
+        ),
+        vec![format!(
+            "wallet-provider CONFINEMENT.md: ## What the profile allows does not list {}, which \
+             capsules/wallet-provider/confine.sb holds",
+            exact[0]
+        )],
+        "a profile form the section omits must be refused"
+    );
+
+    let mut doubled = exact.clone();
+    doubled.insert(1, exact[0]);
+    assert_eq!(
+        profile_allow_table_problems(
+            "wallet-provider",
+            &table(&doubled),
+            "wallet-provider",
+            &profile
+        ),
+        vec![format!(
+            "wallet-provider CONFINEMENT.md: ## What the profile allows row 2 lists {} again, \
+             which capsules/wallet-provider/confine.sb holds once; row 1 already lists it",
+            exact[0]
+        )],
+        "the same form listed twice must be refused"
+    );
+
+    let swapped = [exact[1], exact[0], exact[2], exact[3], exact[4]];
+    assert_eq!(
+        profile_allow_table_problems("wallet-provider", &table(&swapped), "wallet-provider", &profile),
+        vec![format!(
+            "wallet-provider CONFINEMENT.md: ## What the profile allows row 2 lists {}, which \
+             capsules/wallet-provider/confine.sb holds after row 1's form {}, so the rows are out of \
+             profile order",
+            exact[0], exact[1]
+        )],
+        "two rows in the other profile order must be refused"
+    );
+
+    let empty = "# fixture\n\n## What the profile allows\n\nThe rest stays denied.\n";
+    assert_eq!(
+        profile_allow_table_problems("wallet-provider", empty, "wallet-provider", &profile),
+        vec![
+            "wallet-provider CONFINEMENT.md: ## What the profile allows lists no allow form, so \
+             it cannot show the grants of capsules/wallet-provider/confine.sb"
+                .to_string()
+        ],
+        "a section with no allow span must be refused, not read as an absent grant list"
+    );
+
+    let missing = "# fixture\n\n## Other\n\n- nothing\n";
+    assert_eq!(
+        profile_allow_table_problems("wallet-provider", missing, "wallet-provider", &profile),
+        vec![
+            "wallet-provider CONFINEMENT.md must hold one line ## What the profile allows; found \
+             none"
+                .to_string()
+        ],
+        "a missing heading must be the section reader's own refusal"
+    );
+
+    let twice = "# fixture\n\n## What the profile allows\n\n## What the profile allows\n";
+    assert_eq!(
+        profile_allow_table_problems("wallet-provider", twice, "wallet-provider", &profile),
+        vec![
+            "wallet-provider CONFINEMENT.md must hold one line ## What the profile allows; found \
+             2"
+            .to_string()
+        ],
+        "a duplicated heading must be the section reader's own refusal"
     );
 }
 

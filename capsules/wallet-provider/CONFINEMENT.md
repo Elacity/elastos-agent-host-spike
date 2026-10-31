@@ -38,11 +38,15 @@ holds that rule for encoded names.
 
 | Rule | Why the provider needs it |
 | --- | --- |
-| `(allow process-exec (literal PROVIDER_EXECUTABLE))` | Start only the binary the launch named. `unbound_copy_is_refused_under_profile` shows that a byte-identical copy of the binary under `STORAGE_ROOT` is refused with exit 71 and the `execvp()` `Operation not permitted` line, and `bound_copy_serves_under_profile` is its control. |
+| `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))` | Start only the binary the launch named. `unbound_copy_is_refused_under_profile` shows that a byte-identical copy of the binary under `STORAGE_ROOT` is refused with exit 71 and the `execvp()` `Operation not permitted` line, and `bound_copy_serves_under_profile` is its control. |
 | `(allow file-read* (literal "/"))` | The kernel resolves every absolute path through the root directory. |
 | `(allow sysctl-read)` | The loader and the allocator read kernel facts at startup. |
-| `(allow file-read* (literal STORAGE_PARENT))` | Inspect the existing parent, and publish the parent entry of each directory the provider creates in it. |
-| `(allow file-read* file-write* (subpath STORAGE_ROOT))` | One grant owns all account, key, challenge and approval state under the wallet directory. |
+| `(allow file-read* (literal (param "STORAGE_PARENT")))` | Inspect the existing parent, and publish the parent entry of each directory the provider creates in it. |
+| `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` | One grant owns all account, key, challenge and approval state under the wallet directory. |
+
+One rule, `profile_allow_table_problems`, under the test
+`every_confinement_document_lists_its_profiles_allow_rules`, holds the listed
+forms to `confine.sb`, and the reason column is not checked.
 
 The remaining filesystem and process operations stay under the default denial.
 
@@ -1553,6 +1557,12 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - WP229: The contract reader treats the catch-all `class()` arm as `Read`, so
   the `Effectful` kind that claims only in-memory work passes.
   `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP230: The allow-table compare accepts a listed form the profile does not
+  hold, so a paraphrased row passes.
+  `profile_allow_table_check_refuses_each_bad_table` checks this rule.
+- WP231: An allow section with no backticked span reports no problem, so a
+  document that lists nothing passes.
+  `profile_allow_table_check_refuses_each_bad_table` checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

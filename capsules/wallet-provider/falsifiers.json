@@ -3392,6 +3392,43 @@
       "tests": [
         "operations_table_row_check_refuses_each_bad_table"
       ]
+    },
+    {
+      "id": "WP230",
+      "title": "the allow-table compare accepts a listed form the profile does not hold, so a paraphrased row passes its own row",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        let Some(position) = held.iter().position(|form| form == span) else {\n            problems.push(format!(\n                \"{document_name} CONFINEMENT.md: {PROFILE_ALLOW_HEADING} row {row} lists {span}, \\\n                 which {path} does not hold\"\n            ));\n            continue;\n        };\n",
+          "new": "        let position = held.iter().position(|form| form == span).unwrap_or(index);\n"
+        },
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    for form in &held {\n        if !listed.contains(&form.as_str()) {\n",
+          "new": "    for form in &held {\n        if listed.len() > held.len() && !listed.contains(&form.as_str()) {\n"
+        }
+      ],
+      "tests": [
+        "profile_allow_table_check_refuses_each_bad_table"
+      ]
+    },
+    {
+      "id": "WP231",
+      "title": "an allow section with no span returns no problem, so a document that lists nothing passes",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    if listed.is_empty() {\n        return vec![format!(\n            \"{document_name} CONFINEMENT.md: {PROFILE_ALLOW_HEADING} lists no allow form, so it \\\n             cannot show the grants of {path}\"\n        )];\n    }\n",
+          "new": "    if listed.is_empty() {\n        return Vec::new();\n    }\n"
+        }
+      ],
+      "tests": [
+        "profile_allow_table_check_refuses_each_bad_table"
+      ]
     }
   ]
 }

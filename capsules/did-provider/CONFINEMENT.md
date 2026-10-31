@@ -245,6 +245,10 @@ three shared contract rules pinned verbatim by
 `both_file_profiles_bind_one_storage_parameter_contract`; the `STORAGE_PARENT`
 read is the one of them that did-provider keeps only for that contract.
 
+One rule, `profile_allow_table_problems`, under the test
+`every_confinement_document_lists_its_profiles_allow_rules`, holds the listed
+forms to `confine.sb`, and the reason column is not checked.
+
 Every other file read, file write, process and network operation falls to
 `(deny default)`.
 
