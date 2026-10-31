@@ -53,8 +53,10 @@ import {
   openHomeSharedFile,
   EXTERNAL_LINK_REQUEST_SCHEMA,
   HOME_OPEN_EXTERNAL_TYPE,
+  HOME_SAVE_FILE_TYPE,
   MAX_EXTERNAL_LINK_LENGTH,
-} from "./home-external-link.js?v=home-links-20261029a";
+  requestHomeSaveFile,
+} from "./home-external-link.js?v=home-links-20261031a";
 
 const SUMMARY_REFRESH_DEBOUNCE_MS = 150;
 const SUMMARY_REFRESH_RETRY_MS = 700;
@@ -1988,6 +1990,10 @@ window.addEventListener("message", (event) => {
   }
   if (data.type === "home:open-uri") {
     requestHomeSharedContent({ context, data, prompt: homeExternalLinkPrompt, fetchJson });
+    return;
+  }
+  if (data.type === HOME_SAVE_FILE_TYPE) {
+    requestHomeSaveFile({ context, data, prompt: homeExternalLinkPrompt });
     return;
   }
   if (data.type === "home:deliver-to-target") {

@@ -2819,6 +2819,9 @@ async function onRecoveryDownload(options = {}) {
     const bundle = await exportFullRecoveryBundle(status, isActive);
     if (!isActive()) return false;
     const fileName = downloadRecoveryKit(bundle);
+    const saved = recoverySavedThroughHome()
+      ? `Choose Save when Home asks to save ${fileName}, then store it offline`
+      : `Recovery Kit downloaded as ${fileName}. Store it offline`;
     if (recoveryPasswordInput) {
       recoveryPasswordInput.value = "";
     }
@@ -2826,14 +2829,14 @@ async function onRecoveryDownload(options = {}) {
     const peopleIdentity = bundle && bundle.included && bundle.included.people_identity;
     showRecoveryNote(
       peopleIdentity
-        ? `Recovery Kit downloaded as ${fileName}. Store it offline; it includes your signed People identity.`
-        : `Recovery Kit downloaded as ${fileName}. Store it offline.`,
+        ? `${saved}; it includes your signed People identity.`
+        : `${saved}.`,
       "success"
     );
     setRecoveryButton("Download Recovery Kit", false);
     notifyHomeSummaryChanged();
     await refreshSystemSummary().catch(() => {
-      showRecoveryNote(`Recovery Kit downloaded as ${fileName}. Store it offline. Refresh System to update setup status.`, "success");
+      showRecoveryNote(`${saved}. Refresh System to update setup status.`, "success");
     });
     return true;
   } catch (error) {
@@ -3115,8 +3118,22 @@ function recoveryKitFileName(kit) {
   return `elastos-recovery-${principal}.json`;
 }
 
+// Framed in Home, Home saves the kit after the person chooses Save; System is not told.
+function recoverySavedThroughHome() {
+  return window.top !== window && !!homeParentOrigin && !!apiHomeToken;
+}
+
 function downloadRecoveryKit(kit) {
   const fileName = recoveryKitFileName(kit);
+  if (recoverySavedThroughHome()) {
+    window.top.postMessage({
+      type: "home:save-file",
+      name: fileName,
+      text: JSON.stringify(kit, null, 2),
+      homeToken: apiHomeToken,
+    }, homeParentOrigin);
+    return fileName;
+  }
   const blob = new Blob([JSON.stringify(kit, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");

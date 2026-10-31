@@ -296,3 +296,49 @@ test('Home passes the cleaned name to Documents and Library and never lets it pi
   assert.equal(sharedFileName(' .\u001b.hidden '), 'hidden');
   assert.equal(sharedFileName(undefined), '');
 });
+
+test('an app file saves only from the person\'s trusted Save click in Home\'s page', async () => {
+  const { requestHomeSaveFile } = await import('./home-external-link.js');
+  const h = harness();
+  const saved = [];
+  h.document.body = { append(node) { node.parent = this; } };
+  h.document.createElement = () => ({ remove() {}, click() { saved.push({ name: this.download, href: this.href }); } });
+  const blobs = [];
+  const RealBlob = globalThis.Blob;
+  globalThis.Blob = class extends RealBlob { constructor(parts, options) { super(parts, options); blobs.push(options.type); } };
+  h.windowRef.setTimeout = () => {};
+  const context = { kind: 'app-frame', homeToken: 'launch', targetId: 'system' };
+  const data = { type: 'home:save-file', name: 'kit.json', text: '{"a":1}', homeToken: 'launch' };
+  assert.equal(requestHomeSaveFile({ context: { ...context, kind: 'shell-frame' }, data, prompt: h.prompt }), false);
+  assert.equal(requestHomeSaveFile({ context, data: { ...data, homeToken: 'other' }, prompt: h.prompt }), false);
+  assert.equal(requestHomeSaveFile({ context, data: { ...data, name: '../kit.json' }, prompt: h.prompt }), false);
+  assert.equal(requestHomeSaveFile({ context, data: { ...data, extra: 1 }, prompt: h.prompt }), false);
+  for (const name of ['Install.command', 'run.terminal', 'page.html', 'kit.json.app', '.kit.json', 'safe\u202etxt.command', 'kit\u200b.json', 'k it.json']) {
+    assert.equal(requestHomeSaveFile({ context, data: { ...data, name }, prompt: h.prompt }), false, name);
+  }
+  assert.equal(requestHomeSaveFile({ context, data: { ...data, mime: 'text/html' }, prompt: h.prompt }), false);
+  assert.equal(requestHomeSaveFile({ context, data: { ...data, text: 'x'.repeat(1024 * 1024 + 1) }, prompt: h.prompt }), false);
+  assert.equal(requestHomeSaveFile({ context, data, prompt: h.prompt }), true);
+  assert.equal(h.title.textContent, 'Save this file?');
+  assert.equal(h.appName.textContent, 'System');
+  assert.equal(h.host.textContent, 'kit.json');
+  assert.equal(h.size.textContent, '7 bytes');
+  assert.equal(h.openButton.textContent, 'Save');
+  assert.equal(requestHomeSaveFile({ context, data, prompt: h.prompt }), false);
+  h.click(); assert.equal(saved.length, 0);
+  h.tick(); h.click(false); assert.equal(saved.length, 0);
+  h.click(); h.click();
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].name, 'kit.json');
+  assert.deepEqual(blobs, ['application/octet-stream']);
+  globalThis.Blob = RealBlob;
+  assert.equal(h.root.hidden, true);
+});
+
+test('a save request from an app whose launch ended shows nothing', async () => {
+  const { requestHomeSaveFile } = await import('./home-external-link.js');
+  const h = harness(); h.live(false);
+  const data = { type: 'home:save-file', name: 'kit.json', text: '{}', homeToken: 'launch' };
+  assert.equal(requestHomeSaveFile({ context: { kind: 'app-frame', homeToken: 'launch', targetId: 'system' }, data, prompt: h.prompt }), false);
+  assert.equal(h.begin(), 'external-link-2');
+});

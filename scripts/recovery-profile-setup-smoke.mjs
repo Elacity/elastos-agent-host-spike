@@ -65,6 +65,7 @@ Object.assign(context, {
   showRecoveryStatus: (text, kind) => outcomes.push({ text, kind }),
   showRecoveryNote: (text, kind) => outcomes.push({ text, kind }),
   downloadRecoveryKit: (kit) => { outcomes.push("download"); return context.recoveryKitFileName(kit); }, recoveryPasswordInput: null,
+  recoverySavedThroughHome: () => false,
   notifyHomeSummaryChanged: () => outcomes.push("refresh-home"),
   refreshSystemSummary: async () => { throw new Error("summary failed"); },
 });
@@ -81,6 +82,12 @@ assert(outcomes.includes("download"));
 assert(outcomes.includes("refresh-home"));
 assert(!outcomes.some((outcome) => outcome.kind === "error"));
 assert(outcomes.some((outcome) => outcome.text?.includes("Recovery Kit downloaded as elastos-recovery-did-elastos-iqTKjH4ZKXbM4hnZtYV8M2pnf6Ag7Lqb9zW.json")));
+context.recoverySavedThroughHome = () => true;
+outcomes.length = 0;
+await context.onRecoveryDownload();
+assert(outcomes.some((outcome) => outcome.text?.includes("Choose Save when Home asks to save elastos-recovery-did-elastos-iqTKjH4ZKXbM4hnZtYV8M2pnf6Ag7Lqb9zW.json")));
+assert(!outcomes.some((outcome) => outcome.text?.includes("downloaded")), "Home's save is not reported as done");
+context.recoverySavedThroughHome = () => false;
 let releaseExport;
 let exportCount = 0;
 vm.runInContext(functionSource(system, "setRecoveryButton"), context);

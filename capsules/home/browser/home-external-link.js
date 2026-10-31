@@ -139,6 +139,29 @@ export function requestHomeSharedContent({ context, data, prompt, fetchJson }) {
   return true;
 }
 
+export const HOME_SAVE_FILE_TYPE = "home:save-file";
+export const MAX_SAVE_FILE_BYTES = 1024 * 1024;
+// Plain text kinds only, ASCII, so the name shown is the name saved and opening
+// the file never runs it.
+const SAVE_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}\.(json|txt|csv|md)$/;
+
+// An app frame asks Home to save a file it made. WebKit blocks downloads from
+// sandboxed frames unless they follow a click at once, so Home's top page saves
+// it, in the person's own click on Save. The app gets no reply.
+export function requestHomeSaveFile({ context, data, prompt }) {
+  if (context.kind !== "app-frame"
+    || !hasExactKeys(data, ["type", "name", "text", "homeToken"])
+    || data.type !== HOME_SAVE_FILE_TYPE || data.homeToken !== context.homeToken
+    || typeof data.name !== "string" || !SAVE_FILE_NAME.test(data.name)
+    || typeof data.text !== "string" || data.text.length > MAX_SAVE_FILE_BYTES) return false;
+  const name = data.name;
+  const size = new TextEncoder().encode(data.text).length;
+  if (size > MAX_SAVE_FILE_BYTES) return false;
+  const requestId = prompt.begin({ homeToken: context.homeToken, appId: context.targetId, kind: "save",
+    name, file: { text: data.text, size } });
+  return !!requestId && prompt.showSave(requestId);
+}
+
 // Read only the verified local gateway after the person chooses Open/Get.
 // Raw CID responses use application/octet-stream, so inspect a bounded sample.
 export async function openHomeSharedFile({ cid, uri, name }, { openTarget, fetchLocal = globalThis.fetch, signal } = {}) {
@@ -392,6 +415,17 @@ export function createHomeExternalLinkPrompt({
     if (!isLive(request.homeToken)) {
       return;
     }
+    if (request.kind === "save") {
+      const url = URL.createObjectURL(new Blob([request.file.text], { type: "application/octet-stream" }));
+      const anchor = windowRef.document.createElement("a");
+      anchor.href = url;
+      anchor.download = request.name;
+      windowRef.document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      windowRef.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      return;
+    }
     // Synchronous in the click: Safari keeps the user activation.
     windowRef.open(request.href, "_blank", "noopener,noreferrer");
   });
@@ -420,15 +454,48 @@ export function createHomeExternalLinkPrompt({
   return {
     // Claims the one request slot for this sender. Returns "" while another
     // request is open or being checked, or during the sender's cool-down.
-    begin({ homeToken, appId, kind = "web", uri, name = "", check, get }) {
+    begin({ homeToken, appId, kind = "web", uri, name = "", check, get, file }) {
       if (active || !homeToken || !appId || (cooldownUntil.get(appId) || 0) > now()) {
         return "";
       }
       cooldownUntil.delete(appId);
       sequence += 1;
       const requestId = `external-link-${sequence}`;
-      active = { requestId, homeToken, appId, kind, uri, name, check, get, phase: "checking", href: "", busy: false };
+      active = { requestId, homeToken, appId, kind, uri, name, check, get, file, phase: "checking", href: "", busy: false };
       return requestId;
+    },
+    // Shows a save request. Home already checked the name, type and size.
+    showSave(requestId) {
+      if (active?.requestId !== requestId || active.kind !== "save" || active.phase !== "checking") {
+        return false;
+      }
+      if (!isLive(active.homeToken) || otherSheetShown()) {
+        active = null;
+        return false;
+      }
+      pointerPress = null;
+      keyboardPress = null;
+      active.phase = "shown";
+      active.shownAt = now();
+      if (eyebrow) { eyebrow.hidden = false; eyebrow.textContent = "File"; }
+      if (title) title.textContent = "Save this file?";
+      if (appName.parentElement) appName.parentElement.hidden = false;
+      if (asker) asker.textContent = " wants to save this file to your computer.";
+      appName.textContent = active.appId.replace(/(^|-)([a-z])/g, (_, dash, letter) => (dash ? " " : "") + letter.toUpperCase());
+      host.hidden = false;
+      host.textContent = active.name;
+      address.hidden = true;
+      address.textContent = "";
+      if (size) { size.textContent = formatSize(active.file.size); size.hidden = false; }
+      if (status) status.hidden = true;
+      openButton.textContent = "Save";
+      cancelButton.textContent = "Cancel";
+      openButton.hidden = false;
+      openButton.disabled = false;
+      root.hidden = false;
+      root.setAttribute("aria-hidden", "false");
+      cancelButton.focus({ preventScroll: true });
+      return true;
     },
     // Shows the Runtime-checked request. Anything stale or malformed, or a
     // request that would stack on another Home sheet, is dropped unshown.
