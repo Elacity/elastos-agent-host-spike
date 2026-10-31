@@ -90,6 +90,8 @@ pub(crate) struct GrantRecord {
     parent: Option<Handle>,
     once: bool,
     expiry: Option<u64>,
+    effect_limit: Option<u64>,
+    effects: u64,
 }
 
 /// The binding copied out after a successful check.
@@ -117,6 +119,8 @@ pub enum Refuse {
     PublicRead,
     HomeMint,
     Expired,
+    EffectLimit,
+    IssuingLimit,
 }
 
 impl std::fmt::Display for Refuse {
@@ -134,6 +138,8 @@ impl std::fmt::Display for Refuse {
             Refuse::PublicRead => "public storage read does not bind",
             Refuse::HomeMint => "home does not mint an app capability",
             Refuse::Expired => "grant has expired",
+            Refuse::EffectLimit => "effect limit is reached",
+            Refuse::IssuingLimit => "effect limit stays on the issuing grant",
         })
     }
 }
@@ -228,6 +234,8 @@ impl Verifier {
                     parent,
                     once,
                     expiry,
+                    effect_limit: None,
+                    effects: 0,
                 },
                 ended: false,
             },
@@ -303,6 +311,26 @@ impl Verifier {
     ) -> Result<Handle, Refuse> {
         self.pending_expiry = Some(expiry);
         self.bind_grant(instance, resource, rights)
+    }
+
+    #[rustfmt::skip]
+    pub fn set_effect_limit(&mut self, handle: Handle, limit: u64) -> Result<(), Refuse> {
+        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+        if grant.ended {
+            return Err(Refuse::UnknownHandle);
+        }
+        if grant.record.parent.is_some() {
+            return Err(Refuse::IssuingLimit);
+        }
+        grant.record.effect_limit = Some(limit);
+        Ok(())
+    }
+
+    #[rustfmt::skip]
+    fn note_effect(&mut self, handle: Handle) -> Result<(), Refuse> {
+        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+        grant.record.effects += 1;
+        Ok(())
     }
 
     /// The one handle check: resolves a handle and compares the stored grant
