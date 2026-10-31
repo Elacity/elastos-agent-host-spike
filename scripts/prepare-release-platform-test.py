@@ -766,6 +766,25 @@ class PrepareWorkerTest(unittest.TestCase):
         # The pre-existing provider keeps its row: the selector only grows.
         self.assertIn("capsule_metadata", manifest["external"]["shell"])
 
+    def test_marked_provider_refuses_a_non_provider_manifest_role(self):
+        # The marked route (provider_runtime on the record) selects through the
+        # same selector, so it obeys the same rule: the selected capsule
+        # manifest must be role: provider. Only the role differs from the
+        # fixture that releases, so this refusal comes from the selector.
+        self.assertIn("provider_runtime", json.loads(
+            (self.repo / "components.json").read_text())["external"]["shell"])
+        path = self.repo / "capsules/shell/capsule.json"
+        manifest = json.loads(path.read_text())
+        manifest["role"] = "content"
+        path.write_text(json.dumps(manifest))
+        self.commit("non-provider role fixture")
+        output, result = self.prepare()
+        self.assertNotEqual(result.returncode, 0)
+        # The selector refuses before the archive builder, which raises its own
+        # role message; that is why this text proves the selector's refusal.
+        self.assertIn("shell capsule manifest must describe native-provider execution", result.stderr)
+        self.assertFalse(output.exists())
+
     def test_packaging_refuses_a_projection_with_microvm_type(self):
         path = self.repo / "capsules/home-cli/capsule.json"
         manifest = json.loads(path.read_text())

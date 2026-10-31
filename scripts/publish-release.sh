@@ -524,16 +524,16 @@ for name, component in sorted((components.get("external") or {}).items()):
     if capsule_dir is None:
         continue
     manifest = json.loads((capsule_dir / "capsule.json").read_text(encoding="utf-8"))
-    # A provider capsule declares role: provider in its own manifest, so the
-    # archived metadata row follows the manifest rather than the component
-    # record. A provider that ships icons is releasable even when its record
-    # carries no provider_runtime marker; a marked component keeps its row.
+    # Two routes select a component: a provider_runtime marker in its record, or
+    # a provider manifest (role: provider, icon) for a record without one.
+    # After either route the SAME rule applies to every selected component: it
+    # must be role: provider with honest or legacy provider execution.
     if "provider_runtime" not in component:
         if manifest.get("role") != "provider" or not str(manifest.get("icon") or "").strip():
             continue
     honest = (manifest.get("type"), manifest.get("execution"), manifest.get("runtime_abi"), manifest.get("entrypoint")) == ("native-provider", "native-provider", "elastos.provider-stdio/v1", name)
     legacy = manifest.get("type") in ("wasm", "microvm") and manifest.get("execution") is None and manifest.get("runtime_abi") is None and manifest.get("entrypoint") == "rootfs.ext4"
-    if not (honest or legacy):
+    if manifest.get("role") != "provider" or not (honest or legacy):
         raise SystemExit(f"{name} capsule manifest must describe native-provider execution")
     icon_dir = str(manifest.get("icon") or "").strip().strip("/")
     if not icon_dir:
