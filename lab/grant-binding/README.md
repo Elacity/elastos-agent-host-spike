@@ -23,6 +23,8 @@ reference model, not the Runtime; counts toward no M1 check; the Runtime half is
 
 `Verifier::operate` checks an append or overwrite path with the one `resource_name` against that grant's stored root. A path outside that root is `Refuse::OutsideRoot`. A child journal's append or overwrite uses that journal's root. A child-journal operate does not use this check. The mint already checks its path. A path outside the root does not spend an effect limit and does not end an allow-once grant. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
 
+`Verifier::set_rate` stores a rate and a window on that grant. One successful append or overwrite counts toward that rate through the one `note_effect`. The next append or overwrite is refused when the count has reached the rate inside the window, and the grant stays in the store. A verifier instant at or after the window end starts a new count on the issuing grant, including when the effect is on a child journal. An unset rate does not refuse. A set rate of 0 stops the first effect. A child-journal operate does not count. A path outside the stored root does not count. `Verifier::set_rate` on a derived journal is refused, and an ended grant stores no rate. A derived journal keeps no rate of its own. This mirrors `is_due`. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
 `Verifier::admit_ask` caps one agent's budget ask and stores the granted amount through the one `admit`. This is a lab stand-in for that admission. It is not the Runtime. It does not count toward A7 or M1-R.
 
 A forged identity, session, instance, usage, ceiling or set of rights changes
