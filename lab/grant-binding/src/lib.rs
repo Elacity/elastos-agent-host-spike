@@ -434,8 +434,10 @@ impl Verifier {
             return Ok(());
         };
         let _ = rate;
-        let end = grant.record.window_start.saturating_add(grant.record.window);
-        self.window_due = now >= end;
+        self.window_due = match grant.record.window_start.checked_add(grant.record.window) {
+            Some(end) => now >= end,
+            None => false,
+        };
         Ok(())
     }
 
