@@ -1681,11 +1681,18 @@ fn standin_admission_admits_a_granted_ask_within_budget_and_refuses_one_above() 
         Ok(json!({ "valid": true })),
         "the stand-in admits an ask at the cap"
     );
-    let default_ask = standin.post_capability_validate(owner, &json!({ "request_id": request_id }));
+    // The 4096 above consumed the identity's budget, so a later ask on the
+    // same grant is refused by the reserve and leaves the grant live.
+    let later_ask = standin.post_capability_validate(owner, &json!({ "request_id": request_id }));
     assert_eq!(
-        default_ask,
-        Ok(json!({ "valid": true })),
-        "the grant route's binding still admits a later ask on the same grant"
+        later_ask,
+        Err((403, "reservation exceeds the ceiling".to_owned())),
+        "a later ask on the same grant is refused once the budget is consumed"
+    );
+    assert_eq!(
+        live(&standin),
+        victim,
+        "the refused later ask leaves the granted effect live"
     );
 
     // A malformed amount is refused against the same victim grant, before
@@ -1754,19 +1761,60 @@ fn standin_admission_admits_a_granted_ask_within_budget_and_refuses_one_above() 
         BTreeSet::from([request_id.clone(), once_id.clone()]),
         "the refused ask leaves the once grant live and unspent"
     );
+    // The session ceiling is filled by the cap use above, so the once grant's
+    // own ask is refused by the reserve and spends nothing.
     assert_eq!(
         standin.post_capability_validate(owner, &json!({ "request_id": once_id, "amount": 4096 })),
-        Ok(json!({ "valid": true })),
-        "the once grant admits its ask at the cap"
+        Err((403, "reservation exceeds the ceiling".to_owned())),
+        "the once grant's ask is refused once the session ceiling is filled"
     );
     assert_eq!(
         live(&standin),
-        BTreeSet::from([request_id.clone()]),
-        "the admitted ask spends the once grant, which leaves the live view"
+        BTreeSet::from([request_id.clone(), once_id.clone()]),
+        "the refused ask leaves the once grant live and unspent"
     );
+
+    // The spend order shows where nothing holds the ceiling: a second session
+    // of the same bundle admits its once grant's ask at the cap and spends it.
+    let fresh = standin
+        .post_capsules(Caller::Shell, &shared.launch_body())
+        .expect("the stand-in launches a second session of the admitted CID")["session_id"]
+        .as_str()
+        .expect("the stand-in names the session")
+        .to_owned();
+    standin
+        .finish_start(&fresh)
+        .expect("the stand-in applies Start::Ok");
+    let fresh_owner = Caller::Client { session_id: &fresh };
+    let fresh_id = standin
+        .post_capability_request(
+            fresh_owner,
+            &json!({
+                "resource": SHARED_RESOURCE,
+                "action": "read",
+                "reason": "one spend",
+            }),
+        )
+        .expect("the second session stores one pending request")["request_id"]
+        .as_str()
+        .expect("the stand-in names the request")
+        .to_owned();
+    standin
+        .post_capability_grant(
+            Caller::Shell,
+            &json!({ "request_id": fresh_id, "duration": "once" }),
+        )
+        .expect("the shell grants the second session's request");
     assert_eq!(
-        standin.post_capability_validate(owner, &json!({ "request_id": once_id })),
-        Err((400, "grant is not live: Exhausted".to_owned())),
-        "the spent once grant is not live for a second use"
+        standin.post_capability_validate(
+            fresh_owner,
+            &json!({ "request_id": fresh_id, "amount": 4096 })
+        ),
+        Ok(json!({ "valid": true })),
+        "the once grant on a fresh session admits its ask at the cap"
+    );
+    assert!(
+        !live(&standin).contains(&fresh_id),
+        "the admitted ask spends the once grant"
     );
 }

@@ -10733,6 +10733,7 @@ mod tests {
         }
     }
     use elastos_runtime::auth::PasskeyWebAuthnBinding;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn verified_auth_state_cache_returns_equivalent_state_on_unchanged_dir() {
@@ -15556,8 +15557,291 @@ mod tests {
         );
     }
 
-    /// The protected read binds by the stored kind, as this test's inspect call
-    /// does: an Agent record is refused under the `Users/` root of its own id.
+    /// One row per non-test `validate_principal_root_object_binding_in_state`
+    /// call site, in file order: an Agent record refused under the own
+    /// `Users/` root of its id, with the refusal reason and the unchanged
+    /// record and file asserted per row.
+    #[test]
+    fn agent_record_binding_sites_table() {
+        struct Site {
+            data_dir: tempfile::TempDir,
+            backup: Option<tempfile::TempDir>,
+            agent: PrincipalRecord,
+            uri: String,
+            path: PathBuf,
+        }
+        // An Admin Human record, protected, then moved to the Agent kind under
+        // the same root: every field is valid for the site.
+        fn site_new(index: u32) -> Site {
+            let data_dir = tempfile::tempdir().unwrap();
+            let id = format!("person:local:binding-site-{index}");
+            upsert_principal_for_binding_as_role_named(
+                data_dir.path(),
+                ProofBinding::evm_account(
+                    40 + u64::from(index),
+                    &format!("0x{index:040x}"),
+                    now_ts(),
+                ),
+                id.clone(),
+                RuntimePrincipalRole::Admin,
+                None,
+                now_ts(),
+            )
+            .unwrap();
+            let human = stored_principal_record(data_dir.path(), &id).unwrap();
+            let root = principal_localhost_root(&id);
+            assert!(human.iter().all(|human| human.localhost_root == root));
+            let record = store_test_principal_root_protection_for(data_dir.path(), &id, &root);
+            let agent = mint_agent_record(data_dir.path(), &id, Some(&root));
+            assert_eq!(agent.kind, PrincipalKind::Agent);
+            assert_eq!(record.principal_id, id);
+            let uri = format!("{}/Documents/a.txt", agent.localhost_root);
+            let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"human note").unwrap();
+            Site {
+                data_dir,
+                backup: None,
+                agent,
+                uri,
+                path,
+            }
+        }
+        // The plaintext v1 journal of an ended run: a real owner-only backup.
+        fn site_journal(site: &mut Site) -> PrincipalRootMigrationJournalV1 {
+            let backup_dir = tempfile::tempdir().unwrap();
+            set_owner_only(backup_dir.path(), 0o700);
+            let object_uri = site.agent.localhost_root.clone();
+            let digest = hex::encode(Sha256::digest(object_uri.as_bytes()));
+            let backup_path = backup_dir
+                .path()
+                .join(format!("000-{}.plaintext.backup", &digest[..24]));
+            std::fs::write(&backup_path, b"human note").unwrap();
+            set_owner_only(&backup_path, 0o600);
+            let journal = PrincipalRootMigrationJournalV1 {
+                schema: LEGACY_PRINCIPAL_ROOT_MIGRATION_JOURNAL_SCHEMA.to_string(),
+                phase: PrincipalRootMigrationJournalPhaseV1::Committing,
+                plan_sha256: sha256_label(b"plan"),
+                data_key_id: "data-key".to_string(),
+                principal_id: site.agent.principal_id.clone(),
+                localhost_root: object_uri.clone(),
+                backup_dir: backup_dir.path().to_path_buf(),
+                stage_dir: backup_dir.path().join("stage"),
+                objects: vec![PrincipalRootMigrationJournalObjectV1 {
+                    object_uri,
+                    plaintext_sha256: sha256_label(b"human note"),
+                    backup_sha256: sha256_label(b"human note"),
+                    encrypted_sha256: sha256_label(b"human note"),
+                    original_mode: 0o644,
+                    backup_path,
+                    stage_path: backup_dir.path().join("000.stage"),
+                }],
+            };
+            site.backup = Some(backup_dir);
+            journal
+        }
+        fn exact(site: &Site) -> [PrincipalRootProtectedObjectDeclarationV1; 1] {
+            [PrincipalRootProtectedObjectDeclarationV1::exact(
+                site.uri.clone(),
+            )]
+        }
+        fn set_owner_only(path: &Path, mode: u32) {
+            std::fs::set_permissions(path, PermissionsExt::from_mode(mode)).unwrap()
+        }
+        fn plan(site: &Site, root: String) -> PrincipalRootMigrationPlanV1 {
+            PrincipalRootMigrationPlanV1 {
+                schema: PRINCIPAL_ROOT_MIGRATION_PLAN_SCHEMA.to_string(),
+                principal_id: site.agent.principal_id.clone(),
+                objects: vec![PrincipalRootMigrationSelectionV1 {
+                    object_uri: format!("{root}/Documents/plan.txt"),
+                    plaintext_sha256: sha256_label(b"human note"),
+                }],
+                localhost_root: root,
+            }
+        }
+        const WANT: &str = "principal localhost root must be the record's own root for its kind";
+        // :9024/:9204 pass the Agent root, so :9035/:9224 refuse a Users/ URI.
+        const OUTSIDE: &str = "principal-root object URI is outside the principal root";
+        fn outside(result: anyhow::Result<()>) -> anyhow::Result<()> {
+            let error = result.expect_err("a Users/ URI is outside the UsersAI root");
+            assert_eq!(error.to_string(), OUTSIDE);
+            Err(anyhow!(WANT))
+        }
+        let mut failed = Vec::<String>::new();
+        // Runs one row: the body drives the named function; this asserts the
+        // reason and that the record and the file are unchanged.
+        let mut row = |index: u32, label: &str, body: &dyn Fn(&mut Site) -> anyhow::Result<()>| {
+            if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut site = site_new(index);
+                let record = |site: &Site| {
+                    format!(
+                        "{:?}",
+                        stored_principal_record(site.data_dir.path(), &site.agent.principal_id)
+                            .unwrap()
+                    )
+                };
+                let before_record = record(&site);
+                let before_file = std::fs::read(&site.path).unwrap();
+                let error = body(&mut site).expect_err("an Agent record owns no Users/ root");
+                assert_eq!(error.to_string(), WANT);
+                assert_eq!(std::fs::read(&site.path).unwrap(), before_file);
+                assert_eq!(record(&site), before_record);
+            })) {
+                let text = panic.downcast_ref::<String>().map(|text| text.as_str());
+                let reason = text
+                    .or(panic.downcast_ref::<&str>().copied())
+                    .unwrap_or("?");
+                failed.push(format!("{label}: {reason}"));
+            }
+        };
+        type Row = (&'static str, fn(&mut Site) -> anyhow::Result<()>);
+        let rows: [Row; 16] = [
+            ("auth.rs:5145 begin activation", |s| {
+                begin_declarative_principal_root_protection_activation(
+                    s.data_dir.path(),
+                    &s.agent.principal_id,
+                    &s.agent.localhost_root,
+                    &exact(s),
+                )
+                .map(|_| ())
+            }),
+            ("auth.rs:5196 begin activation migrating plaintext", |s| {
+                begin_declarative_principal_root_protection_activation_migrating_plaintext(
+                    s.data_dir.path(),
+                    &s.agent.principal_id,
+                    &s.agent.localhost_root,
+                    &exact(s),
+                )
+                .map(|_| ())
+            }),
+            ("auth.rs:5270 begin activation with candidate", |s| {
+                let mut candidate = store_test_principal_root_protection_for(
+                    s.data_dir.path(),
+                    &s.agent.principal_id,
+                    &s.agent.localhost_root,
+                );
+                candidate.principal_id = s.agent.principal_id.clone();
+                candidate.localhost_root = s.agent.localhost_root.clone();
+                begin_declarative_principal_root_protection_activation_with_candidate(
+                    s.data_dir.path(),
+                    &candidate,
+                    &[0u8; 32],
+                    &exact(s),
+                )
+                .map(|_| ())
+            }),
+            ("auth.rs:5312 inspect", |s| {
+                inspect_declarative_principal_root_protection(
+                    s.data_dir.path(),
+                    &s.agent.principal_id,
+                    &s.agent.localhost_root,
+                    &[],
+                )
+                .map(|_| ())
+            }),
+            ("auth.rs:5353 read", |s| {
+                read_principal_root_object(
+                    s.data_dir.path(),
+                    &s.agent.principal_id,
+                    &s.agent.localhost_root,
+                    &s.uri,
+                    &s.path,
+                )
+                .map(|_| ())
+            }),
+            ("auth.rs:5374 protected read", |s| {
+                read_protected_principal_root_object(
+                    s.data_dir.path(),
+                    &s.agent.principal_id,
+                    &s.agent.localhost_root,
+                    &s.uri,
+                    &s.path,
+                )
+                .map(|_| ())
+            }),
+            ("auth.rs:5798 store read", |s| {
+                PrincipalRootObjectMutation::acquire(s.data_dir.path())?
+                    .read(
+                        &s.agent.principal_id,
+                        &s.agent.localhost_root,
+                        &s.uri,
+                        &s.path,
+                    )
+                    .map(|_| ())
+            }),
+            ("auth.rs:5851 write inner", |s| {
+                write_principal_root_object_if_revision(
+                    s.data_dir.path(),
+                    &s.agent.principal_id,
+                    &s.agent.localhost_root,
+                    &s.uri,
+                    &s.path,
+                    b"replacement",
+                    PrincipalRootObjectPrecondition::Absent,
+                )
+            }),
+            ("auth.rs:5881 write locked", |s| {
+                PrincipalRootObjectMutation::acquire(s.data_dir.path())?.write(
+                    &s.agent.principal_id,
+                    &s.agent.localhost_root,
+                    &s.uri,
+                    &s.path,
+                    b"x",
+                )
+            }),
+            ("auth.rs:7515 walk", |s| {
+                walk_declared_principal_root_objects(
+                    s.data_dir.path(),
+                    &s.agent.principal_id,
+                    &s.agent.localhost_root,
+                    &exact(s),
+                )
+                .map(|_| ())
+            }),
+            ("auth.rs:9024 migration plan root", |s| {
+                validate_principal_root_migration_plan(
+                    s.data_dir.path(),
+                    &plan(s, s.agent.localhost_root.clone()),
+                )
+            }),
+            ("auth.rs:9035 migration plan object", |s| {
+                // The plan's own Agent root passes :9024; its URI is Human.
+                let mut plan = plan(
+                    s,
+                    principal_kind_localhost_root(&s.agent.principal_id, PrincipalKind::Agent),
+                );
+                plan.objects[0].object_uri = s.uri.clone();
+                let result = validate_principal_root_migration_plan(s.data_dir.path(), &plan);
+                outside(result)
+            }),
+            ("auth.rs:9204 migration journal root", |s| {
+                let journal = site_journal(s);
+                validate_principal_root_migration_journal(s.data_dir.path(), &journal)
+            }),
+            ("auth.rs:9224 migration journal object", |s| {
+                let mut journal = site_journal(s);
+                journal.localhost_root =
+                    principal_kind_localhost_root(&s.agent.principal_id, PrincipalKind::Agent);
+                journal.objects[0].object_uri = s.uri.clone();
+                let result = validate_principal_root_migration_journal(s.data_dir.path(), &journal);
+                outside(result)
+            }),
+            ("auth.rs:9408 verify journal plaintext object", |s| {
+                let journal = site_journal(s);
+                verify_journal_plaintext_object(s.data_dir.path(), &journal, &journal.objects[0])
+            }),
+            ("auth.rs:9492 restore journal plaintext object", |s| {
+                let journal = site_journal(s);
+                restore_journal_plaintext_object(s.data_dir.path(), &journal, &journal.objects[0])
+            }),
+        ];
+        assert_eq!(rows.len(), 16, "one row per non-test _in_state call site");
+        for (position, (label, body)) in rows.into_iter().enumerate() {
+            row(position as u32, label, &body);
+        }
+        assert!(failed.is_empty(), "failing rows:\n{}", failed.join("\n"));
+    }
+
     #[test]
     fn inspect_refuses_an_agent_records_users_root() {
         let data_dir = tempfile::tempdir().unwrap();
