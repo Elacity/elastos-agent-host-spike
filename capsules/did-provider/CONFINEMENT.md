@@ -457,6 +457,13 @@ This section records the lab evidence for M1 checks C0 and B3 for
 `did-provider`. It states what the evidence is and gives no verdict; cc-redteam
 judges C0 and B3.
 
+The rule `m1_summary_problems`, which
+`every_m1_summary_names_its_journey_and_its_falsifiers` runs over this summary,
+reads each part's `Journey test:` name and requires that name to be a `fn`
+declaration in `../wallet-provider/tests/confine.rs`, then reads the ids of that
+part's `CAUGHT falsifiers.` block and requires them to be exactly the ids
+wallet's `falsifiers.json` registers against that one test.
+
 Pins: `e31f0f517a3364c6067b1989c1c985c21f823312` is a fixed commit on this lane; every `confine.rs` line number in this section is read with `git show e31f0f517a3364c6067b1989c1c985c21f823312:capsules/wallet-provider/tests/confine.rs`, each wallet `falsifiers.json` entry line in this section is read with `git show e31f0f517a3364c6067b1989c1c985c21f823312:capsules/wallet-provider/falsifiers.json`, and each file pin below is a commit that holds the file, read with `git show <commit>:<path>`.
 
 Gap (#309, routed to Flint): draft PR #309 at 513988ebd names no provider-launch ask, so this launcher has no RA route to copy, and M1-R for C0 and B3 waits on that ask.

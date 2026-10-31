@@ -313,8 +313,13 @@ use std::process::Command;
 /// paragraph naming a wallet test under "in the same file" passes; and WP237,
 /// which makes the set compare accept two unequal lists, so a crate that
 /// declares a second OS passes. Both are CAUGHT on the Mac by
-/// `tests_sections_name_the_crate_that_holds_each_cited_test`.
-const EXPECTED_FALSIFIERS: usize = 217;
+/// `tests_sections_name_the_crate_that_holds_each_cited_test`. Task 168 adds
+/// WP238, which makes the M1 summary's block compare accept an id no list
+/// registers, so a summary citing a retired plant passes; and WP239, which
+/// reads that id set from the whole part instead of its CAUGHT block, so the C0
+/// part's `WP127` review line passes as B3 evidence. Both are CAUGHT on the Mac
+/// by `every_m1_summary_names_its_journey_and_its_falsifiers`.
+const EXPECTED_FALSIFIERS: usize = 219;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

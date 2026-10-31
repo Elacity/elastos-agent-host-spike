@@ -3525,6 +3525,38 @@
       "tests": [
         "tests_sections_name_the_crate_that_holds_each_cited_test"
       ]
+    },
+    {
+      "id": "WP238",
+      "title": "the block compare accepts an id no list registers, so a summary citing a retired plant passes",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            problems.push(format!(\n                \"{document_name} CONFINEMENT.md: {part} lists {id} in its {M1_BLOCK_LABEL} \\\n                 block, and no falsifier list registers it\"\n            ));\n            continue;\n",
+          "new": "            continue;\n"
+        }
+      ],
+      "tests": [
+        "every_m1_summary_names_its_journey_and_its_falsifiers"
+      ]
+    },
+    {
+      "id": "WP239",
+      "title": "the id set is read from the whole part instead of the block, so the C0 part's WP127 review line passes as B3 evidence",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let block = body[shape.block_start..shape.block_end].join(\"\\n\");\n",
+          "new": "    let block = body.join(\"\\n\");\n"
+        }
+      ],
+      "tests": [
+        "every_m1_summary_names_its_journey_and_its_falsifiers"
+      ]
     }
   ]
 }

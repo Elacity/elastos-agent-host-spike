@@ -12959,6 +12959,37 @@ fn read_launched_profile(name: &str, profile_dir: &Path) -> Result<String, Strin
 /// section.
 const FALSIFIER_HEADING: &str = "## Falsifiers";
 
+/// The heading line every confinement document uses for its summary of the lab
+/// evidence for M1 checks C0 and B3.
+const M1_SUMMARY_HEADING: &str = "## M1 acceptance summary: C0 and B3";
+
+/// The two part headings an `M1_SUMMARY_HEADING` section holds, in this order.
+const M1_SUMMARY_PARTS: [&str; 2] = ["### C0 part", "### B3 part"];
+
+/// The label of the one line in each part that names the journey test.
+const M1_JOURNEY_LABEL: &str = "Journey test:";
+
+/// The label of the line that starts each part's CAUGHT falsifier block.
+const M1_BLOCK_LABEL: &str = "CAUGHT falsifiers.";
+
+/// The label of the line that ends each part's CAUGHT falsifier block.
+const M1_REVIEWS_LABEL: &str = "Reviews.";
+
+/// The six label lines each part of an `M1_SUMMARY_HEADING` section holds once,
+/// in this order.
+const M1_PART_LABELS: [&str; 6] = [
+    "Written sentence:",
+    "Counting rule,",
+    M1_JOURNEY_LABEL,
+    "Files at their commits:",
+    M1_BLOCK_LABEL,
+    M1_REVIEWS_LABEL,
+];
+
+/// The two sentences each part holds once: the lab-evidence limit and the unmet
+/// M1-R gate.
+const M1_PART_SENTENCES: [&str; 2] = ["M1-R is not met", "not the Runtime"];
+
 /// The heading line every operations table uses.
 const OPERATIONS_HEADING: &str = "## Operations and the rights they need";
 
@@ -13156,6 +13187,369 @@ fn falsifier_section_problems(
         problems.push(format!(
             "{document_name} CONFINEMENT.md: {FALSIFIER_HEADING} names {token}, which neither \
              falsifier list registers"
+        ));
+    }
+    problems
+}
+
+/// How a refusal counts the lines it found: `none` for no line, else the count.
+fn m1_line_count(found: usize) -> String {
+    if found == 0 {
+        "none".to_string()
+    } else {
+        found.to_string()
+    }
+}
+
+/// Where a part's one journey line and its CAUGHT falsifier block sit among the
+/// part's lines.
+struct M1PartShape {
+    journey_line: usize,
+    block_start: usize,
+    block_end: usize,
+}
+
+/// The position of the journey label in `M1_PART_LABELS`.
+const M1_JOURNEY_LABEL_POSITION: usize = 2;
+
+/// The position of the block label in `M1_PART_LABELS`.
+const M1_BLOCK_LABEL_POSITION: usize = 4;
+
+/// The position of the reviews label in `M1_PART_LABELS`, which ends the block.
+const M1_REVIEWS_LABEL_POSITION: usize = 5;
+
+/// The line span of each part of `M1_SUMMARY_HEADING`, from the line after its
+/// heading to the next part's heading or the section's end, or every problem
+/// with the two headings.
+///
+/// The section must hold each of `M1_SUMMARY_PARTS` exactly once, in that
+/// order. Every refusal names the document and the part it is about.
+fn m1_part_spans(document_name: &str, lines: &[&str]) -> Result<[(usize, usize); 2], Vec<String>> {
+    let mut headings = [0usize; 2];
+    for (index, part) in M1_SUMMARY_PARTS.iter().enumerate() {
+        let found: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| *line == part)
+            .map(|(at, _)| at)
+            .collect();
+        if found.len() != 1 {
+            return Err(vec![format!(
+                "{document_name} CONFINEMENT.md must hold one line {part} under \
+                 {M1_SUMMARY_HEADING}; found {}",
+                m1_line_count(found.len())
+            )]);
+        }
+        headings[index] = found[0];
+    }
+    if headings[0] > headings[1] {
+        return Err(vec![format!(
+            "{document_name} CONFINEMENT.md must hold {} before {}; it holds them out of order",
+            M1_SUMMARY_PARTS[0], M1_SUMMARY_PARTS[1]
+        )]);
+    }
+    Ok([
+        (headings[0] + 1, headings[1]),
+        (headings[1] + 1, lines.len()),
+    ])
+}
+
+/// Where a part's journey line and its block sit, or every problem with the
+/// part's shape, each naming the document, the part and the label.
+///
+/// The part must hold one line starting each of `M1_PART_LABELS`, in that
+/// order, and one occurrence of each of `M1_PART_SENTENCES`. A sentence counts
+/// wherever it sits in the part, so a wrapped sentence still counts once.
+fn m1_part_shape(
+    document_name: &str,
+    part: &str,
+    body: &[&str],
+) -> Result<M1PartShape, Vec<String>> {
+    let mut problems = Vec::new();
+    let mut positions: Vec<usize> = Vec::new();
+    for label in M1_PART_LABELS {
+        let found: Vec<usize> = body
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.starts_with(label))
+            .map(|(at, _)| at)
+            .collect();
+        if found.len() != 1 {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {part} must hold one line starting {label}; \
+                 found {}",
+                m1_line_count(found.len())
+            ));
+            continue;
+        }
+        positions.push(found[0]);
+    }
+    let text = body.join("\n");
+    for sentence in M1_PART_SENTENCES {
+        let count = text.matches(sentence).count();
+        if count == 1 {
+            continue;
+        }
+        problems.push(format!(
+            "{document_name} CONFINEMENT.md: {part} must hold the sentence {sentence} once; \
+             found {}",
+            m1_line_count(count)
+        ));
+    }
+    if !problems.is_empty() {
+        return Err(problems);
+    }
+    // Every label was found once, so `positions` holds one line index per
+    // label, in `M1_PART_LABELS` order.
+    for (index, pair) in positions.windows(2).enumerate() {
+        if pair[0] < pair[1] {
+            continue;
+        }
+        problems.push(format!(
+            "{document_name} CONFINEMENT.md: {part} must hold {} after {}; the two are out of \
+             order",
+            M1_PART_LABELS[index + 1],
+            M1_PART_LABELS[index]
+        ));
+    }
+    if !problems.is_empty() {
+        return Err(problems);
+    }
+    Ok(M1PartShape {
+        journey_line: positions[M1_JOURNEY_LABEL_POSITION],
+        block_start: positions[M1_BLOCK_LABEL_POSITION],
+        block_end: positions[M1_REVIEWS_LABEL_POSITION],
+    })
+}
+
+/// The one backtick span of a part's journey line, or the refusal.
+///
+/// The span must be a `fn` declaration in `journey_source`, which is
+/// `capsules/wallet-provider/tests/confine.rs` read through
+/// `read_lane_test_source`, so a refusal names that path. The rule keeps the
+/// bar the operations-table citation check sets, `fn <name>(`, and does not
+/// decide whether the name is a `#[test]`.
+fn m1_part_journey<'a>(
+    document_name: &str,
+    part: &str,
+    line: &'a str,
+    journey_source: &str,
+) -> Result<&'a str, Vec<String>> {
+    let spans = backtick_spans(line);
+    if spans.len() != 1 {
+        return Err(vec![format!(
+            "{document_name} CONFINEMENT.md: {part} {M1_JOURNEY_LABEL} must name one backtick \
+             span; found {}",
+            m1_line_count(spans.len())
+        )]);
+    }
+    let name = spans[0];
+    if !source_declares_function(journey_source, name) {
+        return Err(vec![format!(
+            "{document_name} CONFINEMENT.md: {part} {M1_JOURNEY_LABEL} names `{name}`, which is \
+             not a `fn` declaration in capsules/{WALLET_PROVIDER}/{CONFINEMENT_TEST_FILE}"
+        )]);
+    }
+    Ok(name)
+}
+
+/// The ids a part's CAUGHT falsifier block holds, in block order, each named
+/// once.
+///
+/// The block runs from the part's `M1_BLOCK_LABEL` line to its
+/// `M1_REVIEWS_LABEL` line, read through `falsifier_id_tokens`, so a repeated
+/// id is one id and an id named outside the block is not read.
+fn m1_block_ids(body: &[&str], shape: &M1PartShape) -> Vec<String> {
+    let block = body[shape.block_start..shape.block_end].join("\n");
+    let mut ids: Vec<String> = Vec::new();
+    for token in falsifier_id_tokens(&block) {
+        if ids.iter().any(|id| id == token) {
+            continue;
+        }
+        ids.push(token.to_string());
+    }
+    ids
+}
+
+/// One falsifier list entry's id and the tests it names, in list order.
+struct RegisteredEntry<'a> {
+    id: &'a str,
+    tests: Vec<&'a str>,
+}
+
+/// Every entry of `lists` as its id and tests, each id once.
+///
+/// The one list reader already refuses an entry without a string `id`, so every
+/// entry here has one, and an entry with no `tests` names none.
+fn registered_entries(lists: &[FalsifierList]) -> Vec<RegisteredEntry<'_>> {
+    let mut entries: Vec<RegisteredEntry> = Vec::new();
+    for list in lists {
+        for entry in &list.entries {
+            let id = entry["id"].as_str().unwrap_or_default();
+            if entries.iter().any(|known| known.id == id) {
+                continue;
+            }
+            let tests = entry["tests"]
+                .as_array()
+                .map(|tests| tests.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            entries.push(RegisteredEntry { id, tests });
+        }
+    }
+    entries
+}
+
+/// How a refusal names the tests one registered entry holds.
+fn registered_tests_description(tests: &[&str]) -> String {
+    if tests.is_empty() {
+        "and it names no test".to_string()
+    } else {
+        format!("and its registered tests are [{}]", tests.join(", "))
+    }
+}
+
+/// Every problem with one part's block, each naming the document, the part, the
+/// id and the entry's tests or their absence.
+///
+/// The block's ids must equal exactly the ids of `entries` whose `tests` is that
+/// one journey test, so an unregistered id, an id registered against another
+/// test or against two, and a registered id the block leaves out are each
+/// refused.
+fn m1_part_block_problems(
+    document_name: &str,
+    part: &str,
+    block_ids: &[String],
+    journey: &str,
+    entries: &[RegisteredEntry<'_>],
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    for id in block_ids {
+        let Some(entry) = entries.iter().find(|entry| entry.id == id) else {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {part} lists {id} in its {M1_BLOCK_LABEL} \
+                 block, and no falsifier list registers it"
+            ));
+            continue;
+        };
+        if entry.tests.len() == 1 && entry.tests[0] == journey {
+            continue;
+        }
+        problems.push(format!(
+            "{document_name} CONFINEMENT.md: {part} lists {id} in its {M1_BLOCK_LABEL} block, \
+             {}, while this part's journey is `{journey}`",
+            registered_tests_description(&entry.tests)
+        ));
+    }
+    for entry in entries {
+        if entry.tests.len() != 1
+            || entry.tests[0] != journey
+            || block_ids.iter().any(|id| id == entry.id)
+        {
+            continue;
+        }
+        problems.push(format!(
+            "{document_name} CONFINEMENT.md: {part} leaves {} out of its {M1_BLOCK_LABEL} \
+             block, and its entry is registered against `{journey}`",
+            entry.id
+        ));
+    }
+    problems
+}
+
+/// Every problem with one document's `M1_SUMMARY_HEADING` section, each naming
+/// the document, the part and the label, id or journey name it is about.
+///
+/// The section holds one `### C0 part` and then one `### B3 part`, and each part
+/// holds its six label lines once each in order and its two sentences once
+/// each. Each part's `M1_JOURNEY_LABEL` line names its journey in one backtick
+/// span, and that name must be a `fn` declaration in
+/// `capsules/wallet-provider/tests/confine.rs`, read through the one test-source
+/// reader. The rule keeps the bar the citation check sets, `fn <name>(`, and
+/// does not decide whether the name is a `#[test]`.
+///
+/// Each part's `M1_BLOCK_LABEL` to `M1_REVIEWS_LABEL` block must hold exactly
+/// the ids of `lists` registered against that one journey. Only the block is
+/// read, because the C0 part's `WP127` review line names an id outside it and
+/// that mention is no C0 evidence.
+///
+/// It takes values and reads only that one source file, so a fixture test drives
+/// it from text and it runs on every OS. A missing or duplicated heading is
+/// `section_under_one_heading`'s own refusal, and a missing test source is the
+/// test-source reader's, which names its path.
+fn m1_summary_problems(
+    document_name: &str,
+    document: &str,
+    lists: &[FalsifierList],
+) -> Vec<String> {
+    let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("capsules/wallet-provider must sit under capsules/");
+    let journey_source = match read_lane_test_source(capsules, WALLET_PROVIDER) {
+        Ok(source) => source,
+        Err(reason) => return vec![reason],
+    };
+    let section = match section_under_one_heading(document_name, document, M1_SUMMARY_HEADING) {
+        Ok(section) => section,
+        Err(problems) => return problems,
+    };
+    let lines: Vec<&str> = section.lines().collect();
+    let spans = match m1_part_spans(document_name, &lines) {
+        Ok(spans) => spans,
+        Err(problems) => return problems,
+    };
+    let entries = registered_entries(lists);
+    let mut problems = Vec::new();
+    let mut blocks: Vec<Vec<String>> = Vec::new();
+    for (index, part) in M1_SUMMARY_PARTS.iter().enumerate() {
+        let (start, end) = spans[index];
+        let body = &lines[start..end];
+        let shape = match m1_part_shape(document_name, part, body) {
+            Ok(shape) => shape,
+            Err(refusals) => {
+                problems.extend(refusals);
+                blocks.push(Vec::new());
+                continue;
+            }
+        };
+        let journey = match m1_part_journey(
+            document_name,
+            part,
+            body[shape.journey_line],
+            &journey_source,
+        ) {
+            Ok(journey) => journey,
+            Err(refusals) => {
+                problems.extend(refusals);
+                blocks.push(Vec::new());
+                continue;
+            }
+        };
+        let block_ids = m1_block_ids(body, &shape);
+        problems.extend(m1_part_block_problems(
+            document_name,
+            part,
+            &block_ids,
+            journey,
+            &entries,
+        ));
+        blocks.push(block_ids);
+    }
+    problems.extend(m1_shared_id_problems(document_name, &blocks));
+    problems
+}
+
+/// Every id one document's two blocks both hold, naming the document, the id
+/// and both parts; one refusal per id.
+fn m1_shared_id_problems(document_name: &str, blocks: &[Vec<String>]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for id in &blocks[0] {
+        if !blocks[1].iter().any(|known| known == id) {
+            continue;
+        }
+        problems.push(format!(
+            "{document_name} CONFINEMENT.md: {id} is CAUGHT evidence in both {} and {}, so one \
+             plant is claimed for both parts",
+            M1_SUMMARY_PARTS[0], M1_SUMMARY_PARTS[1]
         ));
     }
     problems
@@ -19217,6 +19611,459 @@ fn tests_section_check_refuses_each_bad_section() {
         ),
         Vec::<String>::new(),
         "the same OS named twice is one set"
+    );
+}
+
+/// The journey test the C0 part of every M1 acceptance summary names.
+const STANDIN_C0_JOURNEY: &str =
+    "standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host";
+
+/// The journey test the B3 part of every M1 acceptance summary names.
+const STANDIN_B3_JOURNEY: &str =
+    "standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite";
+
+/// The two documents, both falsifier lists and both crates' test sources that
+/// the M1 summary rule and its named tests read, held once so both named tests
+/// drive one set of values.
+struct M1Summaries {
+    did_document: String,
+    wallet_document: String,
+    lists: Vec<FalsifierList>,
+    did_source: String,
+    wallet_source: String,
+}
+
+impl M1Summaries {
+    /// Reads both documents through `read_confinement_document`, both lists
+    /// through `read_falsifier_lists` and both crates' `tests/confine.rs`
+    /// through `read_lane_test_source`. A missing document, list or test source
+    /// is a refusal that names its path, so no provider is skipped.
+    fn read() -> Self {
+        let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("capsules/wallet-provider must sit under capsules/");
+        let did_document =
+            read_confinement_document(capsules, DID_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+        let wallet_document = read_confinement_document(capsules, WALLET_PROVIDER)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let lists = read_falsifier_lists(capsules).unwrap_or_else(|err| panic!("{err}"));
+        let did_source =
+            read_lane_test_source(capsules, DID_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+        let wallet_source =
+            read_lane_test_source(capsules, WALLET_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+        Self {
+            did_document,
+            wallet_document,
+            lists,
+            did_source,
+            wallet_source,
+        }
+    }
+
+    /// Every problem the rule reports over `document`.
+    fn problems(&self, document_name: &str, document: &str) -> Vec<String> {
+        m1_summary_problems(document_name, document, &self.lists)
+    }
+
+    /// Every problem the rule reports over both committed documents.
+    fn committed_problems(&self) -> Vec<String> {
+        let mut problems = self.problems(DID_PROVIDER, &self.did_document);
+        problems.extend(self.problems(WALLET_PROVIDER, &self.wallet_document));
+        problems
+    }
+
+    /// The tests one list entry names, in list order.
+    fn entry_tests(entry: &Value) -> Vec<&str> {
+        entry["tests"]
+            .as_array()
+            .map(|tests| tests.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default()
+    }
+
+    /// The ids `lists` register against `journey` and against no other test, in
+    /// list order.
+    fn ids_registered_against(&self, journey: &str) -> Vec<String> {
+        let mut ids = Vec::new();
+        for list in &self.lists {
+            for entry in &list.entries {
+                if Self::entry_tests(entry) == [journey] {
+                    ids.push(entry["id"].as_str().unwrap_or_default().to_string());
+                }
+            }
+        }
+        ids
+    }
+
+    /// One part of a fixture summary: its heading, its six label lines in order,
+    /// one occurrence of each sentence, and a CAUGHT block listing `ids`.
+    fn fixture_part(part: &str, journey: &str, ids: &[String]) -> String {
+        let block: String = ids
+            .iter()
+            .map(|id| format!("- `{id}` (entry line 1, PR #1, not rerun): a plant.\n"))
+            .collect();
+        format!(
+            "{part}\n\n\
+             Written sentence: One journey starts both providers.\n\n\
+             Counting rule, as `lab/redteam/acceptance/C8.md` words it: a complete journey.\n\n\
+             {M1_JOURNEY_LABEL} `{journey}`\n\
+             in `capsules/{WALLET_PROVIDER}/{CONFINEMENT_TEST_FILE}`.\n\n\
+             Files at their commits:\n\n\
+             - `capsules/{WALLET_PROVIDER}/{CONFINEMENT_TEST_FILE}`.\n\n\
+             {M1_BLOCK_LABEL} Each entry is in the list.\n\n\
+             {block}\n\
+             {M1_REVIEWS_LABEL} Read with `gh pr view`.\n\n\
+             What this part is not: it is lab stand-in evidence, not the Runtime. M1-R is not \
+             met because the gate waits.\n"
+        )
+    }
+
+    /// A whole fixture document whose C0 block lists `c0_ids` and whose B3 block
+    /// lists `b3_ids`.
+    fn fixture(c0_ids: &[String], b3_ids: &[String]) -> String {
+        format!(
+            "{M1_SUMMARY_HEADING}\n\nThis section records the lab evidence.\n\nPins: one pin.\n\n\
+             {}\n{}",
+            Self::fixture_part(M1_SUMMARY_PARTS[0], STANDIN_C0_JOURNEY, c0_ids),
+            Self::fixture_part(M1_SUMMARY_PARTS[1], STANDIN_B3_JOURNEY, b3_ids)
+        )
+    }
+
+    /// The fixture whose two blocks agree with the two lists.
+    fn passing_fixture(&self) -> String {
+        Self::fixture(
+            &self.ids_registered_against(STANDIN_C0_JOURNEY),
+            &self.ids_registered_against(STANDIN_B3_JOURNEY),
+        )
+    }
+
+    /// The passing fixture with its first `from` replaced by `to`.
+    fn fixture_with(&self, from: &str, to: &str) -> String {
+        let document = self.passing_fixture();
+        assert!(
+            document.contains(from),
+            "the passing fixture must hold {from}, so a case edits a line it has"
+        );
+        document.replacen(from, to, 1)
+    }
+
+    /// The passing fixture with its C0 part's block and reviews label lines
+    /// exchanged, so both labels stay present once and the last two are out of
+    /// order.
+    fn fixture_with_labels_swapped(&self) -> String {
+        let document = self.passing_fixture();
+        let mut lines: Vec<String> = document.lines().map(str::to_string).collect();
+        let block = lines
+            .iter()
+            .position(|line| line.starts_with(M1_BLOCK_LABEL))
+            .expect("the fixture must hold the block label");
+        let reviews = lines
+            .iter()
+            .position(|line| line.starts_with(M1_REVIEWS_LABEL))
+            .expect("the fixture must hold the reviews label");
+        assert!(
+            block < reviews,
+            "the fixture must hold the block before the reviews label"
+        );
+        lines.swap(block, reviews);
+        lines.join("\n")
+    }
+
+    /// The one refusal for a block id no list registers.
+    fn unregistered(part: &str, id: &str) -> String {
+        format!(
+            "{WALLET_PROVIDER} CONFINEMENT.md: {part} lists {id} in its {M1_BLOCK_LABEL} block, \
+             and no falsifier list registers it"
+        )
+    }
+
+    /// The one refusal for a block id whose entry names another test.
+    fn other_test(part: &str, id: &str, tests: &[&str], journey: &str) -> String {
+        format!(
+            "{WALLET_PROVIDER} CONFINEMENT.md: {part} lists {id} in its {M1_BLOCK_LABEL} block, \
+             {}, while this part's journey is `{journey}`",
+            registered_tests_description(tests)
+        )
+    }
+
+    /// The one refusal for a registered id the block leaves out.
+    fn left_out(part: &str, id: &str, journey: &str) -> String {
+        format!(
+            "{WALLET_PROVIDER} CONFINEMENT.md: {part} leaves {id} out of its {M1_BLOCK_LABEL} \
+             block, and its entry is registered against `{journey}`"
+        )
+    }
+
+    /// The one refusal for an id both blocks hold.
+    fn shared(id: &str) -> String {
+        format!(
+            "{WALLET_PROVIDER} CONFINEMENT.md: {id} is CAUGHT evidence in both {} and {}, so one \
+             plant is claimed for both parts",
+            M1_SUMMARY_PARTS[0], M1_SUMMARY_PARTS[1]
+        )
+    }
+
+    /// One case per refusal of the rule: the label a failing case names, the
+    /// document, and the exact problem vector it must report.
+    ///
+    /// The vectors are written out or built from the two lists' own
+    /// registrations, so a rule that stops refusing a case, or refuses it with
+    /// another reason, differs from what the named test asserts.
+    fn bad_cases(&self) -> Vec<(&'static str, String, Vec<String>)> {
+        let c0 = M1_SUMMARY_PARTS[0];
+        let b3 = M1_SUMMARY_PARTS[1];
+        let c0_ids = self.ids_registered_against(STANDIN_C0_JOURNEY);
+        let b3_ids = self.ids_registered_against(STANDIN_B3_JOURNEY);
+        let c0_first = c0_ids
+            .first()
+            .cloned()
+            .expect("the C0 journey must have a registered id");
+        let b3_first = b3_ids
+            .first()
+            .cloned()
+            .expect("the B3 journey must have a registered id");
+
+        // One part with `extra` added to its C0 block, so the only thing the case
+        // changes is that one id.
+        let with_extra = |extra: &str| {
+            let mut ids = c0_ids.clone();
+            ids.push(extra.to_string());
+            Self::fixture(&ids, &b3_ids)
+        };
+        // The C0 block without its first id, so the only thing the case changes
+        // is that one id.
+        let without_first = Self::fixture(&c0_ids[1..], &b3_ids);
+        // Both blocks with one id the other part registers, so each part cites a
+        // plant registered against the other journey.
+        let crossed = {
+            let mut first = c0_ids.clone();
+            first.push(b3_first.clone());
+            let mut second = b3_ids.clone();
+            second.push(c0_first.clone());
+            Self::fixture(&first, &second)
+        };
+        let every_c0_left_out: Vec<String> = c0_ids
+            .iter()
+            .map(|id| Self::left_out(c0, id, STANDIN_C0_JOURNEY))
+            .collect();
+
+        vec![
+            (
+                "a document with no M1 acceptance summary heading",
+                "# fixture\n\n## Tests\n\nNothing here.\n".to_string(),
+                vec![format!(
+                    "{WALLET_PROVIDER} CONFINEMENT.md must hold one line {M1_SUMMARY_HEADING}; \
+                     found none"
+                )],
+            ),
+            (
+                "a section with no C0 part",
+                format!("{M1_SUMMARY_HEADING}\n\n{b3}\n\nNothing.\n"),
+                vec![format!(
+                    "{WALLET_PROVIDER} CONFINEMENT.md must hold one line {c0} under \
+                     {M1_SUMMARY_HEADING}; found none"
+                )],
+            ),
+            (
+                "a section with the C0 part twice",
+                format!("{M1_SUMMARY_HEADING}\n\n{c0}\n\nNothing.\n\n{c0}\n"),
+                vec![format!(
+                    "{WALLET_PROVIDER} CONFINEMENT.md must hold one line {c0} under \
+                     {M1_SUMMARY_HEADING}; found 2"
+                )],
+            ),
+            (
+                "a section with its two parts out of order",
+                format!("{M1_SUMMARY_HEADING}\n\n{b3}\n\nNothing.\n\n{c0}\n\nNothing.\n"),
+                vec![format!(
+                    "{WALLET_PROVIDER} CONFINEMENT.md must hold {c0} before {b3}; it holds them \
+                     out of order"
+                )],
+            ),
+            (
+                "a part with no Journey test line",
+                self.fixture_with(M1_JOURNEY_LABEL, "The journey test is"),
+                vec![format!(
+                    "{WALLET_PROVIDER} CONFINEMENT.md: {c0} must hold one line starting \
+                     {M1_JOURNEY_LABEL}; found none"
+                )],
+            ),
+            (
+                "a part with its block label after its reviews label",
+                self.fixture_with_labels_swapped(),
+                vec![format!(
+                    "{WALLET_PROVIDER} CONFINEMENT.md: {c0} must hold {M1_REVIEWS_LABEL} after \
+                     {M1_BLOCK_LABEL}; the two are out of order"
+                )],
+            ),
+            (
+                "a part holding its lab-evidence sentence twice",
+                self.fixture_with("not the Runtime", "not the Runtime and not the Runtime"),
+                vec![format!(
+                    "{WALLET_PROVIDER} CONFINEMENT.md: {c0} must hold the sentence not the \
+                     Runtime once; found 2"
+                )],
+            ),
+            (
+                "a part with no unmet-gate sentence",
+                self.fixture_with("M1-R is not met", "the gate waits"),
+                vec![format!(
+                    "{WALLET_PROVIDER} CONFINEMENT.md: {c0} must hold the sentence M1-R is not \
+                     met once; found none"
+                )],
+            ),
+            (
+                "a journey line naming two spans",
+                self.fixture_with(
+                    &format!("`{STANDIN_C0_JOURNEY}`"),
+                    &format!("`{STANDIN_C0_JOURNEY}` `{STANDIN_C0_JOURNEY}`"),
+                ),
+                vec![format!(
+                    "{WALLET_PROVIDER} CONFINEMENT.md: {c0} {M1_JOURNEY_LABEL} must name one \
+                     backtick span; found 2"
+                )],
+            ),
+            (
+                "a journey line naming no span",
+                self.fixture_with(&format!("`{STANDIN_C0_JOURNEY}`"), STANDIN_C0_JOURNEY),
+                vec![format!(
+                    "{WALLET_PROVIDER} CONFINEMENT.md: {c0} {M1_JOURNEY_LABEL} must name one \
+                     backtick span; found none"
+                )],
+            ),
+            (
+                "a journey naming no function of the crate",
+                self.fixture_with(STANDIN_C0_JOURNEY, "no_such_journey_test"),
+                vec![format!(
+                    "{WALLET_PROVIDER} CONFINEMENT.md: {c0} {M1_JOURNEY_LABEL} names \
+                     `no_such_journey_test`, which is not a `fn` declaration in \
+                     capsules/{WALLET_PROVIDER}/{CONFINEMENT_TEST_FILE}"
+                )],
+            ),
+            (
+                "a block naming an id no list registers",
+                with_extra("WP9999"),
+                vec![Self::unregistered(c0, "WP9999")],
+            ),
+            (
+                "a block naming an id registered against another test",
+                with_extra(&b3_first),
+                vec![
+                    Self::other_test(c0, &b3_first, &[STANDIN_B3_JOURNEY], STANDIN_C0_JOURNEY),
+                    Self::shared(&b3_first),
+                ],
+            ),
+            (
+                "a block leaving out an id registered against its journey",
+                without_first,
+                vec![Self::left_out(c0, &c0_first, STANDIN_C0_JOURNEY)],
+            ),
+            (
+                "the same id in both blocks",
+                crossed,
+                vec![
+                    Self::other_test(c0, &b3_first, &[STANDIN_B3_JOURNEY], STANDIN_C0_JOURNEY),
+                    Self::other_test(b3, &c0_first, &[STANDIN_C0_JOURNEY], STANDIN_B3_JOURNEY),
+                    Self::shared(&c0_first),
+                    Self::shared(&b3_first),
+                ],
+            ),
+            (
+                "a block holding no id at all",
+                Self::fixture(&[], &b3_ids),
+                every_c0_left_out,
+            ),
+        ]
+    }
+}
+
+/// Each document's M1 acceptance summary names a journey test the lane's test
+/// source holds, and exactly the falsifiers its list registers against it.
+///
+/// The check reads both documents through `read_confinement_document`, both
+/// falsifier lists through `read_falsifier_lists` and both crates'
+/// `tests/confine.rs` through `read_lane_test_source`, then requires
+/// `m1_summary_problems` to find no problem over either document. A missing
+/// document, list or test source is a refusal that names its path, never a
+/// skipped provider. It reads files and starts no process, so it runs on every
+/// OS: it shows what each summary cites, and it re-reads no pin, calls no `git`
+/// and says nothing about a kernel or about any test's behaviour.
+///
+/// Falsifier: WP238 makes the block compare accept an id no list registers, so a
+/// summary that cites a retired plant passes; WP239 reads the id set from the
+/// whole part instead of the block, so the C0 part's `WP127` review line passes
+/// as B3 evidence and the two parts stop being told apart. Both fail this test.
+#[test]
+fn every_m1_summary_names_its_journey_and_its_falsifiers() {
+    let summaries = M1Summaries::read();
+    // Both crates' test sources are read, so a missing one fails here rather
+    // than skipping its provider. The stand-in and its list live in wallet's
+    // crate, so the two journeys are wallet's and did's crate declares neither;
+    // a summary that named one of them from did's source would cite nothing.
+    for journey in [STANDIN_C0_JOURNEY, STANDIN_B3_JOURNEY] {
+        assert!(
+            source_declares_function(&summaries.wallet_source, journey),
+            "capsules/{WALLET_PROVIDER}/{CONFINEMENT_TEST_FILE} must declare {journey}, which both \
+             summaries name"
+        );
+        assert!(
+            !source_declares_function(&summaries.did_source, journey),
+            "capsules/{DID_PROVIDER}/{CONFINEMENT_TEST_FILE} declares {journey}, so the rule's one \
+             journey source no longer holds both journeys"
+        );
+    }
+    let problems = summaries.committed_problems();
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+    for (label, document, expected) in summaries.bad_cases() {
+        assert_eq!(
+            summaries.problems(WALLET_PROVIDER, &document),
+            expected,
+            "{label} must be refused with its own reason"
+        );
+    }
+}
+
+/// The M1 summary rule refuses each bad part, over text values.
+///
+/// The passing cases are each document's real `M1_SUMMARY_HEADING` section,
+/// read as a value from that document, and a fixture built from the two lists'
+/// own registrations. Then one case per refusal asserts the exact problem
+/// vector. A refusal over a real section means this head moved away from its
+/// document, and it is reported rather than fixed by editing the section. The
+/// test starts no process and makes no kernel call.
+///
+/// Falsifier: WP238 and WP239 each make one case report a different vector from
+/// the one asserted here.
+#[test]
+fn m1_summary_check_refuses_each_bad_part() {
+    let summaries = M1Summaries::read();
+    for (document_name, document) in [
+        (DID_PROVIDER, &summaries.did_document),
+        (WALLET_PROVIDER, &summaries.wallet_document),
+    ] {
+        let section = section_under_one_heading(document_name, document, M1_SUMMARY_HEADING)
+            .unwrap_or_else(|problems| panic!("{}", problems.join("\n")));
+        assert_eq!(
+            summaries.problems(document_name, &format!("{M1_SUMMARY_HEADING}\n{section}\n")),
+            Vec::<String>::new(),
+            "{document_name}'s real summary section must pass the rule on its own"
+        );
+    }
+    assert_eq!(
+        summaries.problems(WALLET_PROVIDER, &summaries.passing_fixture()),
+        Vec::<String>::new(),
+        "a fixture whose blocks equal its lists' registrations must pass"
+    );
+    for (label, document, expected) in summaries.bad_cases() {
+        assert_eq!(
+            summaries.problems(WALLET_PROVIDER, &document),
+            expected,
+            "{label} must be refused with its own reason"
+        );
+    }
+    assert_eq!(
+        summaries.bad_cases().len(),
+        16,
+        "every refusal of the rule must have its own case"
     );
 }
 

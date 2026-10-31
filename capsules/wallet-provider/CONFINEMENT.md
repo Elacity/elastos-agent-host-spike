@@ -224,6 +224,13 @@ This section records the lab evidence for M1 checks C0 and B3 for
 `wallet-provider`. It states what the evidence is and gives no verdict;
 cc-redteam judges C0 and B3.
 
+The rule `m1_summary_problems`, which
+`every_m1_summary_names_its_journey_and_its_falsifiers` runs over this summary,
+reads each part's `Journey test:` name and requires that name to be a `fn`
+declaration in `tests/confine.rs`, then reads the ids of that part's `CAUGHT
+falsifiers.` block and requires them to be exactly the ids `falsifiers.json`
+registers against that one test.
+
 Pins: `e31f0f517a3364c6067b1989c1c985c21f823312` is a fixed commit on this lane; every `confine.rs` line number in this section is read with `git show e31f0f517a3364c6067b1989c1c985c21f823312:capsules/wallet-provider/tests/confine.rs`, each wallet `falsifiers.json` entry line in this section is read with `git show e31f0f517a3364c6067b1989c1c985c21f823312:capsules/wallet-provider/falsifiers.json`, and each file pin below is a commit that holds the file, read with `git show <commit>:<path>`.
 
 Gap (#309, routed to Flint): draft PR #309 at 513988ebd names no provider-launch ask, so this launcher has no RA route to copy, and M1-R for C0 and B3 waits on that ask.
@@ -1594,6 +1601,13 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - WP237: The set compare accepts two unequal lists, so a crate that declares a
   second OS passes.
   `tests_sections_name_the_crate_that_holds_each_cited_test` checks this rule.
+- WP238: The M1 summary's block compare accepts an id no list registers, so a
+  summary citing a retired plant passes.
+  `every_m1_summary_names_its_journey_and_its_falsifiers` checks this rule.
+- WP239: The M1 summary's id set is read from the whole part instead of its
+  `CAUGHT falsifiers.` block, so the C0 part's `WP127` review line passes as B3
+  evidence.
+  `every_m1_summary_names_its_journey_and_its_falsifiers` checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,
