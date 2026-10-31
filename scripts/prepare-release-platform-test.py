@@ -728,6 +728,44 @@ class PrepareWorkerTest(unittest.TestCase):
         self.assertIn("Output already exists", refused.stderr)
         self.assertEqual((output / "platform-input.json").read_bytes(), before)
 
+    def test_did_wallet_and_model_providers_release_a_capsule_metadata_row(self):
+        # did/wallet/model ship no platform binary, so their only release row is
+        # the capsule-metadata archive. These records carry no provider_runtime
+        # marker: the selector must find each provider from capsules/<name>/
+        # capsule.json alone, and the real prep worker must emit the row.
+        providers = ("did-provider", "wallet-provider", "model-provider")
+        template_path = self.repo / "components.json"
+        template = json.loads(template_path.read_text())
+        for name in providers:
+            self.assertNotIn("provider_runtime", template["external"].get(name, {}))
+            capsule = self.repo / "capsules" / name
+            (capsule / "icons").mkdir(parents=True)
+            for size in (32, 64, 128, 256):
+                (capsule / "icons" / f"icon-{size}.png").write_bytes(b"fixture icon")
+            (capsule / "capsule.json").write_text(json.dumps(
+                {"name": name, "role": "provider", "type": "microvm",
+                 "entrypoint": "rootfs.ext4", "icon": "icons"}))
+            # A metadata-only provider has no platform payload: its release
+            # row is the capsule-metadata archive alone.
+            template["external"][name] = {"install_path": f"capsules/{name}", "platforms": {}}
+        template_path.write_text(json.dumps(template))
+        self.commit("provider selector fixture")
+        self.assertEqual(self.command("git", "status", "--porcelain").stdout, "")
+        output, result = self.prepare()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        manifest = json.loads((output / "components.json").read_text())
+        for name in providers:
+            row = manifest["external"][name]["capsule_metadata"]["platforms"]["*"]
+            self.assertEqual(row["release_path"], f"{name}-capsule-metadata.tar.gz")
+            archive = output / "artifacts" / row["release_path"]
+            self.assertEqual(row["checksum"], "sha256:" + hashlib.sha256(archive.read_bytes()).hexdigest())
+            self.assertEqual(row["size"], archive.stat().st_size)
+            with tarfile.open(archive) as tar:
+                self.assertEqual(json.loads(tar.extractfile(f"{name}/capsule.json").read())["name"], name)
+                self.assertIn(f"{name}/icons/icon-32.png", tar.getnames())
+        # The pre-existing provider keeps its row: the selector only grows.
+        self.assertIn("capsule_metadata", manifest["external"]["shell"])
+
     def test_packaging_refuses_a_projection_with_microvm_type(self):
         path = self.repo / "capsules/home-cli/capsule.json"
         manifest = json.loads(path.read_text())
