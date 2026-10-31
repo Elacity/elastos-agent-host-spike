@@ -1,9 +1,11 @@
-//! Everything this app knows about ElastOS. P1 runs no Runtime command: it only
-//! looks for the installed binary and asks Home whether it answers.
+//! Everything this app knows about ElastOS. With the real home folder it runs no
+//! Runtime command: it only looks for the installed binary and asks Home whether it
+//! answers. Only with `ELASTOS_LAB_HOME` (experiments) does it start Home.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 /// Passkeys belong to `localhost`; `127.0.0.1` is a different site to WebKit.
@@ -12,7 +14,36 @@ const HOME_ADDR: &str = "localhost:8090";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    lab_home().or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+}
+
+/// A throwaway folder that stands in for the user's home folder in experiments.
+pub fn lab_home() -> Option<PathBuf> {
+    std::env::var_os("ELASTOS_LAB_HOME").map(PathBuf::from)
+}
+
+/// SIMULATED `elastos service start`: alpha.26 has only `home --browser`, which always
+/// runs `open <url>`; `sim_bin` puts a do-nothing `open` first on PATH. Home gets its
+/// own process group, so it keeps running when this app quits.
+pub fn start_home(home: &Path, sim_bin: &Path) -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    let log = std::fs::File::options()
+        .create(true)
+        .append(true)
+        .open(home.join("home.log"))?;
+    Command::new(home.join(".local/bin/elastos"))
+        .args(["home", "--browser"])
+        .env("HOME", home)
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", sim_bin.display()),
+        )
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        .process_group(0)
+        .spawn()?;
+    Ok(())
 }
 
 pub fn installed() -> bool {

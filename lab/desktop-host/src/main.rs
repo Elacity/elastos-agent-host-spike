@@ -1,8 +1,9 @@
 mod checks;
+mod firstrun;
 mod runtime;
 
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tao::dpi::LogicalSize;
 use tao::event::{Event, StartCause, WindowEvent};
@@ -12,7 +13,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use wry::{WebView, WebViewBuilder};
 
-const POLL: Duration = Duration::from_secs(3);
+const POLL: Duration = Duration::from_secs(1);
 
 enum UserEvent {
     Menu(MenuEvent),
@@ -20,9 +21,20 @@ enum UserEvent {
 }
 
 fn main() {
+    let started = Instant::now();
     if let Some(reason) = checks::refusal() {
         alert(&reason);
         return;
+    }
+    let lab_home = runtime::lab_home();
+    if let (Some(home), Some(payload)) = (&lab_home, firstrun::payload()) {
+        if !runtime::installed() {
+            if let Err(error) = firstrun::install(&payload, home) {
+                alert(&format!("Could not set up ElastOS from this app: {error}"));
+                return;
+            }
+            firstrun::note(home, started, "installed from the files inside the app");
+        }
     }
     if !runtime::installed() {
         alert(&checks::not_installed());
@@ -101,6 +113,8 @@ fn main() {
     let mut menu = Some(menu);
     let mut tray: Option<TrayIcon> = None;
     let mut home_up: Option<bool> = None;
+    let mut home_started = false;
+    let mut launch_open = true;
     let mut home: Option<(Window, WebView)> = None;
     let home_proxy = event_loop.create_proxy();
     event_loop.run(move |event, target, control_flow| {
@@ -133,9 +147,24 @@ fn main() {
                 });
             }
             Event::UserEvent(UserEvent::Home(up)) => {
-                // Opening the app opens Home, like any app opens its window.
-                if home_up.is_none() && up {
+                if let (false, false, Some(lab), Some(sim_bin)) =
+                    (up, home_started, &lab_home, firstrun::sim_bin())
+                {
+                    home_started = true;
+                    match runtime::start_home(lab, &sim_bin) {
+                        Ok(()) => firstrun::note(lab, started, "asked the Runtime to start Home"),
+                        Err(error) => alert(&format!("Could not start Home: {error}")),
+                    }
+                }
+                // Opening the app opens Home once, like any app opens its window.
+                if up && launch_open {
+                    launch_open = false;
                     show_home(&mut home, target);
+                    if let Some(lab) = &lab_home {
+                        firstrun::note(lab, started, "Home answered; window shown");
+                    }
+                } else if !up && !home_started {
+                    launch_open = false;
                 }
                 home_up = Some(up);
                 status.set_text(if up {
