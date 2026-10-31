@@ -24,6 +24,7 @@ pub enum OperateRefuse {
     AppendNotGranted,
     ChildJournalNotGranted,
     JournalRoot,
+    JournalSame,
 }
 
 impl std::fmt::Display for OperateRefuse {
@@ -41,6 +42,9 @@ impl std::fmt::Display for OperateRefuse {
             }
             OperateRefuse::JournalRoot => {
                 formatter.write_str("child journal needs a path under the owned root")
+            }
+            OperateRefuse::JournalSame => {
+                formatter.write_str("a live journal already has that path")
             }
         }
     }
@@ -141,8 +145,10 @@ impl Verifier {
 
     /// Creates a child journal and returns its own handle. The grant must
     /// carry the child-journal right. A path equal to the owned root is
-    /// refused. A path under that root still mints. The new handle keeps
-    /// the parent's append and overwrite and does not keep child-journal.
+    /// refused. A path equal to a live journal minted from this grant is
+    /// refused. A path under that root still mints. An ended journal frees
+    /// that path. The new handle keeps the parent's append and overwrite
+    /// and does not keep child-journal.
     #[rustfmt::skip]
     pub fn create_child_journal(
         &mut self,
@@ -172,6 +178,13 @@ impl Verifier {
         let grant = self.resolve(*call, request.handle).map_err(OperateRefuse::Binding)?;
         if path == grant.owned_root {
             return Err(OperateRefuse::JournalRoot);
+        }
+        if self.grants.values().any(|stored| {
+            stored.record.parent == Some(request.handle)
+                && !stored.ended
+                && stored.record.owned_root == path
+        }) {
+            return Err(OperateRefuse::JournalSame);
         }
         super::resource_name(&grant.identity, path, Some(&grant.owned_root))
             .map_err(OperateRefuse::Binding)?;
@@ -2307,4 +2320,79 @@ fn model_child_journal_on_the_owned_root_is_refused() {
         .use_grant(call, &guest(parent))
         .expect("the issuing grant stays");
     assert_eq!(parent_kept.owned_root, "UsersAI/agent-1/journal");
+}
+
+#[test]
+fn model_child_journal_on_a_live_sibling_path_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    assert_eq!(parent, Handle(1));
+    let call = verifier.open_call(instance);
+    let page = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/page.md")
+        .expect("the first journal mints");
+    assert_eq!(page, Handle(2));
+    let refusal = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/page.md")
+        .expect_err("a live sibling already has that path");
+    assert_eq!(refusal, OperateRefuse::JournalSame);
+    assert_eq!(refusal.to_string(), "a live journal already has that path");
+    let leaked = verifier
+        .use_grant(call, &guest(Handle(3)))
+        .expect_err("a refused mint stores no grant");
+    assert_eq!(leaked, Refuse::UnknownHandle);
+    assert_eq!(leaked.to_string(), "unknown handle");
+    let kept = verifier
+        .use_grant(call, &guest(page))
+        .expect("the first journal stays");
+    assert_eq!(kept.owned_root, "UsersAI/agent-1/journal/page.md");
+    let line = verifier
+        .create_child_journal(
+            &call,
+            &guest(parent),
+            "UsersAI/agent-1/journal/page.md/line",
+        )
+        .expect("a path under a live journal still mints");
+    assert_eq!(line, Handle(3));
+    let other = verifier
+        .bind_grant(
+            instance,
+            "UsersAI/agent-1/journal",
+            Rights {
+                append: true,
+                overwrite: false,
+                child_journal: true,
+            },
+        )
+        .expect("another issuing grant");
+    assert_eq!(other, Handle(4));
+    let other_page = verifier
+        .create_child_journal(&call, &guest(other), "UsersAI/agent-1/journal/page.md")
+        .expect("another issuing grant mints that path");
+    assert_eq!(other_page, Handle(5));
+    verifier.revoke_grant(page).expect("end the first journal");
+    let ended = verifier
+        .use_grant(call, &guest(page))
+        .expect_err("the ended journal is gone");
+    assert_eq!(ended, Refuse::UnknownHandle);
+    let again = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/page.md")
+        .expect("an ended journal frees that path");
+    assert_eq!(again, Handle(6));
+    verifier
+        .use_grant(call, &guest(line))
+        .expect("the path under the ended journal stays");
+    verifier
+        .use_grant(call, &guest(other_page))
+        .expect("the other issuing grant's journal stays");
+    verifier
+        .use_grant(call, &guest(parent))
+        .expect("the issuing grant stays");
 }

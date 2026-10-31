@@ -37,6 +37,8 @@ reference model, not the Runtime; counts toward no M1 check; the Runtime half is
 
 `Verifier::create_child_journal` refuses a path equal to the issuing grant's own root. The one `resource_name` still allows an append or overwrite on that root. A path under the root still mints. A refused mint stores no grant, and the next ask is an issuing grant. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
 
+`Verifier::create_child_journal` refuses a path equal to a live journal minted from that same grant. An ended journal frees that path. A path under a live journal still mints. Another issuing grant still mints that path. A refused mint stores no grant. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
 `Verifier::admit_ask` caps one agent's budget ask and stores the granted amount through the one `admit`. This is a lab stand-in for that admission. It is not the Runtime. It does not count toward A7 or M1-R.
 
 A forged identity, session, instance, usage, ceiling or set of rights changes
