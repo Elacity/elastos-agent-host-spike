@@ -16,8 +16,9 @@
 //! `failed` or `stopped` entry. One check refuses a client on a shell-only
 //! route. `post_capability_validate` and `post_hosted_effect` are the two
 //! use paths; the private `use_grant` runs `authorise` on that same filter,
-//! then `admit_effect` against the one budget cap, and only then spends a
-//! `once` grant (M1 checks A6, A7).
+//! then `admit_effect`, which holds the ask on the grant's own ledger handle
+//! against the session ceiling the grant route set at bind, and only then
+//! spends a `once` grant (M1 checks A6, A7).
 //!
 //! `stop_one` and the `worker_exited` seam share one private end path,
 //! `end_instance`. It refuses an unknown or already-ended id before anything
@@ -297,6 +298,11 @@ pub struct StandIn {
     /// The `InstanceId` each live instance holds on `ledger`. It maps one
     /// instance id to one number and never goes the other way.
     instances_on_ledger: Vec<(String, InstanceId)>,
+    /// The bind step's one budget admission, by session. The first bind of a
+    /// session asks `EFFECT_BUDGET_CAP` and stores that as the session's
+    /// ceiling; a later bind of the same session asks nothing, so no use can
+    /// raise or lower the ceiling it reserves against.
+    admitted_on: Vec<String>,
 }
 
 impl StandIn {
@@ -315,6 +321,7 @@ impl StandIn {
             instant: 0,
             ledger: Verifier::new(),
             instances_on_ledger: Vec::new(),
+            admitted_on: Vec::new(),
         }
     }
 
@@ -767,6 +774,34 @@ impl StandIn {
         self.bind_stored_grant(request_id)
     }
 
+    /// Ends one live grant exactly as `revoke_live` does for its session.
+    ///
+    /// Lab test seam, not a route. `revoke_live` runs the same
+    /// `end_live_grant` step over each `Live` grant of a stopped session, so a
+    /// test uses this where a whole-session stop would also revoke the
+    /// sibling grant whose use is the one under test.
+    pub fn end_one_live_grant(&mut self, request_id: &str) {
+        for index in 0..self.grants.len() {
+            if self.grants[index].request_id == request_id {
+                self.end_live_grant(index);
+            }
+        }
+    }
+
+    /// Ends one live grant: writes `Revoked`, then ends its ledger binding
+    /// through `Verifier::end_grant`, which keeps any hold the grant opened
+    /// before this end. A grant of another life stays as it is.
+    fn end_live_grant(&mut self, index: usize) {
+        let grant = &mut self.grants[index];
+        if !is_live(grant.life) {
+            return;
+        }
+        grant.life = Life::Revoked;
+        if let Some(handle) = grant.binding {
+            self.ledger.end_grant(handle);
+        }
+    }
+
     /// The one "bind on the ledger, then store the binding and the run pair"
     /// step. `post_capability_grant` and `seed_bound_grant` both run it, after
     /// each has stored the grant for `request_id`.
@@ -786,6 +821,7 @@ impl StandIn {
             .expect("the caller just stored this request's grant");
         stored.binding = Some(bound);
         stored.run = mint_run_binding(request_id);
+        self.admit_on_ledger(&session_id, bound, instance)?;
         Ok(())
     }
 
@@ -1157,13 +1193,15 @@ impl StandIn {
     ///
     /// An authorised grant is then admitted for its one effect (M1 check
     /// A7): the body's optional `amount` is the ask, defaulting to
-    /// `EFFECT_BUDGET_CAP`, and `admit_effect` reads it against that cap on
-    /// the shared ledger before the `once` spend. A missing, non-numeric or
+    /// `EFFECT_BUDGET_CAP`, and `admit_effect` reserves it against the
+    /// session ceiling on the shared ledger before the `once` spend. A
+    /// missing, non-numeric or
     /// negative `amount` is status 400 with
     /// `budget ask needs a non-negative integer amount`, from `validate_body`
-    /// before the grant is read, so it spends nothing. An ask above the cap is
-    /// status 403 with the `AdmitRefuse` text, and the grant stays live and
-    /// unspent. Only an admitted ask spends a `once` grant.
+    /// before the grant is read, so it spends nothing. An ask that the open
+    /// holds no longer leave room for is status 403 with the `ReserveRefuse`
+    /// text, and the grant stays live and unspent. Only an admitted ask
+    /// spends a `once` grant.
     pub fn post_capability_validate(
         &mut self,
         caller: Caller<'_>,
@@ -1189,7 +1227,7 @@ impl StandIn {
     /// a validate body: a missing `amount` is `EFFECT_BUDGET_CAP`, and a
     /// malformed one is status 400 with `ASK_REASON` before the grant is read,
     /// so it spends nothing. Ok is `{"valid": true}`; every refusal spends
-    /// nothing.
+    /// nothing and holds nothing.
     pub fn post_hosted_effect(
         &mut self,
         caller: Caller<'_>,
@@ -1245,10 +1283,11 @@ impl StandIn {
     /// `post_hosted_effect` are its routes.
     ///
     /// A use is three steps in one order: `authorise` decides, `admit_effect`
-    /// reads the ask against the one budget cap on the shared ledger, and
-    /// only then `spend_once` stores `Exhausted` for a `once` grant. Every
-    /// refusal runs before that store, so a refused use leaves the grant live
-    /// and unspent, and an admitted ask spends it once.
+    /// holds the ask against the grant's consumed budget and the one ceiling
+    /// on the shared ledger, and only then `spend_once` stores `Exhausted` for
+    /// a `once` grant. Every refusal runs before that store, so a refused use
+    /// leaves the grant live and unspent, and an admitted ask spends it once.
+    /// An ask holds its whole amount or is refused holding nothing.
     fn use_grant(
         &mut self,
         caller: Caller<'_>,
@@ -1258,12 +1297,16 @@ impl StandIn {
         amount: u64,
     ) -> Result<(), (u16, String)> {
         let index = self.authorise(caller, request_id, run_id, plan_sha256)?;
-        let (session_id, binding) = {
+        let (session_id, binding, once) = {
             let grant = &self.grants[index];
-            (grant.session_id.clone(), grant.binding)
+            (
+                grant.session_id.clone(),
+                grant.binding,
+                grant.duration == "once",
+            )
         };
         self.admit_effect(&session_id, binding, amount)?;
-        if self.grants[index].duration == "once" {
+        if once {
             self.grants[index].life = Life::Exhausted;
         }
         Ok(())
@@ -1516,17 +1559,18 @@ impl StandIn {
     }
 
     /// Writes `Revoked` on `Live` grants of one session and ends the ledger
-    /// binding of each one (M1 check A7, condition c). Other lives stay.
+    /// binding of each one (M1 check A7, condition c). Other lives stay. It
+    /// runs the one `end_live_grant` step per grant.
     fn revoke_live(&mut self, session_id: &str) {
-        let mut ended = Vec::new();
-        for grant in &mut self.grants {
-            if grant.session_id == session_id && is_live(grant.life) {
-                grant.life = Life::Revoked;
-                ended.extend(grant.binding);
-            }
-        }
-        for handle in ended {
-            self.ledger.end_grant(handle);
+        let ended = self
+            .grants
+            .iter()
+            .enumerate()
+            .filter(|(_, grant)| grant.session_id == session_id)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        for index in ended {
+            self.end_live_grant(index);
         }
     }
 
@@ -1646,7 +1690,9 @@ impl StandIn {
         ))
     }
 
-    /// The one ledger binding. `post_capability_grant` is its route.
+    /// The one ledger binding. Three paths call it, all through
+    /// `bind_stored_grant` (mod.rs:777): `post_capability_grant`,
+    /// `seed_bound_grant` and the module's own test setup.
     ///
     /// Takes the granting instance the route registered for this session and
     /// binds it to its own owned root, `UsersAI/<session_id>/effects`,
@@ -1663,6 +1709,41 @@ impl StandIn {
         self.ledger
             .bind_grant(instance, &root, Self::effect_rights())
             .map_err(|refusal| (403, refusal.to_string()))
+    }
+
+    /// The one budget admission, run once per session by `bind_stored_grant`.
+    ///
+    /// The session's first bind asks `EFFECT_BUDGET_CAP` through
+    /// `Verifier::admit_ask`, which sets that session identity's ceiling to
+    /// the cap; a later bind of the same session skips the ask, so no use
+    /// raises or lowers the ceiling it reserves against. A refusal is status
+    /// 403 with `AdmitRefuse`'s text and the caller stores nothing.
+    fn admit_on_ledger(
+        &mut self,
+        session_id: &str,
+        handle: Handle,
+        instance: InstanceId,
+    ) -> Result<(), (u16, String)> {
+        if self
+            .admitted_on
+            .iter()
+            .any(|admitted| admitted == session_id)
+        {
+            return Ok(());
+        }
+        let call = self.ledger.open_call(instance);
+        self.ledger
+            .admit_ask(
+                &call,
+                &guest_request(handle),
+                BudgetAsk {
+                    amount: EFFECT_BUDGET_CAP,
+                },
+                EFFECT_BUDGET_CAP,
+            )
+            .map_err(|refusal| (403, admit_text(&refusal)))?;
+        self.admitted_on.push(session_id.to_owned());
+        Ok(())
     }
 
     /// The one instance registration for a session. The first call for a
@@ -1695,44 +1776,43 @@ impl StandIn {
         }
     }
 
-    /// The one budget admission. `use_grant` is its caller.
+    /// The one budget use. `use_grant` is its caller, for both routes.
     ///
-    /// The granted effect asks `amount` units, and the one ledger call
-    /// `Verifier::admit_ask` reads that ask against `EFFECT_BUDGET_CAP` and
-    /// records it as the agent's ceiling. The request carries the handle the
-    /// grant route stored on this grant, so the resolve on the ledger is the
-    /// same binding that minted it. An over-budget ask or a binding refusal
-    /// is status 403 with `AdmitRefuse`'s own text, and the ledger keeps the
-    /// grant bound and stores no ceiling. An ask at the cap is admitted.
-    /// The grant route's binding and `seed_bound_grant` are the two bind sites,
-    /// so a grant with no stored handle (one whose binding refused) is refused
-    /// here with status 403 and the ledger's `unknown handle` text. The
-    /// ledger binds nothing on this path.
+    /// The bind set the identity's ceiling (`admit_on_ledger`); a use only
+    /// holds its amount on the grant's own handle. A `once` grant asks
+    /// against the cap first: an ask above `EFFECT_BUDGET_CAP` is 403 with
+    /// `AdmitRefuse`'s text (a plain compare, no ceiling write).
+    /// `Verifier::reserve` then holds the ask, so what that grant already
+    /// holds plus this ask must stay at or under the ceiling; over that is
+    /// 403 with `ReserveRefuse`'s text and the refused ask holds nothing. A
+    /// grant with no stored handle is 403 with the ledger's `unknown handle`
+    /// text. A use asks X and either holds X or is refused holding nothing.
     fn admit_effect(
         &mut self,
         session_id: &str,
         binding: Option<Handle>,
-        amount: u64,
-    ) -> Result<u64, (u16, String)> {
+        asked: u64,
+    ) -> Result<(), (u16, String)> {
         let instance = self.instance_on_ledger(session_id);
         let call = self.ledger.open_call(instance);
         let Some(handle) = binding else {
             return Err((403, AdmitRefuse::Binding(Refuse::UnknownHandle).to_string()));
         };
-        let request = GuestRequest {
-            handle,
-            forged_identity: None,
-            forged_session: None,
-            forged_instance: None,
-            reported_usage: 0,
-            forged_ceiling: 0,
-            forged_append: false,
-            forged_overwrite: false,
-            forged_child_journal: false,
-        };
+        let request = guest_request(handle);
+        let refuse = |refusal: grant_binding::ledger::ReserveRefuse| (403, refusal.to_string());
+        if asked > EFFECT_BUDGET_CAP {
+            return Err((
+                403,
+                admit_text(&AdmitRefuse::OverBudget {
+                    cap: EFFECT_BUDGET_CAP,
+                    asked,
+                }),
+            ));
+        }
         self.ledger
-            .admit_ask(&call, &request, BudgetAsk { amount }, EFFECT_BUDGET_CAP)
-            .map_err(|refusal| (403, admit_text(&refusal)))
+            .reserve(&call, &request, asked)
+            .map_err(refuse)
+            .map(|_| ())
     }
 
     fn not_admitted(&self, cid: LabCid) -> (u16, String) {
@@ -2152,8 +2232,10 @@ fn ask_amount(amount: Option<&Value>) -> Result<u64, (u16, String)> {
     }
 }
 
-/// The one mint helper for the run pair (M1 check A6). Only the grant route
-/// calls it, so the pair exists only after the shell approved the request.
+/// The one mint helper for the run pair (M1 check A6). Two bind paths mint a
+/// pair, both through `bind_stored_grant`: `post_capability_grant` after the
+/// shell approved the request, and `seed_bound_grant`, the lab seam for a grant
+/// whose approval no route can supply. `seed_grant` mints no pair.
 fn mint_run_binding(request_id: &str) -> RunBinding {
     RunBinding {
         run_id: RunBinding::run_id_for(request_id),
@@ -2433,6 +2515,23 @@ fn life_text(life: Life) -> &'static str {
 /// before the grant is read.
 const ASK_REASON: &str = "budget ask needs a non-negative integer amount";
 
+/// The one guest request for a ledger call on a stored handle. No caller
+/// states an identity, a session, an instance, a usage figure or a ceiling,
+/// so the ledger resolves each from the grant's own binding.
+fn guest_request(handle: Handle) -> GuestRequest {
+    GuestRequest {
+        handle,
+        forged_identity: None,
+        forged_session: None,
+        forged_instance: None,
+        reported_usage: 0,
+        forged_ceiling: 0,
+        forged_append: false,
+        forged_overwrite: false,
+        forged_child_journal: false,
+    }
+}
+
 /// The one reason text for a refused budget admission: `AdmitRefuse`'s own.
 /// An over-budget refusal names the cap and the ask it compared.
 fn admit_text(refusal: &AdmitRefuse) -> String {
@@ -2466,9 +2565,12 @@ fn not_live(status: ResidentStatus) -> (u16, String) {
 
 /// The deny body's only keys are `request_id` and an optional string `reason`.
 ///
-/// A missing reason is `Denied by user`.
+/// A missing reason is `Denied by user`. A present reason that is empty or
+/// only whitespace is status 400 with `deny reason must not be blank`, so a
+/// deny always records a reason an owner can read.
 fn deny_body(body: &Value) -> Result<(&str, &str), (u16, String)> {
     const NEEDS_ID: &str = "deny body needs request_id";
+    const BLANK_REASON: &str = "deny reason must not be blank";
     const DEFAULT_REASON: &str = "Denied by user";
 
     let Some(object) = body.as_object() else {
@@ -2498,7 +2600,11 @@ fn deny_body(body: &Value) -> Result<(&str, &str), (u16, String)> {
         return Err((400, "deny reason must be a string".to_owned()));
     }
     let request_id = request_id.ok_or_else(|| (400, NEEDS_ID.to_owned()))?;
-    Ok((request_id, reason.unwrap_or(DEFAULT_REASON)))
+    match reason {
+        Some(reason) if reason.trim().is_empty() => Err((400, BLANK_REASON.to_owned())),
+        Some(reason) => Ok((request_id, reason)),
+        None => Ok((request_id, DEFAULT_REASON)),
+    }
 }
 
 /// The grant body's keys are `request_id`, `duration`, `rationale` and an
@@ -3299,20 +3405,14 @@ mod tests {
     }
 
     /// Binds a seeded grant the way the grant route does, so the admission
-    /// path has the ledger handle it stores. Setup for the rows below uses the
-    /// `bind_on_ledger` step that `post_capability_grant` and
-    /// `seed_bound_grant` share.
-    fn bind_seeded(standin: &mut StandIn, request_id: &str, session_id: &str) {
-        let instance = standin.instance_on_ledger(session_id);
-        let bound = standin
-            .bind_on_ledger(instance, session_id)
+    /// path has the ledger handle it stores. Setup for the rows below runs the
+    /// one step `post_capability_grant` and `seed_bound_grant` share,
+    /// `bind_stored_grant`, so the session's budget admission runs once here
+    /// too.
+    fn bind_seeded(standin: &mut StandIn, request_id: &str, _session_id: &str) {
+        standin
+            .bind_stored_grant(request_id)
             .expect("a registered instance binds its own owned root");
-        let grant = standin
-            .grants
-            .iter_mut()
-            .find(|grant| grant.request_id == request_id)
-            .expect("the seeded grant is stored");
-        grant.binding = Some(bound);
     }
 
     fn grant_record(standin: &StandIn, request_id: &str) -> (Life, bool) {
