@@ -4510,6 +4510,8 @@ mod tests {
         );
     }
 
+    /// Child half of `linux_model_startup_starts_provider_through_the_egress_filtered_spawn`:
+    /// it runs the real `setup_gateway_infrastructure()`, which starts the
     /// model provider here, so the probe's own file records what that route
     /// bound.
     #[cfg(target_os = "linux")]
