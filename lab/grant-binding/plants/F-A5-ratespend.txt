@@ -1,0 +1,10 @@
+id: F-A5-ratespend
+file: src/lib.rs
+test: ops::model_rate_does_not_spend_the_effect_count
+--- old
+        if grant.record.effect_limit.is_some() {
+            grant.record.effects += 1;
+        }
+--- new
+        grant.record.effects += 1;
+--- end
