@@ -1801,6 +1801,30 @@ mod tests {
     }
 
     #[test]
+    fn provider_authority_rights_reject_empty_rules() {
+        let mut value: Value = serde_json::from_str(include_str!(
+            "../../../../capsules/did-provider/capsule.json"
+        ))
+        .unwrap();
+        value["authority"]["rights"][0]["rules"] = serde_json::json!([]);
+        let manifest: CapsuleManifest = serde_json::from_value(value).unwrap();
+        let err = manifest.validate().unwrap_err();
+        assert!(err.contains("\"storage\" must declare its rules"), "{err}");
+
+        let mut value: Value = serde_json::from_str(include_str!(
+            "../../../../capsules/did-provider/capsule.json"
+        ))
+        .unwrap();
+        value["authority"]["rights"][0]["rules"] = serde_json::json!(["   "]);
+        let manifest: CapsuleManifest = serde_json::from_value(value).unwrap();
+        let err = manifest.validate().unwrap_err();
+        assert!(
+            err.contains("\"storage\" must not declare an empty rule"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn manifest_accepts_old_and_new_provider_formats() {
         let old: CapsuleManifest = serde_json::from_str(include_str!(
             "../../../../capsules/model-provider/capsule.json"
