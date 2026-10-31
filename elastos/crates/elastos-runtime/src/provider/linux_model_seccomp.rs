@@ -125,6 +125,11 @@ mod tests {
     /// Set only in the helper process it starts, so a row that inherits the row
     /// variable still names the live sibling.
     const VICTIM_SELF_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_VICTIM_SELF";
+    /// Set only for the unfiltered probe in a victim row's sibling control: the
+    /// probe runs from the filtered probe's position (a sibling of the helper)
+    /// but takes no filter, so its success proves the position can reach the
+    /// helper and only the deny entry refuses the filtered row.
+    const UNFILTERED_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_UNFILTERED";
     /// The test that serves as the helper sibling.
     const VICTIM_TEST: &str =
         "provider::linux_model_seccomp::tests::helper_sibling_serves_the_victim_rows";
@@ -499,12 +504,18 @@ mod tests {
         // `pidfd_getfd` deny entry alone.
         let borrowed = sys(libc::SYS_pidfd_getfd, [pidfd as _, 0, 0, 0, 0, 0]);
         let failed = errno();
-        close_all(&[pidfd as libc::c_int]);
-        if borrowed >= 0 {
+        // The borrowed descriptor stays open in the unfiltered sibling
+        // control, so that call really borrows from the helper. A negative
+        // pidfd fails both positions and would make the control prove nothing.
+        if std::env::var_os(UNFILTERED_VAR).is_none() || borrowed < 0 {
+            close_all(&[pidfd as libc::c_int]);
+        }
+        // The control checks the borrowed descriptor is a real fd. A filtered
+        // probe never gets here with one: the filter answers EPERM. `close_all`
+        // leaves its own errno, so the call's errno is restored for the check.
+        if borrowed >= 0 && std::env::var_os(UNFILTERED_VAR).is_none() {
             close_all(&[borrowed as libc::c_int]);
         }
-        // `close_all` leaves its own errno, so the call's errno is restored for
-        // the row's check.
         unsafe { *libc::__errno_location() = failed };
         borrowed
     }
@@ -565,24 +576,43 @@ mod tests {
     /// Runs one named row in the filtered probe.
     fn probe(wanted: &str) {
         // The redirection runs the probe with the row variable in this
-        // process, so the filter's own state is the first proof here.
-        assert_eq!(
-            unsafe { libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) },
-            2,
-            "the model filter was not attached"
-        );
-        // The probe runs under install_on_command, which sets no_new_privs
-        // before attaching the filter.
-        assert_eq!(
-            unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) },
-            1
-        );
+        // process, so the filter's own state is the first proof here. The
+        // unfiltered sibling control takes no filter on purpose.
+        let unfiltered = std::env::var_os(UNFILTERED_VAR).is_some();
+        if !unfiltered {
+            assert_eq!(
+                unsafe { libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) },
+                2,
+                "the model filter was not attached"
+            );
+            // The probe runs under install_on_command, which sets no_new_privs
+            // before attaching the filter.
+            assert_eq!(
+                unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) },
+                1
+            );
+        }
         let row = rows()
             .into_iter()
             .find(|row| row.name == wanted)
             .unwrap_or_else(|| panic!("row {wanted} was not requested by the harness"));
         let rc = (row.body)(row.domain, row.kind, row.protocol);
-        check(row.name, row.outcome, rc);
+        if unfiltered {
+            // The control expects the call to work here: a refusal of the
+            // position (Yama, for example) must fail loudly, never skip.
+            assert!(
+                rc >= row.outcome as libc::c_long,
+                "unfiltered sibling control for row {wanted}: rc {rc}, errno {}",
+                errno()
+            );
+            if rc >= 0 {
+                // A real descriptor, never a zero success code: closing it here
+                // also closes the one the row body kept open for this control.
+                close_all(&[rc as libc::c_int]);
+            }
+        } else {
+            check(row.name, row.outcome, rc);
+        }
         println!("{PROBE_TOKEN} {}", row.name);
     }
 
@@ -815,6 +845,16 @@ mod tests {
             return;
         }
         let pid = std::process::id() as libc::pid_t;
+        // pidfd_getfd needs ptrace-attach access. The probe is a sibling, not
+        // an ancestor, so Yama scope 1 (the Jetson) refuses it. Allow any
+        // tracer: test fixture only. A host without Yama answers EINVAL.
+        let permitted =
+            unsafe { libc::prctl(libc::PR_SET_PTRACER, libc::PR_SET_PTRACER_ANY, 0, 0, 0) };
+        assert!(
+            permitted == 0 || errno() == libc::EINVAL,
+            "helper PR_SET_PTRACER failed: errno {}",
+            errno()
+        );
         let token = victim_token(victim_parent(), pid);
         let staging = token.with_extension("tmp");
         std::fs::write(&staging, format!("{pid}\n")).expect("helper publication");
@@ -894,6 +934,10 @@ mod tests {
             .then(Victim::start);
         let total = all.len();
         let mut failures = Vec::new();
+        // Victim rows also get one unfiltered sibling control each; their
+        // failures are separate lines, never new rows in `rows()`.
+        let mut defects = Vec::new();
+        let controls = all.iter().filter(|row| is_victim(row.name)).count();
         // Control: every row's body answers without the filter, so only the
         // filter can refuse it. A send row answers a peer with no reader with
         // EAGAIN, and a receive row reads a message its own pair carries. Each
@@ -951,6 +995,16 @@ mod tests {
         }
         for row in all {
             let name = row.name;
+            // A victim row's filtered probe is a sibling of the helper, so its
+            // control runs from that same position without a filter. A
+            // position the host refuses (Yama scope 1 for a non-ancestor) then
+            // fails here by name instead of passing the row vacuously.
+            if is_victim(name) {
+                if let Err(failure) = sibling_control(victim.as_ref().expect("helper"), &row).await
+                {
+                    defects.push(failure);
+                }
+            }
             // The descendant test serves the row that ends in a signal.
             let filter = match row.outcome {
                 KILLED => DESCENDANT_TEST,
@@ -995,11 +1049,43 @@ mod tests {
             }
         }
         println!("ROWS: {total} checked, {} failed", failures.len());
+        println!(
+            "SIBLING CONTROLS: {controls} checked, {} failed",
+            defects.len()
+        );
+        failures.extend(defects);
         assert!(
             failures.is_empty(),
-            "{} of {total} rows failed:\n{}",
+            "{} of {} rows and controls failed:\n{}",
             failures.len(),
+            total + controls,
             failures.join("\n")
         );
+    }
+
+    /// The unfiltered control from the filtered probe's position: a sibling of
+    /// the helper, same row command, no filter. Its body must get a real
+    /// descriptor back; any other answer names this control in a failure.
+    async fn sibling_control(victim: &Victim, row: &Row) -> Result<(), String> {
+        let name = row.name;
+        let mut command = Command::new(std::env::current_exe().expect("test executable path"));
+        command
+            .arg("--exact")
+            .arg(PROBE_TEST_NAME)
+            .arg("--nocapture")
+            .env(ROW_VAR, name)
+            .env(VICTIM_PID_VAR, victim.pid.to_string())
+            .env(UNFILTERED_VAR, "1")
+            .stdout(std::process::Stdio::from(
+                std::fs::File::create(probe_token(name)).expect("control token file"),
+            ))
+            .stderr(std::process::Stdio::null());
+        let mut child = spawn_row(&mut command);
+        match finish_probe(name, row, &mut child).await {
+            None => Ok(()),
+            Some(_) => Err(format!(
+                "row {name} sibling: unfiltered sibling control failed"
+            )),
+        }
     }
 }
