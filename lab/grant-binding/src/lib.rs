@@ -215,6 +215,13 @@ impl Verifier {
         Ok(handle)
     }
 
+    /// Ends one grant through the one `end_grant`.
+    pub fn revoke_grant(&mut self, handle: Handle) -> Result<(), Refuse> {
+        #[rustfmt::skip]
+        self.end_grant(handle);
+        Ok(())
+    }
+
     /// Changes the registry identity for a live instance.
     pub fn host_set_identity(
         &mut self,
@@ -1847,4 +1854,34 @@ fn model_home_direct_mint_is_refused() {
         .use_grant(verifier.open_call(photo), &guest(handle))
         .expect("photo effect");
     assert_eq!(decision.identity, "photo");
+}
+
+#[test]
+fn model_revoke_one_app_stops_only_that_app() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let notes = verifier.register_instance("notes", "session-a");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("photo ask");
+    let pad = verifier
+        .bind_grant(notes, "UsersAI/notes/pad", rights())
+        .expect("notes ask");
+    assert_ne!(library, pad);
+    let photo_call = verifier.open_call(photo);
+    let notes_call = verifier.open_call(notes);
+    verifier
+        .use_grant(photo_call, &guest(library))
+        .expect("photo effect");
+    verifier.revoke_grant(library).expect("revoke photo");
+    let stopped = verifier
+        .use_grant(photo_call, &guest(library))
+        .expect_err("ended photo effect");
+    assert_eq!(stopped, Refuse::UnknownHandle);
+    assert_eq!(stopped.to_string(), "unknown handle");
+    let kept = verifier
+        .use_grant(notes_call, &guest(pad))
+        .expect("notes grant stays");
+    assert_eq!(kept.identity, "notes");
+    assert_eq!(kept.owned_root, "UsersAI/notes/pad");
 }
