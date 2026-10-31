@@ -57,6 +57,7 @@ use capsule_identity::{
     checked_bundle, verify_checked_signature, CheckedBundle, LabCid, NameSignature, Refusal,
 };
 use grant_binding::{
+    ledger::{Reservation, SettleOutcome, SettleRefuse},
     AdmitRefuse, BudgetAsk, GuestRequest, Handle, InstanceId, Refuse, Rights, Verifier,
 };
 use serde_json::{json, Map, Value};
@@ -1282,12 +1283,13 @@ impl StandIn {
     /// The one use path. `post_capability_validate` and
     /// `post_hosted_effect` are its routes.
     ///
-    /// A use is three steps in one order: `authorise` decides, `admit_effect`
-    /// holds the ask against the grant's consumed budget and the one ceiling
-    /// on the shared ledger, and only then `spend_once` stores `Exhausted` for
-    /// a `once` grant. Every refusal runs before that store, so a refused use
-    /// leaves the grant live and unspent, and an admitted ask spends it once.
-    /// An ask holds its whole amount or is refused holding nothing.
+    /// A use is `authorise`, then `admit_effect`, which holds the whole ask
+    /// or refuses holding nothing. A `session` grant keeps that hold, so the
+    /// ceiling rows still score it. A `once` grant settles the hold with
+    /// `SettleOutcome::Known` for that amount and does not release a settled
+    /// reservation. If `settle` fails, a hold that is still outstanding is
+    /// released, the grant stays `Live`, and that error is returned. Only a
+    /// settled `once` ask stores `Exhausted`.
     fn use_grant(
         &mut self,
         caller: Caller<'_>,
@@ -1305,9 +1307,29 @@ impl StandIn {
                 grant.duration == "once",
             )
         };
-        self.admit_effect(&session_id, binding, amount)?;
-        if once {
+        let reservation = self.admit_effect(&session_id, binding, amount)?;
+        if !once {
+            return Ok(());
+        }
+        let handle = binding.expect("admit_effect holds a stored handle");
+        let settled = {
+            let instance = self.instance_on_ledger(&session_id);
+            let call = self.ledger.open_call(instance);
+            let request = guest_request(handle);
+            self.ledger
+                .settle(&call, &request, reservation, SettleOutcome::Known(amount))
+        };
+        if settled.is_ok() {
             self.grants[index].life = Life::Exhausted;
+        }
+        if let Err(refusal) = settled {
+            if !matches!(refusal, SettleRefuse::NotOutstanding) {
+                let instance = self.instance_on_ledger(&session_id);
+                let call = self.ledger.open_call(instance);
+                let request = guest_request(handle);
+                let _ = self.ledger.release(&call, &request, reservation);
+            }
+            return Err((403, refusal.to_string()));
         }
         Ok(())
     }
@@ -1349,6 +1371,104 @@ impl StandIn {
             return Err(plan_not_bound());
         }
         Ok(index)
+    }
+
+    /// Lab test seam, not a route.
+    ///
+    /// The one hostcall. A capability line calls `post_capability_request`
+    /// for the capsule id. An invoke line calls `use_grant` with no run id,
+    /// no plan hash, and the amount from `body`. The principal argument does
+    /// not choose the caller.
+    pub fn bridge_envelope(
+        &mut self,
+        line: &str,
+        capsule_id: &str,
+        principal: Option<&str>,
+    ) -> Result<String, String> {
+        let _ = principal;
+        let parsed: Value =
+            serde_json::from_str(line).map_err(|err| format!("Invalid JSON: {err}"))?;
+        let Some(request) = parsed.get("request").filter(|request| request.is_object()) else {
+            return Err("Invalid JSON: request must be an object".to_owned());
+        };
+        let id = match parsed.get("id") {
+            None => 0,
+            Some(value) => value
+                .as_u64()
+                .ok_or_else(|| "bridge id must be a number".to_owned())?,
+        };
+        let request = request.as_object().expect("the request object was checked");
+        let denied = |message: &str| {
+            serde_json::to_string(&json!({
+                "id": id,
+                "response": {
+                    "type": "error",
+                    "code": "denied",
+                    "message": message,
+                }
+            }))
+            .expect("the bridge error envelope is one JSON object")
+        };
+        let accepted = |data: Value| {
+            serde_json::to_string(&json!({
+                "id": id,
+                "response": {
+                    "type": "ok",
+                    "data": data,
+                }
+            }))
+            .expect("the bridge ok envelope is one JSON object")
+        };
+        let caller = Caller::Client {
+            session_id: capsule_id,
+        };
+        match request.get("type").and_then(Value::as_str) {
+            Some("request_capability") => {
+                let mut body = Map::new();
+                for (key, value) in request {
+                    if key != "type" {
+                        body.insert(key.clone(), value.clone());
+                    }
+                }
+                match self.post_capability_request(caller, &Value::Object(body)) {
+                    Ok(data) => Ok(accepted(data)),
+                    Err((_, reason)) => Ok(denied(&reason)),
+                }
+            }
+            Some("resource_invoke") => {
+                let token = match request.get("token") {
+                    None => "",
+                    Some(Value::String(text)) => text.as_str(),
+                    Some(_) => return Err("invoke token must be a string".to_owned()),
+                };
+                let amount = match request.get("body") {
+                    Some(Value::Object(object)) if object.contains_key("amount") => {
+                        match ask_amount(object.get("amount")) {
+                            Ok(0) => {
+                                return Ok(denied("budget ask needs a positive integer amount"));
+                            }
+                            Ok(amount) => amount,
+                            Err((_, reason)) => return Ok(denied(&reason)),
+                        }
+                    }
+                    _ => {
+                        return Ok(denied("budget ask needs a non-negative integer amount"));
+                    }
+                };
+                if amount > 4_096 {
+                    let reason = admit_text(&AdmitRefuse::OverBudget {
+                        cap: 4_096,
+                        asked: amount,
+                    });
+                    return Ok(denied(&reason));
+                }
+                match self.use_grant(caller, token, None, None, amount) {
+                    Ok(()) => Ok(accepted(Value::Null)),
+                    Err((_, reason)) => Ok(denied(&reason)),
+                }
+            }
+            _ => Ok(denied("unsupported bridge request")),
+        }
     }
 
     /// Lab test seam, not a route.
@@ -1792,7 +1912,7 @@ impl StandIn {
         session_id: &str,
         binding: Option<Handle>,
         asked: u64,
-    ) -> Result<(), (u16, String)> {
+    ) -> Result<Reservation, (u16, String)> {
         let instance = self.instance_on_ledger(session_id);
         let call = self.ledger.open_call(instance);
         let Some(handle) = binding else {
@@ -1809,10 +1929,7 @@ impl StandIn {
                 }),
             ));
         }
-        self.ledger
-            .reserve(&call, &request, asked)
-            .map_err(refuse)
-            .map(|_| ())
+        self.ledger.reserve(&call, &request, asked).map_err(refuse)
     }
 
     fn not_admitted(&self, cid: LabCid) -> (u16, String) {
@@ -9716,5 +9833,721 @@ mod tests {
             "the stand-in did the work: the reads leave the runtime denial record as it was"
         );
         assert_live_request_ids_empty(&standin, "the denial read leaves no live grant");
+    }
+
+    fn bridge_object(result: Result<String, String>, note: &str) -> Value {
+        let text = result.unwrap_or_else(|err| {
+            panic!("the stand-in did the work: {note} returns one object, not {err}")
+        });
+        serde_json::from_str(&text).unwrap_or_else(|err| {
+            panic!("the stand-in did the work: {note} is one JSON object: {err}")
+        })
+    }
+
+    fn assert_envelope_keys(value: &Value, note: &str) {
+        assert_keys(
+            value,
+            &["id", "response"],
+            &format!("the stand-in did the work: {note} returns id and response"),
+        );
+    }
+
+    fn assert_ok(value: &Value, id: u64, data: Value, note: &str) {
+        assert_eq!(
+            value["id"],
+            json!(id),
+            "the stand-in did the work: {note} keeps the bridge id"
+        );
+        assert_envelope_keys(value, note);
+        let response = &value["response"];
+        assert_keys(
+            response,
+            &["data", "type"],
+            &format!("the stand-in did the work: {note} answers with type and data"),
+        );
+        assert_eq!(
+            response["type"],
+            json!("ok"),
+            "the stand-in did the work: {note}"
+        );
+        assert_eq!(response["data"], data, "the stand-in did the work: {note}");
+    }
+
+    fn assert_denied(value: &Value, id: u64, message: &str, note: &str) {
+        assert_eq!(
+            value["id"],
+            json!(id),
+            "the stand-in did the work: {note} keeps the bridge id"
+        );
+        assert_envelope_keys(value, note);
+        let response = &value["response"];
+        assert_keys(
+            response,
+            &["code", "message", "type"],
+            &format!("the stand-in did the work: {note} answers with type, code and message"),
+        );
+        assert_eq!(
+            response,
+            &json!({
+                "type": "error",
+                "code": "denied",
+                "message": message,
+            }),
+            "the stand-in did the work: {note}"
+        );
+    }
+
+    fn request_ids_stored(standin: &StandIn) -> BTreeSet<String> {
+        standin
+            .requests
+            .iter()
+            .map(|request| request.request_id.clone())
+            .collect()
+    }
+
+    /// The one hostcall records a capability line for the capsule and spends
+    /// the invoke amount from the body. A passing row gives the Runtime no A3
+    /// credit. Two-capsule-run owns the real component bytes.
+    #[test]
+    fn standin_bridge_envelope_records_the_capsule_request() {
+        const PLAN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let shared = Shared::new();
+        let mut standin = StandIn::new();
+        launch_two_running(&shared, &mut standin);
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 is running before the hostcall",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 is running before the hostcall",
+        );
+
+        let capability = format!(
+            r#"{{"id":7,"request":{{"type":"request_capability","resource":"{SHARED_RESOURCE}","action":"read","reason":"read shared"}}}}"#
+        );
+        let first = bridge_object(
+            standin.bridge_envelope(&capability, "component-1", Some("person-a")),
+            "the first capability line",
+        );
+        assert_ok(
+            &first,
+            7,
+            json!({"status": "pending", "request_id": "request-1"}),
+            "the first capability line",
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![pending_request("request-1", "component-1")],
+            "the stand-in did the work: component-1 stores the capability line"
+        );
+        assert!(
+            request_entries(&standin, "component-2").is_empty(),
+            "the stand-in did the work: component-2 stores nothing from component-1's line"
+        );
+
+        let second = bridge_object(
+            standin.bridge_envelope(&capability, "component-2", None),
+            "the second capability line",
+        );
+        assert_eq!(
+            second["response"]["data"]["request_id"],
+            json!("request-2"),
+            "the stand-in did the work: component-2's line is its own request"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![pending_request("request-1", "component-1")],
+            "the stand-in did the work: component-1 still has only request-1"
+        );
+
+        let foreign = r#"{"id":7,"request":{"type":"request_capability","resource":"https://example","action":"read","reason":"read shared"}}"#;
+        let refused_scheme = bridge_object(
+            standin.bridge_envelope(foreign, "component-1", None),
+            "the unsupported scheme",
+        );
+        assert_denied(
+            &refused_scheme,
+            7,
+            "Unsupported resource scheme. Allowed: elastos://, localhost://",
+            "the unsupported scheme",
+        );
+        assert!(
+            !request_ids_stored(&standin).contains("request-3"),
+            "the stand-in did the work: the unsupported scheme stores no request-3"
+        );
+
+        let not_json = standin.bridge_envelope("not json", "component-1", None);
+        let not_json = not_json.expect_err("the stand-in did the work: not json is refused");
+        assert!(
+            not_json.contains("Invalid JSON"),
+            "the stand-in did the work: not json names Invalid JSON: {not_json}"
+        );
+        assert!(
+            !not_json.contains("request must be an object"),
+            "the stand-in did the work: not json is not a missing request: {not_json}"
+        );
+        for line in [r#"{"id":7}"#, r#"{"id":7,"request":"nope"}"#] {
+            assert_eq!(
+                standin.bridge_envelope(line, "component-1", None),
+                Err("Invalid JSON: request must be an object".to_owned()),
+                "the stand-in did the work: {line} needs a request object"
+            );
+        }
+        let stored = request_ids_stored(&standin);
+        for line in [
+            r#"{"id":"7","request":{"type":"request_capability","resource":"localhost://Public/resident-instances/shared.txt","action":"read","reason":"read shared"}}"#,
+            r#"{"id":7.5,"request":{"type":"request_capability","resource":"localhost://Public/resident-instances/shared.txt","action":"read","reason":"read shared"}}"#,
+            r#"{"id":-1,"request":{"type":"request_capability","resource":"localhost://Public/resident-instances/shared.txt","action":"read","reason":"read shared"}}"#,
+        ] {
+            assert_eq!(
+                standin.bridge_envelope(line, "component-1", None),
+                Err("bridge id must be a number".to_owned()),
+                "the stand-in did the work: {line} keeps a non-number id out of the store"
+            );
+        }
+        assert_eq!(
+            request_ids_stored(&standin),
+            stored,
+            "the stand-in did the work: a bad bridge id stores no further request"
+        );
+
+        let missing_resource = bridge_object(
+            standin.bridge_envelope(
+                r#"{"request":{"type":"request_capability","action":"read","reason":"read shared"}}"#,
+                "component-1",
+                None,
+            ),
+            "the line with no resource",
+        );
+        assert_denied(
+            &missing_resource,
+            0,
+            "request body needs resource",
+            "the line with no resource",
+        );
+        let bad_resource = bridge_object(
+            standin.bridge_envelope(
+                r#"{"id":9,"request":{"type":"request_capability","resource":1,"action":"read"}}"#,
+                "component-1",
+                None,
+            ),
+            "the non-string resource",
+        );
+        assert_eq!(
+            bad_resource["response"]["message"],
+            json!("request resource must be a string"),
+            "the stand-in did the work: a non-string resource is refused"
+        );
+        let no_reason = bridge_object(
+            standin.bridge_envelope(
+                r#"{"request":{"type":"request_capability","resource":"localhost://Public/resident-instances/shared.txt","action":"read"}}"#,
+                "component-1",
+                None,
+            ),
+            "the line with no reason",
+        );
+        assert_ok(
+            &no_reason,
+            0,
+            json!({"status": "pending", "request_id": "request-3"}),
+            "the line with no reason",
+        );
+        let request_3 = request_entries(&standin, "component-1")
+            .into_iter()
+            .find(|record| record["request_id"] == json!("request-3"))
+            .expect("the stand-in did the work: request-3 is stored");
+        assert_eq!(
+            request_3["reason"],
+            json!(""),
+            "the stand-in did the work: a missing reason is stored empty"
+        );
+        assert_eq!(
+            request_3["plan"],
+            Value::Null,
+            "the stand-in did the work: request-3 stores no plan"
+        );
+
+        let token_in_request = bridge_object(
+            standin.bridge_envelope(
+                r#"{"id":4,"request":{"type":"request_capability","resource":"localhost://Public/resident-instances/shared.txt","action":"read","reason":"read shared","token":"no"}}"#,
+                "component-1",
+                None,
+            ),
+            "the capability line that carries a token",
+        );
+        assert_eq!(
+            token_in_request["response"]["message"],
+            json!("request body rejects token"),
+            "the stand-in did the work: a capability line rejects token"
+        );
+        let planned = bridge_object(
+            standin.bridge_envelope(
+                &format!(
+                    r#"{{"id":5,"request":{{"type":"request_capability","resource":"{SHARED_RESOURCE}","action":"read","reason":"read shared","plan":"{PLAN}"}}}}"#
+                ),
+                "component-1",
+                None,
+            ),
+            "the planned capability line",
+        );
+        assert_eq!(
+            planned["response"]["data"]["request_id"],
+            json!("request-4"),
+            "the stand-in did the work: the planned line is request-4"
+        );
+        let request_4 = request_entries(&standin, "component-1")
+            .into_iter()
+            .find(|record| record["request_id"] == json!("request-4"))
+            .expect("the stand-in did the work: request-4 is stored");
+        assert_eq!(
+            request_4["plan"],
+            json!(PLAN),
+            "the stand-in did the work: request-4 stores the plan hash"
+        );
+        let before_ping = request_ids_stored(&standin);
+        let ping = bridge_object(
+            standin.bridge_envelope(r#"{"id":6,"request":{"type":"ping"}}"#, "component-1", None),
+            "the ping line",
+        );
+        assert_eq!(
+            ping["response"]["message"],
+            json!("unsupported bridge request"),
+            "the stand-in did the work: ping is not a bridge request"
+        );
+        assert_eq!(
+            request_ids_stored(&standin),
+            before_ping,
+            "the stand-in did the work: ping stores no further request"
+        );
+
+        let fifth = bridge_object(
+            standin.bridge_envelope(
+                &format!(
+                    r#"{{"id":15,"request":{{"type":"request_capability","resource":"{SHARED_RESOURCE}","action":"read","reason":"read shared"}}}}"#
+                ),
+                "component-1",
+                None,
+            ),
+            "the request-5 capability line",
+        );
+        assert_eq!(
+            fifth["id"],
+            json!(15),
+            "the stand-in did the work: the request-5 line keeps id 15"
+        );
+        assert_eq!(
+            fifth["response"]["data"]["request_id"],
+            json!("request-5"),
+            "the stand-in did the work: the next capability line is request-5"
+        );
+
+        assert_eq!(
+            standin.post_capability_grant(
+                Caller::Shell,
+                &json!({
+                    "request_id": "request-4",
+                    "duration": "once",
+                    "rationale": "grant the plan",
+                    "plan_sha256": PLAN,
+                }),
+            ),
+            Ok(json!({ "success": true })),
+            "the stand-in did the work: the shell grants the planned request"
+        );
+        let bound_line = format!(
+            r#"{{"id":12,"request":{{"type":"resource_invoke","uri":"{SHARED_RESOURCE}","operation":"read","body":{{"amount":1}},"token":"request-4"}}}}"#
+        );
+        let bound = bridge_object(
+            standin.bridge_envelope(&bound_line, "component-1", None),
+            "the bound invoke",
+        );
+        assert_eq!(
+            grant_record(&standin, "request-4"),
+            (Life::Live, false),
+            "the stand-in did the work: the bound grant stays live"
+        );
+        assert_eq!(
+            bound["response"]["message"],
+            json!("grant is not bound to this plan"),
+            "the stand-in did the work: the bound invoke is refused before any spend"
+        );
+
+        assert_eq!(
+            standin.post_capability_grant(
+                Caller::Shell,
+                &json!({
+                    "request_id": "request-5",
+                    "duration": "once",
+                    "rationale": "grant once",
+                }),
+            ),
+            Ok(json!({ "success": true })),
+            "the stand-in did the work: the shell grants request-5 once"
+        );
+        assert_eq!(
+            grant_record(&standin, "request-5"),
+            (Life::Live, false),
+            "the stand-in did the work: request-5 is live before its invoke"
+        );
+        let sibling_line = format!(
+            r#"{{"id":8,"request":{{"type":"resource_invoke","uri":"{SHARED_RESOURCE}","operation":"read","body":{{"amount":1}},"token":"request-5"}}}}"#
+        );
+        let sibling = bridge_object(
+            standin.bridge_envelope(&sibling_line, "component-2", Some("component-1")),
+            "the sibling invoke",
+        );
+        assert_denied(
+            &sibling,
+            8,
+            "wrong capsule: expected component-1, got component-2",
+            "the sibling invoke",
+        );
+        assert_eq!(
+            grant_record(&standin, "request-5"),
+            (Life::Live, false),
+            "the stand-in did the work: the sibling invoke leaves request-5 live"
+        );
+
+        let owner = |standin: &mut StandIn, id: u64, body: &str| {
+            let line = format!(
+                r#"{{"id":{id},"request":{{"type":"resource_invoke","uri":"{SHARED_RESOURCE}","operation":"read","body":{body},"token":"request-5"}}}}"#
+            );
+            bridge_object(
+                standin.bridge_envelope(&line, "component-1", None),
+                "an owner invoke of request-5",
+            )
+        };
+        let empty_body = owner(&mut standin, 17, "{}");
+        assert_eq!(
+            empty_body["response"]["message"],
+            json!("budget ask needs a non-negative integer amount"),
+            "the stand-in did the work: an empty body is refused"
+        );
+        assert_eq!(
+            grant_record(&standin, "request-5"),
+            (Life::Live, false),
+            "the stand-in did the work: the empty body leaves request-5 live"
+        );
+        let text_amount = owner(&mut standin, 17, r#"{"amount":"1"}"#);
+        assert_eq!(
+            text_amount["response"]["message"],
+            json!("budget ask needs a non-negative integer amount"),
+            "the stand-in did the work: a string amount is refused"
+        );
+        assert_eq!(
+            grant_record(&standin, "request-5"),
+            (Life::Live, false),
+            "the stand-in did the work: the string amount leaves request-5 live"
+        );
+        let zero = owner(&mut standin, 17, r#"{"amount":0}"#);
+        assert_eq!(
+            zero["response"]["message"],
+            json!("budget ask needs a positive integer amount"),
+            "the stand-in did the work: zero is refused"
+        );
+        assert_eq!(
+            grant_record(&standin, "request-5"),
+            (Life::Live, false),
+            "the stand-in did the work: zero leaves request-5 live"
+        );
+        let over = owner(&mut standin, 17, r#"{"amount":4097}"#);
+        assert_eq!(
+            over["response"]["message"],
+            json!("budget ask exceeds the admission cap: asked 4097, cap 4096"),
+            "the stand-in did the work: 4097 is refused and not clamped"
+        );
+        assert_eq!(
+            grant_record(&standin, "request-5"),
+            (Life::Live, false),
+            "the stand-in did the work: 4097 leaves request-5 live"
+        );
+
+        let spend_5 = format!(
+            r#"{{"id":14,"request":{{"type":"resource_invoke","uri":"{SHARED_RESOURCE}","operation":"read","body":{{"amount":1}},"token":"request-5","run_id":""}}}}"#
+        );
+        let spent_5 = bridge_object(
+            standin.bridge_envelope(&spend_5, "component-1", Some("person-a")),
+            "the owner spend of request-5",
+        );
+        assert_ok(&spent_5, 14, Value::Null, "the owner spend of request-5");
+        assert_eq!(
+            grant_record(&standin, "request-5"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: request-5 is spent"
+        );
+        let again = bridge_object(
+            standin.bridge_envelope(&spend_5, "component-1", Some("person-a")),
+            "the second spend of request-5",
+        );
+        assert_eq!(
+            again["response"]["message"],
+            json!("grant is not live: Exhausted"),
+            "the stand-in did the work: a second invoke finds request-5 exhausted"
+        );
+
+        let sixth = bridge_object(
+            standin.bridge_envelope(
+                &format!(
+                    r#"{{"id":16,"request":{{"type":"request_capability","resource":"{SHARED_RESOURCE}","action":"read","reason":"read shared"}}}}"#
+                ),
+                "component-1",
+                None,
+            ),
+            "the request-6 capability line",
+        );
+        assert_eq!(
+            sixth["response"]["data"]["request_id"],
+            json!("request-6"),
+            "the stand-in did the work: the next capability line is request-6"
+        );
+        assert_eq!(
+            standin.post_capability_grant(
+                Caller::Shell,
+                &json!({
+                    "request_id": "request-6",
+                    "duration": "once",
+                    "rationale": "grant once",
+                }),
+            ),
+            Ok(json!({ "success": true })),
+            "the stand-in did the work: the shell grants request-6 once"
+        );
+        let spend_6 = format!(
+            r#"{{"id":18,"request":{{"type":"resource_invoke","uri":"{SHARED_RESOURCE}","operation":"read","body":{{"amount":1}},"token":"request-6","run_id":""}}}}"#
+        );
+        let spent_6 = bridge_object(
+            standin.bridge_envelope(&spend_6, "component-1", None),
+            "the owner spend of request-6",
+        );
+        assert_ok(&spent_6, 18, Value::Null, "the owner spend of request-6");
+        assert_eq!(
+            grant_record(&standin, "request-6"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: two once grants of amount 1 are both spent"
+        );
+
+        let seventh = bridge_object(
+            standin.bridge_envelope(
+                &format!(
+                    r#"{{"id":19,"request":{{"type":"request_capability","resource":"{SHARED_RESOURCE}","action":"read","reason":"read shared"}}}}"#
+                ),
+                "component-1",
+                None,
+            ),
+            "the request-7 capability line",
+        );
+        assert_eq!(
+            seventh["response"]["data"]["request_id"],
+            json!("request-7"),
+            "the stand-in did the work: the next capability line is request-7"
+        );
+        assert_eq!(
+            standin.post_capability_grant(
+                Caller::Shell,
+                &json!({
+                    "request_id": "request-7",
+                    "duration": "once",
+                    "rationale": "grant once",
+                }),
+            ),
+            Ok(json!({ "success": true })),
+            "the stand-in did the work: the shell grants request-7 once"
+        );
+        let spend_7 = format!(
+            r#"{{"id":20,"request":{{"type":"resource_invoke","uri":"{SHARED_RESOURCE}","operation":"read","body":{{"amount":4096}},"token":"request-7"}}}}"#
+        );
+        let spent_7 = bridge_object(
+            standin.bridge_envelope(&spend_7, "component-1", None),
+            "the full-ceiling spend of request-7",
+        );
+        assert_ok(
+            &spent_7,
+            20,
+            Value::Null,
+            "the full-ceiling spend of request-7",
+        );
+        assert_eq!(
+            grant_record(&standin, "request-7"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: amount 4096 is spent after the settled asks"
+        );
+
+        standin.seed_grant(
+            "req-tok",
+            "component-1",
+            SHARED_RESOURCE,
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        assert_eq!(
+            standin.bridge_envelope(
+                r#"{"id":10,"request":{"type":"resource_invoke","token":1}}"#,
+                "component-1",
+                None,
+            ),
+            Err("invoke token must be a string".to_owned()),
+            "the stand-in did the work: a non-string token is refused"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-tok"),
+            (Life::Live, false),
+            "the stand-in did the work: the bad token leaves req-tok live"
+        );
+        let missing_token = bridge_object(
+            standin.bridge_envelope(
+                &format!(
+                    r#"{{"id":11,"request":{{"type":"resource_invoke","uri":"{SHARED_RESOURCE}","operation":"read","body":{{"amount":1}}}}}}"#
+                ),
+                "component-1",
+                None,
+            ),
+            "the invoke with no token",
+        );
+        assert_eq!(
+            missing_token["response"]["message"],
+            json!("unknown grant"),
+            "the stand-in did the work: a missing token is an empty grant id"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-tok"),
+            (Life::Live, false),
+            "the stand-in did the work: the empty token leaves req-tok live"
+        );
+        let undeclared = bridge_object(
+            standin.bridge_envelope(
+                r#"{"id":13,"request":{"type":"request_capability","resource":"localhost://Public/resident-instances/other.txt","action":"read","reason":"read shared"}}"#,
+                "component-1",
+                None,
+            ),
+            "the undeclared ask",
+        );
+        assert_eq!(
+            undeclared["response"]["message"],
+            json!(
+                "ask not declared in the signed manifest: localhost://Public/resident-instances/other.txt read"
+            ),
+            "the stand-in did the work: an undeclared ask is refused"
+        );
+        assert!(
+            !request_ids_stored(&standin).contains("request-8"),
+            "the stand-in did the work: the undeclared ask stores no request-8"
+        );
+        assert_eq!(
+            request_ids(&shell_pair(&standin).0),
+            BTreeSet::from(["req-tok".to_owned(), "request-4".to_owned()]),
+            "the stand-in did the work: the shell live view keeps req-tok and request-4"
+        );
+        for spent in ["request-5", "request-6", "request-7"] {
+            assert_eq!(
+                grant_record(&standin, spent),
+                (Life::Exhausted, false),
+                "the stand-in did the work: {spent} stays exhausted and off the live view"
+            );
+        }
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 stays running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running",
+        );
+    }
+
+    /// The hostcall text calls `use_grant` with the body amount. `use_grant`
+    /// settles that hold and releases it only when settle fails.
+    #[test]
+    fn standin_hostcall_calls_use_grant() {
+        let source = include_str!("mod.rs");
+        let bridge_at = source
+            .find("fn bridge_envelope")
+            .expect("the stand-in did the work: the hostcall is bridge_envelope");
+        let bridge_rest = &source[bridge_at..];
+        let resident_at = bridge_rest
+            .find("fn admit_resident")
+            .expect("the stand-in did the work: bridge_envelope sits above admit_resident");
+        let slice = &bridge_rest[..resident_at];
+        assert!(
+            slice.contains("use_grant"),
+            "the stand-in did the work: the hostcall calls use_grant"
+        );
+        assert!(
+            slice.contains("ask_amount"),
+            "the stand-in did the work: the hostcall reads the amount through ask_amount"
+        );
+        assert!(
+            !slice.contains("ask_amount(None)"),
+            "the stand-in did the work: the hostcall does not ask for the cap"
+        );
+        assert!(
+            !slice.contains("self.authorise"),
+            "the stand-in did the work: the hostcall does not call authorise"
+        );
+        assert!(
+            !slice.contains("post_capability_validate"),
+            "the stand-in did the work: the hostcall does not call post_capability_validate"
+        );
+        assert!(
+            !slice.contains("EFFECT_BUDGET_CAP"),
+            "the stand-in did the work: the hostcall does not pass the cap"
+        );
+        assert!(
+            !slice.contains(".settle("),
+            "the stand-in did the work: the hostcall does not settle"
+        );
+        assert!(
+            !slice.contains(".release("),
+            "the stand-in did the work: the hostcall does not release"
+        );
+
+        let use_at = source
+            .find("fn use_grant")
+            .expect("the stand-in did the work: use_grant is the one use path");
+        let use_rest = &source[use_at..];
+        let next_fn = use_rest[3..]
+            .find("fn ")
+            .map(|index| index + 3)
+            .expect("the stand-in did the work: use_grant is followed by another function");
+        let use_slice = &use_rest[..next_fn];
+        assert!(
+            use_slice.contains(".settle("),
+            "the stand-in did the work: use_grant settles the hold"
+        );
+        assert!(
+            use_slice.contains(".release("),
+            "the stand-in did the work: use_grant releases a hold settle did not keep"
+        );
+        let admit_at = use_slice
+            .find("admit_effect")
+            .expect("the stand-in did the work: use_grant admits the ask");
+        let exhausted_at = use_slice[admit_at..]
+            .find("Exhausted")
+            .map(|index| admit_at + index)
+            .expect("the stand-in did the work: a once grant stores Exhausted");
+        let spent = &use_slice[admit_at..exhausted_at];
+        assert!(
+            spent.contains(".settle("),
+            "the stand-in did the work: the successful ask is settled before the once spend"
+        );
+        assert!(
+            !spent.contains(".release("),
+            "the stand-in did the work: a settled spend is not released"
+        );
     }
 }
