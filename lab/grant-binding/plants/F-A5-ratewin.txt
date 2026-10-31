@@ -1,0 +1,14 @@
+id: F-A5-ratewin
+file: src/lib.rs
+test: ops::model_new_window_allows_one_effect
+--- old
+        if now >= end {
+            grant.record.window_start = now;
+            grant.record.window_effects = 0;
+        }
+--- new
+        if now >= end {
+            let _ = now;
+            let _ = grant.record.window_effects;
+        }
+--- end
