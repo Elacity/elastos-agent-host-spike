@@ -943,6 +943,12 @@ one caller without starting a process: with `macos` and a missing
 `sandbox-exec` it fails the test with the gate's reason, and with `macos` and
 a present one it returns `true`. It runs on every supported build target.
 
+One rule,
+`tests_sections_name_the_crate_that_holds_each_cited_test`, holds this section
+and did's to the crate that declares each test they cite: a cited test that
+lives in the other crate must be named with that crate's
+`tests/confine.rs`, so a reader can tell which crate runs it.
+
 ## Falsifiers
 
 Falsifier procedure (run against a temporary edit, then restore the profile):
@@ -1582,6 +1588,12 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - WP235: The cited-name check accepts any fourth-cell name, so a cell citing a
   name that nothing holds passes.
   `linux_contract_table_covers_every_committed_allow_form` checks this rule.
+- WP236: The sibling check accepts any paragraph, so a did paragraph naming a
+  wallet test under "in the same file" passes.
+  `tests_sections_name_the_crate_that_holds_each_cited_test` checks this rule.
+- WP237: The set compare accepts two unequal lists, so a crate that declares a
+  second OS passes.
+  `tests_sections_name_the_crate_that_holds_each_cited_test` checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

@@ -308,8 +308,13 @@ use std::process::Command;
 /// a committed allow form that no row quotes, so a grant with no Linux row
 /// passes; and WP235, which accepts any fourth-cell name, so a cell citing a
 /// name that nothing holds passes. Both are CAUGHT on the Mac by
-/// `linux_contract_table_covers_every_committed_allow_form`.
-const EXPECTED_FALSIFIERS: usize = 215;
+/// `linux_contract_table_covers_every_committed_allow_form`. Task 167 adds
+/// WP236, which makes the sibling check accept any paragraph, so a did
+/// paragraph naming a wallet test under "in the same file" passes; and WP237,
+/// which makes the set compare accept two unequal lists, so a crate that
+/// declares a second OS passes. Both are CAUGHT on the Mac by
+/// `tests_sections_name_the_crate_that_holds_each_cited_test`.
+const EXPECTED_FALSIFIERS: usize = 217;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

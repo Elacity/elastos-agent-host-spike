@@ -3493,6 +3493,38 @@
       "tests": [
         "linux_contract_table_covers_every_committed_allow_form"
       ]
+    },
+    {
+      "id": "WP236",
+      "title": "the sibling check accepts any paragraph, so a did paragraph naming a wallet test under \"in the same file\" passes",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            if sibling && !own && !names_sibling_file {\n",
+          "new": "            if sibling && !own && !names_sibling_file && false {\n"
+        }
+      ],
+      "tests": [
+        "tests_sections_name_the_crate_that_holds_each_cited_test"
+      ]
+    },
+    {
+      "id": "WP237",
+      "title": "the set compare accepts two unequal lists, so a crate that declares a second OS passes",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    if as_set(first) == as_set(second) {\n        return Vec::new();\n    }\n",
+          "new": "    if as_set(first) != as_set(second) {\n        return Vec::new();\n    }\n"
+        }
+      ],
+      "tests": [
+        "tests_sections_name_the_crate_that_holds_each_cited_test"
+      ]
     }
   ]
 }

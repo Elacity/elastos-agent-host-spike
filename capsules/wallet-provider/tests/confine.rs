@@ -12971,6 +12971,27 @@ const PROFILE_ALLOW_HEADING: &str = "## What the profile allows";
 /// derives.
 const PROFILE_PARAMETERS_HEADING: &str = "## Profile parameters";
 
+/// The heading line every confinement document uses for the section that says
+/// which tests hold its rules.
+const TESTS_HEADING: &str = "## Tests";
+
+/// The heading line every confinement document uses for the section that
+/// states the host OSes its confinement tests exercise.
+const HOST_OS_HEADING: &str = "## Host-OS status";
+
+/// The one declaration each `tests/confine.rs` file holds the OSes its
+/// confinement tests exercise in. The two files are two test binaries, so no
+/// constant can be shared by `use`; the rule reads the sibling file as text.
+const DECLARED_OS_CONST: &str = "const DECLARED_CONFINED_OS";
+
+/// The path of the one test source that holds `DECLARED_OS_CONST`, as every
+/// refusal of the declared-OS reader names it.
+const CONFINEMENT_TEST_FILE: &str = "tests/confine.rs";
+
+/// How many characters of a paragraph's first words a refusal quotes, so a
+/// reader can find the paragraph without the refusal repeating it whole.
+const FIRST_WORDS_LIMIT: usize = 60;
+
 /// The heading line of the one table that maps each oracle rule of the file
 /// profile to the Linux primitive that would carry it.
 const LINUX_CONTRACT_HEADING: &str = "## The contract on Linux";
@@ -14007,6 +14028,192 @@ fn operations_table_citation_problems(
     if citations.is_empty() {
         problems.push(format!(
             "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} cites no file::fn test"
+        ));
+    }
+    problems
+}
+
+/// The paragraphs of a section: its lines split at each blank line, so a
+/// paragraph is the text a reader sees as one block.
+fn section_paragraphs(section: &str) -> Vec<String> {
+    let mut paragraphs = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    for line in section.lines() {
+        if line.trim().is_empty() {
+            if !current.is_empty() {
+                paragraphs.push(current.join("\n"));
+                current.clear();
+            }
+            continue;
+        }
+        current.push(line);
+    }
+    if !current.is_empty() {
+        paragraphs.push(current.join("\n"));
+    }
+    paragraphs
+}
+
+/// The first words of `paragraph`, on one line, so a refusal names the
+/// paragraph a reader has to find without repeating it whole.
+fn paragraph_first_words(paragraph: &str) -> String {
+    let flat = paragraph.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= FIRST_WORDS_LIMIT {
+        return flat;
+    }
+    let mut cut: String = flat.chars().take(FIRST_WORDS_LIMIT).collect();
+    cut.push('…');
+    cut
+}
+
+/// The OS names `source` declares in its one `DECLARED_OS_CONST` line, or a
+/// refusal that names `path` and the reason.
+///
+/// The line is one line that starts `DECLARED_OS_CONST`, and its strings are
+/// the `"`-quoted names on that line. A source with no such line, a source with
+/// more than one, and a line that holds no quoted name are each a refusal with
+/// its own reason, so a missing constant is never read as an empty list. Every
+/// refusal names `path`, so a reader knows which file to fix.
+fn declared_confinement_os(path: &str, source: &str) -> Result<Vec<String>, String> {
+    let lines: Vec<&str> = source
+        .lines()
+        .filter(|line| line.trim_start().starts_with(DECLARED_OS_CONST))
+        .collect();
+    if lines.is_empty() {
+        return Err(format!(
+            "{path} must hold one line {DECLARED_OS_CONST}; found none"
+        ));
+    }
+    if lines.len() > 1 {
+        return Err(format!(
+            "{path} must hold one line {DECLARED_OS_CONST}; found {}",
+            lines.len()
+        ));
+    }
+    let quoted: Vec<String> = lines[0]
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect();
+    if quoted.is_empty() {
+        return Err(format!(
+            "{path} {DECLARED_OS_CONST} holds no quoted OS name, so it declares nothing"
+        ));
+    }
+    Ok(quoted)
+}
+
+/// Every problem with one document's `HOST_OS_HEADING` section against one
+/// declared-OS list, each naming the document and the OS.
+///
+/// The section must name each OS of `list` in a backticked span. A missing or
+/// duplicated heading is the one section reader's own refusal, and a missing OS
+/// is one refusal naming the document and that OS, so a document that states a
+/// different declared list is refused rather than read as agreeing.
+fn declared_confinement_os_problems(
+    document_name: &str,
+    document: &str,
+    list: &[String],
+) -> Vec<String> {
+    let section = match section_under_one_heading(document_name, document, HOST_OS_HEADING) {
+        Ok(section) => section,
+        Err(problems) => return problems,
+    };
+    let named = backtick_spans(&section);
+    list.iter()
+        .filter(|os| !named.contains(&os.as_str()))
+        .map(|os| {
+            format!(
+                "{document_name} CONFINEMENT.md: {HOST_OS_HEADING} does not name `{os}` in \
+                 backticks, so it does not state the OS its own {CONFINEMENT_TEST_FILE} \
+                 {DECLARED_OS_CONST} declares"
+            )
+        })
+        .collect()
+}
+
+/// The one refusal when the two crates declare different OS sets, naming both
+/// lists, or no problem when they declare one set.
+///
+/// The lists are compared as sets, so a repeated name and a different order are
+/// not a difference. Nothing picks one list as the right one: a disagreement is
+/// refused with both, because each crate's document is held to its own.
+fn declared_confinement_os_set_problems(
+    first_name: &str,
+    first: &[String],
+    second_name: &str,
+    second: &[String],
+) -> Vec<String> {
+    let as_set = |list: &[String]| {
+        let mut sorted = list.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        sorted
+    };
+    if as_set(first) == as_set(second) {
+        return Vec::new();
+    }
+    vec![format!(
+        "capsules/{first_name}/{CONFINEMENT_TEST_FILE} declares [{}] and \
+         capsules/{second_name}/{CONFINEMENT_TEST_FILE} declares [{}], and the two providers must \
+         declare one OS set",
+        first.join(", "),
+        second.join(", ")
+    )]
+}
+
+/// Every problem with one document's `TESTS_HEADING` section, each naming the
+/// document, the name and the paragraph's first words.
+///
+/// A paragraph that names a test `sibling_source` declares and `own_source`
+/// does not must also name the sibling's `CONFINEMENT_TEST_FILE` by a path
+/// ending `<sibling_name>/tests/confine.rs`, so a reader can tell which crate
+/// runs the test. A section that cites no test of either crate is never read as
+/// a complete section. A missing or duplicated heading is the one section
+/// reader's own refusal.
+///
+/// Two honesty limits, and no more. A backtick span that is a test in neither
+/// crate is prose or a protocol code, so the rule says nothing about it. The
+/// rule is one-way: it does not require a crate to name every test it declares.
+fn tests_section_citation_problems(
+    document_name: &str,
+    document: &str,
+    own_source: &str,
+    sibling_name: &str,
+    sibling_source: &str,
+) -> Vec<String> {
+    let section = match section_under_one_heading(document_name, document, TESTS_HEADING) {
+        Ok(section) => section,
+        Err(problems) => return problems,
+    };
+    let sibling_file = format!("{sibling_name}/{CONFINEMENT_TEST_FILE}");
+    let mut problems = Vec::new();
+    let mut cited = 0;
+    for paragraph in section_paragraphs(&section) {
+        let names_sibling_file = paragraph.contains(&sibling_file);
+        let first_words = paragraph_first_words(&paragraph);
+        for span in backtick_spans(&paragraph) {
+            let own = source_declares_function(own_source, span);
+            let sibling = source_declares_function(sibling_source, span);
+            if own || sibling {
+                cited += 1;
+            }
+            if sibling && !own && !names_sibling_file {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {TESTS_HEADING} names `{span}`, which \
+                     capsules/{sibling_name}/{CONFINEMENT_TEST_FILE} declares and this crate's \
+                     {CONFINEMENT_TEST_FILE} does not, in the paragraph that starts \
+                     \"{first_words}\", without naming `{sibling_file}`"
+                ));
+            }
+        }
+    }
+    if cited == 0 {
+        problems.push(format!(
+            "{document_name} CONFINEMENT.md: {TESTS_HEADING} cites no test of this crate or of \
+             capsules/{sibling_name}/{CONFINEMENT_TEST_FILE}, so it cannot be read as a complete \
+             section"
         ));
     }
     problems
@@ -18575,6 +18782,442 @@ impl LinuxContractTables {
             ),
         ]
     }
+}
+
+/// The two documents and two test sources the two rules read, held once so
+/// both named tests drive one set of values.
+struct TestsSections {
+    did_document: String,
+    wallet_document: String,
+    did_source: String,
+    wallet_source: String,
+    did_os: Vec<String>,
+    wallet_os: Vec<String>,
+}
+
+impl TestsSections {
+    /// Reads both documents, both test sources and both declared-OS lists. A
+    /// missing document, test source or constant is a refusal that names its
+    /// path, so no provider is skipped.
+    fn read() -> Self {
+        let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("capsules/wallet-provider must sit under capsules/");
+        let did_document =
+            read_confinement_document(capsules, DID_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+        let wallet_document = read_confinement_document(capsules, WALLET_PROVIDER)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let did_source =
+            read_lane_test_source(capsules, DID_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+        let wallet_source =
+            read_lane_test_source(capsules, WALLET_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+        let did_os = declared_confinement_os(
+            &format!("capsules/{DID_PROVIDER}/{CONFINEMENT_TEST_FILE}"),
+            &did_source,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        let wallet_os = declared_confinement_os(
+            &format!("capsules/{WALLET_PROVIDER}/{CONFINEMENT_TEST_FILE}"),
+            &wallet_source,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        Self {
+            did_document,
+            wallet_document,
+            did_source,
+            wallet_source,
+            did_os,
+            wallet_os,
+        }
+    }
+
+    /// Every problem the three rules report over the two committed documents
+    /// and the two committed lists.
+    fn problems(&self) -> Vec<String> {
+        let mut problems = declared_confinement_os_set_problems(
+            DID_PROVIDER,
+            &self.did_os,
+            WALLET_PROVIDER,
+            &self.wallet_os,
+        );
+        problems.extend(tests_section_citation_problems(
+            DID_PROVIDER,
+            &self.did_document,
+            &self.did_source,
+            WALLET_PROVIDER,
+            &self.wallet_source,
+        ));
+        problems.extend(tests_section_citation_problems(
+            WALLET_PROVIDER,
+            &self.wallet_document,
+            &self.wallet_source,
+            DID_PROVIDER,
+            &self.did_source,
+        ));
+        problems.extend(declared_confinement_os_problems(
+            DID_PROVIDER,
+            &self.did_document,
+            &self.did_os,
+        ));
+        problems.extend(declared_confinement_os_problems(
+            WALLET_PROVIDER,
+            &self.wallet_document,
+            &self.wallet_os,
+        ));
+        problems
+    }
+
+    /// One document holding `paragraph` under `TESTS_HEADING`, as the did
+    /// document, so the sibling crate is wallet's.
+    fn did_citation(&self, paragraph: &str) -> Vec<String> {
+        tests_section_citation_problems(
+            DID_PROVIDER,
+            &format!("{TESTS_HEADING}\n\n{paragraph}\n\n## Falsifiers\n\nNothing here.\n"),
+            &self.did_source,
+            WALLET_PROVIDER,
+            &self.wallet_source,
+        )
+    }
+
+    /// The one sibling test named here without its file, and the same
+    /// paragraph naming it.
+    const UNPLACED_SIBLING: &'static str =
+        "`every_falsifier_id_is_named_in_its_confinement_document` in the same file reads both \
+         documents.";
+
+    /// One bad case per refusal of the three rules, each with the label a
+    /// failing case names and every problem it reports.
+    ///
+    /// This is the one set of bad cases both named tests read:
+    /// `tests_sections_name_the_crate_that_holds_each_cited_test` requires every
+    /// case to report something, so a rule that stops refusing one of them
+    /// fails the real-document test too, and
+    /// `tests_section_check_refuses_each_bad_section` asserts exact vectors.
+    fn bad_cases(&self) -> Vec<(&'static str, Vec<String>)> {
+        vec![
+            (
+                "a sibling test named with no path",
+                self.did_citation(Self::UNPLACED_SIBLING),
+            ),
+            (
+                "a section that cites no test of either crate",
+                self.did_citation("The tests live in this crate."),
+            ),
+            (
+                "a document with no Tests heading",
+                tests_section_citation_problems(
+                    DID_PROVIDER,
+                    "# fixture\n\n## Other\n\nNothing here.\n",
+                    &self.did_source,
+                    WALLET_PROVIDER,
+                    &self.wallet_source,
+                ),
+            ),
+            (
+                "a document with two Tests headings",
+                tests_section_citation_problems(
+                    DID_PROVIDER,
+                    &format!("{TESTS_HEADING}\n\n`outside_write_denied`\n\n{TESTS_HEADING}\n"),
+                    &self.did_source,
+                    WALLET_PROVIDER,
+                    &self.wallet_source,
+                ),
+            ),
+            (
+                "a source with no declared-OS line",
+                declared_confinement_os(
+                    &format!("capsules/{DID_PROVIDER}/{CONFINEMENT_TEST_FILE}"),
+                    "const OTHER: [&str; 1] = [\"macos\"];\n",
+                )
+                .err()
+                .map(|reason| vec![reason])
+                .unwrap_or_default(),
+            ),
+            (
+                "a source with two declared-OS lines",
+                declared_confinement_os(
+                    &format!("capsules/{DID_PROVIDER}/{CONFINEMENT_TEST_FILE}"),
+                    &format!(
+                        "{DECLARED_OS_CONST}: [&str; 1] = [\"macos\"];\n{DECLARED_OS_CONST}: \
+                              [&str; 1] = [\"macos\"];\n"
+                    ),
+                )
+                .err()
+                .map(|reason| vec![reason])
+                .unwrap_or_default(),
+            ),
+            (
+                "a declared-OS line with no quoted name",
+                declared_confinement_os(
+                    &format!("capsules/{DID_PROVIDER}/{CONFINEMENT_TEST_FILE}"),
+                    &format!("{DECLARED_OS_CONST}: [&str; 0] = [];\n"),
+                )
+                .err()
+                .map(|reason| vec![reason])
+                .unwrap_or_default(),
+            ),
+            (
+                "a Host-OS section that omits a declared OS",
+                declared_confinement_os_problems(
+                    DID_PROVIDER,
+                    &format!("{HOST_OS_HEADING}\n\nThe tests run on `linux`.\n"),
+                    &self.did_os,
+                ),
+            ),
+            (
+                "a document with no Host-OS heading",
+                declared_confinement_os_problems(
+                    DID_PROVIDER,
+                    "# fixture\n\n## Other\n",
+                    &self.did_os,
+                ),
+            ),
+            (
+                "two unequal declared-OS lists",
+                declared_confinement_os_set_problems(
+                    DID_PROVIDER,
+                    &self.did_os,
+                    WALLET_PROVIDER,
+                    &[self.wallet_os[0].clone(), "linux".to_string()],
+                ),
+            ),
+        ]
+    }
+}
+
+/// Each document's `TESTS_HEADING` section names the crate that holds each
+/// test it cites, and both crates declare one OS set their documents state.
+///
+/// The check reads both documents through `read_confinement_document`, both
+/// `tests/confine.rs` files through `read_lane_test_source`, both
+/// `DECLARED_OS_CONST` lines through `declared_confinement_os` and both
+/// `HOST_OS_HEADING` sections through `section_under_one_heading`, then
+/// requires `declared_confinement_os_set_problems` to find one set, no problem
+/// from `tests_section_citation_problems` over either document, and no problem
+/// from `declared_confinement_os_problems` over either document and its own
+/// list. It then requires every bad case to report something, so a rule that
+/// stops refusing one of them fails here too. A missing document, test source
+/// or constant is a refusal that names its path, never a skipped provider. The
+/// check reads files and starts no process, so it runs on every OS. It shows
+/// which crate declares a cited name and that the two lists and both documents
+/// agree as text; it says nothing about a kernel or about any test's behaviour.
+///
+/// Falsifier: WP236 makes the sibling check accept any paragraph, so a did
+/// paragraph naming a wallet test under "in the same file" passes; WP237 makes
+/// the set compare accept two unequal lists, so a crate that declares a second
+/// OS passes. Both fail this test.
+#[test]
+fn tests_sections_name_the_crate_that_holds_each_cited_test() {
+    let sections = TestsSections::read();
+    let problems = sections.problems();
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+    for (label, problems) in sections.bad_cases() {
+        assert!(
+            !problems.is_empty(),
+            "{label} must be refused, and the rules reported nothing"
+        );
+    }
+}
+
+/// The three rules refuse each bad section or list, over text values.
+///
+/// The passing cases are each document's real `TESTS_HEADING` and
+/// `HOST_OS_HEADING` sections and its own crate's source, so a refusal over one
+/// of them means the document and its crate have drifted apart. Then one case
+/// per refusal of the three rules asserts the exact problem vector: a paragraph
+/// whose sibling test is named with no path, that same paragraph with the path
+/// naming the sibling crate, a test of the document's own crate with no path, a
+/// section that cites no test of either crate, a missing and a duplicated
+/// heading, a source with no `DECLARED_OS_CONST` line, a source with two, a
+/// line that holds no quoted name, a `HOST_OS_HEADING` section that omits one
+/// OS, a missing `HOST_OS_HEADING` heading, two unequal declared lists, and the
+/// same OS named twice. The documents and sources are values in memory; only
+/// the two real documents and the two real sources are read, and the test
+/// starts no process.
+///
+/// Falsifier: WP236 makes the sibling case report nothing; WP237 makes the
+/// unequal-lists case report nothing. Both fail this test.
+#[test]
+fn tests_section_check_refuses_each_bad_section() {
+    let sections = TestsSections::read();
+    assert_eq!(
+        sections.problems(),
+        Vec::<String>::new(),
+        "the committed sections, read as text, must name the crate of each cited test"
+    );
+
+    let unplaced = TestsSections::UNPLACED_SIBLING;
+    assert_eq!(
+        paragraph_first_words("`a_test` in the same file."),
+        "`a_test` in the same file.",
+        "a short paragraph is quoted whole"
+    );
+    let long = format!("`{}`", "x".repeat(FIRST_WORDS_LIMIT + 10));
+    assert_eq!(
+        paragraph_first_words(&long),
+        format!("`{}…", "x".repeat(FIRST_WORDS_LIMIT - 1)),
+        "a long paragraph is cut at the limit and marked with an ellipsis"
+    );
+    assert_eq!(
+        sections.did_citation(unplaced),
+        vec![format!(
+            "{DID_PROVIDER} CONFINEMENT.md: {TESTS_HEADING} names \
+             `every_falsifier_id_is_named_in_its_confinement_document`, which \
+             capsules/{WALLET_PROVIDER}/{CONFINEMENT_TEST_FILE} declares and this crate's \
+             {CONFINEMENT_TEST_FILE} does not, in the paragraph that starts \"{}\", without \
+             naming `{WALLET_PROVIDER}/{CONFINEMENT_TEST_FILE}`",
+            paragraph_first_words(unplaced)
+        )],
+        "a sibling test named with no path must be refused with its paragraph's first words"
+    );
+
+    let placed = format!(
+        "`every_falsifier_id_is_named_in_its_confinement_document` in \
+         `../{WALLET_PROVIDER}/{CONFINEMENT_TEST_FILE}` reads both documents."
+    );
+    assert_eq!(
+        sections.did_citation(&placed),
+        Vec::<String>::new(),
+        "the same paragraph naming the sibling's file must pass"
+    );
+
+    assert_eq!(
+        sections.did_citation("`outside_write_denied` covers the boundary."),
+        Vec::<String>::new(),
+        "a test of the document's own crate needs no path"
+    );
+
+    assert_eq!(
+        sections.did_citation("The tests live in this crate."),
+        vec![format!(
+            "{DID_PROVIDER} CONFINEMENT.md: {TESTS_HEADING} cites no test of this crate or of \
+             capsules/{WALLET_PROVIDER}/{CONFINEMENT_TEST_FILE}, so it cannot be read as a \
+             complete section"
+        )],
+        "a section that cites no test of either crate must be refused"
+    );
+
+    assert_eq!(
+        tests_section_citation_problems(
+            DID_PROVIDER,
+            "# fixture\n\n## Other\n\nNothing here.\n",
+            &sections.did_source,
+            WALLET_PROVIDER,
+            &sections.wallet_source
+        ),
+        vec![format!(
+            "{DID_PROVIDER} CONFINEMENT.md must hold one line {TESTS_HEADING}; found none"
+        )],
+        "a missing heading must be the section reader's own refusal"
+    );
+
+    assert_eq!(
+        tests_section_citation_problems(
+            DID_PROVIDER,
+            &format!("{TESTS_HEADING}\n\n`outside_write_denied`\n\n{TESTS_HEADING}\n"),
+            &sections.did_source,
+            WALLET_PROVIDER,
+            &sections.wallet_source
+        ),
+        vec![format!(
+            "{DID_PROVIDER} CONFINEMENT.md must hold one line {TESTS_HEADING}; found 2"
+        )],
+        "a duplicated heading must be the section reader's own refusal"
+    );
+
+    let did_path = format!("capsules/{DID_PROVIDER}/{CONFINEMENT_TEST_FILE}");
+    assert_eq!(
+        declared_confinement_os(&did_path, "const OTHER: [&str; 1] = [\"macos\"];\n"),
+        Err(format!(
+            "{did_path} must hold one line {DECLARED_OS_CONST}; found none"
+        )),
+        "a source with no declared-OS line must be refused with its path"
+    );
+
+    assert_eq!(
+        declared_confinement_os(
+            &did_path,
+            &format!(
+                "{DECLARED_OS_CONST}: [&str; 1] = [\"macos\"];\n{DECLARED_OS_CONST}: \
+                      [&str; 1] = [\"macos\"];\n"
+            )
+        ),
+        Err(format!(
+            "{did_path} must hold one line {DECLARED_OS_CONST}; found 2"
+        )),
+        "a source with two declared-OS lines must be refused"
+    );
+
+    assert_eq!(
+        declared_confinement_os(
+            &did_path,
+            &format!("{DECLARED_OS_CONST}: [&str; 0] = [];\n")
+        ),
+        Err(format!(
+            "{did_path} {DECLARED_OS_CONST} holds no quoted OS name, so it declares nothing"
+        )),
+        "a declared-OS line with no quoted name must be refused, never read as an empty list"
+    );
+
+    assert_eq!(
+        declared_confinement_os(
+            &did_path,
+            &format!("{DECLARED_OS_CONST}: [&str; 2] = [\"macos\", \"linux\"];\n")
+        ),
+        Ok(vec!["macos".to_string(), "linux".to_string()]),
+        "one line declares the OS names it quotes, in order"
+    );
+
+    assert_eq!(
+        declared_confinement_os_problems(
+            DID_PROVIDER,
+            &format!("{HOST_OS_HEADING}\n\nThe tests exercise these profiles on `linux`.\n"),
+            &sections.did_os
+        ),
+        vec![format!(
+            "{DID_PROVIDER} CONFINEMENT.md: {HOST_OS_HEADING} does not name `macos` in backticks, \
+             so it does not state the OS its own {CONFINEMENT_TEST_FILE} {DECLARED_OS_CONST} \
+             declares"
+        )],
+        "a section that omits a declared OS must be refused with the document and the OS"
+    );
+
+    assert_eq!(
+        declared_confinement_os_problems(DID_PROVIDER, "# fixture\n\n## Other\n", &sections.did_os),
+        vec![format!(
+            "{DID_PROVIDER} CONFINEMENT.md must hold one line {HOST_OS_HEADING}; found none"
+        )],
+        "a missing heading must be the section reader's own refusal"
+    );
+
+    let two_os = vec![sections.wallet_os[0].clone(), "linux".to_string()];
+    assert_eq!(
+        declared_confinement_os_set_problems(
+            DID_PROVIDER,
+            &sections.did_os,
+            WALLET_PROVIDER,
+            &two_os
+        ),
+        vec![format!(
+            "capsules/{DID_PROVIDER}/{CONFINEMENT_TEST_FILE} declares [{}] and \
+             capsules/{WALLET_PROVIDER}/{CONFINEMENT_TEST_FILE} declares [{}], and the two \
+             providers must declare one OS set",
+            sections.did_os.join(", "),
+            two_os.join(", ")
+        )],
+        "two unequal lists must be refused with both, never read as one"
+    );
+
+    assert_eq!(
+        declared_confinement_os_set_problems(
+            DID_PROVIDER,
+            &sections.did_os,
+            WALLET_PROVIDER,
+            &[sections.wallet_os[0].clone(), sections.wallet_os[0].clone()]
+        ),
+        Vec::<String>::new(),
+        "the same OS named twice is one set"
+    );
 }
 
 /// The data-row lines of a contract section, in table order, without the header
