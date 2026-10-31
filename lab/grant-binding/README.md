@@ -17,6 +17,8 @@ reference model, not the Runtime; counts toward no M1 check; the Runtime half is
 
 `Verifier::revoke_grant` also ends every child journal minted from that grant, through the same `end_grant`. The store keeps those records. A journal revoked on its own leaves the grant that minted it. A grant asked on its own stays. This mirrors `end_live_grant`. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
 
+`Verifier::bind_once` and `Verifier::bind_until` store an allow-once grant and an expiry through the one `bind_grant`. One successful append or overwrite ends an allow-once grant through the one `revoke_grant`. The store keeps the record. `resolve` refuses a grant when `verifier_now` is at or after its expiry. An unset expiry is not due. This mirrors `Life::Exhausted` and `is_due`. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
 `Verifier::admit_ask` caps one agent's budget ask and stores the granted amount through the one `admit`. This is a lab stand-in for that admission. It is not the Runtime. It does not count toward A7 or M1-R.
 
 A forged identity, session, instance, usage, ceiling or set of rights changes

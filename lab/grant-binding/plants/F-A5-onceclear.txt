@@ -1,0 +1,8 @@
+id: F-A5-onceclear
+file: src/lib.rs
+test: ops::model_session_grant_allows_a_second_effect
+--- old
+        self.pending_once = false;
+--- new
+        let _ = self.pending_once;
+--- end
