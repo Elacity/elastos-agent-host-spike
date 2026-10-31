@@ -93,6 +93,7 @@ const LAUNCH_ENVIRONMENT: &[&str] = &[
     "ELASTOS_BROWSER_MAX_ACTIVE_SESSIONS",
     "ELASTOS_BROWSER_MAX_SESSIONS_PER_PRINCIPAL",
     "ELASTOS_QUIET_RUNTIME_NOTICES",
+    "ELASTOS_SERVICE",
 ];
 
 fn allowed_launch_key(key: &std::ffi::OsStr) -> bool {

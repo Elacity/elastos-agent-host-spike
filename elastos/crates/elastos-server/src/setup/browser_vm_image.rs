@@ -478,6 +478,23 @@ pub(super) async fn install_via_carrier(
 ) -> anyhow::Result<()> {
     let info = row.info();
     validate_request(data, info, dest, platform)?;
+    if let Some(dir) = super::release_dir::selected() {
+        let cid = info
+            .cid
+            .as_deref()
+            .context("Browser image has no CID to find in the release folder")?;
+        let file = super::release_dir::open(dir, cid)?;
+        let limit = info.size.context("Browser image has no signed size")?;
+        let (data, info, platform) = (data.to_path_buf(), info.clone(), platform.to_owned());
+        return tokio::task::spawn_blocking(move || {
+            // Hash and extract one private copy, so the folder cannot change in between.
+            let mut copy = tempfile::tempfile_in(&data)?;
+            std::io::copy(&mut file.take(limit + 1), &mut copy)?;
+            copy.rewind()?;
+            install_archive_reader(&data, copy, &info, &platform, &AtomicBool::new(false))
+        })
+        .await?;
+    }
     let bind_addr = super::first_party_carrier_bind_addr(data, context)?;
     let source = crate::sources::load_trusted_sources(data)?
         .default_source()

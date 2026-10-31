@@ -20,6 +20,7 @@ mod browser_vm_image;
 #[cfg(unix)]
 mod local_model_engine_receipt;
 mod progress;
+pub mod release_dir;
 
 const DEFAULT_SETUP_PROFILE: &str = "home";
 const CACHED_CID_FILE: &str = ".elastos-cid";
@@ -731,9 +732,12 @@ async fn admit_installed_setup_metadata(
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("signed components CID is missing"))?;
     // The live source names only its newest release; a signed CID names this one.
-    let client = crate::carrier::CarrierClient::connect_trusted_source(source, 15).await?;
+    let client = match release_dir::selected() {
+        Some(_) => None,
+        None => Some(crate::carrier::CarrierClient::connect_trusted_source(source, 15).await?),
+    };
     let result = async {
-        let components = client.fetch_content_bounded(cid, size as usize).await?;
+        let components = fetch_pinned(client.as_ref(), cid, size as usize).await?;
         // The release verifies, binds these components, and each capsule record
         // verifies and matches its row before setup writes.
         let (manifest, admission) = crate::capsule_record::admit_release(
@@ -743,9 +747,8 @@ async fn admit_installed_setup_metadata(
             crate::update::detect_release_platform(),
         )?;
         let catalog = if let Some(trust) = &manifest.model_catalog {
-            let bytes = client
-                .fetch_content_bounded(&trust.head_cid, MAX_MODEL_CATALOG_BYTES)
-                .await?;
+            let bytes =
+                fetch_pinned(client.as_ref(), &trust.head_cid, MAX_MODEL_CATALOG_BYTES).await?;
             verify_pinned_model_catalog(trust, &bytes)?;
             Some(bytes)
         } else {
@@ -758,14 +761,14 @@ async fn admit_installed_setup_metadata(
             manifest.collaboration_network.as_ref(),
             |pin| {
                 let cid = pin.head_cid.clone();
-                let client = &client;
+                let client = client.as_ref();
                 async move {
-                    client
-                        .fetch_content_bounded(
-                            &cid,
-                            crate::collaboration_startup::MAX_STARTUP_CONFIG_BYTES,
-                        )
-                        .await
+                    fetch_pinned(
+                        client,
+                        &cid,
+                        crate::collaboration_startup::MAX_STARTUP_CONFIG_BYTES,
+                    )
+                    .await
                 }
             },
         )
@@ -781,7 +784,9 @@ async fn admit_installed_setup_metadata(
         ))
     }
     .await;
-    client.close().await;
+    if let Some(client) = client {
+        client.close().await;
+    }
     let metadata = result?;
     // The same private pair and writer still own the destination after transport.
     let current = crate::installed_release::read_for_setup(data_dir, &binary, source, guard)?;
@@ -790,6 +795,19 @@ async fn admit_installed_setup_metadata(
         "installed release inputs changed during setup"
     );
     Ok(Some(metadata))
+}
+
+/// Pinned bytes by CID from the selected release folder, else from the trusted source.
+async fn fetch_pinned(
+    client: Option<&crate::carrier::CarrierClient>,
+    cid: &str,
+    max_bytes: usize,
+) -> anyhow::Result<Vec<u8>> {
+    match (release_dir::selected(), client) {
+        (Some(dir), _) => release_dir::read(dir, cid, max_bytes),
+        (None, Some(client)) => client.fetch_content_bounded(cid, max_bytes).await,
+        (None, None) => anyhow::bail!("no trusted source connection for {cid}"),
+    }
 }
 
 #[cfg(test)]
@@ -4209,6 +4227,15 @@ pub(crate) async fn fetch_first_party_component_via_carrier(
 ) -> anyhow::Result<Vec<u8>> {
     let (name, info) = (row.name(), row.info());
     let release_path = required_release_path(name, info)?;
+    if let Some(dir) = release_dir::selected() {
+        let cid = info
+            .cid
+            .as_deref()
+            .with_context(|| format!("{name} has no CID to find in the release folder"))?;
+        let bytes = release_dir::read(dir, cid, elastos_common::MAX_WHOLE_CONTENT_BYTES)?;
+        verify_release_bytes(name, &bytes, info)?;
+        return Ok(bytes);
+    }
     let source = crate::sources::load_trusted_sources(data_dir)?
         .default_source()
         .cloned()
@@ -4348,10 +4375,14 @@ async fn download_component(
         .unwrap_or_else(|| format!("elastos://artifact/{}", release_path));
     if !progress::reporting() {
         println!("  Resolving {} from {}...", name, elastos_url);
-        println!(
-            "  Trying {} via trusted source over Carrier...",
-            elastos_url
-        );
+        if release_dir::selected().is_some() {
+            println!("  Reading {} from the release folder...", elastos_url);
+        } else {
+            println!(
+                "  Trying {} via trusted source over Carrier...",
+                elastos_url
+            );
+        }
     }
     install_first_party_component_via_carrier(data_dir, row, dest, carrier_context)
         .await

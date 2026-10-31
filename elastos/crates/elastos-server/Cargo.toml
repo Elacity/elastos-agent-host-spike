@@ -120,6 +120,11 @@ getrandom = "0.2"
 data-encoding = "2.6"
 custody-provider = { path = "../../../capsules/custody-provider" }
 
+# Apple silicon's SHA-256 instructions; without `asm`, sha2 0.10 hashes in software
+# on aarch64 (about 4.5x slower over the installed tree at every Home start).
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+sha2 = { version = "0.10", features = ["asm"] }
+
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full", "test-util"] }
 tempfile = "3.10"

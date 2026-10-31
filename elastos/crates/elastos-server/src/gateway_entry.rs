@@ -34,6 +34,10 @@ fn browser_home_ready(url: &str) {
     if std::env::var("ELASTOS_UPDATE_RESTART").as_deref() == Ok("1") {
         return;
     }
+    // A desktop app or login service shows Home itself.
+    if std::env::var("ELASTOS_SERVICE").as_deref() == Ok("1") {
+        return;
+    }
     eprintln!("Home: {url}");
     eprintln!("Keep this terminal open. Press Ctrl+C to stop Home.");
     crate::open_browser(url);

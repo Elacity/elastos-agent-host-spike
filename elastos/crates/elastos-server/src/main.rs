@@ -480,6 +480,30 @@ enum Commands {
         /// before the Home first starts; a Home keeps a network it joined.
         #[arg(long)]
         isolated: bool,
+
+        /// Read the release from this folder (artifacts named by CID) instead of the network
+        #[arg(long, value_name = "DIR")]
+        from: Option<PathBuf>,
+    },
+
+    /// Install ElastOS from a release folder on this computer, with the same checks
+    /// as the online installer, then set it up from the same folder
+    Install {
+        /// Release folder: release-head.json, release.json, sources.json and artifacts named by CID
+        #[arg(long, value_name = "DIR")]
+        from: PathBuf,
+        /// Where the `elastos` command goes (default ~/.local/bin)
+        #[arg(long, value_name = "DIR")]
+        install_dir: Option<PathBuf>,
+        /// The only publisher DID accepted to sign the release
+        #[arg(long, value_name = "DID")]
+        publisher: String,
+        /// CID of the exact release-head.json to install
+        #[arg(long, value_name = "CID")]
+        head: String,
+        /// SHA-256 of the release folder's sources.json (its update endpoints)
+        #[arg(long, value_name = "HEX")]
+        sources_sha256: String,
     },
 
     /// Manage trusted release sources
@@ -1586,9 +1610,13 @@ async fn run() -> anyhow::Result<()> {
             prerequisites_only,
             media_tools_dir,
             isolated,
+            from,
         } => {
             if isolated {
                 setup::choose_isolated_collaboration()?;
+            }
+            if let Some(from) = from {
+                setup::release_dir::select(&from)?;
             }
             setup::run(
                 profile,
@@ -1599,6 +1627,39 @@ async fn run() -> anyhow::Result<()> {
                 media_tools_dir,
             )
             .await?;
+        }
+
+        Commands::Install {
+            from,
+            install_dir,
+            publisher,
+            head,
+            sources_sha256,
+        } => {
+            let install_dir = match install_dir {
+                Some(dir) => dir,
+                None => dirs::home_dir()
+                    .ok_or_else(|| anyhow::anyhow!("no home folder"))?
+                    .join(".local/bin"),
+            };
+            let binary = setup::release_dir::install(
+                &from,
+                &install_dir,
+                &publisher,
+                &head,
+                &sources_sha256,
+            )?;
+            // Setup runs as the installed Runtime, as install.sh runs it.
+            let status = std::process::Command::new(&binary)
+                .arg("setup")
+                .arg("--from")
+                .arg(&from)
+                .stdin(std::process::Stdio::null())
+                .status()?;
+            anyhow::ensure!(
+                status.success(),
+                "setup from the release folder failed ({status})"
+            );
         }
 
         Commands::Source(cmd) => {
