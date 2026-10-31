@@ -10071,3 +10071,128 @@ Rerun, same environment (`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFL
 
 A passing row gives the real Runtime no A3 credit. Two-capsule-run owns the real component bytes.
 
+## 123 — A6: invoke spends through one validate route
+
+123: the one `resource_invoke` arm spends through `post_capability_validate`, and the once grant is the shell grant of `request-5`.
+
+Comparison base, recorded before the first edit: `80a2405624121eef3404fe3b3814a558be4b7cb5`. `b2eccab68f03ce9a0ced0c8afea96b496dbfd15f` is an ancestor. `fff8f1761eb851f642f8e9b680ea1c6747974060` is not. `authorise` before the first edit is `fn authorise(&mut self, caller: Caller<'_>, request_id: &str, plan_sha256: Option<&str>) -> Result<(), (u16, String)>`. That parameter list and that body stay. `fn bridge_envelope` was already present. Its invoke called `authorise` and did not call `post_capability_validate`.
+
+`bridge_envelope`'s `resource_invoke` arm now calls `post_capability_validate` with `Caller::Client { session_id: capsule_id }` and a body whose only key is `request_id`. `Ok` is the ok envelope with `data` null. `Err` is the error envelope and that reason. The arm does not call `authorise`. `let _ = principal` stays. The capability arm stays `post_capability_request`. No new public method and no new store. `post_capability_request`, `post_capability_validate`, `validate_body`, `authorise`, `post_capability_grant`, and `seed_grant` keep their bodies. `standin_bridge_envelope_records_the_capsule_request` replaces `seed_grant` of `req-once` with a capability line that stores `request-5` and a shell grant of that id. `req-tok` stays a `seed_grant`. `standin_invoke_calls_validate` reads the hostcall slice.
+
+### Quote from the request flow (read only)
+
+`docs/AGENT_ARCHITECTURE.md` section "Request flow", step 7:
+
+> Runtime verifies the exact resource, action, operation, principal, session, capsule, grant, expiry, and revocation state.
+
+This task is the one use route in front of that check. It does not mint a grant.
+
+### Plants
+
+Each plant was applied alone, the planted crate compiled, the named test failed on its assertion, and the file was restored before the next. Restored, that test passed (`1 passed; 0 failed`). No `falsifiers.json` id. After the last restore, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` shows no plant.
+
+F-invoke-skip-validate. Real 20.51 seconds. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_bridge_envelope_records_the_capsule_request -- --exact`. Assertion `src/../standin-runtime/mod.rs:9780:9` (restored `:9779`): `the stand-in did the work: the principal does not choose the caller`. Left `String("ok")`, right `"error"`. The early return compiled; rustc warned `unreachable expression` and `unused variable: token`, and the test still ran. The sibling invoke receives the ok envelope before `post_capability_validate`, so the once grant is not spent and `request-5` stays `Live`. Restored real 2.45 seconds.
+
+Old:
+
+```text
+                match self.post_capability_validate(
+```
+
+New:
+
+```text
+                return Ok(ok_line(id, Value::Null));
+                match self.post_capability_validate(
+```
+
+F-invoke-pass-plan. Real 2.68 seconds. Same command. Assertion `src/../standin-runtime/mod.rs:9779:9` (restored `:9779`): `the stand-in did the work: a bound grant stays live`. Left `String("ok")`, right `"error"`. The validate body names the 64-character string of `a`, so the use of `request-4` succeeds and that once grant is `Exhausted`. Restored real 2.48 seconds.
+
+Old:
+
+```text
+                    &json!({ "request_id": token }),
+```
+
+New:
+
+```text
+                    &json!({ "request_id": token, "plan_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }),
+```
+
+F-invoke-pass-run. Real 2.65 seconds. Same command. Assertion `src/../standin-runtime/mod.rs:9787:9` (restored `:9787`): `the stand-in did the work: the principal does not choose the caller`. Left `String("validate body rejects run_id")`, right `"wrong capsule: expected component-1, got component-2"`. The sibling invoke is the first use of that body. The owner invoke is the same body and is not reached; its message would be `validate body rejects run_id`. `validate_body` rejects `run_id` before `authorise`, so `request-5` stays `Live`. Restored real 2.36 seconds.
+
+Old:
+
+```text
+                    &json!({ "request_id": token }),
+```
+
+New:
+
+```text
+                    &json!({ "request_id": token, "run_id": "" }),
+```
+
+F-invoke-return-valid. Real 2.60 seconds. Same command. Assertion `src/../standin-runtime/mod.rs:9761:9` (restored `:9761`): `the stand-in did the work: the owner invoke returns data null`. Left `Object {"valid": Bool(true)}`, right `Null`. Restored real 2.26 seconds.
+
+Old:
+
+```text
+                    Ok(_) => Ok(ok_line(id, Value::Null)),
+```
+
+New:
+
+```text
+                    Ok(valid) => Ok(ok_line(id, valid)),
+```
+
+F-invoke-direct. Real 2.62 seconds. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_invoke_calls_validate -- --exact`. Assertion `src/../standin-runtime/mod.rs:10225:9` (restored `:10218`): `the stand-in did the work: the invoke does not call authorise`. The slice contains `self.authorise`. Restored real 2.22 seconds.
+
+Old:
+
+```text
+                match self.post_capability_validate(
+```
+
+New:
+
+```text
+                let _ = self.authorise(
+                    Caller::Client {
+                        session_id: capsule_id,
+                    },
+                    token,
+                    None,
+                );
+                match self.post_capability_validate(
+```
+
+### Docs
+
+`standin-runtime/README.md` keeps the hostcall paragraph. The invoke sentence now says an invoke line calls `post_capability_validate` with a body whose only key is `request_id`, and that it does not pass a run id or a plan hash. The sentences that a bound grant stays live, that the principal does not choose the caller, and that a PASS gives the Runtime no A3 credit stay. The paragraph adds that a once grant the shell granted is spent, and that a PASS gives the Runtime no A6 credit for that spend. `RUNBOOK.md` gains one paragraph after the last stand-in paragraph: `standin_bridge_envelope_records_the_capsule_request` spends a shell-granted once grant through `post_capability_validate`, and a PASS there gives the Runtime no A6 credit. Every other paragraph stays.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. `Cargo.toml` and `Cargo.lock` are unchanged. `git diff` for `src/harness.rs`, `src/census.rs`, `src/report.rs`, `tests/effects.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. The changed files are `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md`. After the plants were restored, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` shows no plant. `post_capability_request`, `post_capability_validate`, `validate_body`, `authorise`, `post_capability_grant`, and `seed_grant` are unchanged. `authorise`'s parameter list is the list recorded above.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.29 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 349.70 seconds, inside the 600-second bound. `--lib --list` counts 91 tests, including `standin_bridge_envelope_records_the_capsule_request` and `standin_invoke_calls_validate`. Printed summaries from that command: effects 63 passed and 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed (including `cleanup_census_refuses_each_leftover`) and 2 ignored; standin_contract 13 passed; standin_plan 8 passed; standin_residents 2 passed; probe 3 passed; doc-tests 0. No census line failed, so the single-rerun rule did not apply.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.29 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_bridge_envelope_records_the_capsule_request -- --exact` exit 0, 1 passed and 0 failed, real 0.13 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_invoke_calls_validate -- --exact` exit 0, 1 passed and 0 failed, real 0.07 seconds. `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | The validate body at `standin-runtime/mod.rs:1214` has only `request_id`. It adds no code or content identity. |
+| 2. Capsule, Home or UI gains ungranted access? | No | The caller session is `capsule_id` at `:1211`. `let _ = principal` at `:1150` drops the principal. The arm mints no grant. |
+| 3. A second path or a second copy of one rule? | No | The invoke calls `post_capability_validate` at `:1210`. `authorise` stays the private check of that route at `:1094`. No new public method. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`. `elastos/` is untouched. |
+| 5. Refusals deny by default with a clear reason? | Yes | A non-string token is `invoke token must be a string` at `:1208`, before the use call. A route error keeps that reason at `:1217`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The method is the stand-in hostcall. A PASS gives the Runtime no A6 credit for the spend. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_bridge_envelope_records_the_capsule_request` at `:9804` and `standin_invoke_calls_validate` at `:10204`. Each of the five plants fails its named test on its assertion, and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | The shell grant is `post_capability_grant`. The invoke only spends. A bound grant with no plan hash stays `Live`. The capsule id is the session, and the principal is not. |
+
+A passing row gives the real Runtime no A6 credit for that spend.
+

@@ -1137,10 +1137,11 @@ impl StandIn {
     ///
     /// The one hostcall. A `request_capability` line copies every key of
     /// `request` except `type` and calls `post_capability_request` for
-    /// `capsule_id`. A `resource_invoke` line calls `authorise` for that
-    /// capsule id with the token and no plan hash, so a bound grant stays
-    /// live. The principal argument does not choose the caller. This method
-    /// mints no grant.
+    /// `capsule_id`. A `resource_invoke` line calls `post_capability_validate`
+    /// for that capsule id with a body whose only key is `request_id`. It
+    /// does not pass a run id or a plan hash, so a bound grant stays live.
+    /// The principal argument does not choose the caller. This method mints
+    /// no grant.
     pub fn bridge_envelope(
         &mut self,
         line: &str,
@@ -1206,14 +1207,13 @@ impl StandIn {
                     Some(Value::String(text)) => text.as_str(),
                     Some(_) => return Err("invoke token must be a string".to_owned()),
                 };
-                match self.authorise(
+                match self.post_capability_validate(
                     Caller::Client {
                         session_id: capsule_id,
                     },
-                    token,
-                    None,
+                    &json!({ "request_id": token }),
                 ) {
-                    Ok(()) => Ok(ok_line(id, Value::Null)),
+                    Ok(_) => Ok(ok_line(id, Value::Null)),
                     Err((_, message)) => Ok(error_line(id, &message)),
                 }
             }
@@ -10024,22 +10024,36 @@ mod tests {
             "the stand-in did the work: ping stores no further request"
         );
 
-        standin.seed_grant(
-            "req-once",
-            "component-1",
-            SHARED_RESOURCE,
-            "read",
-            "once",
-            1,
-            Life::Live,
-            false,
+        let once_line = r#"{"id":15,"request":{"type":"request_capability","resource":"localhost://Public/resident-instances/shared.txt","action":"read","reason":"read shared"}}"#;
+        let recorded = standin
+            .bridge_envelope(once_line, "component-1", None)
+            .expect("the stand-in did the work: the once request is recorded");
+        assert_eq!(
+            bridge_value(&recorded)["response"]["data"]["request_id"],
+            "request-5",
+            "the stand-in did the work: the line stores request-5",
+        );
+        let granted = standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({
+                    "request_id": "request-5",
+                    "duration": "once",
+                    "rationale": "grant once",
+                }),
+            )
+            .expect("the stand-in did the work: the shell grants request-5");
+        assert_eq!(
+            granted,
+            json!({ "success": true }),
+            "the stand-in did the work: the shell grant is success true",
         );
         assert_eq!(
-            grant_record(&standin, "req-once"),
+            grant_record(&standin, "request-5"),
             (Life::Live, false),
-            "the stand-in did the work: req-once starts live"
+            "the stand-in did the work: request-5 starts live"
         );
-        let invoke = r#"{"id":8,"request":{"type":"resource_invoke","uri":"localhost://Public/resident-instances/shared.txt","operation":"read","body":{},"token":"req-once"}}"#;
+        let invoke = r#"{"id":8,"request":{"type":"resource_invoke","uri":"localhost://Public/resident-instances/shared.txt","operation":"read","body":{},"token":"request-5"}}"#;
         let denied = standin
             .bridge_envelope(invoke, "component-2", Some("component-1"))
             .expect("the stand-in did the work: the sibling invoke is an envelope");
@@ -10050,9 +10064,9 @@ mod tests {
             "the principal does not choose the caller",
         );
         assert_eq!(
-            grant_record(&standin, "req-once"),
+            grant_record(&standin, "request-5"),
             (Life::Live, false),
-            "the stand-in did the work: the sibling invoke leaves req-once live"
+            "the stand-in did the work: the sibling invoke leaves request-5 live"
         );
         let spent = standin
             .bridge_envelope(invoke, "component-1", Some("person-a"))
@@ -10064,7 +10078,7 @@ mod tests {
             "the owner invoke returns data null",
         );
         assert_eq!(
-            grant_record(&standin, "req-once"),
+            grant_record(&standin, "request-5"),
             (Life::Exhausted, false),
             "the stand-in did the work: the owner invoke spends the once grant"
         );
@@ -10183,6 +10197,27 @@ mod tests {
             "running",
             "",
             "the stand-in did the work: component-2 stays running",
+        );
+    }
+
+    #[test]
+    fn standin_invoke_calls_validate() {
+        let source = include_str!("mod.rs");
+        let start = source
+            .find("fn bridge_envelope")
+            .expect("the stand-in did the work: bridge_envelope is the one hostcall");
+        let rest = &source[start..];
+        let end = rest
+            .find("fn admit_resident")
+            .expect("the stand-in did the work: admit_resident follows the hostcall");
+        let slice = &rest[..end];
+        assert!(
+            slice.contains("post_capability_validate"),
+            "the stand-in did the work: the invoke calls post_capability_validate"
+        );
+        assert!(
+            !slice.contains("self.authorise"),
+            "the stand-in did the work: the invoke does not call authorise"
         );
     }
 }
