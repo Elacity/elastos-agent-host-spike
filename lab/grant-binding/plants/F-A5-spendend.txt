@@ -1,0 +1,12 @@
+id: F-A5-spendend
+file: src/lib.rs
+test: ops::model_effect_limit_stops_the_next_effect
+--- old
+        if grant.ended {
+            return Err(Refuse::UnknownHandle);
+        }
+        if grant.record.parent.is_some() {
+--- new
+        let _ = grant.ended;
+        if grant.record.parent.is_some() {
+--- end
