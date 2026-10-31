@@ -14,6 +14,11 @@ with `sandbox-exec -D`:
 - `STORAGE_ROOT` is `base_path/ElastOS/SystemServices/Wallet`.
 - `STORAGE_PARENT` is its parent, `base_path/ElastOS/SystemServices`.
 
+One rule, `profile_parameter_section_problems`, under the test
+`every_confinement_document_states_its_bindings_from_the_one_derivation`,
+holds these three names and the two storage layouts to the one derivation the
+launch uses, and it does not check a path for `PROVIDER_EXECUTABLE`.
+
 `../did-provider/` presents the same contract as this oracle: one profile file,
 the same three parameter tokens, literal startup access, one state subtree
 grant, and a real stdin/stdout process test.
@@ -1563,6 +1568,14 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - WP231: An allow section with no backticked span reports no problem, so a
   document that lists nothing passes.
   `profile_allow_table_check_refuses_each_bad_table` checks this rule.
+- WP232: The layout compare swaps the two storage derivations, so a drifted
+  storage layout passes and the bound one is refused.
+  `every_confinement_document_states_its_bindings_from_the_one_derivation`
+  checks this rule.
+- WP233: The bullet reader yields no parameter bullet, so a section that names
+  nothing passes as an empty binding list.
+  `every_confinement_document_states_its_bindings_from_the_one_derivation`
+  checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

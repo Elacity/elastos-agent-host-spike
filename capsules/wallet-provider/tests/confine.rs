@@ -12966,6 +12966,11 @@ const OPERATIONS_HEADING: &str = "## Operations and the rights they need";
 /// lists the startup grants its profile holds.
 const PROFILE_ALLOW_HEADING: &str = "## What the profile allows";
 
+/// The heading line every confinement document uses for the section that
+/// states the three parameters a launch binds and the two storage layouts it
+/// derives.
+const PROFILE_PARAMETERS_HEADING: &str = "## Profile parameters";
+
 /// The providers whose `CONFINEMENT.md` operations table names the tests it
 /// cites.
 const OPERATIONS_TABLES: &[&str] = &["did-provider", "wallet-provider"];
@@ -13098,6 +13103,218 @@ fn falsifier_section_problems(
             "{document_name} CONFINEMENT.md: {FALSIFIER_HEADING} names {token}, which neither \
              falsifier list registers"
         ));
+    }
+    problems
+}
+
+/// One bullet of a `PROFILE_PARAMETERS_HEADING` section: the parameter name
+/// its first backticked span names and, where the bullet writes one, the
+/// layout its second backticked span writes.
+struct ParameterBullet<'a> {
+    row: usize,
+    name: &'a str,
+    layout: Option<&'a str>,
+}
+
+/// Every bullet of `section` that names a parameter, in document order, each
+/// with the row it holds among those bullets.
+fn parameter_bullets(section: &str) -> Vec<ParameterBullet<'_>> {
+    let mut bullets = Vec::new();
+    for line in section.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("- ") {
+            continue;
+        }
+        let spans = backtick_spans(trimmed);
+        let Some(name) = spans.first() else {
+            continue;
+        };
+        bullets.push(ParameterBullet {
+            row: bullets.len() + 1,
+            name,
+            layout: spans.get(1).copied(),
+        });
+    }
+    bullets
+}
+
+/// The base token a parameter bullet writes and the layout beneath it, or
+/// `None` when the span carries no base token.
+///
+/// A bullet writes its path as a base token and the layout the launch derives
+/// beneath that token, such as `base_path/ElastOS/SystemServices/Wallet`. The
+/// token is the text before the first `/`, and the layout is the rest of the
+/// span, so a bullet that writes the token alone has an empty layout. A span
+/// that starts with `/` or is empty names no token.
+fn base_token_and_layout(span: &str) -> Option<(&str, &str)> {
+    let Some(slash) = span.find('/') else {
+        return if span.is_empty() {
+            None
+        } else {
+            Some((span, ""))
+        };
+    };
+    if slash == 0 {
+        return None;
+    }
+    Some((&span[..slash], &span[slash..]))
+}
+
+/// The two storage layouts the derivation adds beneath a launch's base.
+///
+/// An empty base drops the caller's base out of the one derivation
+/// (`provider_storage_root` and `storage_parent`), so what remains is the
+/// layout the launch builds under whatever base it is given. The rule reads
+/// that layout's depth here and writes no path of its own (P10).
+fn storage_layouts(name: &str) -> (PathBuf, PathBuf) {
+    let empty = Path::new("");
+    (
+        provider_storage_root(name, empty),
+        storage_parent(name, empty),
+    )
+}
+
+/// Whether `layout` is exactly the last `depth` path components of `path`.
+///
+/// The compare is by component, so a layout that matches only a shorter tail
+/// of the derived path is not the derived layout: `Wallet` alone is not the
+/// three components wallet's derivation adds beneath a base.
+fn layout_is_tail_of(path: &Path, layout: &str, depth: usize) -> bool {
+    let written: Vec<_> = Path::new(layout.trim_start_matches('/'))
+        .components()
+        .collect();
+    let derived: Vec<_> = path.components().collect();
+    written.len() == depth && derived.len() >= depth && derived[derived.len() - depth..] == written
+}
+
+/// Every problem with one document's `PROFILE_PARAMETERS_HEADING`, each naming
+/// the document, the provider and the offending bullet.
+///
+/// The section under `PROFILE_PARAMETERS_HEADING` states the three parameter
+/// names a generated profile binds and the two storage layouts the launch
+/// derives. `root` and `parent` are the two paths `provider_storage_root` and
+/// `storage_parent` derive, so this rule holds the section to the one
+/// derivation and keeps no path of its own. The refusals are: a section that
+/// holds no bullet naming a parameter; a bullet whose first backticked span is
+/// not one of `CANONICAL_PARAMS`; a canonical name listed twice or not at all;
+/// a `STORAGE_ROOT` or `STORAGE_PARENT` bullet that writes no layout, whose
+/// second backticked span does not start with a base token, or whose layout
+/// beneath that token is not the layout of the derived path; and a section
+/// whose bullets use two base tokens. A missing or duplicated heading is the
+/// one section reader's own refusal.
+///
+/// The one honesty limit: the derivation is absolute only against the base its
+/// caller passes, so the rule compares the layout beneath the base token, never
+/// the token, and requires one spelling of the base inside a section rather
+/// than a particular one. It does not check a path for `PROVIDER_EXECUTABLE`,
+/// because that binary is the program the caller passes and no section writes a
+/// fixed path for it; that bullet is checked for its name only.
+///
+/// Falsifier: WP232 swaps the two storage derivations, so a drifted storage
+/// layout passes while the bound one is refused; WP233 yields no parameter
+/// bullet, so a section that names nothing is refused as empty instead of
+/// passing. `every_confinement_document_states_its_bindings_from_the_one_derivation`
+/// fails on each, because a real document then reports a problem.
+fn profile_parameter_section_problems(
+    document_name: &str,
+    document: &str,
+    name: &str,
+    root: &Path,
+    parent: &Path,
+) -> Vec<String> {
+    let section =
+        match section_under_one_heading(document_name, document, PROFILE_PARAMETERS_HEADING) {
+            Ok(section) => section,
+            Err(problems) => return problems,
+        };
+    let heading = PROFILE_PARAMETERS_HEADING;
+    let bullets = parameter_bullets(&section);
+    if bullets.is_empty() {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md: {heading} holds no bullet naming a parameter for \
+             {name}, so it cannot show the bindings"
+        )];
+    }
+    let mut problems = Vec::new();
+    let mut first_rows: Vec<(&str, usize)> = Vec::new();
+    for bullet in &bullets {
+        if !CANONICAL_PARAMS.contains(&bullet.name) {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {heading} bullet {} for {name} names {}, which \
+                 is not one of {}",
+                bullet.row,
+                bullet.name,
+                CANONICAL_PARAMS.join(", ")
+            ));
+            continue;
+        }
+        if let Some((_, first)) = first_rows
+            .iter()
+            .find(|(earlier, _)| *earlier == bullet.name)
+        {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {heading} bullet {} for {name} names {} again, \
+                 but the launch binds it once; bullet {first} already names it",
+                bullet.row, bullet.name
+            ));
+            continue;
+        }
+        first_rows.push((bullet.name, bullet.row));
+    }
+    for param in CANONICAL_PARAMS {
+        if !first_rows.iter().any(|(listed, _)| *listed == param) {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {heading} lists no bullet naming {param}, but \
+                 the launch binds it for {name}"
+            ));
+        }
+    }
+    let (root_layout, parent_layout) = storage_layouts(name);
+    let depth = |layout: &Path| layout.components().count();
+    let mut tokens: Vec<(&str, usize)> = Vec::new();
+    for (param, derived, layout) in [
+        (STORAGE_ROOT_PARAM, root, root_layout),
+        (STORAGE_PARENT_PARAM, parent, parent_layout),
+    ] {
+        let Some(bullet) = bullets.iter().find(|bullet| bullet.name == param) else {
+            continue;
+        };
+        let span = bullet.layout.unwrap_or_default();
+        let Some((token, written)) = base_token_and_layout(span) else {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {heading} bullet {} for {name} writes {} for \
+                 {param}, which does not start with a base token, so it does not show the layout \
+                 beneath a base that the derivation gives, {}",
+                bullet.row,
+                if span.is_empty() {
+                    "no span".to_string()
+                } else {
+                    format!("the span {span}")
+                },
+                derived.display()
+            ));
+            continue;
+        };
+        if !layout_is_tail_of(derived, written, depth(&layout)) {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {heading} bullet {} for {name} writes {span} for \
+                 {param}, whose layout beneath {token} is not the one the derivation gives, {}",
+                bullet.row,
+                derived.display()
+            ));
+            continue;
+        }
+        tokens.push((token, bullet.row));
+    }
+    if let Some((first, first_row)) = tokens.first().copied() {
+        for (token, row) in &tokens[1..] {
+            if *token != first {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {heading} bullets {first_row} and {row} for \
+                     {name} use two base tokens, {first} and {token}, but one launch binds one base"
+                ));
+            }
+        }
     }
     problems
 }
@@ -13320,6 +13537,11 @@ const STORAGE_RIGHT: &str = CONTRACT_RIGHTS[0];
 /// It is one `CANONICAL_PARAMS` entry, so the rule names the same token the
 /// profile does.
 const STORAGE_ROOT_PARAM: &str = CANONICAL_PARAMS[1];
+
+/// The canonical parameter whose path is the parent of the storage root. It is
+/// one `CANONICAL_PARAMS` entry, so the layout rule names the same token the
+/// profile does.
+const STORAGE_PARENT_PARAM: &str = CANONICAL_PARAMS[2];
 
 /// The store file every Effectful wallet kind writes.
 const STORE_FILE_NAME: &str = "wallet-state.json";
@@ -17164,6 +17386,253 @@ fn every_confinement_document_lists_its_profiles_allow_rules() {
         ));
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// Each confinement document states the bindings a launch makes, and it states
+/// them from the one derivation the launch uses.
+///
+/// The check loops over `allow_rule_profiles`, reads each provider's
+/// `capsules/<name>/CONFINEMENT.md` through `read_confinement_document`, derives
+/// that provider's root and parent through `provider_storage_root` and
+/// `storage_parent` over a placeholder base, and requires
+/// `profile_parameter_section_problems` to report nothing. The base is a
+/// placeholder because the derivation is absolute only against the base its
+/// caller passes, so the rule holds the layout beneath the base token. A
+/// missing document is a refusal that names its path, never a skipped
+/// provider. The check reads one file per provider and starts no process, so it
+/// runs on every platform.
+///
+/// Falsifier: WP232 swaps the two storage derivations, so the committed layout
+/// no longer matches and a drifted one would; WP233 yields no parameter bullet,
+/// so a real section is refused as naming nothing.
+/// `every_confinement_document_states_its_bindings_from_the_one_derivation`
+/// fails on each. Those plants edit the checker, and the committed sections
+/// still state the derivation, so this test fails with them.
+#[test]
+fn every_confinement_document_states_its_bindings_from_the_one_derivation() {
+    let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("capsules/wallet-provider must sit under capsules/");
+    let base = Path::new("/placeholder/base");
+    let mut problems = Vec::new();
+    for name in allow_rule_profiles() {
+        let document =
+            read_confinement_document(capsules, name).unwrap_or_else(|err| panic!("{err}"));
+        problems.extend(profile_parameter_section_problems(
+            name,
+            &document,
+            name,
+            &provider_storage_root(name, base),
+            &storage_parent(name, base),
+        ));
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// The parameter rule refuses each bad section and accepts both real ones.
+///
+/// The passing cases are built from the real did and wallet sections, cut from
+/// their committed documents, so a refusal over one of them means the section
+/// and the derivation have drifted apart. Then one case per refusal asserts the
+/// exact problem vector: a bullet naming a span outside `CANONICAL_PARAMS`, a
+/// canonical name listed twice, a canonical name absent, a `STORAGE_ROOT`
+/// bullet whose layout is not the derived one, a `STORAGE_PARENT` bullet with
+/// no layout span, a layout span with no base token, two different base tokens,
+/// a section with no parameter bullet, and the section reader's own missing and
+/// duplicated heading refusals. The documents and paths are values in memory;
+/// only the two real sections are read, and the test starts no process.
+///
+/// Falsifier: WP232 swaps the two storage derivations, so the drifted-layout
+/// case reports nothing and the bound-layout case is refused; WP233 yields no
+/// parameter bullet, so the empty-section case reports nothing. Both fail this
+/// test.
+#[test]
+fn profile_parameter_section_check_refuses_each_bad_section() {
+    let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("capsules/wallet-provider must sit under capsules/");
+    let base = Path::new("/placeholder/base");
+    for name in allow_rule_profiles() {
+        let document =
+            read_confinement_document(capsules, name).unwrap_or_else(|err| panic!("{err}"));
+        let real = section_under_one_heading(name, &document, PROFILE_PARAMETERS_HEADING)
+            .unwrap_or_else(|problems| panic!("{}", problems.join("\n")));
+        let fixture = format!("# fixture\n\n{PROFILE_PARAMETERS_HEADING}\n{real}\n");
+        assert_eq!(
+            profile_parameter_section_problems(
+                name,
+                &fixture,
+                name,
+                &provider_storage_root(name, base),
+                &storage_parent(name, base),
+            ),
+            Vec::<String>::new(),
+            "the committed {name} section, read as text, must state the one derivation"
+        );
+    }
+
+    let root = provider_storage_root(WALLET_PROVIDER, base);
+    let parent = storage_parent(WALLET_PROVIDER, base);
+    let section = |bullets: &[&str]| {
+        let mut document = String::from("# fixture\n\n");
+        document.push_str(PROFILE_PARAMETERS_HEADING);
+        document.push_str("\n\nThe generated profile binds three parameters:\n\n");
+        for bullet in bullets {
+            document.push_str(bullet);
+            document.push('\n');
+        }
+        document.push_str("\nThe tests bind all three before launch.\n");
+        document
+    };
+    let check = |document: &str| {
+        profile_parameter_section_problems(
+            WALLET_PROVIDER,
+            document,
+            WALLET_PROVIDER,
+            &root,
+            &parent,
+        )
+    };
+    let executable = "- `PROVIDER_EXECUTABLE` is the provider binary the launch starts.";
+    let wallet_root = "- `STORAGE_ROOT` is `base_path/ElastOS/SystemServices/Wallet`.";
+    let wallet_parent = "- `STORAGE_PARENT` is its parent, `base_path/ElastOS/SystemServices`.";
+    let good = [executable, wallet_root, wallet_parent];
+    assert_eq!(
+        check(&section(&good)),
+        Vec::<String>::new(),
+        "three bullets naming the three canonical parameters must report no problem"
+    );
+
+    assert_eq!(
+        check(&section(&[
+            good[0],
+            "- `STORAGE_KEYS` is `base_path/keys`.",
+            good[2]
+        ])),
+        vec![
+            "wallet-provider CONFINEMENT.md: ## Profile parameters bullet 2 for wallet-provider \
+             names STORAGE_KEYS, which is not one of PROVIDER_EXECUTABLE, STORAGE_ROOT, \
+             STORAGE_PARENT"
+                .to_string(),
+            "wallet-provider CONFINEMENT.md: ## Profile parameters lists no bullet naming \
+             STORAGE_ROOT, but the launch binds it for wallet-provider"
+                .to_string(),
+        ],
+        "a non-canonical span must be refused, and its displaced name reported missing"
+    );
+
+    assert_eq!(
+        check(&section(&[good[0], good[1], good[2], wallet_parent])),
+        vec![
+            "wallet-provider CONFINEMENT.md: ## Profile parameters bullet 4 for wallet-provider \
+              names STORAGE_PARENT again, but the launch binds it once; bullet 3 already names it"
+                .to_string()
+        ],
+        "a canonical name listed twice must be refused"
+    );
+
+    assert_eq!(
+        check(&section(&[good[0], good[1]])),
+        vec![
+            "wallet-provider CONFINEMENT.md: ## Profile parameters lists no bullet naming \
+              STORAGE_PARENT, but the launch binds it for wallet-provider"
+                .to_string()
+        ],
+        "a canonical name listed zero times must be refused"
+    );
+
+    assert_eq!(
+        check(&section(&[
+            executable,
+            "- `STORAGE_ROOT` is `base_path/ElastOS/Wallet`.",
+            wallet_parent
+        ])),
+        vec![
+            "wallet-provider CONFINEMENT.md: ## Profile parameters bullet 2 for wallet-provider \
+              writes base_path/ElastOS/Wallet for STORAGE_ROOT, whose layout beneath base_path is \
+              not the one the derivation gives, /placeholder/base/ElastOS/SystemServices/Wallet"
+                .to_string()
+        ],
+        "a drifted storage layout must be refused with both spans"
+    );
+
+    assert_eq!(
+        check(&section(&[
+            executable,
+            wallet_root,
+            "- `STORAGE_PARENT` is its parent."
+        ])),
+        vec![
+            "wallet-provider CONFINEMENT.md: ## Profile parameters bullet 3 for wallet-provider \
+              writes no span for STORAGE_PARENT, which does not start with a base token, so it \
+              does not show the layout beneath a base that the derivation gives, \
+              /placeholder/base/ElastOS/SystemServices"
+                .to_string()
+        ],
+        "a bullet that writes no layout must be refused"
+    );
+
+    assert_eq!(
+        check(&section(&[
+            executable,
+            wallet_root,
+            "- `STORAGE_PARENT` is its parent, `/placeholder/base/ElastOS/SystemServices`."
+        ])),
+        vec![
+            "wallet-provider CONFINEMENT.md: ## Profile parameters bullet 3 for wallet-provider \
+              writes the span /placeholder/base/ElastOS/SystemServices for STORAGE_PARENT, which \
+              does not start with a base token, so it does not show the layout beneath a base that \
+              the derivation gives, /placeholder/base/ElastOS/SystemServices"
+                .to_string()
+        ],
+        "a span with no base token must be refused"
+    );
+
+    assert_eq!(
+        check(&section(&[
+            executable,
+            wallet_root,
+            "- `STORAGE_PARENT` is its parent, `Init.base_path/ElastOS/SystemServices`."
+        ])),
+        vec![
+            "wallet-provider CONFINEMENT.md: ## Profile parameters bullets 2 and 3 for \
+              wallet-provider use two base tokens, base_path and Init.base_path, but one launch \
+              binds one base"
+                .to_string()
+        ],
+        "two base tokens inside one section must be refused"
+    );
+
+    let empty = "# fixture\n\n## Profile parameters\n\nNo bullet names a parameter.\n";
+    assert_eq!(
+        check(empty),
+        vec![
+            "wallet-provider CONFINEMENT.md: ## Profile parameters holds no bullet naming a \
+              parameter for wallet-provider, so it cannot show the bindings"
+                .to_string()
+        ],
+        "a section with no parameter bullet must be refused, not read as an absent list"
+    );
+
+    let missing = "# fixture\n\n## Other\n\n- nothing\n";
+    assert_eq!(
+        check(missing),
+        vec![
+            "wallet-provider CONFINEMENT.md must hold one line ## Profile parameters; found none"
+                .to_string()
+        ],
+        "a missing heading must be the section reader's own refusal"
+    );
+
+    let twice = "# fixture\n\n## Profile parameters\n\n## Profile parameters\n";
+    assert_eq!(
+        check(twice),
+        vec![
+            "wallet-provider CONFINEMENT.md must hold one line ## Profile parameters; found 2"
+                .to_string()
+        ],
+        "a duplicated heading must be the section reader's own refusal"
+    );
 }
 
 /// Every test cited in an operations table exists where the table says.

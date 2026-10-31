@@ -299,8 +299,12 @@ use std::process::Command;
 /// form the profile does not hold, so a paraphrased row passes; and WP231,
 /// which makes an allow section with no span report no problem, so a document
 /// that lists nothing passes. Both are CAUGHT on the Mac by
-/// `profile_allow_table_check_refuses_each_bad_table`.
-const EXPECTED_FALSIFIERS: usize = 211;
+/// `profile_allow_table_check_refuses_each_bad_table`. Task 165 adds WP232,
+/// which swaps the two storage derivations, so a drifted layout passes while
+/// the bound one is refused; and WP233, which yields no parameter bullet, so a
+/// section that names nothing passes. Both are CAUGHT on the Mac by
+/// `every_confinement_document_states_its_bindings_from_the_one_derivation`.
+const EXPECTED_FALSIFIERS: usize = 213;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

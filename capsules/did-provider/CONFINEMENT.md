@@ -82,6 +82,11 @@ The generated profile binds three parameters, which the tests pass with
 - `STORAGE_ROOT`: `Init.base_path/did`.
 - `STORAGE_PARENT`: `Init.base_path`.
 
+One rule, `profile_parameter_section_problems`, under the test
+`every_confinement_document_states_its_bindings_from_the_one_derivation`,
+holds these three names and the two storage layouts to the one derivation the
+launch uses, and it does not check a path for `PROVIDER_EXECUTABLE`.
+
 The tests pass a temporary base and bind all three parameters before launch;
 the Runtime half of the bridge change does the same and is not built.
 
