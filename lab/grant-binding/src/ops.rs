@@ -3212,3 +3212,134 @@ fn model_second_set_rate_keeps_the_window() {
         .use_grant(call, &guest(album))
         .expect("the album grant stays");
 }
+
+#[test]
+fn model_expired_grant_stores_no_new_bound() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_until(photo, "UsersAI/photo/library", rights(), 10)
+        .expect("library");
+    assert_eq!(library, Handle(1));
+    let frames = verifier
+        .bind_until(photo, "UsersAI/photo/frames", rights(), 10)
+        .expect("frames");
+    assert_eq!(frames, Handle(2));
+    let album = verifier
+        .bind_grant(photo, "UsersAI/photo/album", rights())
+        .expect("album has no expiry");
+    assert_eq!(album, Handle(3));
+    verifier.set_verifier_now(4);
+    verifier
+        .set_rate(library, 1, 10)
+        .expect("the rate starts before the expiry");
+    verifier
+        .set_effect_limit(frames, 1)
+        .expect("the limit starts before the expiry");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("the journal mints before the expiry");
+    assert_eq!(roll, Handle(4));
+    verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect("one rated effect");
+    let rated = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("the rate is spent");
+    assert_eq!(rated, OperateRefuse::Binding(Refuse::Rate));
+    verifier
+        .operate(
+            &call,
+            &guest(frames),
+            Operation::Append,
+            "UsersAI/photo/frames",
+        )
+        .expect("one counted effect");
+    let limited = verifier
+        .operate(
+            &call,
+            &guest(frames),
+            Operation::Append,
+            "UsersAI/photo/frames",
+        )
+        .expect_err("the effect count is spent");
+    assert_eq!(limited, OperateRefuse::Binding(Refuse::EffectLimit));
+    verifier.set_verifier_now(u64::MAX);
+    verifier
+        .set_rate(album, 1, 10)
+        .expect("an unset expiry still stores a rate");
+    verifier
+        .set_effect_limit(album, 2)
+        .expect("an unset expiry still stores a limit");
+    verifier.set_verifier_now(10);
+    let late_rate = verifier
+        .set_rate(library, 5, 10)
+        .expect_err("an expired grant stores no new rate");
+    assert_eq!(late_rate, Refuse::Expired);
+    assert_eq!(late_rate.to_string(), "grant has expired");
+    let late_limit = verifier
+        .set_effect_limit(frames, 4)
+        .expect_err("an expired grant stores no new effect count limit");
+    assert_eq!(late_limit, Refuse::Expired);
+    assert_eq!(late_limit.to_string(), "grant has expired");
+    let child_rate = verifier
+        .set_rate(roll, 1, 10)
+        .expect_err("a child journal keeps no rate");
+    assert_eq!(child_rate, Refuse::IssuingRate);
+    let child_limit = verifier
+        .set_effect_limit(roll, 1)
+        .expect_err("a child journal keeps no effect count limit");
+    assert_eq!(child_limit, Refuse::IssuingLimit);
+    let due = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("the library grant has expired");
+    assert_eq!(due, Refuse::Expired);
+    let child_due = verifier
+        .use_grant(call, &guest(roll))
+        .expect_err("the journal follows the issuing expiry");
+    assert_eq!(child_due, Refuse::Expired);
+    verifier
+        .use_grant(call, &guest(album))
+        .expect("the album grant has no expiry");
+    verifier.set_verifier_now(4);
+    let still_rated = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("the spent rate was not raised");
+    assert_eq!(still_rated, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(still_rated.to_string(), "rate limit is reached");
+    let still_limited = verifier
+        .operate(
+            &call,
+            &guest(frames),
+            Operation::Append,
+            "UsersAI/photo/frames",
+        )
+        .expect_err("the spent effect count limit was not raised");
+    assert_eq!(still_limited, OperateRefuse::Binding(Refuse::EffectLimit));
+    assert_eq!(still_limited.to_string(), "effect limit is reached");
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the library grant stays");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("the journal stays");
+    verifier
+        .use_grant(call, &guest(album))
+        .expect("the album grant stays");
+}

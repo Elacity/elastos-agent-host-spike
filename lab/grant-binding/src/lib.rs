@@ -366,27 +366,43 @@ impl Verifier {
     }
 
     #[rustfmt::skip]
-    pub fn set_effect_limit(&mut self, handle: Handle, limit: u64) -> Result<(), Refuse> {
-        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+    fn limit_expiry(&self, handle: Handle) -> Result<Option<u64>, Refuse> {
+        let grant = self.grants.get(&handle).ok_or(Refuse::UnknownHandle)?;
         if grant.ended {
             return Err(Refuse::UnknownHandle);
         }
         if grant.record.parent.is_some() {
             return Err(Refuse::IssuingLimit);
         }
+        Ok(grant.record.expiry)
+    }
+
+    #[rustfmt::skip]
+    pub fn set_effect_limit(&mut self, handle: Handle, limit: u64) -> Result<(), Refuse> {
+        let expiry = self.limit_expiry(handle)?;
+        self.refuse_if_due(expiry)?;
+        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
         grant.record.effect_limit = Some(limit);
         Ok(())
     }
 
     #[rustfmt::skip]
-    pub fn set_rate(&mut self, handle: Handle, limit: u64, window: u64) -> Result<(), Refuse> {
-        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+    fn rate_expiry(&self, handle: Handle) -> Result<Option<u64>, Refuse> {
+        let grant = self.grants.get(&handle).ok_or(Refuse::UnknownHandle)?;
         if grant.record.parent.is_some() {
             return Err(Refuse::IssuingRate);
         }
         if grant.ended {
             return Err(Refuse::UnknownHandle);
         }
+        Ok(grant.record.expiry)
+    }
+
+    #[rustfmt::skip]
+    pub fn set_rate(&mut self, handle: Handle, limit: u64, window: u64) -> Result<(), Refuse> {
+        let expiry = self.rate_expiry(handle)?;
+        self.refuse_if_due(expiry)?;
+        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
         let starting = grant.record.rate.is_none();
         grant.record.rate = Some(limit);
         grant.record.window = window;
@@ -440,6 +456,19 @@ impl Verifier {
         Ok(bound)
     }
 
+    /// The one expiry comparison: a set expiry is due when `verifier_now` is at
+    /// or after it. `resolve` and both bound writes call it, so one place
+    /// decides when a grant has expired.
+    #[rustfmt::skip]
+    fn refuse_if_due(&self, expiry: Option<u64>) -> Result<(), Refuse> {
+        if let Some(expiry) = expiry {
+            if self.verifier_now >= expiry {
+                return Err(Refuse::Expired);
+            }
+        }
+        Ok(())
+    }
+
     /// The one handle check: resolves a handle and compares the stored grant
     /// with the registry record of the call's instance, in order.
     pub(crate) fn resolve(&self, call: Call, handle: Handle) -> Result<GrantRecord, Refuse> {
@@ -453,11 +482,7 @@ impl Verifier {
                 expiry = ancestor.record.expiry;
                 parent = ancestor.record.parent;
             }
-            if let Some(expiry) = expiry {
-                if self.verifier_now >= expiry {
-                    return Err(Refuse::Expired);
-                }
-            }
+            self.refuse_if_due(expiry)?;
         };
         Ok(bound)
     }
