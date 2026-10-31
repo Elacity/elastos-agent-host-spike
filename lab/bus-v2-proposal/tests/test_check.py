@@ -10199,7 +10199,8 @@ class CitationCheckTests(unittest.TestCase):
             + len(check.EGRESS_LINE_SPANS)
             + len(check.RESTATED_LINE_SPANS)
             + len(check.LEDGER_LINE_SPANS)
-            + len(check.OTHER_INDENT_SPANS),
+            + len(check.OTHER_INDENT_SPANS)
+            + len(check.BLOCKLESS_FUNCTION_SPANS),
         )
         self.assertEqual(set(ALIGNED_ALREADY_DECIDED) - ALIGNED_ENDPOINT_SET, set())
 
@@ -10246,7 +10247,8 @@ class CitationCheckTests(unittest.TestCase):
             + len(check.EGRESS_LINE_SPANS)
             + len(check.RESTATED_LINE_SPANS)
             + len(check.LEDGER_LINE_SPANS)
-            + len(check.OTHER_INDENT_SPANS),
+            + len(check.OTHER_INDENT_SPANS)
+            + len(check.BLOCKLESS_FUNCTION_SPANS),
         )
         # The spans this task adds, read back from the target list as spans, are
         # exactly the 65 names above minus the 12 that already had entries. A
@@ -10269,6 +10271,7 @@ class CitationCheckTests(unittest.TestCase):
             and endpoint not in check.RESTATED_LINE_SPANS
             and endpoint not in check.LEDGER_LINE_SPANS
             and endpoint not in check.OTHER_INDENT_SPANS
+            and endpoint not in check.BLOCKLESS_FUNCTION_SPANS
         ]
         self.assertEqual(len(added), len(ALIGNED_NEW_ENDPOINTS))
         added_spans = {
@@ -10461,7 +10464,8 @@ class CitationCheckTests(unittest.TestCase):
         # then one None quoter per indent line span, then one None quoter per
         # egress line span, then one None quoter per retargeted line span, then
         # one None quoter per ledger line span, then one None quoter per
-        # other-indent line span. A missing, extra, or duplicated
+        # other-indent line span, then one None quoter per blockless function
+        # span. A missing, extra, or duplicated
         # entry fails this ordered comparison.
         expected = BASE_QUOTE_TARGETS + tuple(
             (span, "`" + span + "`", None) for span in FUNCTION_QUOTE_SPAN_ORDER
@@ -10475,6 +10479,8 @@ class CitationCheckTests(unittest.TestCase):
             (span, "`" + span + "`", None) for span in LEDGER_LINE_SPAN_ORDER
         ) + tuple(
             (span, "`" + span + "`", None) for span in OTHER_INDENT_SPAN_ORDER
+        ) + tuple(
+            (span, "`" + span + "`", None) for span in BLOCKLESS_FUNCTION_SPAN_ORDER
         )
         self.assertEqual(check.QUOTE_TARGETS, expected)
         self.assertEqual(check.FUNCTION_QUOTE_SPANS, FUNCTION_QUOTE_SPAN_ORDER)
@@ -10483,36 +10489,44 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(check.RESTATED_LINE_SPANS, RESTATED_LINE_SPAN_ORDER)
         self.assertEqual(check.LEDGER_LINE_SPANS, LEDGER_LINE_SPAN_ORDER)
         self.assertEqual(check.OTHER_INDENT_SPANS, OTHER_INDENT_SPAN_ORDER)
+        self.assertEqual(
+            check.BLOCKLESS_FUNCTION_SPANS, BLOCKLESS_FUNCTION_SPAN_ORDER
+        )
         self.assertEqual(len(FUNCTION_QUOTE_SPAN_ORDER), 51)
         self.assertEqual(len(INDENT_LINE_SPAN_ORDER), 18)
         self.assertEqual(len(EGRESS_LINE_SPAN_ORDER), 2)
         self.assertEqual(len(RESTATED_LINE_SPAN_ORDER), 2)
         self.assertEqual(len(LEDGER_LINE_SPAN_ORDER), 3)
         self.assertEqual(len(OTHER_INDENT_SPAN_ORDER), 3)
-        self.assertEqual(len(expected), 194)
+        self.assertEqual(len(BLOCKLESS_FUNCTION_SPAN_ORDER), 77)
+        self.assertEqual(len(expected), 271)
         self.assertEqual(
             len(check.QUOTE_TARGETS),
             len({target[0] for target in check.QUOTE_TARGETS}),
         )
         self.assertEqual(
-            tuple(target[0] for target in check.QUOTE_TARGETS[-28:-10]),
+            tuple(target[0] for target in check.QUOTE_TARGETS[-105:-87]),
             INDENT_LINE_SPAN_ORDER,
         )
         self.assertEqual(
-            tuple(target[0] for target in check.QUOTE_TARGETS[-10:-8]),
+            tuple(target[0] for target in check.QUOTE_TARGETS[-87:-85]),
             EGRESS_LINE_SPAN_ORDER,
         )
         self.assertEqual(
-            tuple(target[0] for target in check.QUOTE_TARGETS[-8:-6]),
+            tuple(target[0] for target in check.QUOTE_TARGETS[-85:-83]),
             RESTATED_LINE_SPAN_ORDER,
         )
         self.assertEqual(
-            tuple(target[0] for target in check.QUOTE_TARGETS[-6:-3]),
+            tuple(target[0] for target in check.QUOTE_TARGETS[-83:-80]),
             LEDGER_LINE_SPAN_ORDER,
         )
         self.assertEqual(
-            tuple(target[0] for target in check.QUOTE_TARGETS[-3:]),
+            tuple(target[0] for target in check.QUOTE_TARGETS[-80:-77]),
             OTHER_INDENT_SPAN_ORDER,
+        )
+        self.assertEqual(
+            tuple(target[0] for target in check.QUOTE_TARGETS[-77:]),
+            BLOCKLESS_FUNCTION_SPAN_ORDER,
         )
         for span in UNMATCHED_FUNCTION_SPANS:
             self.assertNotIn(span, check.FUNCTION_QUOTE_SPANS, span)
@@ -10533,6 +10547,9 @@ class CitationCheckTests(unittest.TestCase):
                 (span, "`" + span + "`", None) for span in LEDGER_LINE_SPAN_ORDER
             ) + tuple(
                 (span, "`" + span + "`", None) for span in OTHER_INDENT_SPAN_ORDER
+            ) + tuple(
+                (span, "`" + span + "`", None)
+                for span in BLOCKLESS_FUNCTION_SPAN_ORDER
             )
             self.assertEqual(check.QUOTE_TARGETS, expected)
             self.assertNotIn(
@@ -10926,6 +10943,121 @@ class CitationCheckTests(unittest.TestCase):
             "CAUGHT other-indent-spans",
         )
 
+    def test_changed_blockless_function_remainder_does_not_match(self):
+        # One changed character of the remainder that stands for the declaring
+        # line refuses that blockless function span and no other reason. The
+        # loop reads this file's own order, so the falsifier's empty tuple
+        # still leaves this test work to do.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        sha = check.pin_sha(text)
+        self.assertEqual(len(BLOCKLESS_FUNCTION_SPAN_ORDER), 77)
+        for span in BLOCKLESS_FUNCTION_SPAN_ORDER:
+            remainders = check._remainders(text, "`" + span + "`")
+            rel = check.CITATION.fullmatch(span).group("path")
+            pinned = check._pinned_lines(root, sha, rel)
+            number = check.cited_line(span, pinned)
+            self.assertIsNotNone(number, span)
+            self.assertEqual(remainders, [pinned[number - 1]], span)
+            index = check._quote_window(remainders, pinned, number)
+            changed = list(remainders)
+            line = changed[index]
+            changed[index] = line[:-1] + ("x" if line[-1] != "x" else "y")
+            block = "".join("    " + row + "\n" for row in changed)
+            body = "Pinned commit: " + sha + "\n`" + span + "`\n\n" + block
+            self.assertEqual(
+                self._problems_for(body),
+                ["refuse: quoted line does not match " + span],
+                span,
+            )
+
+    def test_blockless_ledger_release_after_unknown_mismatch_is_refused(self):
+        # The one-character mismatch over this blockless span. The falsifier
+        # plants an empty tuple, and this test then reads no refusal for it.
+        span = "lab/grant-binding/src/ledger.rs::model_release_after_unknown_is_refused"
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        sha = check.pin_sha(text)
+        remainders = check._remainders(text, "`" + span + "`")
+        rel = check.CITATION.fullmatch(span).group("path")
+        pinned = check._pinned_lines(root, sha, rel)
+        number = check.cited_line(span, pinned)
+        index = check._quote_window(remainders, pinned, number)
+        changed = list(remainders)
+        line = changed[index]
+        changed[index] = line[:-1] + ("x" if line[-1] != "x" else "y")
+        block = "".join("    " + row + "\n" for row in changed)
+        body = "Pinned commit: " + sha + "\n`" + span + "`\n\n" + block
+        self.assertEqual(
+            self._problems_for(body),
+            ["refuse: quoted line does not match " + span],
+            span,
+        )
+
+    def test_repeated_blockless_function_marker_is_not_one_line(self):
+        # The first blockless span stands once in the draft, and a marker that
+        # stands twice is refused before the line read.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        sha = check.pin_sha(text)
+        span = check.BLOCKLESS_FUNCTION_SPANS[0]
+        self.assertEqual(text.count("`" + span + "`"), 1, span)
+        body = (
+            "Pinned commit: " + sha + "\n"
+            "`" + span + "`\n"
+            "`" + span + "`\n"
+            "    fn lab_cid_prints_with_the_lab_label() {\n"
+        )
+        self.assertEqual(
+            self._problems_for(body),
+            ["refuse: quoted line is not one line: " + span],
+        )
+
+    def test_blockless_function_block_deleted_is_refused(self):
+        # The end-to-end deletion case: one blockless paragraph keeps its
+        # marker and loses only the block line under it, and main() prints the
+        # refusal and exits 1.
+        span = "lab/grant-binding/src/ledger.rs::model_release_after_unknown_is_refused"
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        lines = text.splitlines(keepends=True)
+        marker = "`" + span + "`"
+        keep = set(self._block_lines_after(text, marker))
+        self.assertEqual(len(keep), 1, span)
+        draft = "".join(line for index, line in enumerate(lines) if index not in keep)
+        self.assertIn(marker, draft)
+        expected = "refuse: quoted line has no block: " + span
+        self.assertEqual(self._problems_for(draft), [expected])
+        code, out = self._main_for(draft)
+        self.assertEqual(code, 1)
+        self.assertEqual(out, expected + "\n")
+
+    def test_blockless_function_span_and_marker_dropped_adds_no_refusal(self):
+        # A paragraph that stops citing its span together with its block is not
+        # a missing block, so the walk moves on and this deletion stays silent.
+        span = check.BLOCKLESS_FUNCTION_SPANS[1]
+        block = "    fn single_block_at_the_chunk_limit_has_the_pinned_cid() {\n"
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        lines = text.splitlines(keepends=True)
+        marker = "`" + span + "`"
+        draft = "".join(
+            line for line in lines if marker not in line and line != block
+        )
+        self.assertNotIn(marker, draft)
+        self.assertEqual(self._problems_for(draft), [])
+
+    def test_falsifier_blockless_function_spans(self):
+        # An empty BLOCKLESS_FUNCTION_SPANS drops the span, so the changed
+        # declaring line is not refused and this test fails.
+        self._caught(
+            "BLOCKLESS_FUNCTION_SPANS",
+            (),
+            self.test_blockless_ledger_release_after_unknown_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT blockless-function-spans",
+        )
+
     def _block_lines_after(self, text, marker):
         """Return the line indexes of the indented block that follows MARKER."""
         lines = text.splitlines(keepends=True)
@@ -11277,4 +11409,86 @@ OTHER_INDENT_SPAN_ORDER = (
     'elastos/crates/elastos-runtime/src/capability/manager.rs:409',
     'elastos/crates/elastos-compute/src/providers/component.rs:384',
     'elastos/wit/elastos-bus-v1.wit:10',
+)
+
+# The 77 function spans with no block that this task scores, spliced after the
+# other-indent line spans, in draft order.
+BLOCKLESS_FUNCTION_SPAN_ORDER = (
+    'lab/capsule-identity/tests/encoding.rs::lab_cid_prints_with_the_lab_label',
+    'lab/capsule-identity/tests/encoding.rs::single_block_at_the_chunk_limit_has_the_pinned_cid',
+    'lab/capsule-identity/tests/location.rs::file_times_and_modes_do_not_change_the_lab_cid',
+    'lab/capsule-identity/tests/encoding.rs::long_utf8_name_has_the_pinned_cid',
+    'lab/capsule-identity/tests/encoding.rs::path_and_content_boundaries_cannot_collide',
+    'lab/capsule-identity/tests/encoding.rs::empty_file_has_the_pinned_cid',
+    'lab/capsule-identity/tests/encoding.rs::encoder_refuses_file_directory_conflict',
+    'lab/capsule-identity/tests/refusals.rs::symlink_in_bundle_is_refused_with_its_path',
+    'lab/capsule-identity/tests/walk.rs::link_at_the_bundle_root_is_refused',
+    'lab/capsule-identity/tests/walk.rs::root_path_through_a_link_loop_keeps_the_system_reason',
+    'lab/capsule-identity/tests/walk.rs::entry_swapped_for_a_link_before_open_is_refused',
+    'lab/capsule-identity/tests/refusals.rs::manifest_with_an_unknown_field_is_refused',
+    'lab/capsule-identity/tests/bytes.rs::one_byte_change_in_the_manifest_changes_the_lab_cid',
+    'lab/capsule-identity/tests/location.rs::changing_the_url_or_store_row_keeps_the_lab_cid',
+    'lab/capsule-identity/tests/bytes.rs::one_byte_change_in_any_payload_file_changes_the_lab_cid',
+    'lab/capsule-identity/tests/bytes.rs::adding_or_removing_a_payload_file_changes_the_lab_cid',
+    'lab/capsule-identity/tests/refusals.rs::unreadable_folder_is_refused_with_its_path',
+    'lab/capsule-identity/tests/walk.rs::entry_swapped_for_a_fifo_before_open_is_refused_without_blocking',
+    'lab/capsule-identity/tests/location.rs::renaming_the_bundle_folder_keeps_the_lab_cid',
+    'lab/capsule-identity/tests/encoding.rs::lab_cid_does_not_depend_on_listing_order',
+    'lab/capsule-identity/tests/encoding.rs::encoder_refuses_a_duplicate_path',
+    'lab/capsule-identity/tests/refusals.rs::bundle_without_capsule_json_is_refused',
+    'lab/capsule-identity/tests/encoding.rs::directory_over_the_hamt_threshold_is_refused',
+    'lab/capsule-identity/tests/walk.rs::entry_swapped_for_a_folder_before_open_is_refused',
+    'lab/capsule-identity/tests/refusals.rs::manifest_that_fails_runtime_validate_is_refused',
+    'lab/capsule-identity/tests/encoding.rs::encoder_refuses_a_path_with_an_empty_or_dot_part',
+    'lab/capsule-identity/tests/refusals.rs::non_utf8_path_is_refused',
+    'lab/capsule-identity/tests/name_signature.rs::checked_signature_judges_the_checked_bytes',
+    'lab/capsule-identity/tests/package_record.rs::record_signed_under_the_wrong_domain_is_refused',
+    'lab/capsule-identity/tests/variant_binding.rs::variant_binding_stays_outside_the_bundles',
+    'lab/capsule-identity/tests/package_record.rs::package_record_stays_outside_the_bundle',
+    'lab/capsule-identity/tests/package_record.rs::checked_record_judges_the_checked_bytes',
+    'lab/capsule-identity/tests/location.rs::moving_the_bundle_to_another_parent_keeps_the_lab_cid',
+    'lab/capsule-identity/tests/walk.rs::entry_swapped_after_its_handle_is_checked_names_the_checked_bytes',
+    'lab/capsule-identity/tests/walk.rs::checked_entries_are_the_bytes_the_walk_checked',
+    'lab/capsule-identity/tests/walk.rs::folder_swapped_after_its_handle_is_checked_names_the_checked_bytes',
+    'lab/agent-conformance/standin-runtime/mod.rs::delete_capsule',
+    'lab/grant-binding/src/lib.rs::model_public_storage_read_is_refused',
+    'lab/grant-binding/src/lib.rs::model_unknown_handle_is_refused',
+    'lab/grant-binding/src/lib.rs::model_public_prefix_is_not_a_public_read',
+    'lab/grant-binding/src/lib.rs::model_host_path_root_is_refused',
+    'lab/grant-binding/src/lib.rs::model_use_path_under_the_owned_root_is_allowed',
+    'lab/grant-binding/src/lib.rs::model_extended_identity_is_refused',
+    'lab/grant-binding/src/lib.rs::model_extended_session_is_refused',
+    'lab/grant-binding/src/ops.rs::model_forged_rights_do_not_widen_the_child_grant',
+    'lab/grant-binding/src/ops.rs::model_refused_child_journal_stores_no_grant',
+    'lab/grant-binding/src/ops.rs::model_forged_identity_does_not_move_the_child_path',
+    'lab/grant-binding/src/ops.rs::model_forged_instance_does_not_move_the_child_grant',
+    'lab/grant-binding/src/ops.rs::model_forged_session_does_not_move_the_child_path',
+    'lab/grant-binding/src/ops.rs::model_append_and_overwrite_do_not_permit_child_journal',
+    'lab/grant-binding/src/ops.rs::model_child_journal_under_the_owned_root_is_allowed',
+    'lab/capsule-identity/tests/bytes.rs::one_byte_change_in_asks_json_changes_the_lab_cid',
+    'lab/grant-binding/src/ask.rs::model_over_budget_ask_is_refused',
+    'lab/grant-binding/src/ask.rs::model_ask_at_the_cap_is_admitted',
+    'lab/grant-binding/src/ask.rs::model_admitted_ask_sets_the_ceiling',
+    'lab/grant-binding/src/ledger.rs::model_second_agent_does_not_raise_the_ceiling',
+    'lab/grant-binding/src/ledger.rs::model_lower_admit_binds_an_asked_agent',
+    'lab/grant-binding/src/ledger.rs::model_unasked_agent_reads_the_last_admit',
+    'lab/grant-binding/src/ledger.rs::model_other_agent_hold_does_not_fill_the_ceiling',
+    'lab/grant-binding/src/ledger.rs::model_second_agent_hold_past_the_shared_u64_total_is_refused',
+    'lab/grant-binding/src/ledger.rs::model_concurrent_reserves_keep_one_ceiling',
+    'lab/grant-binding/src/ledger.rs::model_settle_above_the_reservation_is_refused',
+    'lab/grant-binding/src/ledger.rs::model_forged_instance_does_not_move_the_settle',
+    'lab/grant-binding/src/ledger.rs::model_forged_instance_does_not_move_the_reserve',
+    'lab/grant-binding/src/ledger.rs::model_forged_instance_does_not_move_the_release',
+    'lab/grant-binding/src/ledger.rs::model_forged_ceiling_does_not_raise_the_ceiling',
+    'lab/grant-binding/src/ledger.rs::model_settle_below_the_hold_returns_the_rest',
+    'lab/grant-binding/src/ledger.rs::model_settle_past_the_u64_charge_is_refused',
+    'lab/grant-binding/src/ledger.rs::model_lower_ceiling_does_not_refuse_the_settle',
+    'lab/grant-binding/src/ledger.rs::model_reserve_past_the_u64_total_is_refused',
+    'lab/grant-binding/src/ledger.rs::model_one_settle_drops_only_that_hold',
+    'lab/grant-binding/src/ledger.rs::model_one_release_returns_only_that_hold',
+    'lab/grant-binding/src/ledger.rs::model_release_twice_is_refused',
+    'lab/grant-binding/src/ledger.rs::model_reported_usage_does_not_keep_the_released_hold',
+    'lab/grant-binding/src/ledger.rs::model_release_after_unknown_is_refused',
+    'lab/grant-binding/src/ledger.rs::model_unknown_from_another_handle_does_not_mark_the_hold',
+    'lab/grant-binding/src/ledger.rs::model_forged_instance_does_not_move_the_timeout',
 )

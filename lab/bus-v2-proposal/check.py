@@ -955,6 +955,90 @@ OTHER_INDENT_SPANS = (
     "elastos/wit/elastos-bus-v1.wit:10",
 )
 
+# Function spans that cite a test by name with no indented block, in draft
+# order. One blank line and one indented declaring line under each paragraph
+# scores all of them through the one window rule. Each is spliced into
+# QUOTE_TARGETS with a None quoter, the same way as OTHER_INDENT_SPANS.
+BLOCKLESS_FUNCTION_SPANS = (
+    "lab/capsule-identity/tests/encoding.rs::lab_cid_prints_with_the_lab_label",
+    "lab/capsule-identity/tests/encoding.rs::single_block_at_the_chunk_limit_has_the_pinned_cid",
+    "lab/capsule-identity/tests/location.rs::file_times_and_modes_do_not_change_the_lab_cid",
+    "lab/capsule-identity/tests/encoding.rs::long_utf8_name_has_the_pinned_cid",
+    "lab/capsule-identity/tests/encoding.rs::path_and_content_boundaries_cannot_collide",
+    "lab/capsule-identity/tests/encoding.rs::empty_file_has_the_pinned_cid",
+    "lab/capsule-identity/tests/encoding.rs::encoder_refuses_file_directory_conflict",
+    "lab/capsule-identity/tests/refusals.rs::symlink_in_bundle_is_refused_with_its_path",
+    "lab/capsule-identity/tests/walk.rs::link_at_the_bundle_root_is_refused",
+    "lab/capsule-identity/tests/walk.rs::root_path_through_a_link_loop_keeps_the_system_reason",
+    "lab/capsule-identity/tests/walk.rs::entry_swapped_for_a_link_before_open_is_refused",
+    "lab/capsule-identity/tests/refusals.rs::manifest_with_an_unknown_field_is_refused",
+    "lab/capsule-identity/tests/bytes.rs::one_byte_change_in_the_manifest_changes_the_lab_cid",
+    "lab/capsule-identity/tests/location.rs::changing_the_url_or_store_row_keeps_the_lab_cid",
+    "lab/capsule-identity/tests/bytes.rs::one_byte_change_in_any_payload_file_changes_the_lab_cid",
+    "lab/capsule-identity/tests/bytes.rs::adding_or_removing_a_payload_file_changes_the_lab_cid",
+    "lab/capsule-identity/tests/refusals.rs::unreadable_folder_is_refused_with_its_path",
+    "lab/capsule-identity/tests/walk.rs::entry_swapped_for_a_fifo_before_open_is_refused_without_blocking",
+    "lab/capsule-identity/tests/location.rs::renaming_the_bundle_folder_keeps_the_lab_cid",
+    "lab/capsule-identity/tests/encoding.rs::lab_cid_does_not_depend_on_listing_order",
+    "lab/capsule-identity/tests/encoding.rs::encoder_refuses_a_duplicate_path",
+    "lab/capsule-identity/tests/refusals.rs::bundle_without_capsule_json_is_refused",
+    "lab/capsule-identity/tests/encoding.rs::directory_over_the_hamt_threshold_is_refused",
+    "lab/capsule-identity/tests/walk.rs::entry_swapped_for_a_folder_before_open_is_refused",
+    "lab/capsule-identity/tests/refusals.rs::manifest_that_fails_runtime_validate_is_refused",
+    "lab/capsule-identity/tests/encoding.rs::encoder_refuses_a_path_with_an_empty_or_dot_part",
+    "lab/capsule-identity/tests/refusals.rs::non_utf8_path_is_refused",
+    "lab/capsule-identity/tests/name_signature.rs::checked_signature_judges_the_checked_bytes",
+    "lab/capsule-identity/tests/package_record.rs::record_signed_under_the_wrong_domain_is_refused",
+    "lab/capsule-identity/tests/variant_binding.rs::variant_binding_stays_outside_the_bundles",
+    "lab/capsule-identity/tests/package_record.rs::package_record_stays_outside_the_bundle",
+    "lab/capsule-identity/tests/package_record.rs::checked_record_judges_the_checked_bytes",
+    "lab/capsule-identity/tests/location.rs::moving_the_bundle_to_another_parent_keeps_the_lab_cid",
+    "lab/capsule-identity/tests/walk.rs::entry_swapped_after_its_handle_is_checked_names_the_checked_bytes",
+    "lab/capsule-identity/tests/walk.rs::checked_entries_are_the_bytes_the_walk_checked",
+    "lab/capsule-identity/tests/walk.rs::folder_swapped_after_its_handle_is_checked_names_the_checked_bytes",
+    "lab/agent-conformance/standin-runtime/mod.rs::delete_capsule",
+    "lab/grant-binding/src/lib.rs::model_public_storage_read_is_refused",
+    "lab/grant-binding/src/lib.rs::model_unknown_handle_is_refused",
+    "lab/grant-binding/src/lib.rs::model_public_prefix_is_not_a_public_read",
+    "lab/grant-binding/src/lib.rs::model_host_path_root_is_refused",
+    "lab/grant-binding/src/lib.rs::model_use_path_under_the_owned_root_is_allowed",
+    "lab/grant-binding/src/lib.rs::model_extended_identity_is_refused",
+    "lab/grant-binding/src/lib.rs::model_extended_session_is_refused",
+    "lab/grant-binding/src/ops.rs::model_forged_rights_do_not_widen_the_child_grant",
+    "lab/grant-binding/src/ops.rs::model_refused_child_journal_stores_no_grant",
+    "lab/grant-binding/src/ops.rs::model_forged_identity_does_not_move_the_child_path",
+    "lab/grant-binding/src/ops.rs::model_forged_instance_does_not_move_the_child_grant",
+    "lab/grant-binding/src/ops.rs::model_forged_session_does_not_move_the_child_path",
+    "lab/grant-binding/src/ops.rs::model_append_and_overwrite_do_not_permit_child_journal",
+    "lab/grant-binding/src/ops.rs::model_child_journal_under_the_owned_root_is_allowed",
+    "lab/capsule-identity/tests/bytes.rs::one_byte_change_in_asks_json_changes_the_lab_cid",
+    "lab/grant-binding/src/ask.rs::model_over_budget_ask_is_refused",
+    "lab/grant-binding/src/ask.rs::model_ask_at_the_cap_is_admitted",
+    "lab/grant-binding/src/ask.rs::model_admitted_ask_sets_the_ceiling",
+    "lab/grant-binding/src/ledger.rs::model_second_agent_does_not_raise_the_ceiling",
+    "lab/grant-binding/src/ledger.rs::model_lower_admit_binds_an_asked_agent",
+    "lab/grant-binding/src/ledger.rs::model_unasked_agent_reads_the_last_admit",
+    "lab/grant-binding/src/ledger.rs::model_other_agent_hold_does_not_fill_the_ceiling",
+    "lab/grant-binding/src/ledger.rs::model_second_agent_hold_past_the_shared_u64_total_is_refused",
+    "lab/grant-binding/src/ledger.rs::model_concurrent_reserves_keep_one_ceiling",
+    "lab/grant-binding/src/ledger.rs::model_settle_above_the_reservation_is_refused",
+    "lab/grant-binding/src/ledger.rs::model_forged_instance_does_not_move_the_settle",
+    "lab/grant-binding/src/ledger.rs::model_forged_instance_does_not_move_the_reserve",
+    "lab/grant-binding/src/ledger.rs::model_forged_instance_does_not_move_the_release",
+    "lab/grant-binding/src/ledger.rs::model_forged_ceiling_does_not_raise_the_ceiling",
+    "lab/grant-binding/src/ledger.rs::model_settle_below_the_hold_returns_the_rest",
+    "lab/grant-binding/src/ledger.rs::model_settle_past_the_u64_charge_is_refused",
+    "lab/grant-binding/src/ledger.rs::model_lower_ceiling_does_not_refuse_the_settle",
+    "lab/grant-binding/src/ledger.rs::model_reserve_past_the_u64_total_is_refused",
+    "lab/grant-binding/src/ledger.rs::model_one_settle_drops_only_that_hold",
+    "lab/grant-binding/src/ledger.rs::model_one_release_returns_only_that_hold",
+    "lab/grant-binding/src/ledger.rs::model_release_twice_is_refused",
+    "lab/grant-binding/src/ledger.rs::model_reported_usage_does_not_keep_the_released_hold",
+    "lab/grant-binding/src/ledger.rs::model_release_after_unknown_is_refused",
+    "lab/grant-binding/src/ledger.rs::model_unknown_from_another_handle_does_not_mark_the_hold",
+    "lab/grant-binding/src/ledger.rs::model_forged_instance_does_not_move_the_timeout",
+)
+
 # The one fixed prefix of the target list: one entry per line decision, in
 # source order before the function spans and the indent line spans. A range's
 # two endpoints share one marker. The quoter name is looked up at call time so
@@ -1094,6 +1178,7 @@ def _build_quote_targets():
         + _quote_target_tail(RESTATED_LINE_SPANS)
         + _quote_target_tail(LEDGER_LINE_SPANS)
         + _quote_target_tail(OTHER_INDENT_SPANS)
+        + _quote_target_tail(BLOCKLESS_FUNCTION_SPANS)
     )
 
 
@@ -1122,7 +1207,8 @@ class _QuoteTargets:
 # The only target list: one entry per line decision, then one None-quoter entry
 # per FUNCTION_QUOTE_SPANS entry, then one per INDENT_LINE_SPANS entry, then one
 # per EGRESS_LINE_SPANS entry, then one per RESTATED_LINE_SPANS entry, then one
-# per LEDGER_LINE_SPANS entry, then one per OTHER_INDENT_SPANS entry.
+# per LEDGER_LINE_SPANS entry, then one per OTHER_INDENT_SPANS entry, then one
+# per BLOCKLESS_FUNCTION_SPANS entry.
 QUOTE_TARGETS = _QuoteTargets()
 
 
