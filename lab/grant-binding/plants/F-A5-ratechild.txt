@@ -1,0 +1,8 @@
+id: F-A5-ratechild
+file: src/ops.rs
+test: ops::model_child_effect_spends_the_issuing_rate
+--- old
+                    let rate_handle = counted;
+--- new
+                    let rate_handle = request.handle;
+--- end
