@@ -1160,11 +1160,113 @@ fn standin_a12_census(standin: &StandIn, home: &ThrowawayHome, port: u16) -> Res
             }
         }
     }
-    match census::cleanup(home, port) {
+    standin.unlisted_pending()?;
+    // lsof's stat helper can still hold the capture after it moves into the
+    // home. Wait that file out. Any other leftover is returned at once.
+    let physical = || match census::cleanup(home, port) {
         Ok(line) if line.contains("root checks PASS") => Ok(()),
         Ok(line) => Err(line),
         Err(line) => Err(line),
+    };
+    let mut settled = physical();
+    for _ in 0..15 {
+        let Err(reason) = &settled else {
+            break;
+        };
+        if !capture_process_leftover(reason) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        settled = physical();
     }
+    settled
+}
+
+/// A process leftover whose paths are only harness capture files.
+fn capture_process_leftover(reason: &str) -> bool {
+    if reason.contains("host-process.lock")
+        || reason.contains("config.toml")
+        || reason.contains("temp leftover")
+        || reason.contains("API socket leftover")
+        || !reason.contains("process leftover")
+    {
+        return false;
+    }
+    let Some(paths) = reason.split("paths:").nth(1) else {
+        return false;
+    };
+    let Some(end) = paths.find(']') else {
+        return false;
+    };
+    let list = &paths[..=end];
+    if list.len() < 3 {
+        return false;
+    }
+    list[1..list.len() - 1].split(',').all(|part| {
+        let name = part.trim().trim_matches('"');
+        let Some((kind, digits)) = name.split_once('-') else {
+            return false;
+        };
+        (kind == "stdout" || kind == "stderr")
+            && !digits.is_empty()
+            && digits.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
+#[test]
+fn capture_process_leftover_is_only_harness_files() {
+    assert!(
+        capture_process_leftover(
+            "cleanup census: FAIL retained:target/home-1; process leftover; processes:1 paths:[\"stdout-209\"] API sockets:0 temp:0 paths:[]; excludes only test PID; outside-root:BLOCKED(AC-006-STORAGE)"
+        ),
+        "the stand-in did the work: a stdout capture is waited out"
+    );
+    assert!(
+        capture_process_leftover(
+            "cleanup census: FAIL retained:target/home-1; process leftover; processes:2 paths:[\"stderr-3\", \"stdout-4\"] API sockets:0 temp:0 paths:[]"
+        ),
+        "the stand-in did the work: stderr and stdout captures are waited out"
+    );
+    assert!(
+        !capture_process_leftover(
+            "cleanup census: FAIL retained:target/home-1; process leftover; processes:1 paths:[\"held-a12.txt\"] API sockets:0 temp:0 paths:[]"
+        ),
+        "the stand-in did the work: a held file is not a capture"
+    );
+    assert!(
+        !capture_process_leftover(
+            "cleanup census: FAIL retained:target/home-1; process leftover, temp leftover; processes:1 paths:[\"stdout-1\"] API sockets:0 temp:1 paths:[\"tmp/a12-planted-dir\"]"
+        ),
+        "the stand-in did the work: a temp leftover is returned at once"
+    );
+    assert!(
+        !capture_process_leftover(
+            "cleanup census: FAIL retained:target/home-1; process leftover, API socket leftover; processes:1 paths:[\"stdout-1\"] API sockets:1 temp:0 paths:[]"
+        ),
+        "the stand-in did the work: an API socket leftover is returned at once"
+    );
+    assert!(
+        !capture_process_leftover(
+            "cleanup census: FAIL retained:target/home-1; process leftover; processes:1 paths:[\"home/Library/Application Support/elastos/host-process.lock\"] API sockets:0 temp:0 paths:[]"
+        ),
+        "the stand-in did the work: host-process.lock is returned at once"
+    );
+    assert!(
+        !capture_process_leftover(
+            "cleanup census: FAIL retained:target/home-1; process leftover; processes:1 paths:[\"config.toml\"] API sockets:0 temp:0 paths:[]"
+        ),
+        "the stand-in did the work: config.toml is returned at once"
+    );
+    assert!(
+        !capture_process_leftover(
+            "cleanup census: FAIL retained:target/home-1; process leftover; processes:2 paths:[\"held-a12.txt\", \"stdout-209\"] API sockets:0 temp:0 paths:[]"
+        ),
+        "the stand-in did the work: a capture beside another path is returned at once"
+    );
+    assert!(
+        !capture_process_leftover("pending request leftover"),
+        "the stand-in did the work: a pending request leftover is not a capture"
+    );
 }
 
 #[test]

@@ -10071,3 +10071,178 @@ Rerun, same environment (`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFL
 
 A passing row gives the real Runtime no A3 credit. Two-capsule-run owns the real component bytes.
 
+## 119 — A12: census reads a session that left the list
+
+119: `request_sessions` and `unlisted_pending` are the only new methods. Both are lab observations, not routes. `request_sessions` returns the sorted unique `session_id` values of the one request store. `unlisted_pending` reads `get_capsules` for the shell, then `request_sessions`, then `get_capability_requests` for each session the capsule list did not contain. A `pending` status is `pending request leftover`. A denied, granted or expired request is not. A listed session is not read again. `standin_a12_census` keeps its listed-session loop and, after that loop, calls `unlisted_pending`. The grant check, the status check, and `census::cleanup` stay. `post_capability_deny`, `post_capability_grant`, `deny_body`, and `settle_pending` are unchanged. Comparison base, recorded before the first edit: `80a2405624121eef3404fe3b3814a558be4b7cb5`. `b2eccab68f03ce9a0ced0c8afea96b496dbfd15f` is an ancestor. `fff8f1761eb851f642f8e9b680ea1c6747974060` is not.
+
+### Quote from the session contract (read only)
+
+`docs/AGENT_ARCHITECTURE.md`, section "Session and interaction contract":
+
+> an explicit interrupt or cancel operation that reports its settlement;
+
+This task is the census after the instance has left the list. It does not add an interrupt.
+
+### Quote from the resident SPEC (read only at `35697329be0aad89eb68d0adf78aa94d24751317`)
+
+The **Census.** paragraph of `lab/resident-instances/SPEC.md`:
+
+> **Census.** No launched instance is `starting`, `running` or `stopping`. No
+> pending request comes from a journey session. In A6 and A12, no live grant
+> belongs to a journey session. No process below the operator pid is new since
+> the baseline. `GET /api/health` is still ok.
+
+The one physical census stays `census::cleanup`. `src/census.rs` is unchanged.
+
+### Plants
+
+Each plant was applied alone, the planted crate compiled, the named test failed on its assertion, and the file was restored before the next. No `falsifiers.json` id. `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`.
+
+F-census-listed-only. `unlisted_pending` returns `Ok(())` before it reads the request store. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_unlisted_pending_is_not_authority -- --exact`. Planted exit 101, real 3.12 seconds. The crate compiled; rustc warned `unreachable statement` and the test still ran. Assertion `src/../standin-runtime/mod.rs:10293:9` (restored `:10292`): `the stand-in did the work: a pending request on a session that left the list is pending request leftover`. Left `Ok(())`, right `Err("pending request leftover")`. Restored exit 0, real 2.91 seconds.
+
+Old:
+
+```text
+        let sessions = self.request_sessions();
+```
+
+New:
+
+```text
+        return Ok(());
+        let sessions = self.request_sessions();
+```
+
+F-census-listed-as-unlisted. `unlisted_pending` also reads sessions that are still listed, so `req-live` makes the running stand-in return `pending request leftover`. Same command. Planted exit 101, real 3.21 seconds. Assertion `src/../standin-runtime/mod.rs:10341:9`: `the stand-in did the work: a listed session is not read again`. Left `Err("pending request leftover")`, right `Ok(())`. Restored exit 0, real 2.87 seconds.
+
+Old:
+
+```text
+            if listed_sessions.contains(&session_id) {
+```
+
+New:
+
+```text
+            if false && listed_sessions.contains(&session_id) {
+```
+
+F-census-skip-call. `standin_a12_census` does not call `unlisted_pending`. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_census_calls_unlisted_pending -- --exact`. Planted exit 101, real 3.03 seconds. Assertion `src/../standin-runtime/mod.rs:10376:9`: `the stand-in did the work: standin_a12_census calls unlisted_pending`. Restored exit 0, real 2.80 seconds.
+
+Old:
+
+```text
+    }
+    standin.unlisted_pending()?;
+    match census::cleanup(home, port) {
+```
+
+New:
+
+```text
+    }
+    match census::cleanup(home, port) {
+```
+
+After the plants were restored, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` shows the two methods and the two tests, and it shows no plant.
+
+### Docs
+
+`standin-runtime/README.md` keeps the census paragraph and adds one sentence: the census also reads a session that has left the list, through `unlisted_pending`, and a pending request there is `pending request leftover`. A PASS gives the Runtime no A12 credit. `RUNBOOK.md` adds one paragraph after the last stand-in paragraph: `standin_unlisted_pending_is_not_authority` is this stand-in, and a PASS there gives the Runtime no A12 credit. Every other paragraph stays.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. `Cargo.toml` and `Cargo.lock` are unchanged. `git diff` for `src/census.rs`, `src/harness.rs`, `src/report.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.48 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`, first run: exit 101, real 523.36 seconds. Lib 92 passed, including both new tests. The effects target reported 59 passed, 4 failed, 12 ignored in 331.05 seconds, and the command stopped there. The failures were `grants::tests::overlap_second_barrier_waits_for_both_requests` (`child exceeded its time bound`), `granted_read_succeeds` (`cleanup census: FAIL ... child exceeded its time bound; pending:0 grants:BLOCKED(AC-021-GRANTS)`), `no_policy_file_does_not_mean_allow` (`child exceeded its time bound`; its census line was `root checks PASS`), and `standin_a12_census_catches_planted_leftovers` (`process leftover; processes:1 paths:["stdout-208"]`). The `stdout-208` path matches `stdout-<digits>`. No census line included `host-process.lock`, a path containing `config.toml`, or a missing `pending request leftover` while `req-b` was pending. No source change.
+- Rerun, same command, no source change: exit 0, real 347.34 seconds, inside the 600-second bound. Lib 92 passed (including `standin_unlisted_pending_is_not_authority` and `standin_census_calls_unlisted_pending`); bin/report 1 passed; artifact 7 passed; build 1 passed; content_cid 2 passed; effects 63 passed and 12 ignored (including `standin_a12_census_catches_planted_leftovers`, `granted_read_succeeds`, and `standin_stopped_run_leaves_no_live_grant`); harness 9 passed; report 23 passed; runtime 10 passed and 2 ignored; standin_contract 13 passed; standin_plan 8 passed; standin_residents 2 passed; probe 3 passed; doc-tests 0. `run_leaves_no_live_grant` stayed ignored on `AC-021-GRANTS`.
+
+### Proof
+
+After the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.42 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_unlisted_pending` exit 0, 1 passed and 0 failed, real 0.49 seconds. `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `request_sessions` at `standin-runtime/mod.rs:904` returns session ids from the one request store. `started_cid` stays the instance's bundle identity at `:1405`. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `unlisted_pending` at `:921` only reads. The test at `:10297` keeps `req-b` pending, so the read grants nothing and settles nothing. |
+| 3. A second path or a second copy of one rule? | No | `tests/effects.rs:1163` is the one new call, after the listed-session loop in the one `standin_a12_census`. A listed session is skipped at `standin-runtime/mod.rs:937` and is not read again. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`. `src/census.rs` is unchanged, and `census::cleanup` stays the physical census at `tests/effects.rs:1166`. |
+| 5. Refusals deny by default with a clear reason? | Yes | A pending request on an unlisted session is `pending request leftover` at `standin-runtime/mod.rs:948`. A denied, granted or expired status is not. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The observation stays in the stand-in and uses the existing shell reads. It adds no capsule import. A PASS gives the Runtime no A12 credit. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_unlisted_pending_is_not_authority` at `:10244`, `standin_census_calls_unlisted_pending` at `:10354`, and `capture_process_leftover_is_only_harness_files` at `tests/effects.rs:1217`. Each plant fails its named assertion, and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | The grant check stays in `standin_a12_census` before the list loop. Admission stays `admit_shared`. The leftover read does not grant. `started_cid` at `:1405` stays separate from the session id. |
+
+A passing row gives the real Runtime no A12 credit.
+
+- 119: The one census reads a session that has left the capsule list through `unlisted_pending`, and a pending request there is `pending request leftover`.
+- 119: Removed the untracked repo-root binary `rust_out`. It sat outside `lab/agent-conformance/`. Lane source is unchanged. Round-2 gates, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.38 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_unlisted_pending` exit 0, 1 passed, real 0.34 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` exit 0, real 523.78 seconds, inside the 600-second bound. Lib 92 passed; effects 63 passed and 12 ignored.
+
+### Round 3
+
+The supervisor gate failed on two process leftovers, both `stdout-<digits>`: `standin_a12_census_catches_planted_leftovers` (`paths:["stdout-209"]`) and `ungranted_effect_is_refused` (`paths:["stdout-268"]`). No `host-process.lock`, no `config.toml`, and no missing `pending request leftover`. `standin_a12_census` still calls `census::cleanup`. After that call, a leftover whose paths are only `stdout-<digits>` or `stderr-<digits>` is waited out, up to 15 times at 100 ms. A held file, a temp leftover, an API socket, `host-process.lock`, `config.toml`, or `pending request leftover` is returned at once. `capture_process_leftover` is that check. `src/census.rs` is unchanged.
+
+F-census-capture-skip. `capture_process_leftover` returns `false` before it reads the reason. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects capture_process_leftover_is_only_harness_files -- --exact`. Planted exit 101, real 1.86 seconds. The crate compiled; rustc warned `unreachable statement` and the test still ran. Assertion `tests/effects.rs:1219:5`: `the stand-in did the work: a stdout capture is waited out`. Restored exit 0, real 1.13 seconds.
+
+Old:
+
+```text
+fn capture_process_leftover(reason: &str) -> bool {
+    if reason.contains("host-process.lock")
+```
+
+New:
+
+```text
+fn capture_process_leftover(reason: &str) -> bool {
+    return false;
+    if reason.contains("host-process.lock")
+```
+
+F-census-capture-all. `capture_process_leftover` returns `true` before it reads the reason, so a held file is treated as a capture. Same command. Planted exit 101, real 1.49 seconds. Assertion `tests/effects.rs:1231:5`: `the stand-in did the work: a held file is not a capture`. Restored with the skip plant; the restored test is the exit 0 above.
+
+Old:
+
+```text
+fn capture_process_leftover(reason: &str) -> bool {
+    if reason.contains("host-process.lock")
+```
+
+New:
+
+```text
+fn capture_process_leftover(reason: &str) -> bool {
+    return true;
+    if reason.contains("host-process.lock")
+```
+
+F-census-capture-unwired. `standin_a12_census` breaks before it calls `capture_process_leftover`. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_census_calls_unlisted_pending -- --exact`. Planted exit 101, real 1.94 seconds. The crate compiled. Assertion `src/../standin-runtime/mod.rs:10380:9`: `the stand-in did the work: standin_a12_census waits out a capture leftover`. Restored exit 0, real 1.90 seconds.
+
+Old:
+
+```text
+        if !capture_process_leftover(reason) {
+            break;
+        }
+```
+
+New:
+
+```text
+        if true {
+            break;
+        }
+```
+
+After the plants were restored, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` shows no plant. `census::cleanup` is the physical census at `tests/effects.rs:1166`.
+
+Round-3 gates, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.19 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 318.93 seconds, inside the 600-second bound. Lib 92 passed, including `standin_unlisted_pending_is_not_authority` and `standin_census_calls_unlisted_pending`. Effects 64 passed and 12 ignored, including `capture_process_leftover_is_only_harness_files`, `standin_a12_census_catches_planted_leftovers`, `ungranted_effect_is_refused`, and `standin_stopped_run_leaves_no_live_grant`. No rerun. `run_leaves_no_live_grant` stayed ignored on `AC-021-GRANTS`.
+- Proof: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_unlisted_pending` exit 0, 1 passed, real 0.14 seconds. `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false.
+
+- 119: The one census waits out a harness capture leftover and returns every other leftover at once.
+
