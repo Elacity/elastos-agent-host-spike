@@ -1470,6 +1470,7 @@ dependencies = [
  "elastos-wallet-contract",
  "hex",
  "k256",
+ "libc",
  "rand",
  "serde",
  "serde_json",
