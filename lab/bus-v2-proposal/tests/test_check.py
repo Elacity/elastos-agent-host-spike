@@ -1462,12 +1462,12 @@ ALIGNED_SPANS_DECIDED = (
     "examples/agent-host/src/lib.rs:3471",
     "examples/agent-host/src/lib.rs:3474",
     "examples/agent-host/src/lib.rs:3482",
-    "lab/capsule-identity/README.md:946",
-    "lab/capsule-identity/src/lib.rs:1425",
+    "lab/capsule-identity/README.md:950",
+    "lab/capsule-identity/src/lib.rs:1453",
     "lab/grant-binding/README.md:12",
-    "lab/grant-binding/src/lib.rs:23",
-    "lab/grant-binding/src/lib.rs:25",
-    "lab/grant-binding/src/lib.rs:280",
+    "lab/grant-binding/src/lib.rs:24",
+    "lab/grant-binding/src/lib.rs:26",
+    "lab/grant-binding/src/lib.rs:348",
 )
 
 # The 68 endpoint decisions those spans make.
@@ -1551,9 +1551,9 @@ ALIGNED_GROUPS = (
     ),
     (
         (
-            "lab/capsule-identity/src/lib.rs:1425",
+            "lab/capsule-identity/src/lib.rs:1453",
         ),
-        1425,
+        1453,
         (
             '/// `Ok(())` means all four passed. It is not a trust, admission or launch',
             '/// value. A wrong key, a changed signature and a name moved onto other bytes',
@@ -1562,9 +1562,9 @@ ALIGNED_GROUPS = (
     ),
     (
         (
-            "lab/capsule-identity/README.md:946",
+            "lab/capsule-identity/README.md:950",
         ),
-        946,
+        950,
         (
             'The rule: a valid signature grants nothing by itself. A bundle whose test-key',
             'signature verifies is still not admitted, and it gets no grant. This library',
@@ -2382,9 +2382,9 @@ ALIGNED_GROUPS = (
     ),
     (
         (
-            "lab/grant-binding/src/lib.rs:280",
+            "lab/grant-binding/src/lib.rs:348",
         ),
-        266,
+        334,
         (
             'fn resource_name(agent: &str, name: &str, owned_root: Option<&str>) -> Result<String, Refuse> {',
             "    if name.contains('\\\\') || name.starts_with('/') {",
@@ -2423,10 +2423,10 @@ ALIGNED_GROUPS = (
     ),
     (
         (
-            "lab/grant-binding/src/lib.rs:23",
-            "lab/grant-binding/src/lib.rs:25",
+            "lab/grant-binding/src/lib.rs:24",
+            "lab/grant-binding/src/lib.rs:26",
         ),
-        23,
+        24,
         (
             '/// An opaque grant handle. The guest holds only this.',
             '#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]',
@@ -10884,7 +10884,7 @@ class CitationCheckTests(unittest.TestCase):
             "LEDGER_LINE_SPANS",
             (),
             self.test_changed_ledger_remainder_does_not_match,
-            "ledger.rs:356",
+            "ledger.rs:379",
             "CAUGHT ledger-line-spans",
         )
 
@@ -11238,8 +11238,8 @@ BASE_QUOTE_TARGETS = (
     ('elastos/crates/elastos-compute/src/providers/component.rs:232', '`elastos/crates/elastos-compute/src/providers/component.rs:232`', 'resident_stop_quote'),
     ('elastos/wit/elastos-bus-v1.wit:87', '`elastos/wit/elastos-bus-v1.wit:87`', 'resident_export_quote'),
     ('elastos/crates/elastos-server/src/resource_bridge.rs:814', '`elastos/crates/elastos-server/src/resource_bridge.rs:814`', None),
-    ('lab/capsule-identity/src/lib.rs:1425', '`lab/capsule-identity/src/lib.rs:1425`', None),
-    ('lab/capsule-identity/README.md:946', '`lab/capsule-identity/README.md:946`', None),
+    ('lab/capsule-identity/src/lib.rs:1453', '`lab/capsule-identity/src/lib.rs:1453`', None),
+    ('lab/capsule-identity/README.md:950', '`lab/capsule-identity/README.md:950`', None),
     ('elastos/crates/elastos-compute/src/providers/component.rs:350', '`elastos/crates/elastos-compute/src/providers/component.rs:350`', None),
     ('capsules/model-provider/src/adapters.rs:58', '`capsules/model-provider/src/adapters.rs:58`', None),
     ('elastos/crates/elastos-server/src/api/gateway_model_service.rs:1', '`elastos/crates/elastos-server/src/api/gateway_model_service.rs:1`', None),
@@ -11290,9 +11290,9 @@ BASE_QUOTE_TARGETS = (
     ('docs/AGENT_ARCHITECTURE.md:21', '`docs/AGENT_ARCHITECTURE.md:21`', None),
     ('docs/AGENT_ARCHITECTURE.md:24', '`docs/AGENT_ARCHITECTURE.md:24`', None),
     ('docs/AGENT_ARCHITECTURE.md:332', '`docs/AGENT_ARCHITECTURE.md:332`', None),
-    ('lab/grant-binding/src/lib.rs:280', '`lab/grant-binding/src/lib.rs:280`', None),
-    ('lab/grant-binding/src/lib.rs:23', '`lab/grant-binding/src/lib.rs:23`', None),
-    ('lab/grant-binding/src/lib.rs:25', '`lab/grant-binding/src/lib.rs:25`', None),
+    ('lab/grant-binding/src/lib.rs:348', '`lab/grant-binding/src/lib.rs:348`', None),
+    ('lab/grant-binding/src/lib.rs:24', '`lab/grant-binding/src/lib.rs:24`', None),
+    ('lab/grant-binding/src/lib.rs:26', '`lab/grant-binding/src/lib.rs:26`', None),
 )
 
 # The 51 function spans spliced after that base, in draft order.
@@ -11379,8 +11379,8 @@ INDENT_LINE_SPAN_ORDER = (
     'capsules/model-provider/src/config.rs:113',
     'elastos/crates/elastos-runtime/src/provider/bridge.rs:774',
     'elastos/crates/elastos-runtime/src/provider/registry.rs:841',
-    'lab/grant-binding/src/lib.rs:162',
-    'lab/grant-binding/src/lib.rs:244',
+    'lab/grant-binding/src/lib.rs:184',
+    'lab/grant-binding/src/lib.rs:312',
 )
 
 # The 2 egress line spans spliced after the indent line spans, in draft order.
@@ -11398,9 +11398,9 @@ RESTATED_LINE_SPAN_ORDER = (
 # The 3 retargeted ledger line spans spliced after the restated line spans, in
 # draft order.
 LEDGER_LINE_SPAN_ORDER = (
-    'lab/grant-binding/src/ledger.rs:356',
-    'lab/grant-binding/src/ledger.rs:341',
-    'lab/grant-binding/src/ledger.rs:417',
+    'lab/grant-binding/src/ledger.rs:379',
+    'lab/grant-binding/src/ledger.rs:365',
+    'lab/grant-binding/src/ledger.rs:490',
 )
 
 # The 3 caller-check and grant-id line spans spliced after the ledger line
@@ -11471,7 +11471,7 @@ BLOCKLESS_FUNCTION_SPAN_ORDER = (
     'lab/grant-binding/src/ask.rs::model_admitted_ask_sets_the_ceiling',
     'lab/grant-binding/src/ledger.rs::model_second_agent_does_not_raise_the_ceiling',
     'lab/grant-binding/src/ledger.rs::model_lower_admit_binds_an_asked_agent',
-    'lab/grant-binding/src/ledger.rs::model_unasked_agent_reads_the_last_admit',
+    'lab/grant-binding/src/ledger.rs::model_unasked_agent_does_not_inherit_the_last_admit',
     'lab/grant-binding/src/ledger.rs::model_other_agent_hold_does_not_fill_the_ceiling',
     'lab/grant-binding/src/ledger.rs::model_second_agent_hold_past_the_shared_u64_total_is_refused',
     'lab/grant-binding/src/ledger.rs::model_concurrent_reserves_keep_one_ceiling',

@@ -917,8 +917,8 @@ INDENT_LINE_SPANS = (
     "capsules/model-provider/src/config.rs:113",
     "elastos/crates/elastos-runtime/src/provider/bridge.rs:774",
     "elastos/crates/elastos-runtime/src/provider/registry.rs:841",
-    "lab/grant-binding/src/lib.rs:162",
-    "lab/grant-binding/src/lib.rs:244",
+    "lab/grant-binding/src/lib.rs:184",
+    "lab/grant-binding/src/lib.rs:312",
 )
 
 # Egress line spans whose block equals the pinned line, in draft order. Each
@@ -941,9 +941,9 @@ RESTATED_LINE_SPANS = (
 # order. Each one is spliced into QUOTE_TARGETS with a None quoter, the same
 # way as RESTATED_LINE_SPANS.
 LEDGER_LINE_SPANS = (
-    "lab/grant-binding/src/ledger.rs:356",
-    "lab/grant-binding/src/ledger.rs:341",
-    "lab/grant-binding/src/ledger.rs:417",
+    "lab/grant-binding/src/ledger.rs:379",
+    "lab/grant-binding/src/ledger.rs:365",
+    "lab/grant-binding/src/ledger.rs:490",
 )
 
 # Caller-check and grant-id line spans whose block equals the pinned line, in
@@ -1017,7 +1017,7 @@ BLOCKLESS_FUNCTION_SPANS = (
     "lab/grant-binding/src/ask.rs::model_admitted_ask_sets_the_ceiling",
     "lab/grant-binding/src/ledger.rs::model_second_agent_does_not_raise_the_ceiling",
     "lab/grant-binding/src/ledger.rs::model_lower_admit_binds_an_asked_agent",
-    "lab/grant-binding/src/ledger.rs::model_unasked_agent_reads_the_last_admit",
+    "lab/grant-binding/src/ledger.rs::model_unasked_agent_does_not_inherit_the_last_admit",
     "lab/grant-binding/src/ledger.rs::model_other_agent_hold_does_not_fill_the_ceiling",
     "lab/grant-binding/src/ledger.rs::model_second_agent_hold_past_the_shared_u64_total_is_refused",
     "lab/grant-binding/src/ledger.rs::model_concurrent_reserves_keep_one_ceiling",
@@ -1107,8 +1107,8 @@ _QUOTE_TARGETS_PREFIX = (
     # span through the shared window rule. A range's two endpoints share one
     # marker and stand first endpoint then second endpoint.
     ("elastos/crates/elastos-server/src/resource_bridge.rs:814", "`elastos/crates/elastos-server/src/resource_bridge.rs:814`", None),
-    ("lab/capsule-identity/src/lib.rs:1425", "`lab/capsule-identity/src/lib.rs:1425`", None),
-    ("lab/capsule-identity/README.md:946", "`lab/capsule-identity/README.md:946`", None),
+    ("lab/capsule-identity/src/lib.rs:1453", "`lab/capsule-identity/src/lib.rs:1453`", None),
+    ("lab/capsule-identity/README.md:950", "`lab/capsule-identity/README.md:950`", None),
     ("elastos/crates/elastos-compute/src/providers/component.rs:350", "`elastos/crates/elastos-compute/src/providers/component.rs:350`", None),
     ("capsules/model-provider/src/adapters.rs:58", "`capsules/model-provider/src/adapters.rs:58`", None),
     ("elastos/crates/elastos-server/src/api/gateway_model_service.rs:1", "`elastos/crates/elastos-server/src/api/gateway_model_service.rs:1`", None),
@@ -1159,9 +1159,9 @@ _QUOTE_TARGETS_PREFIX = (
     ("docs/AGENT_ARCHITECTURE.md:21", "`docs/AGENT_ARCHITECTURE.md:21`", None),
     ("docs/AGENT_ARCHITECTURE.md:24", "`docs/AGENT_ARCHITECTURE.md:24`", None),
     ("docs/AGENT_ARCHITECTURE.md:332", "`docs/AGENT_ARCHITECTURE.md:332`", None),
-    ("lab/grant-binding/src/lib.rs:280", "`lab/grant-binding/src/lib.rs:280`", None),
-    ("lab/grant-binding/src/lib.rs:23", "`lab/grant-binding/src/lib.rs:23`", None),
-    ("lab/grant-binding/src/lib.rs:25", "`lab/grant-binding/src/lib.rs:25`", None),
+    ("lab/grant-binding/src/lib.rs:348", "`lab/grant-binding/src/lib.rs:348`", None),
+    ("lab/grant-binding/src/lib.rs:24", "`lab/grant-binding/src/lib.rs:24`", None),
+    ("lab/grant-binding/src/lib.rs:26", "`lab/grant-binding/src/lib.rs:26`", None),
 )
 
 def _quote_target_tail(spans):
