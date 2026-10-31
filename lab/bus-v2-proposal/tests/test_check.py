@@ -6,6 +6,7 @@ The tests call ``check.problems``. They do not compile a citation expression.
 import contextlib
 import io
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -883,6 +884,47 @@ PROVIDER_CASES = (
 # The groups one provider body cites, in the order it emits them.
 PROVIDER_GROUPS = ("scheme", "read_action", "write_action", "default_action")
 
+# The three resident-A3 citations: the activation removal, the stop contract
+# error, and the one lifecycle export. Each stands on its own prose line.
+RESIDENT_REL = "elastos/crates/elastos-compute/src/providers/component.rs"
+RESIDENT_RUN_NUMBER = 218
+RESIDENT_RUN_SPAN = RESIDENT_REL + ":218"
+RESIDENT_RUN_QUOTE = "        self.instances.write().await.remove(&handle.id);"
+
+RESIDENT_STOP_NUMBER = 232
+RESIDENT_STOP_SPAN = RESIDENT_REL + ":232"
+RESIDENT_STOP_QUOTE = (
+    '                "component/v1 is a bounded activation contract and has no resident stop operation"'
+)
+
+RESIDENT_EXPORT_REL = "elastos/wit/elastos-bus-v1.wit"
+RESIDENT_EXPORT_NUMBER = 87
+RESIDENT_EXPORT_SPAN = RESIDENT_EXPORT_REL + ":87"
+RESIDENT_EXPORT_QUOTE = "  run: func() -> result<_, bus-error>;"
+
+RESIDENT_CASES = (
+    ("run", RESIDENT_RUN_SPAN, RESIDENT_RUN_QUOTE),
+    ("stop", RESIDENT_STOP_SPAN, RESIDENT_STOP_QUOTE),
+    ("export", RESIDENT_EXPORT_SPAN, RESIDENT_EXPORT_QUOTE),
+)
+
+# The groups one resident body cites, in the order it emits them.
+RESIDENT_GROUPS = ("run", "stop", "export")
+
+# The order in which the resident decisions read their pinned lines.
+RESIDENT_DECISION_ORDER = (
+    RESIDENT_RUN_NUMBER,
+    RESIDENT_STOP_NUMBER,
+    RESIDENT_EXPORT_NUMBER,
+)
+
+# A paragraph that keeps the resident decision but states no forbidden claim.
+RESIDENT_OPEN = "A3 stays open.\n"
+
+# The two claims the resident paragraph never makes, one refusal each.
+A3_MET_REFUSAL = "refuse: draft says A3 is met"
+A3_GRANT_REFUSAL = "refuse: draft says ComponentProvider grants resident A3 credit"
+
 # The order in which the provider decisions read their pinned lines.
 PROVIDER_DECISION_ORDER = (
     SCHEME_NUMBER,
@@ -1283,6 +1325,1123 @@ PROVIDER_WALKS = (
 )
 
 
+# The 59 entries the target list held before this task, in list order. The
+# 56 aligned entries are the whole difference, so an extra entry fails too.
+BASELINE_TARGETS = (
+    'examples/agent-host/src/lib.rs:2067',
+    'examples/agent-host/src/lib.rs:2421',
+    'examples/agent-host/src/lib.rs:2422',
+    'examples/agent-host/src/lib.rs:2720',
+    'examples/agent-host/src/lib.rs:2741',
+    'examples/agent-host/src/lib.rs:2749',
+    'examples/agent-host/src/lib.rs:2958',
+    'examples/agent-host/src/lib.rs:2981',
+    'examples/agent-host/src/lib.rs:3290',
+    'examples/agent-host/src/lib.rs:3308',
+    'examples/agent-host/src/lib.rs:3339',
+    'examples/agent-host/src/lib.rs:3360',
+    'examples/agent-host/src/lib.rs:3370',
+    'examples/agent-host/src/lib.rs:3382',
+    'examples/agent-host/src/lib.rs:3387',
+    'examples/agent-host/src/lib.rs:3403',
+    'examples/agent-host/src/lib.rs:3449',
+    'examples/agent-host/src/lib.rs:3455',
+    'examples/agent-host/src/lib.rs:3470',
+    'examples/agent-host/src/lib.rs:3471',
+    'examples/agent-host/src/lib.rs:3474',
+    'examples/agent-host/src/lib.rs:3482',
+    'examples/agent-host/src/lib.rs:3526',
+    'examples/agent-host/src/lib.rs:3549',
+    'examples/agent-host/src/lib.rs:3754',
+    'examples/agent-host/src/lib.rs:3755',
+    'examples/agent-host/src/lib.rs:3757',
+    'examples/agent-host/src/lib.rs:3767',
+    'examples/agent-host/src/lib.rs:3849',
+    'examples/agent-host/src/lib.rs:3850',
+    'examples/agent-host/src/lib.rs:3935',
+    'examples/agent-host/src/lib.rs:3936',
+    'examples/agent-host/src/lib.rs:3947',
+    'examples/agent-host/src/lib.rs:3961',
+    'examples/agent-host/src/lib.rs:3966',
+    'examples/agent-host/src/lib.rs:3967',
+    'examples/agent-host/src/lib.rs:4023',
+    'examples/agent-host/src/lib.rs:4032',
+    'examples/agent-host/src/lib.rs:4033',
+    'examples/agent-host/src/lib.rs:4061',
+    'examples/agent-host/src/lib.rs:8149',
+    'examples/agent-host/src/lib.rs:8162',
+    'examples/agent-host/src/lib.rs:8168',
+    'examples/agent-host/src/lib.rs:8187',
+    'examples/agent-host/src/lib.rs:8188',
+    'examples/agent-host/src/lib.rs:8189',
+    'examples/agent-host/src/lib.rs:8190',
+    'examples/agent-host/src/lib.rs:8191',
+    'examples/agent-host/src/lib.rs:8192',
+    'examples/agent-host/src/lib.rs:8193',
+    'examples/agent-host/src/lib.rs:8194',
+    'examples/agent-host/src/lib.rs:8488',
+    'elastos/crates/elastos-server/src/provider_resource.rs:123',
+    'elastos/crates/elastos-server/src/provider_resource.rs:189',
+    'elastos/crates/elastos-server/src/provider_resource.rs:190',
+    'elastos/crates/elastos-server/src/provider_resource.rs:192',
+    'elastos/crates/elastos-compute/src/providers/component.rs:218',
+    'elastos/crates/elastos-compute/src/providers/component.rs:232',
+    'elastos/wit/elastos-bus-v1.wit:87',
+)
+
+# The 37 blocks the 65 aligned citations indent, in draft order. Each entry
+# is its markers, the first pinned line of its block, and the block itself.
+# Several markers share one entry: a shared block is one block, not a copy.
+def _aligned_endpoints(span):
+    """Return the endpoint decisions SPAN makes: two for a range, else one."""
+    rel, _, number = span.rpartition(":")
+    if "-" in number:
+        start, end = number.split("-")
+        return [rel + ":" + start, rel + ":" + end]
+    return [span]
+
+
+# The 65 spans this task decides, one per marker, in the order it lists them.
+ALIGNED_SPANS_DECIDED = (
+    "capsules/model-provider/src/adapters.rs:58",
+    "capsules/model-provider/src/contract.rs:134",
+    "capsules/model-provider/src/journal.rs:391-397",
+    "capsules/model-provider/src/journal.rs:921",
+    "capsules/model-provider/src/state.rs:530",
+    "capsules/model-provider/src/state.rs:609",
+    "docs/AGENT_ARCHITECTURE.md:19",
+    "docs/AGENT_ARCHITECTURE.md:21",
+    "docs/AGENT_ARCHITECTURE.md:24",
+    "docs/AGENT_ARCHITECTURE.md:332",
+    "elastos/crates/elastos-compute/src/exec_vm.rs:43",
+    "elastos/crates/elastos-compute/src/exec_vm.rs:49",
+    "elastos/crates/elastos-compute/src/exec_vm.rs:130",
+    "elastos/crates/elastos-compute/src/providers/component.rs:350",
+    "elastos/crates/elastos-server/src/api/gateway_model_service.rs:1",
+    "elastos/crates/elastos-server/src/api/gateway_model_service.rs:4",
+    "elastos/crates/elastos-server/src/api/gateway_model_service.rs:355",
+    "elastos/crates/elastos-server/src/api/gateway_model_service.rs:1452-1454",
+    "elastos/crates/elastos-server/src/provider_resource.rs:163",
+    "elastos/crates/elastos-server/src/provider_resource.rs:164",
+    "elastos/crates/elastos-server/src/provider_resource.rs:165",
+    "elastos/crates/elastos-server/src/provider_resource.rs:174",
+    "elastos/crates/elastos-server/src/provider_resource.rs:176",
+    "elastos/crates/elastos-server/src/provider_resource.rs:379",
+    "elastos/crates/elastos-server/src/provider_resource.rs:382",
+    "elastos/crates/elastos-server/src/provider_resource.rs:422",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:570",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:571",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:582",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:583",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:603",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:606",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:696",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:697",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:698",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:699",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:814",
+    "examples/agent-host/asks.json:4",
+    "examples/agent-host/asks.json:5",
+    "examples/agent-host/asks.json:6",
+    "examples/agent-host/asks.json:7",
+    "examples/agent-host/asks.json:8",
+    "examples/agent-host/asks.json:9",
+    "examples/agent-host/asks.json:12",
+    "examples/agent-host/src/lib.rs:471-476",
+    "examples/agent-host/src/lib.rs:532",
+    "examples/agent-host/src/lib.rs:754",
+    "examples/agent-host/src/lib.rs:3339",
+    "examples/agent-host/src/lib.rs:3360",
+    "examples/agent-host/src/lib.rs:3370",
+    "examples/agent-host/src/lib.rs:3382",
+    "examples/agent-host/src/lib.rs:3387",
+    "examples/agent-host/src/lib.rs:3403",
+    "examples/agent-host/src/lib.rs:3449",
+    "examples/agent-host/src/lib.rs:3455",
+    "examples/agent-host/src/lib.rs:3470",
+    "examples/agent-host/src/lib.rs:3471",
+    "examples/agent-host/src/lib.rs:3474",
+    "examples/agent-host/src/lib.rs:3482",
+    "lab/capsule-identity/README.md:946",
+    "lab/capsule-identity/src/lib.rs:1425",
+    "lab/grant-binding/README.md:12",
+    "lab/grant-binding/src/lib.rs:23",
+    "lab/grant-binding/src/lib.rs:25",
+    "lab/grant-binding/src/lib.rs:280",
+)
+
+# The 68 endpoint decisions those spans make.
+ALIGNED_ENDPOINTS = tuple(
+    endpoint for span in ALIGNED_SPANS_DECIDED for endpoint in _aligned_endpoints(span)
+)
+ALIGNED_ENDPOINT_SET = frozenset(ALIGNED_ENDPOINTS)
+
+# The 12 endpoint decisions 130, 131, and 136 already made.
+ALIGNED_ALREADY_DECIDED = frozenset(
+    (
+        "examples/agent-host/src/lib.rs:3339",
+        "examples/agent-host/src/lib.rs:3360",
+        "examples/agent-host/src/lib.rs:3370",
+        "examples/agent-host/src/lib.rs:3382",
+        "examples/agent-host/src/lib.rs:3387",
+        "examples/agent-host/src/lib.rs:3403",
+        "examples/agent-host/src/lib.rs:3449",
+        "examples/agent-host/src/lib.rs:3455",
+        "examples/agent-host/src/lib.rs:3470",
+        "examples/agent-host/src/lib.rs:3471",
+        "examples/agent-host/src/lib.rs:3474",
+        "examples/agent-host/src/lib.rs:3482",
+    )
+)
+
+# The 56 endpoint decisions this task appends to the target list.
+ALIGNED_NEW_ENDPOINTS = tuple(
+    endpoint
+    for endpoint in ALIGNED_ENDPOINTS
+    if endpoint not in ALIGNED_ALREADY_DECIDED
+)
+
+# One marker per aligned span, with its one or two endpoints.
+ALIGNED_RANGE_SPAN = "examples/agent-host/src/lib.rs:471-476"
+
+ALIGNED_GROUPS = (
+    (
+        (
+            "elastos/crates/elastos-server/src/resource_bridge.rs:814",
+        ),
+        803,
+        (
+            'fn scope_current_user_alias(',
+            '    uri_or_resource: &str,',
+            '    principal_id: Option<&str>,',
+            ') -> Result<String, String> {',
+            '    let Some(rooted) = rooted_localhost_uri(uri_or_resource) else {',
+            '        return Ok(uri_or_resource.to_string());',
+            '    };',
+            '    if is_unscoped_current_user_alias(&rooted) {',
+            '        let Some(principal_id) = principal_id else {',
+            '            return Err(',
+            '                "localhost://Users/self requires a principal-scoped launch context".to_string(),',
+            '            );',
+            '        };',
+            '        let principal_root = crate::auth::principal_localhost_root(principal_id);',
+            '        if rooted == "localhost://Users/self" {',
+            '            return Ok(principal_root);',
+            '        }',
+            '        let rest = rooted',
+            '            .strip_prefix("localhost://Users/self/")',
+            '            .ok_or_else(|| format!("Invalid current-user alias: {uri_or_resource}"))?;',
+            '        return Ok(format!("{principal_root}/{rest}"));',
+            '    }',
+            '    if rooted.starts_with("localhost://Users/") {',
+            '        let Some(principal_id) = principal_id else {',
+            '            return Err("localhost://Users requires a principal-scoped launch context".to_string());',
+            '        };',
+            '        let principal_root = crate::auth::principal_localhost_root(principal_id);',
+            '        if rooted == principal_root || rooted.starts_with(&format!("{principal_root}/")) {',
+            '            return Ok(rooted);',
+            '        }',
+            '        return Err(',
+            '            "localhost://Users roots must use Users/self or the active principal root".to_string(),',
+            '        );',
+            '    }',
+            '    Ok(rooted)',
+            '}',
+        ),
+    ),
+    (
+        (
+            "lab/capsule-identity/src/lib.rs:1425",
+        ),
+        1425,
+        (
+            '/// `Ok(())` means all four passed. It is not a trust, admission or launch',
+            '/// value. A wrong key, a changed signature and a name moved onto other bytes',
+            '/// all fail step 4 with one reason.',
+        ),
+    ),
+    (
+        (
+            "lab/capsule-identity/README.md:946",
+        ),
+        946,
+        (
+            'The rule: a valid signature grants nothing by itself. A bundle whose test-key',
+            'signature verifies is still not admitted, and it gets no grant. This library',
+            'checks identity only, and it sits in no Runtime admission or launch path; the',
+            "lab's stand-in launcher, in test code, calls it",
+            '([below](#lab-stand-in-launcher-m1-check-b1)).',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-compute/src/providers/component.rs:350",
+        ),
+        347,
+        (
+            'impl elastos::bus::identity::Host for ComponentState {',
+            '    fn context(&mut self) -> elastos::bus::types::IdentityContext {',
+            '        elastos::bus::types::IdentityContext {',
+            '            principal: self.principal_id.clone(),',
+            '            capsule: self.capsule_id.clone(),',
+            '            session: self.capsule_id.clone(),',
+            '            device: None,',
+            '        }',
+            '    }',
+            '}',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/src/lib.rs:3339",
+        ),
+        3338,
+        (
+            '/// Record a hosted model proposal. The resource names the model. There is',
+            '/// no secret field. This does not call a provider.',
+            '#[cfg(any(test, target_arch = "wasm32"))]',
+            "fn propose_hosted(journal: &mut Journal, resource: &str) -> Result<u64, &'static str> {",
+            '    if !resource.starts_with("localhost://")',
+            '        || resource.chars().any(char::is_whitespace)',
+            '        || host_path(resource)',
+            '    {',
+            '        return Err("host path");',
+            '    }',
+            '    let id = propose_step(journal);',
+            '    let step = journal',
+            '        .steps',
+            '        .iter_mut()',
+            '        .find(|step| step.id == id)',
+            '        .expect("just pushed");',
+            '    step.kind = ProposalKind::Hosted;',
+            '    step.resource = resource.to_string();',
+            '    Ok(id)',
+            '}',
+        ),
+    ),
+    (
+        (
+            "capsules/model-provider/src/adapters.rs:58",
+        ),
+        45,
+        (
+            'fn effect_request(',
+            '    client: &reqwest::Client,',
+            '    method: reqwest::Method,',
+            '    direct_url: &str,',
+            '    runtime_socket: Option<&str>,',
+            '    offer_id: &str,',
+            '    run_id: &str,',
+            '    request_id: &str,',
+            "    effect: &'static str,",
+            ') -> reqwest::RequestBuilder {',
+            '    let url = if runtime_socket.is_some() {',
+            '        RUNTIME_HOSTED_EFFECT_URL',
+            '    } else {',
+            '        direct_url',
+            '    };',
+            '    let builder = client.request(method, url);',
+            '    if runtime_socket.is_some() {',
+            '        builder',
+            '            .header("x-elastos-offer-id", offer_id)',
+            '            .header("x-elastos-run-id", run_id)',
+            '            .header("x-elastos-request-id", request_id)',
+            '            .header("x-elastos-effect", effect)',
+            '    } else {',
+            '        builder',
+            '    }',
+            '}',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/api/gateway_model_service.rs:1",
+            "elastos/crates/elastos-server/src/api/gateway_model_service.rs:4",
+        ),
+        1,
+        (
+            '//! Remote model service: the destination side of a `remote_model` grant.',
+            '//!',
+            '//! A seed Runtime routes typed model operations over Carrier `provider_invoke`',
+            '//! with target `model`. This Runtime owns the decision. It verifies the grant',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/src/lib.rs:471-476",
+        ),
+        454,
+        (
+            'fn step_payload(step: &Step) -> Option<Vec<u8>> {',
+            '    let mut out = step.id.to_le_bytes().to_vec();',
+            '    out.push(state_tag(step.state));',
+            '    out.push(kind_tag(step.kind));',
+            '    put_str(&mut out, &step.resource)?;',
+            '    out.extend_from_slice(&step.effect_id.to_le_bytes());',
+            '    out.push(u8::from(step.has_result));',
+            '    put_str(&mut out, &step.old)?;',
+            '    put_str(&mut out, &step.new)?;',
+            '    out.extend_from_slice(&u32::try_from(step.argv.len()).ok()?.to_le_bytes());',
+            '    for arg in &step.argv {',
+            '        put_str(&mut out, arg)?;',
+            '    }',
+            '    put_opt(&mut out, step.parent_id);',
+            '    put_str(&mut out, &step.seat)?;',
+            '    put_opt(&mut out, step.seen_version);',
+            '    put_str(&mut out, &step.inbox)?;',
+            '    // Room for OMP idea 2, empty until it is built: depth, budget (flag,',
+            '    // requests, seconds), requests_used, stop.',
+            '    out.push(0);',
+            '    out.extend_from_slice(&[0; 1 + 4 + 8]);',
+            '    out.extend_from_slice(&0_u32.to_le_bytes());',
+            '    out.push(0);',
+            '    Some(out)',
+            '}',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/src/lib.rs:532",
+        ),
+        531,
+        (
+            '    // Room for OMP idea 2, empty until it is built: cancelled_from (flag and',
+            '    // step id), task_budget (flag, requests, seconds), depth.',
+            '    out.extend_from_slice(&[0; 1 + 8]);',
+            '    out.extend_from_slice(&[0; 1 + 4 + 8]);',
+            '    out.push(0);',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/src/lib.rs:754",
+        ),
+        749,
+        (
+            "    // OMP idea 2's fields must be empty until it is built.",
+            '    let depth = reader.byte().map_err(fail)?;',
+            '    let budget = reader.take(1 + 4 + 8).map_err(fail)?;',
+            '    let requests_used = reader.u32().map_err(fail)?;',
+            '    let stop = reader.byte().map_err(fail)?;',
+            '    if depth != 0 || budget.iter().any(|byte| *byte != 0) || requests_used != 0 || stop != 0 {',
+            '        return Err("record");',
+            '    }',
+        ),
+    ),
+    (
+        (
+            "capsules/model-provider/src/journal.rs:391-397",
+        ),
+        389,
+        (
+            '        } else {',
+            '            let usage = self.visit_census(&census, |_, _, _| Ok(()))?;',
+            '            if usage.entries >= MAX_NEW_JOURNAL_ENTRIES',
+            '                || usage',
+            '                    .charged_bytes',
+            '                    .checked_add(charge)',
+            '                    .is_none_or(|total| total > MAX_JOURNAL_GROWTH_BYTES)',
+            '            {',
+            '                // This check precedes the durable Prepared record and dispatch.',
+            '                return Err(journal_budget_fault());',
+            '            }',
+            '        }',
+            '        self.verify_census(&census)?;',
+            '        let expected = existing.map(|entry| &entry.metadata);',
+            '        atomic_write_owner_only(&path, &bytes, expected)',
+            '    }',
+            '    pub fn active_run_count(&self, offer_id: &str) -> Result<usize, ProviderFault> {',
+            '        let mut total = 0usize;',
+        ),
+    ),
+    (
+        (
+            "capsules/model-provider/src/journal.rs:921",
+        ),
+        906,
+        (
+            '                    .iter()',
+            '                    .find(|entry| entry.path == old.path)',
+            '                    .is_none_or(|entry| !same_snapshot(&old.metadata, &entry.metadata))',
+            '            })',
+            '        {',
+            '            return Err(ProviderFault::corrupt_journal(',
+            '                "model run journal census changed during scan",',
+            '            ));',
+            '        }',
+            '        Ok(())',
+            '    }',
+            '}',
+            'fn journal_budget_fault() -> ProviderFault {',
+            '    ProviderFault::policy_limit(',
+            '        "Model run history is full. Retained outcomes expire after their history window; then try again.",',
+            '        "model run journal admission or growth limit exceeded",',
+            '    )',
+            '}',
+        ),
+    ),
+    (
+        (
+            "capsules/model-provider/src/state.rs:530",
+        ),
+        516,
+        (
+            '        // A retained request owns its original result, including legacy IDs and',
+            '        // results whose offer has since changed or retired.',
+            '        if let Some(mut existing) = self.journal.load_run_if_present(&run_id)? {',
+            '            if request_fingerprint(&existing.runtime_binding, &existing.input_hash)? != fingerprint',
+            '            {',
+            '                return Err(ProviderFault::invalid_request(',
+            '                    "request_id conflicts with an existing model run",',
+            '                ));',
+            '            }',
+            '            self.project_archived_run(&mut existing)?;',
+            '            if !existing.status.is_terminal() {',
+            '                let current_offer = self.current_execution_offer_for_run(&existing)?;',
+            '                self.refresh_run_if_needed(current_offer.as_ref(), &mut existing)?;',
+            '            }',
+            '            return serialize_run_view(&existing);',
+            '        }',
+        ),
+    ),
+    (
+        (
+            "capsules/model-provider/src/state.rs:609",
+        ),
+        606,
+        (
+            '        self.journal.store_run(&run)?;',
+            '        let active_runs = self.journal.active_run_count(&offer.id)?;',
+            '        if active_runs > offer.policy.concurrency_limit as usize {',
+            '            transition_error(',
+            '                &offer,',
+            '                &mut run,',
+            '                RunError {',
+            '                    class: ErrorClass::RateLimited,',
+            '                    code: "model_busy".to_string(),',
+            '                    message: "Model is busy.".to_string(),',
+            '                },',
+            '            )?;',
+            '            self.journal.store_run(&run)?;',
+            '            return serialize_run_view(&run);',
+            '        }',
+            '        match self.adapters.dispatch(',
+            '            &offer.adapter,',
+            '            &offer,',
+            '            &request.runtime_binding,',
+            '            &request.input,',
+            '            run.deadline_ms,',
+            '        ) {',
+        ),
+    ),
+    (
+        (
+            "capsules/model-provider/src/contract.rs:134",
+        ),
+        131,
+        (
+            '    pub fn is_terminal(&self) -> bool {',
+            '        matches!(',
+            '            self,',
+            '            Self::Completed | Self::Failed | Self::Cancelled | Self::SettlementUnknown',
+            '        )',
+            '    }',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/api/gateway_model_service.rs:355",
+        ),
+        324,
+        (
+            '/// Hold one slot for a create, or recognise that the request already has a',
+            '/// record. The check and the hold happen under the same lock and land in the',
+            '/// same index write, so two creates cannot both take the last slot.',
+            'fn reserve_run_slot(',
+            '    data_dir: &Path,',
+            '    now: u64,',
+            '    key: &str,',
+            '    grant_id: &str,',
+            '    remote_principal_id: &str,',
+            '    capsule_id: &str,',
+            '    request_id: &str,',
+            ') -> anyhow::Result<RunSlot> {',
+            '    update_run_index(data_dir, now, |index| {',
+            '        if let Some((run_id, record)) = index.runs.iter().find(|(_, record)| {',
+            '            record.grant_id == grant_id',
+            '                && record.remote_principal_id == remote_principal_id',
+            '                && record_capsule_id(record) == capsule_id',
+            '                && record.request_id == request_id',
+            '        }) {',
+            '            return Ok(RunSlot::Existing {',
+            '                run_id: run_id.clone(),',
+            '                record: Box::new(record.clone()),',
+            '            });',
+            '        }',
+            '        if index.pending.contains_key(key) {',
+            '            anyhow::bail!("model run reservation is already held");',
+            '        }',
+            '        anyhow::ensure!(',
+            '            index.runs.len() + index.pending.len() < MODEL_RUN_INDEX_MAX,',
+            '            "model run index is full"',
+            '        );',
+            '        index.pending.insert(key.to_string(), now);',
+            '        Ok(RunSlot::Reserved)',
+            '    })',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/api/gateway_model_service.rs:1452-1454",
+        ),
+        1452,
+        (
+            '    // A create holds its record slot before any model work starts. A retry of',
+            '    // an already recorded request is answered from that record before another',
+            '    // create. A full index refuses here.',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/asks.json:4",
+            "examples/agent-host/asks.json:5",
+            "examples/agent-host/asks.json:6",
+        ),
+        4,
+        (
+            '    {"kind": "read", "resource": "<principal>/"},',
+            '    {"kind": "edit", "resource": "<principal>/"},',
+            '    {"kind": "restore", "resource": "<principal>/"},',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/provider_resource.rs:422",
+        ),
+        422,
+        (
+            '            "read", "write", "list", "delete", "stat", "mkdir", "exists", "resolve", "ping",',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/asks.json:7",
+            "examples/agent-host/asks.json:8",
+            "examples/agent-host/asks.json:9",
+        ),
+        7,
+        (
+            '    {"kind": "run", "resource": "<principal>/Projects/"},',
+            '    {"kind": "child", "resource": "<principal>/Projects/"},',
+            '    {"kind": "init", "resource": "<principal>/Projects/"},',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-compute/src/exec_vm.rs:43",
+            "elastos/crates/elastos-compute/src/exec_vm.rs:49",
+        ),
+        42,
+        (
+            '/// Refuse a missing grant, a cancel, a host path, a missing Linux rootfs,',
+            '/// or a host that has no adapter. A ready decision still does not boot.',
+            "pub fn decide_exec(request: &ExecRequest<'_>) -> ExecDecision {",
+            '    if request.cancelled {',
+            '        return ExecDecision::Refuse("cancelled");',
+            '    }',
+            '    if request.grant.is_none_or(|grant| grant.is_empty()) {',
+            '        return ExecDecision::Refuse("missing grant");',
+            '    }',
+            '    if !request.workspace.starts_with("localhost://")',
+            '        || request.workspace.chars().any(char::is_whitespace)',
+            '        || host_path(request.workspace)',
+            '    {',
+            '        return ExecDecision::Refuse("host path");',
+            '    }',
+            '    if request.argv.is_empty() || request.argv.iter().any(|arg| host_path(arg)) {',
+            '        return ExecDecision::Refuse("host path");',
+            '    }',
+            '    if request.rootfs.file_name().and_then(|name| name.to_str()) != Some("rootfs.ext4")',
+            '        || !request.rootfs.is_file()',
+            '    {',
+            '        return ExecDecision::Refuse("rootfs missing");',
+            '    }',
+            '    match request.host {',
+            '        ExecHost::Macos => ExecDecision::Admit {',
+            '            adapter: ExecAdapter::AppleVirtualization,',
+            '        },',
+            '        ExecHost::Linux => ExecDecision::Admit {',
+            '            adapter: ExecAdapter::Crosvm,',
+            '        },',
+            '        ExecHost::Other => ExecDecision::Refuse("unsupported host"),',
+            '    }',
+            '}',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-compute/src/exec_vm.rs:130",
+        ),
+        122,
+        (
+            '/// Files that may be placed in the machine for one project. Paths stay',
+            '/// relative. A host path, a `..` segment, or a workspace that is not',
+            '/// `localhost://Users/<root>/Projects/<name>` is refused. This does not copy',
+            '/// a directory from the host.',
+            "pub fn admit_project_files(workspace: &str, files: &[(&str, &str)]) -> Result<(), &'static str> {",
+            '    let Some(rest) = workspace.strip_prefix("localhost://Users/") else {',
+            '        return Err("host path");',
+            '    };',
+            '    let Some((root, name)) = rest.split_once("/Projects/") else {',
+            '        return Err("host path");',
+            '    };',
+            '    if root.is_empty()',
+            '        || name.is_empty()',
+            "        || root.contains('/')",
+            "        || name.contains('/')",
+            "        || root.contains('\\\\')",
+            "        || name.contains('\\\\')",
+            '        || host_path(workspace)',
+            '        || host_path(root)',
+            '        || host_path(name)',
+            '        || workspace.chars().any(char::is_whitespace)',
+            '        || files.is_empty()',
+            '    {',
+            '        return Err("host path");',
+            '    }',
+            '    for (path, text) in files {',
+            '        if path.is_empty()',
+            "            || path.starts_with('/')",
+            '            || host_path(path)',
+            '            || path.chars().any(char::is_whitespace)',
+            '            || path',
+            "                .split('/')",
+            '                .any(|part| part.is_empty() || part == "." || part == "..")',
+            '        {',
+            '            return Err("host path");',
+            '        }',
+            '        if host_path(text) {',
+            '            return Err("host path");',
+            '        }',
+            '    }',
+            '    Ok(())',
+            '}',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/src/lib.rs:3360",
+            "examples/agent-host/src/lib.rs:3370",
+            "examples/agent-host/src/lib.rs:3382",
+        ),
+        3359,
+        (
+            "/// A child is a separate step. Its resource must sit under the parent's",
+            "/// resource. It does not copy the parent's grant.",
+            '#[cfg(any(test, target_arch = "wasm32"))]',
+            'fn propose_child(',
+            '    journal: &mut Journal,',
+            '    parent_id: u64,',
+            '    resource: &str,',
+            ") -> Result<u64, &'static str> {",
+            '    let Some(parent) = journal.steps.iter().find(|step| step.id == parent_id) else {',
+            '        return Err("no parent");',
+            '    };',
+            '    if parent.resource.is_empty() || !narrower_resource(&parent.resource, resource) {',
+            '        return Err("not a subset");',
+            '    }',
+            '    let id = propose_step(journal);',
+            '    let step = journal',
+            '        .steps',
+            '        .iter_mut()',
+            '        .find(|step| step.id == id)',
+            '        .expect("just pushed");',
+            '    step.kind = ProposalKind::Child;',
+            '    step.resource = resource.to_string();',
+            '    step.parent_id = Some(parent_id);',
+            '    step.grant = None;',
+            '    Ok(id)',
+            '}',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/src/lib.rs:3449",
+        ),
+        3432,
+        (
+            "/// Give a child its own grant. The parent's grant string is refused, and the",
+            '/// child stays prepared. This does not start a process.',
+            '#[cfg(any(test, target_arch = "wasm32"))]',
+            'fn authorize_child(journal: &mut Journal, child_id: u64, grant: Option<&str>) -> bool {',
+            '    let Some(child) = journal.steps.iter().find(|step| step.id == child_id) else {',
+            '        return false;',
+            '    };',
+            '    if child.kind != ProposalKind::Child {',
+            '        return false;',
+            '    }',
+            '    let parent_grant = child.parent_id.and_then(|parent_id| {',
+            '        journal',
+            '            .steps',
+            '            .iter()',
+            '            .find(|step| step.id == parent_id)',
+            '            .and_then(|step| step.grant.clone())',
+            '    });',
+            '    if grant.is_none() || grant == Some("") || parent_grant.as_deref() == grant {',
+            '        return false;',
+            '    }',
+            '    authorize(journal, child_id, grant)',
+            '}',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/src/lib.rs:3455",
+            "examples/agent-host/src/lib.rs:3470",
+            "examples/agent-host/src/lib.rs:3471",
+        ),
+        3455,
+        (
+            '/// A child host is a second journal. It keeps the system head and does not',
+            "/// copy the parent's log or the parent's grant. This is not a second loaded",
+            '/// component, and it does not start a process.',
+            '#[cfg(any(test, target_arch = "wasm32"))]',
+            'fn open_child_host(',
+            '    parent: &Journal,',
+            '    parent_id: u64,',
+            '    resource: &str,',
+            ") -> Result<Journal, &'static str> {",
+            '    let Some(parent_step) = parent.steps.iter().find(|step| step.id == parent_id) else {',
+            '        return Err("no parent");',
+            '    };',
+            '    if parent_step.resource.is_empty() || !narrower_resource(&parent_step.resource, resource) {',
+            '        return Err("not a subset");',
+            '    }',
+            '    let mut child = empty_journal();',
+            '    admit_system(&mut child, SYSTEM_HEAD, true);',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/src/lib.rs:3474",
+        ),
+        3473,
+        (
+            '    if child.steps.iter().any(|step| step.grant.is_some()) {',
+            '        return Err("inherited");',
+            '    }',
+            '    Ok(child)',
+            '}',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/src/lib.rs:3482",
+        ),
+        3479,
+        (
+            "/// Give the child host its own grant. The parent's grant is refused.",
+            '#[cfg(any(test, target_arch = "wasm32"))]',
+            'fn grant_child_host(child: &mut Journal, parent_grant: Option<&str>, grant: Option<&str>) -> bool {',
+            '    if grant.is_none() || grant == Some("") || grant == parent_grant {',
+            '        return false;',
+            '    }',
+            '    let Some(id) = child',
+            '        .steps',
+            '        .iter()',
+            '        .find(|step| {',
+            '            step.kind == ProposalKind::Run',
+            '                && step.grant.is_none()',
+            '                && step.state == StepState::Prepared',
+            '        })',
+            '        .map(|step| step.id)',
+            '    else {',
+            '        return false;',
+            '    };',
+            '    authorize(child, id, grant)',
+            '}',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/src/lib.rs:3387",
+            "examples/agent-host/src/lib.rs:3403",
+        ),
+        3386,
+        (
+            '/// Record a project proposal. The resource is a `localhost://` project name.',
+            '/// A host path or a slash inside the root or the name creates no step.',
+            '#[cfg(any(test, target_arch = "wasm32"))]',
+            "fn propose_init(journal: &mut Journal, root: &str, name: &str) -> Result<u64, &'static str> {",
+            '    if root.is_empty()',
+            '        || name.is_empty()',
+            '        || root',
+            '            .chars()',
+            "            .any(|ch| ch.is_whitespace() || ch == '/' || ch == '\\\\')",
+            '        || name',
+            '            .chars()',
+            "            .any(|ch| ch.is_whitespace() || ch == '/' || ch == '\\\\')",
+            '        || host_path(root)',
+            '        || host_path(name)',
+            '    {',
+            '        return Err("host path");',
+            '    }',
+            '    let resource = format!("localhost://Users/{root}/Projects/{name}");',
+            '    let id = propose_step(journal);',
+            '    let step = journal',
+            '        .steps',
+            '        .iter_mut()',
+            '        .find(|step| step.id == id)',
+            '        .expect("just pushed");',
+            '    step.kind = ProposalKind::Init;',
+            '    step.resource = resource;',
+            '    Ok(id)',
+            '}',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/provider_resource.rs:174",
+            "elastos/crates/elastos-server/src/provider_resource.rs:176",
+        ),
+        173,
+        (
+            '        "peer" => match op {',
+            '            "init" | "connect" | "remember_peer" | "gossip_join" | "gossip_leave"',
+            '            | "gossip_send" | "get_ticket" | "get_node_id" | "list_peers" | "list_topics"',
+            '            | "list_topic_peers" | "gossip_join_peers" | "gossip_recv" => Some(Action::Message),',
+            '            _ => None,',
+            '        },',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/provider_resource.rs:163",
+            "elastos/crates/elastos-server/src/provider_resource.rs:164",
+            "elastos/crates/elastos-server/src/provider_resource.rs:165",
+        ),
+        163,
+        (
+            '            "offers_list" | "runs_get" | "runs_events" => Some(Action::Read),',
+            '            "runs_create" | "runs_cancel" => Some(Action::Execute),',
+            '            _ => None,',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/asks.json:12",
+        ),
+        12,
+        (
+            '    {"kind": "journal-append", "resource": "<principal>/.AppData/Agents/agent-host/"}',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/provider_resource.rs:379",
+            "elastos/crates/elastos-server/src/provider_resource.rs:382",
+        ),
+        372,
+        (
+            'pub(crate) fn agents_area_refusal(',
+            '    rooted: &str,',
+            '    operation: &str,',
+            ") -> Option<(&'static str, &'static str)> {",
+            '    if !in_agents_area(rooted) {',
+            '        return None;',
+            '    }',
+            '    if !matches!(operation, "read" | "write") {',
+            '        return Some((',
+            '            "operation_not_allowed",',
+            '            "only read and write are allowed under .AppData/Agents/",',
+            '        ));',
+            '    }',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/resource_bridge.rs:696",
+            "elastos/crates/elastos-server/src/resource_bridge.rs:697",
+            "elastos/crates/elastos-server/src/resource_bridge.rs:698",
+            "elastos/crates/elastos-server/src/resource_bridge.rs:699",
+        ),
+        684,
+        (
+            'fn write_precondition(request: &serde_json::Value) -> Result<Option<WritePrecondition>, String> {',
+            '    let create_only = match request.get("create_only") {',
+            '        None | Some(serde_json::Value::Null) => false,',
+            '        Some(serde_json::Value::Bool(value)) => *value,',
+            '        Some(_) => return Err("create_only must be a boolean".to_string()),',
+            '    };',
+            '    let if_revision = match request.get("if_revision") {',
+            '        None | Some(serde_json::Value::Null) => None,',
+            '        Some(serde_json::Value::String(value)) if !value.is_empty() => Some(value.clone()),',
+            '        Some(_) => return Err("if_revision must be a non-empty string".to_string()),',
+            '    };',
+            '    match (create_only, if_revision) {',
+            '        (true, Some(_)) => Err("create_only and if_revision cannot both be set".to_string()),',
+            '        (true, None) => Ok(Some(WritePrecondition::Absent)),',
+            '        (false, Some(revision)) => Ok(Some(WritePrecondition::Revision(revision))),',
+            '        (false, None) => Ok(None),',
+            '    }',
+            '}',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/resource_bridge.rs:570",
+            "elastos/crates/elastos-server/src/resource_bridge.rs:571",
+        ),
+        568,
+        (
+            '            if agent_journal && append {',
+            '                return Some(resource_error_response(',
+            '                    "append_not_allowed",',
+            '                    "append is read-then-write; Agent journals are written whole with a revision precondition",',
+            '                ));',
+            '            }',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/resource_bridge.rs:582",
+            "elastos/crates/elastos-server/src/resource_bridge.rs:583",
+        ),
+        580,
+        (
+            '            if agent_journal && precondition.is_none() {',
+            '                return Some(resource_error_response(',
+            '                    "revision_required",',
+            '                    "Agent journal writes need create_only or if_revision",',
+            '                ));',
+            '            }',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/resource_bridge.rs:603",
+        ),
+        603,
+        (
+            '                content.clone()',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/resource_bridge.rs:606",
+        ),
+        606,
+        (
+            '                Some(precondition) => crate::auth::write_principal_root_object_if_revision(',
+        ),
+    ),
+    (
+        (
+            "lab/grant-binding/README.md:12",
+        ),
+        12,
+        (
+            "reference model, not the Runtime; counts toward no M1 check; the Runtime half is Anders's (#464, #463, #181)",
+        ),
+    ),
+    (
+        (
+            "docs/AGENT_ARCHITECTURE.md:19",
+        ),
+        19,
+        (
+            '- A human and an agent are both represented by Runtime principals.',
+        ),
+    ),
+    (
+        (
+            "docs/AGENT_ARCHITECTURE.md:21",
+        ),
+        21,
+        (
+            '  signed Profile document with a stable Profile DID, controlled from a',
+        ),
+    ),
+    (
+        (
+            "docs/AGENT_ARCHITECTURE.md:24",
+        ),
+        24,
+        (
+            '- Executable agent software is a capsule, separate from the agent principal',
+        ),
+    ),
+    (
+        (
+            "docs/AGENT_ARCHITECTURE.md:332",
+        ),
+        332,
+        (
+            "- Agent state is rooted under the agent principal's `UsersAI/...` space.",
+        ),
+    ),
+    (
+        (
+            "lab/grant-binding/src/lib.rs:280",
+        ),
+        266,
+        (
+            'fn resource_name(agent: &str, name: &str, owned_root: Option<&str>) -> Result<String, Refuse> {',
+            "    if name.contains('\\\\') || name.starts_with('/') {",
+            '        return Err(Refuse::HostPath);',
+            '    }',
+            "    let parts: Vec<&str> = name.split('/').collect();",
+            '    if parts',
+            '        .iter()',
+            '        .any(|part| part.is_empty() || *part == "." || *part == "..")',
+            '    {',
+            '        return Err(Refuse::HostPath);',
+            '    }',
+            '    if parts.first() == Some(&"Public") {',
+            '        return Err(Refuse::PublicRead);',
+            '    }',
+            '    if parts.len() < 3 || parts[0] != "UsersAI" || parts[1] != agent {',
+            '        return Err(Refuse::OutsidePrincipal);',
+            '    }',
+            '    if !parts.iter().skip(2).all(|part| {',
+            '        part.chars()',
+            "            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))",
+            '    }) {',
+            '        return Err(Refuse::SymlinkShaped);',
+            '    }',
+            '    if let Some(root) = owned_root {',
+            '        let inside = name',
+            '            .strip_prefix(root)',
+            "            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'));",
+            '        if !inside {',
+            '            return Err(Refuse::OutsideRoot);',
+            '        }',
+            '    }',
+            '    Ok(name.to_owned())',
+            '}',
+        ),
+    ),
+    (
+        (
+            "lab/grant-binding/src/lib.rs:23",
+            "lab/grant-binding/src/lib.rs:25",
+        ),
+        23,
+        (
+            '/// An opaque grant handle. The guest holds only this.',
+            '#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]',
+            'pub struct Handle(u64);',
+        ),
+    ),
+)
+
+# The shared groups: one quoted block that several markers read.
+ALIGNED_SHARED = tuple(
+    (markers, start, lines)
+    for markers, start, lines in ALIGNED_GROUPS
+    if len(markers) > 1
+)
+
 class CitationCheckTests(unittest.TestCase):
     def _temp_root(self):
         tmp = tempfile.TemporaryDirectory()
@@ -1349,6 +2508,24 @@ class CitationCheckTests(unittest.TestCase):
     def _assert_one(self, body, files, expected):
         got = check.problems(self._draft(body, files))
         assert got == [expected], expected
+
+    def _refused_numbers(self, body, count):
+        """The line numbers the structural read refuses at a PIN of COUNT lines.
+
+        The rule is the checker's own: a single line past the pinned end is
+        refused by its number, and a range is refused by its end when the end is
+        past the pinned end. A citation the pin holds is not in this list.
+        """
+        numbers = []
+        for span in check._spans(body):
+            match = check.CITATION.fullmatch(span)
+            if match is None or match.group("start") is None:
+                continue
+            end = match.group("end")
+            number = int(end) if end is not None else int(match.group("start"))
+            if number > count:
+                numbers.append(number)
+        return numbers
 
     def _source(self, quote, following=NEXT_QUOTE):
         """A committed file whose line 3754 is QUOTE and line 3755 is FOLLOWING."""
@@ -1823,6 +3000,61 @@ class CitationCheckTests(unittest.TestCase):
         rows = self._walk_rows(PROVIDER_WALKS, PROVIDER_WALK_END, lines)
         return ("\n".join(rows[:count]) + "\n").encode("utf-8")
 
+    def _resident_source(self, count=RESIDENT_STOP_NUMBER, lines=None):
+        """A committed ComponentProvider file with lines 218 and 232 laid in.
+
+        LINES overrides one pinned line number, so a case can plant a single
+        differing character in the pinned commit instead of in the draft.
+        """
+        overrides = dict(lines or {})
+        rows = ["// filler"] * count
+        for number, text in (
+            (RESIDENT_RUN_NUMBER, RESIDENT_RUN_QUOTE),
+            (RESIDENT_STOP_NUMBER, RESIDENT_STOP_QUOTE),
+        ):
+            if number <= count:
+                rows[number - 1] = overrides.get(number, text)
+        return ("\n".join(rows) + "\n").encode("utf-8")
+
+    def _wit_source(self, lines=None):
+        """A committed Bus v1 WIT file with line 87 laid in."""
+        overrides = dict(lines or {})
+        rows = ["// filler"] * RESIDENT_EXPORT_NUMBER
+        rows[RESIDENT_EXPORT_NUMBER - 1] = overrides.get(
+            RESIDENT_EXPORT_NUMBER, RESIDENT_EXPORT_QUOTE
+        )
+        return ("\n".join(rows) + "\n").encode("utf-8")
+
+    def _resident_files(self, resident=None, wit=None):
+        """The two pinned files the resident block cites."""
+        return {
+            RESIDENT_REL: self._resident_source(lines=resident),
+            RESIDENT_EXPORT_REL: self._wit_source(lines=wit),
+        }
+
+    def _resident_body(
+        self,
+        run=RESIDENT_RUN_QUOTE,
+        stop=RESIDENT_STOP_QUOTE,
+        export=RESIDENT_EXPORT_QUOTE,
+        groups=None,
+    ):
+        """A draft that cites the three resident spans and quotes each one."""
+        chosen = RESIDENT_GROUPS if groups is None else tuple(groups)
+        blocks = (
+            ("run", RESIDENT_RUN_SPAN, run),
+            ("stop", RESIDENT_STOP_SPAN, stop),
+            ("export", RESIDENT_EXPORT_SPAN, export),
+        )
+        parts = []
+        for name, span, quote in blocks:
+            if name not in chosen:
+                continue
+            parts.append("`" + span + "` is cited.\n")
+            parts.append("    " + quote + "\n")
+        parts.append(RESIDENT_OPEN)
+        return "".join(parts)
+
     def _changed(self, lines, index):
         """Return LINES with the one line at INDEX altered by one character."""
         rows = list(lines)
@@ -2100,14 +3332,20 @@ class CitationCheckTests(unittest.TestCase):
         )
 
     def test_missing_pin_is_refused(self):
-        got = check.problems(self._raw_draft("No pin line here.\n"))
+        # An absent path in the same draft adds no second line: no revision is
+        # named, so the pin refusal is the only reason.
+        body = "No pin line here, and `missing/no-such.rs:1` is absent.\n"
+        got = check.problems(self._raw_draft(body))
         self.assertEqual(got, ["refuse: draft has no pinned commit"])
 
     def test_pin_line_is_one_commit(self):
+        # Each bad pin line is the only refusal, even when the draft also cites
+        # a path the worktree does not hold.
         sha = "a" * 40
+        absent = "`missing/no-such.rs:1` is absent.\n"
         bodies = (
-            "Pinned commit: HEAD\n",
-            "Pinned commit: %s\nPinned commit: %s\n" % (sha, sha),
+            "Pinned commit: HEAD\n" + absent,
+            "Pinned commit: %s\nPinned commit: %s\n" % (sha, sha) + absent,
         )
         for body in bodies:
             got = check.problems(self._raw_draft(body))
@@ -2118,8 +3356,11 @@ class CitationCheckTests(unittest.TestCase):
             )
 
     def test_unknown_pin_is_refused(self):
+        # An unknown pin is the only refusal, even when the draft also cites a
+        # path the worktree does not hold.
         sha = "f" * 40
-        root = self._raw_draft("Pinned commit: " + sha + "\n", commit=True)
+        body = "Pinned commit: " + sha + "\n`missing/no-such.rs:1` is absent.\n"
+        root = self._raw_draft(body, commit=True)
         got = check.problems(root)
         self.assertEqual(got, ["refuse: pinned commit is not a commit: " + sha])
 
@@ -2137,6 +3378,21 @@ class CitationCheckTests(unittest.TestCase):
     def test_missing_path_is_refused(self):
         expected = "refuse: path does not exist: missing/no-such.rs"
         self._assert_one("See `missing/no-such.rs:1`.\n", {}, expected)
+
+    def test_directory_citation_is_refused(self):
+        # A tree whose name looks like a source file is still not a blob.
+        # Every citation form returns the path reason before inspecting bytes.
+        rel = "pkg/source.rs"
+        files = {rel + "/child.txt": b"fn child(\n"}
+        expected = "refuse: path does not exist: " + rel
+        for suffix in (":1", ":1-2", "::child"):
+            self._assert_one("See `" + rel + suffix + "`.\n", files, expected)
+        # A quote target that names a tree keeps only the structural reason.
+        self._assert_one(
+            self._quote_body(OWNED_QUOTE),
+            {OWNED_REL + "/child.txt": b"fn child(\n"},
+            "refuse: path does not exist: " + OWNED_REL,
+        )
 
     def test_past_end_line_is_refused(self):
         one = {"pkg/one.rs": b"only\n"}
@@ -2208,7 +3464,10 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(check.problems(root), [])
 
     def test_quoted_line_absent_from_the_pinned_commit_is_refused(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + OWNED_SPAN
+        expected = (
+            "refuse: line %d is past the end of %s (10 lines)"
+            % (OWNED_NUMBER, OWNED_REL)
+        )
         short = ("// filler\n" * 10).encode("utf-8")
         root = self._draft(self._quote_body(OWNED_QUOTE), {OWNED_REL: short})
         (root / OWNED_REL).write_bytes(self._source(OWNED_QUOTE))
@@ -2335,7 +3594,10 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(check.problems(root), [])
 
     def test_marker_quoted_line_absent_from_the_pinned_commit_is_refused(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + MARKER_SPAN
+        expected = (
+            "refuse: line %d is past the end of %s (10 lines)"
+            % (MARKER_NUMBER, MARKER_REL)
+        )
         short = ("// filler\n" * 10).encode("utf-8")
         root = self._draft(self._marker_body(MARKER_CONST), {MARKER_REL: short})
         (root / MARKER_REL).write_bytes(self._marker_source())
@@ -2431,7 +3693,10 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(check.problems(root), [])
 
     def test_launching_quoted_line_absent_from_the_pinned_commit_is_refused(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + LAUNCHING_SPAN
+        expected = (
+            "refuse: line %d is past the end of %s (10 lines)"
+            % (LAUNCHING_NUMBER, MARKER_REL)
+        )
         short = ("// filler\n" * 10).encode("utf-8")
         root = self._draft(self._launching_body(LAUNCHING_CONST), {MARKER_REL: short})
         (root / MARKER_REL).write_bytes(self._launching_source())
@@ -2499,7 +3764,10 @@ class CitationCheckTests(unittest.TestCase):
         )
 
     def test_short_pinned_file_refuses_the_owned_line_only(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + OWNED_SPAN
+        expected = (
+            "refuse: line %d is past the end of %s (10 lines)"
+            % (OWNED_NUMBER, OWNED_REL)
+        )
         short = ("// filler\n" * 10).encode("utf-8")
         root = self._draft(
             self._quote_body(OWNED_QUOTE, NEXT_QUOTE), {OWNED_REL: short}
@@ -2716,7 +3984,10 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [ASKS_NUMBER])
 
     def test_asks_quoted_line_absent_from_the_pinned_commit_is_refused(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + ASKS_SPAN
+        expected = (
+            "refuse: line %d is past the end of %s (10 lines)"
+            % (ASKS_NUMBER, ASKS_REL)
+        )
         short = ("// filler\n" * 10).encode("utf-8")
         root = self._draft(self._asks_block(), {ASKS_REL: short})
         (root / ASKS_REL).write_bytes(self._asks_source())
@@ -2867,7 +4138,10 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [])
 
     def test_deny_quoted_line_absent_from_the_pinned_commit_is_refused(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + DENY_SPAN
+        expected = (
+            "refuse: line %d is past the end of %s (10 lines)"
+            % (DENY_NUMBER, DENY_REL)
+        )
         short = ("// filler\n" * 10).encode("utf-8")
         root = self._draft(self._deny_block(), {DENY_REL: short})
         (root / DENY_REL).write_bytes(self._deny_source())
@@ -2997,7 +4271,10 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [MINT_NUMBER])
 
     def test_mint_quoted_line_absent_from_the_pinned_commit_is_refused(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + MINT_SPAN
+        expected = (
+            "refuse: line %d is past the end of %s (10 lines)"
+            % (MINT_NUMBER, MINT_REL)
+        )
         short = ("// filler\n" * 10).encode("utf-8")
         root = self._draft(self._mint_block(), {MINT_REL: short})
         (root / MINT_REL).write_bytes(self._mint_source())
@@ -3168,7 +4445,10 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [JOURNAL_NUMBER])
 
     def test_journal_quoted_line_absent_from_the_pinned_commit_is_refused(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + JOURNAL_SPAN
+        expected = (
+            "refuse: line %d is past the end of %s (10 lines)"
+            % (JOURNAL_NUMBER, JOURNAL_REL)
+        )
         short = ("// filler\n" * 10).encode("utf-8")
         root = self._draft(self._journal_block(), {JOURNAL_REL: short})
         (root / JOURNAL_REL).write_bytes(self._journal_source())
@@ -3364,7 +4644,10 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [])
 
     def test_grant_quoted_line_absent_from_the_pinned_commit_is_refused(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + GRANT_SPAN
+        expected = (
+            "refuse: line %d is past the end of %s (10 lines)"
+            % (GRANT_NUMBER, GRANT_REL)
+        )
         short = ("// filler\n" * 10).encode("utf-8")
         root = self._draft(self._grant_block(), {GRANT_REL: short})
         (root / GRANT_REL).write_bytes(self._journal_source())
@@ -3587,22 +4870,32 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [])
 
     def test_write_quoted_line_absent_from_the_pinned_commit_is_refused(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + WRITE_SPAN
+        # The pin stops before both arms, so both are past the pinned end. The
+        # structural read refuses them and the quote walk reads nothing.
+        past = "refuse: line %d is past the end of %s (10 lines)"
+        expected = [
+            past % (WRITE_NUMBER, ASK_REL),
+            past % (READ_NUMBER, ASK_REL),
+        ]
         short = ("// filler\n" * 10).encode("utf-8")
         got, reads = self._pinned_reads(
             self._ask_block(),
             {ASK_REL: short},
             {ASK_REL: self._ask_source()},
         )
-        self.assertEqual(got, [expected])
-        self.assertEqual(reads, [WRITE_NUMBER])
+        self.assertEqual(got, expected)
+        self.assertEqual(reads, [])
 
     def test_read_quoted_line_past_the_pin_is_refused_at_the_write_line(self):
         # The walk is 20 remainders wide and the pin stops on line 3849, so the
-        # only window that holds 3849 is 3830..3849 and it scores 0. The write
-        # line is compared through that zero-score window and refused, and the
-        # read line is never read.
-        expected = "refuse: quoted line does not match " + WRITE_SPAN
+        # only window that holds 3849 is 3830..3849 and it scores 0. The read
+        # line is past the pinned end and is refused by its bound, and the write
+        # line is compared through that zero-score window and refused.
+        past = "refuse: line %d is past the end of %s (%d lines)"
+        expected = [
+            past % (READ_NUMBER, ASK_REL, WRITE_NUMBER),
+            "refuse: quoted line does not match " + WRITE_SPAN,
+        ]
         short = (
             "// filler\n" * (WRITE_NUMBER - 1) + WRITE_QUOTE + "\n"
         ).encode("utf-8")
@@ -3611,7 +4904,7 @@ class CitationCheckTests(unittest.TestCase):
             {ASK_REL: short},
             {ASK_REL: self._ask_source()},
         )
-        self.assertEqual(got, [expected])
+        self.assertEqual(got, expected)
         self.assertEqual(reads, [WRITE_NUMBER])
 
     def test_two_write_spans_are_refused(self):
@@ -3680,10 +4973,22 @@ class CitationCheckTests(unittest.TestCase):
     def test_falsifier_missing_path_is_caught(self):
         self._caught(
             "read_file",
-            lambda root, rel: b"fn x() {\n",
+            lambda root, rel, sha: b"fn x() {\n",
             self.test_missing_path_is_refused,
             "refuse: path does not exist:",
             "CAUGHT missing-path",
+        )
+
+    def test_falsifier_directory_citation_is_caught(self):
+        # Plant the text that a successful tree listing returned as file bytes.
+        self._caught(
+            "read_file",
+            lambda root, rel, sha: (
+                "tree " + sha + ":" + rel + "\n\nchild.txt\n"
+            ).encode("utf-8"),
+            self.test_directory_citation_is_refused,
+            "refuse: path does not exist:",
+            "CAUGHT directory-citation",
         )
 
     def test_falsifier_past_end_line_is_caught(self):
@@ -3722,6 +5027,38 @@ class CitationCheckTests(unittest.TestCase):
             "CAUGHT reversed-range",
         )
 
+    def test_falsifier_structural_read_before_the_pin_is_caught(self):
+        # Forcing structural reads adds a second refusal to each draft whose
+        # pin names no known revision.
+        cases = (
+            (self.test_missing_pin_is_refused, "CAUGHT structural-before-pin"),
+            (self.test_pin_line_is_one_commit, "CAUGHT structural-before-malformed-pin"),
+            (self.test_unknown_pin_is_refused, "CAUGHT structural-before-unknown-pin"),
+        )
+        for named_test, label in cases:
+            self._caught(
+                "pin_allows_structural_reads",
+                lambda pin_reason, pinned: True,
+                named_test,
+                "refuse:",
+                label,
+            )
+
+    def test_falsifier_duplicate_quote_refusal_is_caught(self):
+        # A walk that ignores the structural refusals repeats a citation the pin
+        # already refused, so one citation carries two reasons.
+        def planted(root, text, sha, refused_spans=frozenset()):
+            return _original_quote_refusals(root, text, sha)
+
+        _original_quote_refusals = check._quote_refusals
+        self._caught(
+            "_quote_refusals",
+            planted,
+            self.test_quoted_line_absent_from_the_pinned_commit_is_refused,
+            "refuse: quoted line",
+            "CAUGHT duplicate-quote-refusal",
+        )
+
     def test_falsifier_absent_draft_is_caught(self):
         self._caught(
             "load_draft",
@@ -3729,6 +5066,65 @@ class CitationCheckTests(unittest.TestCase):
             self.test_absent_draft_is_refused,
             "refuse: proposal is absent",
             "CAUGHT absent-draft",
+        )
+
+    def test_structural_citation_uses_the_pinned_commit(self):
+        # The pinned commit holds `pinned_here` on line 2 of pkg/pin.rs. The
+        # worktree copy is deleted after the commit, so a function span and a
+        # line span both pass only through the pinned read. A symbol defined in
+        # a file the pin does not hold is refused because that path is absent
+        # from the pinned commit, even though the worktree has the file.
+        source = b"// filler\nfn pinned_here(\n// third\n"
+        body = (
+            "Call `pkg/pin.rs::pinned_here`.\n"
+            "Line `pkg/pin.rs:2` is the fn line.\n"
+        )
+        root = self._temp_root()
+        self._write(root, body, {"pkg/pin.rs": source})
+        sha = self._commit_all(root)
+        (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
+            "Pinned commit: " + sha + "\n" + body, encoding="utf-8"
+        )
+        (root / "pkg" / "pin.rs").unlink()
+        self.assertEqual(check.problems(root), [])
+        # A symbol that exists only in the worktree is refused, because the pin
+        # does not hold that path at all.
+        worktree_only = "pkg/only.rs"
+        (root / worktree_only).parent.mkdir(parents=True, exist_ok=True)
+        (root / worktree_only).write_bytes(b"fn only_here(\n")
+        extended = body + "Also `" + worktree_only + "::only_here`.\n"
+        (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
+            "Pinned commit: " + sha + "\n" + extended, encoding="utf-8"
+        )
+        self.assertEqual(
+            check.problems(root),
+            ["refuse: path does not exist: " + worktree_only],
+        )
+        # A line the pin holds but the worktree file also holds is read at the
+        # pin, so replacing the worktree bytes with a different line changes
+        # nothing.
+        (root / "pkg" / "pin.rs").write_bytes(b"// other\nfn pinned_here(\n")
+        self.assertEqual(
+            check.problems(root),
+            ["refuse: path does not exist: " + worktree_only],
+        )
+
+    def test_falsifier_structural_pin_is_caught(self):
+        # A pinned reader that falls back to the worktree sees neither the
+        # pinned file nor its line once the worktree copy is gone, so the named
+        # test fails.
+        def planted(root, rel, sha):
+            path = Path(root) / rel
+            if not path.is_file():
+                return None
+            return path.read_bytes()
+
+        self._caught(
+            "read_file",
+            planted,
+            self.test_structural_citation_uses_the_pinned_commit,
+            "refuse: ",
+            "CAUGHT structural-pin",
         )
 
     def test_falsifier_missing_pin_is_caught(self):
@@ -4113,14 +5509,21 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [])
 
     def test_kind_read_quoted_line_absent_from_the_pinned_commit_is_refused(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + KIND_READ_SPAN
+        # The pin stops before all three arms, so each is past the pinned end.
+        # The structural read refuses them and the quote walk reads nothing.
+        past = "refuse: line %d is past the end of %s (%d lines)"
+        expected = [
+            past % (KIND_READ_NUMBER, KIND_REL, KIND_READ_NUMBER - 1),
+            past % (KIND_EDIT_NUMBER, KIND_REL, KIND_READ_NUMBER - 1),
+            past % (KIND_RESTORE_NUMBER, KIND_REL, KIND_READ_NUMBER - 1),
+        ]
         got, reads = self._pinned_reads(
             self._kind_block(),
             {KIND_REL: self._kind_source(kind_count=8)},
             {KIND_REL: self._kind_source()},
         )
-        self.assertEqual(got, [expected])
-        self.assertEqual(reads, [KIND_READ_NUMBER])
+        self.assertEqual(got, expected)
+        self.assertEqual(reads, [])
 
     def test_two_kind_read_spans_are_refused(self):
         expected = "refuse: quoted line is not one line: " + KIND_READ_SPAN
@@ -4211,15 +5614,22 @@ class CitationCheckTests(unittest.TestCase):
 
     def test_kind_edit_quoted_line_past_the_pin_is_refused(self):
         # A pin that stops after the Read arm leaves the 8187 window whole and
-        # the 8188 window gone. The walk stops at the Read arm, whose quotation
-        # no window over 8187 matches once the pin is cut.
-        expected = "refuse: quoted line does not match " + KIND_READ_SPAN
+        # the 8188 window gone. The two later arms are past the pinned end, so
+        # the structural read refuses them and the quote walk skips both. The
+        # walk still stops at the Read arm, whose quotation no window over 8187
+        # matches once the pin is cut.
+        past = "refuse: line %d is past the end of %s (%d lines)"
+        expected = [
+            past % (KIND_EDIT_NUMBER, KIND_REL, KIND_EDIT_NUMBER - 1),
+            past % (KIND_RESTORE_NUMBER, KIND_REL, KIND_EDIT_NUMBER - 1),
+            "refuse: quoted line does not match " + KIND_READ_SPAN,
+        ]
         got, reads = self._pinned_reads(
             self._kind_block(),
             {KIND_REL: self._kind_source(kind_count=9)},
             {KIND_REL: self._kind_source()},
         )
-        self.assertEqual(got, [expected])
+        self.assertEqual(got, expected)
         self.assertEqual(reads, [KIND_READ_NUMBER])
 
     def test_two_kind_edit_spans_are_refused(self):
@@ -4302,13 +5712,20 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(check.problems(root), [])
 
     def test_kind_restore_quoted_line_past_the_pin_is_refused(self):
-        expected = "refuse: quoted line does not match " + KIND_READ_SPAN
+        # The 8190 line is past the pinned end, so the structural read refuses
+        # it and the quote walk skips it. The walk then stops at the Read arm,
+        # whose quotation no window over 8187 matches once the pin is cut.
+        past = "refuse: line %d is past the end of %s (%d lines)"
+        expected = [
+            past % (KIND_RESTORE_NUMBER, KIND_REL, KIND_RESTORE_NUMBER - 1),
+            "refuse: quoted line does not match " + KIND_READ_SPAN,
+        ]
         got, reads = self._pinned_reads(
             self._kind_block(),
             {KIND_REL: self._kind_source(kind_count=11)},
             {KIND_REL: self._kind_source()},
         )
-        self.assertEqual(got, [expected])
+        self.assertEqual(got, expected)
         self.assertEqual(reads, [KIND_READ_NUMBER])
 
     def test_two_kind_restore_spans_are_refused(self):
@@ -4577,17 +5994,27 @@ class CitationCheckTests(unittest.TestCase):
             self.assertEqual(check.problems(root), [], name)
 
     def test_kind_line_quoted_line_past_the_pin_is_refused(self):
-        # Each arm is a one-remainder walk. A pin that stops at that arm keeps
-        # a window over its line but drops the Read arm from the 8187 window,
-        # so the Read arm is refused first.
-        expected = "refuse: quoted line does not match " + KIND_READ_SPAN
+        # Each arm is a one-remainder walk. A pin that stops at that arm makes
+        # every later arm past the pinned end, so the structural read refuses
+        # those arms and the quote walk skips them. The walk then stops at the
+        # Read arm, whose quotation no window over 8187 matches once the pin is
+        # cut.
+        past = "refuse: line %d is past the end of %s (%d lines)"
+        body = self._kind_line_body()
         for name, number, span, quote, index in KIND_LINE_ARMS:
+            count = index
+            last = KIND_BLOCK_START + count - 1
+            expected = [
+                past % (other, KIND_REL, last)
+                for other in self._refused_numbers(body, last)
+            ]
+            expected.append("refuse: quoted line does not match " + KIND_READ_SPAN)
             got, reads = self._pinned_reads(
                 self._kind_line_body(),
-                {KIND_REL: self._kind_source(kind_count=index)},
+                {KIND_REL: self._kind_source(kind_count=count)},
                 {KIND_REL: self._kind_source()},
             )
-            self.assertEqual(got, [expected], name)
+            self.assertEqual(got, expected, name)
             self.assertEqual(reads, [KIND_READ_NUMBER], name)
 
     def _arm_span(self, number):
@@ -5079,41 +6506,37 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [])
 
     def test_file_ask_quoted_line_past_the_pin_is_refused(self):
-        # A pin that stops before the cited line leaves no window over it. The
-        # refusal then says the line is not in the pin, and the reads stop with
-        # the earlier decision that failed. A pin cut inside one walk leaves
-        # the first cited line of that walk with a zero-score window.
+        # A pin that stops before a cited line makes every citation at or past
+        # that line past the pinned end. The structural read refuses each one in
+        # body order with its line bound. A walk cut inside itself keeps a window
+        # over its first cited line, which is then refused for not matching.
+        past = "refuse: line %d is past the end of %s (%d lines)"
+        body = self._file_ask_body()
         cases = {
-            "observe": (
-                "refuse: quoted line is not in the pinned commit: " + OBSERVE_SPAN,
-                [OBSERVE_NUMBER],
-            ),
-            "revision": (
-                "refuse: quoted line is not in the pinned commit: " + REVISION_SPAN,
-                [OBSERVE_NUMBER, REVISION_NUMBER],
-            ),
+            "observe": ([], []),
+            "revision": ([], [OBSERVE_NUMBER]),
             "op": (
-                "refuse: quoted line does not match " + REVISION_SPAN,
+                ["refuse: quoted line does not match " + REVISION_SPAN],
                 [OBSERVE_NUMBER, REVISION_NUMBER],
             ),
-            "no_write": (
-                "refuse: quoted line is not in the pinned commit: " + NO_WRITE_SPAN,
-                [OBSERVE_NUMBER, REVISION_NUMBER, OP_NUMBER, NO_WRITE_NUMBER],
-            ),
-            "cover": (
-                "refuse: quoted line is not in the pinned commit: " + COVER_SPAN,
-                list(QUOTE_DECISION_ORDER),
-            ),
+            "no_write": ([], [OBSERVE_NUMBER, REVISION_NUMBER, OP_NUMBER]),
+            "cover": ([], [other for other in QUOTE_DECISION_ORDER if other != COVER_NUMBER]),
         }
         for name, number, span, lines, index in FILE_ASK_CASES:
-            expected, expected_reads = cases[name]
+            count = number - 1
+            extra, reads_expected = cases[name]
+            expected = [
+                past % (other, OWNED_REL, count)
+                for other in self._refused_numbers(body, count)
+            ]
+            expected.extend(extra)
             got, reads = self._pinned_reads(
-                self._file_ask_body(),
-                {OWNED_REL: self._file_ask_source(count=number - 1)},
+                body,
+                {OWNED_REL: self._file_ask_source(count=count)},
                 {OWNED_REL: self._file_ask_source()},
             )
-            self.assertEqual(got, [expected], span)
-            self.assertEqual(reads, expected_reads, span)
+            self.assertEqual(got, expected, span)
+            self.assertEqual(reads, reads_expected, span)
 
     def test_observe_mismatch_stops_every_later_decision(self):
         got, reads = self._pinned_reads(
@@ -5521,38 +6944,26 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [])
 
     def test_edit_walk_quoted_line_past_the_pin_is_refused(self):
-        # Only a pin that stops before the cited line removes every window over
-        # it. A pin cut inside one walk leaves the first cited line with a
-        # zero-score window, so that line is the one refused first.
+        # A pin that stops before the cited line makes that citation past the
+        # pinned end. The structural read refuses it with its line bound and the
+        # quote walk reads nothing, so one citation keeps one reason.
+        past = "refuse: line %d is past the end of %s (%d lines)"
         cases = {
-            "edit_start": (
-                "refuse: quoted line is not in the pinned commit: " + EDIT_START_SPAN,
-                [EDIT_START_NUMBER],
-            ),
-            "edit_end": (
-                "refuse: quoted line does not match " + EDIT_START_SPAN,
-                [EDIT_START_NUMBER],
-            ),
-            "request": (
-                "refuse: quoted line is not in the pinned commit: "
-                + REQUEST_WALK_SPAN,
-                [REQUEST_WALK_NUMBER],
-            ),
-            "is_write": (
-                "refuse: quoted line is not in the pinned commit: " + IS_WRITE_SPAN,
-                [IS_WRITE_NUMBER],
-            ),
+            "edit_start": (EDIT_END_NUMBER, EDIT_START_NUMBER - 1),
+            "edit_end": (EDIT_END_NUMBER, EDIT_END_NUMBER - 1),
+            "request": (REQUEST_WALK_NUMBER, REQUEST_WALK_NUMBER - 1),
+            "is_write": (IS_WRITE_NUMBER, IS_WRITE_NUMBER - 1),
         }
         for name, number, span, lines, index in EDIT_CASES:
-            expected, expected_reads = cases[name]
+            refused, count = cases[name]
             group = self._edit_group(name)
             got, reads = self._pinned_reads(
                 self._edit_walk_body(groups=[group]),
-                {OWNED_REL: self._file_ask_source(count=number - 1)},
+                {OWNED_REL: self._file_ask_source(count=count)},
                 {OWNED_REL: self._file_ask_source()},
             )
-            self.assertEqual(got, [expected], span)
-            self.assertEqual(reads, expected_reads, span)
+            self.assertEqual(got, [past % (refused, OWNED_REL, count)], span)
+            self.assertEqual(reads, [], span)
 
     def test_two_edit_range_spans_are_refused(self):
         expected = "refuse: quoted line is not one line: " + EDIT_RANGE_SPAN
@@ -6010,15 +7421,19 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [])
 
     def test_provider_quoted_line_absent_from_the_pinned_commit_is_refused(self):
+        # A pin that stops before the cited line makes it past the pinned end,
+        # so the structural read refuses it with its line bound and the quote
+        # walk reads nothing.
+        past = "refuse: line %d is past the end of %s (%d lines)"
         for name, number, span, lines, index in PROVIDER_CASES:
-            expected = "refuse: quoted line is not in the pinned commit: " + span
+            count = number - 1
             got, reads = self._pinned_reads(
                 self._provider_body(groups=[name]),
-                {PROVIDER_REL: self._provider_source(count=number - 1)},
+                {PROVIDER_REL: self._provider_source(count=count)},
                 {PROVIDER_REL: self._provider_source()},
             )
-            self.assertEqual(got, [expected], span)
-            self.assertEqual(reads, [number], span)
+            self.assertEqual(got, [past % (number, PROVIDER_REL, count)], span)
+            self.assertEqual(reads, [], span)
 
     def test_two_provider_spans_are_refused(self):
         for name, number, span, lines, index in PROVIDER_CASES:
@@ -6122,39 +7537,49 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [WRITE_ACTION_NUMBER])
 
     def test_absent_read_action_line_stops_the_write_action_decision(self):
+        # The pin stops before the read action. Both the read action and the
+        # write action stand past the pinned end, so both are refused by their
+        # line bound and the quote walk reads nothing.
+        count = READ_ACTION_NUMBER - 1
+        past = "refuse: line %d is past the end of %s (%d lines)"
         body = self._provider_body(groups=["read_action", "write_action"])
         got, reads = self._pinned_reads(
             body,
-            {PROVIDER_REL: self._provider_source(count=READ_ACTION_NUMBER - 1)},
+            {PROVIDER_REL: self._provider_source(count=count)},
             {PROVIDER_REL: self._provider_source()},
         )
         self.assertEqual(
             got,
             [
-                "refuse: quoted line is not in the pinned commit: "
-                + READ_ACTION_SPAN
+                past % (READ_ACTION_NUMBER, PROVIDER_REL, count),
+                past % (WRITE_ACTION_NUMBER, PROVIDER_REL, count),
             ],
         )
-        self.assertEqual(reads, [READ_ACTION_NUMBER])
+        self.assertEqual(reads, [])
 
     def test_absent_write_action_line_stops_the_default_action_decision(self):
+        # The pin stops before the write action. Both the write action and the
+        # default action stand past the pinned end, so both are refused by their
+        # line bound and the quote walk reads nothing.
+        count = WRITE_ACTION_NUMBER - 1
+        past = "refuse: line %d is past the end of %s (%d lines)"
         body = self._provider_body(
             groups=["write_action", "default_action"],
             default_action=self._changed(WRITE_ACTION_LINES, 5),
         )
         got, reads = self._pinned_reads(
             body,
-            {PROVIDER_REL: self._provider_source(count=WRITE_ACTION_NUMBER - 1)},
+            {PROVIDER_REL: self._provider_source(count=count)},
             {PROVIDER_REL: self._provider_source()},
         )
         self.assertEqual(
             got,
             [
-                "refuse: quoted line is not in the pinned commit: "
-                + WRITE_ACTION_SPAN
+                past % (WRITE_ACTION_NUMBER, PROVIDER_REL, count),
+                past % (DEFAULT_ACTION_NUMBER, PROVIDER_REL, count),
             ],
         )
-        self.assertEqual(reads, [WRITE_ACTION_NUMBER])
+        self.assertEqual(reads, [])
 
     def test_provider_quote_refusal_waits_for_a_known_pin(self):
         body = self._provider_body(
@@ -6433,42 +7858,41 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [])
 
     def test_run_body_quoted_line_past_the_pin_is_refused(self):
-        # A pin that stops before the cited line leaves no window over it, so
-        # the refusal says the line is not in the pin. A pin cut inside one walk
-        # leaves the first cited line of that walk with a zero-score window.
-        cases = {
-            "no_process": (
-                "refuse: quoted line is not in the pinned commit: " + NO_PROCESS_SPAN,
-                NO_PROCESS_NUMBER,
-            ),
-            "seat": (
-                "refuse: quoted line does not match " + NO_PROCESS_SPAN,
-                NO_PROCESS_NUMBER,
-            ),
-            "body_doc": (
-                "refuse: quoted line is not in the pinned commit: " + BODY_DOC_SPAN,
-                BODY_DOC_NUMBER,
-            ),
-            "create_only": (
-                "refuse: quoted line does not match " + BODY_DOC_SPAN,
-                BODY_DOC_NUMBER,
-            ),
-            "present_revision": (
-                "refuse: quoted line does not match " + BODY_DOC_SPAN,
-                BODY_DOC_NUMBER,
-            ),
+        # A pin that stops before a cited line makes every citation of that body
+        # stand past the pinned end. Each is refused by its line bound in body
+        # order, and the quote walk still reads the citations before the cut.
+        past = "refuse: line %d is past the end of %s (%d lines)"
+        read_before_the_cut = {
+            "no_process": [],
+            "seat": [NO_PROCESS_NUMBER],
+            "body_doc": [],
+            "create_only": [BODY_DOC_NUMBER],
+            "present_revision": [BODY_DOC_NUMBER],
+        }
+        # The seat walk is cut inside itself. Its first cited line keeps a
+        # window over the shorter pin, so it is refused for not matching and
+        # the walk stops there. The later past bound is refused all the same.
+        mismatch_after_the_cut = {
+            "seat": "refuse: quoted line does not match " + NO_PROCESS_SPAN,
+            "create_only": "refuse: quoted line does not match " + BODY_DOC_SPAN,
+            "present_revision": "refuse: quoted line does not match " + BODY_DOC_SPAN,
         }
         for name, number, span, lines, index in RUN_BODY_CASES:
-            expected, refused = cases[name]
+            count = number - 1
             body = self._file_ask_body(groups=[self._run_body_group(name)])
             got, reads = self._pinned_reads(
                 body,
-                {OWNED_REL: self._file_ask_source(count=number - 1)},
+                {OWNED_REL: self._file_ask_source(count=count)},
                 {OWNED_REL: self._file_ask_source()},
             )
-            self.assertEqual(got, [expected], span)
-            present = self._present_run_body_decisions(body)
-            self.assertEqual(reads, present[: present.index(refused) + 1], span)
+            expected = [
+                past % (other, OWNED_REL, count)
+                for other in self._refused_numbers(body, count)
+            ]
+            if name in mismatch_after_the_cut:
+                expected.append(mismatch_after_the_cut[name])
+            self.assertEqual(got, expected, span)
+            self.assertEqual(reads, read_before_the_cut[name], span)
 
     def test_two_run_body_spans_are_refused(self):
         cases = (
@@ -7033,40 +8457,45 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [])
 
     def test_append_quoted_line_past_the_pin_is_refused(self):
-        # A pin cut before the cited line has no window over it, so the
-        # comparison cannot run and the refusal says the line is not in the
-        # pin. A pin cut between two lines of one group leaves the earlier
-        # line holding a window, so the earlier line is the one refused.
-        cases = {
-            "append_condition": APPEND_CONDITION_NUMBER,
-            "host_path_err": APPEND_CONDITION_NUMBER,
-            "held_err": APPEND_CONDITION_NUMBER,
-            "append_cap": APPEND_CAP_NUMBER,
-            "append_call": APPEND_CAP_NUMBER,
-            "outcome_held": APPEND_CAP_NUMBER,
-            "write_invoke": WRITE_INVOKE_NUMBER,
+        # A pin that stops before a cited line makes every citation of that body
+        # stand past the pinned end. Each is refused by its line bound in body
+        # order, and the quote walk still reads the citations before the cut.
+        past = "refuse: line %d is past the end of %s (%d lines)"
+        # The walk reads the decision before a cut, and the cut then removes the
+        # window the next decision needs.
+        read_before_the_cut = {
+            "append_condition": [],
+            "host_path_err": [APPEND_CONDITION_NUMBER],
+            "held_err": [APPEND_CONDITION_NUMBER],
+            "append_cap": [],
+            "append_call": [APPEND_CAP_NUMBER],
+            "outcome_held": [APPEND_CAP_NUMBER],
+            "write_invoke": [APPEND_CAP_NUMBER, APPEND_CALL_NUMBER, OUTCOME_HELD_NUMBER],
         }
-        spans = {
-            APPEND_CONDITION_NUMBER: APPEND_CONDITION_SPAN,
-            APPEND_CAP_NUMBER: APPEND_CAP_SPAN,
-            WRITE_INVOKE_NUMBER: WRITE_INVOKE_SPAN,
+        # A walk cut inside itself keeps a window over its first cited line, so
+        # that line is refused for not matching and the walk stops there.
+        mismatch_after_the_cut = {
+            "host_path_err": "refuse: quoted line does not match " + APPEND_CONDITION_SPAN,
+            "held_err": "refuse: quoted line does not match " + APPEND_CONDITION_SPAN,
+            "append_call": "refuse: quoted line does not match " + APPEND_CAP_SPAN,
+            "outcome_held": "refuse: quoted line does not match " + APPEND_CAP_SPAN,
         }
         for name, number, span, lines, index in APPEND_CASES:
-            refused = cases[name]
+            count = number - 1
             body = self._append_body(groups=[self._append_group(name)])
             got, reads = self._pinned_reads(
                 body,
-                {OWNED_REL: self._append_source(count=number - 1)},
+                {OWNED_REL: self._append_source(count=count)},
                 {OWNED_REL: self._append_source()},
             )
-            missing = "refuse: quoted line is not in the pinned commit: "
-            if refused == number:
-                expected = missing + span
-            else:
-                expected = "refuse: quoted line does not match " + spans[refused]
-            self.assertEqual(got, [expected], span)
-            present = self._present_append_decisions(body)
-            self.assertEqual(reads, present[: present.index(refused) + 1], span)
+            expected = [
+                past % (other, OWNED_REL, count)
+                for other in self._refused_numbers(body, count)
+            ]
+            if name in mismatch_after_the_cut:
+                expected.append(mismatch_after_the_cut[name])
+            self.assertEqual(got, expected, span)
+            self.assertEqual(reads, read_before_the_cut[name], span)
 
     def test_two_append_spans_are_refused(self):
         cases = (
@@ -7876,51 +9305,53 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [])
 
     def test_hosted_quoted_line_past_the_pin_is_refused(self):
-        # A pin that stops before the cited line leaves no window over it, so
-        # the refusal says the line is not in the pin. A pin cut inside one
-        # walk leaves the first cited line of that walk with a zero-score
-        # window, and the walk stops at that earlier line.
-        cases = {
-            "no_provider": NO_PROVIDER_NUMBER,
-            "parent_grant_doc": CHILD_NUMBER,
-            "narrower": CHILD_NUMBER,
-            "child_grant_none": CHILD_NUMBER,
-            "init_guard": PROJECT_NUMBER,
-            "project_resource": PROJECT_NUMBER,
-            "parent_compare": AUTHORIZE_NUMBER,
-            "child_host_doc": CHILD_HOST_DOC_NUMBER,
-            "empty_journal": CHILD_HOST_DOC_NUMBER,
-            "admit_system": CHILD_HOST_DOC_NUMBER,
-            "inherited_err": INHERITED_ERR_NUMBER,
-            "grant_parent": GRANT_PARENT_NUMBER,
+        # A pin that stops before a cited line makes every later citation of
+        # that body stand past the pinned end. Each past one is refused by its
+        # line bound in body order, the quote walk never reads the past one and
+        # no quote-absence refusal appears.
+        past = "refuse: line %d is past the end of %s (%d lines)"
+        # A walk cut inside itself keeps a window over its first cited line, so
+        # that line is refused for not matching and the walk stops there. The
+        # first cited line of each cut walk is named here.
+        mismatch_after_the_cut = {
+            "narrower": CHILD_SPAN,
+            "child_grant_none": CHILD_SPAN,
+            "project_resource": PROJECT_SPAN,
+            "empty_journal": CHILD_HOST_DOC_SPAN,
+            "admit_system": CHILD_HOST_DOC_SPAN,
         }
         for name, number, span, lines, index in HOSTED_CASES:
-            refused = cases[name]
+            count = number - 1
+            body = self._hosted_body()
             got, reads = self._pinned_reads(
-                self._hosted_body(),
+                body,
                 {
-                    OWNED_REL: self._hosted_source(count=number - 1),
+                    OWNED_REL: self._hosted_source(count=count),
                     PROVIDER_REL: self._provider_source(),
                 },
                 {OWNED_REL: self._hosted_source()},
             )
-            if refused == number:
-                expected = "refuse: quoted line is not in the pinned commit: " + span
-            else:
-                expected = "refuse: quoted line does not match " + self._hosted_span(
-                    refused
+            expected = [
+                past % (other, OWNED_REL, count)
+                for other in self._refused_numbers(body, count)
+            ]
+            # The provider file remains complete, so its last read still runs
+            # unless an earlier quotation mismatch stops the walk.
+            expected_reads = [
+                other for other in HOSTED_READ_ORDER
+                if other <= count or other == SCHEME_NUMBER
+            ]
+            if name in mismatch_after_the_cut:
+                expected.append(
+                    "refuse: quoted line does not match "
+                    + mismatch_after_the_cut[name]
                 )
-            self.assertEqual(got, [expected], span)
-            self.assertEqual(
-                reads,
-                [NO_WRITE_NUMBER]
-                + list(
-                    HOSTED_DECISION_ORDER[
-                        : HOSTED_DECISION_ORDER.index(refused) + 1
-                    ]
-                ),
-                span,
-            )
+                last_read = int(mismatch_after_the_cut[name].rpartition(":")[2])
+                expected_reads = expected_reads[:expected_reads.index(last_read) + 1]
+            self.assertEqual(got, expected, span)
+            self.assertIn(number, self._refused_numbers(body, count), span)
+            self.assertNotIn(number, reads, span)
+            self.assertEqual(reads, expected_reads, span)
 
     def test_no_write_mismatch_stops_the_no_provider_decision(self):
         got, reads = self._pinned_reads(
@@ -8115,17 +9546,19 @@ class CitationCheckTests(unittest.TestCase):
             ],
         )
 
-    def test_unchecked_exec_vm_line_is_not_compared(self):
+    def test_exec_vm_line_43_mismatch_is_refused(self):
+        # Line 43 is the ready-decision doc line. A quotation that differs from
+        # it is refused after the hosted decisions, and line 49 is never read.
         body = self._hosted_body() + (
             "`" + EXEC_SPAN + "` says `A ready decision still does not boot.`\n"
             "\n"
-            "    // a different remainder no slice compares yet\n"
+            "    // a different remainder than line 43\n"
         )
         files = self._hosted_files()
         files[EXEC_REL] = ("// filler\n" * EXEC_NUMBER).encode("utf-8")
         got, reads = self._pinned_reads(body, files)
-        self.assertEqual(got, [])
-        self.assertEqual(reads, list(HOSTED_READ_ORDER))
+        self.assertEqual(got, ["refuse: quoted line does not match " + EXEC_SPAN])
+        self.assertEqual(reads, list(HOSTED_READ_ORDER) + [EXEC_NUMBER])
 
     def test_cover_mismatch_stops_the_provider_decision(self):
         got, reads = self._pinned_reads(
@@ -8387,3 +9820,1091 @@ class CitationCheckTests(unittest.TestCase):
             self.test_one_prose_line_citing_3455_3470_and_3471_walks_each_marker,
             "CAUGHT shared-line-child-host-index",
         )
+
+    def test_live_draft_resident_quotes_match_their_pinned_lines(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        numbers = {
+            "run": RESIDENT_RUN_NUMBER,
+            "stop": RESIDENT_STOP_NUMBER,
+            "export": RESIDENT_EXPORT_NUMBER,
+        }
+        for name, span, quote in RESIDENT_CASES:
+            selector = getattr(check, "resident_" + name + "_quote")
+            self.assertEqual(selector(text), quote, span)
+            rel = RESIDENT_EXPORT_REL if name == "export" else RESIDENT_REL
+            self.assertEqual(check.pinned_line(root, sha, rel, numbers[name]), quote, span)
+        self.assertEqual(check.problems(root), [])
+
+    def test_resident_run_line_mismatch_is_refused(self):
+        # Line 218 is the first resident decision. Its refusal is the only
+        # reason, and the later pinned lines are never read.
+        got, reads = self._pinned_reads(
+            self._resident_body(run=RESIDENT_RUN_QUOTE + "x"),
+            self._resident_files(),
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + RESIDENT_RUN_SPAN]
+        )
+        self.assertEqual(reads, [RESIDENT_RUN_NUMBER])
+
+    def test_resident_stop_line_mismatch_is_refused(self):
+        # A zero-scoring window still stands for line 232: the window that holds
+        # that line is compared, and the one differing character is refused.
+        got, reads = self._pinned_reads(
+            self._resident_body(stop=RESIDENT_STOP_QUOTE + "x"),
+            self._resident_files(),
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + RESIDENT_STOP_SPAN]
+        )
+        self.assertEqual(reads, [RESIDENT_RUN_NUMBER, RESIDENT_STOP_NUMBER])
+
+    def test_resident_export_line_mismatch_is_refused(self):
+        got, reads = self._pinned_reads(
+            self._resident_body(export=RESIDENT_EXPORT_QUOTE + "x"),
+            self._resident_files(),
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + RESIDENT_EXPORT_SPAN]
+        )
+        self.assertEqual(reads, list(RESIDENT_DECISION_ORDER))
+
+    def test_resident_single_character_difference_in_the_pin_is_refused(self):
+        # The same one-character difference planted in the pinned commit, not in
+        # the draft, is refused for each of the three cited lines.
+        cases = (
+            (RESIDENT_RUN_SPAN, {RESIDENT_RUN_NUMBER: RESIDENT_RUN_QUOTE + "x"}, None),
+            (RESIDENT_STOP_SPAN, {RESIDENT_STOP_NUMBER: RESIDENT_STOP_QUOTE + "x"}, None),
+            (RESIDENT_EXPORT_SPAN, None, {RESIDENT_EXPORT_NUMBER: RESIDENT_EXPORT_QUOTE + "x"}),
+        )
+        for span, resident, wit in cases:
+            root = self._draft(self._resident_body(), self._resident_files(resident, wit))
+            self.assertEqual(
+                check.problems(root), ["refuse: quoted line does not match " + span]
+            )
+
+    def test_resident_quote_refusal_short_circuits(self):
+        # The run refusal stands first, so the stop and export decisions never
+        # read their pinned lines. A walker that keeps walking reads all three.
+        got, reads = self._pinned_reads(
+            self._resident_body(run=RESIDENT_RUN_QUOTE + "x"),
+            self._resident_files(),
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + RESIDENT_RUN_SPAN]
+        )
+        self.assertEqual(reads, [RESIDENT_RUN_NUMBER])
+
+    def test_resident_draft_without_a_span_adds_no_refusal(self):
+        # The draft's other citations are unchanged, so dropping one resident
+        # span leaves no refusal for it.
+        for name, span, _ in RESIDENT_CASES:
+            groups = [group for group in RESIDENT_GROUPS if group != name]
+            body = self._resident_body(groups=groups)
+            self.assertNotIn("`" + span + "`", body)
+            self.assertEqual(check.problems(self._draft(body, self._resident_files())), [])
+
+    def test_resident_a3_stays_open(self):
+        # The paragraph keeps A3 open. Each claim that would close it has its
+        # own refusal, and neither claim is accepted in the other's place.
+        self.assertEqual(
+            check.problems(self._draft(self._resident_body(), self._resident_files())),
+            [],
+        )
+        claims = (
+            (check.A3_MET_CLAIM, A3_MET_REFUSAL),
+            (check.A3_GRANT_CLAIM, A3_GRANT_REFUSAL),
+        )
+        for claim, refusal in claims:
+            body = self._resident_body() + claim + "\n"
+            self.assertEqual(
+                check.problems(self._draft(body, self._resident_files())), [refusal]
+            )
+        both = self._resident_body() + check.A3_MET_CLAIM + "\n" + check.A3_GRANT_CLAIM + "\n"
+        self.assertEqual(
+            check.problems(self._draft(both, self._resident_files())),
+            [A3_MET_REFUSAL, A3_GRANT_REFUSAL],
+        )
+
+    def test_resident_a3_claim_waits_for_a_known_pin(self):
+        body = self._resident_body() + check.A3_MET_CLAIM + "\n"
+        files = self._resident_files()
+        self.assertEqual(
+            check.problems(self._raw_draft(body, files)),
+            ["refuse: draft has no pinned commit"],
+        )
+
+    def _caught_dropped_target(self, span, named_test, label):
+        planted = tuple(
+            target for target in check.QUOTE_TARGETS if target[0] != span
+        )
+        self.assertEqual(len(planted), len(check.QUOTE_TARGETS) - 1, span)
+        self._caught(
+            "QUOTE_TARGETS",
+            planted,
+            named_test,
+            "refuse: quoted line does not match",
+            label,
+        )
+
+    def test_falsifier_resident_stop_line_is_caught(self):
+        # A window picker that returns None for a zero score is the rule this
+        # slice removes. The zero-scoring line 232 window is refused under that
+        # plant before the comparison runs.
+        def planted(remainders, pinned_lines, number):
+            nonempty = [
+                (line, text) for line, text in enumerate(pinned_lines, 1) if text
+            ]
+            width = len(remainders)
+            if not width or width > len(nonempty):
+                return None
+            best = None
+            best_score = None
+            for start in range(len(nonempty) - width + 1):
+                window = nonempty[start:start + width]
+                if not any(line == number for line, _ in window):
+                    continue
+                score = sum(
+                    1
+                    for offset, (_, text) in enumerate(window)
+                    if remainders[offset] == text
+                )
+                if best_score is None or score > best_score:
+                    best = start
+                    best_score = score
+            if not best_score:
+                return None
+            return sum(1 for line, _ in nonempty[best:best + width] if line < number)
+
+        self._caught(
+            "_quote_window",
+            planted,
+            self.test_resident_stop_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT resident-stop",
+        )
+
+    def test_falsifier_resident_a3_open_is_caught(self):
+        # A draft that drops both claim checks accepts a closed A3.
+        self._caught(
+            "a3_claim_refusals",
+            lambda text: [],
+            self.test_resident_a3_stays_open,
+            A3_MET_REFUSAL,
+            "CAUGHT resident-a3-open",
+        )
+
+    def test_falsifier_resident_run_target_is_caught(self):
+        self._caught_dropped_target(
+            RESIDENT_RUN_SPAN,
+            self.test_resident_run_line_mismatch_is_refused,
+            "CAUGHT resident-run-target",
+        )
+
+    def test_falsifier_resident_stop_target_is_caught(self):
+        self._caught_dropped_target(
+            RESIDENT_STOP_SPAN,
+            self.test_resident_stop_line_mismatch_is_refused,
+            "CAUGHT resident-stop-target",
+        )
+
+    def test_falsifier_resident_export_target_is_caught(self):
+        self._caught_dropped_target(
+            RESIDENT_EXPORT_SPAN,
+            self.test_resident_export_line_mismatch_is_refused,
+            "CAUGHT resident-export-target",
+        )
+
+    def test_falsifier_resident_short_circuit_is_caught(self):
+        # A walker that keeps walking after a refusal reads the later pinned
+        # lines, and the short-circuit test sees reads past the run line.
+        def planted(root, text, sha, refused_spans=frozenset()):
+            found = []
+            for target in check.QUOTE_TARGETS:
+                reason = check._quote_refusal(root, text, sha, target, refused_spans)
+                if reason is not None:
+                    found.append(reason)
+            return found[:1]
+
+        self._caught(
+            "_quote_refusals",
+            planted,
+            self.test_resident_quote_refusal_short_circuits,
+            "",
+            "CAUGHT resident-short-circuit",
+        )
+
+    # The 65 aligned citations this task decides. Each marker indents one block,
+    # and several markers can share one block. A range makes two decisions.
+    def _aligned_place(self, endpoint):
+        """Return the group index and block offset that ENDPOINT reads."""
+        rel, _, number = endpoint.rpartition(":")
+        number = int(number)
+        for index, (markers, start, lines) in enumerate(ALIGNED_GROUPS):
+            if endpoint not in [e for m in markers for e in _aligned_endpoints(m)]:
+                continue
+            offset = number - start
+            self.assertTrue(0 <= offset < len(lines), endpoint)
+            return index, offset
+        raise AssertionError(endpoint)
+
+    def _aligned_first_endpoint(self, endpoint):
+        """Return the first marker's endpoint that reads ENDPOINT's pinned line.
+
+        The draft cites a shared group's markers on one prose line in
+        ``ALIGNED_SPANS_DECIDED`` order, so the first of them is the one the walk
+        reaches first. This reads no target list, so a dropped target is still
+        named by its own marker.
+        """
+        index, offset = self._aligned_place(endpoint)
+        markers, start, _ = ALIGNED_GROUPS[index]
+        rel = markers[0].rpartition(":")[0]
+        line = rel + ":" + str(start + offset)
+        same = [
+            other
+            for marker in markers
+            for other in _aligned_endpoints(marker)
+            if other == line
+        ]
+        self.assertTrue(same, endpoint)
+        return same[0]
+
+    def _aligned_body(self, changes=None, copies=None, groups=None):
+        """A draft that cites each aligned marker and indents its one block."""
+        changes = changes or {}
+        copies = copies or {}
+        parts = []
+        for index, (markers, _, lines) in enumerate(groups or ALIGNED_GROUPS):
+            prose = " ".join(self._cited(marker, copies.get(marker, 1)) for marker in markers)
+            block = [
+                changes.get((index, offset), text)
+                for offset, text in enumerate(lines)
+            ]
+            parts.append(prose + "\n")
+            parts.append("".join("    " + line + "\n" for line in block))
+            parts.append("\n")
+        return "".join(parts)
+
+    def _aligned_files(self, changes=None):
+        """A committed file set that lays each block at the line the pin gives it."""
+        changes = changes or {}
+        rows = {}
+        for index, (markers, start, lines) in enumerate(ALIGNED_GROUPS):
+            rel = markers[0].rpartition(":")[0]
+            store = rows.setdefault(rel, {})
+            for offset, text in enumerate(lines):
+                store[start + offset] = changes.get((index, offset), text)
+        return {
+            rel: (
+                "\n".join(store.get(number, "// filler") for number in range(1, max(store) + 1))
+                + "\n"
+            ).encode("utf-8")
+            for rel, store in rows.items()
+        }
+
+    def _aligned_root(self, files=None):
+        """A committed fixture whose draft can be rewritten without a new pin."""
+        root = self._temp_root()
+        self._write(root, "", files if files is not None else self._aligned_files())
+        return root, self._commit_all(root)
+
+    def _aligned_reads(self, root, sha, body):
+        """Return the problems and the numbers read, for BODY at the fixture pin."""
+        reads = []
+        original = check.pinned_line
+
+        def record(read_root, read_sha, rel, number):
+            reads.append(number)
+            return original(read_root, read_sha, rel, number)
+
+        check.pinned_line = record
+        try:
+            (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
+                "Pinned commit: " + sha + "\n" + body, encoding="utf-8"
+            )
+            got = check.problems(root)
+        finally:
+            check.pinned_line = original
+        return got, reads
+
+    def _aligned_order(self, body):
+        """The aligned decisions BODY cites, in target-list order."""
+        return [
+            target[0]
+            for target in check.QUOTE_TARGETS
+            if target[0] in ALIGNED_ENDPOINT_SET
+            and check._remainders(body, target[1])
+        ]
+
+    def test_aligned_span_set_is_the_65_this_task_decides(self):
+        # The 65 spans make 68 endpoint decisions, and 12 of those were already
+        # targets, so that task adds 56 entries. The function spans sit after
+        # those 115, and the indent line spans sit after the function spans. A
+        # missing span, an extra span and a duplicated span each fail here.
+        self.assertEqual(len(ALIGNED_SPANS_DECIDED), 65)
+        self.assertEqual(len(ALIGNED_ENDPOINTS), 68)
+        self.assertEqual(len(ALIGNED_ALREADY_DECIDED), 12)
+        self.assertEqual(len(ALIGNED_NEW_ENDPOINTS), 56)
+        self.assertEqual(
+            len(check.QUOTE_TARGETS),
+            115
+            + len(check.FUNCTION_QUOTE_SPANS)
+            + len(check.INDENT_LINE_SPANS)
+            + len(check.EGRESS_LINE_SPANS),
+        )
+        self.assertEqual(set(ALIGNED_ALREADY_DECIDED) - ALIGNED_ENDPOINT_SET, set())
+
+    def test_live_draft_aligned_quotes_match_their_pinned_lines(self):
+        # Every one of the 65 markers stands once in the draft, its block is the
+        # pinned block, and the window rule reads the cited line from it.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        for span in ALIGNED_SPANS_DECIDED:
+            marker = "`" + span + "`"
+            self.assertEqual(text.count(marker), 1, span)
+            remainders = check._remainders(text, marker)
+            self.assertTrue(remainders, span)
+            rel, _, number = span.rpartition(":")
+            pinned = check._pinned_lines(root, sha, rel)
+            for endpoint in _aligned_endpoints(span):
+                line = int(endpoint.rpartition(":")[2])
+                self.assertEqual(
+                    check.quote_for(remainders, pinned, line),
+                    check.pinned_line(root, sha, rel, line),
+                    endpoint,
+                )
+        self.assertEqual(check.problems(root), [])
+
+    def test_every_aligned_span_is_a_target(self):
+        # The target list names each of the 68 endpoint decisions exactly once,
+        # so a dropped span, an extra span and a duplicated span all fail here
+        # before any file is read.
+        entries = [target[0] for target in check.QUOTE_TARGETS]
+        for endpoint in ALIGNED_ENDPOINTS:
+            self.assertEqual(entries.count(endpoint), 1, endpoint)
+        for endpoint in BASELINE_TARGETS:
+            self.assertEqual(entries.count(endpoint), 1, endpoint)
+        self.assertEqual(
+            len(entries),
+            len(BASELINE_TARGETS)
+            + len(ALIGNED_NEW_ENDPOINTS)
+            + len(check.FUNCTION_QUOTE_SPANS)
+            + len(check.INDENT_LINE_SPANS)
+            + len(check.EGRESS_LINE_SPANS),
+        )
+        # The spans this task adds, read back from the target list as spans, are
+        # exactly the 65 names above minus the 12 that already had entries. A
+        # missing span leaves its name out here, an extra span makes the entry
+        # count differ, and a duplicated span repeats a name or an entry.
+        needed = [
+            span
+            for span in ALIGNED_SPANS_DECIDED
+            if not set(_aligned_endpoints(span)) <= ALIGNED_ALREADY_DECIDED
+        ]
+        self.assertEqual(len(needed), 53)
+        self.assertEqual(len(ALIGNED_SPANS_DECIDED), len(set(ALIGNED_SPANS_DECIDED)))
+        added = [
+            endpoint
+            for endpoint in entries
+            if endpoint not in BASELINE_TARGETS
+            and endpoint not in check.FUNCTION_QUOTE_SPANS
+            and endpoint not in check.INDENT_LINE_SPANS
+            and endpoint not in check.EGRESS_LINE_SPANS
+        ]
+        self.assertEqual(len(added), len(ALIGNED_NEW_ENDPOINTS))
+        added_spans = {
+            span
+            for endpoint in added
+            for span in ALIGNED_SPANS_DECIDED
+            if endpoint in _aligned_endpoints(span)
+        }
+        self.assertEqual(sorted(added_spans), sorted(needed))
+        # Each of the 68 endpoint decisions then refuses on a one-character
+        # change, and the walk stops at that refusal. A shared block refuses on
+        # the first of its markers in list order; a range refuses on the
+        # endpoint whose own remainder differs.
+        files = self._aligned_files()
+        root, sha = self._aligned_root(files)
+        body = self._aligned_body()
+        got, reads = self._aligned_reads(root, sha, body)
+        self.assertEqual(got, [])
+        order = self._aligned_order(body)
+        self.assertEqual(reads, [int(span.rpartition(":")[2]) for span in order])
+        for span in ALIGNED_ENDPOINTS:
+            index, offset = self._aligned_place(span)
+            changed = (index, offset)
+            block = list(ALIGNED_GROUPS[index][2])
+            block[offset] = block[offset] + "x"
+            refused = self._aligned_first_endpoint(span)
+            got, reads = self._aligned_reads(
+                root,
+                sha,
+                self._aligned_body(
+                    changes={changed: block[offset]},
+                    groups=ALIGNED_GROUPS,
+                ),
+            )
+            self.assertEqual(
+                got, ["refuse: quoted line does not match " + refused], span
+            )
+            stopped = order[: order.index(refused) + 1]
+            self.assertEqual(
+                reads, [int(other.rpartition(":")[2]) for other in stopped], span
+            )
+
+    def test_shared_block_is_read_once(self):
+        # A shared block is one block read by several markers, not one copy per
+        # marker. Each shared group's markers read the same block, the group's
+        # text stands once in the draft, and each marker stands once.
+        shared = [group for group in ALIGNED_GROUPS if len(group[0]) > 1]
+        self.assertEqual(len(shared), len(ALIGNED_SHARED))
+        body = self._aligned_body()
+        root, sha = self._aligned_root()
+        got, reads = self._aligned_reads(root, sha, body)
+        self.assertEqual(got, [])
+        for markers, _, lines in shared:
+            blocks = {
+                tuple(check._remainders(body, "`" + marker + "`"))
+                for marker in markers
+            }
+            self.assertEqual(blocks, {tuple(lines)}, markers)
+            block = "".join("    " + line + "\n" for line in lines)
+            self.assertEqual(body.count(block), 1, markers)
+            for marker in markers:
+                self.assertEqual(body.count("`" + marker + "`"), 1, marker)
+
+    def test_range_second_endpoint_is_decided(self):
+        # Only the second endpoint's remainder differs, so the range refuses on
+        # its second endpoint and not on its first.
+        span = ALIGNED_RANGE_SPAN
+        first, second = _aligned_endpoints(span)
+        index, offset = self._aligned_place(second)
+        block = list(ALIGNED_GROUPS[index][2])
+        block[offset] = block[offset] + "x"
+        got, reads = self._pinned_reads(
+            self._aligned_body(changes={(index, offset): block[offset]}),
+            self._aligned_files(),
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + second])
+        self.assertIn(int(first.rpartition(":")[2]), reads)
+        self.assertEqual(reads[-1], int(second.rpartition(":")[2]))
+
+    def test_aligned_draft_without_a_span_adds_no_refusal(self):
+        for span in ALIGNED_SPANS_DECIDED[:4]:
+            groups = [
+                group for group in ALIGNED_GROUPS if span not in group[0]
+            ]
+            self.assertEqual(len(groups), len(ALIGNED_GROUPS) - 1, span)
+            got, _ = self._pinned_reads(
+                self._aligned_body(groups=groups), self._aligned_files()
+            )
+            self.assertEqual(got, [], span)
+
+    def test_aligned_quote_refusal_waits_for_a_known_pin(self):
+        body = self._aligned_body()
+        self.assertEqual(
+            check.problems(self._raw_draft(body, self._aligned_files())),
+            ["refuse: draft has no pinned commit"],
+        )
+
+    def test_falsifier_exec_vm_43_target_dropped(self):
+        # The old test accepted an unchecked exec_vm line. Dropping the 43
+        # target now leaves that draft with no refusal, which this test names.
+        planted = tuple(
+            target for target in check.QUOTE_TARGETS if target[0] != EXEC_SPAN
+        )
+        self.assertEqual(len(planted), len(check.QUOTE_TARGETS) - 1)
+        self._caught(
+            "QUOTE_TARGETS",
+            planted,
+            self.test_exec_vm_line_43_mismatch_is_refused,
+            "",
+            "CAUGHT exec-vm-43-target",
+        )
+
+    def test_falsifier_aligned_target_dropped(self):
+        # The 65-span test names every one of the 68 endpoint decisions, so
+        # dropping any one entry fails it. The unplanted run proves the test
+        # passes for another reason than the plant.
+        self.test_every_aligned_span_is_a_target()
+        original = check.QUOTE_TARGETS
+        try:
+            for endpoint in ALIGNED_ENDPOINTS:
+                planted = tuple(
+                    target for target in original if target[0] != endpoint
+                )
+                self.assertEqual(len(planted), len(original) - 1, endpoint)
+                check.QUOTE_TARGETS = planted
+                with self.assertRaises(AssertionError):
+                    self.test_every_aligned_span_is_a_target()
+        finally:
+            check.QUOTE_TARGETS = original
+        print("CAUGHT aligned-target-dropped")
+
+    def test_falsifier_shared_block_copied(self):
+        # A reader that hands one marker a second copy of its block breaks the
+        # one-block rule the shared markers share.
+        shared = [group for group in ALIGNED_GROUPS if len(group[0]) > 1]
+        marker = "`" + shared[0][0][0] + "`"
+        original = check._remainders
+
+        def planted(text, name):
+            found = original(text, name)
+            if name == marker:
+                return list(found) + list(found)
+            return found
+
+        self._caught(
+            "_remainders",
+            planted,
+            self.test_shared_block_is_read_once,
+            "",
+            "CAUGHT shared-block-copied",
+        )
+
+    def test_falsifier_range_endpoint_dropped(self):
+        self._caught_dropped_target(
+            _aligned_endpoints(ALIGNED_RANGE_SPAN)[1],
+            self.test_range_second_endpoint_is_decided,
+            "CAUGHT range-endpoint-dropped",
+        )
+
+    def _problems_for(self, body):
+        """problems() for an in-memory draft judged at this worktree's pin."""
+        root = check.worktree_root()
+        original = check.load_draft
+
+        def load(_root):
+            return body
+
+        check.load_draft = load
+        try:
+            return check.problems(root)
+        finally:
+            check.load_draft = original
+
+    def test_cited_line_reads_a_line_span_as_its_number(self):
+        # A line span does not search the file. The number is _span_target's.
+        span = "examples/agent-host/src/lib.rs:3754"
+        self.assertEqual(check.cited_line(span, None), check._span_target(span)[1])
+        self.assertEqual(check.cited_line(span, ["fn other("]), 3754)
+
+    def test_cited_line_reads_the_first_declaration(self):
+        # The same fn/def pattern as has_function, the first matching line.
+        span = "pkg/kept.rs::kept"
+        lines = ["// kept is below", "pub fn other(", "    fn kept("]
+        self.assertEqual(check.cited_line(span, lines), 3)
+        self.assertIsNone(check.cited_line(span, None))
+        self.assertIsNone(check.cited_line(span, ["fn other("]))
+
+    def test_quote_targets_are_the_base_list_plus_function_spans(self):
+        # Walk order is the base list, then one None quoter per function span,
+        # then one None quoter per indent line span, then one None quoter per
+        # egress line span. A missing, extra, or duplicated entry fails this
+        # ordered comparison.
+        expected = BASE_QUOTE_TARGETS + tuple(
+            (span, "`" + span + "`", None) for span in FUNCTION_QUOTE_SPAN_ORDER
+        ) + tuple(
+            (span, "`" + span + "`", None) for span in INDENT_LINE_SPAN_ORDER
+        ) + tuple(
+            (span, "`" + span + "`", None) for span in EGRESS_LINE_SPAN_ORDER
+        )
+        self.assertEqual(check.QUOTE_TARGETS, expected)
+        self.assertEqual(check.FUNCTION_QUOTE_SPANS, FUNCTION_QUOTE_SPAN_ORDER)
+        self.assertEqual(check.INDENT_LINE_SPANS, INDENT_LINE_SPAN_ORDER)
+        self.assertEqual(check.EGRESS_LINE_SPANS, EGRESS_LINE_SPAN_ORDER)
+        self.assertEqual(len(FUNCTION_QUOTE_SPAN_ORDER), 51)
+        self.assertEqual(len(INDENT_LINE_SPAN_ORDER), 18)
+        self.assertEqual(len(EGRESS_LINE_SPAN_ORDER), 2)
+        self.assertEqual(len(expected), 186)
+        self.assertEqual(
+            len(check.QUOTE_TARGETS),
+            len({target[0] for target in check.QUOTE_TARGETS}),
+        )
+        self.assertEqual(
+            tuple(target[0] for target in check.QUOTE_TARGETS[-20:-2]),
+            INDENT_LINE_SPAN_ORDER,
+        )
+        self.assertEqual(
+            tuple(target[0] for target in check.QUOTE_TARGETS[-2:]),
+            EGRESS_LINE_SPAN_ORDER,
+        )
+        for span in UNMATCHED_FUNCTION_SPANS:
+            self.assertNotIn(span, check.FUNCTION_QUOTE_SPANS, span)
+
+    def test_quote_targets_follow_indent_line_spans(self):
+        # QUOTE_TARGETS is the published list the checker walks, so dropping
+        # the indent spans drops only that suffix from the same list.
+        original = check.INDENT_LINE_SPANS
+        try:
+            check.INDENT_LINE_SPANS = ()
+            expected = BASE_QUOTE_TARGETS + tuple(
+                (span, "`" + span + "`", None) for span in FUNCTION_QUOTE_SPAN_ORDER
+            ) + tuple(
+                (span, "`" + span + "`", None) for span in EGRESS_LINE_SPAN_ORDER
+            )
+            self.assertEqual(check.QUOTE_TARGETS, expected)
+            self.assertNotIn(
+                "elastos/crates/elastos-compute/src/providers/component.rs:352",
+                tuple(target[0] for target in check.QUOTE_TARGETS),
+            )
+        finally:
+            check.INDENT_LINE_SPANS = original
+
+    def test_changed_function_remainder_does_not_match(self):
+        # One changed character of the remainder that stands for the declaring
+        # line refuses that function span and no other reason.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        sha = check.pin_sha(text)
+        self.assertEqual(len(check.FUNCTION_QUOTE_SPANS), 51)
+        for span in check.FUNCTION_QUOTE_SPANS:
+            remainders = check._remainders(text, "`" + span + "`")
+            rel = check.CITATION.fullmatch(span).group("path")
+            pinned = check._pinned_lines(root, sha, rel)
+            number = check.cited_line(span, pinned)
+            index = check._quote_window(remainders, pinned, number)
+            changed = list(remainders)
+            line = changed[index]
+            changed[index] = line[:-1] + ("x" if line[-1] != "x" else "y")
+            block = "".join("    " + row + "\n" for row in changed)
+            body = "Pinned commit: " + sha + "\n`" + span + "`\n\n" + block
+            self.assertEqual(
+                self._problems_for(body),
+                ["refuse: quoted line does not match " + span],
+                span,
+            )
+
+    def test_repeated_function_marker_is_not_one_line(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        sha = check.pin_sha(text)
+        span = check.FUNCTION_QUOTE_SPANS[0]
+        body = (
+            "Pinned commit: " + sha + "\n"
+            "`" + span + "`\n"
+            "`" + span + "`\n"
+            "    fn local_person_principal_id(\n"
+        )
+        self.assertEqual(
+            self._problems_for(body),
+            ["refuse: quoted line is not one line: " + span],
+        )
+
+    def test_function_span_outside_the_tuple_adds_no_refusal(self):
+        # A function span the tuple does not name is not a quote target, so a
+        # block under it adds no refusal. 123 function spans stay unchecked:
+        # 117 with no block and these 6 whose block stays short of the line.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        cited = []
+        for span in check._spans(text):
+            match = check.CITATION.fullmatch(span)
+            if match is not None and match.group("func") is not None:
+                cited.append(span)
+        self.assertEqual(len(cited), 174)
+        self.assertEqual(len(set(cited)), 174)
+        unchecked = [
+            span for span in cited if span not in check.FUNCTION_QUOTE_SPANS
+        ]
+        self.assertEqual(len(unchecked), 123)
+        self.assertEqual(len(UNMATCHED_FUNCTION_SPANS), 6)
+        span = UNMATCHED_FUNCTION_SPANS[0]
+        sha = check.pin_sha(text)
+        body = (
+            "Pinned commit: " + sha + "\n`" + span + "`\n\n"
+            "    this is not the declaring line\n"
+        )
+        self.assertEqual(self._problems_for(body), [])
+        self.assertEqual(check.problems(root), [])
+
+    def test_span_target_is_not_called_for_a_function_span(self):
+        original = check._span_target
+
+        def planted(span):
+            if "::" in span:
+                raise AssertionError("span target saw " + span)
+            return original(span)
+
+        check._span_target = planted
+        try:
+            self.assertEqual(check.problems(check.worktree_root()), [])
+        finally:
+            check._span_target = original
+
+    def test_added_function_span_cites_its_own_declaration(self):
+        # This function is not the first one in its file. The real helper
+        # quotes its own declaring line.
+        span = "elastos/crates/elastos-server/src/auth.rs::local_person_principal_id"
+        self.assertIn(span, check.FUNCTION_QUOTE_SPANS)
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        sha = check.pin_sha(text)
+        rel = "elastos/crates/elastos-server/src/auth.rs"
+        lines = check._pinned_lines(root, sha, rel)
+        number = check.cited_line(span, lines)
+        self.assertIn("fn local_person_principal_id(", lines[number - 1], span)
+        target = (span, "`" + span + "`", None)
+        self.assertIsNone(check._quote_refusal(root, text, sha, target), span)
+
+    def test_falsifier_func_decl_line(self):
+        # A helper that returns the first declared function in the file quotes
+        # the wrong line for a later function, and this test fails.
+        def planted(span, lines):
+            pattern = r"(?:^|\s)(?:fn|def) [A-Za-z_][A-Za-z0-9_]*\("
+            for number, line in enumerate(lines or [], 1):
+                if re.search(pattern, line):
+                    return number
+            return None
+
+        self._caught(
+            "cited_line",
+            planted,
+            self.test_added_function_span_cites_its_own_declaration,
+            "local_person_principal_id",
+            "CAUGHT func-decl-line",
+        )
+
+    def test_changed_indent_remainder_does_not_match(self):
+        # One changed character of the remainder that stands for the cited
+        # line refuses that indent span and no other reason.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        sha = check.pin_sha(text)
+        self.assertEqual(len(check.INDENT_LINE_SPANS), 18)
+        for span in check.INDENT_LINE_SPANS:
+            remainders = check._remainders(text, "`" + span + "`")
+            rel = check.CITATION.fullmatch(span).group("path")
+            pinned = check._pinned_lines(root, sha, rel)
+            number = check.cited_line(span, pinned)
+            index = check._quote_window(remainders, pinned, number)
+            changed = list(remainders)
+            line = changed[index]
+            changed[index] = line[:-1] + ("x" if line[-1] != "x" else "y")
+            block = "".join("    " + row + "\n" for row in changed)
+            body = "Pinned commit: " + sha + "\n`" + span + "`\n\n" + block
+            self.assertEqual(
+                self._problems_for(body),
+                ["refuse: quoted line does not match " + span],
+                span,
+            )
+
+    def test_changed_egress_remainder_does_not_match(self):
+        # One changed character of the remainder that stands for the cited
+        # line refuses that egress span and no other reason.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        sha = check.pin_sha(text)
+        for span in EGRESS_LINE_SPAN_ORDER:
+            remainders = check._remainders(text, "`" + span + "`")
+            rel = check.CITATION.fullmatch(span).group("path")
+            pinned = check._pinned_lines(root, sha, rel)
+            number = check.cited_line(span, pinned)
+            index = check._quote_window(remainders, pinned, number)
+            changed = list(remainders)
+            line = changed[index]
+            changed[index] = line[:-1] + ("x" if line[-1] != "x" else "y")
+            block = "".join("    " + row + "\n" for row in changed)
+            body = "Pinned commit: " + sha + "\n`" + span + "`\n\n" + block
+            self.assertEqual(
+                self._problems_for(body),
+                ["refuse: quoted line does not match " + span],
+                span,
+            )
+
+    def test_repeated_indent_marker_is_not_one_line(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        sha = check.pin_sha(text)
+        added = check.INDENT_LINE_SPANS + (
+            "elastos/crates/elastos-server/src/resource_bridge.rs::manifest_bound_users_self_matches_active_principal_root_only_with_context",
+            "elastos/crates/elastos-runtime/src/capability/manager.rs::test_wrong_capsule",
+            "lab/grant-binding/src/lib.rs::register_instance",
+            "lab/grant-binding/src/lib.rs::bind_grant",
+            "lab/grant-binding/src/lib.rs::use_grant",
+            "lab/grant-binding/src/ops.rs::operate",
+        )
+        for span in added:
+            body = (
+                "Pinned commit: " + sha + "\n"
+                "`" + span + "`\n"
+                "`" + span + "`\n"
+                "    kept\n"
+            )
+            self.assertEqual(
+                self._problems_for(body),
+                ["refuse: quoted line is not one line: " + span],
+                span,
+            )
+
+    def test_component_352_short_indent_is_refused(self):
+        # Removing the four repaired spaces from this block refuses that line.
+        span = "elastos/crates/elastos-compute/src/providers/component.rs:352"
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        lines = text.splitlines()
+        marker = "`" + span + "`"
+        index = next(i for i, line in enumerate(lines) if marker in line)
+        changed = False
+        for j in range(index + 1, len(lines)):
+            following = lines[j]
+            if not following:
+                continue
+            if not following.startswith(check.DRAFT_INDENT):
+                break
+            self.assertTrue(
+                following.startswith(check.DRAFT_INDENT + check.DRAFT_INDENT),
+                span,
+            )
+            lines[j] = following[len(check.DRAFT_INDENT):]
+            changed = True
+        self.assertTrue(changed, span)
+        body = "\n".join(lines) + "\n"
+        self.assertEqual(
+            self._problems_for(body),
+            ["refuse: quoted line does not match " + span],
+        )
+
+    def test_falsifier_indent_line_spans(self):
+        # An empty INDENT_LINE_SPANS drops the span, so the short line is not
+        # refused and this test fails.
+        self._caught(
+            "INDENT_LINE_SPANS",
+            (),
+            self.test_component_352_short_indent_is_refused,
+            "component.rs:352",
+            "CAUGHT indent-line-spans",
+        )
+
+    def test_falsifier_egress_line_spans(self):
+        # An empty EGRESS_LINE_SPANS drops the span, so the changed line is not
+        # refused and this test fails.
+        self._caught(
+            "EGRESS_LINE_SPANS",
+            (),
+            self.test_changed_egress_remainder_does_not_match,
+            EGRESS_LINE_SPAN_ORDER[0],
+            "CAUGHT egress-line-spans",
+        )
+
+# The quote-target walk before function spans, in list order.
+BASE_QUOTE_TARGETS = (
+    ('examples/agent-host/src/lib.rs:2067', '`examples/agent-host/src/lib.rs:2067`', 'observe_quote'),
+    ('examples/agent-host/src/lib.rs:2421', '`examples/agent-host/src/lib.rs:2421-2422`', 'edit_start_quote'),
+    ('examples/agent-host/src/lib.rs:2422', '`examples/agent-host/src/lib.rs:2421-2422`', 'edit_end_quote'),
+    ('examples/agent-host/src/lib.rs:2720', '`examples/agent-host/src/lib.rs:2720`', 'request_quote'),
+    ('examples/agent-host/src/lib.rs:2741', '`examples/agent-host/src/lib.rs:2741`', 'revision_quote'),
+    ('examples/agent-host/src/lib.rs:2749', '`examples/agent-host/src/lib.rs:2749`', 'op_quote'),
+    ('examples/agent-host/src/lib.rs:2958', '`examples/agent-host/src/lib.rs:2958`', 'no_process_quote'),
+    ('examples/agent-host/src/lib.rs:2981', '`examples/agent-host/src/lib.rs:2981`', 'seat_quote'),
+    ('examples/agent-host/src/lib.rs:3290', '`examples/agent-host/src/lib.rs:3290`', 'is_write_quote'),
+    ('examples/agent-host/src/lib.rs:3308', '`examples/agent-host/src/lib.rs:3308`', 'no_write_quote'),
+    ('examples/agent-host/src/lib.rs:3339', '`examples/agent-host/src/lib.rs:3339`', 'no_provider_quote'),
+    ('examples/agent-host/src/lib.rs:3360', '`examples/agent-host/src/lib.rs:3360`', 'parent_grant_doc_quote'),
+    ('examples/agent-host/src/lib.rs:3370', '`examples/agent-host/src/lib.rs:3370`', 'narrower_quote'),
+    ('examples/agent-host/src/lib.rs:3382', '`examples/agent-host/src/lib.rs:3382`', 'child_grant_none_quote'),
+    ('examples/agent-host/src/lib.rs:3387', '`examples/agent-host/src/lib.rs:3387`', 'init_guard_quote'),
+    ('examples/agent-host/src/lib.rs:3403', '`examples/agent-host/src/lib.rs:3403`', 'project_resource_quote'),
+    ('examples/agent-host/src/lib.rs:3449', '`examples/agent-host/src/lib.rs:3449`', 'parent_compare_quote'),
+    ('examples/agent-host/src/lib.rs:3455', '`examples/agent-host/src/lib.rs:3455`', 'child_host_doc_quote'),
+    ('examples/agent-host/src/lib.rs:3470', '`examples/agent-host/src/lib.rs:3470`', 'empty_journal_quote'),
+    ('examples/agent-host/src/lib.rs:3471', '`examples/agent-host/src/lib.rs:3471`', 'admit_system_quote'),
+    ('examples/agent-host/src/lib.rs:3474', '`examples/agent-host/src/lib.rs:3474`', 'inherited_err_quote'),
+    ('examples/agent-host/src/lib.rs:3482', '`examples/agent-host/src/lib.rs:3482`', 'grant_parent_quote'),
+    ('examples/agent-host/src/lib.rs:3526', '`examples/agent-host/src/lib.rs:3526`', 'deny_quote'),
+    ('examples/agent-host/src/lib.rs:3549', '`examples/agent-host/src/lib.rs:3549`', 'mint_quote'),
+    ('examples/agent-host/src/lib.rs:3754', '`examples/agent-host/src/lib.rs:3754`', 'owned_quote'),
+    ('examples/agent-host/src/lib.rs:3755', '`examples/agent-host/src/lib.rs:3754`', 'next_owned_quote'),
+    ('examples/agent-host/src/lib.rs:3757', '`examples/agent-host/src/lib.rs:3757`', 'journal_quote'),
+    ('examples/agent-host/src/lib.rs:3767', '`examples/agent-host/src/lib.rs:3767`', 'grant_quote'),
+    ('examples/agent-host/src/lib.rs:3849', '`examples/agent-host/src/lib.rs:3849`', 'write_quote'),
+    ('examples/agent-host/src/lib.rs:3850', '`examples/agent-host/src/lib.rs:3850`', 'read_quote'),
+    ('examples/agent-host/src/lib.rs:3935', '`examples/agent-host/src/lib.rs:3935`', 'append_condition_quote'),
+    ('examples/agent-host/src/lib.rs:3936', '`examples/agent-host/src/lib.rs:3936`', 'host_path_err_quote'),
+    ('examples/agent-host/src/lib.rs:3947', '`examples/agent-host/src/lib.rs:3947`', 'held_err_quote'),
+    ('examples/agent-host/src/lib.rs:3961', '`examples/agent-host/src/lib.rs:3961`', 'body_doc_quote'),
+    ('examples/agent-host/src/lib.rs:3966', '`examples/agent-host/src/lib.rs:3966`', 'create_only_quote'),
+    ('examples/agent-host/src/lib.rs:3967', '`examples/agent-host/src/lib.rs:3967`', 'present_revision_quote'),
+    ('examples/agent-host/src/lib.rs:4023', '`examples/agent-host/src/lib.rs:4023`', 'append_cap_quote'),
+    ('examples/agent-host/src/lib.rs:4032', '`examples/agent-host/src/lib.rs:4032-4033`', 'append_call_quote'),
+    ('examples/agent-host/src/lib.rs:4033', '`examples/agent-host/src/lib.rs:4032-4033`', 'outcome_held_quote'),
+    ('examples/agent-host/src/lib.rs:4061', '`examples/agent-host/src/lib.rs:4061`', 'write_invoke_quote'),
+    ('examples/agent-host/src/lib.rs:8149', '`examples/agent-host/src/lib.rs:8149`', 'asks_quote'),
+    ('examples/agent-host/src/lib.rs:8162', '`examples/agent-host/src/lib.rs:8162`', 'marker_quote'),
+    ('examples/agent-host/src/lib.rs:8168', '`examples/agent-host/src/lib.rs:8168`', 'launching_quote'),
+    ('examples/agent-host/src/lib.rs:8187', '`examples/agent-host/src/lib.rs:8187`', 'kind_read_quote'),
+    ('examples/agent-host/src/lib.rs:8188', '`examples/agent-host/src/lib.rs:8188`', 'kind_edit_quote'),
+    ('examples/agent-host/src/lib.rs:8189', '`examples/agent-host/src/lib.rs:8189`', 'kind_run_quote'),
+    ('examples/agent-host/src/lib.rs:8190', '`examples/agent-host/src/lib.rs:8190`', 'kind_restore_quote'),
+    ('examples/agent-host/src/lib.rs:8191', '`examples/agent-host/src/lib.rs:8191`', 'kind_hosted_quote'),
+    ('examples/agent-host/src/lib.rs:8192', '`examples/agent-host/src/lib.rs:8192`', 'kind_child_quote'),
+    ('examples/agent-host/src/lib.rs:8193', '`examples/agent-host/src/lib.rs:8193`', 'kind_init_quote'),
+    ('examples/agent-host/src/lib.rs:8194', '`examples/agent-host/src/lib.rs:8194`', 'kind_append_quote'),
+    ('examples/agent-host/src/lib.rs:8488', '`examples/agent-host/src/lib.rs:8488`', 'cover_quote'),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:123', '`elastos/crates/elastos-server/src/provider_resource.rs:123`', 'scheme_quote'),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:189', '`elastos/crates/elastos-server/src/provider_resource.rs:189`', 'read_action_quote'),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:190', '`elastos/crates/elastos-server/src/provider_resource.rs:190`', 'write_action_quote'),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:192', '`elastos/crates/elastos-server/src/provider_resource.rs:192`', 'default_action_quote'),
+    ('elastos/crates/elastos-compute/src/providers/component.rs:218', '`elastos/crates/elastos-compute/src/providers/component.rs:218`', 'resident_run_quote'),
+    ('elastos/crates/elastos-compute/src/providers/component.rs:232', '`elastos/crates/elastos-compute/src/providers/component.rs:232`', 'resident_stop_quote'),
+    ('elastos/wit/elastos-bus-v1.wit:87', '`elastos/wit/elastos-bus-v1.wit:87`', 'resident_export_quote'),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:814', '`elastos/crates/elastos-server/src/resource_bridge.rs:814`', None),
+    ('lab/capsule-identity/src/lib.rs:1425', '`lab/capsule-identity/src/lib.rs:1425`', None),
+    ('lab/capsule-identity/README.md:946', '`lab/capsule-identity/README.md:946`', None),
+    ('elastos/crates/elastos-compute/src/providers/component.rs:350', '`elastos/crates/elastos-compute/src/providers/component.rs:350`', None),
+    ('capsules/model-provider/src/adapters.rs:58', '`capsules/model-provider/src/adapters.rs:58`', None),
+    ('elastos/crates/elastos-server/src/api/gateway_model_service.rs:1', '`elastos/crates/elastos-server/src/api/gateway_model_service.rs:1`', None),
+    ('elastos/crates/elastos-server/src/api/gateway_model_service.rs:4', '`elastos/crates/elastos-server/src/api/gateway_model_service.rs:4`', None),
+    ('examples/agent-host/src/lib.rs:471', '`examples/agent-host/src/lib.rs:471-476`', None),
+    ('examples/agent-host/src/lib.rs:476', '`examples/agent-host/src/lib.rs:471-476`', None),
+    ('examples/agent-host/src/lib.rs:532', '`examples/agent-host/src/lib.rs:532`', None),
+    ('examples/agent-host/src/lib.rs:754', '`examples/agent-host/src/lib.rs:754`', None),
+    ('capsules/model-provider/src/journal.rs:391', '`capsules/model-provider/src/journal.rs:391-397`', None),
+    ('capsules/model-provider/src/journal.rs:397', '`capsules/model-provider/src/journal.rs:391-397`', None),
+    ('capsules/model-provider/src/journal.rs:921', '`capsules/model-provider/src/journal.rs:921`', None),
+    ('capsules/model-provider/src/state.rs:530', '`capsules/model-provider/src/state.rs:530`', None),
+    ('capsules/model-provider/src/state.rs:609', '`capsules/model-provider/src/state.rs:609`', None),
+    ('capsules/model-provider/src/contract.rs:134', '`capsules/model-provider/src/contract.rs:134`', None),
+    ('elastos/crates/elastos-server/src/api/gateway_model_service.rs:355', '`elastos/crates/elastos-server/src/api/gateway_model_service.rs:355`', None),
+    ('elastos/crates/elastos-server/src/api/gateway_model_service.rs:1452', '`elastos/crates/elastos-server/src/api/gateway_model_service.rs:1452-1454`', None),
+    ('elastos/crates/elastos-server/src/api/gateway_model_service.rs:1454', '`elastos/crates/elastos-server/src/api/gateway_model_service.rs:1452-1454`', None),
+    ('examples/agent-host/asks.json:4', '`examples/agent-host/asks.json:4`', None),
+    ('examples/agent-host/asks.json:5', '`examples/agent-host/asks.json:5`', None),
+    ('examples/agent-host/asks.json:6', '`examples/agent-host/asks.json:6`', None),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:422', '`elastos/crates/elastos-server/src/provider_resource.rs:422`', None),
+    ('examples/agent-host/asks.json:7', '`examples/agent-host/asks.json:7`', None),
+    ('examples/agent-host/asks.json:8', '`examples/agent-host/asks.json:8`', None),
+    ('examples/agent-host/asks.json:9', '`examples/agent-host/asks.json:9`', None),
+    ('elastos/crates/elastos-compute/src/exec_vm.rs:43', '`elastos/crates/elastos-compute/src/exec_vm.rs:43`', None),
+    ('elastos/crates/elastos-compute/src/exec_vm.rs:49', '`elastos/crates/elastos-compute/src/exec_vm.rs:49`', None),
+    ('elastos/crates/elastos-compute/src/exec_vm.rs:130', '`elastos/crates/elastos-compute/src/exec_vm.rs:130`', None),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:174', '`elastos/crates/elastos-server/src/provider_resource.rs:174`', None),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:176', '`elastos/crates/elastos-server/src/provider_resource.rs:176`', None),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:163', '`elastos/crates/elastos-server/src/provider_resource.rs:163`', None),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:164', '`elastos/crates/elastos-server/src/provider_resource.rs:164`', None),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:165', '`elastos/crates/elastos-server/src/provider_resource.rs:165`', None),
+    ('examples/agent-host/asks.json:12', '`examples/agent-host/asks.json:12`', None),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:379', '`elastos/crates/elastos-server/src/provider_resource.rs:379`', None),
+    ('elastos/crates/elastos-server/src/provider_resource.rs:382', '`elastos/crates/elastos-server/src/provider_resource.rs:382`', None),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:696', '`elastos/crates/elastos-server/src/resource_bridge.rs:696`', None),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:697', '`elastos/crates/elastos-server/src/resource_bridge.rs:697`', None),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:698', '`elastos/crates/elastos-server/src/resource_bridge.rs:698`', None),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:699', '`elastos/crates/elastos-server/src/resource_bridge.rs:699`', None),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:570', '`elastos/crates/elastos-server/src/resource_bridge.rs:570`', None),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:571', '`elastos/crates/elastos-server/src/resource_bridge.rs:571`', None),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:582', '`elastos/crates/elastos-server/src/resource_bridge.rs:582`', None),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:583', '`elastos/crates/elastos-server/src/resource_bridge.rs:583`', None),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:603', '`elastos/crates/elastos-server/src/resource_bridge.rs:603`', None),
+    ('elastos/crates/elastos-server/src/resource_bridge.rs:606', '`elastos/crates/elastos-server/src/resource_bridge.rs:606`', None),
+    ('lab/grant-binding/README.md:12', '`lab/grant-binding/README.md:12`', None),
+    ('docs/AGENT_ARCHITECTURE.md:19', '`docs/AGENT_ARCHITECTURE.md:19`', None),
+    ('docs/AGENT_ARCHITECTURE.md:21', '`docs/AGENT_ARCHITECTURE.md:21`', None),
+    ('docs/AGENT_ARCHITECTURE.md:24', '`docs/AGENT_ARCHITECTURE.md:24`', None),
+    ('docs/AGENT_ARCHITECTURE.md:332', '`docs/AGENT_ARCHITECTURE.md:332`', None),
+    ('lab/grant-binding/src/lib.rs:280', '`lab/grant-binding/src/lib.rs:280`', None),
+    ('lab/grant-binding/src/lib.rs:23', '`lab/grant-binding/src/lib.rs:23`', None),
+    ('lab/grant-binding/src/lib.rs:25', '`lab/grant-binding/src/lib.rs:25`', None),
+)
+
+# The 51 function spans spliced after that base, in draft order.
+FUNCTION_QUOTE_SPAN_ORDER = (
+    'elastos/crates/elastos-server/src/auth.rs::local_person_principal_id',
+    'elastos/crates/elastos-server/src/auth.rs::principal_localhost_root',
+    'elastos/crates/elastos-server/src/resource_bridge.rs::scope_current_user_alias',
+    'elastos/crates/elastos-server/src/resource_bridge.rs::manifest_bound_users_self_matches_active_principal_root_only_with_context',
+    'examples/agent-host/src/lib.rs::journal_resource',
+    'lab/capsule-identity/src/lib.rs::name_signature_message',
+    'lab/capsule-identity/src/lib.rs::sign_bundle',
+    'lab/capsule-identity/src/lib.rs::verify_checked_signature',
+    'examples/agent-host/src/lib.rs::authorize',
+    'elastos/crates/elastos-runtime/src/capability/manager.rs::test_wrong_capsule',
+    'examples/agent-host/src/lib.rs::propose_hosted',
+    'capsules/model-provider/src/adapters.rs::effect_request',
+    'elastos/crates/elastos-server/src/api/model_provider_egress.rs::handle',
+    'examples/agent-host/src/lib.rs::step_payload',
+    'capsules/model-provider/src/journal.rs::journal_budget_fault',
+    'capsules/model-provider/src/journal.rs::active_run_count',
+    'capsules/model-provider/src/contract.rs::is_terminal',
+    'elastos/crates/elastos-server/src/api/gateway_model_service.rs::reserve_run_slot',
+    'capsules/model-provider/src/journal.rs::validate_backend_usage',
+    'examples/agent-host/src/lib.rs::ask_kind_name',
+    'examples/agent-host/src/lib.rs::declared_ask',
+    'examples/agent-host/src/lib.rs::propose_read',
+    'examples/agent-host/src/lib.rs::observe',
+    'examples/agent-host/src/lib.rs::propose_edit',
+    'examples/agent-host/src/lib.rs::propose_restore',
+    'examples/agent-host/src/lib.rs::is_write',
+    'examples/agent-host/src/lib.rs::edit_request',
+    'examples/agent-host/src/lib.rs::request_body',
+    'elastos/crates/elastos-server/src/provider_resource.rs::provider_operation_action',
+    'elastos/crates/elastos-server/src/provider_resource.rs::localhost_op_required_action',
+    'examples/agent-host/src/lib.rs::propose_run',
+    'elastos/crates/elastos-compute/src/exec_vm.rs::decide_exec',
+    'elastos/crates/elastos-compute/src/exec_vm.rs::admit_project_files',
+    'examples/agent-host/src/lib.rs::propose_child',
+    'examples/agent-host/src/lib.rs::authorize_child',
+    'examples/agent-host/src/lib.rs::open_child_host',
+    'examples/agent-host/src/lib.rs::grant_child_host',
+    'examples/agent-host/src/lib.rs::propose_init',
+    'examples/agent-host/src/lib.rs::journal_write_body',
+    'examples/agent-host/src/lib.rs::append_journal',
+    'examples/agent-host/src/lib.rs::propose_journal_append',
+    'elastos/crates/elastos-server/src/provider_resource.rs::agents_area_refusal',
+    'elastos/crates/elastos-server/src/resource_bridge.rs::write_precondition',
+    'lab/grant-binding/src/ops.rs::model_overwrite_grant_does_not_permit_append',
+    'lab/grant-binding/src/lib.rs::register_instance',
+    'lab/grant-binding/src/lib.rs::resource_name',
+    'lab/grant-binding/src/lib.rs::bind_grant',
+    'lab/grant-binding/src/lib.rs::use_grant',
+    'lab/grant-binding/src/ledger.rs::model_reserve_over_the_ceiling_is_refused',
+    'lab/grant-binding/src/ledger.rs::model_reported_usage_does_not_lower_the_hold',
+    'lab/grant-binding/src/ops.rs::operate',
+)
+
+# Blocks that stay short of the declaring line after a four-space shift.
+# They stay out of the walk.
+UNMATCHED_FUNCTION_SPANS = (
+    'elastos/crates/elastos-compute/src/providers/component.rs::stop',
+    'examples/agent-host/src/lib.rs::encode_journal',
+    'examples/agent-host/src/lib.rs::decode_step',
+    'capsules/model-provider/src/journal.rs::store_run',
+    'capsules/model-provider/src/state.rs::handle_runs_create',
+    'lab/grant-binding/src/ledger.rs::reserve',
+)
+
+# The 18 line spans spliced after the function spans, in draft order.
+INDENT_LINE_SPAN_ORDER = (
+    'elastos/crates/elastos-server/src/resource_bridge.rs:43',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:984',
+    'elastos/crates/elastos-compute/src/providers/component.rs:352',
+    'elastos/crates/elastos-server/src/api/handlers/capability.rs:182',
+    'elastos/crates/elastos-server/src/api/handlers/capability.rs:339',
+    'elastos/crates/elastos-server/src/api/handlers/capability.rs:341',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:40',
+    'elastos/crates/elastos-runtime/src/capability/manager.rs:326',
+    'elastos/crates/elastos-runtime/src/capability/token.rs:203',
+    'examples/agent-host/asks.json:10',
+    'examples/agent-host/asks.json:11',
+    'capsules/model-provider/src/adapters.rs:1670',
+    'capsules/model-provider/src/config.rs:111',
+    'capsules/model-provider/src/config.rs:113',
+    'elastos/crates/elastos-runtime/src/provider/bridge.rs:774',
+    'elastos/crates/elastos-runtime/src/provider/registry.rs:841',
+    'lab/grant-binding/src/lib.rs:162',
+    'lab/grant-binding/src/lib.rs:244',
+)
+
+# The 2 egress line spans spliced after the indent line spans, in draft order.
+EGRESS_LINE_SPAN_ORDER = (
+    'elastos/crates/elastos-server/src/api/model_provider_egress.rs:504',
+    'elastos/crates/elastos-server/src/api/model_provider_egress.rs:509',
+)
