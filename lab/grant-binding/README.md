@@ -13,6 +13,16 @@ reference model, not the Runtime; counts toward no M1 check; the Runtime half is
 
 `Verifier::bind_grant` is the stand-in entry for a capability ask, and the stand-in's `seed_bound_grant` calls it too. The asker is the registered instance principal. A Home principal is refused and does not mint. An app principal stores the binding. A caller claim is not the principal and no caller names the asker. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
 
+`Verifier::revoke_grant` ends one handle through the one `end_grant`. The store keeps the record. Another app's grant stays. The next effect on an ended handle is `Refuse::UnknownHandle`. This mirrors `end_live_grant`. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
+`Verifier::revoke_grant` also ends every child journal minted from that grant, through the same `end_grant`. The store keeps those records. A journal revoked on its own leaves the grant that minted it. A grant asked on its own stays. This mirrors `end_live_grant`. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
+`Verifier::bind_once` and `Verifier::bind_until` store an allow-once grant and an expiry through the one `bind_grant`. One successful append or overwrite ends an allow-once grant through the one `revoke_grant`. The store keeps the record. `resolve` refuses a grant when `verifier_now` is at or after its expiry. An unset expiry is not due. This mirrors `Life::Exhausted` and `is_due`. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
+`Verifier::set_effect_limit` stores an effect limit on that grant. One successful append or overwrite counts toward it, and an append or overwrite on a child journal minted from that grant counts against the issuing grant. The next effect is refused when the count has reached the limit. The grant stays in the store. An unset limit does not refuse. A set limit of 0 stops the first effect. A child-journal operate does not count. A derived journal keeps no limit of its own. This mirrors `admit_effect`. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
+`Verifier::operate` checks an append or overwrite path with the one `resource_name` against that grant's stored root. A path outside that root is `Refuse::OutsideRoot`. A child journal's append or overwrite uses that journal's root. A child-journal operate does not use this check. The mint already checks its path. A path outside the root does not spend an effect limit and does not end an allow-once grant. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
 `Verifier::admit_ask` caps one agent's budget ask and stores the granted amount through the one `admit`. This is a lab stand-in for that admission. It is not the Runtime. It does not count toward A7 or M1-R.
 
 A forged identity, session, instance, usage, ceiling or set of rights changes
