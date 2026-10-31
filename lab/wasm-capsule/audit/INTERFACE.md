@@ -3,7 +3,8 @@
 `wasm-capsule-audit` is a static lab pre-check. It lists imports and refuses
 imports outside the caller's declaration. It makes no admission, launch or
 trust decision. The Runtime owns enforcement. No admission or launch path
-calls this crate.
+calls this crate. `audit` on the core module is a pre-check; the claim that
+counts is the componentized artifact passing `audit_component`.
 
 ## Public API
 
@@ -64,17 +65,27 @@ Callers match the variant's fields; they never parse the Display string.
   compressed or encoded content is not decoded.
   One exception: a custom section whose name starts with `component-type`
   (the name wit-bindgen writes for its encoded world) skips this byte rule
-  at one level only. Its data must parse and validate as a Component of type
-  definitions and type exports: every payload is a version, an end, a
+  at one level only. An artifact may carry exactly one such section; a second
+  returns the same refusal. Its data must parse and validate as a Component
+  of type definitions and type exports: every payload is a version, an end, a
   Component type section, a Component export section whose every export kind
   is `Type`, or a custom section whose name does not start with
-  `component-type` and whose data passes the byte rule above. Any custom
-  section whose name starts with `component-type`, at any depth inside that
-  data, returns `CodeInCustomSection`; it is not followed, so a hostile chain
-  cannot exhaust the stack. Any other payload, a parse error, a validation
-  error or a non-Component encoding returns `CodeInCustomSection` with the
-  string `code in custom section`. Every other custom section, at every
-  depth, keeps the byte rule above.
+  `component-type` and whose data passes the byte rule above. The section is
+  accepted only when its data equals the committed `product-capsule-v1`
+  encoding (1,382 bytes, SHA-256
+  `439929eb565421a1de4791c7e5b278ae105687eb0f12d4a965d6a6adabce24a8`) or when
+  every type-level import name equals one of the five `ALLOWED_BUS_IMPORTS`
+  strings and at least one is present. Type-level names are read from
+  `ComponentType::Component` import declarations, including names one or more
+  nested `Type(...)` declarations down. A prefix of a listed name, or a name
+  that only starts with `elastos:bus`, is refused. A type-only section with no
+  type-level import and no byte match is refused. Any custom section whose name
+  starts with `component-type`, at any depth inside that data, returns
+  `CodeInCustomSection`; it is not followed, so a hostile chain cannot exhaust
+  the stack, and it is not a second outer count. Any other payload, a parse
+  error, a validation error or a non-Component encoding returns
+  `CodeInCustomSection` with the string `code in custom section`. Every other
+  custom section, at every depth, keeps the byte rule above.
   The export-kind check is defence in depth: a non-`Type` export needs a
   definition section (module, instance, component, function or value), and
   the payload list above already refuses every such section.
