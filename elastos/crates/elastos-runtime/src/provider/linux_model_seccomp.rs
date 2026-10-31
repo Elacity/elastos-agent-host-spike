@@ -115,6 +115,24 @@ mod tests {
     const ROW_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_ROW";
     /// Debug only: send each probe's stderr to its token file.
     const PROBE_LOG_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_LOG";
+    /// The pid of a plain helper the harness starts beside the filtered probe.
+    /// The victim rows call cross-process syscalls on that sibling, so no row
+    /// can read its own process or its child instead.
+    const VICTIM_PID_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_VICTIM_PID";
+    /// The harness pid, keyed into the helper's token path so the harness and
+    /// each row read one file.
+    const VICTIM_PARENT_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_VICTIM_PARENT";
+    /// Set only in the helper process it starts, so a row that inherits the row
+    /// variable still names the live sibling.
+    const VICTIM_SELF_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_VICTIM_SELF";
+    /// Set only for the unfiltered probe in a victim row's sibling control: the
+    /// probe runs from the filtered probe's position (a sibling of the helper)
+    /// but takes no filter, so its success proves the position can reach the
+    /// helper and only the deny entry refuses the filtered row.
+    const UNFILTERED_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_UNFILTERED";
+    /// The test that serves as the helper sibling.
+    const VICTIM_TEST: &str =
+        "provider::linux_model_seccomp::tests::helper_sibling_serves_the_victim_rows";
     /// The harness test also dispatches a row when `ROW_VAR` is set, before it
     /// touches the test process, so a probe enters its own row there. The probe
     /// runs from the test executable's directory and passes `--`, so libtest
@@ -463,6 +481,45 @@ mod tests {
         sys(0x4000_0000, [0; 6])
     }
 
+    /// The helper sibling the victim rows act on. A row with no pid fails by
+    /// name, so a row run without a live sibling cannot pass.
+    fn victim_pid() -> libc::pid_t {
+        std::env::var(VICTIM_PID_VAR)
+            .ok()
+            .and_then(|pid| pid.parse().ok())
+            .unwrap_or_else(|| panic!("row has no live helper pid in {VICTIM_PID_VAR}"))
+    }
+
+    /// The three cross-process calls the deny list refuses, one body each. Each
+    /// names the helper sibling, never this process or its own child. This piece
+    /// keeps the `pidfd_getfd` row; `process_vm_readv`/`process_vm_writev`
+    /// follow in a later piece.
+    fn pidfd_getfd_body(_: libc::c_int, _: libc::c_int, _: libc::c_int) -> libc::c_long {
+        let pid = victim_pid();
+        let pidfd = sys(libc::SYS_pidfd_open, [pid as _, 0, 0, 0, 0, 0]);
+        if pidfd < 0 {
+            panic!("pidfd_open on helper {pid} failed: errno {}", errno());
+        }
+        // `pidfd_open` is permitted by the filter, so this row proves the
+        // `pidfd_getfd` deny entry alone.
+        let borrowed = sys(libc::SYS_pidfd_getfd, [pidfd as _, 0, 0, 0, 0, 0]);
+        let failed = errno();
+        // The borrowed descriptor stays open in the unfiltered sibling
+        // control, so that call really borrows from the helper. A negative
+        // pidfd fails both positions and would make the control prove nothing.
+        if std::env::var_os(UNFILTERED_VAR).is_none() || borrowed < 0 {
+            close_all(&[pidfd as libc::c_int]);
+        }
+        // The control checks the borrowed descriptor is a real fd. A filtered
+        // probe never gets here with one: the filter answers EPERM. `close_all`
+        // leaves its own errno, so the call's errno is restored for the check.
+        if borrowed >= 0 && std::env::var_os(UNFILTERED_VAR).is_none() {
+            close_all(&[borrowed as libc::c_int]);
+        }
+        unsafe { *libc::__errno_location() = failed };
+        borrowed
+    }
+
     /// Each denied family through `socket`, the Unix controls through both
     /// creators, the four message syscalls the deny list refuses, `getpid` and
     /// the x32 boundary. Each entry is its own probe run, so a removed deny
@@ -490,6 +547,7 @@ mod tests {
             row("sendmmsg+SCM_RIGHTS", sendmmsg_body, 0, 0, 0, EPERM),
             row("recvmmsg+cmsg", recv_body, 1, 0, 0, EPERM),
             row("io_uring_setup", io_uring_body, 0, 0, 0, EPERM),
+            row("pidfd_getfd sibling", pidfd_getfd_body, 0, 0, 0, EPERM),
             row("getpid", getpid_body, 0, 0, 0, PERMITTED),
             row("nr==0x40000000", x32_body, 0, 0, 0, KILLED),
         ]
@@ -518,24 +576,43 @@ mod tests {
     /// Runs one named row in the filtered probe.
     fn probe(wanted: &str) {
         // The redirection runs the probe with the row variable in this
-        // process, so the filter's own state is the first proof here.
-        assert_eq!(
-            unsafe { libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) },
-            2,
-            "the model filter was not attached"
-        );
-        // The probe runs under install_on_command, which sets no_new_privs
-        // before attaching the filter.
-        assert_eq!(
-            unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) },
-            1
-        );
+        // process, so the filter's own state is the first proof here. The
+        // unfiltered sibling control takes no filter on purpose.
+        let unfiltered = std::env::var_os(UNFILTERED_VAR).is_some();
+        if !unfiltered {
+            assert_eq!(
+                unsafe { libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) },
+                2,
+                "the model filter was not attached"
+            );
+            // The probe runs under install_on_command, which sets no_new_privs
+            // before attaching the filter.
+            assert_eq!(
+                unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) },
+                1
+            );
+        }
         let row = rows()
             .into_iter()
             .find(|row| row.name == wanted)
             .unwrap_or_else(|| panic!("row {wanted} was not requested by the harness"));
         let rc = (row.body)(row.domain, row.kind, row.protocol);
-        check(row.name, row.outcome, rc);
+        if unfiltered {
+            // The control expects the call to work here: a refusal of the
+            // position (Yama, for example) must fail loudly, never skip.
+            assert!(
+                rc >= row.outcome as libc::c_long,
+                "unfiltered sibling control for row {wanted}: rc {rc}, errno {}",
+                errno()
+            );
+            if rc >= 0 {
+                // A real descriptor, never a zero success code: closing it here
+                // also closes the one the row body kept open for this control.
+                close_all(&[rc as libc::c_int]);
+            }
+        } else {
+            check(row.name, row.outcome, rc);
+        }
         println!("{PROBE_TOKEN} {}", row.name);
     }
 
@@ -641,6 +718,198 @@ mod tests {
         std::env::temp_dir().join(format!("elastos-row-probe-{}-{safe}", std::process::id()))
     }
 
+    /// Where the helper publishes its readiness line, keyed by the harness pid
+    /// and the helper pid, so the harness and the helper name one file. The
+    /// harness passes its own `process::id()`; the helper reads it from
+    /// `VICTIM_PARENT_VAR`. A missing variable is a failure, never a silent
+    /// `getppid()` fallback, because the helper's parent is not the harness.
+    fn victim_token(parent: libc::pid_t, pid: libc::pid_t) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("elastos-row-victim-{parent}-{pid}"))
+    }
+
+    /// The harness pid a helper process was given in `VICTIM_PARENT_VAR`.
+    fn victim_parent() -> libc::pid_t {
+        std::env::var(VICTIM_PARENT_VAR)
+            .ok()
+            .and_then(|parent| parent.parse().ok())
+            .unwrap_or_else(|| panic!("helper has no harness pid in {VICTIM_PARENT_VAR}"))
+    }
+
+    /// Reads the helper's readiness line, then unlinks the file: the open
+    /// descriptor is the file the check and the read share, so no path is
+    /// re-resolved after the check. The helper writes the line once, through a
+    /// rename, so a poll reads a whole line or no file. A line that names
+    /// another pid fails.
+    fn read_readiness(token: &std::path::Path, pid: libc::pid_t) -> bool {
+        let file = std::fs::File::open(token);
+        let _ = std::fs::remove_file(token);
+        let Ok(mut file) = file else {
+            return false;
+        };
+        let mut text = String::new();
+        if std::io::Read::read_to_string(&mut file, &mut text).is_err() {
+            return false;
+        }
+        assert_eq!(
+            text.trim().parse::<libc::pid_t>(),
+            Ok(pid),
+            "readiness line {text:?} is not helper {pid}"
+        );
+        true
+    }
+
+    /// `true` for a row that acts on the helper sibling.
+    fn is_victim(name: &str) -> bool {
+        name.ends_with(" sibling")
+    }
+
+    /// A plain helper the harness starts beside the filtered probe: the test
+    /// executable re-entered as `VICTIM_TEST`, which publishes its pid in its
+    /// token file. It holds no filter, so the control can act on it, and the
+    /// harness kills and reaps it on every path.
+    struct Victim {
+        pid: libc::pid_t,
+        /// `process::Child` owns the wait and the kill.
+        child: std::process::Child,
+    }
+
+    impl Victim {
+        /// Starts the helper and waits for its first publication. The helper
+        /// exits by itself after 120 s, so a lost harness cannot leave it
+        /// running.
+        fn start() -> Victim {
+            let child =
+                std::process::Command::new(std::env::current_exe().expect("test executable path"))
+                    .arg("--exact")
+                    .arg(VICTIM_TEST)
+                    .arg("--nocapture")
+                    .env(VICTIM_SELF_VAR, "")
+                    .env(VICTIM_PARENT_VAR, std::process::id().to_string())
+                    // The helper holds fd 0, the only cheap descriptor the
+                    // filter permits the probe to open a pidfd for, so the row
+                    // borrows a real descriptor and never fails on EBADF.
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .expect("helper sibling did not start");
+            let pid = child.id() as libc::pid_t;
+            let mut victim = Victim { pid, child };
+            let token = victim_token(std::process::id() as libc::pid_t, pid);
+            let start = std::time::Instant::now();
+            while !read_readiness(&token, pid) {
+                assert!(
+                    start.elapsed() < std::time::Duration::from_secs(30),
+                    "helper sibling published no readiness line: token {:?} parent {} child {:?}",
+                    token,
+                    std::process::id(),
+                    victim.child.try_wait()
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            victim
+        }
+    }
+
+    impl Drop for Victim {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    /// The unfiltered control for a victim row: the same call against the same
+    /// helper, made by this unfiltered process, must succeed, so only the
+    /// filter can refuse the probe's call.
+    fn victim_control(victim: &Victim, row: &Row) {
+        std::env::set_var(VICTIM_PID_VAR, victim.pid.to_string());
+        let rc = (row.body)(0, 0, 0);
+        let failed = errno();
+        std::env::remove_var(VICTIM_PID_VAR);
+        assert!(
+            rc >= 0,
+            "row {} is not valid unfiltered: rc {rc}, errno {failed}",
+            row.name
+        );
+        if rc > 2 {
+            close_all(&[rc as libc::c_int]);
+        }
+    }
+
+    /// The helper served by `VICTIM_TEST`. Without the flag it is a plain test.
+    /// With it the helper publishes its pid in its token file once, through a
+    /// rename, then sleeps until the harness ends it. The publication is the
+    /// readiness line the harness reads and then unlinks.
+    #[test]
+    fn helper_sibling_serves_the_victim_rows() {
+        if std::env::var(VICTIM_SELF_VAR).is_err() {
+            return;
+        }
+        let pid = std::process::id() as libc::pid_t;
+        // pidfd_getfd needs ptrace-attach access. The probe is a sibling, not
+        // an ancestor, so Yama scope 1 (the Jetson) refuses it. Allow any
+        // tracer: test fixture only. A host without Yama answers EINVAL.
+        let permitted =
+            unsafe { libc::prctl(libc::PR_SET_PTRACER, libc::PR_SET_PTRACER_ANY, 0, 0, 0) };
+        assert!(
+            permitted == 0 || errno() == libc::EINVAL,
+            "helper PR_SET_PTRACER failed: errno {}",
+            errno()
+        );
+        let token = victim_token(victim_parent(), pid);
+        let staging = token.with_extension("tmp");
+        std::fs::write(&staging, format!("{pid}\n")).expect("helper publication");
+        std::fs::rename(&staging, &token).expect("helper publication rename");
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(120) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// Spawns one filtered probe child for a row command.
+    fn spawn_row(command: &mut Command) -> tokio::process::Child {
+        command.spawn().expect("probe child did not start")
+    }
+
+    /// The pass rule for a row that ends by exit: it exits zero and its token
+    /// file holds the pass token. A child that exits zero without the token
+    /// exercised nothing.
+    fn row_result(name: &str, success: bool) -> Result<(), String> {
+        if !success {
+            return Err(format!("row {name} failed"));
+        }
+        let stdout = std::fs::read_to_string(probe_token(name)).unwrap_or_default();
+        let _ = std::fs::remove_file(probe_token(name));
+        if stdout.contains(PROBE_TOKEN) {
+            Ok(())
+        } else {
+            Err(format!("row {name}: no pass token"))
+        }
+    }
+
+    /// Runs one row's probe to its end: a killed row ends in SIGSYS and any
+    /// other row exits zero with its pass token written.
+    async fn finish_probe(
+        name: &str,
+        row: &Row,
+        child: &mut tokio::process::Child,
+    ) -> Option<String> {
+        let deadline = std::time::Duration::from_secs(20);
+        let result: Result<(), String> = match (run_probe(child, deadline).await, row.outcome) {
+            (None, _) => Err(format!("row {name}: probe child did not finish")),
+            (Some(status), KILLED) => {
+                use std::os::unix::process::ExitStatusExt as _;
+                if status.signal() == Some(libc::SIGSYS) {
+                    Ok(())
+                } else {
+                    Err(format!("row {name}: expected SIGSYS, status {status:?}"))
+                }
+            }
+            // The child must also prove it exercised the row.
+            (Some(status), _) => row_result(name, status.success()),
+        };
+        result.err()
+    }
+
     /// Harness half: each row runs in its own filtered child through
     /// `install_on_command`, and one row's failure keeps the others reporting
     /// their own name. A row that exits zero without printing the pass token
@@ -656,14 +925,35 @@ mod tests {
         // `run_probe` measures with the wall clock, so a sleeping row still
         // reaches its limit.
         let all = rows();
+        // The victim rows act on a plain sibling of the filtered probe, so the
+        // subject of the call is a real process with its own address space and
+        // descriptors. The sibling ends with this test on every path.
+        let victim = all
+            .iter()
+            .any(|row| is_victim(row.name))
+            .then(Victim::start);
         let total = all.len();
         let mut failures = Vec::new();
+        // Victim rows also get one unfiltered sibling control each; their
+        // failures are separate lines, never new rows in `rows()`.
+        let mut defects = Vec::new();
+        let controls = all.iter().filter(|row| is_victim(row.name)).count();
         // Control: every row's body answers without the filter, so only the
         // filter can refuse it. A send row answers a peer with no reader with
         // EAGAIN, and a receive row reads a message its own pair carries. Each
         // receive row's own body must also read its queued byte. The SIGSYS
-        // row is killed before any unfiltered call can run.
+        // row is killed before any unfiltered call can run. The victim row's
+        // control borrows the helper's pid and gets a real descriptor back.
         for row in &all {
+            if is_victim(row.name) {
+                // The victim row runs once unfiltered here and once in its own
+                // filtered probe below: only the filter can refuse it.
+                victim_control(
+                    victim.as_ref().expect("a victim row starts the helper"),
+                    row,
+                );
+                continue;
+            }
             // A receive row's control queues one descriptor-bearing message on
             // a pair of its own, so only the filter can refuse the same call.
             let receive = matches!(row.name, "recvmsg+cmsg" | "recvmmsg+cmsg");
@@ -705,6 +995,16 @@ mod tests {
         }
         for row in all {
             let name = row.name;
+            // A victim row's filtered probe is a sibling of the helper, so its
+            // control runs from that same position without a filter. A
+            // position the host refuses (Yama scope 1 for a non-ancestor) then
+            // fails here by name instead of passing the row vacuously.
+            if is_victim(name) {
+                if let Err(failure) = sibling_control(victim.as_ref().expect("helper"), &row).await
+                {
+                    defects.push(failure);
+                }
+            }
             // The descendant test serves the row that ends in a signal.
             let filter = match row.outcome {
                 KILLED => DESCENDANT_TEST,
@@ -719,6 +1019,10 @@ mod tests {
                 .stdout(std::process::Stdio::from(
                     std::fs::File::create(probe_token(row.name)).expect("probe token file"),
                 ));
+            if is_victim(name) {
+                let pid = victim.as_ref().expect("a victim row starts the helper").pid;
+                command.env(VICTIM_PID_VAR, pid.to_string());
+            }
             if let Ok(path) = std::env::var(PROBE_LOG_VAR) {
                 command
                     .stdout(std::process::Stdio::from(
@@ -739,45 +1043,49 @@ mod tests {
                 command.stderr(std::process::Stdio::null());
             }
             install_on_command(&mut command).expect("filter attach failed");
-            let mut child = command.spawn().expect("probe child did not start");
-            let deadline = std::time::Duration::from_secs(20);
-            let finished = run_probe(&mut child, deadline).await;
-            let result: Result<(), String> = match (finished, row.outcome) {
-                (None, _) => Err(format!("row {name}: probe child did not finish")),
-                (Some(status), KILLED) => {
-                    use std::os::unix::process::ExitStatusExt as _;
-                    if status.signal() == Some(libc::SIGSYS) {
-                        Ok(())
-                    } else {
-                        Err(format!("row {name}: expected SIGSYS, status {status:?}"))
-                    }
-                }
-                (Some(status), _) if !status.success() => {
-                    Err(format!("row {name} failed: {status:?}"))
-                }
-                // The child must also prove it exercised the row.
-                (Some(_), _) => {
-                    // The probe is reaped and its group ended, so the pipe has
-                    // no writer left; `output` collects it to EOF.
-                    let stdout = std::fs::read_to_string(probe_token(name)).unwrap_or_default();
-                    let _ = std::fs::remove_file(probe_token(name));
-                    if stdout.contains(PROBE_TOKEN) {
-                        Ok(())
-                    } else {
-                        Err(format!("row {name}: no pass token"))
-                    }
-                }
-            };
-            if let Err(failure) = result {
+            let mut child = spawn_row(&mut command);
+            if let Some(failure) = finish_probe(name, &row, &mut child).await {
                 failures.push(failure);
             }
         }
         println!("ROWS: {total} checked, {} failed", failures.len());
+        println!(
+            "SIBLING CONTROLS: {controls} checked, {} failed",
+            defects.len()
+        );
+        failures.extend(defects);
         assert!(
             failures.is_empty(),
-            "{} of {total} rows failed:\n{}",
+            "{} of {} rows and controls failed:\n{}",
             failures.len(),
+            total + controls,
             failures.join("\n")
         );
+    }
+
+    /// The unfiltered control from the filtered probe's position: a sibling of
+    /// the helper, same row command, no filter. Its body must get a real
+    /// descriptor back; any other answer names this control in a failure.
+    async fn sibling_control(victim: &Victim, row: &Row) -> Result<(), String> {
+        let name = row.name;
+        let mut command = Command::new(std::env::current_exe().expect("test executable path"));
+        command
+            .arg("--exact")
+            .arg(PROBE_TEST_NAME)
+            .arg("--nocapture")
+            .env(ROW_VAR, name)
+            .env(VICTIM_PID_VAR, victim.pid.to_string())
+            .env(UNFILTERED_VAR, "1")
+            .stdout(std::process::Stdio::from(
+                std::fs::File::create(probe_token(name)).expect("control token file"),
+            ))
+            .stderr(std::process::Stdio::null());
+        let mut child = spawn_row(&mut command);
+        match finish_probe(name, row, &mut child).await {
+            None => Ok(()),
+            Some(_) => Err(format!(
+                "row {name} sibling: unfiltered sibling control failed"
+            )),
+        }
     }
 }
