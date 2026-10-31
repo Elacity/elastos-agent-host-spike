@@ -29,8 +29,14 @@
 //! and both stdouts, written only through the shared new-file writer.
 
 pub mod bundle;
+pub mod cid_required;
+pub mod fetch_cancel;
+pub mod fetch_progress;
+pub mod pin_report;
 pub mod receipt;
 pub mod run;
+pub mod scrub;
+pub mod sync_schedule;
 pub mod verify;
 
 pub use capsule_identity::lab_cid as bundle_identity;
