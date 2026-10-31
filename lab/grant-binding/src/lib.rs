@@ -434,11 +434,21 @@ impl Verifier {
         }
         let bound = live_record(grant);
         self.check_call(call, &bound)?;
-        if let Some(expiry) = bound.expiry {
-            if self.verifier_now >= expiry {
-                return Err(Refuse::Expired);
+        #[rustfmt::skip]
+        let _ = {
+            let mut expiry = bound.expiry;
+            let mut parent = bound.parent;
+            while let Some(handle) = parent {
+                let ancestor = self.grants.get(&handle).ok_or(Refuse::UnknownHandle)?;
+                expiry = ancestor.record.expiry;
+                parent = ancestor.record.parent;
             }
-        }
+            if let Some(expiry) = expiry {
+                if self.verifier_now >= expiry {
+                    return Err(Refuse::Expired);
+                }
+            }
+        };
         Ok(bound)
     }
 
@@ -2349,4 +2359,75 @@ fn model_session_change_leaves_the_other_instance() {
         .use_grant(notes_call, &guest(page))
         .expect("the other instance's child journal stays");
     assert_eq!(page_kept.owned_root, "UsersAI/notes/pad/page");
+}
+
+#[test]
+fn model_child_use_follows_the_issuing_expiry() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_until(photo, "UsersAI/photo/library", rights(), 5)
+        .expect("issuing expiry");
+    let album = verifier
+        .bind_grant(photo, "UsersAI/photo/album", rights())
+        .expect("standing album");
+    let call = verifier.open_call(photo);
+    verifier.set_verifier_now(4);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    let other = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/other")
+        .expect("sibling journal");
+    let page = verifier
+        .create_child_journal(&call, &guest(album), "UsersAI/photo/album/page")
+        .expect("standing child");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("before the issuing expiry");
+    verifier.set_verifier_now(5);
+    let due = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("the issuing grant has expired");
+    assert_eq!(due, Refuse::Expired);
+    let child_due = verifier
+        .use_grant(call, &guest(roll))
+        .expect_err("the child journal follows the issuing expiry");
+    assert_eq!(child_due, Refuse::Expired);
+    let sibling = verifier
+        .use_grant(call, &guest(other))
+        .expect_err("the sibling follows the same issuing expiry");
+    assert_eq!(sibling, Refuse::Expired);
+    assert_eq!(sibling.to_string(), "grant has expired");
+    verifier.set_verifier_now(6);
+    let later = verifier
+        .use_grant(call, &guest(roll))
+        .expect_err("past the issuing expiry is still due");
+    assert_eq!(later, Refuse::Expired);
+    let album_kept = verifier
+        .use_grant(call, &guest(album))
+        .expect("a standing grant has no expiry");
+    assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
+    let page_kept = verifier
+        .use_grant(call, &guest(page))
+        .expect("a standing child has no issuing expiry");
+    assert_eq!(page_kept.owned_root, "UsersAI/photo/album/page");
+}
+
+#[test]
+fn model_unset_issuing_expiry_does_not_expire_the_child() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("no expiry");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    verifier.set_verifier_now(u64::MAX);
+    let decision = verifier
+        .use_grant(call, &guest(roll))
+        .expect("unset issuing expiry is not due");
+    assert_eq!(decision.owned_root, "UsersAI/photo/library/roll");
 }
