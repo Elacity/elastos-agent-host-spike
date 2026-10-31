@@ -4,8 +4,16 @@ test: ops::model_refused_child_journal_stores_no_grant
 --- old
         super::resource_name(&grant.identity, path, Some(&grant.owned_root))
             .map_err(OperateRefuse::Binding)?;
-        self.bind_grant(grant.instance, path, grant.rights)
-            .map_err(OperateRefuse::Binding)
+        self.bind_grant(
+            grant.instance,
+            path,
+            crate::Rights {
+                append: grant.rights.append,
+                overwrite: grant.rights.overwrite,
+                child_journal: false,
+            },
+        )
+        .map_err(OperateRefuse::Binding)
 --- new
         let bound = self
             .bind_grant(grant.instance, path, grant.rights)
