@@ -92,6 +92,11 @@ pub(crate) struct GrantRecord {
     expiry: Option<u64>,
     effect_limit: Option<u64>,
     effects: u64,
+    rate: Option<u64>,
+    window: u64,
+    window_start: u64,
+    window_effects: u64,
+    session_bound: bool,
 }
 
 /// The binding copied out after a successful check.
@@ -121,6 +126,8 @@ pub enum Refuse {
     Expired,
     EffectLimit,
     IssuingLimit,
+    Rate,
+    IssuingRate,
 }
 
 impl std::fmt::Display for Refuse {
@@ -140,6 +147,8 @@ impl std::fmt::Display for Refuse {
             Refuse::Expired => "grant has expired",
             Refuse::EffectLimit => "effect limit is reached",
             Refuse::IssuingLimit => "effect limit stays on the issuing grant",
+            Refuse::Rate => "rate limit is reached",
+            Refuse::IssuingRate => "rate stays on the issuing grant",
         })
     }
 }
@@ -161,6 +170,7 @@ pub struct Verifier {
     #[allow(dead_code)] // later slices fill the ledger
     ledger: std::sync::Mutex<ledger::Ledger>,
     pending_once: bool,
+    pending_session: bool,
     pending_expiry: Option<u64>,
     verifier_now: u64,
 }
@@ -176,6 +186,7 @@ impl Verifier {
             pending_parent: None,
             ledger: std::sync::Mutex::new(ledger::Ledger::new()),
             pending_once: false,
+            pending_session: false,
             pending_expiry: None,
             verifier_now: 0,
         }
@@ -212,6 +223,8 @@ impl Verifier {
         let once = self.pending_once;
         let expiry = self.pending_expiry.take();
         self.pending_once = false;
+        let session_bound = self.pending_session;
+        self.pending_session = false;
         let record = self
             .registry
             .get(&instance)
@@ -236,6 +249,11 @@ impl Verifier {
                     expiry,
                     effect_limit: None,
                     effects: 0,
+                    rate: None,
+                    window: 0,
+                    window_start: 0,
+                    window_effects: 0,
+                    session_bound: session_bound,
                 },
                 ended: false,
             },
@@ -280,10 +298,32 @@ impl Verifier {
 
     /// Changes the registry session for a live instance.
     pub fn host_set_session(&mut self, instance: InstanceId, session: &str) -> Result<(), Refuse> {
-        self.registry
-            .get_mut(&instance)
-            .ok_or(Refuse::UnknownInstance)?
-            .session = session.to_owned();
+        let same = {
+            let record = self
+                .registry
+                .get_mut(&instance)
+                .ok_or(Refuse::UnknownInstance)?;
+            let same = record.session == session;
+            if !same {
+                record.session = session.to_owned();
+            }
+            same
+        };
+        #[rustfmt::skip]
+        if same {
+            return Ok(());
+        };
+        #[rustfmt::skip]
+        let ended: Vec<Handle> = self
+            .grants
+            .iter()
+            .filter(|(_, grant)| grant.record.instance == instance && grant.record.session_bound)
+            .map(|(handle, _)| *handle)
+            .collect();
+        #[rustfmt::skip]
+        for handle in ended {
+            self.revoke_grant(handle)?;
+        };
         Ok(())
     }
 
@@ -313,6 +353,16 @@ impl Verifier {
         self.bind_grant(instance, resource, rights)
     }
 
+    pub fn bind_for_session(
+        &mut self,
+        instance: InstanceId,
+        resource: &str,
+        rights: Rights,
+    ) -> Result<Handle, Refuse> {
+        self.pending_session = true;
+        self.bind_grant(instance, resource, rights)
+    }
+
     #[rustfmt::skip]
     pub fn set_effect_limit(&mut self, handle: Handle, limit: u64) -> Result<(), Refuse> {
         let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
@@ -327,15 +377,51 @@ impl Verifier {
     }
 
     #[rustfmt::skip]
-    fn note_effect(&mut self, handle: Handle) -> Result<(), Refuse> {
+    pub fn set_rate(&mut self, handle: Handle, limit: u64, window: u64) -> Result<(), Refuse> {
         let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
-        grant.record.effects += 1;
+        if grant.record.parent.is_some() {
+            return Err(Refuse::IssuingRate);
+        }
+        if grant.ended {
+            return Err(Refuse::UnknownHandle);
+        }
+        grant.record.rate = Some(limit);
+        grant.record.window = window;
+        grant.record.window_start = self.verifier_now;
+        grant.record.window_effects = 0;
         Ok(())
     }
 
-    /// The one handle check: resolves a handle and compares the stored grant
-    /// with the registry record of the call's instance, in order.
-    pub(crate) fn resolve(&self, call: Call, handle: Handle) -> Result<GrantRecord, Refuse> {
+    #[rustfmt::skip]
+    fn note_effect(&mut self, handle: Handle) -> Result<(), Refuse> {
+        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+        grant.record.effects += 1;
+        if grant.record.rate.is_some() {
+            grant.record.window_effects += 1;
+        }
+        Ok(())
+    }
+
+    #[rustfmt::skip]
+    fn open_rate_window(&mut self, handle: Handle) -> Result<(), Refuse> {
+        let now = self.verifier_now;
+        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+        let Some(rate) = grant.record.rate else {
+            return Ok(());
+        };
+        let _ = rate;
+        let end = grant.record.window_start.saturating_add(grant.record.window);
+        if now >= end {
+            grant.record.window_start = now;
+            grant.record.window_effects = 0;
+        }
+        Ok(())
+    }
+
+    /// The live-handle prefix `resolve` runs before the expiry walk: the handle
+    /// must be known and not ended, and the call must match the stored binding.
+    /// It does not read the expiry, so an expired grant is still live here.
+    fn resolve_live(&self, call: Call, handle: Handle) -> Result<GrantRecord, Refuse> {
         let grant = self
             .grants
             .get(&handle)
@@ -346,11 +432,28 @@ impl Verifier {
         }
         let bound = live_record(grant);
         self.check_call(call, &bound)?;
-        if let Some(expiry) = bound.expiry {
-            if self.verifier_now >= expiry {
-                return Err(Refuse::Expired);
+        Ok(bound)
+    }
+
+    /// The one handle check: resolves a handle and compares the stored grant
+    /// with the registry record of the call's instance, in order.
+    pub(crate) fn resolve(&self, call: Call, handle: Handle) -> Result<GrantRecord, Refuse> {
+        let bound = self.resolve_live(call, handle)?;
+        #[rustfmt::skip]
+        let _ = {
+            let mut expiry = bound.expiry;
+            let mut parent = bound.parent;
+            while let Some(handle) = parent {
+                let ancestor = self.grants.get(&handle).ok_or(Refuse::UnknownHandle)?;
+                expiry = ancestor.record.expiry;
+                parent = ancestor.record.parent;
             }
-        }
+            if let Some(expiry) = expiry {
+                if self.verifier_now >= expiry {
+                    return Err(Refuse::Expired);
+                }
+            }
+        };
         Ok(bound)
     }
 
@@ -396,10 +499,14 @@ impl Verifier {
     /// it so a hold opened before its grant's end still closes. `reserve` and
     /// `admit_ask` call `resolve` and open nothing new on an ended grant.
     fn resolve_for_hold(&self, call: Call, handle: Handle) -> Result<GrantRecord, Refuse> {
-        self.resolve(call, handle).or_else(|refusal| match refusal {
-            Refuse::UnknownHandle => self.resolve_kept(call, handle),
-            refusal => Err(refusal),
-        })
+        #[rustfmt::skip]
+        let resolved = {
+            self.resolve_live(call, handle).or_else(|refusal| match refusal {
+                Refuse::UnknownHandle => self.resolve_kept(call, handle),
+                refusal => Err(refusal),
+            })
+        };
+        resolved
     }
 
     /// Uses a grant for one path. The path must be the stored owned root or a
@@ -2159,4 +2266,177 @@ fn model_successful_child_keeps_next_ask_independent() {
         .use_grant(photo_call, &guest(album))
         .expect("independent album stays");
     assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
+}
+
+#[test]
+fn model_session_grant_ends_when_the_session_changes() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let home = verifier.register_instance("home", "session-a");
+    let home_mint = verifier
+        .bind_for_session(home, "UsersAI/home/desk", rights())
+        .expect_err("home does not mint");
+    assert_eq!(home_mint, Refuse::HomeMint);
+    let library = verifier
+        .bind_for_session(photo, "UsersAI/photo/library", rights())
+        .expect("session grant");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    let album = verifier
+        .bind_grant(photo, "UsersAI/photo/album", rights())
+        .expect("standing album");
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("first use");
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("a session grant allows a second use");
+    verifier
+        .host_set_session(photo, "session-b")
+        .expect("session changes");
+    let stopped = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("session grant has ended");
+    assert_eq!(stopped, Refuse::UnknownHandle);
+    assert_eq!(stopped.to_string(), "unknown handle");
+    let child_stopped = verifier
+        .use_grant(call, &guest(roll))
+        .expect_err("child journal ended with the session grant");
+    assert_eq!(child_stopped, Refuse::UnknownHandle);
+    let album_while = verifier
+        .use_grant(call, &guest(album))
+        .expect_err("standing grant waits for the old session");
+    assert_eq!(album_while, Refuse::Session);
+    verifier
+        .host_set_session(photo, "session-a")
+        .expect("restore session");
+    let still = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("restore does not revive the session grant");
+    assert_eq!(still, Refuse::UnknownHandle);
+    let album_kept = verifier
+        .use_grant(call, &guest(album))
+        .expect("standing grant revives");
+    assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
+}
+
+#[test]
+fn model_same_session_keeps_the_session_grant() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_for_session(photo, "UsersAI/photo/library", rights())
+        .expect("session grant");
+    verifier
+        .host_set_session(photo, "session-a")
+        .expect("same session");
+    let kept = verifier
+        .use_grant(verifier.open_call(photo), &guest(library))
+        .expect("the same session does not end the grant");
+    assert_eq!(kept.owned_root, "UsersAI/photo/library");
+}
+
+#[test]
+fn model_session_change_leaves_the_other_instance() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let notes = verifier.register_instance("notes", "session-a");
+    let library = verifier
+        .bind_for_session(photo, "UsersAI/photo/library", rights())
+        .expect("photo session grant");
+    let pad = verifier
+        .bind_for_session(notes, "UsersAI/notes/pad", rights())
+        .expect("notes session grant");
+    let photo_call = verifier.open_call(photo);
+    let notes_call = verifier.open_call(notes);
+    verifier
+        .use_grant(photo_call, &guest(library))
+        .expect("photo session grant works before the change");
+    let page = verifier
+        .create_child_journal(&notes_call, &guest(pad), "UsersAI/notes/pad/page")
+        .expect("notes child journal");
+    verifier
+        .host_set_session(photo, "session-b")
+        .expect("photo session changes");
+    let notes_kept = verifier
+        .use_grant(notes_call, &guest(pad))
+        .expect("the other instance's session grant stays");
+    assert_eq!(notes_kept.owned_root, "UsersAI/notes/pad");
+    let page_kept = verifier
+        .use_grant(notes_call, &guest(page))
+        .expect("the other instance's child journal stays");
+    assert_eq!(page_kept.owned_root, "UsersAI/notes/pad/page");
+}
+
+#[test]
+fn model_child_use_follows_the_issuing_expiry() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_until(photo, "UsersAI/photo/library", rights(), 5)
+        .expect("issuing expiry");
+    let album = verifier
+        .bind_grant(photo, "UsersAI/photo/album", rights())
+        .expect("standing album");
+    let call = verifier.open_call(photo);
+    verifier.set_verifier_now(4);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    let other = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/other")
+        .expect("sibling journal");
+    let page = verifier
+        .create_child_journal(&call, &guest(album), "UsersAI/photo/album/page")
+        .expect("standing child");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("before the issuing expiry");
+    verifier.set_verifier_now(5);
+    let due = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("the issuing grant has expired");
+    assert_eq!(due, Refuse::Expired);
+    let child_due = verifier
+        .use_grant(call, &guest(roll))
+        .expect_err("the child journal follows the issuing expiry");
+    assert_eq!(child_due, Refuse::Expired);
+    let sibling = verifier
+        .use_grant(call, &guest(other))
+        .expect_err("the sibling follows the same issuing expiry");
+    assert_eq!(sibling, Refuse::Expired);
+    assert_eq!(sibling.to_string(), "grant has expired");
+    verifier.set_verifier_now(6);
+    let later = verifier
+        .use_grant(call, &guest(roll))
+        .expect_err("past the issuing expiry is still due");
+    assert_eq!(later, Refuse::Expired);
+    let album_kept = verifier
+        .use_grant(call, &guest(album))
+        .expect("a standing grant has no expiry");
+    assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
+    let page_kept = verifier
+        .use_grant(call, &guest(page))
+        .expect("a standing child has no issuing expiry");
+    assert_eq!(page_kept.owned_root, "UsersAI/photo/album/page");
+}
+
+#[test]
+fn model_unset_issuing_expiry_does_not_expire_the_child() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("no expiry");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    verifier.set_verifier_now(u64::MAX);
+    let decision = verifier
+        .use_grant(call, &guest(roll))
+        .expect("unset issuing expiry is not due");
+    assert_eq!(decision.owned_root, "UsersAI/photo/library/roll");
 }
