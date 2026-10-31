@@ -43,6 +43,8 @@ reference model, not the Runtime; counts toward no M1 check; the Runtime half is
 
 `Verifier::operate` refuses an append or overwrite on the issuing grant when that path sits inside a live journal minted from that grant, or is that journal's path. The check calls the one `resource_name` and follows the owned-root check. A refused path spends no rate and no effect count, and it does not end an allow-once grant. An effect on the issuing root stays allowed. A path beside that journal stays allowed. A path that only shares a string prefix stays allowed. The journal's own append or overwrite stays allowed. An ended journal frees that path. Another issuing grant still effects a path inside that journal. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
 
+`Verifier::use_path` refuses a path a live journal minted from that grant holds, including that journal's own path. The check is the one `live_journal_holds` that `Verifier::operate` calls. A use of the issuing root stays allowed. A path beside that journal stays allowed. A path that only shares a string prefix stays allowed. The journal's own use stays allowed. An ended journal frees that path. Another issuing grant still uses a path inside that journal. A refused use spends nothing and does not end an allow-once grant. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
 `Verifier::admit_ask` caps one agent's budget ask and stores the granted amount through the one `admit`. This is a lab stand-in for that admission. It is not the Runtime. It does not count toward A7 or M1-R.
 
 A forged identity, session, instance, usage, ceiling or set of rights changes
