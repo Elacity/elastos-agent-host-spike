@@ -3047,3 +3047,168 @@ fn model_refused_effect_limit_does_not_roll_the_rate_window() {
         .use_grant(call, &guest(roll))
         .expect("the journal stays");
 }
+
+#[test]
+fn model_second_set_rate_keeps_the_window() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    assert_eq!(parent, Handle(1));
+    let album = verifier
+        .bind_grant(
+            instance,
+            "UsersAI/agent-1/album",
+            Rights {
+                append: true,
+                overwrite: false,
+                child_journal: false,
+            },
+        )
+        .expect("album");
+    assert_eq!(album, Handle(2));
+    verifier.set_verifier_now(3);
+    verifier
+        .set_rate(album, 1, 10)
+        .expect("the first rate starts the window at this instant");
+    let call = verifier.open_call(instance);
+    verifier
+        .operate(
+            &call,
+            &guest(album),
+            Operation::Append,
+            "UsersAI/agent-1/album",
+        )
+        .expect("one effect in the window that started at 3");
+    let inside = verifier
+        .operate(
+            &call,
+            &guest(album),
+            Operation::Append,
+            "UsersAI/agent-1/album",
+        )
+        .expect_err("the rate is spent");
+    assert_eq!(inside, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(inside.to_string(), "rate limit is reached");
+    verifier
+        .set_rate(album, 2, 11)
+        .expect("a second rate keeps the count and stores the new window");
+    verifier
+        .operate(
+            &call,
+            &guest(album),
+            Operation::Append,
+            "UsersAI/agent-1/album",
+        )
+        .expect("the raised rate allows one more effect");
+    let kept = verifier
+        .operate(
+            &call,
+            &guest(album),
+            Operation::Append,
+            "UsersAI/agent-1/album",
+        )
+        .expect_err("the kept count reaches the new rate");
+    assert_eq!(kept, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(kept.to_string(), "rate limit is reached");
+    verifier.set_verifier_now(12);
+    let still = verifier
+        .operate(
+            &call,
+            &guest(album),
+            Operation::Append,
+            "UsersAI/agent-1/album",
+        )
+        .expect_err("the window still started at 3");
+    assert_eq!(still, OperateRefuse::Binding(Refuse::Rate));
+    verifier.set_verifier_now(13);
+    let longer = verifier
+        .operate(
+            &call,
+            &guest(album),
+            Operation::Append,
+            "UsersAI/agent-1/album",
+        )
+        .expect_err("the second call stored a window of 11");
+    assert_eq!(longer, OperateRefuse::Binding(Refuse::Rate));
+    verifier.set_verifier_now(14);
+    verifier
+        .operate(
+            &call,
+            &guest(album),
+            Operation::Append,
+            "UsersAI/agent-1/album",
+        )
+        .expect("that longer window ends at 14");
+    verifier
+        .set_rate(parent, 1, 10)
+        .expect("the issuing rate starts at this instant");
+    let roll = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/roll")
+        .expect("the journal mints");
+    assert_eq!(roll, Handle(3));
+    verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/agent-1/journal/roll",
+        )
+        .expect("the child spends the issuing rate");
+    let parent_spent = verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
+        .expect_err("the issuing rate is spent");
+    assert_eq!(parent_spent, OperateRefuse::Binding(Refuse::Rate));
+    verifier.set_verifier_now(23);
+    verifier
+        .set_rate(parent, 1, 10)
+        .expect("a second issuing rate does not move the window");
+    let child_kept = verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/agent-1/journal/roll",
+        )
+        .expect_err("the child spend is still counted");
+    assert_eq!(child_kept, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(child_kept.to_string(), "rate limit is reached");
+    verifier.set_verifier_now(24);
+    verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/agent-1/journal/roll",
+        )
+        .expect("the window that started at 14 ends here");
+    verifier.set_verifier_now(25);
+    let next = verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
+        .expect_err("that effect started the next window");
+    assert_eq!(next, OperateRefuse::Binding(Refuse::Rate));
+    verifier
+        .use_grant(call, &guest(parent))
+        .expect("the issuing grant stays");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("the journal stays");
+    verifier
+        .use_grant(call, &guest(album))
+        .expect("the album grant stays");
+}

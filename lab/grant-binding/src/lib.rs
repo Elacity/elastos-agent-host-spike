@@ -387,10 +387,13 @@ impl Verifier {
         if grant.ended {
             return Err(Refuse::UnknownHandle);
         }
+        let starting = grant.record.rate.is_none();
         grant.record.rate = Some(limit);
         grant.record.window = window;
-        grant.record.window_start = self.verifier_now;
-        grant.record.window_effects = 0;
+        if starting {
+            grant.record.window_start = self.verifier_now;
+            grant.record.window_effects = 0;
+        }
         Ok(())
     }
 
