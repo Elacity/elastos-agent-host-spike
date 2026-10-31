@@ -101,6 +101,11 @@ interpolates storage paths into `(regex ...)` rules rather than binding a
 inline with `sandbox-exec -p` rather than `-f confine.sb`. It does not share
 the file-profile contract and this document does not claim it does. Aligning
 the model provider is future Runtime work in `elastos/`, outside this lane.
+The rule `model_inline_profile_problems` reads this section's quoted forms
+against the bridge's production region, and the rule
+`model_inline_profile_copies_agree` reads the same section in both documents
+for one text; `model_inline_profile_sections_match_the_bridge` runs both, and
+the did and wallet providers run under their own profile.
 The model provider's own file profile, `../model-provider/confine.sb`,
 presents this contract as an oracle, and the shared test requires it; the
 generated profile for the model provider must match it too.

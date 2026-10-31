@@ -486,6 +486,11 @@ interpolates storage paths into `(regex ...)` rules rather than binding a
 inline with `sandbox-exec -p` rather than `-f confine.sb`. It does not share
 the file-profile contract and this document does not claim it does. Aligning
 the model provider is future Runtime work in `elastos/`, outside this lane.
+The rule `model_inline_profile_problems` reads this section's quoted forms
+against the bridge's production region, and the rule
+`model_inline_profile_copies_agree` reads the same section in both documents
+for one text; `model_inline_profile_sections_match_the_bridge` runs both, and
+the did and wallet providers run under their own profile.
 The model provider's own file profile, `../model-provider/confine.sb`,
 presents this contract as an oracle, and the shared test requires it; the
 generated profile for the model provider must match it too.
@@ -1608,6 +1613,13 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `CAUGHT falsifiers.` block, so the C0 part's `WP127` review line passes as B3
   evidence.
   `every_m1_summary_names_its_journey_and_its_falsifiers` checks this rule.
+- WP240: The claims rule accepts every token without reading the bridge's
+  production region, so a section claiming the Runtime binds a `(param ...)`
+  token passes.
+  `model_inline_profile_sections_match_the_bridge` checks this rule.
+- WP241: The copies rule accepts two sections that differ, so a
+  provider-specific sentence added to one copy passes.
+  `model_inline_profile_sections_match_the_bridge` checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

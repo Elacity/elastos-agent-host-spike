@@ -318,8 +318,14 @@ use std::process::Command;
 /// registers, so a summary citing a retired plant passes; and WP239, which
 /// reads that id set from the whole part instead of its CAUGHT block, so the C0
 /// part's `WP127` review line passes as B3 evidence. Both are CAUGHT on the Mac
-/// by `every_m1_summary_names_its_journey_and_its_falsifiers`.
-const EXPECTED_FALSIFIERS: usize = 219;
+/// by `every_m1_summary_names_its_journey_and_its_falsifiers`. Task 169 adds
+/// WP240, which makes the inline-profile claims rule accept every token without
+/// reading the bridge's production region, so a section claiming a
+/// `(param ...)` token passes; and WP241, which makes the copies rule accept two
+/// sections that differ, so a provider-specific sentence added to one copy
+/// passes. Both are CAUGHT on the Mac by
+/// `model_inline_profile_sections_match_the_bridge`.
+const EXPECTED_FALSIFIERS: usize = 221;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

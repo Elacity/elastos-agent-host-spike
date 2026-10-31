@@ -3557,6 +3557,38 @@
       "tests": [
         "every_m1_summary_names_its_journey_and_its_falsifiers"
       ]
+    },
+    {
+      "id": "WP240",
+      "title": "the claims rule accepts every token without reading the bridge's production region, so a section claiming a param token passes",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        RegionReading::Held => region.contains(token),\n        RegionReading::Absent => !region.contains(token),\n",
+          "new": "        RegionReading::Held => true,\n        RegionReading::Absent => true,\n"
+        }
+      ],
+      "tests": [
+        "model_inline_profile_sections_match_the_bridge"
+      ]
+    },
+    {
+      "id": "WP241",
+      "title": "the copies rule accepts two sections that differ, so a provider-specific sentence added to one copy passes",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    if first_section == second_section {\n        return Vec::new();\n    }\n",
+          "new": "    if true {\n        return Vec::new();\n    }\n"
+        }
+      ],
+      "tests": [
+        "model_inline_profile_sections_match_the_bridge"
+      ]
     }
   ]
 }

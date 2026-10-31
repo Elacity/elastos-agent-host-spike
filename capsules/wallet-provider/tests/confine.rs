@@ -392,6 +392,22 @@ fn wallet_dir(root: &Path) -> PathBuf {
         .fold(root.to_path_buf(), |path, part| path.join(part))
 }
 
+/// The repository root, the directory that holds `capsules/` and `elastos/`.
+///
+/// `capsules/wallet-provider` sits two levels under the root, so the root is
+/// `CARGO_MANIFEST_DIR` twice up. One lookup serves every reader of a file
+/// outside `capsules/` (P10).
+fn repository_root() -> &'static Path {
+    static ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("capsules/wallet-provider must sit under the repository root")
+            .to_path_buf()
+    });
+    ROOT.as_path()
+}
+
 /// The did-provider crate's directory, the source of its binary, profile and
 /// declared-rights fixture.
 fn did_provider_dir() -> PathBuf {
@@ -13010,6 +13026,19 @@ const TESTS_HEADING: &str = "## Tests";
 /// states the host OSes its confinement tests exercise.
 const HOST_OS_HEADING: &str = "## Host-OS status";
 
+/// The heading line every confinement document uses for the section that
+/// states the model provider's inline profile convention and how it differs
+/// from the file-profile contract in `elastos/`.
+const MODEL_INLINE_HEADING: &str = "## The model provider's inline profile";
+
+/// The one bridge source the inline-profile section states facts about, as
+/// every refusal of its reader names it.
+const BRIDGE_SOURCE_PATH: &str = "elastos/crates/elastos-runtime/src/provider/bridge.rs";
+
+/// The attribute line that starts the bridge's test module. The production
+/// region is cut before the first line equal to this text.
+const TEST_MODULE_ATTRIBUTE: &str = "#[cfg(test)]";
+
 /// The one declaration each `tests/confine.rs` file holds the OSes its
 /// confinement tests exercise in. The two files are two test binaries, so no
 /// constant can be shared by `use`; the rule reads the sibling file as text.
@@ -13855,6 +13884,177 @@ fn profile_allow_table_problems(
     problems
 }
 
+/// Whether a claim requires one token to be present in the production region
+/// or to be absent from it.
+#[derive(Clone, Copy)]
+enum RegionReading {
+    Held,
+    Absent,
+}
+
+/// Whether `region` reads as the claim requires: `Held` needs the token at
+/// least once, `Absent` needs it nowhere.
+fn region_matches(region: &str, token: &str, want: RegionReading) -> bool {
+    match want {
+        RegionReading::Held => region.contains(token),
+        RegionReading::Absent => !region.contains(token),
+    }
+}
+
+/// One of the four facts the inline-profile section states about the bridge:
+/// the forms the section quotes, and the tokens its production region must
+/// hold or must lack.
+struct InlineClaim {
+    /// The claim's short name, as a refusal names it.
+    name: &'static str,
+    /// The forms the section must quote, each exactly as the section writes it.
+    quoted: &'static [&'static str],
+    /// The tokens the production region must hold, each at least once.
+    held: &'static [&'static str],
+    /// The tokens the production region must not hold at all.
+    absent: &'static [&'static str],
+}
+
+/// The four facts `MODEL_INLINE_HEADING` states about the bridge's inline
+/// policy, as one table. The claims rule reads every row, and both named tests
+/// drive the same rows, so no claim has a second copy (P10).
+const INLINE_CLAIMS: [InlineClaim; 4] = [
+    InlineClaim {
+        name: "the default rule",
+        quoted: &["(allow default)", "(deny default)"],
+        held: &["(allow default)"],
+        absent: &["(deny default)"],
+    },
+    InlineClaim {
+        name: "the storage-path rules",
+        quoted: &["(regex ...)", "(param ...)"],
+        // The bridge writes its policy inside Rust string literals, so the
+        // source text holds an escaped quote.
+        held: &["(allow file-read* (regex \\\""],
+        absent: &["(param \\\""],
+    },
+    InlineClaim {
+        name: "the socket grant",
+        quoted: &["(allow network-outbound (literal ...))"],
+        held: &["(allow network-outbound (literal \\\""],
+        absent: &[],
+    },
+    InlineClaim {
+        name: "the inline policy",
+        quoted: &["sandbox-exec -p", "-f confine.sb"],
+        held: &["arg(\"-p\")"],
+        absent: &["arg(\"-f\")"],
+    },
+];
+
+/// Every problem with one document's `MODEL_INLINE_HEADING` section, each
+/// naming the document, the claim and the form or token it read.
+///
+/// For each row of `INLINE_CLAIMS` the section's backtick spans must quote
+/// every form of `quoted`, and `region`, the bridge's production text, must
+/// hold every token of `held` and no token of `absent`. A missing or
+/// duplicated heading is the one section reader's own refusal.
+///
+/// The one honesty limit: this compares text in a source with text in a
+/// document. It shows that the section and the bridge agree on these four
+/// forms and shows nothing about a loaded policy, a kernel or the Runtime
+/// starting anything. It takes values, starts no process and makes no kernel
+/// call, so it runs on every OS.
+///
+/// Falsifier: WP240 makes `region_matches` accept every token without reading
+/// the region, so a section claiming the Runtime binds a `(param ...)` token
+/// passes; `model_inline_profile_sections_match_the_bridge` fails on its
+/// planted region.
+fn model_inline_profile_problems(document_name: &str, document: &str, region: &str) -> Vec<String> {
+    let section = match section_under_one_heading(document_name, document, MODEL_INLINE_HEADING) {
+        Ok(section) => section,
+        Err(problems) => return problems,
+    };
+    let spans = backtick_spans(&section);
+    let mut problems = Vec::new();
+    for claim in &INLINE_CLAIMS {
+        for form in claim.quoted {
+            if !spans.contains(form) {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {MODEL_INLINE_HEADING} claim {} must quote \
+                     {form}, and it does not",
+                    claim.name
+                ));
+            }
+        }
+        for (want, token) in claim
+            .held
+            .iter()
+            .map(|token| (RegionReading::Held, token))
+            .chain(
+                claim
+                    .absent
+                    .iter()
+                    .map(|token| (RegionReading::Absent, token)),
+            )
+        {
+            if region_matches(region, token, want) {
+                continue;
+            }
+            let reading = match want {
+                RegionReading::Held => "to hold the token",
+                RegionReading::Absent => "to lack the token",
+            };
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {MODEL_INLINE_HEADING} claim {} requires \
+                 {BRIDGE_SOURCE_PATH} {reading} {token}, and its production region reads \
+                 otherwise",
+                claim.name
+            ));
+        }
+    }
+    problems
+}
+
+/// The one problem with two documents whose `MODEL_INLINE_HEADING` sections
+/// differ, naming both documents and the first line that differs.
+///
+/// It reads no file itself, so a caller passes the two sections it cut. The
+/// section states one convention for the model provider, so the two copies are
+/// one text: a sentence added to one copy is refused, and a provider-specific
+/// sentence belongs in both copies or in neither.
+///
+/// Falsifier: WP241 makes the compare accept two different sections, so a
+/// provider-specific sentence added to one copy passes;
+/// `model_inline_profile_sections_match_the_bridge` fails on its planted copy.
+fn model_inline_profile_copies_agree(
+    first_name: &str,
+    first_section: &str,
+    second_name: &str,
+    second_section: &str,
+) -> Vec<String> {
+    if first_section == second_section {
+        return Vec::new();
+    }
+    let first: Vec<&str> = first_section.lines().collect();
+    let second: Vec<&str> = second_section.lines().collect();
+    let differs = first
+        .iter()
+        .zip(second.iter())
+        .position(|(left, right)| left != right)
+        .unwrap_or_else(|| first.len().min(second.len()));
+    // A copy that ends earlier leaves no line to quote, so the reading names
+    // the ending rather than a trailing empty line.
+    let line = |lines: &[&str]| {
+        lines.get(differs).map_or_else(
+            || "no line, the section ends there".to_string(),
+            |line| format!("\"{line}\""),
+        )
+    };
+    vec![format!(
+        "{first_name} CONFINEMENT.md and {second_name} CONFINEMENT.md must hold one text under \
+         {MODEL_INLINE_HEADING}; line {} differs, {} against {}",
+        differs + 1,
+        line(&first),
+        line(&second)
+    )]
+}
+
 /// Reads `capsules/<name>/CONFINEMENT.md`, or refuses with a reason that names
 /// its path. There is no skip path.
 fn read_confinement_document(capsules: &Path, name: &str) -> Result<String, String> {
@@ -13891,6 +14091,38 @@ fn read_lane_test_source(capsules: &Path, name: &str) -> Result<String, String> 
             path.display()
         )
     })
+}
+
+/// Reads the Runtime bridge source the inline-profile section states facts
+/// about, or refuses with a reason that names its path. There is no skip path.
+/// The file is read as text and never edited: this lane owns no path under
+/// `elastos/`.
+fn read_bridge_source() -> Result<String, String> {
+    let path = repository_root().join(BRIDGE_SOURCE_PATH);
+    fs::read_to_string(&path).map_err(|err| format!("{BRIDGE_SOURCE_PATH} must be readable: {err}"))
+}
+
+/// The production region of a Rust source: the text before its first top-level
+/// `#[cfg(test)]` line, or a refusal that names `source_name` when that line is
+/// absent.
+///
+/// A line that carries the attribute after indentation belongs to a nested
+/// module and is not the top-level one, so it does not cut the region. A source
+/// with no top-level test module is a refusal, never a silent read of the whole
+/// file, because a whole-file read would let a test's own launch answer for the
+/// shipped policy.
+fn rust_production_region<'a>(source_name: &str, source: &'a str) -> Result<&'a str, String> {
+    let mut cut = 0;
+    for line in source.split_inclusive('\n') {
+        if line.trim_end_matches(['\n', '\r']) == TEST_MODULE_ATTRIBUTE {
+            return Ok(&source[..cut]);
+        }
+        cut += line.len();
+    }
+    Err(format!(
+        "{source_name} must hold one top-level line {TEST_MODULE_ATTRIBUTE} that starts its test \
+         module; found none, so its production region cannot be cut"
+    ))
 }
 
 /// Every backtick-delimited span in `text`, in order.
@@ -17911,11 +18143,7 @@ fn check_lab_generator_names(root: &Path) -> Result<usize, String> {
 /// `write_generated_profile`. It prints how many files it read.
 #[test]
 fn lab_generator_is_named_only_in_test_code() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|capsules| capsules.parent())
-        .expect("capsules/wallet-provider must sit under the repository root");
-    let read = check_lab_generator_names(root).unwrap_or_else(|err| panic!("{err}"));
+    let read = check_lab_generator_names(repository_root()).unwrap_or_else(|err| panic!("{err}"));
     println!("lab generator name check read {read} files");
 }
 
@@ -20064,6 +20292,431 @@ fn m1_summary_check_refuses_each_bad_part() {
         summaries.bad_cases().len(),
         16,
         "every refusal of the rule must have its own case"
+    );
+}
+
+/// The two documents, their inline-profile sections and the bridge's
+/// production region, held once so both named tests drive one set of values.
+struct ModelInlineProfile {
+    did_document: String,
+    wallet_document: String,
+    did_section: String,
+    wallet_section: String,
+    region: String,
+}
+
+impl ModelInlineProfile {
+    /// Reads both documents through `read_confinement_document`, reads
+    /// `BRIDGE_SOURCE_PATH` through `read_bridge_source`, cuts it with
+    /// `rust_production_region` and cuts both sections with the one section
+    /// reader. A missing document or source is a refusal that names its path,
+    /// never a skipped provider.
+    fn read() -> Self {
+        let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("capsules/wallet-provider must sit under capsules/");
+        let did_document =
+            read_confinement_document(capsules, DID_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+        let wallet_document = read_confinement_document(capsules, WALLET_PROVIDER)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let source = read_bridge_source().unwrap_or_else(|err| panic!("{err}"));
+        let region = rust_production_region(BRIDGE_SOURCE_PATH, &source)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .to_string();
+        let did_section =
+            section_under_one_heading(DID_PROVIDER, &did_document, MODEL_INLINE_HEADING)
+                .unwrap_or_else(|refusals| panic!("{}", refusals.join("\n")));
+        let wallet_section =
+            section_under_one_heading(WALLET_PROVIDER, &wallet_document, MODEL_INLINE_HEADING)
+                .unwrap_or_else(|refusals| panic!("{}", refusals.join("\n")));
+        Self {
+            did_document,
+            wallet_document,
+            did_section,
+            wallet_section,
+            region,
+        }
+    }
+
+    /// Every problem both rules report over the two committed documents and
+    /// the committed production region.
+    fn committed_problems(&self) -> Vec<String> {
+        let mut problems =
+            model_inline_profile_problems(DID_PROVIDER, &self.did_document, &self.region);
+        problems.extend(model_inline_profile_problems(
+            WALLET_PROVIDER,
+            &self.wallet_document,
+            &self.region,
+        ));
+        problems.extend(model_inline_profile_copies_agree(
+            DID_PROVIDER,
+            &self.did_section,
+            WALLET_PROVIDER,
+            &self.wallet_section,
+        ));
+        problems
+    }
+
+    /// The one refusal of a missing heading.
+    fn missing_heading() -> String {
+        format!("{WALLET_PROVIDER} CONFINEMENT.md must hold one line {MODEL_INLINE_HEADING}; found none")
+    }
+
+    /// The one refusal of a duplicated heading.
+    fn duplicated_heading() -> String {
+        format!(
+            "{WALLET_PROVIDER} CONFINEMENT.md must hold one line {MODEL_INLINE_HEADING}; found 2"
+        )
+    }
+
+    /// The one refusal of a claim whose form the section does not quote.
+    fn unquoted(claim: &str, form: &str) -> String {
+        format!(
+            "{WALLET_PROVIDER} CONFINEMENT.md: {MODEL_INLINE_HEADING} claim {claim} must quote \
+             {form}, and it does not"
+        )
+    }
+
+    /// The one refusal of a claim the production region does not read as the
+    /// claim states.
+    fn region_mismatch(claim: &str, reading: &str) -> String {
+        format!(
+            "{WALLET_PROVIDER} CONFINEMENT.md: {MODEL_INLINE_HEADING} claim {claim} requires \
+             {BRIDGE_SOURCE_PATH} {reading}, and its production region reads otherwise"
+        )
+    }
+
+    /// One case per refusal of the two rules: the label a failing case names,
+    /// the document, the region, and the exact problem vector it must report.
+    ///
+    /// The vectors are built from this head's own section and region, so a
+    /// rule that stops refusing a case, or refuses it with another reason,
+    /// differs from what the named tests assert.
+    fn bad_cases(&self) -> Vec<(&'static str, String, String, Vec<String>)> {
+        let heading = |body: &str| format!("{MODEL_INLINE_HEADING}\n{body}\n");
+        let real = self.region.clone();
+        let real_section = heading(&self.wallet_section);
+        // The real section with `form` unquoted, so the case changes only the
+        // quoting the claim it names requires.
+        let unquoted = |form: &str| {
+            assert!(
+                self.wallet_section.contains(form),
+                "the committed section must quote {form}, so a case edits a span it has"
+            );
+            heading(
+                &self
+                    .wallet_section
+                    .replacen(form, &form.replace('`', ""), 1),
+            )
+        };
+        let default_claim = &INLINE_CLAIMS[0];
+        let storage_claim = &INLINE_CLAIMS[1];
+        let socket_claim = &INLINE_CLAIMS[2];
+        let inline_claim = &INLINE_CLAIMS[3];
+        vec![
+            (
+                "a document with no inline-profile heading",
+                "# fixture\n\n## Tests\n\nNothing here.\n".to_string(),
+                real.clone(),
+                vec![Self::missing_heading()],
+            ),
+            (
+                "a document with the heading twice",
+                format!(
+                    "{MODEL_INLINE_HEADING}\n{section}\n\n{MODEL_INLINE_HEADING}\n{section}\n",
+                    section = self.wallet_section
+                ),
+                real.clone(),
+                vec![Self::duplicated_heading()],
+            ),
+            (
+                "a section that does not quote the allow-default form",
+                unquoted("`(allow default)`"),
+                real.clone(),
+                vec![Self::unquoted(default_claim.name, "(allow default)")],
+            ),
+            (
+                "a section that does not quote the deny-default form",
+                unquoted("`(deny default)`"),
+                real.clone(),
+                vec![Self::unquoted(default_claim.name, "(deny default)")],
+            ),
+            (
+                "a section that does not quote the regex form",
+                unquoted("`(regex ...)`"),
+                real.clone(),
+                vec![Self::unquoted(storage_claim.name, "(regex ...)")],
+            ),
+            (
+                "a section that does not quote the param form",
+                unquoted("`(param ...)`"),
+                real.clone(),
+                vec![Self::unquoted(storage_claim.name, "(param ...)")],
+            ),
+            (
+                "a section that does not quote the socket form",
+                unquoted("`(allow network-outbound (literal ...))`"),
+                real.clone(),
+                vec![Self::unquoted(
+                    socket_claim.name,
+                    "(allow network-outbound (literal ...))",
+                )],
+            ),
+            (
+                "a section that does not quote the inline-policy form",
+                unquoted("`sandbox-exec -p`"),
+                real.clone(),
+                vec![Self::unquoted(inline_claim.name, "sandbox-exec -p")],
+            ),
+            (
+                "a section that does not quote the profile-file form",
+                unquoted("`-f confine.sb`"),
+                real.clone(),
+                vec![Self::unquoted(inline_claim.name, "-f confine.sb")],
+            ),
+            (
+                "a region whose default rule is a denial",
+                real_section.clone(),
+                real.replace("(allow default)", "(deny default)"),
+                vec![
+                    Self::region_mismatch(default_claim.name, "to hold the token (allow default)"),
+                    Self::region_mismatch(default_claim.name, "to lack the token (deny default)"),
+                ],
+            ),
+            (
+                "a region that binds a param token",
+                real_section.clone(),
+                format!("{real}\n(allow file-read* (param \\\"storage\\\"))\n"),
+                vec![Self::region_mismatch(
+                    storage_claim.name,
+                    "to lack the token (param \\\"",
+                )],
+            ),
+            (
+                "a region that interpolates no regex rule",
+                real_section.clone(),
+                real.replace(
+                    "(allow file-read* (regex \\\"",
+                    "(allow file-read* (literal \\\"",
+                ),
+                vec![Self::region_mismatch(
+                    storage_claim.name,
+                    "to hold the token (allow file-read* (regex \\\"",
+                )],
+            ),
+            (
+                "a region that grants no socket",
+                real_section.clone(),
+                real.replace(
+                    "(allow network-outbound (literal \\\"",
+                    "(deny network-outbound (literal \\\"",
+                ),
+                vec![Self::region_mismatch(
+                    socket_claim.name,
+                    "to hold the token (allow network-outbound (literal \\\"",
+                )],
+            ),
+            (
+                "a region that passes its policy from a file",
+                real_section,
+                format!("{real}\n        command.arg(\"-f\").arg(policy);\n"),
+                vec![Self::region_mismatch(
+                    inline_claim.name,
+                    "to lack the token arg(\"-f\")",
+                )],
+            ),
+            (
+                "a region that passes no inline policy",
+                heading(&self.wallet_section),
+                real.replace("arg(\"-p\")", "arg(\"-x\")"),
+                vec![Self::region_mismatch(
+                    inline_claim.name,
+                    "to hold the token arg(\"-p\")",
+                )],
+            ),
+        ]
+    }
+}
+
+/// The model provider's inline-profile section states the four facts the
+/// Runtime bridge still holds, and both documents state them as one text.
+///
+/// The check reads both documents through `read_confinement_document`, reads
+/// `BRIDGE_SOURCE_PATH` through `read_bridge_source`, cuts it with
+/// `rust_production_region`, cuts both sections with the one section reader
+/// and requires `model_inline_profile_problems` and
+/// `model_inline_profile_copies_agree` to find no problem. It then requires
+/// both rules to refuse this head's committed section against a planted region
+/// and against a planted second copy, so a rule that accepts without reading
+/// its region or its second copy fails here too. A missing document or source
+/// is a refusal that names its path, never a skipped provider. It reads files
+/// only and starts no process, so it runs on every OS; it shows that this text
+/// and that source agree, and nothing about a loaded policy, a kernel or the
+/// Runtime starting anything.
+///
+/// Falsifier: WP240 makes the claims rule read no region, so a section
+/// claiming a `(param ...)` token passes; WP241 makes the copies compare accept
+/// two different sections, so a sentence added to one copy passes. Both fail
+/// this test.
+#[test]
+fn model_inline_profile_sections_match_the_bridge() {
+    let inline = ModelInlineProfile::read();
+    let problems = inline.committed_problems();
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+    // Both rules read what they compare: the committed section is refused
+    // against a region that lacks one claimed token, and the two committed
+    // copies are refused when one line differs. A rule that accepts without
+    // reading its region or its second copy fails here.
+    assert!(
+        !model_inline_profile_problems(
+            WALLET_PROVIDER,
+            &format!("{MODEL_INLINE_HEADING}\n{}\n", inline.wallet_section),
+            &inline
+                .region
+                .replacen("(allow default)", "(deny default)", 1),
+        )
+        .is_empty(),
+        "a region that denies by default must be refused against the committed section"
+    );
+    assert!(
+        !model_inline_profile_copies_agree(
+            DID_PROVIDER,
+            &inline.did_section,
+            WALLET_PROVIDER,
+            &format!("{}\nA provider-specific sentence.", inline.wallet_section),
+        )
+        .is_empty(),
+        "a sentence added to one copy must be refused"
+    );
+}
+
+/// The inline-profile rules refuse each bad section, each unread region and
+/// each differing copy, over text values.
+///
+/// The passing cases are each document's real `MODEL_INLINE_HEADING` section
+/// against the real `BRIDGE_SOURCE_PATH` production region, so a refusal there
+/// means this head moved away from its document and is reported rather than
+/// fixed by editing a rule. Then one case per refusal asserts the exact
+/// problem vector: a missing and a duplicated heading, a section that stops
+/// quoting each claim's form, a region that lacks or holds a token the claim
+/// denies, a source with no test module, and two sections that differ at a
+/// line and one that differs by length alone. The test starts no process and
+/// makes no kernel call.
+///
+/// Falsifier: WP240 and WP241 each make one case report a different vector from
+/// the one asserted here.
+#[test]
+fn model_inline_profile_check_refuses_each_bad_section() {
+    let inline = ModelInlineProfile::read();
+    for (document_name, document) in [
+        (DID_PROVIDER, &inline.did_document),
+        (WALLET_PROVIDER, &inline.wallet_document),
+    ] {
+        let section = section_under_one_heading(document_name, document, MODEL_INLINE_HEADING)
+            .unwrap_or_else(|refusals| panic!("{}", refusals.join("\n")));
+        assert_eq!(
+            model_inline_profile_problems(
+                document_name,
+                &format!("{MODEL_INLINE_HEADING}\n{section}\n"),
+                &inline.region
+            ),
+            Vec::<String>::new(),
+            "{document_name}'s real inline-profile section must pass the rule on its own"
+        );
+    }
+    assert_eq!(
+        rust_production_region(BRIDGE_SOURCE_PATH, &inline.did_document)
+            .expect_err("a source with no test module must be refused"),
+        format!(
+            "{BRIDGE_SOURCE_PATH} must hold one top-level line {TEST_MODULE_ATTRIBUTE} that starts \
+             its test module; found none, so its production region cannot be cut"
+        ),
+        "a source with no test module is a refusal that names the file"
+    );
+    assert!(
+        !inline
+            .region
+            .contains(&format!("\n{TEST_MODULE_ATTRIBUTE}")),
+        "the production region must stop before the test module"
+    );
+
+    for (label, document, region, expected) in inline.bad_cases() {
+        assert_eq!(
+            model_inline_profile_problems(WALLET_PROVIDER, &document, &region),
+            expected,
+            "{label} must be refused with its own reason"
+        );
+    }
+
+    let real = &inline.wallet_section;
+    let first_line = real
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .expect("a real section holds a line");
+    assert_eq!(
+        model_inline_profile_copies_agree(DID_PROVIDER, real, WALLET_PROVIDER, real),
+        Vec::<String>::new(),
+        "one text in both copies passes"
+    );
+    assert_eq!(
+        model_inline_profile_copies_agree(
+            DID_PROVIDER,
+            real,
+            WALLET_PROVIDER,
+            &real.replacen(first_line, "A provider-specific sentence.", 1)
+        ),
+        vec![format!(
+            "{DID_PROVIDER} CONFINEMENT.md and {WALLET_PROVIDER} CONFINEMENT.md must hold one text \
+             under {MODEL_INLINE_HEADING}; line 2 differs, \"{first_line}\" against \"A \
+             provider-specific sentence.\""
+        )],
+        "a sentence in one copy alone must be refused, naming both documents and the first \
+         differing line"
+    );
+    assert_eq!(
+        model_inline_profile_copies_agree(
+            DID_PROVIDER,
+            real,
+            WALLET_PROVIDER,
+            &format!("{real}\nA provider-specific sentence.")
+        ),
+        vec![format!(
+            "{DID_PROVIDER} CONFINEMENT.md and {WALLET_PROVIDER} CONFINEMENT.md must hold one text \
+             under {MODEL_INLINE_HEADING}; line 19 differs, no line, the section ends there \
+             against \"\""
+        )],
+        "a copy that ends later must be refused at the first line the other copy lacks"
+    );
+    // The last sentence line, and the same section with that line added to,
+    // and with it dropped, so the two copies differ by one whole line.
+    let last_sentence = real
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .next_back()
+        .expect("a real section holds a sentence line");
+    let longer = real.replacen(
+        last_sentence,
+        &format!("{last_sentence}\nA provider-specific sentence."),
+        1,
+    );
+    let shorter = real.replacen(&format!("{last_sentence}\n"), "", 1);
+    assert_eq!(
+        model_inline_profile_copies_agree(DID_PROVIDER, &shorter, WALLET_PROVIDER, &longer),
+        vec![format!(
+            "{DID_PROVIDER} CONFINEMENT.md and {WALLET_PROVIDER} CONFINEMENT.md must hold one text \
+             under {MODEL_INLINE_HEADING}; line 18 differs, no line, the section ends there \
+             against \"{last_sentence}\""
+        )],
+        "a copy that ends earlier must be refused at the line it does not hold"
+    );
+    assert_eq!(
+        model_inline_profile_copies_agree(DID_PROVIDER, &longer, WALLET_PROVIDER, &shorter),
+        vec![format!(
+            "{DID_PROVIDER} CONFINEMENT.md and {WALLET_PROVIDER} CONFINEMENT.md must hold one text \
+             under {MODEL_INLINE_HEADING}; line 18 differs, \"{last_sentence}\" against no line, \
+             the section ends there"
+        )],
+        "the refusal names whichever copy ends first"
     );
 }
 
