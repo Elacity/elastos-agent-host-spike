@@ -1,0 +1,12 @@
+id: F-A5-zerowin
+file: src/lib.rs
+test: ops::model_zero_window_starts_a_new_count
+test: ops::model_child_zero_window_starts_a_new_count
+--- old
+        let end = grant.record.window_start.saturating_add(grant.record.window);
+--- new
+        if grant.record.window == 0 {
+            return Ok(());
+        }
+        let end = grant.record.window_start.saturating_add(grant.record.window);
+--- end
