@@ -1,0 +1,11 @@
+id: F-A5-sesskeep
+file: src/lib.rs
+test: model_session_grant_ends_when_the_session_changes
+test: model_extended_session_is_refused
+test: model_case_different_session_is_refused
+test: model_new_session_is_refused
+--- old
+            .filter(|(_, grant)| grant.record.instance == instance && grant.record.session_bound)
+--- new
+            .filter(|(_, grant)| grant.record.instance == instance)
+--- end
