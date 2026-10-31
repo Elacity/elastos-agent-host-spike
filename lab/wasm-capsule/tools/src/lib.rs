@@ -30,6 +30,7 @@
 
 pub mod bundle;
 pub mod receipt;
+pub mod release_feed;
 pub mod run;
 pub mod verify;
 
