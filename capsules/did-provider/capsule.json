@@ -18,7 +18,22 @@
         "operations": ["get_did", "resolve", "sign_chat_message", "verify", "verify_did_recovery", "get_nickname", "set_nickname", "get_persona_did"]
       }
     ],
-    "audit_events": ["did.resolve", "did.sign", "did.profile_update"]
+    "audit_events": ["did.resolve", "did.sign", "did.profile_update"],
+    "rights": [
+      {
+        "id": "storage",
+        "rules": [
+          "(allow file-read* (literal (param \"STORAGE_PARENT\")))",
+          "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))"
+        ]
+      },
+      {
+        "id": "bound-executable",
+        "rules": [
+          "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))"
+        ]
+      }
+    ]
   },
   "interfaces": [
     {
