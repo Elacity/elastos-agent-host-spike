@@ -1,0 +1,9 @@
+id: F-A5-issueexpiry
+file: src/lib.rs
+test: model_child_use_follows_the_issuing_expiry
+test: model_child_path_follows_the_issuing_expiry
+--- old
+                expiry = ancestor.record.expiry;
+--- new
+                expiry = bound.expiry;
+--- end

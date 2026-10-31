@@ -5217,3 +5217,191 @@ fn model_end_grant_with_no_hold_leaves_no_kept_binding() {
         .expect_err("the ended handle opens no hold");
     assert_eq!(refusal, ReserveRefuse::Binding(Refuse::UnknownHandle));
 }
+
+#[test]
+fn model_expired_grant_still_settles() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_until(photo, "UsersAI/photo/library", rights(), 5)
+        .expect("expiry");
+    let album = verifier
+        .bind_grant(photo, "UsersAI/photo/album", rights())
+        .expect("standing album");
+    let call = verifier.open_call(photo);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(library),
+            crate::ask::BudgetAsk { amount: 5 },
+            5,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(library), 5).expect("hold");
+    verifier.set_verifier_now(5);
+    let due = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("the grant has expired");
+    assert_eq!(due, Refuse::Expired);
+    assert_eq!(due.to_string(), "grant has expired");
+    let opened = verifier
+        .reserve(&call, &guest(library), 1)
+        .expect_err("an expired grant opens no hold");
+    assert_eq!(opened, ReserveRefuse::Binding(Refuse::Expired));
+    let blocked = verifier
+        .reserve(&call, &guest(album), 1)
+        .expect_err("the open hold still fills the ceiling");
+    assert_eq!(
+        blocked,
+        ReserveRefuse::OverCeiling {
+            ceiling: 5,
+            held: 5,
+            asked: 1,
+        }
+    );
+    assert_eq!(
+        verifier.settle(&call, &guest(library), reservation, SettleOutcome::Known(5)),
+        Ok(5),
+        "a hold opened before the expiry still settles"
+    );
+    assert_eq!(
+        books(&verifier).held,
+        0,
+        "the settled hold gives its amount back"
+    );
+    assert_eq!(
+        books(&verifier).charged,
+        5,
+        "the measured figure is charged"
+    );
+    let later = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("settle does not end the expiry");
+    assert_eq!(later, Refuse::Expired);
+    verifier
+        .reserve(&call, &guest(album), 1)
+        .expect("the ceiling room returned");
+}
+
+#[test]
+fn model_expired_grant_still_releases() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_until(photo, "UsersAI/photo/library", rights(), 5)
+        .expect("expiry");
+    let call = verifier.open_call(photo);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(library),
+            crate::ask::BudgetAsk { amount: 5 },
+            5,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(library), 5).expect("hold");
+    verifier.set_verifier_now(5);
+    assert_eq!(
+        verifier.release(&call, &guest(library), reservation),
+        Ok(()),
+        "a hold opened before the expiry still releases"
+    );
+    assert_eq!(
+        books(&verifier).held,
+        0,
+        "the released hold gives its amount back"
+    );
+    assert_eq!(books(&verifier).charged, 0, "release charges nothing");
+    let due = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("release does not end the expiry");
+    assert_eq!(due, Refuse::Expired);
+}
+
+#[test]
+fn model_expired_grant_still_times_out() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_until(photo, "UsersAI/photo/library", rights(), 5)
+        .expect("expiry");
+    let call = verifier.open_call(photo);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(library),
+            crate::ask::BudgetAsk { amount: 5 },
+            5,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(library), 5).expect("hold");
+    verifier.set_verifier_deadline(10);
+    verifier.set_verifier_now(5);
+    assert_eq!(
+        verifier.settle(&call, &guest(library), reservation, SettleOutcome::Unknown),
+        Err(SettleRefuse::UnknownOutcome)
+    );
+    assert_eq!(
+        verifier.timeout_hold(&call, &guest(library), reservation, 10),
+        Ok(TimeoutRecord),
+        "a hold opened before the expiry still times out"
+    );
+    assert_eq!(
+        books(&verifier).timed_out.get(&reservation.id),
+        Some(&true),
+        "the kept uncertain hold records its timeout"
+    );
+    assert_eq!(books(&verifier).held, 5, "the uncertain hold stays counted");
+    let due = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("timeout does not end the expiry");
+    assert_eq!(due, Refuse::Expired);
+}
+
+#[test]
+fn model_child_hold_settles_after_the_issuing_expiry() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_until(photo, "UsersAI/photo/library", rights(), 5)
+        .expect("issuing expiry");
+    let call = verifier.open_call(photo);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(library),
+            crate::ask::BudgetAsk { amount: 5 },
+            5,
+        )
+        .expect("ask");
+    verifier.set_verifier_now(4);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    let reservation = verifier
+        .reserve(&call, &guest(roll), 5)
+        .expect("child hold");
+    verifier.set_verifier_now(5);
+    let due = verifier
+        .use_grant(call, &guest(roll))
+        .expect_err("the child follows the issuing expiry");
+    assert_eq!(due, Refuse::Expired);
+    let opened = verifier
+        .reserve(&call, &guest(roll), 1)
+        .expect_err("the child opens no new hold");
+    assert_eq!(opened, ReserveRefuse::Binding(Refuse::Expired));
+    assert_eq!(
+        verifier.settle(&call, &guest(roll), reservation, SettleOutcome::Known(5)),
+        Ok(5),
+        "the child hold still settles"
+    );
+    assert_eq!(
+        books(&verifier).held,
+        0,
+        "the child hold gives its amount back"
+    );
+    let later = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("the issuing grant stays expired");
+    assert_eq!(later, Refuse::Expired);
+}
