@@ -818,6 +818,13 @@ that names it, not a skip.
 A Linux counterpart of a named macOS test reuses that test's name; a test with
 no macOS counterpart is named here for the first time.
 
+`linux_contract_table_covers_every_committed_allow_form` holds the table of
+"The contract on Linux" to the three committed profiles and to the lane's test
+code: every did and wallet allow form must have one row, every quoted form must
+be a profile's, and every name a row cites must be a function of the lane's two
+test files or a test this document names. It reads the document and the profiles
+as text and makes no claim about a kernel.
+
 - `both_file_profiles_bind_one_storage_parameter_contract` runs on Linux today.
   It proves the head terms, the three tokens and the three shared rules of the
   oracle, and it needs no Linux counterpart. Falsifier: rename `STORAGE_ROOT`

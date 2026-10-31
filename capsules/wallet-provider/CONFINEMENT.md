@@ -1576,6 +1576,12 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   nothing passes as an empty binding list.
   `every_confinement_document_states_its_bindings_from_the_one_derivation`
   checks this rule.
+- WP234: The Linux table's form-to-row compare skips a committed allow form
+  that no row quotes, so a grant with no Linux row passes.
+  `linux_contract_table_covers_every_committed_allow_form` checks this rule.
+- WP235: The cited-name check accepts any fourth-cell name, so a cell citing a
+  name that nothing holds passes.
+  `linux_contract_table_covers_every_committed_allow_form` checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

@@ -3461,6 +3461,38 @@
       "tests": [
         "every_confinement_document_states_its_bindings_from_the_one_derivation"
       ]
+    },
+    {
+      "id": "WP234",
+      "title": "the form-to-row compare skips a committed allow form that no row quotes, so a grant with no Linux row passes",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            if quoted.iter().any(|(quoted, _)| *quoted == form) {\n                continue;\n            }\n",
+          "new": "            if quoted.iter().any(|(quoted, _)| *quoted == form) || true {\n                continue;\n            }\n"
+        }
+      ],
+      "tests": [
+        "linux_contract_table_covers_every_committed_allow_form"
+      ]
+    },
+    {
+      "id": "WP235",
+      "title": "the cited-name check accepts any fourth-cell name, so a cell citing a name that nothing holds passes",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            let held = test_sources\n                .iter()\n                .any(|source| source_declares_function(source, name))\n                || documented.iter().any(|documented| documented == name);\n            if !held {\n",
+          "new": "            let held = test_sources\n                .iter()\n                .any(|source| source_declares_function(source, name))\n                || documented.iter().any(|documented| documented == name)\n                || true;\n            if !held {\n"
+        }
+      ],
+      "tests": [
+        "linux_contract_table_covers_every_committed_allow_form"
+      ]
     }
   ]
 }

@@ -304,7 +304,12 @@ use std::process::Command;
 /// the bound one is refused; and WP233, which yields no parameter bullet, so a
 /// section that names nothing passes. Both are CAUGHT on the Mac by
 /// `every_confinement_document_states_its_bindings_from_the_one_derivation`.
-const EXPECTED_FALSIFIERS: usize = 213;
+/// Task 166 adds WP234, which makes the Linux table's form-to-row compare skip
+/// a committed allow form that no row quotes, so a grant with no Linux row
+/// passes; and WP235, which accepts any fourth-cell name, so a cell citing a
+/// name that nothing holds passes. Both are CAUGHT on the Mac by
+/// `linux_contract_table_covers_every_committed_allow_form`.
+const EXPECTED_FALSIFIERS: usize = 215;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

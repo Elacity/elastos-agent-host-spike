@@ -12971,6 +12971,39 @@ const PROFILE_ALLOW_HEADING: &str = "## What the profile allows";
 /// derives.
 const PROFILE_PARAMETERS_HEADING: &str = "## Profile parameters";
 
+/// The heading line of the one table that maps each oracle rule of the file
+/// profile to the Linux primitive that would carry it.
+const LINUX_CONTRACT_HEADING: &str = "## The contract on Linux";
+
+/// The heading line of the section whose bullets explain every row of
+/// `LINUX_CONTRACT_HEADING` that has no exact Linux match.
+const LINUX_INEXACT_HEADING: &str = "## Rows with no exact Linux match";
+
+/// The three sections of the Linux document whose backticked spans name the
+/// tests that would prove a `LINUX_CONTRACT_HEADING` row, or the missing
+/// primitive that refuses the start. A fourth-cell name may also be a function
+/// of the lane's two test files; a name in none of these sections and in
+/// neither file is the refusal.
+const LINUX_TEST_NAME_SECTIONS: [&str; 3] = [
+    "## The tests",
+    LINUX_INEXACT_HEADING,
+    "## When a primitive is missing",
+];
+
+/// The quoted span the `no (allow default)` row names as the form the
+/// contract refuses. `check_profile_contract` already refuses it in any
+/// profile (`file_profile_contract_rejects_an_allow_default`), so this rule
+/// reads it as a refused form and not as a claimed grant.
+const REFUSED_ALLOW_FORM: &str = "(allow default)";
+
+/// The two ways an Exactness cell may start: an exact match, or the declared
+/// departure the section under `LINUX_INEXACT_HEADING` explains.
+const EXACT_PREFIX: &str = "Exact";
+const NO_EXACT_PREFIX: &str = "No exact match";
+
+/// The opening sentence of the inexact-row section that states the count.
+const INEXACT_COUNT_PHRASE: &str = "rows have no exact Linux rule";
+
 /// The providers whose `CONFINEMENT.md` operations table names the tests it
 /// cites.
 const OPERATIONS_TABLES: &[&str] = &["did-provider", "wallet-provider"];
@@ -13419,6 +13452,32 @@ fn read_confinement_document(capsules: &Path, name: &str) -> Result<String, Stri
     })
 }
 
+/// Reads `capsules/wallet-provider/CONFINEMENT-LINUX.md`, the one file that
+/// maps the contract to Linux, or refuses with a reason that names its path.
+/// There is no skip path. The Linux table check is its one reader.
+fn read_linux_confinement_document(capsules: &Path) -> Result<String, String> {
+    let path = capsules.join(WALLET_PROVIDER).join("CONFINEMENT-LINUX.md");
+    fs::read_to_string(&path).map_err(|err| {
+        format!(
+            "{WALLET_PROVIDER} Linux confinement document {} must be readable: {err}",
+            path.display()
+        )
+    })
+}
+
+/// Reads one of the lane's two `tests/confine.rs` files, the source the
+/// fourth cell's cited names are held against, or refuses with a reason that
+/// names its path. There is no skip path.
+fn read_lane_test_source(capsules: &Path, name: &str) -> Result<String, String> {
+    let path = capsules.join(name).join("tests/confine.rs");
+    fs::read_to_string(&path).map_err(|err| {
+        format!(
+            "{name} confinement test source {} must be readable: {err}",
+            path.display()
+        )
+    })
+}
+
 /// Every backtick-delimited span in `text`, in order.
 fn backtick_spans(text: &str) -> Vec<&str> {
     let mut spans = Vec::new();
@@ -13432,6 +13491,435 @@ fn backtick_spans(text: &str) -> Vec<&str> {
         rest = &after[close + 1..];
     }
     spans
+}
+
+/// One data row of the Linux contract table, at the row number a reader counts
+/// among the data rows (1 is the row after the separator), holding all four
+/// cells in header order.
+///
+/// The rule reads the Oracle rule cell for the quoted allow forms, the
+/// Exactness cell for the verdict, and the Linux test cell for the cited names.
+struct LinuxContractRow {
+    row: usize,
+    cells: [String; LINUX_CONTRACT_CELLS],
+}
+
+impl LinuxContractRow {
+    /// The Oracle rule cell: the contract form or sentence this row maps.
+    fn oracle(&self) -> &str {
+        &self.cells[0]
+    }
+
+    /// The Exactness cell: how close the Linux mapping is to the oracle.
+    fn exactness(&self) -> &str {
+        &self.cells[LINUX_EXACTNESS_CELL]
+    }
+
+    /// The Linux test cell: the tests that would prove the row.
+    fn tests(&self) -> &str {
+        &self.cells[LINUX_TEST_CELL]
+    }
+}
+
+/// The four header cells of `LINUX_CONTRACT_HEADING`, in the order the rule
+/// reads a row's cells.
+const LINUX_CONTRACT_HEADER: [&str; 4] = [
+    "Oracle rule",
+    "Linux primitive that would carry it",
+    "How exact the match is",
+    "Linux test that would prove it",
+];
+
+/// The cell count every line of the Linux contract table holds.
+const LINUX_CONTRACT_CELLS: usize = LINUX_CONTRACT_HEADER.len();
+
+/// The index of the Exactness cell in `LINUX_CONTRACT_HEADER`.
+const LINUX_EXACTNESS_CELL: usize = 2;
+
+/// The index of the Linux test cell in `LINUX_CONTRACT_HEADER`.
+const LINUX_TEST_CELL: usize = 3;
+
+/// Whether `cells` are the Linux contract table's separator line: one dash-only
+/// cell per column, with at least one cell that is not empty.
+///
+/// `dash_cells` is the one dash rule, and the operations reader's
+/// `is_separator_cells` calls it with its seven-column count, so a separator is
+/// read the same way in both tables.
+fn dash_cells(cells: &[&str]) -> bool {
+    !cells.is_empty()
+        && cells
+            .iter()
+            .all(|cell| cell.chars().all(|character| character == '-'))
+        && cells.iter().any(|cell| !cell.is_empty())
+}
+
+/// Whether `cells` are the Linux contract table's separator: a dash-only cell
+/// for each of its `LINUX_CONTRACT_CELLS` columns.
+fn is_linux_separator_cells(cells: &[&str]) -> bool {
+    cells.len() == LINUX_CONTRACT_CELLS && dash_cells(cells)
+}
+
+/// Every data row of the `LINUX_CONTRACT_HEADING` table, and every row that
+/// cannot be read.
+///
+/// The first line containing a bar is the complete header over
+/// `LINUX_CONTRACT_CELLS` cells and the next nonempty line is the separator.
+/// Every later nonempty line with a bar is a row. A row whose cell count is not
+/// the header's is a refusal that names its place and its cell count. A section
+/// with no table line, a first line that is not the header, a second line that
+/// is not the separator and a table with no data row are refusals that name the
+/// document; a table with no data row is never read as a complete table. Every
+/// reason names the document and the heading.
+fn linux_contract_rows(
+    document_name: &str,
+    section: &str,
+) -> Result<(Vec<LinuxContractRow>, Vec<String>), Vec<String>> {
+    let heading = LINUX_CONTRACT_HEADING;
+    let mut lines = section
+        .lines()
+        .skip_while(|line| !is_table_line(line))
+        .filter(|line| !line.trim().is_empty());
+    let Some(header) = lines.next() else {
+        return Err(vec![format!(
+            "{document_name} CONFINEMENT-LINUX.md: {heading} holds no table line"
+        )]);
+    };
+    let header_cells = table_cells(header);
+    if header_cells != LINUX_CONTRACT_HEADER {
+        return Err(vec![format!(
+            "{document_name} CONFINEMENT-LINUX.md: {heading} table line 1 is not the header \
+             {} over {LINUX_CONTRACT_CELLS} cells: {}",
+            LINUX_CONTRACT_HEADER.join(" | "),
+            header.trim()
+        )]);
+    }
+    let Some(separator) = lines.next() else {
+        return Err(vec![format!(
+            "{document_name} CONFINEMENT-LINUX.md: {heading} table line 1 is the header and the \
+             table holds no separator line"
+        )]);
+    };
+    if !is_linux_separator_cells(&table_cells(separator)) {
+        return Err(vec![format!(
+            "{document_name} CONFINEMENT-LINUX.md: {heading} table line 2 is not the separator of \
+             {LINUX_CONTRACT_CELLS} dash cells: {}",
+            separator.trim()
+        )]);
+    }
+    let mut rows = Vec::new();
+    let mut problems = Vec::new();
+    for line in lines.take_while(|line| is_table_line(line)) {
+        let cells = table_cells(line);
+        if cells.len() != LINUX_CONTRACT_CELLS {
+            problems.push(format!(
+                "{document_name} CONFINEMENT-LINUX.md: {heading} row {} holds {} cells, and every \
+                 row holds {LINUX_CONTRACT_CELLS}",
+                rows.len() + problems.len() + 1,
+                cells.len()
+            ));
+            continue;
+        }
+        rows.push(LinuxContractRow {
+            row: rows.len() + problems.len() + 1,
+            cells: std::array::from_fn(|index| cells[index].to_string()),
+        });
+    }
+    if rows.is_empty() {
+        return Err(vec![format!(
+            "{document_name} CONFINEMENT-LINUX.md: {heading} holds no data row, so it cannot be \
+             read as the table of the contract's Linux mapping"
+        )]);
+    }
+    Ok((rows, problems))
+}
+
+/// The Exactness verdict one row states, or the problem with a cell that states
+/// neither verdict.
+///
+/// A cell must start `Exact` or `No exact match`, so a reviewer reads one of two
+/// words per row and a row that leaves the verdict to its prose fails closed.
+fn linux_exactness_problem(document_name: &str, row: &LinuxContractRow) -> Option<String> {
+    let cell = row.exactness();
+    if cell.starts_with(EXACT_PREFIX) || cell.starts_with(NO_EXACT_PREFIX) {
+        return None;
+    }
+    Some(format!(
+        "{document_name} CONFINEMENT-LINUX.md: {LINUX_CONTRACT_HEADING} row {} states the \
+         exactness {cell}, which starts neither {EXACT_PREFIX} nor {NO_EXACT_PREFIX}",
+        row.row
+    ))
+}
+
+/// Whether `name` is a function `source` declares: a line whose trimmed text
+/// starts `fn <name>(`, including `pub fn`, `const fn`, `unsafe fn` and
+/// `async fn`.
+///
+/// The one function-name reader for the fourth cell's citations, so the code
+/// side and the document side of "does anything hold this name" ask their one
+/// question of one reader.
+fn source_declares_function(source: &str, name: &str) -> bool {
+    let declaration = format!("fn {name}(");
+    source.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with(&declaration)
+            || trimmed
+                .split_once(&declaration)
+                .is_some_and(|(head, _)| head.ends_with(' '))
+    })
+}
+
+/// The backticked names of `document` in one of `LINUX_TEST_NAME_SECTIONS`, each
+/// section read through `section_under_one_heading`.
+///
+/// A document with no such section contributes no names from it, because the
+/// other two sections still name the eight future tests. The rule accepts a
+/// fourth-cell name from this set or from the lane's two test files.
+fn linux_documented_test_names(document_name: &str, document: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for heading in LINUX_TEST_NAME_SECTIONS {
+        let Ok(section) = section_under_one_heading(document_name, document, heading) else {
+            continue;
+        };
+        names.extend(backtick_spans(&section).into_iter().map(str::to_string));
+    }
+    names
+}
+
+/// Every problem with the one Linux contract table, each naming the document,
+/// the row and the offending span or name.
+///
+/// `providers` is each `(name, profile text)` pair the caller read through
+/// `read_allow_rule_profile`, in `allow_rule_profiles` order; `model_profile` is
+/// the model profile text or the read refusal's reason, so a caller that cannot
+/// read it is refused by name instead of skipping it. `test_sources` is the text
+/// of the lane's two `tests/confine.rs` files, so the rule reads values and
+/// needs no filesystem. The section comes from `section_under_one_heading` and
+/// its rows through `table_cells` after the header and separator.
+///
+/// The refusals: a section with no data row, which is never read as a complete
+/// table; a row whose cell count is not the header's four; a did or wallet
+/// profile allow form, taken through `allow_forms`, that no row quotes exactly
+/// once, naming the form and its provider; a quoted span that starts `(allow `
+/// and is neither `REFUSED_ALLOW_FORM` nor a form of a did or wallet profile nor
+/// a form of the model profile, naming the span and its row; the same allow form
+/// quoted by two rows; an Exactness cell that starts neither `Exact` nor
+/// `No exact match`; and a fourth-cell name that is a function in neither of
+/// `test_sources` and is named in backticks in none of `LINUX_TEST_NAME_SECTIONS`,
+/// naming the name and the row.
+///
+/// The model profile's completeness is not required, so a grant that the model
+/// provider's lane adds does not fail this lane's gate; a model form the table
+/// quotes and that profile no longer holds is this document's stale row. The
+/// rule makes no kernel call and starts no process, so it runs on every OS. It
+/// shows the table equals the committed profiles as text; it says nothing about
+/// a kernel and nothing about enforcement.
+///
+/// Falsifier: WP234 makes the form-to-row compare skip a form that no row
+/// quotes, so a grant with no Linux row passes; WP235 accepts any fourth-cell
+/// name, so a cell citing a name that nothing holds passes.
+/// `linux_contract_table_covers_every_committed_allow_form` fails on each.
+fn linux_contract_table_problems(
+    document_name: &str,
+    document: &str,
+    providers: &[(&str, String)],
+    model_profile: &Result<String, String>,
+    test_sources: &[String],
+) -> Vec<String> {
+    let section = match section_under_one_heading(document_name, document, LINUX_CONTRACT_HEADING) {
+        Ok(section) => section,
+        Err(problems) => return problems,
+    };
+    let (rows, mut problems) = match linux_contract_rows(document_name, &section) {
+        Ok((rows, problems)) => (rows, problems),
+        Err(problems) => return problems,
+    };
+
+    let mut quoted: Vec<(&str, Vec<usize>)> = Vec::new();
+    for row in &rows {
+        for span in backtick_spans(row.oracle()) {
+            if !span.starts_with("(allow ") || span == REFUSED_ALLOW_FORM {
+                continue;
+            }
+            match quoted.iter_mut().find(|(form, _)| *form == span) {
+                Some((_, rows_that_quote)) => rows_that_quote.push(row.row),
+                None => quoted.push((span, vec![row.row])),
+            }
+        }
+    }
+
+    let model_forms = match model_profile {
+        Ok(profile) => Some(allow_forms(profile)),
+        Err(reason) => {
+            problems.push(reason.clone());
+            None
+        }
+    };
+
+    for (name, profile) in providers {
+        for form in allow_forms(profile) {
+            // The duplicate-row refusal below owns a form that two rows quote, so
+            // this compare asks the provider's one question: does the table hold
+            // this committed form at all?
+            if quoted.iter().any(|(quoted, _)| *quoted == form) {
+                continue;
+            }
+            problems.push(format!(
+                "{document_name} CONFINEMENT-LINUX.md: {LINUX_CONTRACT_HEADING} holds no row \
+                 quoting {form}, which capsules/{name}/confine.sb holds"
+            ));
+        }
+    }
+
+    for (form, rows_that_quote) in &quoted {
+        if rows_that_quote.len() > 1 {
+            problems.push(format!(
+                "{document_name} CONFINEMENT-LINUX.md: {LINUX_CONTRACT_HEADING} rows {} quote \
+                 {form}; one allow form takes one row",
+                rows_that_quote
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            ));
+            continue;
+        }
+        let held = providers
+            .iter()
+            .any(|(_, profile)| allow_forms(profile).iter().any(|held| held == form))
+            || model_forms
+                .as_ref()
+                .is_some_and(|held| held.iter().any(|held| held == form));
+        if !held {
+            problems.push(format!(
+                "{document_name} CONFINEMENT-LINUX.md: {LINUX_CONTRACT_HEADING} row {} quotes \
+                 {form}, which no profile of this lane holds",
+                rows_that_quote[0]
+            ));
+        }
+    }
+
+    let documented = linux_documented_test_names(document_name, document);
+    for row in &rows {
+        if let Some(problem) = linux_exactness_problem(document_name, row) {
+            problems.push(problem);
+        }
+        for name in backtick_spans(row.tests()) {
+            let held = test_sources
+                .iter()
+                .any(|source| source_declares_function(source, name))
+                || documented.iter().any(|documented| documented == name);
+            if !held {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT-LINUX.md: {LINUX_CONTRACT_HEADING} row {} names \
+                     the test {name}, which neither crate's tests hold and which \
+                     {LINUX_TEST_NAME_SECTIONS} do not name",
+                    row.row,
+                    LINUX_TEST_NAME_SECTIONS = LINUX_TEST_NAME_SECTIONS.join(", ")
+                ));
+            }
+        }
+    }
+    problems
+}
+
+/// Every problem with the prose count of the rows that have no exact Linux
+/// match, each naming the document and all three numbers.
+///
+/// The number of rows whose Exactness cell starts `No exact match`, the number
+/// word or digits in the `N rows have no exact Linux rule` opening line, and the
+/// number of bullets under `LINUX_INEXACT_HEADING` must be one number. A document
+/// that holds no such opening line, no such section, or no such table is
+/// refused, never read as zero.
+fn linux_inexact_row_count_problems(document_name: &str, document: &str) -> Vec<String> {
+    let section = match section_under_one_heading(document_name, document, LINUX_CONTRACT_HEADING) {
+        Ok(section) => section,
+        Err(problems) => return problems,
+    };
+    let rows = match linux_contract_rows(document_name, &section) {
+        Ok((rows, problems)) if problems.is_empty() => rows,
+        Ok((_, problems)) => return problems,
+        Err(problems) => return problems,
+    };
+    let measured = rows
+        .iter()
+        .filter(|row| row.exactness().starts_with(NO_EXACT_PREFIX))
+        .count();
+    let Some(stated) = document
+        .lines()
+        .find(|line| line.contains(INEXACT_COUNT_PHRASE))
+        .and_then(|line| count_before_phrase(line, INEXACT_COUNT_PHRASE))
+    else {
+        return vec![format!(
+            "{document_name} CONFINEMENT-LINUX.md holds no line stating how many \
+             `{INEXACT_COUNT_PHRASE}`, so the rows cannot be counted against the prose"
+        )];
+    };
+    let bullets = match section_under_one_heading(document_name, document, LINUX_INEXACT_HEADING) {
+        Ok(section) => section
+            .lines()
+            .filter(|line| line.starts_with("- "))
+            .count(),
+        Err(problems) => return problems,
+    };
+    if measured == stated && measured == bullets {
+        return Vec::new();
+    }
+    vec![format!(
+        "{document_name} CONFINEMENT-LINUX.md: the table has {measured} rows whose exactness \
+         starts {NO_EXACT_PREFIX}, the opening line states {stated}, and {LINUX_INEXACT_HEADING} \
+         holds {bullets} bullets, and the one count must be one number"
+    )]
+}
+
+/// The count a line states before `phrase`, as digits or as a number word.
+///
+/// The document writes `Five rows have no exact Linux rule`, so the count is the
+/// last word before the phrase. A line whose text before the phrase states no
+/// digits and no number word answers `None`, which the caller refuses instead of
+/// reading the count as zero.
+fn count_before_phrase(line: &str, phrase: &str) -> Option<usize> {
+    let before = line.split(phrase).next()?.trim_end();
+    let word = before.split_whitespace().last()?;
+    word.parse::<usize>().ok().or_else(|| number_word(word))
+}
+
+/// The value of a whole English number word up to ninety-nine, including the
+/// hyphenated tens, or `None` for any other word.
+fn number_word(word: &str) -> Option<usize> {
+    const UNITS: [&str; 10] = [
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    ];
+    const TEENS: [&str; 10] = [
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+    ];
+    const TENS: [&str; 8] = [
+        "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+    ];
+    let lower = word
+        .trim_matches(|character: char| !character.is_alphanumeric() && character != '-')
+        .to_ascii_lowercase();
+    if let Some(index) = UNITS.iter().position(|unit| *unit == lower) {
+        return Some(index);
+    }
+    if let Some(index) = TEENS.iter().position(|teen| *teen == lower) {
+        return Some(index + 10);
+    }
+    if let Some(index) = TENS.iter().position(|ten| *ten == lower) {
+        return Some((index + 2) * 10);
+    }
+    let (tens, units) = lower.split_once('-')?;
+    let tens = TENS.iter().position(|ten| *ten == tens)?;
+    let units = UNITS.iter().position(|unit| *unit == units)?;
+    Some((tens + 2) * 10 + units)
 }
 
 /// Every problem with one operations table's test citations, each naming the
@@ -13641,11 +14129,7 @@ fn table_cells(line: &str) -> Vec<&str> {
 /// Whether `cells` are the table's separator line: `TABLE_CELLS` dashes-only
 /// cells, with at least one cell that is not empty.
 fn is_separator_cells(cells: &[&str]) -> bool {
-    cells.len() == TABLE_CELLS
-        && cells
-            .iter()
-            .all(|cell| cell.chars().all(|character| character == '-'))
-        && cells.iter().any(|cell| !cell.is_empty())
+    cells.len() == TABLE_CELLS && dash_cells(cells)
 }
 
 /// Every data row of one operations table section, in table order, and every
@@ -17633,6 +18117,485 @@ fn profile_parameter_section_check_refuses_each_bad_section() {
         ],
         "a duplicated heading must be the section reader's own refusal"
     );
+}
+
+/// The one Linux document's contract table equals the committed profiles and
+/// cites names the lane holds.
+///
+/// The check reads `capsules/wallet-provider/CONFINEMENT-LINUX.md` through
+/// `read_linux_confinement_document`, each profile `allow_rule_profiles` selects
+/// through `read_allow_rule_profile`, both `tests/confine.rs` files through
+/// `read_lane_test_source`, and `capsules/model-provider/confine.sb` through
+/// `read_allow_rule_profile` without requiring it, then requires no problem from
+/// `linux_contract_table_problems` or `linux_inexact_row_count_problems`. A
+/// missing document or a missing did or wallet profile is a refusal that names
+/// its path, never a skipped provider; a missing model profile is refused by
+/// name in this one test, and the shared contract check already requires it. The
+/// test reads files and starts no process, so it runs on every OS. It reads its
+/// bad-table cases through the same one body
+/// `linux_contract_table_check_refuses_each_bad_table` does.
+///
+/// Falsifier: WP234 makes the form-to-row compare skip a form that no row
+/// quotes, so a grant with no Linux row passes; WP235 accepts any fourth-cell
+/// name, so a cell citing a name that nothing holds passes. Both fail this
+/// test.
+#[test]
+fn linux_contract_table_covers_every_committed_allow_form() {
+    let tables = LinuxContractTables::read();
+    let document = tables.document();
+    let mut problems = tables.problems(document);
+    problems.extend(linux_inexact_row_count_problems(WALLET_PROVIDER, document));
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+    for (label, problems) in tables.bad_table_problems() {
+        assert!(
+            !problems.is_empty(),
+            "{label} must be refused, and the rule reported nothing"
+        );
+    }
+}
+
+/// The two Linux table rules refuse each bad table and accept the real one.
+///
+/// The passing case is the document's real `LINUX_CONTRACT_HEADING` section and
+/// the three real profiles, so a refusal over it means the table and the
+/// profiles have drifted apart. Then one case per refusal asserts the exact
+/// problem vector: a section with no data row, a row with five cells, a profile
+/// form no row quotes, a quoted span no profile holds, the same form quoted by
+/// two rows, an Exactness cell that states neither verdict, a fourth-cell name
+/// that nothing holds, a stated count that disagrees with the table, a bullet
+/// list that disagrees with the table, a document with no count line, and the
+/// section reader's own missing and duplicated heading refusals. The documents
+/// and profiles are values in memory; only the three real profiles and the two
+/// real sections are read, and the test starts no process.
+///
+/// Falsifier: WP234 makes the form-to-row compare skip a form that no row
+/// quotes, WP235 accepts any fourth-cell name, and WP236 reads a missing count
+/// line as zero; this test fails on each because the corresponding refusal does
+/// not come.
+#[test]
+fn linux_contract_table_check_refuses_each_bad_table() {
+    let tables = LinuxContractTables::read();
+    let document = tables.document();
+    let check = |document: &str| tables.problems(document);
+    let count = |document: &str| linux_inexact_row_count_problems(WALLET_PROVIDER, document);
+    assert_eq!(
+        check(document),
+        Vec::<String>::new(),
+        "the committed Linux table, read as text, must equal the committed profiles"
+    );
+    assert_eq!(
+        count(document),
+        Vec::<String>::new(),
+        "the committed Linux document must state one inexact-row count"
+    );
+
+    let section = section_under_one_heading(WALLET_PROVIDER, document, LINUX_CONTRACT_HEADING)
+        .unwrap_or_else(|problems| panic!("{}", problems.join("\n")));
+    let inexact = section_under_one_heading(WALLET_PROVIDER, document, LINUX_INEXACT_HEADING)
+        .unwrap_or_else(|problems| panic!("{}", problems.join("\n")));
+    let rows = linux_row_lines(&section);
+    assert_eq!(rows.len(), 14, "the committed table holds 14 data rows");
+    assert_eq!(
+        check(&tables.table(&rows, None, None)),
+        Vec::<String>::new(),
+        "the table rebuilt from its own rows must still equal the committed profiles"
+    );
+    assert_eq!(
+        check(&tables.table(&[], None, None)),
+        vec![format!(
+            "{WALLET_PROVIDER} CONFINEMENT-LINUX.md: {LINUX_CONTRACT_HEADING} holds no data row, \
+             so it cannot be read as the table of the contract's Linux mapping"
+        )],
+        "a section with no data row must be refused, never read as a complete table"
+    );
+
+    let mut short = rows.clone();
+    short.insert(
+        0,
+        "| `(allow sysctl-read)` | a primitive | Exact: it matches | two | extra |".to_string(),
+    );
+    assert_eq!(
+        check(&tables.table(&short, None, None)),
+        vec![format!(
+            "{WALLET_PROVIDER} CONFINEMENT-LINUX.md: {LINUX_CONTRACT_HEADING} row 1 holds 5 cells, \
+             and every row holds 4"
+        )],
+        "a row with five cells must be refused"
+    );
+
+    let exec = "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))";
+    let omitted: Vec<String> = rows
+        .iter()
+        .filter(|line| !line.contains(exec))
+        .cloned()
+        .collect();
+    assert_eq!(
+        check(&tables.table(&omitted, None, None)),
+        vec![
+            format!(
+                "{WALLET_PROVIDER} CONFINEMENT-LINUX.md: {LINUX_CONTRACT_HEADING} holds no row \
+                 quoting {exec}, which capsules/did-provider/confine.sb holds"
+            ),
+            format!(
+                "{WALLET_PROVIDER} CONFINEMENT-LINUX.md: {LINUX_CONTRACT_HEADING} holds no row \
+                 quoting {exec}, which capsules/wallet-provider/confine.sb holds"
+            ),
+        ],
+        "a profile form no row quotes must be refused for each provider that holds it"
+    );
+
+    let read_of_root = "(allow file-read* (literal \"/\"))";
+    let mut paraphrased = rows.clone();
+    let index = paraphrased
+        .iter()
+        .position(|line| line.contains(read_of_root))
+        .expect("the committed table quotes the read of /");
+    paraphrased[index] =
+        paraphrased[index].replace(read_of_root, "(allow file-read (literal \"/\"))");
+    assert_eq!(
+        check(&tables.table(&paraphrased, None, None)),
+        vec![
+            format!(
+                "{WALLET_PROVIDER} CONFINEMENT-LINUX.md: {LINUX_CONTRACT_HEADING} holds no row \
+                 quoting {read_of_root}, which capsules/did-provider/confine.sb holds"
+            ),
+            format!(
+                "{WALLET_PROVIDER} CONFINEMENT-LINUX.md: {LINUX_CONTRACT_HEADING} holds no row \
+                 quoting {read_of_root}, which capsules/wallet-provider/confine.sb holds"
+            ),
+            format!(
+                "{WALLET_PROVIDER} CONFINEMENT-LINUX.md: {LINUX_CONTRACT_HEADING} row 10 quotes \
+                 (allow file-read (literal \"/\")), which no profile of this lane holds"
+            ),
+        ],
+        "a quoted span no profile holds must be refused, and its form reported missing"
+    );
+
+    let repeated = exec;
+    let mut doubled = rows.clone();
+    doubled.insert(9, rows[8].clone());
+    assert_eq!(
+        check(&tables.table(&doubled, None, None)),
+        vec![format!(
+            "{WALLET_PROVIDER} CONFINEMENT-LINUX.md: {LINUX_CONTRACT_HEADING} rows 9 and 10 quote \
+             {repeated}; one allow form takes one row"
+        )],
+        "the same allow form quoted by two rows must be refused once"
+    );
+
+    let mut verdict = rows.clone();
+    verdict[0] = verdict[0].replacen("Exact:", "Probably:", 1);
+    assert_eq!(
+        check(&tables.table(&verdict, None, None)),
+        vec![format!(
+            "{WALLET_PROVIDER} CONFINEMENT-LINUX.md: {LINUX_CONTRACT_HEADING} row 1 states the \
+             exactness Probably: the generator emits one version, and the contract check refuses \
+             any other head., which starts neither Exact nor No exact match"
+        )],
+        "an Exactness cell that states neither verdict must be refused"
+    );
+
+    let mut cited = rows.clone();
+    cited[0] = format!(
+        "| `(version 1)` | a primitive | Exact: the generator emits one version | \
+         `linux_a_test_that_nothing_holds` |"
+    );
+    assert_eq!(
+        check(&tables.table(&cited, None, None)),
+        vec![format!(
+            "{WALLET_PROVIDER} CONFINEMENT-LINUX.md: {LINUX_CONTRACT_HEADING} row 1 names the test \
+             linux_a_test_that_nothing_holds, which neither crate's tests hold and which {} do not \
+             name",
+            LINUX_TEST_NAME_SECTIONS.join(", ")
+        )],
+        "a fourth-cell name that nothing holds must be refused"
+    );
+
+    assert_eq!(
+        count(&tables.table(
+            &rows,
+            Some("Three rows have no exact Linux rule."),
+            None
+        )),
+        vec![format!(
+            "{WALLET_PROVIDER} CONFINEMENT-LINUX.md: the table has 5 rows whose exactness starts \
+             No exact match, the opening line states 3, and {LINUX_INEXACT_HEADING} holds {bullets} \
+             bullets, and the one count must be one number",
+            bullets = inexact_bullets(&inexact)
+        )],
+        "a stated count that disagrees with the table must be refused with all three numbers"
+    );
+    assert_eq!(
+        count(&tables.table(
+            &rows,
+            Some("Five rows have no exact Linux rule."),
+            Some("- One bullet, where the table has five such rows.")
+        )),
+        vec![format!(
+            "{WALLET_PROVIDER} CONFINEMENT-LINUX.md: the table has 5 rows whose exactness starts \
+             No exact match, the opening line states 5, and {LINUX_INEXACT_HEADING} holds 1 \
+             bullets, and the one count must be one number"
+        )],
+        "a bullet list that disagrees with the table must be refused"
+    );
+    assert_eq!(
+        count(&format!(
+            "# fixture\n\n{LINUX_CONTRACT_HEADING}\n\n{}| {} |\n{}\n",
+            format!("| {} |\n", LINUX_CONTRACT_HEADER.join(" | ")),
+            vec!["---"; LINUX_CONTRACT_CELLS].join(" | "),
+            rows.join("\n")
+        )),
+        vec![format!(
+            "{WALLET_PROVIDER} CONFINEMENT-LINUX.md holds no line stating how many \
+             `{INEXACT_COUNT_PHRASE}`, so the rows cannot be counted against the prose"
+        )],
+        "a document with no count line must be refused, never read as zero"
+    );
+    assert_eq!(
+        count("# fixture\n\n## Other\n\nNo heading here.\n"),
+        vec![format!(
+            "{WALLET_PROVIDER} CONFINEMENT.md must hold one line {LINUX_CONTRACT_HEADING}; found \
+             none"
+        )],
+        "a missing heading must be the section reader's own refusal"
+    );
+}
+
+/// The one Linux document, the three profiles and the two test sources the
+/// Linux table rules read, held once so both named tests drive one set of values.
+struct LinuxContractTables {
+    document: String,
+    providers: Vec<(&'static str, String)>,
+    model_profile: Result<String, String>,
+    test_sources: Vec<String>,
+    bullets: String,
+}
+
+impl LinuxContractTables {
+    /// Reads the document, the two profiles `allow_rule_profiles` selects, the
+    /// model profile and the lane's two test files. A missing document or
+    /// profile is a refusal that names its path, so no provider is skipped there;
+    /// the model profile's refusal is kept as a value, because a missing model
+    /// profile is refused by the two named tests and by the shared contract
+    /// check.
+    fn read() -> Self {
+        let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("capsules/wallet-provider must sit under capsules/");
+        let document =
+            read_linux_confinement_document(capsules).unwrap_or_else(|err| panic!("{err}"));
+        let providers = allow_rule_profiles()
+            .map(|name| {
+                let path = capsules.join(name).join("confine.sb");
+                (
+                    name,
+                    read_allow_rule_profile(name, &path).unwrap_or_else(|err| panic!("{err}")),
+                )
+            })
+            .collect();
+        let model_profile = read_allow_rule_profile(
+            "model-provider",
+            &capsules.join("model-provider").join("confine.sb"),
+        );
+        let test_sources = [DID_PROVIDER, WALLET_PROVIDER]
+            .into_iter()
+            .map(|name| read_lane_test_source(capsules, name).unwrap_or_else(|err| panic!("{err}")))
+            .collect();
+        let bullets = section_under_one_heading(WALLET_PROVIDER, &document, LINUX_INEXACT_HEADING)
+            .unwrap_or_else(|problems| panic!("{}", problems.join("\n")));
+        Self {
+            document,
+            providers,
+            model_profile,
+            test_sources,
+            bullets,
+        }
+    }
+
+    /// The one Linux document's text.
+    fn document(&self) -> &str {
+        &self.document
+    }
+
+    /// Every problem `linux_contract_table_problems` reports over `document`.
+    fn problems(&self, document: &str) -> Vec<String> {
+        linux_contract_table_problems(
+            WALLET_PROVIDER,
+            document,
+            &self.providers,
+            &self.model_profile,
+            &self.test_sources,
+        )
+    }
+
+    /// One `document` in the shape the real one has: the contract table over
+    /// `rows`, the three name sections a fourth cell cites, and, where the caller
+    /// gives them, a count line and the inexact section's bullets. A caller that
+    /// gives no count line and no bullets gets the name sections alone, so the
+    /// count rule reports its own missing-line refusal.
+    fn table(&self, rows: &[String], count_line: Option<&str>, bullets: Option<&str>) -> String {
+        let mut fixture = String::from("# fixture\n\n");
+        fixture.push_str(LINUX_CONTRACT_HEADING);
+        fixture.push_str("\n\n| ");
+        fixture.push_str(&LINUX_CONTRACT_HEADER.join(" | "));
+        fixture.push_str(" |\n| ");
+        fixture.push_str(&vec!["---"; LINUX_CONTRACT_CELLS].join(" | "));
+        fixture.push_str(" |\n");
+        for row in rows {
+            fixture.push_str(row);
+            fixture.push('\n');
+        }
+        fixture.push('\n');
+        for heading in LINUX_TEST_NAME_SECTIONS {
+            // Inexact is added below, with the count line a caller gives, so its
+            // own count sentence is never read as the prose count here.
+            if heading == LINUX_INEXACT_HEADING {
+                continue;
+            }
+            fixture.push_str(&format!("{heading}\n\n"));
+            if let Ok(section) = section_under_one_heading(WALLET_PROVIDER, &self.document, heading)
+            {
+                fixture.push_str(&section);
+                fixture.push('\n');
+            }
+        }
+        if let Some(line) = count_line {
+            fixture.push_str(&format!("\n{line}\n\n{LINUX_INEXACT_HEADING}\n\n"));
+            fixture.push_str(bullets.unwrap_or(&self.bullets));
+            fixture.push('\n');
+        } else if let Some(bullets) = bullets {
+            fixture.push_str(&format!("\n{LINUX_INEXACT_HEADING}\n\n{bullets}\n"));
+        }
+        fixture
+    }
+
+    /// One bad table per refusal of the two rules, each with the label a failing
+    /// case names and every problem that table reports.
+    ///
+    /// This is the one set of bad tables both named tests read:
+    /// `linux_contract_table_covers_every_committed_allow_form` requires every
+    /// case to report something, so a rule that stops refusing one of them fails
+    /// the real-document test too, and
+    /// `linux_contract_table_check_refuses_each_bad_table` asserts exact vectors.
+    fn bad_table_problems(&self) -> Vec<(&'static str, Vec<String>)> {
+        let section =
+            section_under_one_heading(WALLET_PROVIDER, &self.document, LINUX_CONTRACT_HEADING)
+                .unwrap_or_else(|problems| panic!("{}", problems.join("\n")));
+        let rows = linux_row_lines(&section);
+        let exec = "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))";
+        let omitted: Vec<String> = rows
+            .iter()
+            .filter(|line| !line.contains(exec))
+            .cloned()
+            .collect();
+        let read_of_root = "(allow file-read* (literal \"/\"))";
+        let mut paraphrased = rows.clone();
+        if let Some(index) = paraphrased
+            .iter()
+            .position(|line| line.contains(read_of_root))
+        {
+            paraphrased[index] =
+                paraphrased[index].replace(read_of_root, "(allow file-read (literal \"/\"))");
+        }
+        let mut doubled = rows.clone();
+        doubled.insert(9, rows[8].clone());
+        let mut verdict = rows.clone();
+        verdict[0] = verdict[0].replacen("Exact:", "Probably:", 1);
+        let mut cited = rows.clone();
+        cited[0] = "| `(version 1)` | a primitive | Exact: the generator emits one version | \
+                    `linux_a_test_that_nothing_holds` |"
+            .to_string();
+        let mut short = rows.clone();
+        short.insert(
+            0,
+            "| `(allow sysctl-read)` | a primitive | Exact: it matches | two | extra |".to_string(),
+        );
+        vec![
+            (
+                "a section with no data row",
+                self.problems(&self.table(&[], None, None)),
+            ),
+            (
+                "a row with five cells",
+                self.problems(&self.table(&short, None, None)),
+            ),
+            (
+                "a committed allow form with no row",
+                self.problems(&self.table(&omitted, None, None)),
+            ),
+            (
+                "a quoted span that no profile holds",
+                self.problems(&self.table(&paraphrased, None, None)),
+            ),
+            (
+                "the same allow form quoted by two rows",
+                self.problems(&self.table(&doubled, None, None)),
+            ),
+            (
+                "an Exactness cell with no verdict",
+                self.problems(&self.table(&verdict, None, None)),
+            ),
+            (
+                "a fourth-cell name that nothing holds",
+                self.problems(&self.table(&cited, None, None)),
+            ),
+            (
+                "a stated count that disagrees with the table",
+                linux_inexact_row_count_problems(
+                    WALLET_PROVIDER,
+                    &self.table(&rows, Some("Three rows have no exact Linux rule."), None),
+                ),
+            ),
+            (
+                "a bullet list that disagrees with the table",
+                linux_inexact_row_count_problems(
+                    WALLET_PROVIDER,
+                    &self.table(
+                        &rows,
+                        Some("Five rows have no exact Linux rule."),
+                        Some("- One bullet, where the table has five such rows."),
+                    ),
+                ),
+            ),
+            (
+                "a document with no count line",
+                linux_inexact_row_count_problems(
+                    WALLET_PROVIDER,
+                    // Five bullets, one per inexact row, and no line states the
+                    // count, so only the missing-line refusal can answer here.
+                    &self.table(
+                        &rows,
+                        None,
+                        Some(
+                            "- One bullet per inexact row.\n- The second.\n- The third.\n\
+                             - The fourth.\n- The fifth.",
+                        ),
+                    ),
+                ),
+            ),
+        ]
+    }
+}
+
+/// The data-row lines of a contract section, in table order, without the header
+/// and separator.
+fn linux_row_lines(section: &str) -> Vec<String> {
+    section
+        .lines()
+        .skip_while(|line| !is_table_line(line))
+        .filter(|line| !line.trim().is_empty())
+        .skip(2)
+        .take_while(|line| is_table_line(line))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The number of bullets under an inexact-row section.
+fn inexact_bullets(section: &str) -> usize {
+    section
+        .lines()
+        .filter(|line| line.starts_with("- "))
+        .count()
 }
 
 /// Every test cited in an operations table exists where the table says.
