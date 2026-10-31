@@ -22,10 +22,10 @@ pub fn lab_home() -> Option<PathBuf> {
     std::env::var_os("ELASTOS_LAB_HOME").map(PathBuf::from)
 }
 
-/// SIMULATED `elastos service start`: alpha.26 has only `home --browser`, which always
-/// runs `open <url>`; `sim_bin` puts a do-nothing `open` first on PATH. Home gets its
-/// own process group, so it keeps running when this app quits.
-pub fn start_home(home: &Path, sim_bin: &Path) -> std::io::Result<()> {
+/// LAB DRAFT of `elastos service start`: `ELASTOS_SERVICE=1` keeps the lab Runtime
+/// from opening a browser, because this app shows Home itself. Home gets its own
+/// process group, so it keeps running when this app quits.
+pub fn start_home(home: &Path) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
     let log = std::fs::File::options()
         .create(true)
@@ -34,10 +34,9 @@ pub fn start_home(home: &Path, sim_bin: &Path) -> std::io::Result<()> {
     Command::new(home.join(".local/bin/elastos"))
         .args(["home", "--browser"])
         .env("HOME", home)
-        .env(
-            "PATH",
-            format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", sim_bin.display()),
-        )
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("ELASTOS_SERVICE", "1")
+        .current_dir(home)
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log)

@@ -1,59 +1,46 @@
-//! First open from the files inside the app (prototype P3 of ELASTOS-DESKTOP-APP).
+//! First open from the signed release folder inside the app (ELASTOS-DESKTOP-APP P4).
 //!
-//! SIMULATED: the Runtime has no command yet that installs from local files. This
-//! clones a ready-made alpha.26 install that `bundle.sh` packed into the app and skips
-//! the publisher, signature, CID and SHA-256 checks the real Runtime command must run.
-//! It only ever writes into `ELASTOS_LAB_HOME`.
+//! LAB DRAFT: `elastos install --from` exists only on the lab Runtime branch
+//! `lab/standalone-install`. The Runtime checks the publisher, signatures, CIDs and
+//! SHA-256 of every file exactly as for a download; this app only runs it, and only
+//! into `ELASTOS_LAB_HOME`.
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Instant;
 
-/// `Contents/Resources/payload` of this app, when `bundle.sh` packed one.
+/// `Contents/Resources/release` of this app, when `bundle.sh` packed one.
 pub fn payload() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let payload = exe.parent()?.parent()?.join("Resources/payload");
-    payload.is_dir().then_some(payload)
+    let release = exe.parent()?.parent()?.join("Resources/release");
+    release.is_dir().then_some(release)
 }
 
-/// `Contents/Resources/sim-bin`: a do-nothing `open`, so alpha.26 `home --browser`
-/// starts Home without a browser.
-pub fn sim_bin() -> Option<PathBuf> {
-    let bin = payload()?.parent()?.join("sim-bin");
-    bin.is_dir().then_some(bin)
-}
-
-/// Clones the packed install into `home` and points its absolute paths at `home`.
-/// APFS clones files on the same volume, so this takes no extra space.
-pub fn install(payload: &Path, home: &Path) -> io::Result<()> {
-    let seed = std::fs::read_to_string(payload.join(".seed-home"))?;
-    let seed = seed.trim();
-    let target = home
-        .to_str()
-        .ok_or_else(|| io::Error::other("the lab home path is not UTF-8"))?;
+/// Runs the release's own Runtime, a file named by its CID, to install from `release`.
+pub fn install(release: &Path, home: &Path) -> io::Result<()> {
+    let cid = std::fs::read_to_string(release.with_file_name("runtime-cid"))?;
     std::fs::create_dir_all(home)?;
-    for dir in [".local", "Library"] {
-        let status = Command::new("/bin/cp")
-            .arg("-cRp")
-            .arg(payload.join(dir))
-            .arg(home)
-            .status()?;
-        if !status.success() {
-            return Err(io::Error::other(format!("cp {dir} exited with {status}")));
-        }
-    }
-    for file in lines(&payload.join(".path-files"))? {
-        let file = home.join(file);
-        let text = std::fs::read_to_string(&file)?;
-        std::fs::write(&file, text.replace(seed, target))?;
-    }
-    // Links are listed, not packed: a signed app may not hold links that leave it.
-    for line in lines(&payload.join(".path-links"))? {
-        let (link, to) = line
-            .split_once('\t')
-            .ok_or_else(|| io::Error::other("bad .path-links line"))?;
-        std::os::unix::fs::symlink(to.replace(seed, target), home.join(link))?;
+    let log = std::fs::File::options()
+        .create(true)
+        .append(true)
+        .open(home.join("install.log"))?;
+    let status = Command::new(release.join(cid.trim()))
+        .arg("install")
+        .arg("--from")
+        .arg(release)
+        .env("HOME", home)
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .current_dir(home)
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "the Runtime installer exited with {status}; see {}",
+            home.join("install.log").display()
+        )));
     }
     Ok(())
 }
@@ -68,12 +55,4 @@ pub fn note(home: &Path, started: Instant, what: &str) {
     {
         let _ = writeln!(log, "{:>7.2} s  {what}", started.elapsed().as_secs_f64());
     }
-}
-
-fn lines(list: &Path) -> io::Result<Vec<String>> {
-    Ok(std::fs::read_to_string(list)?
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(str::to_owned)
-        .collect())
 }

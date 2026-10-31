@@ -14,10 +14,12 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use wry::{WebView, WebViewBuilder};
 
 const POLL: Duration = Duration::from_secs(1);
+const STARTING: &str = "<!doctype html><meta charset=\"utf-8\"><style>html{height:100%;display:grid;place-items:center;font:15px -apple-system,system-ui;color-scheme:light dark}</style><p>Starting ElastOS…</p>";
 
 enum UserEvent {
     Menu(MenuEvent),
     Home(bool),
+    Installed(Result<(), String>),
 }
 
 fn main() {
@@ -27,19 +29,15 @@ fn main() {
         return;
     }
     let lab_home = runtime::lab_home();
-    if let (Some(home), Some(payload)) = (&lab_home, firstrun::payload()) {
-        if !runtime::installed() {
-            if let Err(error) = firstrun::install(&payload, home) {
-                alert(&format!("Could not set up ElastOS from this app: {error}"));
-                return;
-            }
-            firstrun::note(home, started, "installed from the files inside the app");
-        }
-    }
-    if !runtime::installed() {
+    let release = firstrun::payload();
+    // Only experiments with the lab Runtime packed inside the app start Home.
+    let lab_start = lab_home.clone().zip(release);
+    let mut first_run = lab_start.clone().filter(|_| !runtime::installed());
+    if !runtime::installed() && first_run.is_none() {
         alert(&checks::not_installed());
         return;
     }
+    let mut ready = first_run.is_none();
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
 
@@ -116,7 +114,9 @@ fn main() {
     let mut home_started = false;
     let mut launch_open = true;
     let mut home: Option<(Window, WebView)> = None;
+    let mut home_loaded = false;
     let home_proxy = event_loop.create_proxy();
+    let install_proxy = event_loop.create_proxy();
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
         match event {
@@ -135,6 +135,16 @@ fn main() {
                         .build()
                         .expect("tray icon"),
                 );
+                if lab_start.is_some() {
+                    show_home(&mut home, target);
+                }
+                if let Some((lab, release)) = first_run.take() {
+                    let proxy = install_proxy.clone();
+                    thread::spawn(move || {
+                        let result = firstrun::install(&release, &lab).map_err(|e| e.to_string());
+                        let _ = proxy.send_event(UserEvent::Installed(result));
+                    });
+                }
                 let proxy = home_proxy.clone();
                 thread::spawn(move || loop {
                     if proxy
@@ -146,12 +156,23 @@ fn main() {
                     thread::sleep(POLL);
                 });
             }
+            Event::UserEvent(UserEvent::Installed(result)) => match result {
+                Ok(()) => {
+                    ready = true;
+                    if let Some(lab) = &lab_home {
+                        firstrun::note(lab, started, "installed from the release inside the app");
+                    }
+                }
+                Err(error) => {
+                    alert(&format!("Could not set up ElastOS from this app: {error}"));
+                    *control_flow = ControlFlow::Exit;
+                }
+            },
             Event::UserEvent(UserEvent::Home(up)) => {
-                if let (false, false, Some(lab), Some(sim_bin)) =
-                    (up, home_started, &lab_home, firstrun::sim_bin())
+                if let (false, false, true, Some((lab, _))) = (up, home_started, ready, &lab_start)
                 {
                     home_started = true;
-                    match runtime::start_home(lab, &sim_bin) {
+                    match runtime::start_home(lab) {
                         Ok(()) => firstrun::note(lab, started, "asked the Runtime to start Home"),
                         Err(error) => alert(&format!("Could not start Home: {error}")),
                     }
@@ -161,10 +182,15 @@ fn main() {
                     launch_open = false;
                     show_home(&mut home, target);
                     if let Some(lab) = &lab_home {
-                        firstrun::note(lab, started, "Home answered; window shown");
+                        firstrun::note(lab, started, "Home answered; Home loaded in the window");
                     }
-                } else if !up && !home_started {
+                } else if !up && !home_started && lab_start.is_none() {
                     launch_open = false;
+                }
+                if up && !home_loaded {
+                    if let Some((_, webview)) = &home {
+                        home_loaded = webview.load_url(runtime::HOME_URL).is_ok();
+                    }
                 }
                 home_up = Some(up);
                 status.set_text(if up {
@@ -174,7 +200,7 @@ fn main() {
                 });
             }
             // Double-clicking the app, or clicking its Dock icon, while it runs.
-            Event::Reopen { .. } => open_home(home_up, &mut home, target),
+            Event::Reopen { .. } => open_home(home_up, &mut home, &mut home_loaded, target),
             // Closing the window hides it; the app keeps running in the menu bar.
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -186,7 +212,7 @@ fn main() {
             }
             Event::UserEvent(UserEvent::Menu(event)) => {
                 if event.id == *open.id() || event.id == *updates.id() {
-                    open_home(home_up, &mut home, target);
+                    open_home(home_up, &mut home, &mut home_loaded, target);
                 } else if event.id == *quit.id() {
                     home.take();
                     tray.take();
@@ -201,16 +227,20 @@ fn main() {
 fn open_home(
     home_up: Option<bool>,
     home: &mut Option<(Window, WebView)>,
+    home_loaded: &mut bool,
     target: &EventLoopWindowTarget<UserEvent>,
 ) {
-    if home_up == Some(true) {
-        show_home(home, target);
-    } else {
+    if home_up != Some(true) {
         alert("Home is not running, so there is nothing to open yet.");
+        return;
+    }
+    show_home(home, target);
+    if let (false, Some((_, webview))) = (*home_loaded, &*home) {
+        *home_loaded = webview.load_url(runtime::HOME_URL).is_ok();
     }
 }
 
-/// Shows the one Home window, creating it the first time.
+/// Shows the one Home window, creating it on a local "Starting" page the first time.
 fn show_home(home: &mut Option<(Window, WebView)>, target: &EventLoopWindowTarget<UserEvent>) {
     if home.is_none() {
         match new_home_window(target) {
@@ -235,9 +265,7 @@ fn new_home_window(
         .with_inner_size(LogicalSize::new(1280.0, 820.0))
         .with_min_inner_size(LogicalSize::new(720.0, 480.0))
         .build(target)?;
-    let webview = WebViewBuilder::new()
-        .with_url(runtime::HOME_URL)
-        .build(&window)?;
+    let webview = WebViewBuilder::new().with_html(STARTING).build(&window)?;
     Ok((window, webview))
 }
 

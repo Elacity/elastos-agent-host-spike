@@ -34,27 +34,16 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-# Experiment P3, SIMULATED install from the files inside the app. LAB_SEED is a fresh
-# alpha.26 install made by the official installer with HOME=$LAB_SEED; LAB_HOME is the
-# throwaway folder the app then treats as the user's home folder.
-if [ -n "${LAB_SEED:-}" ]; then
-	: "${LAB_HOME:?LAB_HOME is required with LAB_SEED}"
+# Experiment P4: first open installs from a signed release folder made by
+# make-release-folder.py with the lab Runtime. LAB_HOME is the throwaway folder the
+# app then treats as the user's home folder.
+if [ -n "${LAB_RELEASE:-}" ]; then
+	: "${LAB_HOME:?LAB_HOME is required with LAB_RELEASE}"
 	res="$app/Contents/Resources"
-	payload="$res/payload"
-	mkdir -p "$payload" "$res/sim-bin"
-	cp -cRp "$LAB_SEED/.local" "$LAB_SEED/Library" "$payload/"
-	rm -rf "$payload/Library/Caches" "$payload/Library/Application Support/elastos/host-process.lock"
-	(
-		cd "$payload"
-		find . -type l | while read -r link; do
-			printf '%s\t%s\n' "${link#./}" "$(readlink "$link")"
-			rm "$link"
-		done > .path-links
-		grep -rlIF --exclude=.path-links "$LAB_SEED" . | sed 's#^\./##' > .path-files
-	)
-	printf '%s\n' "$LAB_SEED" > "$payload/.seed-home"
-	printf '#!/bin/sh\nexit 0\n' > "$res/sim-bin/open"
-	chmod +x "$res/sim-bin/open"
+	mkdir -p "$res"
+	cp -cRp "$LAB_RELEASE" "$res/release"
+	python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["payload"]["platforms"]["aarch64-darwin"]["binary"]["cid"])' \
+		"$res/release/release.json" > "$res/runtime-cid"
 	plutil -insert LSEnvironment -dictionary "$app/Contents/Info.plist"
 	plutil -insert LSEnvironment.ELASTOS_LAB_HOME -string "$LAB_HOME" "$app/Contents/Info.plist"
 fi

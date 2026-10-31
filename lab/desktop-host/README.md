@@ -39,22 +39,26 @@ On start the app refuses anything other than an Apple silicon Mac, and says so w
   stay in that browser.
 - Links that leave Home and requests for new windows get no special handling yet.
 
-## Experiment P3: first open from the files inside the app
+## Experiment P4: first open from the signed release inside the app
 
-SIMULATED. The Runtime cannot yet install from local files, so `bundle.sh` packs a
-fresh alpha.26 install (made by the official installer with `HOME=$LAB_SEED`) into
-`Contents/Resources/payload`. On first open the app clones it into `LAB_HOME`, fixes
-the two files and eight links that hold the install location, and starts Home with
-alpha.26 `home --browser` behind a do-nothing `open` (standing in for
-`elastos service start`). It skips the publisher, signature, CID and SHA-256 checks the
-real Runtime command must run. The packed install holds no device keys; Home makes
-them on first start. Only `LAB_HOME` is ever written. Timings go to
-`$LAB_HOME/firstrun-timing.log`.
+LAB DRAFT. Needs the lab Runtime branch `lab/standalone-install`, which adds
+`elastos install --from DIR` and the quiet start `ELASTOS_SERVICE=1`. Neither is in a
+published release.
+
+`make-release-folder.py` fetches one release into a folder: head, release, sources,
+and every file for this Mac named by its CID, each checked against its SHA-256. With
+`--lab-runtime` it swaps in a lab Runtime and signs the release with a lab key.
+`bundle.sh` packs that folder into `Contents/Resources/release`. On first open the
+window shows "Starting ElastOS…", the release's own Runtime runs `install --from` (the
+same publisher, signature, CID and SHA-256 checks as a download), then Home starts
+without a browser and loads in the window. Only `LAB_HOME` is ever written. Timings go
+to `$LAB_HOME/firstrun-timing.log`.
 
 ```sh
-LAB_SEED=~/elastos-lab-seed/home LAB_HOME=~/elastos-lab-user/home lab/desktop-host/bundle.sh
-hdiutil create -volname "ElastOS Lab" -srcfolder "lab/desktop-host/dist/ElastOS Lab.app" \
-  -format ULFO "lab/desktop-host/dist/ElastOS-Lab.dmg"
+python3 lab/desktop-host/make-release-folder.py --sources SOURCES_JSON --out ~/elastos-lab-release/lab \
+  --lab-runtime LAB_ELASTOS --lab-key ~/elastos-lab-release/lab-publisher.key --signer LAB_ELASTOS
+LAB_RELEASE=~/elastos-lab-release/lab LAB_HOME=~/elastos-lab-user4 lab/desktop-host/bundle.sh
+hdiutil create -volname "ElastOS Lab" -srcfolder DMG_SOURCE_FOLDER -format ULFO lab/desktop-host/dist/ElastOS-Lab.dmg
 ```
 
 ## Build and run
