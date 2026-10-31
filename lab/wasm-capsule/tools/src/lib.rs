@@ -30,6 +30,7 @@
 
 pub mod bundle;
 pub mod receipt;
+pub mod refusal_receipts;
 pub mod run;
 pub mod verify;
 
