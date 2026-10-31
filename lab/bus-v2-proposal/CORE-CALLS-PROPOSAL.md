@@ -1126,7 +1126,7 @@ A reported figure is not a hold, and the required account stays open. `capsules/
         Ok(())
     }
 
-The account A7 asks for is this account. Admission sets the ceiling. The Runtime reserves a bounded usage amount before each dispatch. That account covers concurrent calls, a retry, a cancellation, and an uncertain outcome. A reported figure does not lower the hold. The guest writes zeros. The journal check is room for history. The concurrency check counts non-terminal runs. The slot stores a time under one lock. The usage function refuses an empty report. A7 stays open.
+The account A7 asks for is this account. Admission sets the ceiling. The Runtime reserves a bounded usage amount before each dispatch. In the pinned lab this account covers concurrent calls, which share one ceiling, and an uncertain outcome, which keeps the hold until a measured settle or the verifier deadline. The contract must add a retry, and must add a cancellation; both are obligations on the Runtime. A reported figure does not lower the hold. The guest writes zeros, so the guest keeps no usage total. The journal check is room for history. The concurrency check counts non-terminal runs. The slot stores a time under one lock. The usage function refuses an empty report. A7 stays open.
 
 This section cites no lab/grant-binding test.
 
