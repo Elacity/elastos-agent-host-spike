@@ -9844,3 +9844,230 @@ Rerun, same environment (`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFL
 - `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.18 seconds.
 - `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 318.70 seconds, inside the 600-second bound. Targets: lib 89 passed (including `standin_shell_lists_every_pending_request`); bin/report 1 passed; artifact 7 passed; build 1 passed; content_cid 2 passed; effects 63 passed (including `granted_read_succeeds`) and 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed and 2 ignored; standin_contract 13 passed; standin_plan 8 passed; standin_residents 2 passed; probe 3 passed; doc-tests 0.
 
+## 113 — One hostcall records the capsule request
+
+113: `bridge_envelope` is the one hostcall. A capability line calls `post_capability_request` for the capsule id and copies every request key except `type`, including `plan`. An invoke line calls `authorise` for that capsule id with no plan hash, so a bound grant stays live. The principal argument does not choose the caller. This method mints no grant. Comparison base, recorded before the first edit: `4533316f4b40ce9d59ab4a44a434b4b475f101cf`. `b2eccab68f03ce9a0ced0c8afea96b496dbfd15f` is an ancestor. `fff8f1761eb851f642f8e9b680ea1c6747974060` is not.
+
+### Quote from the request flow (read only)
+
+`docs/AGENT_ARCHITECTURE.md` section "Request flow", steps 6 and 7:
+
+> The Agent Host submits the proposed operation to Runtime as the active agent principal and session.
+
+> Runtime verifies the exact resource, action, operation, principal, session, capsule, grant, expiry, and revocation state.
+
+This task is that submit on the one hostcall. It does not mint a grant.
+
+### Quote from the call shape (read only)
+
+`elastos/crates/elastos-compute/src/providers/mod.rs`, `BridgeHostcall`. The hostcall arguments are the envelope line, the capsule id, and the principal:
+
+```text
+pub type BridgeHostcall =
+    Arc<dyn Fn(&str, &str, Option<&str>) -> std::result::Result<String, String> + Send + Sync>;
+```
+
+`elastos/crates/elastos-compute/src/providers/component.rs`, `call_bridge`. It passes that line, the capsule id, and the principal:
+
+```text
+let raw = hostcall(&line, &self.capsule_id, self.principal_id.as_deref())
+```
+
+`elastos/crates/elastos-guest/src/runtime.rs`, `RequestEnvelope` and `RuntimeRequest`. A line is JSON `{"id": <number>, "request": {"type": ...}}`. `request_capability` carries `resource`, `action`, and `reason`. `resource_invoke` carries `uri`, `operation`, `body`, and `token`. The guest invoke carries no plan hash, so this hostcall passes `None`.
+
+### Plants
+
+Each plant was applied alone, the planted crate compiled, `standin_bridge_envelope_records_the_capsule_request` failed on its assertion, and the file was restored before the next. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_bridge_envelope_records_the_capsule_request -- --exact`. No `falsifiers.json` id.
+
+F-bridge-stub. Real 5.84 seconds. Assertion `src/../standin-runtime/mod.rs:9836:9` (restored `:9835`): `the stand-in did the work: component-1 holds the capsule request`. Left `[]`, right the `request-1` record. The early return compiled; rustc warned `unreachable statement` and the test still ran.
+
+Old:
+
+```text
+        let _ = principal;
+        let parsed: Value =
+```
+
+New:
+
+```text
+        let _ = principal;
+        return Ok("{\"id\":7,\"response\":{\"type\":\"ok\",\"data\":{\"status\":\"pending\",\"request_id\":\"request-1\"}}}".to_owned());
+        let parsed: Value =
+```
+
+F-bridge-fixed-session. Real 1.28 seconds. Assertion `src/../standin-runtime/mod.rs:9853:9` (restored `:9853`): `the stand-in did the work: component-1 still has only request-1`. Left held `request-1` and `request-2` on `component-1`. Right held only `request-1`.
+
+Old:
+
+```text
+                match self.post_capability_request(
+                    Caller::Client {
+                        session_id: capsule_id,
+                    },
+```
+
+New:
+
+```text
+                match self.post_capability_request(
+                    Caller::Client {
+                        session_id: "component-1",
+                    },
+```
+
+F-bridge-principal-caller. Real 1.31 seconds. Assertion `src/../standin-runtime/mod.rs:9779:9` (restored `:9779`): `the stand-in did the work: the principal does not choose the caller`. Left `String("ok")`, right `"error"`.
+
+Old:
+
+```text
+                match self.authorise(
+                    Caller::Client {
+                        session_id: capsule_id,
+                    },
+```
+
+New:
+
+```text
+                match self.authorise(
+                    Caller::Client {
+                        session_id: principal.unwrap_or(capsule_id),
+                    },
+```
+
+F-bridge-drop-plan. Real 1.35 seconds. Assertion `src/../standin-runtime/mod.rs:9997:9` (restored `:9997`): `the stand-in did the work: request-4 stores the plan hash`. Left `plan` null. Right `plan` the 64-character string of `a`.
+
+Old:
+
+```text
+                        .filter(|(key, _)| key.as_str() != "type")
+```
+
+New:
+
+```text
+                        .filter(|(key, _)| key.as_str() != "type" && key.as_str() != "plan")
+```
+
+F-bridge-pass-plan. Real 1.33 seconds. Assertion `src/../standin-runtime/mod.rs:9779:9` (restored `:9779`): `the stand-in did the work: a bound grant stays live`. Left `String("ok")`, right `"error"`.
+
+Old:
+
+```text
+                    token,
+                    None,
+```
+
+New:
+
+```text
+                    token,
+                    Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+```
+
+F-bridge-coerce-id. Real 1.35 seconds. Assertion `src/../standin-runtime/mod.rs:9909:18` (restored `:9908`): `the stand-in did the work: a nonnumeric id is refused`. The call returned Ok of id `0` and `request-3`, so `post_capability_request` ran.
+
+Old:
+
+```text
+        let id = match parsed.get("id") {
+            None => 0,
+            Some(id) => id
+                .as_u64()
+                .ok_or_else(|| "bridge id must be a number".to_owned())?,
+        };
+```
+
+New:
+
+```text
+        let id = match parsed.get("id") {
+            None => 0,
+            Some(Value::String(_)) => 0,
+            Some(id) => id
+                .as_u64()
+                .ok_or_else(|| "bridge id must be a number".to_owned())?,
+        };
+```
+
+F-bridge-coerce-token. Real 1.30 seconds. Assertion `src/../standin-runtime/mod.rs:10094:14` (restored `:10094`): `the stand-in did the work: a non-string token is refused`. The call returned Ok with message `unknown grant`, so `authorise` ran.
+
+Old:
+
+```text
+                let token = match request.get("token") {
+                    None => "",
+                    Some(Value::String(text)) => text.as_str(),
+                    Some(_) => return Err("invoke token must be a string".to_owned()),
+                };
+```
+
+New:
+
+```text
+                let token = match request.get("token") {
+                    None => "",
+                    Some(Value::String(text)) => text.as_str(),
+                    Some(_) => "",
+                };
+```
+
+F-bridge-skip-object. Real 1.30 seconds. Assertion `src/../standin-runtime/mod.rs:9899:18` (restored `:9895`): `the stand-in did the work: a missing request object is refused`. The call returned Ok with message `unsupported bridge request`.
+
+Old:
+
+```text
+        let request = match parsed.get("request") {
+            Some(Value::Object(object)) => object,
+            _ => return Err("Invalid JSON: request must be an object".to_owned()),
+        };
+```
+
+New:
+
+```text
+        let request = match parsed.get("request") {
+            Some(Value::Object(object)) => object,
+            None => {
+                let id = parsed.get("id").and_then(Value::as_u64).unwrap_or(0);
+                return Ok(error_line(id, "unsupported bridge request"));
+            }
+            Some(_) => return Err("Invalid JSON: request must be an object".to_owned()),
+        };
+```
+
+### Docs
+
+`standin-runtime/README.md` adds one paragraph immediately before `## Callers`. `bridge_envelope` is the one hostcall, a capability line calls `post_capability_request` for the capsule id, and an invoke line calls `authorise` for that capsule id with no plan hash. The principal argument does not choose the caller. A bound grant stays live. Two-capsule-run passes the line, the capsule id, and the principal, and this lane does not run the component bytes. A PASS gives the Runtime no A3 credit. The grant paragraph and the plan-approval section stay. `RUNBOOK.md` adds one paragraph after the last stand-in paragraph: `standin_bridge_envelope_records_the_capsule_request` is this stand-in, two-capsule-run owns the real-bytes run, and a PASS here gives the Runtime no A3 credit. Every other RUNBOOK paragraph stays.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. `Cargo.toml` and `Cargo.lock` are unchanged. `git diff` for `src/harness.rs`, `src/census.rs`, `src/report.rs`, `tests/effects.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. The changed files are `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md`. After the plants were restored, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` is insertions only and shows no plant. `post_capability_request`, `request_body`, `declared_ask`, `authorise`, `plan_accepts`, `seed_request`, `seed_grant`, and `post_capability_grant` are unchanged. `bridge_envelope` is the only new method above `#[cfg(test)]`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.17 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 262.17 seconds, inside the 600-second bound. Targets: lib 90 passed (including `standin_bridge_envelope_records_the_capsule_request`); bin/report 1 passed; artifact 7 passed; build 1 passed; content_cid 2 passed; effects 63 passed and 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed and 2 ignored; standin_contract 13 passed; standin_plan 8 passed; standin_residents 2 passed; probe 3 passed; doc-tests 0. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.15 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_bridge_envelope_records_the_capsule_request -- --exact` exit 0, 1 passed and 0 failed, real 0.11 seconds. `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false.
+
+The supervisor's `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` exited 101. The only failure was `cleanup_census_refuses_each_leftover` in `tests/runtime.rs`. Its census line was `cleanup census: FAIL retained:target/home-62484-1793348985844653000-0; process leftover; processes:1 paths:["stdout-25"] API sockets:0 temp:0 paths:[]; excludes only test PID; outside-root:BLOCKED(AC-006-STORAGE)`. The only path is `stdout-25`, which matches `stdout-<digits>`. It does not include `host-process.lock`, a path containing `config.toml`, a request stored for session `person-a`, or a bound grant that became `Exhausted`. The stand-in was left as restored. `src/census.rs` and the operator stay unchanged.
+
+Rerun, same environment (`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`):
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.22 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 268.29 seconds, inside the 600-second bound. Targets: lib 90 passed (including `standin_bridge_envelope_records_the_capsule_request`); bin/report 1 passed; artifact 7 passed; build 1 passed; content_cid 2 passed; effects 63 passed and 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed (including `cleanup_census_refuses_each_leftover`) and 2 ignored; standin_contract 13 passed; standin_plan 8 passed; standin_residents 2 passed; probe 3 passed; doc-tests 0.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | The hostcall copies the request keys at `standin-runtime/mod.rs:1187-1190`. It adds no code or content identity. |
+| 2. Capsule, Home or UI gains ungranted access? | No | The caller session is `capsule_id` at `:1194` and `:1211`. `let _ = principal` at `:1150` drops the principal. The method mints no grant. |
+| 3. A second path or a second copy of one rule? | No | `bridge_envelope` at `:1144` is the only new method. The capability arm calls `post_capability_request` at `:1193`. The invoke arm calls `authorise` at `:1209` with `None` at `:1214`. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`. `elastos/` is untouched and its hostcall is quoted only. |
+| 5. Refusals deny by default with a clear reason? | Yes | A bad line is `Invalid JSON: ` at `:1152`, `request must be an object` at `:1176`, `bridge id must be a number` at `:1182`, or `invoke token must be a string` at `:1208`. Any other type is `unsupported bridge request` at `:1220`. A route error keeps that route's reason. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The method is the stand-in for `call_bridge`. This lane does not run the component bytes. A PASS gives the Runtime no A3 credit. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_bridge_envelope_records_the_capsule_request` at `:9812`. Each of the eight plants fails that test on its assertion, and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | A capability line stores a pending request and mints nothing. An invoke passes no plan hash, so a bound grant stays `Live`. The capsule id is the session, and the principal is not. |
+
+A passing row gives the real Runtime no A3 credit. Two-capsule-run owns the real component bytes.
+
