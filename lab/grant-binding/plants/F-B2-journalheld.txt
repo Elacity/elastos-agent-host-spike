@@ -1,0 +1,31 @@
+id: F-B2-journalheld
+file: src/ops.rs
+test: ops::model_issuing_effect_inside_a_live_journal_is_refused
+--- old
+                    if operation != Operation::ChildJournal {
+                        if self.grants.values().any(|stored| {
+                            stored.record.parent == Some(request.handle)
+                                && !stored.ended
+                                && super::resource_name(
+                                    &grant.identity,
+                                    path,
+                                    Some(&stored.record.owned_root),
+                                )
+                                .is_ok()
+                        }) {
+                            return Err(OperateRefuse::JournalHeld);
+                        }
+                    }
+--- new
+                    let _ = operation != Operation::ChildJournal
+                        && self.grants.values().any(|stored| {
+                            stored.record.parent == Some(request.handle)
+                                && !stored.ended
+                                && super::resource_name(
+                                    &grant.identity,
+                                    path,
+                                    Some(&stored.record.owned_root),
+                                )
+                                .is_ok()
+                        });
+--- end
