@@ -354,3 +354,28 @@ fn embedded_imports_are_internal() {
     assert_eq!(audit_component(&wasm, &[name]), Ok(vec![name.into()]));
     assert_undeclared(&wasm, &[], name);
 }
+
+#[test]
+fn componentized_product_capsule_passes_audit_component() {
+    const BUS: [&str; 5] = [
+        "elastos:bus/types@1.0.0",
+        "elastos:bus/runtime@1.0.0",
+        "elastos:bus/identity@1.0.0",
+        "elastos:bus/capabilities@1.0.0",
+        "elastos:bus/providers@1.0.0",
+    ];
+    let wasm = wat::parse_str(
+        r#"(component
+            (import "elastos:bus/types@1.0.0" (instance))
+            (import "elastos:bus/runtime@1.0.0" (instance))
+            (import "elastos:bus/identity@1.0.0" (instance))
+            (import "elastos:bus/capabilities@1.0.0" (instance))
+            (import "elastos:bus/providers@1.0.0" (instance)))"#,
+    )
+    .unwrap();
+    Validator::new().validate_all(&wasm).unwrap();
+    assert_eq!(
+        audit_component(&wasm, &BUS),
+        Ok(BUS.iter().map(|name| name.to_string()).collect())
+    );
+}
