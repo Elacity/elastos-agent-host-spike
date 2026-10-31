@@ -9,8 +9,9 @@
 //! spawn gate: every right's rules must equal the template for its id.
 //!
 //! The templates are byte-for-byte the rules in the committed provider
-//! manifests. Comparison normalises whitespace and strips `;` comments only;
-//! rule order and rule count stay meaningful.
+//! manifests. Comparison normalises whitespace only; rule order and rule count
+//! stay meaningful, and template text carries no `;` comments, so a declared
+//! rule with a comment is refused.
 
 // The spawn gate (`check_rights_against_runtime_templates`) gets its caller in
 // Y50b; until then its only users are this module's tests. Remove this allow
@@ -39,12 +40,11 @@ pub(crate) fn approved_right_template(id: &str) -> Option<&'static [&'static str
     }
 }
 
-/// Normalise a rule to its comparison form: drop `;` comments and collapse
-/// whitespace runs to one space, trimmed at both ends.
+/// Normalise a rule to its comparison form: whitespace runs collapse to one
+/// space, trimmed at both ends. `;` is ordinary text here, and no template
+/// carries a comment, so a commented rule never matches its template.
 fn normalised(rule: &str) -> Vec<String> {
-    let uncommented = rule.split(';').next().unwrap_or("");
-    uncommented
-        .split_whitespace()
+    rule.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .split(' ')
@@ -117,6 +117,15 @@ mod tests {
             .clone()
     }
 
+    fn rules_mut<'a>(authority: &'a mut ProviderAuthority, id: &str) -> &'a mut Vec<String> {
+        authority
+            .rights
+            .iter_mut()
+            .find(|right| right.id == id)
+            .map(|right| &mut right.rules)
+            .unwrap_or_else(|| panic!("provider right \"{id}\" is missing"))
+    }
+
     #[test]
     fn committed_provider_manifests_match_runtime_templates() {
         for name in ["did", "wallet", "model"] {
@@ -132,7 +141,7 @@ mod tests {
         let template = approved_right_template("storage").unwrap();
         let mut rules = vec![r#"(allow file-read* file-write* (subpath "/"))"#.to_string()];
         rules.push(template[1].to_string());
-        authority.rights[0].rules = rules;
+        *rules_mut(&mut authority, "storage") = rules;
         assert_eq!(
             check_rights_against_runtime_templates(&authority),
             Err(
@@ -147,7 +156,7 @@ mod tests {
         let mut authority = did_authority();
         let mut rules = storage_rules(&authority);
         rules.swap(0, 1);
-        authority.rights[0].rules = rules;
+        *rules_mut(&mut authority, "storage") = rules;
         assert_eq!(
             check_rights_against_runtime_templates(&authority),
             Err(
@@ -158,15 +167,44 @@ mod tests {
     }
 
     #[test]
-    fn whitespace_and_comments_still_match() {
+    fn whitespace_still_matches() {
         let mut authority = did_authority();
         let template = approved_right_template("storage").unwrap();
-        authority.rights[0].rules = vec![
-            format!("  (allow\n file-read*    (literal   (param \"STORAGE_PARENT\"))) ; parent"),
-            format!("(allow file-read* file-write*\n (subpath (param \"STORAGE_ROOT\")))\t; root"),
+        *rules_mut(&mut authority, "storage") = vec![
+            "  (allow\n file-read*    (literal   (param \"STORAGE_PARENT\")))".to_string(),
+            "(allow file-read* file-write*\n (subpath (param \"STORAGE_ROOT\")))\t".to_string(),
         ];
         assert_eq!(template.len(), 2);
         check_rights_against_runtime_templates(&authority).unwrap();
+    }
+
+    #[test]
+    fn semicolon_smuggled_rule_is_refused() {
+        let mut authority = did_authority();
+        let smuggled = "  (allow process-exec (literal (param \"PROVIDER_EXECUTABLE\"))) ;x\n\
+                        (allow process-exec (subpath \"/\"))";
+        *rules_mut(&mut authority, "bound-executable") = vec![smuggled.to_string()];
+        assert_eq!(
+            check_rights_against_runtime_templates(&authority),
+            Err(
+                "provider right \"bound-executable\" rule text differs from the Runtime template"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn widened_bound_executable_rule_is_refused() {
+        let mut authority = did_authority();
+        *rules_mut(&mut authority, "bound-executable") =
+            vec![r#"(allow process-exec (subpath "/"))"#.to_string()];
+        assert_eq!(
+            check_rights_against_runtime_templates(&authority),
+            Err(
+                "provider right \"bound-executable\" rule text differs from the Runtime template"
+                    .to_string()
+            )
+        );
     }
 
     #[test]
