@@ -305,6 +305,12 @@ pub struct StandIn {
     admitted_on: Vec<String>,
 }
 
+impl Default for StandIn {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StandIn {
     pub fn new() -> Self {
         Self {
