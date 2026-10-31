@@ -67,6 +67,8 @@ A request may carry `plan`, the `sha256` that `plan_approval::preview` returned;
 
 `StandIn::bridge_envelope` is the one hostcall. A capability line calls `post_capability_request` for the capsule id. An invoke line calls `authorise` for that capsule id with no plan hash. The principal argument does not choose the caller. A bound grant stays live. Two-capsule-run passes the line, the capsule id, and the principal, and this lane does not run the component bytes. A PASS gives the Runtime no A3 credit.
 
+`seed_request` holds at most 1024 pending records, and at most 32 pending records for one session. The store reason is `Too many pending requests`. The session reason is `Too many pending requests for this session`. The store check runs first. A granted, denied or expired record does not count and is not removed. `post_capability_request` returns that error and does not count. A PASS gives the Runtime no A11 credit.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.
