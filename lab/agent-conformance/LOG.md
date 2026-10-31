@@ -10071,3 +10071,169 @@ Rerun, same environment (`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFL
 
 A passing row gives the real Runtime no A3 credit. Two-capsule-run owns the real component bytes.
 
+## 128 — A12: unlisted pending on this base
+
+128: `standin_a12_census` keeps its listed-session read, then calls `unlisted_pending` once, then `census::cleanup` once. A pending request whose session has left the capsule list is `pending request leftover`. A denied, granted or expired request is not. A listed session is not read again. Comparison base, recorded before the first edit: `80a2405624121eef3404fe3b3814a558be4b7cb5`. `b2eccab68f03ce9a0ced0c8afea96b496dbfd15f` is an ancestor. `fff8f1761eb851f642f8e9b680ea1c6747974060` is not. `fn bridge_envelope` is already on that base. This task left its body, and `authorise`, as found.
+
+### Quote from the session contract (read only)
+
+`docs/AGENT_ARCHITECTURE.md`, section "Session and interaction contract":
+
+> an explicit interrupt or cancel operation that reports its settlement;
+
+This task is the census after the instance has left the list. It does not add an interrupt.
+
+### Quote from the census (read only)
+
+`git show 35697329be0aad89eb68d0adf78aa94d24751317:lab/resident-instances/SPEC.md`, the **Census.** paragraph:
+
+> **Census.** No launched instance is `starting`, `running` or `stopping`. No pending request comes from a journey session. In A6 and A12, no live grant belongs to a journey session. No process below the operator pid is new since the baseline. `GET /api/health` is still ok.
+
+The one physical census stays `census::cleanup`. `src/census.rs` is unchanged.
+
+### Plants
+
+Each plant was applied alone, the named test failed on its assertion, and the restored crate passed that test. No `falsifiers.json` id. `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`.
+
+F-census-listed-only. `unlisted_pending` returns `Ok(())` before `request_sessions`. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_unlisted_pending_is_not_authority -- --exact`. Real 10.15 seconds. Assertion `src/../standin-runtime/mod.rs:10293:9` (restored `:10292`): `the stand-in did the work: a pending request whose session left the list is a leftover`. Left `Ok(())`, right `Err("pending request leftover")`. Restored, the same command passed.
+
+Old:
+
+```text
+        for session_id in self.request_sessions() {
+```
+
+New:
+
+```text
+        return Ok(());
+        for session_id in self.request_sessions() {
+```
+
+F-census-listed-as-unlisted. The listed-session skip is removed, so `req-live` is `pending request leftover`. Same command. Real 1.72 seconds. Assertion `src/../standin-runtime/mod.rs:10412:9` (restored `:10415`): `the stand-in did the work: a listed session is not read again`. Left `Err("pending request leftover")`, right `Ok(())`. Restored, the same command passed.
+
+Old:
+
+```text
+            if listed_sessions.iter().any(|listed| listed == &session_id) {
+                continue;
+            }
+```
+
+New: those three lines removed.
+
+F-census-count-granted. A `granted` status is `pending request leftover`, so `req-g` fails. Same command. Real 1.65 seconds. Assertion `src/../standin-runtime/mod.rs:10344:9` (restored `:10344`): `the stand-in did the work: a granted request is not a leftover`. Left `Err("pending request leftover")`, right `Ok(())`. Restored, the same command passed.
+
+Old:
+
+```text
+                if request["status"] == "pending" {
+```
+
+New:
+
+```text
+                if request["status"] == "pending" || request["status"] == "granted" {
+```
+
+F-census-count-expired. An `expired` status is `pending request leftover`, so `req-e` fails. Same command. Real 1.79 seconds. Assertion `src/../standin-runtime/mod.rs:10370:9` (restored `:10370`): `the stand-in did the work: an expired request is not a leftover`. Left `Err("pending request leftover")`, right `Ok(())`. Restored, the same command passed.
+
+Old:
+
+```text
+                if request["status"] == "pending" {
+```
+
+New:
+
+```text
+                if request["status"] == "pending" || request["status"] == "expired" {
+```
+
+F-census-skip-call. `standin_a12_census` does not call `unlisted_pending`. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_census_calls_unlisted_pending -- --exact`. Real 1.66 seconds. Assertion `src/../standin-runtime/mod.rs:10443:9` (restored `:10443`): `the stand-in did the work: standin_a12_census calls unlisted_pending`. Restored, the same command passed.
+
+Old:
+
+```text
+    standin.unlisted_pending()?;
+```
+
+New: that line removed.
+
+F-census-second-cleanup. `standin_a12_census` contains `capture_process_leftover`. Same wiring command. Real 1.70 seconds. Assertion `src/../standin-runtime/mod.rs:10447:9` (restored `:10447`): `the stand-in did the work: standin_a12_census has no second census`. Restored, the same command passed.
+
+Old:
+
+```text
+    standin.unlisted_pending()?;
+```
+
+New:
+
+```text
+    // capture_process_leftover
+    standin.unlisted_pending()?;
+```
+
+F-census-after-cleanup. The `unlisted_pending` call is after `census::cleanup`. Same wiring command. Real 1.70 seconds. Assertion `src/../standin-runtime/mod.rs:10457:9` (restored `:10457`): `the stand-in did the work: unlisted_pending runs before census::cleanup`. Restored, the same command passed.
+
+Old:
+
+```text
+    standin.unlisted_pending()?;
+    match census::cleanup(home, port) {
+        Ok(line) if line.contains("root checks PASS") => Ok(()),
+        Ok(line) => Err(line),
+        Err(line) => Err(line),
+    }
+```
+
+New:
+
+```text
+    let cleaned = match census::cleanup(home, port) {
+        Ok(line) if line.contains("root checks PASS") => Ok(()),
+        Ok(line) => Err(line),
+        Err(line) => Err(line),
+    };
+    standin.unlisted_pending()?;
+    cleaned
+```
+
+### Docs
+
+`standin-runtime/README.md` keeps the census paragraph that names `standin_a12_census` and adds the unlisted sentence: the census also reads a session that has left the list, through `unlisted_pending`, and a pending request there is `pending request leftover`. A denied, granted or expired request is not. A PASS gives the Runtime no A12 credit. `RUNBOOK.md` adds one paragraph after the last stand-in paragraph: `standin_unlisted_pending_is_not_authority` is this stand-in, and a PASS there gives the Runtime no A12 credit. Every other paragraph stays.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. `Cargo.toml` and `Cargo.lock` are unchanged. `git diff` for `src/census.rs`, `src/harness.rs`, `src/report.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. After the plants were restored, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` shows no plant, and `git diff -- lab/agent-conformance/tests/effects.rs` does not contain `capture_process_leftover`.
+
+First full run. `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.18 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101, real 445.94 seconds. The only failure was `grants::tests::attach_refusal_names_the_scope` at `tests/common/grants.rs:2423`. Left `Err("fixture shell attach failed")`, right `Err("fixture shell attach was refused")`. That file was not edited. The scripted 403 frame was not read, so `shell_attach` mapped the HTTP error to `failed`. This is not a census leftover, and it is not one of the named rerun tests. The stand-in tests, including both new ones and `standin_a12_census_catches_planted_leftovers`, had already passed. Cargo stopped at the effects binary, so the later binaries did not run.
+
+Rerun, same command and environment:
+
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 300.46 seconds, inside the 600-second bound. Targets: lib 92 passed (including `standin_unlisted_pending_is_not_authority` and `standin_census_calls_unlisted_pending`); bin/report 1 passed; artifact 7 passed; build 1 passed; content_cid 2 passed; effects 63 passed and 12 ignored (including `attach_refusal_names_the_scope`); harness 9 passed; report 23 passed; runtime 10 passed and 2 ignored; standin_contract 13 passed; standin_plan 8 passed; standin_residents 2 passed; probe 3 passed; doc-tests 0.
+
+Proof after the plants were restored:
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.21 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_unlisted_pending_is_not_authority -- --exact`: exit 0, 1 passed and 0 failed, real 0.10 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_census_calls_unlisted_pending -- --exact`: exit 0, 1 passed and 0 failed, real 0.09 seconds.
+- `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `request_sessions` at `standin-runtime/mod.rs:904` returns session ids from the one request store. It names no code or content. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `unlisted_pending` at `:921` only reads. The test at `:10302` keeps `grants` empty, and `req-b` stays pending at `:10297`. |
+| 3. A second path or a second copy of one rule? | No | `standin_a12_census` at `tests/effects.rs:1163` calls `unlisted_pending` once, then `census::cleanup` once at `:1164`. Listed sessions stay on the loop above that call. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`. `src/census.rs` is untouched. |
+| 5. Refusals deny by default with a clear reason? | Yes | A pending request on an unlisted session is `pending request leftover` at `standin-runtime/mod.rs:947`. A denied, granted or expired request returns `Ok(())`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | Both methods are lab observations. They add no route and no Bus import. A PASS gives the Runtime no A12 credit. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_unlisted_pending_is_not_authority` at `:10243` and `standin_census_calls_unlisted_pending` at `:10428`. Each of the seven plants fails its named assertion, and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | The unlisted read does not grant or settle. A listed running session's pending `req-live` is not a leftover, at `:10415`. |
+
+A passing row gives the real Runtime no A12 credit.
+
+

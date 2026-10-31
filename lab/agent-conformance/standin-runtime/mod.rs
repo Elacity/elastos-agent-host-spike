@@ -898,6 +898,59 @@ impl StandIn {
         Ok(())
     }
 
+    /// Lab observation, not a route.
+    ///
+    /// Returns the sorted unique `session_id` values of the one request store.
+    pub fn request_sessions(&self) -> Vec<String> {
+        let mut sessions: Vec<String> = self
+            .requests
+            .iter()
+            .map(|request| request.session_id.clone())
+            .collect();
+        sessions.sort();
+        sessions.dedup();
+        sessions
+    }
+
+    /// Lab observation, not a route.
+    ///
+    /// Reads the shell capsule list, then `request_sessions`, then
+    /// `get_capability_requests` for each session id that list did not contain.
+    /// A `pending` status is `pending request leftover`. A denied, granted or
+    /// expired request is not. A listed session is not read.
+    pub fn unlisted_pending(&self) -> Result<(), String> {
+        let listed = self
+            .get_capsules(Caller::Shell)
+            .map_err(|(_, reason)| reason)?;
+        let capsules = listed["capsules"]
+            .as_array()
+            .ok_or("capsule list requires a capsule array")?;
+        let mut listed_sessions = Vec::new();
+        for capsule in capsules {
+            let session_id = capsule["session_id"]
+                .as_str()
+                .ok_or("capsule entry requires a session")?;
+            listed_sessions.push(session_id.to_owned());
+        }
+        for session_id in self.request_sessions() {
+            if listed_sessions.iter().any(|listed| listed == &session_id) {
+                continue;
+            }
+            let pending = self
+                .get_capability_requests(Caller::Shell, Some(session_id.as_str()))
+                .map_err(|(_, reason)| reason)?;
+            let requests = pending["requests"]
+                .as_array()
+                .ok_or("request list requires a request array")?;
+            for request in requests {
+                if request["status"] == "pending" {
+                    return Err("pending request leftover".to_owned());
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// `POST /api/capability/deny`.
     ///
     /// A shell denies one pending request through the one writer, which stores
@@ -10183,6 +10236,232 @@ mod tests {
             "running",
             "",
             "the stand-in did the work: component-2 stays running",
+        );
+    }
+
+    #[test]
+    fn standin_unlisted_pending_is_not_authority() {
+        let mut standin = StandIn::new();
+        let shared = Shared::new();
+        admit_shared(
+            &shared,
+            &mut standin,
+            Start::Error("start refused".to_owned()),
+        );
+        let id = launch_starting(&shared, &mut standin);
+        assert_eq!(
+            id, "component-1",
+            "the stand-in did the work: the failed launch is component-1"
+        );
+        standin
+            .finish_start(&id)
+            .expect("the stand-in did the work: finish_start stores the failed start");
+        assert_capsule(
+            &standin,
+            "component-1",
+            "failed",
+            "start refused",
+            "the stand-in did the work: component-1 is failed with cause start refused",
+        );
+        standin.set_instant(60);
+        assert!(
+            shell_list(&standin)["capsules"]
+                .as_array()
+                .expect("the stand-in did the work: the shell returns capsules")
+                .iter()
+                .all(|entry| entry["id"] != "component-1" && entry["session_id"] != "component-1"),
+            "the stand-in did the work: the shell capsule list does not contain component-1"
+        );
+        assert!(
+            standin
+                .seed_request(
+                    "req-b",
+                    "component-1",
+                    SHARED_RESOURCE,
+                    "read",
+                    "read shared",
+                )
+                .is_ok(),
+            "the stand-in did the work: req-b is stored"
+        );
+        assert_eq!(
+            standin.request_sessions(),
+            vec!["component-1".to_owned()],
+            "the stand-in did the work: request_sessions contains component-1"
+        );
+        assert_eq!(
+            standin.unlisted_pending(),
+            Err("pending request leftover".to_owned()),
+            "the stand-in did the work: a pending request whose session left the list is a leftover"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![pending_request("req-b", "component-1")],
+            "the stand-in did the work: the shell record for req-b stays pending"
+        );
+        assert!(
+            standin.grants.is_empty(),
+            "the stand-in did the work: the unlisted read grants nothing"
+        );
+        standin.settle_pending("component-1", "already denied");
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![denied_request("req-b", "component-1", "already denied")],
+            "the stand-in did the work: settle_pending denies req-b"
+        );
+        assert_eq!(
+            standin.unlisted_pending(),
+            Ok(()),
+            "the stand-in did the work: a denied request is not a leftover"
+        );
+        assert!(
+            standin
+                .seed_request(
+                    "req-g",
+                    "component-1",
+                    SHARED_RESOURCE,
+                    "read",
+                    "read shared",
+                )
+                .is_ok(),
+            "the stand-in did the work: req-g is stored"
+        );
+        let granted = standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({
+                    "request_id": "req-g",
+                    "duration": "session",
+                    "rationale": "grant shared read",
+                }),
+            )
+            .expect("the stand-in did the work: the shell grants req-g");
+        assert_eq!(
+            granted,
+            json!({ "success": true }),
+            "the stand-in did the work: the shell grant is success true"
+        );
+        assert_eq!(
+            standin.unlisted_pending(),
+            Ok(()),
+            "the stand-in did the work: a granted request is not a leftover"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![
+                denied_request("req-b", "component-1", "already denied"),
+                granted_request("req-g", "component-1", "grant shared read"),
+            ],
+            "the stand-in did the work: the shell record for req-g is granted"
+        );
+        assert!(
+            standin
+                .seed_request(
+                    "req-e",
+                    "component-1",
+                    SHARED_RESOURCE,
+                    "read",
+                    "read shared",
+                )
+                .is_ok(),
+            "the stand-in did the work: req-e is stored"
+        );
+        standin.set_instant(360);
+        assert_eq!(
+            standin.unlisted_pending(),
+            Ok(()),
+            "the stand-in did the work: an expired request is not a leftover"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![
+                denied_request("req-b", "component-1", "already denied"),
+                expired_request("req-e", "component-1"),
+                granted_request("req-g", "component-1", "grant shared read"),
+            ],
+            "the stand-in did the work: the shell record for req-e is expired and req-g stays granted"
+        );
+
+        let mut running = StandIn::new();
+        let shared = Shared::new();
+        admit_shared(&shared, &mut running, Start::Ok);
+        let id = launch_starting(&shared, &mut running);
+        assert_eq!(
+            id, "component-1",
+            "the stand-in did the work: the running launch is component-1"
+        );
+        running
+            .finish_start(&id)
+            .expect("the stand-in did the work: finish_start stores running");
+        assert_capsule(
+            &running,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 is running",
+        );
+        assert!(
+            running
+                .seed_request(
+                    "req-live",
+                    "component-1",
+                    SHARED_RESOURCE,
+                    "read",
+                    "read shared",
+                )
+                .is_ok(),
+            "the stand-in did the work: req-live is stored"
+        );
+        assert_eq!(
+            running.unlisted_pending(),
+            Ok(()),
+            "the stand-in did the work: a listed session is not read again"
+        );
+        assert_eq!(
+            request_entries(&running, "component-1"),
+            vec![pending_request("req-live", "component-1")],
+            "the stand-in did the work: the shell record for req-live stays pending"
+        );
+    }
+
+    #[test]
+    fn standin_census_calls_unlisted_pending() {
+        let source = include_str!("../tests/effects.rs");
+        let start = source
+            .find("fn standin_a12_census")
+            .expect("the stand-in did the work: standin_a12_census is the one census");
+        let mut lines = source[start..].lines();
+        let _signature = lines.next();
+        let mut body = String::new();
+        for line in lines {
+            if line.starts_with("fn ") {
+                break;
+            }
+            body.push_str(line);
+            body.push('\n');
+        }
+        assert!(
+            body.contains("unlisted_pending"),
+            "the stand-in did the work: standin_a12_census calls unlisted_pending"
+        );
+        assert!(
+            !body.contains("capture_process_leftover"),
+            "the stand-in did the work: standin_a12_census has no second census"
+        );
+        let pending_at = body
+            .find("unlisted_pending")
+            .expect("the stand-in did the work: standin_a12_census calls unlisted_pending");
+        let cleanup_at = body
+            .find("census::cleanup")
+            .expect("the stand-in did the work: standin_a12_census calls census::cleanup once");
+        assert!(
+            pending_at < cleanup_at,
+            "the stand-in did the work: unlisted_pending runs before census::cleanup"
+        );
+        assert_eq!(
+            body.matches("census::cleanup").count(),
+            1,
+            "the stand-in did the work: census::cleanup is one call"
         );
     }
 }
