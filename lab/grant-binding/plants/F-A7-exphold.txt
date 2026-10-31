@@ -1,0 +1,13 @@
+id: F-A7-exphold
+file: src/lib.rs
+test: ledger::model_expired_grant_still_settles
+test: ledger::model_expired_grant_still_releases
+test: ledger::model_expired_grant_still_times_out
+test: ledger::model_child_hold_settles_after_the_issuing_expiry
+--- old
+            self.resolve_live(call, handle).or_else(|refusal| match refusal {
+                Refuse::UnknownHandle => self.resolve_kept(call, handle),
+--- new
+            self.resolve(call, handle).or_else(|refusal| match refusal {
+                Refuse::UnknownHandle => self.resolve_kept(call, handle),
+--- end
