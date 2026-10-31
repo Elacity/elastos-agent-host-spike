@@ -15607,8 +15607,7 @@ mod tests {
                 path,
             }
         }
-        // The plaintext v1 journal of an ended run: a real owner-only backup
-        // holding the note, under a rooted URI with no parent directory.
+        // The plaintext v1 journal of an ended run: a real owner-only backup.
         fn site_journal(site: &mut Site) -> PrincipalRootMigrationJournalV1 {
             let backup_dir = tempfile::tempdir().unwrap();
             set_owner_only(backup_dir.path(), 0o700);
@@ -15660,7 +15659,14 @@ mod tests {
                 localhost_root: root,
             }
         }
-        let want = "principal localhost root must be the record's own root for its kind";
+        const WANT: &str = "principal localhost root must be the record's own root for its kind";
+        // :9024/:9204 pass the Agent root, so :9035/:9224 refuse a Users/ URI.
+        const OUTSIDE: &str = "principal-root object URI is outside the principal root";
+        fn outside(result: anyhow::Result<()>) -> anyhow::Result<()> {
+            let error = result.expect_err("a Users/ URI is outside the UsersAI root");
+            assert_eq!(error.to_string(), OUTSIDE);
+            Err(anyhow!(WANT))
+        }
         let mut failed = Vec::<String>::new();
         // Runs one row: the body drives the named function; this asserts the
         // reason and that the record and the file are unchanged.
@@ -15670,14 +15676,14 @@ mod tests {
                 let record = |site: &Site| {
                     format!(
                         "{:?}",
-                        stored_principal_record(&site.data_dir.path(), &site.agent.principal_id)
+                        stored_principal_record(site.data_dir.path(), &site.agent.principal_id)
                             .unwrap()
                     )
                 };
                 let before_record = record(&site);
                 let before_file = std::fs::read(&site.path).unwrap();
                 let error = body(&mut site).expect_err("an Agent record owns no Users/ root");
-                assert_eq!(error.to_string(), want);
+                assert_eq!(error.to_string(), WANT);
                 assert_eq!(std::fs::read(&site.path).unwrap(), before_file);
                 assert_eq!(record(&site), before_record);
             })) {
@@ -15688,7 +15694,8 @@ mod tests {
                 failed.push(format!("{label}: {reason}"));
             }
         };
-        let rows: [(&str, fn(&mut Site) -> anyhow::Result<()>); 16] = [
+        type Row = (&'static str, fn(&mut Site) -> anyhow::Result<()>);
+        let rows: [Row; 16] = [
             ("auth.rs:5145 begin activation", |s| {
                 begin_declarative_principal_root_protection_activation(
                     s.data_dir.path(),
@@ -15774,18 +15781,12 @@ mod tests {
                 )
             }),
             ("auth.rs:5881 write locked", |s| {
-                write_principal_root_object_inner(
-                    s.data_dir.path(),
+                PrincipalRootObjectMutation::acquire(s.data_dir.path())?.write(
                     &s.agent.principal_id,
                     &s.agent.localhost_root,
                     &s.uri,
                     &s.path,
                     b"x",
-                    PrincipalRootObjectWriteOptions {
-                        require_protection: false,
-                        create_only: false,
-                        precondition: None,
-                    },
                 )
             }),
             ("auth.rs:7515 walk", |s| {
@@ -15804,11 +15805,14 @@ mod tests {
                 )
             }),
             ("auth.rs:9035 migration plan object", |s| {
-                // The Human root of that id, switched before the row's
-                // unchanged-file snapshot: the object row refuses alone.
-                s.agent.localhost_root = principal_localhost_root(&s.agent.principal_id);
-                let root = s.agent.localhost_root.clone();
-                validate_principal_root_migration_plan(s.data_dir.path(), &plan(s, root))
+                // The plan's own Agent root passes :9024; its URI is Human.
+                let mut plan = plan(
+                    s,
+                    principal_kind_localhost_root(&s.agent.principal_id, PrincipalKind::Agent),
+                );
+                plan.objects[0].object_uri = s.uri.clone();
+                let result = validate_principal_root_migration_plan(s.data_dir.path(), &plan);
+                outside(result)
             }),
             ("auth.rs:9204 migration journal root", |s| {
                 let journal = site_journal(s);
@@ -15816,15 +15820,11 @@ mod tests {
             }),
             ("auth.rs:9224 migration journal object", |s| {
                 let mut journal = site_journal(s);
-                // A valid object beneath the Human root of the same id.
-                journal.objects[0].object_uri =
-                    format!("{}/Documents/o.txt", s.agent.localhost_root);
-                journal.objects[0].backup_path = journal.backup_dir.join(format!(
-                    "000-{}.plaintext.backup",
-                    &hex::encode(Sha256::digest(journal.objects[0].object_uri.as_bytes()))[..24]
-                ));
-                std::fs::write(&journal.objects[0].backup_path, b"human note").unwrap();
-                validate_principal_root_migration_journal(s.data_dir.path(), &journal)
+                journal.localhost_root =
+                    principal_kind_localhost_root(&s.agent.principal_id, PrincipalKind::Agent);
+                journal.objects[0].object_uri = s.uri.clone();
+                let result = validate_principal_root_migration_journal(s.data_dir.path(), &journal);
+                outside(result)
             }),
             ("auth.rs:9408 verify journal plaintext object", |s| {
                 let journal = site_journal(s);
