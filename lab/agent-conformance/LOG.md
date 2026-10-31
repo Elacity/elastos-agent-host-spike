@@ -10071,3 +10071,174 @@ Rerun, same environment (`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFL
 
 A passing row gives the real Runtime no A3 credit. Two-capsule-run owns the real component bytes.
 
+## 127 — A11: pending store stops at 32 and 1024
+
+127: `seed_request` holds at most 1024 pending records, and at most 32 pending records for one session. The store count runs first. A granted, denied or expired record does not count and is not removed. `post_capability_request` returns that error and does not count. This method mints no grant. Comparison base, recorded before the first edit: `80a2405624121eef3404fe3b3814a558be4b7cb5`. `b2eccab68f03ce9a0ced0c8afea96b496dbfd15f` is an ancestor. `fff8f1761eb851f642f8e9b680ea1c6747974060` is not.
+
+`fn bridge_envelope` is already present on that base (then `standin-runtime/mod.rs:1144`, now `:1170` only because lines were inserted above it). The spec check dropped the stop that names that function, because moving HEAD is forbidden. This task does not edit `bridge_envelope`. `authorise` stays the list recorded before the first edit: `(caller, request_id, plan_sha256)`. `seed_request` stays `pub(crate)`.
+
+### Quote from the request flow (read only)
+
+`docs/AGENT_ARCHITECTURE.md` section "Request flow", step 8:
+
+> If additional consent is required, Runtime records a pending request and Home or Inbox presents it. The UI does not mint the grant itself.
+
+This task is the bound on that record. It does not mint a grant.
+
+### Quote from the pending cap (read only)
+
+`git show 513988ebd:lab/runtime-asks/07-pending-request-outlives-call.md`, the risk that starts `A guest that never reads the decision`:
+
+> Until then the per-session cap of 32 pending requests applies (`pending.rs:24`).
+
+`elastos/crates/elastos-runtime/src/capability/pending.rs`: `MAX_PENDING_REQUESTS` is 1024 (`:20`), `MAX_PENDING_PER_SESSION` is 32 (`:24`). The store reason is `Too many pending requests` (`:278`). The session reason is `Too many pending requests for this session` (`:306`). `create_request_with_reason` looks at store capacity (`:261`, then again at `:269`) before the per-session count (`:297`). The Runtime then drops expired rows and counts again (`cleanup_expired` at `:262`). The stand-in does not copy that drop. It counts `Pending` records and removes nothing: a granted, denied or expired record stays for the later read.
+
+The README had no sentence that a session may ask twice. The replaced sentence was `It stores one pending request and refuses an empty id, session, resource or action, and a repeated request_id.` The empty-field refusal and the duplicate-id refusal stay in the following sentence.
+
+### Plants
+
+Each plant was applied alone, the planted crate compiled, the named test failed on its assertion, and the file was restored before the next. Restored, that test passed. No `falsifiers.json` id.
+
+Session command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_pending_cap_refuses_the_33rd -- --exact`.
+
+Store command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_pending_cap_refuses_the_1025th -- --exact`.
+
+F-standin-cap-stub. The per-session count is removed, so the 33rd record of `component-1` is stored. Real 2.88 seconds. Assertion `src/../standin-runtime/mod.rs:10261:9` (restored `:10272`): `the stand-in did the work: the 33rd pending request of component-1 is refused`. Left the `Ok` body `request-33` / `pending`. Restored, real 2.84 seconds, pass.
+
+Old:
+
+```text
+        if self
+            .requests
+            .iter()
+            .filter(|request| {
+                request.status == RequestStatus::Pending && request.session_id == session_id
+            })
+            .count()
+            >= MAX_PENDING_PER_SESSION
+        {
+            return Err((400, "Too many pending requests for this session".to_owned()));
+        }
+
+```
+
+New: the block is absent.
+
+F-standin-cap-settled. The per-session count also includes `Granted` records, so `request-34` is refused. Real 3.14 seconds. Assertion `src/../standin-runtime/mod.rs:10315:9` (restored `:10313`): `the stand-in did the work: a granted record frees one session slot`. Restored, real 2.83 seconds, pass.
+
+Old:
+
+```text
+request.status == RequestStatus::Pending && request.session_id == session_id
+```
+
+New:
+
+```text
+(request.status == RequestStatus::Pending
+                    || request.status == RequestStatus::Granted)
+                    && request.session_id == session_id
+```
+
+F-standin-cap-sibling. The per-session count includes every session's pending records, so `request-33` is refused. Real 3.18 seconds. Assertion `src/../standin-runtime/mod.rs:10289:9` (restored `:10289`): `the stand-in did the work: component-2 stores request-33`. Restored, real 2.79 seconds, pass.
+
+Old:
+
+```text
+request.status == RequestStatus::Pending && request.session_id == session_id
+```
+
+New:
+
+```text
+request.status == RequestStatus::Pending
+```
+
+F-standin-store-stub. The store-wide count is removed, so `over` is stored. Real 3.16 seconds. Assertion `src/../standin-runtime/mod.rs:10461:9` (restored `:10470`): `the stand-in did the work: over is refused for the store`. The call returned `Ok(())`. Restored, real 3.12 seconds, pass.
+
+Old:
+
+```text
+        if self
+            .requests
+            .iter()
+            .filter(|request| request.status == RequestStatus::Pending)
+            .count()
+            >= MAX_PENDING_REQUESTS
+        {
+            return Err((400, "Too many pending requests".to_owned()));
+        }
+
+```
+
+New: the block is absent.
+
+F-standin-store-settled. The store-wide count also includes `Expired` records, so the `fill` records do not all store while `old` remains. Real 3.42 seconds. Assertion `src/../standin-runtime/mod.rs:10457:13` (restored `:10454`): `the stand-in did the work: fill-992 is stored`. The call returned `Err((400, "Too many pending requests"))`. Restored, real 3.17 seconds, pass.
+
+Old:
+
+```text
+            .filter(|request| request.status == RequestStatus::Pending)
+            .count()
+            >= MAX_PENDING_REQUESTS
+```
+
+New:
+
+```text
+            .filter(|request| {
+                request.status == RequestStatus::Pending
+                    || request.status == RequestStatus::Expired
+            })
+            .count()
+            >= MAX_PENDING_REQUESTS
+```
+
+F-standin-store-session. The store-wide count includes only that call's session, so `over` is stored. Real 3.22 seconds. Assertion `src/../standin-runtime/mod.rs:10472:9` (restored `:10470`): `the stand-in did the work: over is refused for the store`. The call returned `Ok(())`. Restored, real 2.98 seconds, pass.
+
+Old:
+
+```text
+            .filter(|request| request.status == RequestStatus::Pending)
+            .count()
+            >= MAX_PENDING_REQUESTS
+```
+
+New:
+
+```text
+            .filter(|request| {
+                request.status == RequestStatus::Pending && request.session_id == session_id
+            })
+            .count()
+            >= MAX_PENDING_REQUESTS
+```
+
+F-standin-cap-order. The per-session count runs before the store-wide count, so `pack-34` returns `Too many pending requests for this session`. Real 3.18 seconds. Assertion `src/../standin-runtime/mod.rs:10482:9` (restored `:10482`): `the stand-in did the work: at 1024 the store reason wins for packed`. The call returned `Err((400, "Too many pending requests for this session"))`. Restored, real 3.03 seconds, pass.
+
+Old: the store-wide block, then the per-session block. New: those two blocks swapped.
+
+### Gates
+
+Environment: `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.33 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 528.72 seconds, inside the 600-second bound. Targets: lib 92 passed (including `standin_pending_cap_refuses_the_33rd`, `standin_pending_cap_refuses_the_1025th`, and `standin_shell_grant_makes_one_live_grant`); bin/report 1 passed; artifact 7 passed; build 1 passed; content_cid 2 passed; effects 63 passed and 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed and 2 ignored; standin_contract 13 passed; standin_plan 8 passed; standin_residents 2 passed; probe 3 passed; doc-tests 0.
+
+Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.33 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_pending_cap` exit 0, 2 passed and 0 failed, real 0.27 seconds. `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false. No `Cargo.toml` or `Cargo.lock` change.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | The counts compare `RequestStatus::Pending` and `session_id` at `standin-runtime/mod.rs:721` and `:731`. They add no code or content identity. |
+| 2. Capsule, Home or UI gains ungranted access? | No | Both refusals return at `:725` and `:736` before the push. The function mints no grant. |
+| 3. A second path or a second copy of one rule? | No | Both counts live in `seed_request`. `post_capability_request` at `:869` returns that error through `?` and advances `next_request` only at `:876`. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`. `elastos/` is quoted only. |
+| 5. Refusals deny by default with a clear reason? | Yes | At 1024 the reason is `Too many pending requests` (`:725`). At 32 for one session the reason is `Too many pending requests for this session` (`:736`). The store check runs first. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The bound is the stand-in's own store. This lane does not give the capsule a new import. A PASS gives the Runtime no A11 credit. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_pending_cap_refuses_the_33rd` at `:10231` and `standin_pending_cap_refuses_the_1025th` at `:10391`. Each of the seven plants fails its named test on its assertion, and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | The cap is a count of pending records. It does not admit an instance and it does not mint a grant. |
+
+A passing row gives the real Runtime no A11 credit.
+
