@@ -2440,3 +2440,39 @@ fn model_unset_issuing_expiry_does_not_expire_the_child() {
         .expect("unset issuing expiry is not due");
     assert_eq!(decision.owned_root, "UsersAI/photo/library/roll");
 }
+
+#[test]
+fn model_child_path_follows_the_issuing_expiry() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_until(photo, "UsersAI/photo/library", rights(), 10)
+        .expect("issuing expiry");
+    let call = verifier.open_call(photo);
+    verifier.set_verifier_now(9);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("before the issuing expiry");
+    verifier
+        .use_path(&call, &guest(roll), "UsersAI/photo/library/roll")
+        .expect("the child path is inside before the expiry");
+    verifier.set_verifier_now(10);
+    let due = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("the issuing grant has expired");
+    assert_eq!(due, Refuse::Expired);
+    assert_eq!(due.to_string(), "grant has expired");
+    let child_due = verifier
+        .use_grant(call, &guest(roll))
+        .expect_err("the child journal follows the issuing expiry");
+    assert_eq!(child_due, Refuse::Expired);
+    assert_eq!(child_due.to_string(), "grant has expired");
+    let path_due = verifier
+        .use_path(&call, &guest(roll), "UsersAI/photo/library/roll")
+        .expect_err("the child path follows the issuing expiry");
+    assert_eq!(path_due, Refuse::Expired);
+    assert_eq!(path_due.to_string(), "grant has expired");
+}
