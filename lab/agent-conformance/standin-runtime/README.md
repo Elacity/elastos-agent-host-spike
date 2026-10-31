@@ -65,6 +65,8 @@ A request may carry `plan`, the `sha256` that `plan_approval::preview` returned;
 
 `StandIn::get_capability_pending` answers `GET /api/capability/pending`. A client is status 403 with the reason `This endpoint requires shell privileges`, checked before the store is read. The list is the pending records of every session, sorted by `session_id` then `request_id`. `expires_at` is `requested_at` plus `REQUEST_TIMEOUT_SECS`, saturated. A granted, denied or expired record stays off this list and stays on `get_capability_requests`. The list does not grant and does not settle. `standin_shell_lists_every_pending_request` proves that list. This value is the lab stand-in and the real route can replace it later because the JSON matches (M1-R). A PASS gives the Runtime no A15 credit.
 
+`StandIn::bridge_envelope` is the one hostcall. A capability line calls `post_capability_request` for the capsule id. An invoke line calls `authorise` for that capsule id with no plan hash. The principal argument does not choose the caller. A bound grant stays live. Two-capsule-run passes the line, the capsule id, and the principal, and this lane does not run the component bytes. A PASS gives the Runtime no A3 credit.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.
