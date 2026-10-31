@@ -113,7 +113,13 @@ mod tests {
     /// zero without it exercised nothing and FAILS.
     const PROBE_TOKEN: &str = "elastos-seccomp-row-probe-passed";
     const ROW_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_ROW";
+    /// The harness test also dispatches a row when `ROW_VAR` is set, before it
+    /// touches the test process, so a probe enters its own row there.
     const PROBE_TEST: &str =
+        "provider::linux_model_seccomp::tests::every_denied_syscall_and_domain_has_a_row";
+    /// The descendant test serves a row that ends in a signal, because a killed
+    /// process cannot print the pass token.
+    const DESCENDANT_TEST: &str =
         "provider::linux_model_seccomp::tests::child_and_descendant_have_no_inet_sockets";
 
     /// Expected result of a row: EPERM, a permitted call, or SIGSYS.
@@ -183,6 +189,138 @@ mod tests {
         rc
     }
 
+    const MMSG_LEN: usize = 64;
+    const CONTROL: usize = 32;
+    /// Counts message rows: the first sends on an empty pair (the unfiltered
+    /// control), every later one finds one byte from it.
+    static MESSAGE_ORDER: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+    /// A Unix socketpair made in this probe, so a message row reaches the
+    /// kernel without a network address.
+    fn pair() -> Option<[libc::c_int; 2]> {
+        let mut fd = [-1 as libc::c_int; 2];
+        let rc = sys(
+            libc::SYS_socketpair,
+            [
+                libc::AF_UNIX as _,
+                libc::SOCK_STREAM as _,
+                0,
+                fd.as_mut_ptr() as _,
+                0,
+                0,
+            ],
+        );
+        (rc >= 0).then_some(fd)
+    }
+
+    /// The message at `header`: `payload` bytes from `header` and, when `fd`
+    /// is not negative, its `/dev/null` descriptor in the control space after
+    /// it. A receive asks for the same control space with an empty message.
+    fn message(header: &mut [u8; MMSG_LEN], payload: usize, fd: libc::c_int) -> libc::msghdr {
+        let control = unsafe { header.as_mut_ptr().add(MMSG_LEN - CONTROL) };
+        if fd >= 0 {
+            unsafe { std::ptr::write(control as *mut i32, fd) };
+        }
+        libc::msghdr {
+            msg_name: std::ptr::null_mut(),
+            msg_namelen: 0,
+            msg_iov: &libc::iovec {
+                iov_base: header.as_mut_ptr() as _,
+                iov_len: payload,
+            } as *const _ as _,
+            msg_iovlen: 1,
+            msg_control: control as _,
+            msg_controllen: CONTROL as _,
+            // The payload is one byte; a full control buffer silently drops
+            // the descriptor, so only the descriptor's own space is offered.
+            msg_flags: 0,
+        }
+    }
+
+    /// `true` for the first message call in this process.
+    fn first_message() -> bool {
+        MESSAGE_ORDER.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+    }
+
+    /// One `sendmsg`, or `sendmmsg` when `batched`, of one descriptor-bearing
+    /// message on a socketpair made here; the first call sends on an empty
+    /// pair, so `MSG_DONTWAIT` answers EAGAIN rather than blocking.
+    fn send_message(batched: bool, first: bool) -> libc::c_long {
+        let Some(fd) = pair() else {
+            return -1;
+        };
+        let mut header = [0u8; MMSG_LEN];
+        let (nr, count) = if batched {
+            (libc::SYS_sendmmsg, 1)
+        } else {
+            (libc::SYS_sendmsg, 0)
+        };
+        let sender = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+        let msg = message(&mut header, 1, if first { sender } else { -1 });
+        let rc = sys(nr, [fd[0] as _, &msg as *const _ as _, count, 0, 0, 0]);
+        close_all(&[sender]);
+        close_all(&fd);
+        rc
+    }
+
+    /// One `recvmsg`, or `recvmmsg` when `batched`, on a socketpair made here.
+    /// Later calls find this helper's byte; the first call is the filtered
+    /// probe row, which the deny list answers EPERM before the pair matters.
+    fn recv_message(batched: bool, first: bool) -> libc::c_long {
+        let Some(fd) = pair() else {
+            return -1;
+        };
+        if !first {
+            sys(
+                libc::SYS_sendto,
+                [fd[1] as _, b"x".as_ptr() as _, 1, 0, 0, 0],
+            );
+        }
+        let mut header = [0u8; MMSG_LEN];
+        let mut msg = message(&mut header, MMSG_LEN, -1);
+        let (nr, count) = if batched {
+            (libc::SYS_recvmmsg, 1)
+        } else {
+            (libc::SYS_recvmsg, 0)
+        };
+        let rc = sys(nr, [fd[0] as _, &mut msg as *mut _ as _, count, 0, 0, 0]);
+        close_all(&fd);
+        rc
+    }
+
+    /// Each message row narrows the shared helper to one syscall pair. The
+    /// process-wide counter tells the first message call apart from the rest.
+    fn sendmsg_body(_: libc::c_int, _: libc::c_int, _: libc::c_int) -> libc::c_long {
+        send_message(false, first_message())
+    }
+
+    fn recvmsg_body(_: libc::c_int, _: libc::c_int, _: libc::c_int) -> libc::c_long {
+        recv_message(false, first_message())
+    }
+
+    fn sendmmsg_body(_: libc::c_int, _: libc::c_int, _: libc::c_int) -> libc::c_long {
+        send_message(true, first_message())
+    }
+
+    fn recvmmsg_body(_: libc::c_int, _: libc::c_int, _: libc::c_int) -> libc::c_long {
+        recv_message(true, first_message())
+    }
+
+    fn io_uring_body(_: libc::c_int, _: libc::c_int, _: libc::c_int) -> libc::c_long {
+        // An all-zero `io_uring_params` (zero entries) is a valid request, so
+        // an unfiltered host answers with a ring descriptor and only the deny
+        // entry can refuse it. That descriptor is closed here.
+        let mut params = [0u8; 120];
+        let rc = sys(
+            libc::SYS_io_uring_setup,
+            [1, params.as_mut_ptr() as _, 0, 0, 0, 0],
+        );
+        if rc > 2 {
+            close_all(&[rc as libc::c_int]);
+        }
+        rc
+    }
+
     /// `getpid` must stay permitted: the filter denies by number, not by class.
     fn getpid_body(_: libc::c_int, _: libc::c_int, _: libc::c_int) -> libc::c_long {
         sys(libc::SYS_getpid, [0; 6])
@@ -195,8 +333,9 @@ mod tests {
     }
 
     /// Each denied family through `socket`, the Unix controls through both
-    /// creators, `getpid` and the x32 boundary. Each entry is its own probe run,
-    /// so a removed deny entry turns exactly that row red.
+    /// creators, the four message syscalls the deny list refuses, `getpid` and
+    /// the x32 boundary. Each entry is its own probe run, so a removed deny
+    /// entry turns exactly that row red.
     #[rustfmt::skip]
     fn rows() -> Vec<Row> {
         let row = |name, body, domain, kind, protocol, outcome| Row {
@@ -209,6 +348,11 @@ mod tests {
             row("socket+AF_NETLINK", socket_body, libc::AF_NETLINK, raw, 0, EPERM),
             row("socket+AF_UNIX", socket_body, libc::AF_UNIX, tcp, 0, PERMITTED),
             row("socketpair+AF_UNIX", socketpair_body, libc::AF_UNIX, tcp, 0, PERMITTED),
+            row("sendmsg+SCM_RIGHTS", sendmsg_body, 0, 0, 0, EPERM),
+            row("recvmsg+cmsg", recvmsg_body, 0, 0, 0, EPERM),
+            row("sendmmsg+SCM_RIGHTS", sendmmsg_body, 0, 0, 0, EPERM),
+            row("recvmmsg+cmsg", recvmmsg_body, 0, 0, 0, EPERM),
+            row("io_uring_setup", io_uring_body, 0, 0, 0, EPERM),
             row("getpid", getpid_body, 0, 0, 0, PERMITTED),
             row("nr==0x40000000", x32_body, 0, 0, 0, KILLED),
         ]
@@ -234,12 +378,10 @@ mod tests {
         }
     }
 
-    /// Runs one named row inside the filtered probe or its descendant.
+    /// Runs one named row in the filtered probe.
     fn probe(wanted: &str) {
-        assert_eq!(
-            unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) },
-            1
-        );
+        // The redirection runs the probe with the row variable in this
+        // process, so only the filter's own state is proof here.
         assert_eq!(
             unsafe { libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) },
             2,
@@ -248,7 +390,7 @@ mod tests {
         let row = rows()
             .into_iter()
             .find(|row| row.name == wanted)
-            .unwrap_or_else(|| panic!("unknown probe row {wanted}"));
+            .unwrap_or_else(|| panic!("row {wanted} was not requested by the harness"));
         let rc = (row.body)(row.domain, row.kind, row.protocol);
         check(row.name, row.outcome, rc);
         println!("{PROBE_TOKEN} {}", row.name);
@@ -256,11 +398,10 @@ mod tests {
 
     #[tokio::test]
     async fn child_and_descendant_have_no_inet_sockets() {
-        let name =
-            "provider::linux_model_seccomp::tests::child_and_descendant_have_no_inet_sockets";
+        let name = DESCENDANT_TEST;
         let executable = std::env::current_exe().unwrap();
-        // A row probe outranks the legacy stage variable, which the descendant
-        // body below leaves in this process's environment for its children.
+        // A row that ends in a signal runs here, because the harness test
+        // proves the filter first and a killed process would fail that proof.
         if let Ok(row) = std::env::var(ROW_VAR) {
             probe(&row);
             return;
@@ -330,6 +471,8 @@ mod tests {
         child: &mut tokio::process::Child,
         limit: std::time::Duration,
     ) -> Option<std::process::ExitStatus> {
+        // The limit runs on the wall clock, so a paused runtime clock cannot
+        // stop a probe that never returns from reaching it.
         let start = std::time::Instant::now();
         loop {
             if let Some(status) = child.try_wait().expect("probe wait failed") {
@@ -343,41 +486,84 @@ mod tests {
         }
     }
 
+    /// Where one row's probe records its pass token. The filter closes the
+    /// child's inherited descriptors before exec, so a pipe from
+    /// `Stdio::piped` reaches the probe closed and its token is lost; this
+    /// file is opened before the fork. Each row starts and ends with none.
+    fn probe_token(name: &str) -> std::path::PathBuf {
+        let safe: String = name
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        std::env::temp_dir().join(format!("elastos-row-probe-{}-{safe}", std::process::id()))
+    }
+
     /// Harness half: each row runs in its own filtered child through
     /// `install_on_command`, and one row's failure keeps the others reporting
     /// their own name. A row that exits zero without printing the pass token
-    /// fails, so a probe that never exercised its syscall cannot pass.
+    /// fails, so a probe that never exercised its syscall cannot pass. A probe
+    /// child reaches its row here, before this test touches the test process or
+    /// spawns a child, so it never re-enters a check on its parent's state.
     #[tokio::test]
     async fn every_denied_syscall_and_domain_has_a_row() {
+        if let Ok(row) = std::env::var(ROW_VAR) {
+            probe(&row);
+            return;
+        }
+        // `run_probe` measures with the wall clock, so a sleeping row still
+        // reaches its limit.
         let all = rows();
         let total = all.len();
         let mut failures = Vec::new();
-        // Control: each EPERM row's call must succeed without the filter, so
-        // only the gate under test can refuse it. The SIGSYS row is killed by
-        // the arch gate itself and has no unfiltered call to try.
+        // Control: each EPERM row's call must be accepted by the kernel without
+        // the filter, so only the filter can answer EPERM. On a host with no
+        // loopback address (no network namespace) the message rows still reach
+        // their own syscall over a Unix socketpair, and a kernel without
+        // `sendmsg` returns EINVAL there, so only that errno is tolerated. The
+        // SIGSYS row is killed before any unfiltered call can run.
         for row in &all {
             let rc = match row.outcome {
                 EPERM => (row.body)(row.domain, row.kind, row.protocol),
                 _ => 0,
             };
-            assert!(rc >= 0, "row {} is not valid unfiltered", row.name);
+            // Only a descriptor the kernel returned is closed: a body that
+            // reports success as 0 is not handing back fd 0, and closing it
+            // would take this process's own stdin, then its stdout.
+            if rc > 2 {
+                unsafe { libc::close(rc as libc::c_int) };
+            }
+            assert!(
+                rc >= 0 || errno() == libc::EINVAL,
+                "row {} is not valid unfiltered",
+                row.name
+            );
         }
         for row in all {
             let name = row.name;
+            let test = if row.outcome == KILLED {
+                DESCENDANT_TEST
+            } else {
+                PROBE_TEST
+            };
             let mut command = Command::new(std::env::current_exe().expect("test executable path"));
             command
+                // No `--`: libtest reads the row variable as a name filter
+                // and runs no test, so the probe would pass its row unused.
                 .arg("--exact")
-                .arg(PROBE_TEST)
+                .arg(test)
                 .arg("--nocapture")
                 .env(ROW_VAR, row.name)
-                .stdout(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::from(
+                    std::fs::File::create(probe_token(row.name)).expect("probe token file"),
+                ))
                 .stderr(std::process::Stdio::null());
             install_on_command(&mut command).expect("filter attach failed");
             let mut child = command.spawn().expect("probe child did not start");
             let deadline = std::time::Duration::from_secs(20);
-            let result: Result<(), String> = match run_probe(&mut child, deadline).await {
-                None => Err(format!("row {name}: probe child did not finish")),
-                Some(status) if row.outcome == KILLED => {
+            let finished = run_probe(&mut child, deadline).await;
+            let result: Result<(), String> = match (finished, row.outcome) {
+                (None, _) => Err(format!("row {name}: probe child did not finish")),
+                (Some(status), KILLED) => {
                     use std::os::unix::process::ExitStatusExt as _;
                     if status.signal() == Some(libc::SIGSYS) {
                         Ok(())
@@ -385,14 +571,15 @@ mod tests {
                         Err(format!("row {name}: expected SIGSYS, status {status:?}"))
                     }
                 }
-                Some(status) if !status.success() => Err(format!("row {name} failed: {status:?}")),
+                (Some(status), _) if !status.success() => {
+                    Err(format!("row {name} failed: {status:?}"))
+                }
                 // The child must also prove it exercised the row.
-                Some(_) => {
-                    let mut stdout = String::new();
-                    if let Some(pipe) = child.stdout.as_mut() {
-                        use tokio::io::AsyncReadExt as _;
-                        pipe.read_to_string(&mut stdout).await.ok();
-                    }
+                (Some(_), _) => {
+                    // The probe is reaped and its group ended, so the pipe has
+                    // no writer left; `output` collects it to EOF.
+                    let stdout = std::fs::read_to_string(probe_token(name)).unwrap_or_default();
+                    let _ = std::fs::remove_file(probe_token(name));
                     if stdout.contains(PROBE_TOKEN) {
                         Ok(())
                     } else {
