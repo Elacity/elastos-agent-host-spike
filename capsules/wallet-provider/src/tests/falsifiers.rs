@@ -236,8 +236,90 @@ use std::process::Command;
 /// in the `Request::Shutdown` arm of `fn handle` before it answers
 /// `Response::empty_ok()`, so the final wallet directory compare in
 /// `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged`
-/// fails because it finds a name the setup did not leave.
-const EXPECTED_FALSIFIERS: usize = 143;
+/// fails because it finds a name the setup did not leave. Task 148 adds WP162 to
+/// WP165, all CAUGHT on the Mac: the off-Linux journey label, the record
+/// reader's length case and unknown-step case, and the launcher's list-provider
+/// check. Its two Linux-only plants are named in `CONFINEMENT-LINUX.md` and are
+/// not registered here, because a Linux-only test cannot produce a CAUGHT line
+/// on the Mac. Task 149 adds WP178, CAUGHT on the Mac: the one file-to-list
+/// helper ignoring its provider and reading wallet's declared-rights file, which
+/// `seccomp_allow_list_names_the_provider_it_was_built_for` catches. Its two
+/// Linux-only plants are the same two 148 registered for the wallet journey, on
+/// the did caller, and are named in `CONFINEMENT-LINUX.md` too. Task 150 adds
+/// WP179, which publishes the wallet directory's parent entry at the
+/// `src/main.rs` call after `create_wallet_dir_durable` answers, and WP180,
+/// which canonicalizes the wallet directory there so a symlinked parent passes
+/// the inspection; both are CAUGHT on the Mac by the two storage-root tests
+/// task 150 adds. Task 151 adds WP181, which makes the one field reader honour
+/// no `serde` attribute, and WP182, which makes the Inputs compare tolerate a
+/// cell that stops before a declared field; both are CAUGHT on the Mac by
+/// `operations_table_row_check_refuses_each_bad_table`.
+/// WP183 through WP197 exercise character and raw-identifier boundaries,
+/// quoting, order, malformed cells, and source or arm refusals in that test.
+/// WP198 removes the field-list reader's balance refusal, so a shift expression
+/// hides the field after it and the same test fails on its shift case. Task 152
+/// adds WP202, which grants the parent Landlock row a file read; WP203, which
+/// drops the default-denial ABI check; WP204, which keeps only the read rights
+/// in the handled mask; and WP210, which runs the final Landlock call before
+/// `PR_SET_NO_NEW_PRIVS`. All four are CAUGHT on the Mac. Task 153 adds WP211,
+/// which reads a Landlock launch step as an installed record; WP212, which
+/// adds a loader rule without `READ_FILE`; and WP213, which labels the file
+/// row as a Linux host off Linux. All three are CAUGHT on the Mac. Its two
+/// Linux-only plants are named in `CONFINEMENT-LINUX.md` and are not registered
+/// here. Task 155 adds WP214, which treats an empty arm and a field named
+/// `none` as the same item, and WP215, which makes `inputs_match` ignore the
+/// children of `params`. Both are CAUGHT on the Mac by
+/// `operations_table_row_check_refuses_each_bad_table`. Task 159 adds WP216,
+/// which makes the provider chooser ignore the provider name and answer
+/// wallet's `STORAGE_ROOT` binding for both, so the did iteration fails on the
+/// expected root; it is CAUGHT on the Mac by
+/// `landlock_ruleset_follows_the_declared_rights`. Task 160 adds WP217, which
+/// makes the file row's bound-executable probe read name wallet's binary for
+/// both providers, so did's probe would read the wrong program; it is CAUGHT on
+/// the Mac by `landlock_probe_paths_follow_the_bound_parameters`. Task 158 adds
+/// WP221, which accepts any allow quote on a declared-right row, so the exec
+/// form on the fixture `init` row passes; and WP222, which does not read a
+/// `none:` row's allow quote, so the subpath form on that row passes. Both are
+/// CAUGHT on the Mac by `operations_table_row_check_refuses_each_bad_table`.
+/// Task 161 adds WP223, which adds `socket` to the `STORAGE_ROOT` row so an
+/// allow-form row admits a network call; and WP224, which makes the socket sweep
+/// judge accept a returned descriptor for one family. Both are CAUGHT on the Mac,
+/// by `seccomp_program_denies_by_default_and_lists_no_undeclared_call` and
+/// `socket_sweep_reports_every_family_and_type_refused`. Task 162 adds WP225,
+/// which accepts a declared operation the provider does not answer, and WP226,
+/// which reads a missing `operations` list as an empty list. Both are CAUGHT on
+/// the Mac by `operations_table_row_check_refuses_each_bad_table`. Task 163 adds
+/// WP227, which makes the `none:` row's Effect check return early so a row with
+/// no right passes while naming `STORAGE_ROOT`; WP228, which treats every kind
+/// as `Effectful` so the `Read` kind that claims the store write passes; and
+/// WP229, which treats the contract's catch-all arm as `Read` so the
+/// `Effectful` kind that claims only in-memory work passes. All three are
+/// CAUGHT on the Mac by `operations_table_row_check_refuses_each_bad_table`.
+/// Task 164 adds WP230, which makes the allow-table compare accept a listed
+/// form the profile does not hold, so a paraphrased row passes; and WP231,
+/// which makes an allow section with no span report no problem, so a document
+/// that lists nothing passes. Both are CAUGHT on the Mac by
+/// `profile_allow_table_check_refuses_each_bad_table`. Task 165 adds WP232,
+/// which swaps the two storage derivations, so a drifted layout passes while
+/// the bound one is refused; and WP233, which yields no parameter bullet, so a
+/// section that names nothing passes. Both are CAUGHT on the Mac by
+/// `every_confinement_document_states_its_bindings_from_the_one_derivation`.
+/// Task 166 adds WP234, which makes the Linux table's form-to-row compare skip
+/// a committed allow form that no row quotes, so a grant with no Linux row
+/// passes; and WP235, which accepts any fourth-cell name, so a cell citing a
+/// name that nothing holds passes. Both are CAUGHT on the Mac by
+/// `linux_contract_table_covers_every_committed_allow_form`. Task 167 adds
+/// WP236, which makes the sibling check accept any paragraph, so a did
+/// paragraph naming a wallet test under "in the same file" passes; and WP237,
+/// which makes the set compare accept two unequal lists, so a crate that
+/// declares a second OS passes. Both are CAUGHT on the Mac by
+/// `tests_sections_name_the_crate_that_holds_each_cited_test`. Task 168 adds
+/// WP238, which makes the M1 summary's block compare accept an id no list
+/// registers, so a summary citing a retired plant passes; and WP239, which
+/// reads that id set from the whole part instead of its CAUGHT block, so the C0
+/// part's `WP127` review line passes as B3 evidence. Both are CAUGHT on the Mac
+/// by `every_m1_summary_names_its_journey_and_its_falsifiers`.
+const EXPECTED_FALSIFIERS: usize = 219;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
