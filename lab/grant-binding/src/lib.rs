@@ -410,9 +410,6 @@ impl Verifier {
             return Ok(());
         };
         let _ = rate;
-        if grant.record.window == 0 {
-            return Ok(());
-        }
         let end = grant.record.window_start.saturating_add(grant.record.window);
         if now >= end {
             grant.record.window_start = now;

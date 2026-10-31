@@ -2149,3 +2149,95 @@ fn model_standing_child_allows_another_effect() {
         .use_grant(call, &guest(roll))
         .expect("the child journal stays");
 }
+
+#[test]
+fn model_zero_window_starts_a_new_count() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("library");
+    verifier.set_rate(library, 1, 0).expect("zero window");
+    let call = verifier.open_call(photo);
+    verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect("a window of 0 is already due");
+    verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect("the same instant starts a new count");
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the grant stays in the store");
+}
+
+#[test]
+fn model_child_zero_window_starts_a_new_count() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("issuing grant");
+    verifier
+        .set_rate(library, 1, 0)
+        .expect("issuing zero window");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal does not spend the rate");
+    verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect("one child effect on a window of 0");
+    verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect("the child rolls the issuing window of 0");
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the issuing grant stays");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("the child journal stays");
+}
+
+#[test]
+fn model_zero_rate_on_a_zero_window_still_stops() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let frames = verifier
+        .bind_grant(photo, "UsersAI/photo/frames", rights())
+        .expect("frames");
+    verifier.set_rate(frames, 0, 0).expect("zero rate");
+    let call = verifier.open_call(photo);
+    let refusal = verifier
+        .operate(
+            &call,
+            &guest(frames),
+            Operation::Append,
+            "UsersAI/photo/frames",
+        )
+        .expect_err("a set rate of 0 stops the first effect");
+    assert_eq!(refusal, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(refusal.to_string(), "rate limit is reached");
+    verifier
+        .use_grant(call, &guest(frames))
+        .expect("a refused effect leaves the grant");
+}
