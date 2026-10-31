@@ -14,6 +14,11 @@ with `sandbox-exec -D`:
 - `STORAGE_ROOT` is `base_path/ElastOS/SystemServices/Wallet`.
 - `STORAGE_PARENT` is its parent, `base_path/ElastOS/SystemServices`.
 
+One rule, `profile_parameter_section_problems`, under the test
+`every_confinement_document_states_its_bindings_from_the_one_derivation`,
+holds these three names and the two storage layouts to the one derivation the
+launch uses, and it does not check a path for `PROVIDER_EXECUTABLE`.
+
 `../did-provider/` presents the same contract as this oracle: one profile file,
 the same three parameter tokens, literal startup access, one state subtree
 grant, and a real stdin/stdout process test.
@@ -24,7 +29,9 @@ to `Init` (`start_with_profile`); the Runtime half of the bridge change does
 the same and is not built. The provider creates the final
 `Wallet` directory. Seatbelt grants recursive state access to that wallet
 directory alone. Literal read access to its existing parent lets the provider
-inspect and synchronize the directory while it creates Wallet. The parent
+inspect that parent, and publish the parent entry of each directory it creates
+in the `Init` call, while it creates Wallet. The entry of a wallet directory
+that already existed belongs to the actor that created it. The parent
 receives no recursive grant. The test launch refuses a second binding of a
 canonical parameter, so those three paths come only from
 `canonical_bindings`; `start_with_profile_refuses_a_canonical_parameter` holds
@@ -36,11 +43,15 @@ holds that rule for encoded names.
 
 | Rule | Why the provider needs it |
 | --- | --- |
-| `(allow process-exec (literal PROVIDER_EXECUTABLE))` | Start only the binary the launch named. `unbound_copy_is_refused_under_profile` shows that a byte-identical copy of the binary under `STORAGE_ROOT` is refused with exit 71 and the `execvp()` `Operation not permitted` line, and `bound_copy_serves_under_profile` is its control. |
+| `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))` | Start only the binary the launch named. `unbound_copy_is_refused_under_profile` shows that a byte-identical copy of the binary under `STORAGE_ROOT` is refused with exit 71 and the `execvp()` `Operation not permitted` line, and `bound_copy_serves_under_profile` is its control. |
 | `(allow file-read* (literal "/"))` | The kernel resolves every absolute path through the root directory. |
 | `(allow sysctl-read)` | The loader and the allocator read kernel facts at startup. |
-| `(allow file-read* (literal STORAGE_PARENT))` | Inspect and synchronize the existing parent during wallet directory creation. |
-| `(allow file-read* file-write* (subpath STORAGE_ROOT))` | One grant owns all account, key, challenge and approval state under the wallet directory. |
+| `(allow file-read* (literal (param "STORAGE_PARENT")))` | Inspect the existing parent, and publish the parent entry of each directory the provider creates in it. |
+| `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` | One grant owns all account, key, challenge and approval state under the wallet directory. |
+
+One rule, `profile_allow_table_problems`, under the test
+`every_confinement_document_lists_its_profiles_allow_rules`, holds the listed
+forms to `confine.sb`, and the reason column is not checked.
 
 The remaining filesystem and process operations stay under the default denial.
 
@@ -59,11 +70,13 @@ declared rights; it does not load a profile that the provider supplies.
 `confine.sb` in this folder is the test oracle: the profile the Runtime
 generates for this provider must match it, with the same three parameters bound
 to the same paths. A lab generator, `generate_profile` in
-`capsules/wallet-provider/tests/confine.rs`, builds this profile from the
-declared-rights file and the contract head, and
+`capsules/wallet-provider/tests/common/profile_generator.rs`, builds this
+profile from the declared-rights file and the contract head, and
 `generated_did_and_wallet_profiles_match_their_committed_oracles` requires it
 to equal this oracle; the Runtime's own generator and its comparison are not
 built and stay in `elastos/`, outside this lane.
+This file is the one lab generator for did, wallet and model: each test crate
+includes it by `#[path]` and never copies it (P10).
 The lab generator and writer are test code only, and
 `lab_generator_is_named_only_in_test_code` fails if a file outside test code
 names either, so the Runtime keeps one profile generator (P10).
@@ -210,6 +223,13 @@ Launcher copy: `standin_spawn_confined_provider` is still a lane copy in `capsul
 This section records the lab evidence for M1 checks C0 and B3 for
 `wallet-provider`. It states what the evidence is and gives no verdict;
 cc-redteam judges C0 and B3.
+
+The rule `m1_summary_problems`, which
+`every_m1_summary_names_its_journey_and_its_falsifiers` runs over this summary,
+reads each part's `Journey test:` name and requires that name to be a `fn`
+declaration in `tests/confine.rs`, then reads the ids of that part's `CAUGHT
+falsifiers.` block and requires them to be exactly the ids `falsifiers.json`
+registers against that one test.
 
 Pins: `e31f0f517a3364c6067b1989c1c985c21f823312` is a fixed commit on this lane; every `confine.rs` line number in this section is read with `git show e31f0f517a3364c6067b1989c1c985c21f823312:capsules/wallet-provider/tests/confine.rs`, each wallet `falsifiers.json` entry line in this section is read with `git show e31f0f517a3364c6067b1989c1c985c21f823312:capsules/wallet-provider/falsifiers.json`, and each file pin below is a commit that holds the file, read with `git show <commit>:<path>`.
 
@@ -466,6 +486,11 @@ interpolates storage paths into `(regex ...)` rules rather than binding a
 inline with `sandbox-exec -p` rather than `-f confine.sb`. It does not share
 the file-profile contract and this document does not claim it does. Aligning
 the model provider is future Runtime work in `elastos/`, outside this lane.
+The rule `model_inline_profile_problems` reads this section's quoted forms
+against the bridge's production region, and the rule
+`model_inline_profile_copies_agree` reads the same section in both documents
+for one text; `model_inline_profile_sections_match_the_bridge` runs both, and
+the did and wallet providers run under their own profile.
 The model provider's own file profile, `../model-provider/confine.sb`,
 presents this contract as an oracle, and the shared test requires it; the
 generated profile for the model provider must match it too.
@@ -490,9 +515,35 @@ colons and a function name. The check
 `every_operations_table_row_matches_its_provider_and_the_contract` holds every
 row to four rules: the row set follows the provider's own dispatch, a Right
 cell names a declared id or `none: needs no declared right`, a right row cites
-both sides, and every Linux cell stays `designed, not enforced`. A refusal
-under `(deny default)` is a denial, not a grant, and no
-row writes it as a right. A refusal from a `kind` comes back as an outer
+both sides, and every Linux cell stays `designed, not enforced`. A fifth rule,
+beside those four row rules, holds the capsule's own `capsule.json`, and
+`operations_table_row_check_refuses_each_bad_table` refuses a manifest that
+breaks it, because a manifest declares only operations the provider answers and
+a provider may own operations its manifest does not name. The same check
+reads each ordinary row's Inputs cell against the fields its `Request` arm
+declares, in declaration order, and reads a `wallet_contract` row's Inputs cell
+against that operation's declared `params`.
+`operations_table_row_check_refuses_each_bad_table` refuses a bad
+`wallet_contract` Inputs cell. The same check reads each row's Outputs cell
+against what its handler answers: the error side is the `Response` serde tag
+and its `Error` fields, and `data`'s children are the keys of that handler's
+one `json!`, or the fields `WalletProviderResponseV2` declares on a
+`wallet_contract` row, in declaration order.
+`operations_table_row_check_refuses_each_bad_table` refuses an Outputs cell
+that leaves a key out, adds one, or writes another error name. The check also
+reads a declared-right row's macOS cell for an allow form of that right, and a
+`none: needs no declared right` row quotes none, so
+`operations_table_row_check_refuses_each_bad_table` refuses a bad quote. The same
+check holds each row's Effect cell against the right the row declares and the
+dispatch class the contract's `class()` gives its kind: a
+`none: needs no declared right` row names no canonical parameter and quotes no
+allow form, a `storage` row names `STORAGE_ROOT`, a `Read` kind claims no
+`wallet-state.json` write, and an `Effectful` kind names the store it writes.
+The rule reads the cells against that declared class; it does not show that a
+handler writes only what its cell names.
+`operations_table_row_check_refuses_each_bad_table` refuses a bad Effect cell. A
+refusal under `(deny default)` is a denial, not a grant, and no row writes it
+as a right. A refusal from a `kind` comes back as an outer
 `status` `ok` whose `data.result` holds `status` `error`, `code` and `message`;
 the outer `status`/`code`/`message` error covers envelope failures only. A
 `storage` row cites both sides of its right: `permitted:` names the test that
@@ -552,17 +603,26 @@ one on `linux` is a skip, and a present one on `macos` runs the test.
 The one caller, `sandbox_available`, fails the test on that error;
 `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` calls it
 with `macos` and a missing path and expects the failure.
-This contract has no Linux enforcement or tests yet. A provider-status claim
+The Linux policy stays outside this provider's status. A provider-status claim
 needs host-specific test evidence and the Runtime acceptance step, so no status
-document records `did-provider` or `wallet-provider` as confined on Linux until
-that test exists (P10, P11). The status change lands when the Runtime side
-does.
+document records `did-provider` or `wallet-provider` as confined on Linux (P10,
+P11). The status change lands when the Runtime side does.
 
-Future Linux enforcement tests for this lab contract are designed in
-`CONFINEMENT-LINUX.md`: it is the one Linux mapping, its tests do not exist
-yet, and it claims no current behaviour. The existing source-only check
-`both_file_profiles_bind_one_storage_parameter_contract` reads the three
-oracles and supplies contract evidence, not Linux execution evidence.
+Most Linux enforcement rows are designed in `CONFINEMENT-LINUX.md` and remain
+unbuilt. One row exists today as source with a real Linux run behind it: a
+seccomp allow list generated from this provider's declared rights, with the one
+builder, the one mapping table, the one step sequencer and the one install
+function that file names
+(`seccomp_allow_list_from_declared_rights`, `SECCOMP_RULE_SYSCALLS`,
+`install_seccomp_with`, `install_seccomp`). On a real Linux host the wallet
+provider starts under that filter and the four denied calls answer the filter's
+own marker there, as `CONFINEMENT-LINUX.md` records with its host, kernel and
+per-call answers. That is the whole Linux claim: namespaces, Landlock,
+capability dropping and every file row of the contract remain unbuilt, so
+`linux` stays out of `DECLARED_CONFINED_OS` and every operations-table cell
+reads `designed, not enforced`.
+`both_file_profiles_bind_one_storage_parameter_contract` reads the three oracles
+and supplies contract evidence, not Linux execution evidence.
 
 ## Tests
 
@@ -652,6 +712,33 @@ oracles and supplies contract evidence, not Linux execution evidence.
   failure names the request, the exit status and `sandbox-exec`'s own line on
   standard error. That failure also shows that `sandbox-exec` refused the
   profile before any exec.
+
+- The Linux half of `tests/confine.rs` builds nothing on the Mac. Five tests are
+  `#[cfg(target_os = "linux")]` and one runs everywhere:
+  `linux_wallet_journey_runs_under_the_seccomp_allow_list` starts the provider
+  under the generated filter and requires the launched child's own
+  `SECCOMP_MODE_FILTER`, the launcher's own install, and one file under
+  `STORAGE_ROOT` as its path evidence, then runs one probe child that shows the
+  four refused calls answering the filter's marker;
+  `linux_did_journey_runs_under_the_seccomp_allow_list` is the second caller of
+  the same journey body, with did's own binary, declared rights and permitted
+  operations. It compares the full program with wallet's and leaves the
+  four-call probe to wallet. Did acceptance awaits the shared policy decision
+  recorded in `CONFINEMENT-LINUX.md`;
+  `linux_seccomp_launch_refuses_each_failed_install` requires each install
+  failure and an architecture refusal to start nothing;
+  `linux_seccomp_launcher_runs_the_requested_program` requires the child's own
+  `exe` link to name the program the launcher was given;
+  `linux_seccomp_probe_reaps_failures_and_repeated_journeys` requires every
+  probe child to be reaped and the kernel proof to answer the same twice; and
+  `linux_seccomp_journey_is_not_applicable_off_linux` runs on every OS and
+  requires the journey's label to say `not applicable` and this OS off Linux.
+  `CONFINEMENT-LINUX.md` records the host, kernel, per-call answers and the two
+  kernel plants behind the journey, and the two plants on the did caller.
+- `seccomp_launch_record_refuses_missing_or_unknown_report` reads the one
+  install-record reader and requires a missing, short, long and unknown-step
+  record each to give its own reason, and a complete record to carry the
+  marker's two answers. It reads no kernel and runs on every OS.
 
 `unbound_copy_is_refused_under_profile` and `bound_copy_serves_under_profile`
 split the exec rule into its two halves under the real profile, with no fixture
@@ -867,6 +954,12 @@ target.
 one caller without starting a process: with `macos` and a missing
 `sandbox-exec` it fails the test with the gate's reason, and with `macos` and
 a present one it returns `true`. It runs on every supported build target.
+
+One rule,
+`tests_sections_name_the_crate_that_holds_each_cited_test`, holds this section
+and did's to the crate that declares each test they cite: a cited test that
+lives in the other crate must be named with that crate's
+`tests/confine.rs`, so a reader can tell which crate runs it.
 
 ## Falsifiers
 
@@ -1306,6 +1399,237 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` fails
   at its final wallet directory compare after `shutdown`, which finds
   `shutdown-falsifier.hex`, a name the setup did not leave.
+- Make the allow-list decision the 0710 deny list: refuse `socket`, `connect`
+  and `execve` and permit every other call (WP146):
+  `seccomp_program_denies_by_default_and_lists_no_undeclared_call` fails on its
+  final-decision assertion, which reads `ALLOW` where the deny marker belongs.
+- Make the builder return a fixed list and ignore its declared input (WP147):
+  `seccomp_allow_list_follows_the_declared_rights` fails because removing the
+  `storage` right changes no syscall of the list.
+- Skip an allow form the mapping table does not hold instead of refusing it
+  (WP148): `seccomp_rejects_unmapped_allow_form` fails on all three spellings,
+  because the list is built and no refusal comes.
+- Require a space after the operator in the one allow-form recogniser (WP149):
+  `seccomp_rejects_unmapped_allow_form` fails on `(allow)` and
+  `(allow(file-read*))`, which are then read as head forms instead of refused.
+- Admit both branches of the audit-architecture guard (WP150):
+  `seccomp_program_denies_by_default_and_lists_no_undeclared_call` fails on its
+  guard assertion, because a foreign architecture reaches the number load.
+- Make a false equality test fall into its own `ALLOW` (WP151): the same test
+  fails on its jump assertions, because an unlisted call is admitted.
+- Run the two install steps in the reverse order (WP152):
+  `seccomp_install_refuses_each_failed_step` fails on its recorded order,
+  because the filter runs before `no_new_privs`.
+- Answer both install steps with one fixed reason and errno (WP153): the same
+  test fails because the filter step's refusal names the first step.
+- Continue after a failed first install step (WP154): the same test fails on its
+  recorded order, because the filter runs after a step that failed.
+- Stop the write loop at the first short write (WP155):
+  `seccomp_launch_refuses_each_reporting_failure` fails on the record it
+  expects, because the loop stops early.
+- Report an interrupted write instead of retrying it (WP156): the same test
+  fails because the `EINTR` case comes back as a failure.
+- Answer both reporting failures with one fixed reason (WP157): the same test
+  fails because the two reasons are equal.
+- Accept a `linux` host under a `Seatbelt` policy (WP158):
+  `standin_host_refusal_decides_each_policy` fails because today's exact Linux
+  refusal is lost.
+- Bypass the launcher's `Seccomp` seat (WP159): the same test fails because the
+  `Seccomp` start returns Started instead of its own refusal.
+- Add one unconditional syscall beside the rows (WP160):
+  `seccomp_allow_list_follows_the_declared_rights` fails on its empty case,
+  because a declaration with no allow form still admits that call.
+- Test `ptrace`'s number where an admitted syscall's belongs (WP161):
+  `seccomp_program_denies_by_default_and_lists_no_undeclared_call` fails on its
+  number-set comparison, because the program tests a number no row names.
+- Label the Linux journey with a Linux host on a host that is not Linux
+  (WP162): `linux_seccomp_journey_is_not_applicable_off_linux` fails on a
+  non-Linux host because the label reads `applicable, host` instead of
+  `not applicable`, so a Mac run cannot pass a Linux claim on.
+- Accept any install-record length (WP163):
+  `seccomp_launch_record_refuses_missing_or_unknown_report` fails on its short
+  and long cases, because a short record then decodes as an installed filter.
+- Decode an unknown record step as an installed filter (WP164): the same test
+  fails on its unknown-step case, because the refusal does not come.
+- Accept a seccomp allow list generated for another provider (WP165):
+  `standin_host_refusal_decides_each_policy` fails because the start is then
+  attempted instead of refused for both providers' names.
+- Pass only the command to the probe's `keyctl` call (WP166):
+  `seccomp_keyctl_probe_supplies_every_argument_without_creation` fails because
+  the call omits the keyring, create flag and two unused arguments. The table
+  keeps all five values, so the test checks the call's use of them.
+- Answer a failed spawn's reason alone when the install record is empty (WP167):
+  `seccomp_launch_record_refuses_missing_or_unknown_report` fails because the
+  missing-report reason is lost behind that spawn reason.
+- Make the one file-to-list helper ignore its provider argument and always read
+  wallet's declared-rights file (WP178):
+  `seccomp_allow_list_names_the_provider_it_was_built_for` fails on its did
+  case, because both lists then answer `wallet-provider`.
+- Publish the wallet directory's parent entry at the caller even when this call
+  created nothing (WP179):
+  `tests::storage_root::wallet_init_publishes_only_the_entries_it_creates`
+  fails on its first case, because an existing wallet directory under a parent
+  that cannot be opened for reading then answers `storage_error` instead of
+  `ok`.
+- Canonicalize the wallet directory at the caller so a symlinked parent passes
+  the inspection (WP180): `tests::storage_root::wallet_init_refuses_symlink_parent`
+  fails because `init` answers `ok` instead of refusing the symlinked
+  `SystemServices`.
+- Make the one field reader honour no `serde` attribute (WP181):
+  `operations_table_row_check_refuses_each_bad_table` fails, because `init`'s
+  renamed field then reads as its Rust name and the table names `wire_name`.
+- Make the Inputs compare tolerate a cell that stops before a declared field
+  (WP182): the same test fails, because a cell naming `op` and `config` only is
+  then accepted for `init`.
+
+- WP183: Character literals bypass normalization and hide a required field.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP184: A raw field identifier keeps its Rust prefix as its wire name.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP185: The Inputs comparison accepts bare field names.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP186: The Inputs comparison accepts the fields in another order.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP187: The Inputs reader accepts an opening parenthesis.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP188: The Inputs reader accepts a closing parenthesis.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP189: The Inputs reader accepts an empty item.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP190: The Inputs reader accepts an unterminated backtick span.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP191: The Inputs reader accepts a backtick inside a name.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP192: A malformed Inputs cell passes instead of returning its row refusal.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP193: A source without enum Request loses its Inputs refusal.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP194: A source without fn handle loses its Inputs refusal.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP195: An absent Request arm loses its Inputs refusal.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP196: An unreadable declaration source loses its Inputs refusal.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP197: An unreadable dispatch source loses its row refusal.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP198: A field list whose delimiters do not balance is read as a shorter
+  list instead of being refused.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP202: The `STORAGE_PARENT` Landlock row carries a file read.
+  `landlock_ruleset_follows_the_declared_rights` checks this rule.
+- WP203: The Landlock builder skips the default-denial ABI check, so ABI 1
+  builds a ruleset.
+  `landlock_ruleset_refuses_an_abi_that_cannot_express_a_row` checks this rule.
+- WP204: The Landlock handled mask keeps only the read rights.
+  `landlock_ruleset_handles_every_right_the_abi_reports` checks this rule.
+- WP210: The Landlock sequencer runs the final call before
+  `PR_SET_NO_NEW_PRIVS`.
+  `landlock_install_refuses_each_failed_step` checks this rule.
+- WP211: The launch record reads a Landlock step as an installed record.
+  `landlock_install_record_decodes_each_failed_step` checks this rule.
+- WP212: A measured loader rule is added without `READ_FILE`.
+  `landlock_ruleset_names_each_measured_loader_entry` checks this rule.
+- WP213: The file-row label claims a Linux host off Linux.
+  `linux_landlock_journey_is_not_applicable_off_linux` checks this rule.
+- WP214: The expected item for an empty arm and for a field named `none` is
+  the same item, so the bare marker passes for the renamed field.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP215: `inputs_match` ignores the children of `params`, so a `params` list
+  that names a field the arm does not declare passes.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP216: The provider chooser ignores the provider name and answers wallet's
+  `STORAGE_ROOT` binding for both, so the did iteration fails on the expected
+  root.
+  `landlock_ruleset_follows_the_declared_rights` checks this rule.
+- WP217: The file row's bound-executable probe read names wallet's binary for
+  both providers, so did's probe would read the wrong program.
+  `landlock_probe_paths_follow_the_bound_parameters` checks this rule.
+- WP218: The Outputs compare ignores the children of `data`, so a literal key
+  the cell omits passes.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP219: The ordinary ok side accepts the cell's own names and does not read
+  the handler `json!`, so a key the literal does not write passes.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP220: The `wallet_contract` compare does not read
+  `WalletProviderResponseV2`, so an extra envelope name passes.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP221: The macOS allow compare accepts any allow quote on a declared-right
+  row, so the exec form on a `storage` row passes.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP222: A `none:` row's allow quote is not read, so the subpath form on that
+  row passes.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP223: `socket` is added to the `STORAGE_ROOT` row, so an allow-form row
+  admits a network call.
+  `seccomp_program_denies_by_default_and_lists_no_undeclared_call` checks this
+  rule.
+- WP224: The socket sweep judge accepts a returned descriptor for one family.
+  `socket_sweep_reports_every_family_and_type_refused` checks this rule.
+- WP225: The manifest compare accepts a declared operation the provider does
+  not answer.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP226: A missing `operations` list reads as an empty list, so the
+  missing-list case passes.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP227: The `none:` row's Effect check returns early, so a row with no
+  declared right that names `STORAGE_ROOT` passes.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP228: The Effect class compare treats every kind as `Effectful`, so the
+  `Read` kind that claims the store write passes.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP229: The contract reader treats the catch-all `class()` arm as `Read`, so
+  the `Effectful` kind that claims only in-memory work passes.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP230: The allow-table compare accepts a listed form the profile does not
+  hold, so a paraphrased row passes.
+  `profile_allow_table_check_refuses_each_bad_table` checks this rule.
+- WP231: An allow section with no backticked span reports no problem, so a
+  document that lists nothing passes.
+  `profile_allow_table_check_refuses_each_bad_table` checks this rule.
+- WP232: The layout compare swaps the two storage derivations, so a drifted
+  storage layout passes and the bound one is refused.
+  `every_confinement_document_states_its_bindings_from_the_one_derivation`
+  checks this rule.
+- WP233: The bullet reader yields no parameter bullet, so a section that names
+  nothing passes as an empty binding list.
+  `every_confinement_document_states_its_bindings_from_the_one_derivation`
+  checks this rule.
+- WP234: The Linux table's form-to-row compare skips a committed allow form
+  that no row quotes, so a grant with no Linux row passes.
+  `linux_contract_table_covers_every_committed_allow_form` checks this rule.
+- WP235: The cited-name check accepts any fourth-cell name, so a cell citing a
+  name that nothing holds passes.
+  `linux_contract_table_covers_every_committed_allow_form` checks this rule.
+- WP236: The sibling check accepts any paragraph, so a did paragraph naming a
+  wallet test under "in the same file" passes.
+  `tests_sections_name_the_crate_that_holds_each_cited_test` checks this rule.
+- WP237: The set compare accepts two unequal lists, so a crate that declares a
+  second OS passes.
+  `tests_sections_name_the_crate_that_holds_each_cited_test` checks this rule.
+- WP238: The M1 summary's block compare accepts an id no list registers, so a
+  summary citing a retired plant passes.
+  `every_m1_summary_names_its_journey_and_its_falsifiers` checks this rule.
+- WP239: The M1 summary's id set is read from the whole part instead of its
+  `CAUGHT falsifiers.` block, so the C0 part's `WP127` review line passes as B3
+  evidence.
+  `every_m1_summary_names_its_journey_and_its_falsifiers` checks this rule.
+- WP240: The claims rule accepts every token without reading the bridge's
+  production region, so a section claiming the Runtime binds a `(param ...)`
+  token passes.
+  `model_inline_profile_sections_match_the_bridge` checks this rule.
+- WP241: The copies rule accepts two sections that differ, so a
+  provider-specific sentence added to one copy passes.
+  `model_inline_profile_sections_match_the_bridge` checks this rule.
+
+Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
+Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,
+so none can produce a CAUGHT line in this list. That file names each of them,
+with the red output of its run on the Linux host: the `NoNewPrivileges` and
+`Filter` install-failure plants, the requested-program plant, the stopped-child
+and timeout-reap plants, the omitted-wait plant, the allocation-guard plant, the
+skip-install plant and the outside-write plant. Task 153's two Linux-only
+plants, a launcher that skips its Landlock install and a parent row that grants
+a read, are recorded in that same file. This session did not rerun them.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
