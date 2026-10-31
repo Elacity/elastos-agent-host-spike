@@ -1,5 +1,7 @@
+mod authenticator;
 mod checks;
 mod firstrun;
+mod passkey;
 mod runtime;
 
 use std::thread;
@@ -7,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use tao::dpi::LogicalSize;
 use tao::event::{Event, StartCause, WindowEvent};
-use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopWindowTarget};
+use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget};
 use tao::window::{Window, WindowBuilder};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
@@ -20,6 +22,10 @@ enum UserEvent {
     Menu(MenuEvent),
     Home(bool),
     Installed(Result<(), String>),
+    PasskeyAsk(String, String),
+    /// Page generation, request id, answer, and the id of a new passkey still pending.
+    PasskeyAnswer(u64, String, String, Option<String>),
+    PageStarted,
 }
 
 fn main() {
@@ -117,6 +123,9 @@ fn main() {
     let mut home_loaded = false;
     let home_proxy = event_loop.create_proxy();
     let install_proxy = event_loop.create_proxy();
+    let passkey_proxy = event_loop.create_proxy();
+    let mut page: u64 = 0;
+    let mut asking: Option<(u64, String)> = None;
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
         match event {
@@ -136,7 +145,7 @@ fn main() {
                         .expect("tray icon"),
                 );
                 if lab_start.is_some() {
-                    show_home(&mut home, target);
+                    show_home(&mut home, target, &passkey_proxy);
                 }
                 if let Some((lab, release)) = first_run.take() {
                     let proxy = install_proxy.clone();
@@ -180,7 +189,7 @@ fn main() {
                 // Opening the app opens Home once, like any app opens its window.
                 if up && launch_open {
                     launch_open = false;
-                    show_home(&mut home, target);
+                    show_home(&mut home, target, &passkey_proxy);
                     if let Some(lab) = &lab_home {
                         firstrun::note(lab, started, "Home answered; Home loaded in the window");
                     }
@@ -199,8 +208,64 @@ fn main() {
                     "Home is not running"
                 });
             }
+            // One passkey request at a time; a second is refused, as WebKit does.
+            Event::UserEvent(UserEvent::PasskeyAsk(id, request)) => {
+                let Some((_, webview)) = &home else {
+                    return;
+                };
+                if asking.is_some() {
+                    let _ = webview.evaluate_script(&passkey::finish_script(&id, None));
+                    return;
+                }
+                asking = Some((page, id.clone()));
+                let proxy = passkey_proxy.clone();
+                let generation = page;
+                thread::spawn(move || {
+                    let (answer, created) =
+                        std::panic::catch_unwind(|| authenticator::answer(&request))
+                            .unwrap_or_default();
+                    let _ =
+                        proxy.send_event(UserEvent::PasskeyAnswer(generation, id, answer, created));
+                });
+            }
+            // An answer goes only to the page that asked; a new passkey is kept only
+            // when that page took it.
+            Event::UserEvent(UserEvent::PasskeyAnswer(generation, id, answer, created)) => {
+                let current = asking.as_ref() == Some(&(generation, id.clone()));
+                if current {
+                    asking = None;
+                }
+                let sent = match (&home, current && generation == page) {
+                    (Some((_, webview)), true) => {
+                        let settle = created.clone();
+                        webview
+                            .evaluate_script_with_callback(
+                                &passkey::finish_script(&id, Some(&answer)),
+                                move |taken| {
+                                    if let Some(created) = &settle {
+                                        authenticator::settle(created, taken == "true");
+                                    }
+                                },
+                            )
+                            .is_ok()
+                    }
+                    _ => false,
+                };
+                if let (false, Some(created)) = (sent, &created) {
+                    authenticator::settle(created, false);
+                }
+            }
+            // A new document: the old one's Touch ID ends and its answer is dropped.
+            Event::UserEvent(UserEvent::PageStarted) => {
+                page += 1;
+                if asking.is_some() {
+                    authenticator::cancel();
+                }
+            }
             // Double-clicking the app, or clicking its Dock icon, while it runs.
-            Event::Reopen { .. } => open_home(home_up, &mut home, &mut home_loaded, target),
+            Event::Reopen { .. } => {
+                open_home(home_up, &mut home, &mut home_loaded, target, &passkey_proxy)
+            }
             // Closing the window hides it; the app keeps running in the menu bar.
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -212,7 +277,7 @@ fn main() {
             }
             Event::UserEvent(UserEvent::Menu(event)) => {
                 if event.id == *open.id() || event.id == *updates.id() {
-                    open_home(home_up, &mut home, &mut home_loaded, target);
+                    open_home(home_up, &mut home, &mut home_loaded, target, &passkey_proxy);
                 } else if event.id == *quit.id() {
                     home.take();
                     tray.take();
@@ -229,21 +294,26 @@ fn open_home(
     home: &mut Option<(Window, WebView)>,
     home_loaded: &mut bool,
     target: &EventLoopWindowTarget<UserEvent>,
+    proxy: &EventLoopProxy<UserEvent>,
 ) {
     if home_up != Some(true) {
         alert("Home is not running, so there is nothing to open yet.");
         return;
     }
-    show_home(home, target);
+    show_home(home, target, proxy);
     if let (false, Some((_, webview))) = (*home_loaded, &*home) {
         *home_loaded = webview.load_url(runtime::HOME_URL).is_ok();
     }
 }
 
 /// Shows the one Home window, creating it on a local "Starting" page the first time.
-fn show_home(home: &mut Option<(Window, WebView)>, target: &EventLoopWindowTarget<UserEvent>) {
+fn show_home(
+    home: &mut Option<(Window, WebView)>,
+    target: &EventLoopWindowTarget<UserEvent>,
+    proxy: &EventLoopProxy<UserEvent>,
+) {
     if home.is_none() {
-        match new_home_window(target) {
+        match new_home_window(target, proxy.clone()) {
             Ok(created) => *home = Some(created),
             Err(error) => {
                 alert(&format!("Could not open Home: {error}"));
@@ -257,15 +327,110 @@ fn show_home(home: &mut Option<(Window, WebView)>, target: &EventLoopWindowTarge
     }
 }
 
+/// Lab builds only: page errors and a summary of what Home shows go to
+/// `window-diag.log` in the lab home. Paths only; queries can carry launch tokens.
+const DIAG_SCRIPT: &str = r#"(() => {
+  if (window.location.host !== "localhost:8090") return;
+  const channel = window.ipc || (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ipc);
+  if (!channel) return;
+  const t0 = Date.now();
+  const frame = window.top === window ? "top" : window.location.pathname;
+  const send = (kind, text) => {
+    try { channel.postMessage(`diag:${frame} ${((Date.now() - t0) / 1000).toFixed(1)}s ${kind} ${String(text).slice(0, 1500)}`); } catch (_) {}
+  };
+  const path = (url) => { try { return new URL(url, window.location.href).pathname; } catch (_) { return "?"; } };
+  send("load", window.location.pathname);
+  window.addEventListener("error", (e) => {
+    const el = e.target;
+    if (el && el !== window && el.tagName) {
+      send("load-failed", `${el.tagName} ${path(el.src || el.href || "")}`);
+    } else {
+      send("error", `${e.message} at ${path(e.filename || "")}:${e.lineno}:${e.colno}`);
+    }
+  }, true);
+  document.addEventListener("securitypolicyviolation", (e) =>
+    send("csp", `${e.effectiveDirective} blocked ${path(e.blockedURI || "") || e.blockedURI} at ${path(e.sourceFile || "")}:${e.lineNumber}`));
+  window.addEventListener("unhandledrejection", (e) => send("rejection", (e.reason && (e.reason.stack || e.reason.message)) || e.reason));
+  for (const level of ["error", "warn"]) {
+    const original = console[level].bind(console);
+    console[level] = (...args) => { send(level, args.map((a) => (a && a.stack) || String(a)).join(" ")); original(...args); };
+  }
+  let last = "";
+  setInterval(() => {
+    if (!document.body) return;
+    const shown = [...document.body.querySelectorAll("[id]")]
+      .filter((el) => el.getClientRects().length && getComputedStyle(el).visibility !== "hidden" && el.parentElement === document.body)
+      .map((el) => el.id);
+    const frames = [...document.querySelectorAll("iframe")]
+      .map((f) => `${f.id || "iframe"}=${path(f.getAttribute("src") || "")}${f.hidden ? "(hidden)" : ""}`);
+    const state = `ready=${document.readyState} nodes=${document.body.getElementsByTagName("*").length} shown=[${shown.join(",")}] frames=[${frames.join(",")}]`;
+    if (state !== last) { last = state; send("state", state); }
+  }, 1000);
+})();"#;
+
 fn new_home_window(
     target: &EventLoopWindowTarget<UserEvent>,
+    proxy: EventLoopProxy<UserEvent>,
 ) -> Result<(Window, WebView), Box<dyn std::error::Error>> {
     let window = WindowBuilder::new()
         .with_title("ElastOS")
         .with_inner_size(LogicalSize::new(1280.0, 820.0))
         .with_min_inner_size(LogicalSize::new(720.0, 480.0))
         .build(target)?;
-    let webview = WebViewBuilder::new().with_html(STARTING).build(&window)?;
+    let diag = runtime::lab_home().map(|home| home.join("window-diag.log"));
+    let mut builder = WebViewBuilder::new()
+        .with_initialization_script_for_main_only(passkey::WINDOW_SCRIPT, true)
+        .with_devtools(diag.is_some());
+    if diag.is_some() {
+        builder = builder.with_initialization_script_for_main_only(DIAG_SCRIPT, false);
+    }
+    let lab_downloads = runtime::lab_home().map(|home| home.join("Downloads"));
+    let page_proxy = proxy.clone();
+    let webview = builder
+        .with_on_page_load_handler(move |event, _url| {
+            if let wry::PageLoadEvent::Started = event {
+                let _ = page_proxy.send_event(UserEvent::PageStarted);
+            }
+        })
+        .with_download_started_handler(move |_url, path| {
+            let mut dialog = rfd::FileDialog::new().set_title("Save");
+            if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+                dialog = dialog.set_file_name(name);
+            }
+            if let Some(dir) = &lab_downloads {
+                let _ = std::fs::create_dir_all(dir);
+                dialog = dialog.set_directory(dir);
+            } else if let Some(dir) = path.parent() {
+                dialog = dialog.set_directory(dir);
+            }
+            match dialog.save_file() {
+                Some(chosen) => {
+                    *path = chosen;
+                    true
+                }
+                None => false,
+            }
+        })
+        .with_ipc_handler(move |message| {
+            if let (Some(text), Some(path)) = (message.body().strip_prefix("diag:"), &diag) {
+                use std::io::Write;
+                if let Ok(mut log) = std::fs::File::options()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    let _ = writeln!(log, "{text}");
+                }
+                return;
+            }
+            if let Some((id, request)) =
+                passkey::request(&message.uri().to_string(), message.body())
+            {
+                let _ = proxy.send_event(UserEvent::PasskeyAsk(id, request));
+            }
+        })
+        .with_html(STARTING)
+        .build(&window)?;
     Ok((window, webview))
 }
 

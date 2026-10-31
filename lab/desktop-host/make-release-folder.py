@@ -15,13 +15,16 @@ publisher's key. A folder built that way must never ship.
 
 import argparse
 import base64
+import gzip
 import hashlib
+import io
 import json
 import os
 import secrets
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import urllib.request
 
@@ -72,6 +75,28 @@ def sign(signer, key, domain, payload):
     return json.dumps(envelope, indent=2).encode() + b"\n", signed["signer_did"]
 
 
+def pack_capsule(source, capsule):
+    """<capsule>.tar.gz as the release packs it: `<capsule>/` holding capsules/<capsule> without its README."""
+    buffer = io.BytesIO()
+    with gzip.GzipFile(fileobj=buffer, mode="wb", mtime=0) as gz, tarfile.open(fileobj=gz, mode="w") as tar:
+        for root, dirs, files in os.walk(source):
+            dirs.sort()
+            for name in [""] + sorted(files):
+                path = os.path.join(root, name) if name else root
+                rel = os.path.relpath(path, source)
+                if rel == "README.md":
+                    continue
+                info = tar.gettarinfo(path, arcname=capsule if rel == "." else f"{capsule}/{rel}")
+                info.uid = info.gid = info.mtime = 0
+                info.uname = info.gname = ""
+                if info.isfile():
+                    with open(path, "rb") as f:
+                        tar.addfile(info, f)
+                else:
+                    tar.addfile(info)
+    return buffer.getvalue()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--sources", required=True, help="sources.json written by the official installer")
@@ -79,6 +104,8 @@ def main():
     parser.add_argument("--lab-runtime")
     parser.add_argument("--lab-key")
     parser.add_argument("--signer")
+    parser.add_argument("--lab-capsule", action="append", default=[],
+                        help="capsules/<name> folder to pack as <name>.tar.gz (with --lab-runtime; repeatable)")
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
@@ -133,14 +160,40 @@ def main():
         os.chmod(os.path.join(args.out, cid), 0o755)
         payload = release["payload"]
         payload["platforms"][RELEASE_PLATFORM]["binary"] = {"cid": cid, "sha256": digest.hex(), "size": len(data)}
-        release_bytes, lab_did = sign(args.signer, args.lab_key, "elastos.release.v1", payload)
+        for folder in args.lab_capsule:
+            name = os.path.basename(os.path.normpath(folder))
+            packed = pack_capsule(folder, name)
+            packed_sha = hashlib.sha256(packed).hexdigest()
+            packed_cid = raw_cid(hashlib.sha256(packed).digest())
+            with open(os.path.join(args.out, packed_cid), "wb") as f:
+                f.write(packed)
+            manifest["external"][name]["platforms"]["*"].update(
+                cid=packed_cid, checksum=f"sha256:{packed_sha}", size=len(packed))
+            for record in payload.get("capsule_records", []):
+                if record["payload"]["name"] == name:
+                    record["payload"].update(cid=packed_cid, sha256=packed_sha, size=len(packed))
+            print(f"LAB {name} capsule {packed_cid} from {folder}")
+        if args.lab_capsule:
+            components = json.dumps(manifest, indent=2).encode() + b"\n"
+            components_cid = raw_cid(hashlib.sha256(components).digest())
+            with open(os.path.join(args.out, components_cid), "wb") as f:
+                f.write(components)
+            payload["platforms"][RELEASE_PLATFORM]["components"] = {
+                "cid": components_cid, "sha256": hashlib.sha256(components).hexdigest(), "size": len(components)}
+        # One publisher signs the whole release, capsule records included.
+        _, lab_did = sign(args.signer, args.lab_key, "elastos.lab.probe.v1", {})
+        for i, record in enumerate(payload.get("capsule_records", [])):
+            record["payload"]["signer_did"] = lab_did
+            signed, _ = sign(args.signer, args.lab_key, "elastos.capsule.record.v1", record["payload"])
+            payload["capsule_records"][i] = json.loads(signed)
+        release_bytes, _ = sign(args.signer, args.lab_key, "elastos.release.v1", payload)
         head_payload = head["payload"]
         head_payload["latest_release_cid"] = raw_cid(hashlib.sha256(release_bytes).digest())
         head_payload["release_sha256"] = hashlib.sha256(release_bytes).hexdigest()
         head_payload["signer_did"] = lab_did
         head_bytes, _ = sign(args.signer, args.lab_key, "elastos.release.head.v1", head_payload)
         for source in sources["sources"]:
-            source["publisher_dids"] = [lab_did] + [d for d in source["publisher_dids"] if d != lab_did]
+            source["publisher_dids"] = [lab_did]
             source["head_cid"] = raw_cid(hashlib.sha256(head_bytes).digest())
         print(f"LAB release: Runtime {cid}, signed by {lab_did}")
     for name, data in (("release-head.json", head_bytes), ("release.json", release_bytes),
