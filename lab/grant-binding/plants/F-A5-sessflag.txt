@@ -1,0 +1,8 @@
+id: F-A5-sessflag
+file: src/lib.rs
+test: model_session_grant_ends_when_the_session_changes
+--- old
+                    session_bound: session_bound,
+--- new
+                    session_bound: false,
+--- end
