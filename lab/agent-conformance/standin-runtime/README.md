@@ -67,6 +67,8 @@ A request may carry `plan`, the `sha256` that `plan_approval::preview` returned;
 
 `StandIn::bridge_envelope` is the one hostcall. A capability line calls `post_capability_request` for the capsule id. An invoke line calls `authorise` for that capsule id with no plan hash. The principal argument does not choose the caller. A bound grant stays live. Two-capsule-run passes the line, the capsule id, and the principal, and this lane does not run the component bytes. A PASS gives the Runtime no A3 credit.
 
+`StandIn::bridge_envelope` returns `request_too_large` before parse when the line's byte length is above 1048576. An `Ok` string above that length is replaced with `response_too_large` and keeps its id. A string of length 1048576 stays. The count is bytes. An error string is replaced too. A PASS gives the Runtime no A15 credit.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.

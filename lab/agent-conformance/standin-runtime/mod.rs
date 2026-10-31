@@ -1133,6 +1133,8 @@ impl StandIn {
         Ok(())
     }
 
+    const RESOURCE_FRAME_BYTE_LIMIT: usize = 1_048_576;
+
     /// Lab test seam, not a route.
     ///
     /// The one hostcall. A `request_capability` line copies every key of
@@ -1140,7 +1142,11 @@ impl StandIn {
     /// `capsule_id`. A `resource_invoke` line calls `authorise` for that
     /// capsule id with the token and no plan hash, so a bound grant stays
     /// live. The principal argument does not choose the caller. This method
-    /// mints no grant.
+    /// mints no grant. A line whose byte length is above
+    /// `RESOURCE_FRAME_BYTE_LIMIT` returns `request_too_large` before it is
+    /// parsed. An `Ok` string above that length, including an error string,
+    /// is replaced with `response_too_large` and keeps its id. A string of
+    /// that length stays. The count is bytes. An `Err` stays `Err`.
     pub fn bridge_envelope(
         &mut self,
         line: &str,
@@ -1148,6 +1154,17 @@ impl StandIn {
         principal: Option<&str>,
     ) -> Result<String, String> {
         let _ = principal;
+        if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {
+            return Ok(serde_json::to_string(&json!({
+                "id": 0,
+                "response": {
+                    "type": "error",
+                    "code": "request_too_large",
+                    "message": "resource frame exceeds maximum size",
+                },
+            }))
+            .expect("the stand-in encodes one bridge object"));
+        }
         let parsed: Value =
             serde_json::from_str(line).map_err(|err| format!("Invalid JSON: {err}"))?;
         let ok_line = |id: u64, data: Value| {
@@ -1181,7 +1198,7 @@ impl StandIn {
                 .as_u64()
                 .ok_or_else(|| "bridge id must be a number".to_owned())?,
         };
-        match request.get("type").and_then(Value::as_str) {
+        let built: Result<String, String> = match request.get("type").and_then(Value::as_str) {
             Some("request_capability") => {
                 let body = Value::Object(
                     request
@@ -1218,7 +1235,20 @@ impl StandIn {
                 }
             }
             _ => Ok(error_line(id, "unsupported bridge request")),
+        };
+        let built = built?;
+        if built.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {
+            return Ok(serde_json::to_string(&json!({
+                "id": id,
+                "response": {
+                    "type": "error",
+                    "code": "response_too_large",
+                    "message": "resource response exceeds maximum size",
+                },
+            }))
+            .expect("the stand-in encodes one bridge object"));
         }
+        Ok(built)
     }
 
     /// Lab test seam, not a route.
@@ -10169,6 +10199,252 @@ mod tests {
             request_ids(&plain),
             BTreeSet::from(["req-tok".to_owned(), "request-4".to_owned()]),
             "the stand-in did the work: the shell live-grant set is req-tok and request-4"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 stays running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running",
+        );
+    }
+
+    #[test]
+    fn standin_hostcall_frame_fails_closed() {
+        let shared = Shared::new();
+        let mut standin = StandIn::new();
+        launch_two_running(&shared, &mut standin);
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 is running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 is running",
+        );
+        standin.seed_grant(
+            "req-once",
+            "component-1",
+            SHARED_RESOURCE,
+            "read",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+
+        let oversized = "x".repeat(1_048_577);
+        let too_big = standin
+            .bridge_envelope(&oversized, "component-1", None)
+            .expect("the stand-in did the work: an oversized line is an envelope");
+        assert!(
+            !too_big.ends_with('\n'),
+            "the stand-in did the work: the returned string has no trailing newline"
+        );
+        let parsed = bridge_value(&too_big);
+        assert_eq!(
+            parsed["id"], 0,
+            "the stand-in did the work: an oversized line uses id 0"
+        );
+        assert_eq!(
+            parsed["response"]["type"], "error",
+            "the stand-in did the work: an oversized line is an error"
+        );
+        assert_eq!(
+            parsed["response"]["code"], "request_too_large",
+            "the stand-in did the work: an oversized line is request_too_large"
+        );
+        assert_eq!(
+            parsed["response"]["message"], "resource frame exceeds maximum size",
+            "the stand-in did the work: an oversized line names the frame"
+        );
+        assert_keys(
+            &parsed,
+            &["id", "response"],
+            "the stand-in did the work: request_too_large is one envelope",
+        );
+        assert_keys(
+            &parsed["response"],
+            &["code", "message", "type"],
+            "the stand-in did the work: request_too_large names type, code, and message",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Live, false),
+            "the stand-in did the work: an oversized line leaves req-once live"
+        );
+        assert!(
+            request_entries(&standin, "component-1").is_empty(),
+            "the stand-in did the work: an oversized line stores no request"
+        );
+
+        let exact = "x".repeat(1_048_576);
+        let err = standin
+            .bridge_envelope(&exact, "component-1", None)
+            .expect_err("the stand-in did the work: a line of the limit is parsed");
+        assert!(
+            err.contains("Invalid JSON"),
+            "the stand-in did the work: a line of the limit is Invalid JSON: {err}"
+        );
+        assert!(
+            !err.contains("request_too_large"),
+            "the stand-in did the work: a line of the limit is not request_too_large: {err}"
+        );
+
+        let wide = "á".repeat(524_289);
+        assert_eq!(
+            wide.len(),
+            1_048_578,
+            "the stand-in did the work: the accented line is counted in bytes"
+        );
+        let wide = standin
+            .bridge_envelope(&wide, "component-1", None)
+            .expect("the stand-in did the work: the accented line is an envelope");
+        assert_eq!(
+            bridge_value(&wide)["response"]["code"],
+            "request_too_large",
+            "the stand-in did the work: the accented line is request_too_large"
+        );
+
+        let padded = " ".repeat(1_048_576)
+            + r#"{"id":3,"request":{"type":"request_capability","resource":"localhost://Public/resident-instances/shared.txt","action":"read","reason":"read shared"}}"#;
+        let padded = standin
+            .bridge_envelope(&padded, "component-1", None)
+            .expect("the stand-in did the work: the padded line is an envelope");
+        assert_eq!(
+            bridge_value(&padded)["response"]["code"],
+            "request_too_large",
+            "the stand-in did the work: leading spaces count in the frame"
+        );
+        assert!(
+            request_entries(&standin, "component-1").is_empty(),
+            "the stand-in did the work: the padded line stores no request"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Live, false),
+            "the stand-in did the work: the padded line leaves req-once live"
+        );
+
+        let long = format!(
+            "localhost://{}",
+            "a".repeat(1_048_465 - "localhost://".len())
+        );
+        assert_eq!(
+            long.len(),
+            1_048_465,
+            "the stand-in did the work: the denied resource is 1048465 bytes"
+        );
+        let line = format!(
+            r#"{{"id":9,"request":{{"type":"request_capability","resource":"{long}","action":"read","reason":"x"}}}}"#
+        );
+        assert_eq!(
+            line.len(),
+            1_048_556,
+            "the stand-in did the work: the denied-ask line stays under the frame"
+        );
+        let denied = standin
+            .bridge_envelope(&line, "component-1", None)
+            .expect("the stand-in did the work: the exact denied ask is an envelope");
+        assert!(
+            !denied.ends_with('\n'),
+            "the stand-in did the work: the denied ask has no trailing newline"
+        );
+        let message = format!("ask not declared in the signed manifest: {long} read");
+        let expected = serde_json::to_string(&json!({
+            "id": 9,
+            "response": {
+                "type": "error",
+                "code": "denied",
+                "message": message,
+            },
+        }))
+        .expect("the stand-in did the work: the denied ask encodes");
+        assert_eq!(
+            denied.len(),
+            1_048_576,
+            "the stand-in did the work: the exact denied ask stays"
+        );
+        assert_eq!(
+            denied, expected,
+            "the stand-in did the work: the exact denied ask is returned unchanged"
+        );
+        assert_eq!(
+            bridge_value(&denied)["response"]["code"],
+            "denied",
+            "the stand-in did the work: the exact denied ask stays denied"
+        );
+        assert!(
+            request_entries(&standin, "component-1").is_empty(),
+            "the stand-in did the work: the exact denied ask stores no request"
+        );
+
+        let longer = format!(
+            "localhost://{}",
+            "a".repeat(1_048_466 - "localhost://".len())
+        );
+        assert_eq!(
+            longer.len(),
+            1_048_466,
+            "the stand-in did the work: the longer denied resource is 1048466 bytes"
+        );
+        let line = format!(
+            r#"{{"id":9,"request":{{"type":"request_capability","resource":"{longer}","action":"read","reason":"x"}}}}"#
+        );
+        assert_eq!(
+            line.len(),
+            1_048_557,
+            "the stand-in did the work: the longer denied-ask line stays under the frame"
+        );
+        let replaced = standin
+            .bridge_envelope(&line, "component-1", None)
+            .expect("the stand-in did the work: the longer denied ask is an envelope");
+        assert!(
+            !replaced.ends_with('\n'),
+            "the stand-in did the work: the replaced reply has no trailing newline"
+        );
+        let parsed = bridge_value(&replaced);
+        assert_eq!(
+            parsed["id"], 9,
+            "the stand-in did the work: the replaced reply keeps id 9"
+        );
+        assert_eq!(
+            parsed["response"]["type"], "error",
+            "the stand-in did the work: the replaced reply is an error"
+        );
+        assert_eq!(
+            parsed["response"]["code"], "response_too_large",
+            "the stand-in did the work: the longer denied ask is response_too_large"
+        );
+        assert_eq!(
+            parsed["response"]["message"], "resource response exceeds maximum size",
+            "the stand-in did the work: the replaced reply names the frame"
+        );
+        assert!(
+            !replaced.contains("ask not declared"),
+            "the stand-in did the work: the replaced reply drops the denied ask"
+        );
+        assert!(
+            request_entries(&standin, "component-1").is_empty(),
+            "the stand-in did the work: the longer denied ask stores no request"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Live, false),
+            "the stand-in did the work: the longer denied ask leaves req-once live"
         );
         assert_capsule(
             &standin,

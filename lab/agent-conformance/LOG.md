@@ -10071,3 +10071,192 @@ Rerun, same environment (`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFL
 
 A passing row gives the real Runtime no A3 credit. Two-capsule-run owns the real component bytes.
 
+## 116 — A15: hostcall frame fails closed
+
+116: `bridge_envelope` drops a line whose byte length is above `RESOURCE_FRAME_BYTE_LIMIT` (1048576) before parse, and replaces an `Ok` string above that length, including an error string, with `response_too_large`, keeping the id that call already used. The compare is `>`. A string of length 1048576 stays. This method mints no grant. Comparison base, recorded before the first edit: `80a2405624121eef3404fe3b3814a558be4b7cb5`. `b2eccab68f03ce9a0ced0c8afea96b496dbfd15f` is an ancestor. `fff8f1761eb851f642f8e9b680ea1c6747974060` is not.
+
+`authorise` before the first edit is `(caller, request_id, plan_sha256)`. The invoke still passes the caller, the token, and `None`. That list is unchanged.
+
+### Quote from the request flow (read only)
+
+`docs/AGENT_ARCHITECTURE.md` section "Request flow", step 7:
+
+> Runtime verifies the exact resource, action, operation, principal, session, capsule, grant, expiry, and revocation state.
+
+This task is the frame limit in front of that check on the one hostcall. It does not mint a grant.
+
+### Quote from the Runtime frame (read only)
+
+`elastos/crates/elastos-server/src/resource_bridge.rs`. `MAX_RESOURCE_FRAME_BYTES` is 1048576. `handle_request` returns the request-too-large envelope when `line.len()` is above that number, before `serde_json::from_str`. The codes are `request_too_large` and `response_too_large`. The messages are `resource frame exceeds maximum size` and `resource response exceeds maximum size`. The compare is `>`: `if line.len() > MAX_RESOURCE_FRAME_BYTES` and `if bytes.len() > MAX_RESOURCE_FRAME_BYTES`. A string of length 1048576 stays. `elastos/` is not edited.
+
+### The denied-ask length
+
+`post_capability_request` keeps its scheme refusal. A resource of only `a` is `Unsupported resource scheme. Allowed: elastos://, localhost://` before `declared_ask`, and that compact envelope is 127 bytes, so it cannot be the 1048576-byte row. The exact-limit row uses an undeclared `localhost://` resource of 1048465 bytes (`localhost://` plus `a` repeated 1048453 times). The line is 1048556 bytes. The denied-ask envelope is 1048576 bytes and is returned unchanged. One more `a` makes the resource 1048466 bytes, the line 1048557 bytes, and the denied-ask envelope 1048577 bytes, which is replaced. `post_capability_request`, `declared_ask`, and `authorise` keep their refusal reasons.
+
+### Plants
+
+Each plant was applied alone, the planted crate compiled, `standin_hostcall_frame_fails_closed` failed on its assertion, and the file was restored before the next. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_frame_fails_closed -- --exact`. No `falsifiers.json` id.
+
+F-frame-skip-request. Real 20.24 seconds. Assertion `src/../standin-runtime/mod.rs:10241:14` (restored `:10252`): `the stand-in did the work: an oversized line is an envelope`. The 1048577-byte line was `Err` and its text contained `Invalid JSON`.
+
+Old:
+
+```text
+        if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {
+            return Ok(serde_json::to_string(&json!({
+                "id": 0,
+                "response": {
+                    "type": "error",
+                    "code": "request_too_large",
+                    "message": "resource frame exceeds maximum size",
+                },
+            }))
+            .expect("the stand-in encodes one bridge object"));
+        }
+        let parsed: Value =
+```
+
+New:
+
+```text
+        let parsed: Value =
+```
+
+F-frame-chars. Real 2.36 seconds. Assertion `src/../standin-runtime/mod.rs:10315:14` (restored `:10315`): `the stand-in did the work: the accented line is an envelope`. The `á` line was `Err` and its text contained `Invalid JSON`.
+
+Old:
+
+```text
+        if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {
+```
+
+New:
+
+```text
+        if line.chars().count() > Self::RESOURCE_FRAME_BYTE_LIMIT {
+```
+
+F-frame-trim. Real 2.33 seconds. Assertion `src/../standin-runtime/mod.rs:10327:9` (restored `:10327`): `the stand-in did the work: leading spaces count in the frame`. Left `Null`, right `"request_too_large"`. The reply had no `code`, which is the pending `Ok` body, so the padded declared request was stored.
+
+Old:
+
+```text
+        if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {
+```
+
+New:
+
+```text
+        if line.trim().len() > Self::RESOURCE_FRAME_BYTE_LIMIT {
+```
+
+F-frame-inclusive. Real 2.18 seconds. Assertion `src/../standin-runtime/mod.rs:10297:14` (restored `:10297`): `the stand-in did the work: a line of the limit is parsed`. The 1048576-byte `x` line was `Ok` and `response.code` was `request_too_large`.
+
+Old:
+
+```text
+        if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {
+```
+
+New:
+
+```text
+        if line.len() >= Self::RESOURCE_FRAME_BYTE_LIMIT {
+```
+
+F-frame-keep-exact. Real 1.95 seconds. Assertion `src/../standin-runtime/mod.rs:10376:9` (restored `:10376`): `the stand-in did the work: the exact denied ask stays`. Left `115`, right `1048576`. `115` is the `response_too_large` envelope for id 9.
+
+Old:
+
+```text
+        if built.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {
+```
+
+New:
+
+```text
+        if built.len() >= Self::RESOURCE_FRAME_BYTE_LIMIT {
+```
+
+F-frame-skip-response. Real 1.82 seconds. Assertion `src/../standin-runtime/mod.rs:10417:9` (restored `:10428`): `the stand-in did the work: the longer denied ask is response_too_large`. Left `String("denied")`, right `"response_too_large"`.
+
+Old:
+
+```text
+        let built = built?;
+        if built.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {
+            return Ok(serde_json::to_string(&json!({
+                "id": id,
+                "response": {
+                    "type": "error",
+                    "code": "response_too_large",
+                    "message": "resource response exceeds maximum size",
+                },
+            }))
+            .expect("the stand-in encodes one bridge object"));
+        }
+        Ok(built)
+```
+
+New:
+
+```text
+        let built = built?;
+        Ok(built)
+```
+
+F-frame-success-only. Real 1.58 seconds. Assertion `src/../standin-runtime/mod.rs:10434:9` (restored `:10428`): `the stand-in did the work: the longer denied ask is response_too_large`. Left `String("denied")`, right `"response_too_large"`.
+
+Old:
+
+```text
+        if built.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {
+```
+
+New:
+
+```text
+        if built.len() > Self::RESOURCE_FRAME_BYTE_LIMIT
+            && serde_json::from_str::<Value>(&built)
+                .ok()
+                .and_then(|parsed| parsed["response"]["type"].as_str().map(str::to_owned))
+                .as_deref()
+                == Some("ok")
+        {
+```
+
+### Docs
+
+`standin-runtime/README.md` adds one paragraph immediately before `## Callers`. `bridge_envelope` returns `request_too_large` before parse when the line's byte length is above 1048576. An `Ok` string above that length is replaced with `response_too_large` and keeps its id. A string of length 1048576 stays. The count is bytes. An error string is replaced too. A PASS gives the Runtime no A15 credit. The grant paragraph and the plan-approval section stay. `RUNBOOK.md` adds one paragraph after the last stand-in paragraph: `standin_hostcall_frame_fails_closed` is this stand-in, and a PASS there gives the Runtime no A15 credit for this frame. Every other RUNBOOK paragraph stays.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. `Cargo.toml` and `Cargo.lock` are unchanged. `git diff` for `src/harness.rs`, `src/census.rs`, `src/report.rs`, `tests/effects.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. The changed files are `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md`. After the plants were restored, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` shows no plant. `post_capability_request`, `declared_ask`, and `authorise` are unchanged. `authorise` stays `(caller, request_id, plan_sha256)`.
+
+First run:
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.22 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101, real 309.05 seconds. The only failure was `standin_stopped_run_leaves_no_live_grant` at `tests/effects.rs:1383`. The retained root `target/home-24330-1793432332098654000-229` held only `stderr-231`, `stderr-233`, `stderr-235`, `stdout-231`, `stdout-233` and `stdout-235`. Those names match `stdout-<digits>` and `stderr-<digits>`. It did not include `host-process.lock` or a path containing `config.toml`. The padded line had not stored a request, and `req-once` had not become `Exhausted`. `src/census.rs` and the operator stay unchanged.
+
+Rerun, same environment:
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.29 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 300.97 seconds, inside the 600-second bound. Targets: lib 91 passed (including `standin_hostcall_frame_fails_closed` and `standin_bridge_envelope_records_the_capsule_request`); bin/report 1 passed; artifact 7 passed; build 1 passed; content_cid 2 passed; effects 63 passed (including `standin_stopped_run_leaves_no_live_grant`) and 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed and 2 ignored; standin_contract 13 passed; standin_plan 8 passed; standin_residents 2 passed; probe 3 passed; doc-tests 0.
+
+Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.29 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_frame_fails_closed -- --exact` exit 0, 1 passed and 0 failed, real 0.32 seconds. `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `RESOURCE_FRAME_BYTE_LIMIT` at `standin-runtime/mod.rs:1136` is a byte count. The new text is the two refusal messages. |
+| 2. Capsule, Home or UI gains ungranted access? | No | The oversized line returns at `:1157` before parse at `:1168`, so it does not call `post_capability_request` or `authorise`. `let _ = principal` at `:1156` still drops the principal. |
+| 3. A second path or a second copy of one rule? | No | The one hostcall is `bridge_envelope`. The request compare is `line.len() >` at `:1157`. The reply compare is `built.len() >` at `:1240`. The invoke still calls `authorise` with three arguments at `:1226`. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`. `elastos/` is untouched and its frame constant is quoted only. |
+| 5. Refusals deny by default with a clear reason? | Yes | `request_too_large` at `:1162` with `resource frame exceeds maximum size` at `:1163`. `response_too_large` at `:1245` with `resource response exceeds maximum size` at `:1246`. An `Err` stays `Err`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The method is the one hostcall. A line above the limit is dropped before a grant decision. A PASS gives the Runtime no A15 credit. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_hostcall_frame_fails_closed` at `:10220`. Each of the seven plants fails that test on its assertion, and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | The frame check at `:1157` is a size limit. It does not mint a grant, and a line of the limit still reaches parse. `req-once` stays `(Life::Live, false)`. |
+
+A passing row gives the real Runtime no A15 credit for this frame.
+
