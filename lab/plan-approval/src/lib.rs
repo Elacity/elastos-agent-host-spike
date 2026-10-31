@@ -66,6 +66,7 @@ pub fn approve(
 /// The agent asks for the hash of the bytes it holds now, so a plan that
 /// changed after approval is refused by the stand-in with status 403 and
 /// `grant is not bound to this plan`, and a `once` grant stays `Live`.
+/// It asks `amount: 1` so these tests exercise plan binding, never the budget.
 pub fn execute(
     stand_in: &mut StandIn,
     session_id: &str,
@@ -74,7 +75,11 @@ pub fn execute(
 ) -> Result<Value, (u16, String)> {
     stand_in.post_capability_validate(
         Caller::Client { session_id },
-        &json!({ "request_id": request_id, "plan_sha256": plan_sha256(plan) }),
+        &json!({
+            "request_id": request_id,
+            "plan_sha256": plan_sha256(plan),
+            "amount": 1,
+        }),
     )
 }
 

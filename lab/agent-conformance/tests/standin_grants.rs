@@ -53,6 +53,11 @@ fn launch(standin: &mut StandIn, bundle: &SignedBundle) -> String {
 /// One resident asks for `ASK_RESOURCE`, the shell grants it, and the grant's
 /// own session reads the minted pair back from the route answer.
 fn own_grant(standin: &mut StandIn, session: &str) -> MintedRun {
+    own_grant_of(standin, session, "once")
+}
+
+/// The same, for a grant of the named duration.
+fn own_grant_of(standin: &mut StandIn, session: &str, duration: &str) -> MintedRun {
     let owner = Caller::Client {
         session_id: session,
     };
@@ -88,7 +93,7 @@ fn own_grant(standin: &mut StandIn, session: &str) -> MintedRun {
         standin
             .post_capability_grant(
                 Caller::Shell,
-                &json!({ "request_id": request_id, "duration": "once", "rationale": "journey" }),
+                &json!({ "request_id": request_id, "duration": duration, "rationale": "journey" }),
             )
             .expect("the shell grants the resident's request"),
         json!({ "success": true }),
@@ -109,8 +114,7 @@ fn own_grant(standin: &mut StandIn, session: &str) -> MintedRun {
     MintedRun { run_id, request_id }
 }
 
-/// One hosted effect presented by `session`, through the effect route. The
-/// body carries no `amount`, so the ask is the default cap.
+/// One hosted effect with no ask, so its amount is the route's default.
 fn present(
     standin: &mut StandIn,
     session: &str,
@@ -430,6 +434,24 @@ fn a_hosted_effect_above_the_budget_cap_is_refused_on_the_granted_pair() {
         "the admitted hosted effect spends the once grant"
     );
 
+    // A second resident on its own identity admits the cap on its own grant,
+    // because each identity's ceiling is its own.
+    let other = SignedBundle::distinct("agent-budget-b");
+    admit(&mut standin, &other);
+    let other_session = launch(&mut standin, &other);
+    let own = own_grant(&mut standin, &other_session);
+    assert_eq!(
+        present_ask(
+            &mut standin,
+            &other_session,
+            &own.run_id,
+            &own.request_id,
+            &json!({ "amount": 4096 }),
+        ),
+        Ok(json!({ "valid": true })),
+        "a second identity admits the cap on its own grant"
+    );
+
     // A malformed ask is status 400 with the validate route's own text, before
     // the grant is read, so `over` stays live and unspent.
     assert_eq!(
@@ -545,5 +567,335 @@ fn a_stop_ends_the_ledger_binding_of_its_revoked_grant() {
     assert!(
         !listed_live(&standin, &victim.request_id),
         "the refused use spends nothing after the stop"
+    );
+}
+
+/// The allowance is a held budget per grant, on the use routes.
+///
+/// On A's `session` grant, 4096 is admitted and holds the ceiling; 4096 and 1
+/// on that same grant are then 403 with the ledger's own text and the grant
+/// stays live. Session B admits 4096 on its own ceiling. On C's grant two asks
+/// of 2048 are both admitted, so the budget is held, not spent by one use.
+#[test]
+fn a_session_grants_allowance_is_held_across_its_uses() {
+    let mut standin = StandIn::new();
+    let names = ["a", "b", "c"].map(|n| SignedBundle::distinct(&format!("agent-allowance-{n}")));
+    for bundle in &names {
+        admit(&mut standin, bundle);
+    }
+    let [agent_a, agent_b, agent_c] = names.each_ref().map(|b| launch(&mut standin, b));
+    let a = own_grant_of(&mut standin, &agent_a, "session");
+    let b = own_grant_of(&mut standin, &agent_b, "session");
+    let held = Err((403u16, "reservation exceeds the ceiling".to_owned()));
+    let use_grant = |standin: &mut StandIn, session: &str, grant: &MintedRun, amount: Value| {
+        standin.post_capability_validate(
+            Caller::Client {
+                session_id: session,
+            },
+            &json!({ "request_id": grant.request_id, "amount": amount }),
+        )
+    };
+
+    assert_eq!(
+        use_grant(&mut standin, &agent_a, &a, json!(4096)),
+        Ok(json!({ "valid": true })),
+        "the first ask at the cap is admitted and holds the ceiling"
+    );
+    for amount in [4096, 1] {
+        assert_eq!(
+            use_grant(&mut standin, &agent_a, &a, json!(amount)),
+            held,
+            "the ask of {amount} is refused on the same grant"
+        );
+        assert!(
+            listed_live(&standin, &a.request_id),
+            "the refused ask leaves the grant live and unspent"
+        );
+    }
+    assert_eq!(
+        use_grant(&mut standin, &agent_b, &b, json!(4096)),
+        Ok(json!({ "valid": true })),
+        "a separate session has its own ceiling and admits the cap"
+    );
+    let c = own_grant_of(&mut standin, &agent_c, "session");
+    // The first ask of 2048 fits C's whole budget, and the second fits its
+    // rest, so both are admitted. The third ask of 1 finds C's budget spent
+    // and is refused.
+    for _ in 0..2 {
+        assert_eq!(
+            use_grant(&mut standin, &agent_c, &c, json!(2048)),
+            Ok(json!({ "valid": true })),
+            "each ask of 2048 is admitted while the budget still covers it"
+        );
+    }
+    assert_eq!(
+        use_grant(&mut standin, &agent_c, &c, json!(1)),
+        held,
+        "the third ask of 1 is refused once C's budget is spent"
+    );
+}
+
+/// F-1253-2, at the routes: a stopped grant's open hold still counts.
+///
+/// Agent A holds the cap (4096) through the use route. B is a second route
+/// grant on A's own identity, minted before the stop through
+/// `post_capability_grant` on A's second request. A whole-session stop would
+/// revoke B too, so A alone is ended through `end_one_live_grant`, the seam
+/// whose body is the `end_live_grant` step `revoke_live` runs: the grant
+/// becomes `Revoked` and its ledger binding ends through `end_grant`, which
+/// keeps A's open hold. B is a `session` grant, so nothing revokes it, and its
+/// ask of 1 is refused only because A's held 4096 still counts against the
+/// identity ceiling. B stays live and unspent.
+///
+/// F1 in Rong's table: asking 1, not 4096, proves the shared ceiling. F6
+/// (Rong's table): this journey pins that ending a grant keeps its hold
+/// (`end_grant`), rather than removing the binding. Dropping the `end_grant`
+/// call from `end_live_grant` keeps this test green because the grant stays
+/// live; a `held_for_identity` that skips ended grants turns it red.
+#[test]
+fn an_ended_grants_open_hold_still_blocks_a_sibling_grant() {
+    let mut standin = StandIn::new();
+    let bundle = SignedBundle::distinct("agent-ceiling-a");
+    admit(&mut standin, &bundle);
+    let agent = launch(&mut standin, &bundle);
+    let a = own_grant_of(&mut standin, &agent, "session");
+    let b = own_grant_of(&mut standin, &agent, "session");
+    assert_ne!(a.request_id, b.request_id, "the two grants are distinct");
+    assert_eq!(
+        present(&mut standin, &agent, &a.run_id, &a.request_id),
+        Ok(json!({ "valid": true })),
+        "A's default use holds the whole ceiling"
+    );
+    assert_eq!(
+        present_ask(
+            &mut standin,
+            &agent,
+            &b.run_id,
+            &b.request_id,
+            &json!({ "amount": 1 })
+        ),
+        Err((403u16, "reservation exceeds the ceiling".to_owned())),
+        "A's open hold refuses B's ask of 1 before the stop"
+    );
+    standin.end_one_live_grant(&a.request_id);
+    assert!(
+        !listed_live(&standin, &a.request_id),
+        "the ended grant leaves the live view"
+    );
+    assert!(
+        listed_live(&standin, &b.request_id),
+        "the sibling grant stays live"
+    );
+    assert_eq!(
+        standin.post_capability_validate(
+            Caller::Client { session_id: &agent },
+            &json!({ "request_id": b.request_id, "amount": 1 }),
+        ),
+        Err((403u16, "reservation exceeds the ceiling".to_owned())),
+        "the ended grant's open hold still counts at the routes"
+    );
+    assert!(
+        listed_live(&standin, &b.request_id),
+        "the refused ask leaves B live and unspent"
+    );
+}
+
+/// F1: a second grant is refused while the first grant's hold is open.
+///
+/// Session S asks twice and the shell grants both through `post_capability_grant`,
+/// so A and B are both route-minted `session` grants. A's use asks 4096 and is
+/// admitted; B's use asks 1 and is refused at `Verifier::reserve`, because
+/// the ledger sums the open holds of S's identity, not of one handle.
+#[test]
+fn a_second_grant_is_refused_while_the_first_grants_hold_is_open() {
+    let mut standin = StandIn::new();
+    let bundle = SignedBundle::distinct("agent-two-grants");
+    admit(&mut standin, &bundle);
+    let session = launch(&mut standin, &bundle);
+    let a = own_grant_of(&mut standin, &session, "session");
+    let b = own_grant_of(&mut standin, &session, "session");
+    assert_ne!(a.request_id, b.request_id, "the two grants are distinct");
+    assert_eq!(
+        present(&mut standin, &session, &a.run_id, &a.request_id),
+        Ok(json!({ "valid": true })),
+        "A's use at the cap is admitted"
+    );
+    assert_eq!(
+        present_ask(
+            &mut standin,
+            &session,
+            &b.run_id,
+            &b.request_id,
+            &json!({ "amount": 1 })
+        ),
+        Err((403u16, "reservation exceeds the ceiling".to_owned())),
+        "B's ask of 1 is refused by A's open hold, so the ceiling is shared"
+    );
+    assert!(
+        listed_live(&standin, &a.request_id) && listed_live(&standin, &b.request_id),
+        "both grants stay live after the refusal"
+    );
+}
+
+/// F2: a different identity admits the same ask.
+///
+/// After the same setup as F1, a session T with a grant C asks 4096 and is
+/// admitted: the ceiling is per identity, so S's hold covers T's grant.
+#[test]
+fn a_second_identities_grant_admits_the_cap_while_the_first_identity_holds_it() {
+    let mut standin = StandIn::new();
+    let first = SignedBundle::distinct("agent-identity-s");
+    let second = SignedBundle::distinct("agent-identity-t");
+    admit(&mut standin, &first);
+    admit(&mut standin, &second);
+    let s = launch(&mut standin, &first);
+    let t = launch(&mut standin, &second);
+    let a = own_grant_of(&mut standin, &s, "session");
+    let c = own_grant_of(&mut standin, &t, "session");
+    assert_eq!(
+        present(&mut standin, &s, &a.run_id, &a.request_id),
+        Ok(json!({ "valid": true })),
+        "S's grant holds S's ceiling"
+    );
+    assert_eq!(
+        present(&mut standin, &t, &c.run_id, &c.request_id),
+        Ok(json!({ "valid": true })),
+        "T's grant still admits the cap on its own ceiling"
+    );
+}
+
+/// F4: a refused use holds nothing.
+///
+/// On session S, A's 1000 is admitted, then B's 4096 is refused at
+/// `Verifier::reserve`, then B's 1 is admitted. A and B are two route-minted
+/// grants of S. The 1 fits under the ceiling only when the refused 4096
+/// recorded no hold, so the refused ask left the identity's held sum at
+/// exactly A's 1000.
+#[test]
+fn a_refused_use_holds_nothing() {
+    let mut standin = StandIn::new();
+    let bundle = SignedBundle::distinct("agent-refused-holds");
+    admit(&mut standin, &bundle);
+    let session = launch(&mut standin, &bundle);
+    let a = own_grant_of(&mut standin, &session, "session");
+    let b = own_grant_of(&mut standin, &session, "session");
+    assert_ne!(a.request_id, b.request_id, "the two grants are distinct");
+    assert_eq!(
+        present_ask(
+            &mut standin,
+            &session,
+            &a.run_id,
+            &a.request_id,
+            &json!({ "amount": 1000 })
+        ),
+        Ok(json!({ "valid": true })),
+        "A's 1000 is admitted"
+    );
+    assert_eq!(
+        present_ask(
+            &mut standin,
+            &session,
+            &b.run_id,
+            &b.request_id,
+            &json!({ "amount": 4096 })
+        ),
+        Err((403u16, "reservation exceeds the ceiling".to_owned())),
+        "B's 4096 is refused by A's hold"
+    );
+    assert!(
+        listed_live(&standin, &b.request_id),
+        "the refused ask leaves B live and unspent"
+    );
+    assert_eq!(
+        present_ask(
+            &mut standin,
+            &session,
+            &b.run_id,
+            &b.request_id,
+            &json!({ "amount": 1 })
+        ),
+        Ok(json!({ "valid": true })),
+        "B's 1 fits, so the refused 4096 held nothing"
+    );
+}
+
+/// True when the shell request view lists `request_id` as pending with no
+/// reason.
+fn still_pending(standin: &StandIn, session: &str, request_id: &str) -> bool {
+    let listed = standin
+        .get_capability_requests(Caller::Shell, Some(session))
+        .expect("the shell reads the session's requests");
+    listed["requests"]
+        .as_array()
+        .expect("the request list is an array")
+        .iter()
+        .find(|record| record["request_id"] == json!(request_id))
+        .is_some_and(|record| {
+            record["status"] == json!("pending") && record["decision_reason"] == json!("")
+        })
+}
+
+/// N4: a blank deny reason is refused and the request stays pending.
+///
+/// The resident asks through `post_capability_request` and the shell denies
+/// through `post_capability_deny`. Each refused call names an existing pending
+/// request and passes every rule before the blank check.
+#[test]
+fn a_blank_deny_reason_is_refused_and_an_absent_one_defaults() {
+    let mut standin = StandIn::new();
+    let bundle = SignedBundle::distinct("agent-blank");
+    admit(&mut standin, &bundle);
+    let session = launch(&mut standin, &bundle);
+    let ask = |standin: &mut StandIn, session: &str| {
+        standin
+            .post_capability_request(
+                Caller::Client {
+                    session_id: session,
+                },
+                &json!({ "resource": ASK_RESOURCE, "action": "read", "reason": "journey" }),
+            )
+            .expect("the resident stores its request")["request_id"]
+            .as_str()
+            .expect("the request route names its id")
+            .to_owned()
+    };
+    let blank_id = ask(&mut standin, &session);
+    let ws_id = ask(&mut standin, &session);
+    let absent_id = ask(&mut standin, &session);
+    for (id, reason) in [(&blank_id, ""), (&ws_id, "  ")] {
+        assert_eq!(
+            standin.post_capability_deny(
+                Caller::Shell,
+                &json!({ "request_id": id, "reason": reason }),
+            ),
+            Err((400u16, "deny reason must not be blank".to_owned())),
+            "a blank deny reason is refused"
+        );
+    }
+    assert!(
+        still_pending(&standin, &session, &blank_id),
+        "the refused deny leaves the request pending with no reason"
+    );
+    assert!(
+        still_pending(&standin, &session, &ws_id),
+        "the whitespace refusal leaves its request pending"
+    );
+    assert_eq!(
+        standin.post_capability_deny(Caller::Shell, &json!({ "request_id": absent_id })),
+        Ok(json!({ "success": true })),
+        "an absent deny reason is accepted"
+    );
+    let read = standin
+        .get_capability_request(
+            Caller::Client {
+                session_id: &session,
+            },
+            &absent_id,
+        )
+        .expect("the owning client reads its denied request");
+    assert_eq!(
+        read,
+        json!({ "status": "denied", "reason": "Denied by user" }),
+        "an absent deny reason is stored as the one default"
     );
 }
