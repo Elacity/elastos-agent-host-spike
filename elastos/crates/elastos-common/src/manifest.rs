@@ -1002,10 +1002,17 @@ impl ProviderAuthority {
                 return Err("provider authority audit event must not be empty".to_string());
             }
         }
+        let mut seen_ids: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         for right in &self.rights {
             if !APPROVED_RIGHT_IDS.contains(&right.id.as_str()) {
                 return Err(format!(
                     "provider authority right \"{}\" is not an approved right id",
+                    right.id
+                ));
+            }
+            if !seen_ids.insert(right.id.as_str()) {
+                return Err(format!(
+                    "provider authority right \"{}\" is declared more than once",
                     right.id
                 ));
             }
@@ -1020,6 +1027,15 @@ impl ProviderAuthority {
                     "provider authority right \"{}\" must not declare an empty rule",
                     right.id
                 ));
+            }
+            let mut rules: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+            for rule in &right.rules {
+                if !rules.insert(rule.trim()) {
+                    return Err(format!(
+                        "provider authority right \"{}\" declares the same rule more than once",
+                        right.id
+                    ));
+                }
             }
         }
         Ok(())
@@ -1822,6 +1838,41 @@ mod tests {
             err.contains("\"storage\" must not declare an empty rule"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn provider_authority_rights_reject_duplicates() {
+        let unmodified: CapsuleManifest = serde_json::from_str(include_str!(
+            "../../../../capsules/did-provider/capsule.json"
+        ))
+        .unwrap();
+        unmodified.validate().unwrap();
+
+        let mut value = serde_json::to_value(&unmodified).unwrap();
+        let rights = value["authority"]["rights"].as_array_mut().unwrap();
+        rights.push(rights[0].clone());
+        assert_eq!(rights[0], rights[2], "duplicate copy must be identical");
+        assert_eq!(rights[1]["id"], serde_json::json!("bound-executable"));
+        let manifest: CapsuleManifest = serde_json::from_value(value).unwrap();
+        let err = manifest.validate().unwrap_err();
+        assert!(err.contains("declared more than once"), "{err}");
+        assert!(err.contains("\"storage\""), "{err}");
+
+        let mut value = serde_json::to_value(&unmodified).unwrap();
+        let rules = value["authority"]["rights"][0]["rules"]
+            .as_array_mut()
+            .unwrap();
+        assert_eq!(rules.len(), 2);
+        let first = rules[0].as_str().unwrap().to_string();
+        rules.push(serde_json::json!(format!("  {}  ", first)));
+        assert!(rules[0].as_str().unwrap().trim() == rules[2].as_str().unwrap().trim());
+        let manifest: CapsuleManifest = serde_json::from_value(value).unwrap();
+        let err = manifest.validate().unwrap_err();
+        assert!(err.contains("same rule more than once"), "{err}");
+        assert!(err.contains("\"storage\""), "{err}");
+        assert!(!err.contains("\"bound-executable\""), "{err}");
+
+        unmodified.validate().unwrap();
     }
 
     #[test]
