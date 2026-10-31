@@ -9627,3 +9627,69 @@ New:
 
 A passing row gives the real Runtime no A11 credit for this later call.
 
+## 139 — A3: hostcall passes the invoke amount
+
+Comparison base, recorded before the first edit: `965b3094d8fe50184829d6debce4f1c0114ed11e`. `324c861b02573efc2b4eb984bb303c93305e5ff0` is an ancestor. `fff8f1761eb851f642f8e9b680ea1c6747974060` and `80a2405624121eef3404fe3b3814a558be4b7cb5` are not. `git status --short -- elastos capsules scripts examples` was empty. `cargo fetch --locked --manifest-path elastos/Cargo.toml` completed with no output. wasmtime in `elastos/Cargo.lock` is `36.0.20`. `EFFECT_BUDGET_CAP` is 4096.
+
+Request flow, step 6: "The Agent Host submits the proposed operation to Runtime as the active agent principal and session." Step 7: "Runtime verifies the exact resource, action, operation, principal, session, capsule, grant, expiry, and revocation state."
+
+Call shape, read only. `BridgeHostcall` is `Fn(&str, &str, Option<&str>)`: the envelope line, the capsule id, and the principal. `call_bridge` builds the line with `bridge_envelope_json` and passes the capsule id and the principal. `request_capability` carries `resource`, `action`, and `reason`. `resource_invoke` carries `uri`, `operation`, `body`, and `token`.
+
+`authorise(&mut self, caller: Caller<'_>, request_id: &str, run_id: Option<&str>, plan_sha256: Option<&str>) -> Result<usize, (u16, String)>`. `use_grant(&mut self, caller: Caller<'_>, request_id: &str, run_id: Option<&str>, plan_sha256: Option<&str>, amount: u64) -> Result<(), (u16, String)>`. `run_accepts`: `None => true`.
+
+`bridge_envelope` is the one hostcall, directly above `admit_resident`. A capability line calls `post_capability_request` for the capsule id. An invoke line calls `use_grant` with `None`, `None`, and the body amount. It does not pass `EFFECT_BUDGET_CAP` and it does not call `ask_amount(None)`. A `session` grant keeps the hold `admit_effect` opened. Settling that hold returns the amount to the ceiling and turns the existing ceiling rows red, and this task cannot edit `tests/standin_grants.rs` or `tests/standin_contract.rs`. A `once` grant settles with `SettleOutcome::Known(amount)` and does not release that reservation. If `settle` fails, an outstanding hold is released, the grant stays `Live`, and that error is returned. `authorise` spends nothing.
+
+### Plants
+
+Each plant was restored before the next. Restored, `standin_bridge_envelope_records_the_capsule_request` and `standin_hostcall_calls_use_grant` pass. The planted crate compiled. The named test failed on the assertion below.
+
+- F-bridge-stub. Old: `let _ = principal;\n`. New: `let _ = (line, capsule_id, principal);\n return Ok("{\"id\":7,\"response\":{\"type\":\"ok\",\"data\":{\"status\":\"pending\",\"request_id\":\"request-1\"}}}".to_owned());\n`. `standin-runtime/mod.rs:9949` `component-1 stores the capability line`, left `[]`.
+- F-bridge-fixed-session. Old: `session_id: capsule_id`. New: `session_id: "component-1"`. `standin-runtime/mod.rs:9964` `component-1 still has only request-1`, left also holds `request-2`.
+- F-bridge-principal-caller. Old: the `resource_invoke` arm starts at `let token`. New: `let caller = Caller::Client { session_id: principal.unwrap_or(capsule_id) };` before `let token`. `standin-runtime/mod.rs:10204` `the sibling invoke answers with type, code and message`, left `{"data", "type"}`.
+- F-bridge-drop-plan. Old: `if key != "type"`. New: `if key != "type" && key != "plan"`. `standin-runtime/mod.rs:10109` `request-4 stores the plan hash`, left `Null`.
+- F-bridge-pass-plan. Old: `use_grant(caller, token, None, None, amount)`. New: `use_grant(caller, token, None, Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), amount)`. `standin-runtime/mod.rs:10179` `the bound grant stays live`, left `(Exhausted, false)`.
+- F-bridge-pass-run. Old: `use_grant(caller, token, None, None, amount)`. New: `use_grant(caller, token, Some(""), None, amount)`. `standin-runtime/mod.rs:10176` `the bound invoke is refused before any spend`, left `effect run  is not bound to request request-4`.
+- F-bridge-read-run. Old: `use_grant(caller, token, None, None, amount)`. New: `let presented_run = request.get("run_id").and_then(Value::as_str);` then `use_grant(caller, token, presented_run, None, amount)`. `standin-runtime/mod.rs:10279` `the owner spend of request-5 answers with type and data`, left `{"code", "message", "type"}`. `request-5` stays `Live` because that empty `run_id` is `effect run  is not bound to request request-5`.
+- F-bridge-hosted. Old: the `use_grant` match. New: `post_hosted_effect(caller, "offer", "effect", "", token, &json!({ "amount": amount }))`. `standin-runtime/mod.rs:10183` `the bound invoke is refused before any spend`, left `effect run  is not bound to request request-4`.
+- F-bridge-skip-use. Old: the `use_grant` match. New: `authorise(caller, token, None, None)` then the ok envelope with `data` null. `standin-runtime/mod.rs:10280` `request-5 is spent`, left `(Live, false)`.
+- F-bridge-coerce-id. Old: `Some(value) => value.as_u64()...`. New: `Some(Value::String(_)) => 0` before that arm. `standin-runtime/mod.rs:10010` `keeps a non-number id out of the store`, left `Ok` of id `0` and `request-3`.
+- F-bridge-coerce-token. Old: `Some(_) => return Err("invoke token must be a string".to_owned())`. New: `Some(_) => { let _ = self.use_grant(caller, "", None, None, 1); "" }`. `standin-runtime/mod.rs:10395` `a non-string token is refused`, left `Ok` of the amount error envelope.
+- F-bridge-skip-object. Old: `return Err("Invalid JSON: request must be an object".to_owned())`. New: `return Ok` of the unsupported-bridge error envelope. `standin-runtime/mod.rs:10000` `{"id":7} needs a request object`, left that `Ok`.
+- F-bridge-direct. Old: `let _ = principal;`. New: that line plus `self.authorise(Caller::Client { session_id: capsule_id }, "", None, None)`. `standin-runtime/mod.rs:10500` `the hostcall does not call authorise`.
+- F-bridge-validate. Old: `let _ = principal;`. New: that line plus `self.post_capability_validate(Caller::Client { session_id: capsule_id }, &json!({}))`. `standin-runtime/mod.rs:10504` `the hostcall does not call post_capability_validate`.
+- F-bridge-cap. Old: `use_grant(caller, token, None, None, amount)` and the `once` success path calls `.settle(`. New: `use_grant(caller, token, None, None, EFFECT_BUDGET_CAP)` and that path assigns `Exhausted` without `.settle(`. The refusal rows and the `request-5` spend passed. `standin-runtime/mod.rs:10329` `the owner spend of request-6 answers with type and data`, left `{"code", "message", "type"}`. `request-6` stays `Live` and the refusal is `reservation exceeds the ceiling`.
+- F-bridge-fixed-amount. Old: `Ok(amount) => amount`. New: `Ok(_) => 1`. `standin-runtime/mod.rs:10261` `4097 is refused and not clamped`, left `Null`. The `4097` row spends `request-5`.
+- F-bridge-release. Old: the `once` success path calls `.settle(` with `SettleOutcome::Known(amount)`. New: that path calls `.release(` and does not call `.settle(`. `standin-runtime/mod.rs:10530` `use_grant settles the hold`.
+
+### Docs
+
+`standin-runtime/README.md` adds one paragraph immediately before `## Callers`. The grant paragraph and the plan-approval section keep their bytes. `RUNBOOK.md` adds one paragraph after the last stand-in paragraph. Every other paragraph keeps its bytes.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0` on the full test. `Cargo.toml` and `Cargo.lock` are unchanged. `git diff` for `elastos`, `capsules`, `scripts`, `examples`, `src/harness.rs`, `src/census.rs`, `src/report.rs`, `tests/effects.rs`, `tests/standin_grants.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. The changed files are `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.21 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 270.28 seconds, inside the 600-second bound. Targets: lib 90 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; content_cid 2 passed; effects 63 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 14 passed; standin_grants 11 passed; standin_plan 8 passed; standin_residents 2 passed; probe 3 passed; doc-tests 0. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+
+### Proof
+
+After the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_bridge_envelope_records_the_capsule_request -- --exact` exit 0, 1 passed, real 0.18 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_calls_use_grant -- --exact` exit 0, 1 passed, real 0.08 seconds. `git diff -- elastos` is empty. `324c861b02573efc2b4eb984bb303c93305e5ff0` is an ancestor. `80a2405624121eef3404fe3b3814a558be4b7cb5` is not.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `bridge_envelope` copies the request's own keys at `standin-runtime/mod.rs:1428` and adds no code or content identity. |
+| 2. Capsule, Home or UI gains ungranted access? | No | The caller is `Caller::Client { session_id: capsule_id }` at `:1422`. `let _ = principal` at `:1388` keeps the principal from choosing that caller. An invoke spends only through `use_grant`. |
+| 3. A second path or a second copy of one rule? | No | The hostcall's only grant decision is `use_grant` at `:1465`. `authorise`, `plan_accepts` and `run_accepts` stay the checks that function already calls. An over-cap amount returns `admit_text` at `:1458` and does not spend. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`. `git diff -- elastos` is empty. |
+| 5. Refusals deny by default with a clear reason? | Yes | A bad line is `Invalid JSON` at `:1389`, a bad id is `bridge id must be a number` at `:1397`, a bad token is `invoke token must be a string` at `:1442`, a missing or non-integer amount and a zero amount return before `use_grant` at `:1447` and `:1454`, and any other type is `unsupported bridge request` at `:1470`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | This lane does not run the component bytes. The stand-in hostcall is the submit the capsule already makes, and two-capsule-run owns the real line. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_bridge_envelope_records_the_capsule_request` at `:9912` and `standin_hostcall_calls_use_grant` at `:10476`. The seventeen plants each fail the named test on the assertion recorded above, and the restored tests pass. |
+| 8. Identity, admission and allowance stay separate? | Yes | A capability line stores a pending request and mints no grant. An invoke calls `authorise` before `admit_effect`. A missing plan hash leaves a bound grant `Live`. The body amount is the ask, and a `session` hold stays open while a `once` hold is settled. |
+
+A passing row gives the real Runtime no A3 credit. Two-capsule-run owns the real component bytes.
+
+- 139: `bridge_envelope` records the capsule's capability line and spends the invoke amount through `use_grant`; a `once` hold is settled and a `session` hold stays open.
+
