@@ -31,6 +31,8 @@ reference model, not the Runtime; counts toward no M1 check; the Runtime half is
 
 `Verifier::operate` on a derived journal ends an allow-once issuing grant through the one `revoke_grant`. The journals minted from that grant end with it. The store keeps the record. A direct append or overwrite on that grant ends it through the same call. A child-journal mint does not end the grant. A refused effect does not end the grant. A standing grant stays. This mirrors `Life::Exhausted`. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
 
+`resolve_for_hold` closes a hold after `resolve` would refuse the grant as expired. The live binding is the one `resolve_live`. The expiry walk stays in `resolve`. A new reserve, a new effect, and `use_grant` stay `Refuse::Expired`. The store keeps the record. A hold opened on a derived journal follows the issuing expiry the same way. Settle, release, and timeout still run, and the ceiling room returns when the hold closes. This mirrors `is_due`. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
 `Verifier::admit_ask` caps one agent's budget ask and stores the granted amount through the one `admit`. This is a lab stand-in for that admission. It is not the Runtime. It does not count toward A7 or M1-R.
 
 A forged identity, session, instance, usage, ceiling or set of rights changes
