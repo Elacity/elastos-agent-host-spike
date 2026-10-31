@@ -10445,6 +10445,51 @@ class CitationCheckTests(unittest.TestCase):
         finally:
             check.load_draft = original
 
+    def test_live_draft_retargeted_spans_travel_with_the_pin(self):
+        # The five retargeted spans and the pin are one decision: the spans
+        # stand at the draft pin and not at the older one, so a draft that
+        # keeps the new spans and restores the old pin is refused on both
+        # counts. This is the coupling the pin move rests on.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        self.assertEqual(check.problems(root), [])
+        old_pin = "Pinned commit: 1cc3e47b9dcd965d003c504ac79d027b4f2a0d15"
+        moved = [
+            line
+            for line in text.splitlines()
+            if line.startswith("Pinned commit:")
+        ]
+        self.assertEqual(len(moved), 1)
+        restored = text.replace(moved[0], old_pin)
+        self.assertNotEqual(restored, text)
+        self.assertEqual(
+            self._problems_for(restored),
+            [
+                "refuse: function model_unasked_agent_does_not_inherit_the_last_admit"
+                " is not in lab/grant-binding/src/ledger.rs",
+                "refuse: quoted line is not in the pinned commit:"
+                " lab/capsule-identity/src/lib.rs:1453",
+            ],
+        )
+
+    def test_falsifier_retargeted_span_kept_with_the_old_pin_is_caught(self):
+        # A checker that read the worktree for the moved span, or a draft whose
+        # pin did not travel with its spans, would return [] for the old pin.
+        # The planted pin reader always answers with the draft pin, so the
+        # coupling test sees no refusal and fails.
+        def planted(text):
+            return None
+
+        self._caught(
+            "pin_sha",
+            planted,
+            self.test_live_draft_retargeted_spans_travel_with_the_pin,
+            "refuse:",
+            "CAUGHT pin-and-span-coupling",
+        )
+
     def test_cited_line_reads_a_line_span_as_its_number(self):
         # A line span does not search the file. The number is _span_target's.
         span = "examples/agent-host/src/lib.rs:3754"
