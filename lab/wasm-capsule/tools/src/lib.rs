@@ -40,3 +40,4 @@ pub use capsule_identity::lab_cid as bundle_identity;
 /// `capsule.wasm`. They are compiled in, so nothing reads the file by a path
 /// at run time. Only the Runtime's `CapsuleManifest` parses them.
 pub const CAPSULE_MANIFEST: &[u8] = include_bytes!("../../capsule/capsule.json");
+pub mod carrier_route;
