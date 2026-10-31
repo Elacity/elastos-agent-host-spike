@@ -35,6 +35,8 @@ reference model, not the Runtime; counts toward no M1 check; the Runtime half is
 
 `open_rate_window` rolls a window of 0 through the one end compare. The instant that stored the window is already at its end, so the next append or overwrite starts a new count, including when the effect is on a child journal. A set rate of 0 still stops the first effect. A window above 0 still rolls only at that same compare. This mirrors `is_due`. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
 
+`Verifier::create_child_journal` refuses a path equal to the issuing grant's own root. The one `resource_name` still allows an append or overwrite on that root. A path under the root still mints. A refused mint stores no grant, and the next ask is an issuing grant. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
 `Verifier::admit_ask` caps one agent's budget ask and stores the granted amount through the one `admit`. This is a lab stand-in for that admission. It is not the Runtime. It does not count toward A7 or M1-R.
 
 A forged identity, session, instance, usage, ceiling or set of rights changes

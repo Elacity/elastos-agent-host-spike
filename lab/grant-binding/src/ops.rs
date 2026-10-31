@@ -23,6 +23,7 @@ pub enum OperateRefuse {
     OverwriteNotGranted,
     AppendNotGranted,
     ChildJournalNotGranted,
+    JournalRoot,
 }
 
 impl std::fmt::Display for OperateRefuse {
@@ -37,6 +38,9 @@ impl std::fmt::Display for OperateRefuse {
             }
             OperateRefuse::ChildJournalNotGranted => {
                 formatter.write_str("child journal is its own right")
+            }
+            OperateRefuse::JournalRoot => {
+                formatter.write_str("child journal needs a path under the owned root")
             }
         }
     }
@@ -136,8 +140,9 @@ impl Verifier {
     }
 
     /// Creates a child journal and returns its own handle. The grant must
-    /// carry the child-journal right, and the path must be the owned root or
-    /// a child under it. The new handle keeps the parent's append and overwrite and does not keep child-journal.
+    /// carry the child-journal right. A path equal to the owned root is
+    /// refused. A path under that root still mints. The new handle keeps
+    /// the parent's append and overwrite and does not keep child-journal.
     #[rustfmt::skip]
     pub fn create_child_journal(
         &mut self,
@@ -165,6 +170,9 @@ impl Verifier {
         self.operate(call, request, Operation::ChildJournal, path)?;
         #[rustfmt::skip]
         let grant = self.resolve(*call, request.handle).map_err(OperateRefuse::Binding)?;
+        if path == grant.owned_root {
+            return Err(OperateRefuse::JournalRoot);
+        }
         super::resource_name(&grant.identity, path, Some(&grant.owned_root))
             .map_err(OperateRefuse::Binding)?;
         self.bind_grant(
@@ -593,11 +601,9 @@ fn model_child_journal_under_the_owned_root_is_allowed() {
         },
     );
     let call = verifier.open_call(instance);
-    for path in ["UsersAI/agent-1/journal", "UsersAI/agent-1/journal/page.md"] {
-        verifier
-            .create_child_journal(&call, &guest(handle), path)
-            .expect("child journal under the owned root");
-    }
+    verifier
+        .create_child_journal(&call, &guest(handle), "UsersAI/agent-1/journal/page.md")
+        .expect("child journal under the owned root");
 }
 
 #[test]
@@ -2240,4 +2246,65 @@ fn model_zero_rate_on_a_zero_window_still_stops() {
     verifier
         .use_grant(call, &guest(frames))
         .expect("a refused effect leaves the grant");
+}
+
+#[test]
+fn model_child_journal_on_the_owned_root_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    assert_eq!(parent, Handle(1));
+    let call = verifier.open_call(instance);
+    let refusal = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal")
+        .expect_err("the issuing root is not a child journal");
+    assert_eq!(refusal, OperateRefuse::JournalRoot);
+    assert_eq!(
+        refusal.to_string(),
+        "child journal needs a path under the owned root"
+    );
+    let leaked = verifier
+        .use_grant(call, &guest(Handle(2)))
+        .expect_err("a refused mint stores no grant");
+    assert_eq!(leaked, Refuse::UnknownHandle);
+    assert_eq!(leaked.to_string(), "unknown handle");
+    verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
+        .expect("an effect on the issuing root stays allowed");
+    let album = verifier
+        .bind_grant(
+            instance,
+            "UsersAI/agent-1/album",
+            Rights {
+                append: true,
+                overwrite: false,
+                child_journal: false,
+            },
+        )
+        .expect("the next ask is not a child");
+    verifier
+        .set_rate(album, 1, 10)
+        .expect("the next ask is an issuing grant");
+    let page = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/page.md")
+        .expect("a path under the root still mints");
+    let decision = verifier
+        .use_grant(call, &guest(page))
+        .expect("the child journal stays");
+    assert_eq!(decision.owned_root, "UsersAI/agent-1/journal/page.md");
+    let parent_kept = verifier
+        .use_grant(call, &guest(parent))
+        .expect("the issuing grant stays");
+    assert_eq!(parent_kept.owned_root, "UsersAI/agent-1/journal");
 }

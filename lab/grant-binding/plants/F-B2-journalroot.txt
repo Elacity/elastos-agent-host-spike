@@ -1,0 +1,10 @@
+id: F-B2-journalroot
+file: src/ops.rs
+test: ops::model_child_journal_on_the_owned_root_is_refused
+--- old
+        if path == grant.owned_root {
+            return Err(OperateRefuse::JournalRoot);
+        }
+--- new
+        let _ = path == grant.owned_root;
+--- end
