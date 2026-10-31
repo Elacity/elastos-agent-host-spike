@@ -1,0 +1,12 @@
+id: F-A5-sesssame
+file: src/lib.rs
+test: model_same_session_keeps_the_session_grant
+--- old
+        if same {
+            return Ok(());
+        }
+--- new
+        if same {
+            let _ = same;
+        }
+--- end
