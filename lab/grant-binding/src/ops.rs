@@ -111,17 +111,21 @@ impl Verifier {
                 if operation != Operation::ChildJournal {
                     self.open_rate_window(counted)
                         .map_err(OperateRefuse::Binding)?;
+                    let due = self.window_due;
                     let rate_handle = counted;
                     if let Some(rate) = self
                         .grants
                         .get(&rate_handle)
                         .and_then(|stored| stored.record.rate)
                     {
-                        let used = self
-                            .grants
-                            .get(&rate_handle)
-                            .map(|stored| stored.record.window_effects)
-                            .unwrap_or(0);
+                        let used = if due {
+                            0
+                        } else {
+                            self.grants
+                                .get(&rate_handle)
+                                .map(|stored| stored.record.window_effects)
+                                .unwrap_or(0)
+                        };
                         if used >= rate {
                             return Err(OperateRefuse::Binding(Refuse::Rate));
                         }
@@ -130,6 +134,16 @@ impl Verifier {
                         if grant.effects >= limit {
                             return Err(OperateRefuse::Binding(Refuse::EffectLimit));
                         }
+                    }
+                    if due {
+                        let now = self.verifier_now;
+                        let rolling = self
+                            .grants
+                            .get_mut(&counted)
+                            .ok_or(Refuse::UnknownHandle)
+                            .map_err(OperateRefuse::Binding)?;
+                        rolling.record.window_start = now;
+                        rolling.record.window_effects = 0;
                     }
                     let counting = grant.effect_limit.is_some()
                         || self
@@ -2947,6 +2961,85 @@ fn model_rate_does_not_spend_the_effect_count() {
         .expect_err("the effect count is reached");
     assert_eq!(limited, OperateRefuse::Binding(Refuse::EffectLimit));
     assert_eq!(limited.to_string(), "effect limit is reached");
+    verifier
+        .use_grant(call, &guest(parent))
+        .expect("the issuing grant stays");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("the journal stays");
+}
+
+#[test]
+fn model_refused_effect_limit_does_not_roll_the_rate_window() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    assert_eq!(parent, Handle(1));
+    verifier.set_rate(parent, 1, 10).expect("rate");
+    verifier.set_effect_limit(parent, 1).expect("limit");
+    let call = verifier.open_call(instance);
+    let roll = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/roll")
+        .expect("the journal mints");
+    assert_eq!(roll, Handle(2));
+    verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
+        .expect("the one counted effect");
+    let inside = verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
+        .expect_err("inside the window the rate refuses");
+    assert_eq!(inside, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(inside.to_string(), "rate limit is reached");
+    verifier.set_verifier_now(10);
+    let limited = verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/agent-1/journal/roll/line",
+        )
+        .expect_err("the effect count refuses and does not start the window");
+    assert_eq!(limited, OperateRefuse::Binding(Refuse::EffectLimit));
+    assert_eq!(limited.to_string(), "effect limit is reached");
+    verifier
+        .set_effect_limit(parent, 4)
+        .expect("a higher limit does not start the rate window");
+    verifier.set_verifier_now(15);
+    verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/agent-1/journal/roll/line",
+        )
+        .expect("the allowed effect starts the window");
+    verifier.set_verifier_now(20);
+    let rated = verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
+        .expect_err("the refused effect did not start the window");
+    assert_eq!(rated, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(rated.to_string(), "rate limit is reached");
     verifier
         .use_grant(call, &guest(parent))
         .expect("the issuing grant stays");

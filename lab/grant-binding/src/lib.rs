@@ -175,6 +175,7 @@ pub struct Verifier {
     pending_session: bool,
     pending_expiry: Option<u64>,
     verifier_now: u64,
+    window_due: bool,
 }
 
 impl Verifier {
@@ -191,6 +192,7 @@ impl Verifier {
             pending_session: false,
             pending_expiry: None,
             verifier_now: 0,
+            window_due: false,
         }
     }
 
@@ -406,17 +408,15 @@ impl Verifier {
 
     #[rustfmt::skip]
     fn open_rate_window(&mut self, handle: Handle) -> Result<(), Refuse> {
+        self.window_due = false;
         let now = self.verifier_now;
-        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+        let grant = self.grants.get(&handle).ok_or(Refuse::UnknownHandle)?;
         let Some(rate) = grant.record.rate else {
             return Ok(());
         };
         let _ = rate;
         let end = grant.record.window_start.saturating_add(grant.record.window);
-        if now >= end {
-            grant.record.window_start = now;
-            grant.record.window_effects = 0;
-        }
+        self.window_due = now >= end;
         Ok(())
     }
 

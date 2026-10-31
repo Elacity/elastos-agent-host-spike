@@ -1,14 +1,21 @@
 id: F-A5-ratewin
-file: src/lib.rs
+file: src/ops.rs
 test: ops::model_new_window_allows_one_effect
+test: ops::model_refused_effect_limit_does_not_roll_the_rate_window
 --- old
-        if now >= end {
-            grant.record.window_start = now;
-            grant.record.window_effects = 0;
-        }
+                    if due {
+                        let now = self.verifier_now;
+                        let rolling = self
+                            .grants
+                            .get_mut(&counted)
+                            .ok_or(Refuse::UnknownHandle)
+                            .map_err(OperateRefuse::Binding)?;
+                        rolling.record.window_start = now;
+                        rolling.record.window_effects = 0;
+                    }
 --- new
-        if now >= end {
-            let _ = now;
-            let _ = grant.record.window_effects;
-        }
+                    if due {
+                        let _ = self.verifier_now;
+                        let _ = counted;
+                    }
 --- end
