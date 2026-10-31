@@ -46,7 +46,7 @@ PY
 	export ELASTOS_RELEASE_HEAD ELASTOS_RELEASE_PUBLISHER ELASTOS_RELEASE_RUNTIME \
 		ELASTOS_RELEASE_RUNTIME_SHA256 ELASTOS_RELEASE_SOURCES_SHA256
 fi
-cargo build --release --locked
+cargo build --release --locked --features lab-diag
 
 app="dist/ElastOS Lab.app"
 rm -rf "$app"
@@ -72,6 +72,8 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 	<string>0.1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>ElastOS uses your local network to find your other ElastOS devices.</string>
 </dict>
 </plist>
 PLIST

@@ -329,6 +329,7 @@ fn show_home(
 
 /// Lab builds only: page errors and a summary of what Home shows go to
 /// `window-diag.log` in the lab home. Paths only; queries can carry launch tokens.
+#[cfg(feature = "lab-diag")]
 const DIAG_SCRIPT: &str = r#"(() => {
   if (window.location.host !== "localhost:8090") return;
   const channel = window.ipc || (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ipc);
@@ -377,10 +378,15 @@ fn new_home_window(
         .with_inner_size(LogicalSize::new(1280.0, 820.0))
         .with_min_inner_size(LogicalSize::new(720.0, 480.0))
         .build(target)?;
+    #[cfg(feature = "lab-diag")]
     let diag = runtime::lab_home().map(|home| home.join("window-diag.log"));
+    #[cfg(not(feature = "lab-diag"))]
+    let diag: Option<std::path::PathBuf> = None;
+    #[allow(unused_mut)]
     let mut builder = WebViewBuilder::new()
         .with_initialization_script_for_main_only(passkey::WINDOW_SCRIPT, true)
         .with_devtools(diag.is_some());
+    #[cfg(feature = "lab-diag")]
     if diag.is_some() {
         builder = builder.with_initialization_script_for_main_only(DIAG_SCRIPT, false);
     }
@@ -414,6 +420,9 @@ fn new_home_window(
         .with_ipc_handler(move |message| {
             if let (Some(text), Some(path)) = (message.body().strip_prefix("diag:"), &diag) {
                 use std::io::Write;
+                if text.len() > 2048 {
+                    return;
+                }
                 if let Ok(mut log) = std::fs::File::options()
                     .create(true)
                     .append(true)

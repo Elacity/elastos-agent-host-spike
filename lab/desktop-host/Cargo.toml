@@ -17,4 +17,8 @@ serde_json = "1"
 sha2 = "0.10"
 tao = "0.37.2"
 tray-icon = "0.26.1"
-wry = { version = "0.57.1", features = ["devtools"] }
+wry = "0.57.1"
+
+[features]
+# Lab builds only: Web Inspector and window-diag.log for the Home window.
+lab-diag = ["wry/devtools"]
