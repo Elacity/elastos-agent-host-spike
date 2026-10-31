@@ -69,6 +69,8 @@ const RESIDENT_WORLD: &str = "resident-capsule";
 const FAILED_KEEP_SECS: u64 = 60;
 const REQUEST_TIMEOUT_SECS: u64 = 300;
 const GRANT_LIFETIME_SECS: u64 = 3_600;
+const AUDIT_DEFAULT_LIMIT: usize = 100;
+const AUDIT_MAX_EVENTS: usize = 1000;
 /// The one cause `worker_exited` stores, and the one reason it settles with.
 const WORKER_EXITED: &str = "worker exited";
 
@@ -231,6 +233,17 @@ struct Request {
     plan: Option<String>,
 }
 
+/// One shell decision on the one audit list.
+struct AuditEvent {
+    event_type: String,
+    at: u64,
+    request_id: String,
+    session_id: String,
+    resource: String,
+    action: String,
+    success: bool,
+}
+
 pub struct StandIn {
     /// The Home root this stand-in runs under. Storage routes take the Home
     /// from this field, never from a caller string or a request body, so one
@@ -244,6 +257,8 @@ pub struct StandIn {
     home_fd: Option<Result<OwnedFd, (u16, String)>>,
     grants: Vec<Grant>,
     requests: Vec<Request>,
+    /// The one audit list. Index 0 is the oldest event.
+    audit: Vec<AuditEvent>,
     admitted: Vec<Admitted>,
     instances: Vec<Instance>,
     storage: Vec<Record>,
@@ -263,6 +278,7 @@ impl StandIn {
             home_fd: None,
             grants: Vec::new(),
             requests: Vec::new(),
+            audit: Vec::new(),
             admitted: Vec::new(),
             instances: Vec::new(),
             storage: Vec::new(),
@@ -924,7 +940,17 @@ impl StandIn {
             return Err((400, format!("request is not pending: {request_id}")));
         }
         let session_id = request.session_id.clone();
+        let resource = request.resource.clone();
+        let action = request.action.clone();
         self.settle_record(request_id, RequestStatus::Denied, reason, "shell");
+        self.record_use(
+            "capability_denied",
+            request_id,
+            &session_id,
+            &resource,
+            &action,
+            false,
+        );
         let instant = self.instant;
         let mut failed = false;
         if let Some(instance) = self
@@ -1020,7 +1046,73 @@ impl StandIn {
                 .expect("the grant route just stored this request's grant");
             stored.plan = Some(minted);
         }
+        self.record_use(
+            "capability_grant",
+            &request_id,
+            &session_id,
+            &resource,
+            &action,
+            true,
+        );
         Ok(json!({ "success": true }))
+    }
+
+    /// `GET /api/audit`.
+    ///
+    /// The shell receives the one audit list. The shell check runs before the
+    /// store is read. `limit: None` keeps at most 100 events. A limit above
+    /// 1000 keeps at most 1000. A limit of 0 keeps none. `event_type: None`
+    /// keeps every type. A present type keeps events whose `type` equals it.
+    /// Events are newest first. `total_in_memory` is the number of stored
+    /// events before the type filter and before the limit. Each event's keys
+    /// are `type`, `at`, `request_id`, `session_id`, `resource`, `action` and
+    /// `success`. The body has no token and no epoch.
+    pub fn get_audit(
+        &self,
+        caller: Caller<'_>,
+        limit: Option<usize>,
+        event_type: Option<&str>,
+    ) -> Result<Value, (u16, String)> {
+        require_shell(caller)?;
+        let total_in_memory = self.audit.len();
+        let limit = match limit {
+            None => AUDIT_DEFAULT_LIMIT,
+            Some(limit) => limit.min(AUDIT_MAX_EVENTS),
+        };
+        let events = self
+            .audit
+            .iter()
+            .rev()
+            .filter(|event| event_type.is_none_or(|kind| event.event_type == kind))
+            .take(limit)
+            .map(|event| {
+                json!({
+                    "type": event.event_type,
+                    "at": event.at,
+                    "request_id": event.request_id,
+                    "session_id": event.session_id,
+                    "resource": event.resource,
+                    "action": event.action,
+                    "success": event.success,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "events": events,
+            "total_in_memory": total_in_memory,
+        }))
+    }
+
+    /// `GET /api/audit/types`.
+    ///
+    /// The shell check runs before any other work. This call does not read
+    /// the store and does not append. The type list is `capability_denied`
+    /// then `capability_grant`, including when the store is empty.
+    pub fn get_audit_types(&self, caller: Caller<'_>) -> Result<Value, (u16, String)> {
+        require_shell(caller)?;
+        Ok(json!({
+            "event_types": ["capability_denied", "capability_grant"],
+        }))
     }
 
     /// `GET /api/capability/request/:id`.
@@ -1504,6 +1596,33 @@ impl StandIn {
                 "runtime",
             );
         }
+    }
+
+    /// The one append. A shell grant and a shell deny call it after that
+    /// decision is stored. When the list holds 1000 events, the oldest is
+    /// dropped before the next append. `at` is the test instant. This method
+    /// writes no file and stores no token, reason or epoch.
+    fn record_use(
+        &mut self,
+        event_type: &str,
+        request_id: &str,
+        session_id: &str,
+        resource: &str,
+        action: &str,
+        success: bool,
+    ) {
+        if self.audit.len() >= AUDIT_MAX_EVENTS {
+            self.audit.remove(0);
+        }
+        self.audit.push(AuditEvent {
+            event_type: event_type.to_owned(),
+            at: self.instant,
+            request_id: request_id.to_owned(),
+            session_id: session_id.to_owned(),
+            resource: resource.to_owned(),
+            action: action.to_owned(),
+            success,
+        });
     }
 
     fn mint_id(&mut self) -> String {
@@ -10183,6 +10302,727 @@ mod tests {
             "running",
             "",
             "the stand-in did the work: component-2 stays running",
+        );
+    }
+
+    fn shell_audit(standin: &StandIn, limit: Option<usize>, event_type: Option<&str>) -> Value {
+        standin
+            .get_audit(Caller::Shell, limit, event_type)
+            .expect("the stand-in shell audit")
+    }
+
+    fn audit_events(audit: &Value) -> &[Value] {
+        audit["events"]
+            .as_array()
+            .expect("the stand-in returns audit events")
+    }
+
+    fn assert_audit_object(audit: &Value, message: &str) {
+        let keys = audit
+            .as_object()
+            .expect(message)
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            BTreeSet::from(["events", "total_in_memory"]),
+            "{message}"
+        );
+    }
+
+    fn assert_event_keys(event: &Value, message: &str) {
+        let keys = event
+            .as_object()
+            .expect(message)
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            BTreeSet::from([
+                "action",
+                "at",
+                "request_id",
+                "resource",
+                "session_id",
+                "success",
+                "type",
+            ]),
+            "{message}"
+        );
+    }
+
+    fn assert_shell_refused(result: &Result<Value, (u16, String)>, message: &str) {
+        assert!(
+            matches!(
+                result,
+                Err((403, reason)) if reason == "This endpoint requires shell privileges"
+            ),
+            "{message}: {result:?}"
+        );
+    }
+
+    fn assert_reason_starts(result: &Result<Value, (u16, String)>, prefix: &str, message: &str) {
+        assert!(
+            matches!(result, Err((_, reason)) if reason.starts_with(prefix)),
+            "{message}: {result:?}"
+        );
+    }
+
+    #[test]
+    fn standin_shell_grant_and_deny_share_one_audit_list() {
+        const PLAN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut standin = StandIn::new();
+        let (component_1, component_2) = launch_two_running_ids(&mut standin);
+        assert_eq!(
+            component_1, "component-1",
+            "the stand-in did the work: the first id is component-1"
+        );
+        assert_eq!(
+            component_2, "component-2",
+            "the stand-in did the work: the second id is component-2"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 is running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 is running",
+        );
+
+        let empty_audit = shell_audit(&standin, None, None);
+        assert_eq!(
+            empty_audit,
+            json!({ "events": [], "total_in_memory": 0 }),
+            "the stand-in did the work: the shell audit starts empty"
+        );
+        assert_audit_object(
+            &empty_audit,
+            "the stand-in did the work: the shell audit has events and total_in_memory",
+        );
+        let shell_types = standin
+            .get_audit_types(Caller::Shell)
+            .expect("the stand-in shell audit types");
+        assert_eq!(
+            shell_types,
+            json!({ "event_types": ["capability_denied", "capability_grant"] }),
+            "the stand-in did the work: the shell type list is capability_denied then capability_grant"
+        );
+
+        let client = Caller::Client {
+            session_id: &component_1,
+        };
+        let client_audit = standin.get_audit(client, None, None);
+        assert_shell_refused(
+            &client_audit,
+            "the stand-in did the work: a client audit read is refused",
+        );
+        let client_types = standin.get_audit_types(client);
+        assert_shell_refused(
+            &client_types,
+            "the stand-in did the work: a client type list is refused",
+        );
+        assert_eq!(
+            shell_audit(&standin, None, None),
+            empty_audit,
+            "the stand-in did the work: the shell audit stays empty"
+        );
+        assert_eq!(
+            standin
+                .get_audit_types(Caller::Shell)
+                .expect("the stand-in shell audit types stay"),
+            shell_types,
+            "the stand-in did the work: the shell type list stays"
+        );
+
+        let client_grant = standin.post_capability_grant(
+            client,
+            &json!({ "request_id": "req-a", "duration": "session" }),
+        );
+        assert_shell_refused(
+            &client_grant,
+            "the stand-in did the work: a client grant appends nothing",
+        );
+        let bad_grant = standin.post_capability_grant(Caller::Shell, &Value::Null);
+        assert!(
+            matches!(bad_grant, Err((400, ref reason)) if reason == "grant body needs request_id"),
+            "the stand-in did the work: a bad grant body appends nothing: {bad_grant:?}"
+        );
+        let client_deny =
+            standin.post_capability_deny(client, &json!({ "request_id": "req-a", "reason": "no" }));
+        assert_shell_refused(
+            &client_deny,
+            "the stand-in did the work: a client deny appends nothing",
+        );
+        let bad_deny = standin.post_capability_deny(Caller::Shell, &Value::Null);
+        assert!(
+            matches!(bad_deny, Err((400, ref reason)) if reason == "deny body needs request_id"),
+            "the stand-in did the work: a bad deny body appends nothing: {bad_deny:?}"
+        );
+        assert_eq!(
+            shell_audit(&standin, None, None)["total_in_memory"],
+            json!(0),
+            "the stand-in did the work: a client and a bad body append nothing"
+        );
+
+        standin
+            .seed_request(
+                "req-a",
+                "component-1",
+                "localhost://Public/resident-instances/a.txt",
+                "read",
+                "reason-a",
+            )
+            .expect("the stand-in seeds req-a");
+        standin
+            .seed_request(
+                "req-b",
+                "component-2",
+                "localhost://Public/resident-instances/b.txt",
+                "write",
+                "reason-b",
+            )
+            .expect("the stand-in seeds req-b");
+        standin
+            .seed_request(
+                "req-x",
+                "component-2",
+                "localhost://Public/resident-instances/x.txt",
+                "read",
+                "reason-x",
+            )
+            .expect("the stand-in seeds req-x");
+
+        let missing = standin.post_capability_grant(
+            Caller::Shell,
+            &json!({ "request_id": "missing", "duration": "session" }),
+        );
+        assert_reason_starts(
+            &missing,
+            "unknown request:",
+            "the stand-in did the work: an unknown request is refused",
+        );
+        assert_eq!(
+            shell_audit(&standin, None, None)["total_in_memory"],
+            json!(0),
+            "the stand-in did the work: an unknown request stays off the audit list"
+        );
+
+        standin.set_instant(4);
+        let granted_a = standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({
+                    "request_id": "req-a",
+                    "duration": "session",
+                    "rationale": "grant a",
+                }),
+            )
+            .expect("the stand-in grants req-a");
+        assert_eq!(
+            granted_a,
+            json!({ "success": true }),
+            "the stand-in did the work: the shell grant of req-a succeeds"
+        );
+        let granted_b = standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({
+                    "request_id": "req-b",
+                    "duration": "once",
+                    "rationale": "grant b",
+                }),
+            )
+            .expect("the stand-in grants req-b");
+        assert_eq!(
+            granted_b,
+            json!({ "success": true }),
+            "the stand-in did the work: the shell grant of req-b succeeds"
+        );
+
+        let audit = shell_audit(&standin, None, None);
+        assert_audit_object(
+            &audit,
+            "the stand-in did the work: the granted audit has events and total_in_memory",
+        );
+        assert_eq!(
+            audit["total_in_memory"],
+            json!(2),
+            "the stand-in did the work: two shell grants are two events"
+        );
+        let events = audit_events(&audit);
+        assert_eq!(
+            events[0]["request_id"], "req-b",
+            "the stand-in did the work: the newest grant is req-b"
+        );
+        assert_eq!(
+            events[0]["type"], "capability_grant",
+            "the stand-in did the work: a shell grant is capability_grant"
+        );
+        assert_eq!(
+            events[0]["at"],
+            json!(4),
+            "the stand-in did the work: the grant event uses the test instant"
+        );
+        assert_eq!(
+            events[0]["session_id"], "component-2",
+            "the stand-in did the work: req-b stays on component-2"
+        );
+        assert_eq!(
+            events[0]["resource"], "localhost://Public/resident-instances/b.txt",
+            "the stand-in did the work: the grant event keeps the request resource"
+        );
+        assert_eq!(
+            events[0]["action"], "write",
+            "the stand-in did the work: the grant event keeps the request action"
+        );
+        assert_eq!(
+            events[0]["success"],
+            json!(true),
+            "the stand-in did the work: a shell grant records success"
+        );
+        assert_event_keys(
+            &events[0],
+            "the stand-in did the work: a grant event has the seven audit keys",
+        );
+        assert_eq!(
+            events[1]["request_id"], "req-a",
+            "the stand-in did the work: the older grant is req-a"
+        );
+        assert_eq!(
+            events[1]["session_id"], "component-1",
+            "the stand-in did the work: req-a stays on component-1"
+        );
+        let text = audit.to_string();
+        assert!(
+            !text.contains("token"),
+            "the stand-in did the work: the audit text has no token"
+        );
+
+        let denied = standin
+            .post_capability_deny(
+                Caller::Shell,
+                &json!({ "request_id": "req-x", "reason": "keep this deny" }),
+            )
+            .expect("the stand-in denies req-x");
+        assert_eq!(
+            denied,
+            json!({ "success": true }),
+            "the stand-in did the work: the shell deny of req-x succeeds"
+        );
+        let audit = shell_audit(&standin, None, None);
+        let events = audit_events(&audit);
+        assert_eq!(
+            events[0]["type"], "capability_denied",
+            "the stand-in did the work: a shell deny is capability_denied"
+        );
+        assert_eq!(
+            events[0]["request_id"], "req-x",
+            "the stand-in did the work: the newest event is req-x"
+        );
+        assert_eq!(
+            events[0]["success"],
+            json!(false),
+            "the stand-in did the work: a shell deny records success false"
+        );
+        assert_eq!(
+            events[0]["at"],
+            json!(4),
+            "the stand-in did the work: the deny event uses the test instant"
+        );
+        assert!(
+            events[0].get("reason").is_none(),
+            "the stand-in did the work: the deny event has no reason key"
+        );
+        assert_event_keys(
+            &events[0],
+            "the stand-in did the work: a deny event has the seven audit keys",
+        );
+        assert_eq!(
+            audit["total_in_memory"],
+            json!(3),
+            "the stand-in did the work: the shell deny is the third event"
+        );
+
+        let entries = request_entries(&standin, "component-2");
+        let req_x = entries
+            .iter()
+            .find(|entry| entry["request_id"] == "req-x")
+            .expect("the stand-in did the work: req-x stays in the request record");
+        assert_eq!(
+            req_x["status"], "denied",
+            "the stand-in did the work: req-x is denied"
+        );
+        assert_eq!(
+            req_x["decision_reason"], "keep this deny",
+            "the stand-in did the work: req-x keeps the deny reason on the request"
+        );
+        assert_eq!(
+            req_x["settled_by"], "shell",
+            "the stand-in did the work: the shell settled req-x"
+        );
+
+        let grants = shell_audit(&standin, None, Some("capability_grant"));
+        let grant_events = audit_events(&grants);
+        assert_eq!(
+            grant_events.len(),
+            2,
+            "the stand-in did the work: the grant filter keeps two events"
+        );
+        assert!(
+            grant_events
+                .iter()
+                .all(|event| event["type"] == "capability_grant"),
+            "the stand-in did the work: the grant filter keeps capability_grant"
+        );
+        assert_eq!(
+            grants["total_in_memory"],
+            json!(3),
+            "the stand-in did the work: the grant filter leaves the stored count"
+        );
+        let unused = shell_audit(&standin, None, Some("capability_use"));
+        assert_eq!(
+            unused["events"],
+            json!([]),
+            "the stand-in did the work: a capability_use filter is empty"
+        );
+        assert_eq!(
+            unused["total_in_memory"],
+            json!(3),
+            "the stand-in did the work: an unknown type leaves the stored count"
+        );
+
+        let again = standin.post_capability_grant(
+            Caller::Shell,
+            &json!({
+                "request_id": "req-a",
+                "duration": "session",
+                "rationale": "grant a",
+            }),
+        );
+        assert_reason_starts(
+            &again,
+            "request is not pending:",
+            "the stand-in did the work: a settled request is not granted again",
+        );
+        assert_eq!(
+            shell_audit(&standin, None, None)["total_in_memory"],
+            json!(3),
+            "the stand-in did the work: a request that is not pending appends nothing"
+        );
+
+        let requested = standin
+            .post_capability_request(
+                Caller::Client {
+                    session_id: &component_1,
+                },
+                &json!({
+                    "resource": "localhost://Public/resident-instances/shared.txt",
+                    "action": "read",
+                    "reason": "read shared",
+                    "plan": PLAN,
+                }),
+            )
+            .expect("the stand-in stores request-1");
+        assert_eq!(
+            requested,
+            json!({ "status": "pending", "request_id": "request-1" }),
+            "the stand-in did the work: the plan request is pending"
+        );
+        let mismatched = standin.post_capability_grant(
+            Caller::Shell,
+            &json!({
+                "request_id": "request-1",
+                "plan_sha256": "b".repeat(64),
+            }),
+        );
+        assert!(
+            matches!(
+                mismatched,
+                Err((403, ref reason))
+                    if reason == "approved plan does not match the requested plan"
+            ),
+            "the stand-in did the work: a plan mismatch is refused: {mismatched:?}"
+        );
+        assert_eq!(
+            shell_audit(&standin, None, None)["total_in_memory"],
+            json!(3),
+            "the stand-in did the work: a plan mismatch appends nothing"
+        );
+        let pending = request_entries(&standin, "component-1");
+        let request_1 = pending
+            .iter()
+            .find(|entry| entry["request_id"] == "request-1")
+            .expect("the stand-in did the work: request-1 stays stored");
+        assert_eq!(
+            request_1["status"], "pending",
+            "the stand-in did the work: request-1 stays pending"
+        );
+
+        let approved = standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({
+                    "request_id": "request-1",
+                    "plan_sha256": PLAN,
+                }),
+            )
+            .expect("the stand-in grants request-1");
+        assert_eq!(
+            approved,
+            json!({ "success": true }),
+            "the stand-in did the work: the approved plan grant succeeds"
+        );
+        let audit = shell_audit(&standin, None, None);
+        assert_eq!(
+            audit["total_in_memory"],
+            json!(4),
+            "the stand-in did the work: the approved plan is the fourth event"
+        );
+        let events = audit_events(&audit);
+        assert_eq!(
+            events[0]["request_id"], "request-1",
+            "the stand-in did the work: the newest event is request-1"
+        );
+        assert_eq!(
+            events[0]["type"], "capability_grant",
+            "the stand-in did the work: the approved plan is a capability_grant"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 stays running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running",
+        );
+
+        let mut standin = StandIn::new();
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let id = launch_starting(&shared, &mut standin);
+        assert_eq!(
+            id, "component-1",
+            "the stand-in did the work: the starting id is component-1"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "starting",
+            "",
+            "the stand-in did the work: component-1 is starting",
+        );
+        standin
+            .seed_request(
+                "req-s1",
+                "component-1",
+                "localhost://Public/resident-instances/s.txt",
+                "read",
+                "reason-s1",
+            )
+            .expect("the stand-in seeds req-s1");
+        standin
+            .seed_request(
+                "req-s2",
+                "component-1",
+                "localhost://Public/resident-instances/s.txt",
+                "read",
+                "reason-s2",
+            )
+            .expect("the stand-in seeds req-s2");
+        let stopped = standin
+            .post_capability_deny(
+                Caller::Shell,
+                &json!({ "request_id": "req-s1", "reason": "stop the start" }),
+            )
+            .expect("the stand-in denies req-s1");
+        assert_eq!(
+            stopped,
+            json!({ "success": true }),
+            "the stand-in did the work: the shell deny of req-s1 succeeds"
+        );
+        let audit = shell_audit(&standin, None, None);
+        let events = audit_events(&audit);
+        assert!(
+            events.iter().all(|event| event["request_id"] != "req-s2"),
+            "the stand-in did the work: req-s2 stays off the audit list"
+        );
+        assert_eq!(
+            audit["total_in_memory"],
+            json!(1),
+            "the stand-in did the work: the starting deny is one event"
+        );
+        assert_eq!(
+            events.len(),
+            1,
+            "the stand-in did the work: the starting deny returns one event"
+        );
+        assert_eq!(
+            events[0]["request_id"], "req-s1",
+            "the stand-in did the work: the one event is req-s1"
+        );
+        assert_eq!(
+            events[0]["type"], "capability_denied",
+            "the stand-in did the work: the starting deny is capability_denied"
+        );
+        let entries = request_entries(&standin, "component-1");
+        let req_s2 = entries
+            .iter()
+            .find(|entry| entry["request_id"] == "req-s2")
+            .expect("the stand-in did the work: req-s2 stays in the request record");
+        assert_eq!(
+            req_s2["status"], "denied",
+            "the stand-in did the work: req-s2 is denied"
+        );
+        assert_eq!(
+            req_s2["settled_by"], "runtime",
+            "the stand-in did the work: req-s2 is settled by the runtime"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "failed",
+            "stop the start",
+            "the stand-in did the work: component-1 failed with the deny cause",
+        );
+    }
+
+    #[test]
+    fn standin_audit_list_keeps_one_thousand() {
+        let mut standin = StandIn::new();
+        for n in 0..=1000 {
+            let id = format!("r{n:04}");
+            let session = if n >= 992 {
+                "s31".to_owned()
+            } else {
+                format!("s{}", n / 32)
+            };
+            standin
+                .seed_request(
+                    &id,
+                    &session,
+                    &format!("localhost://Public/resident-instances/{n}.txt"),
+                    "read",
+                    &format!("reason-{n}"),
+                )
+                .expect("the stand-in seeds one pending request");
+            standin
+                .post_capability_grant(
+                    Caller::Shell,
+                    &json!({
+                        "request_id": id,
+                        "duration": "session",
+                        "rationale": format!("grant {n}"),
+                    }),
+                )
+                .expect("the stand-in grants one pending request");
+            if n == 999 {
+                let audit = shell_audit(&standin, Some(1000), None);
+                assert_eq!(
+                    audit["total_in_memory"],
+                    json!(1000),
+                    "the stand-in did the work: one thousand grants fill the list"
+                );
+                let events = audit_events(&audit);
+                assert_eq!(
+                    events.len(),
+                    1000,
+                    "the stand-in did the work: the full window is one thousand events"
+                );
+                assert_eq!(
+                    events[999]["request_id"], "r0000",
+                    "the stand-in did the work: the oldest kept event is r0000"
+                );
+            }
+        }
+        let audit = shell_audit(&standin, Some(1000), None);
+        assert_eq!(
+            audit["total_in_memory"],
+            json!(1000),
+            "the stand-in did the work: the list stays at 1000 after r1000"
+        );
+        let events = audit_events(&audit);
+        assert_eq!(
+            events.len(),
+            1000,
+            "the stand-in did the work: the capped window is one thousand events"
+        );
+        assert_eq!(
+            events[0]["request_id"], "r1000",
+            "the stand-in did the work: the newest event is r1000"
+        );
+        assert_eq!(
+            events[999]["request_id"], "r0001",
+            "the stand-in did the work: the oldest kept event is r0001"
+        );
+        assert!(
+            events.iter().all(|event| event["request_id"] != "r0000"),
+            "the stand-in did the work: r0000 has left the list"
+        );
+        let window = shell_audit(&standin, None, None);
+        let window_events = audit_events(&window);
+        assert_eq!(
+            window_events.len(),
+            100,
+            "the stand-in did the work: an absent limit keeps one hundred events"
+        );
+        assert_eq!(
+            window_events[0]["request_id"], "r1000",
+            "the stand-in did the work: the default window starts at r1000"
+        );
+        assert_eq!(
+            window["total_in_memory"],
+            json!(1000),
+            "the stand-in did the work: the default window leaves the stored count"
+        );
+        let none = shell_audit(&standin, Some(0), None);
+        assert_eq!(
+            none["events"],
+            json!([]),
+            "the stand-in did the work: a zero limit keeps no events"
+        );
+        assert_eq!(
+            none["total_in_memory"],
+            json!(1000),
+            "the stand-in did the work: a zero limit leaves the stored count"
+        );
+        let capped = shell_audit(&standin, Some(1001), None);
+        assert_eq!(
+            audit_events(&capped).len(),
+            1000,
+            "the stand-in did the work: a limit above 1000 keeps one thousand events"
+        );
+        assert_eq!(
+            capped["total_in_memory"],
+            json!(1000),
+            "the stand-in did the work: a limit above 1000 leaves the stored count"
+        );
+        let types = standin
+            .get_audit_types(Caller::Shell)
+            .expect("the stand-in shell audit types");
+        assert_eq!(
+            types,
+            json!({ "event_types": ["capability_denied", "capability_grant"] }),
+            "the stand-in did the work: the type list stays capability_denied then capability_grant"
+        );
+        assert_eq!(
+            shell_audit(&standin, Some(0), None)["total_in_memory"],
+            json!(1000),
+            "the stand-in did the work: the type list appends nothing"
         );
     }
 }

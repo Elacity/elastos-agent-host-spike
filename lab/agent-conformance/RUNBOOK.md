@@ -742,6 +742,8 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 
 `standin_bridge_envelope_records_the_capsule_request` is this stand-in, two-capsule-run owns the real-bytes run, and a PASS here gives the Runtime no A3 credit.
 
+`standin_shell_grant_and_deny_share_one_audit_list` is this stand-in, and a PASS there gives the Runtime no A15 credit for this list.
+
 ## Content capsule named by its CID (M2 exit (e), PH6)
 
 - `requires_cid_is_refused_today` stages the viewer probe through the staging route and records the refusal the manifest reader gives now (`unknown field cid`). It goes red when the Runtime reads `requires[].cid`.
