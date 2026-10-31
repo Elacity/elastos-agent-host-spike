@@ -190,11 +190,14 @@ pub(super) fn create_wallet_dir_durable(wallet_dir: &Path) -> Result<(), String>
     }
     ensure_directory(wallet_dir, "wallet storage directory")?;
     sync_directory(wallet_dir, "wallet storage directory")?;
+    // The loop above publishes the parent entry of every directory the
+    // `missing` walk observed absent and `create_dir_all` then created. An
+    // existing wallet directory was created by another actor, so that actor
+    // publishes its entry and this provider only inspects the parent.
     let parent = wallet_dir
         .parent()
-        .ok_or_else(|| "wallet storage directory has no parent to synchronize".to_string())?;
-    ensure_directory(parent, "wallet storage parent directory")?;
-    sync_directory(parent, "wallet storage parent directory")
+        .ok_or_else(|| "wallet storage directory has no parent to inspect".to_string())?;
+    ensure_directory(parent, "wallet storage parent directory")
 }
 
 pub(super) fn prune_store(mut store: WalletStore, now: u64) -> WalletStore {
