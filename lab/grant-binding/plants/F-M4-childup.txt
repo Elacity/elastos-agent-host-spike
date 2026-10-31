@@ -1,0 +1,19 @@
+id: F-M4-childup
+file: src/lib.rs
+test: model_revoke_child_journal_leaves_its_parent
+--- old
+        for child in children {
+            self.end_grant(child);
+        }
+--- new
+        for child in children {
+            self.end_grant(child);
+        }
+        if let Some(parent) = self
+            .grants
+            .get(&handle)
+            .and_then(|grant| grant.record.parent)
+        {
+            self.end_grant(parent);
+        }
+--- end

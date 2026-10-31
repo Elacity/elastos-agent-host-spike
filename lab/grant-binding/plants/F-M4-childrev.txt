@@ -1,0 +1,8 @@
+id: F-M4-childrev
+file: src/lib.rs
+test: model_revoke_stops_derived_child_journals
+--- old
+        #[rustfmt::skip]
+        self.end_derived_grants(handle);
+--- new
+--- end
