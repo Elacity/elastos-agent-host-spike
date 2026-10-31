@@ -514,7 +514,7 @@ from pathlib import Path
 root = Path(".")
 components = json.loads(Path("components.json").read_text(encoding="utf-8"))
 for name, component in sorted((components.get("external") or {}).items()):
-    if not isinstance(component.get("provider_runtime"), dict):
+    if not isinstance(component, dict):
         continue
     capsule_dir = None
     for candidate in (root / "capsules" / name, root / "elastos" / "capsules" / name):
@@ -524,6 +524,13 @@ for name, component in sorted((components.get("external") or {}).items()):
     if capsule_dir is None:
         continue
     manifest = json.loads((capsule_dir / "capsule.json").read_text(encoding="utf-8"))
+    # Two routes select a component: a provider_runtime marker in its record, or
+    # a provider manifest (role: provider, icon) for a record without one.
+    # After either route the SAME rule applies to every selected component: it
+    # must be role: provider with honest or legacy provider execution.
+    if "provider_runtime" not in component:
+        if manifest.get("role") != "provider" or not str(manifest.get("icon") or "").strip():
+            continue
     honest = (manifest.get("type"), manifest.get("execution"), manifest.get("runtime_abi"), manifest.get("entrypoint")) == ("native-provider", "native-provider", "elastos.provider-stdio/v1", name)
     legacy = manifest.get("type") in ("wasm", "microvm") and manifest.get("execution") is None and manifest.get("runtime_abi") is None and manifest.get("entrypoint") == "rootfs.ext4"
     if manifest.get("role") != "provider" or not (honest or legacy):
