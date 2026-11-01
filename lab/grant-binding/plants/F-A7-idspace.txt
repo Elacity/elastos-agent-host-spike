@@ -1,0 +1,11 @@
+id: F-A7-idspace
+file: src/ledger.rs
+test: ledger::model_reservation_id_that_does_not_fit_is_refused
+--- old
+        let next_id = match ledger.next_reservation.checked_add(1) {
+            Some(next) => next,
+            None => return Err(ReserveRefuse::IdSpace),
+        };
+--- new
+        let next_id = ledger.next_reservation + 1;
+--- end

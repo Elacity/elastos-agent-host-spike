@@ -1,0 +1,11 @@
+id: F-A5-livereg
+file: src/lib.rs
+test: model_later_grant_stores_the_new_session
+test: model_later_grant_stores_the_new_identity
+--- old
+                    identity: record.identity.clone(),
+                    session: record.session.clone(),
+--- new
+                    identity: "photo".to_owned(),
+                    session: "session-a".to_owned(),
+--- end

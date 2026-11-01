@@ -1,0 +1,18 @@
+id: F-B2-childroot
+file: src/ops.rs
+test: ops::model_child_journal_effect_stays_inside_its_root
+--- old
+                        super::resource_name(&grant.identity, path, Some(&grant.owned_root))
+                            .map_err(OperateRefuse::Binding)?;
+--- new
+                        let root = match grant.parent.and_then(|parent| {
+                            self.grants
+                                .get(&parent)
+                                .map(|stored| stored.record.owned_root.clone())
+                        }) {
+                            Some(parent_root) => parent_root,
+                            None => grant.owned_root.clone(),
+                        };
+                        super::resource_name(&grant.identity, path, Some(&root))
+                            .map_err(OperateRefuse::Binding)?;
+--- end
