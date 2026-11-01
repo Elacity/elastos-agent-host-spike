@@ -10,7 +10,10 @@ as the online installer.
 
 LAB ONLY: --lab-runtime BIN --lab-key KEY --signer ELASTOS swaps in a locally built
 Runtime and re-signs the release pair with a throwaway lab key, trusted next to the
-publisher's key. A folder built that way must never ship.
+publisher's key. A folder built that way must never ship. Lab releases carry Apple
+silicon Macs only. For a lab publisher (experiment P7) it can also set the version and
+the previous publication, write the flat signed set `elastos publish-release` takes,
+and name that publisher in sources.json as install.sh does.
 """
 
 import argparse
@@ -26,6 +29,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.request
 
 RELEASE_PLATFORM = "aarch64-darwin"
@@ -56,6 +60,18 @@ def fetch(url, out, cid, sha256=None, size=None):
         sys.exit(f"{url}: bytes differ from pinned CID {cid}")
     os.replace(tmp.name, path)
     return path
+
+
+def name_file(out, path, kubo):
+    """Moves `path` into out/ under its CID: kubo's default import CID, as releases name
+    their files, with --kubo; else the raw-bytes CID."""
+    if kubo:
+        cid = subprocess.run([kubo, "add", "--only-hash", "-Q", path],
+                             capture_output=True, text=True, check=True).stdout.strip()
+    else:
+        cid = raw_cid(bytes.fromhex(file_sha256(path)))
+    os.replace(path, os.path.join(out, cid))
+    return cid
 
 
 def file_sha256(path):
@@ -101,18 +117,32 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--sources", required=True, help="sources.json written by the official installer")
     parser.add_argument("--out", required=True)
+    parser.add_argument("--base", help="folder with the official release-head.json and release.json (default: the gateway)")
+    parser.add_argument("--installer", help="the official install.sh of that release (default: the gateway)")
     parser.add_argument("--lab-runtime")
     parser.add_argument("--lab-key")
     parser.add_argument("--signer")
     parser.add_argument("--lab-capsule", action="append", default=[],
                         help="capsules/<name> folder to pack as <name>.tar.gz (with --lab-runtime; repeatable)")
+    parser.add_argument("--kubo", help="kubo binary; lab files are then named by their import CID, as releases are")
+    parser.add_argument("--lab-version", help="release version (with --lab-runtime; the Runtime must report it)")
+    parser.add_argument("--lab-previous", nargs=2, metavar=("HEAD_CID", "RELEASE_CID"),
+                        help="the lab publisher's last publication (publish-state.json); default none")
+    parser.add_argument("--publication", help="also write the flat signed set for `elastos publish-release`")
+    parser.add_argument("--publisher-node", help="lab publisher's Carrier node id, stamped into sources.json")
+    parser.add_argument("--connect-ticket", help="lab publisher's Carrier ticket, stamped into sources.json")
+    parser.add_argument("--gateway", help="lab publisher's gateway URL, stamped into sources.json")
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
     sources = json.load(open(args.sources))
     gateway = sources["sources"][0]["gateways"][0].rstrip("/")
     get = lambda path: urllib.request.urlopen(f"{gateway}/{path}", timeout=60).read()
-    head_bytes, release_bytes = get("release-head.json"), get("release.json")
+    if args.base:
+        head_bytes, release_bytes = (open(os.path.join(args.base, name), "rb").read()
+                                     for name in ("release-head.json", "release.json"))
+    else:
+        head_bytes, release_bytes = get("release-head.json"), get("release.json")
     head, release = json.loads(head_bytes), json.loads(release_bytes)
     if head["payload"]["release_sha256"] != hashlib.sha256(release_bytes).hexdigest():
         sys.exit("release.json differs from the signed head")
@@ -146,6 +176,9 @@ def main():
     fetch(f"{gateway}/artifacts/model-catalog.json", args.out, manifest["model_catalog"]["head_cid"])
     fetch(f"{gateway}/artifacts/collaboration-network-release-v1.json", args.out,
           manifest["collaboration_network"]["head_cid"])
+    installer = open(args.installer, "rb").read() if args.installer else get("install.sh")
+    if hashlib.sha256(installer).hexdigest() != release["payload"]["installer_sha256"]:
+        sys.exit("install.sh differs from the signed release")
 
     for source in sources["sources"]:
         source["install_path"] = ""
@@ -153,33 +186,54 @@ def main():
         if not os.path.exists(args.lab_key):
             with open(os.open(args.lab_key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
                 f.write(secrets.token_hex(32) + "\n")
+        if args.kubo:
+            os.environ["IPFS_PATH"] = tempfile.mkdtemp(prefix="lab-kubo-")
+            subprocess.run([args.kubo, "init", "--profile=test"], capture_output=True, check=True)
         data = open(args.lab_runtime, "rb").read()
         digest = hashlib.sha256(data).digest()
-        cid = raw_cid(digest)
-        shutil.copyfile(args.lab_runtime, os.path.join(args.out, cid))
-        os.chmod(os.path.join(args.out, cid), 0o755)
+        staged = os.path.join(args.out, ".lab-runtime")
+        shutil.copyfile(args.lab_runtime, staged)
+        os.chmod(staged, 0o755)
+        cid = name_file(args.out, staged, args.kubo)
         payload = release["payload"]
+        payload["platforms"] = {RELEASE_PLATFORM: payload["platforms"][RELEASE_PLATFORM]}
         payload["platforms"][RELEASE_PLATFORM]["binary"] = {"cid": cid, "sha256": digest.hex(), "size": len(data)}
+        def mac_only(value):
+            if isinstance(value, dict):
+                if isinstance(value.get("platforms"), dict):
+                    value["platforms"] = {p: v for p, v in value["platforms"].items() if p in COMPONENT_PLATFORMS}
+                for child in value.values():
+                    mac_only(child)
+        mac_only(manifest["external"])
+        payload["capsule_records"] = [r for r in payload.get("capsule_records", [])
+                                      if r["payload"].get("platform") in COMPONENT_PLATFORMS]
+        head_payload = head["payload"]
+        if args.lab_version:
+            payload["version"] = head_payload["version"] = version = args.lab_version
+            payload["released_at"] = head_payload["updated_at"] = int(time.time())
+        payload["prev_release_cid"] = args.lab_previous[1] if args.lab_previous else None
+        head_payload["prev_head_cid"] = args.lab_previous[0] if args.lab_previous else None
         for folder in args.lab_capsule:
             name = os.path.basename(os.path.normpath(folder))
             packed = pack_capsule(folder, name)
             packed_sha = hashlib.sha256(packed).hexdigest()
-            packed_cid = raw_cid(hashlib.sha256(packed).digest())
-            with open(os.path.join(args.out, packed_cid), "wb") as f:
+            staged = os.path.join(args.out, ".lab-capsule")
+            with open(staged, "wb") as f:
                 f.write(packed)
+            packed_cid = name_file(args.out, staged, args.kubo)
             manifest["external"][name]["platforms"]["*"].update(
                 cid=packed_cid, checksum=f"sha256:{packed_sha}", size=len(packed))
             for record in payload.get("capsule_records", []):
                 if record["payload"]["name"] == name:
                     record["payload"].update(cid=packed_cid, sha256=packed_sha, size=len(packed))
             print(f"LAB {name} capsule {packed_cid} from {folder}")
-        if args.lab_capsule:
-            components = json.dumps(manifest, indent=2).encode() + b"\n"
-            components_cid = raw_cid(hashlib.sha256(components).digest())
-            with open(os.path.join(args.out, components_cid), "wb") as f:
-                f.write(components)
-            payload["platforms"][RELEASE_PLATFORM]["components"] = {
-                "cid": components_cid, "sha256": hashlib.sha256(components).hexdigest(), "size": len(components)}
+        components = json.dumps(manifest, indent=2).encode() + b"\n"
+        staged = os.path.join(args.out, ".lab-components")
+        with open(staged, "wb") as f:
+            f.write(components)
+        components_cid = name_file(args.out, staged, args.kubo)
+        payload["platforms"][RELEASE_PLATFORM]["components"] = {
+            "cid": components_cid, "sha256": hashlib.sha256(components).hexdigest(), "size": len(components)}
         # One publisher signs the whole release, capsule records included.
         _, lab_did = sign(args.signer, args.lab_key, "elastos.lab.probe.v1", {})
         for i, record in enumerate(payload.get("capsule_records", [])):
@@ -187,20 +241,61 @@ def main():
             signed, _ = sign(args.signer, args.lab_key, "elastos.capsule.record.v1", record["payload"])
             payload["capsule_records"][i] = json.loads(signed)
         release_bytes, _ = sign(args.signer, args.lab_key, "elastos.release.v1", payload)
-        head_payload = head["payload"]
-        head_payload["latest_release_cid"] = raw_cid(hashlib.sha256(release_bytes).digest())
+        staged = os.path.join(args.out, ".lab-release")
+        with open(staged, "wb") as f:
+            f.write(release_bytes)
+        head_payload["latest_release_cid"] = name_file(args.out, staged, args.kubo)
         head_payload["release_sha256"] = hashlib.sha256(release_bytes).hexdigest()
         head_payload["signer_did"] = lab_did
         head_bytes, _ = sign(args.signer, args.lab_key, "elastos.release.head.v1", head_payload)
         for source in sources["sources"]:
             source["publisher_dids"] = [lab_did]
+            source["discovery_uri"] = (f"elastos://source/{source['channel']}/"
+                                       f"{hashlib.sha256(lab_did.encode()).hexdigest()[:32]}")
             source["head_cid"] = raw_cid(hashlib.sha256(head_bytes).digest())
         print(f"LAB release: Runtime {cid}, signed by {lab_did}")
+        if args.publication:
+            write_publication(args.publication, args.out, head_bytes, release_bytes, installer,
+                              payload, manifest)
+    for source in sources["sources"]:
+        if args.publisher_node:
+            source["publisher_node_id"] = args.publisher_node
+        if args.connect_ticket:
+            source["connect_ticket"] = args.connect_ticket
+        if args.gateway:
+            source["gateways"] = [args.gateway]
     for name, data in (("release-head.json", head_bytes), ("release.json", release_bytes),
                        ("sources.json", json.dumps(sources, indent=2).encode() + b"\n")):
         with open(os.path.join(args.out, name), "wb") as f:
             f.write(data)
     print(f"Release folder for {version}: {count} artifacts in {args.out}")
+
+
+def write_publication(target, folder, head_bytes, release_bytes, installer, payload, manifest):
+    """The flat signed set: metadata plus every file under the name the release gives it."""
+    os.makedirs(target)
+    platform = payload["platforms"][RELEASE_PLATFORM]
+    names = {f"elastos-{RELEASE_PLATFORM}": platform["binary"]["cid"],
+             f"components-{RELEASE_PLATFORM}.json": platform["components"]["cid"],
+             "model-catalog.json": manifest["model_catalog"]["head_cid"],
+             "collaboration-network-release-v1.json": manifest["collaboration_network"]["head_cid"]}
+    def walk(value):
+        if isinstance(value, dict):
+            if value.get("cid") and value.get("release_path"):
+                names[value["release_path"]] = value["cid"]
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+    walk(manifest)
+    for name, cid in names.items():
+        subprocess.run(["cp", "-c", os.path.join(folder, cid), os.path.join(target, name)], check=True)
+    for name, data in (("release-head.json", head_bytes), ("release.json", release_bytes),
+                       ("install.sh", installer)):
+        with open(os.path.join(target, name), "wb") as f:
+            f.write(data)
+    print(f"LAB publication: {len(names)} artifacts in {target}")
 
 
 if __name__ == "__main__":
