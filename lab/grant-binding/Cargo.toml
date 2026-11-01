@@ -5,3 +5,8 @@ edition = "2021"
 publish = false
 
 [workspace]
+
+# The falsifier runner rebuilds this crate once per plant. Test binaries carry
+# no debug info, which keeps that rebuild inside the lane's check budget.
+[profile.test]
+debug = 0

@@ -1,0 +1,8 @@
+id: F-A5-handid
+file: src/lib.rs
+test: model_handle_id_that_does_not_fit_is_refused
+--- old
+        let next_handle = self.next_handle.checked_add(1).ok_or(Refuse::HandleSpace)?;
+--- new
+        let next_handle = self.next_handle + 1;
+--- end

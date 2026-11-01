@@ -1,0 +1,13 @@
+id: F-A5-idflag
+file: src/lib.rs
+test: model_identity_change_leaves_the_session_grant
+--- old
+            .identity = identity.to_owned();
+--- new
+            .identity = identity.to_owned();
+        for grant in self.grants.values_mut() {
+            if grant.record.instance == instance {
+                grant.record.session_bound = false;
+            }
+        }
+--- end

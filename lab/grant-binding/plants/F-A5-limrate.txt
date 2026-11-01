@@ -1,0 +1,11 @@
+id: F-A5-limrate
+file: src/lib.rs
+test: ops::model_later_limit_keeps_the_spent_rate
+--- old
+        grant.record.effect_limit = Some(limit);
+        Ok(())
+--- new
+        grant.record.effect_limit = Some(limit);
+        grant.record.window_effects = 0;
+        Ok(())
+--- end

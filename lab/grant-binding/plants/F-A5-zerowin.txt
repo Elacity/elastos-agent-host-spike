@@ -1,0 +1,18 @@
+id: F-A5-zerowin
+file: src/lib.rs
+test: ops::model_zero_window_starts_a_new_count
+test: ops::model_child_zero_window_starts_a_new_count
+--- old
+        self.window_due = match grant.record.window_start.checked_add(grant.record.window) {
+            Some(end) => now >= end,
+            None => false,
+        };
+--- new
+        if grant.record.window == 0 {
+            return Ok(());
+        }
+        self.window_due = match grant.record.window_start.checked_add(grant.record.window) {
+            Some(end) => now >= end,
+            None => false,
+        };
+--- end
