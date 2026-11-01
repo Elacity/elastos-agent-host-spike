@@ -106,6 +106,7 @@ pub enum ReserveRefuse {
     OverCeiling { ceiling: u64, held: u64, asked: u64 },
     SumOverflow { held: u64, asked: u64 },
     NoCeiling,
+    IdSpace,
     Binding(Refuse),
 }
 
@@ -119,6 +120,7 @@ impl std::fmt::Display for ReserveRefuse {
                 formatter.write_str("reservation sum does not fit in u64")
             }
             ReserveRefuse::NoCeiling => formatter.write_str("identity has no ceiling"),
+            ReserveRefuse::IdSpace => formatter.write_str("reservation id does not fit"),
             ReserveRefuse::Binding(refusal) => refusal.fmt(formatter),
         }
     }
@@ -309,11 +311,15 @@ impl Verifier {
         } else {
             None
         };
+        let next_id = match ledger.next_reservation.checked_add(1) {
+            Some(next) => next,
+            None => return Err(ReserveRefuse::IdSpace),
+        };
         ledger.held = total;
         if let Some(shared_total) = put_back {
             ledger.held = shared_total;
         }
-        ledger.next_reservation += 1;
+        ledger.next_reservation = next_id;
         ledger.open.insert(
             ledger.next_reservation,
             OpenHold {
@@ -5408,4 +5414,69 @@ fn model_child_hold_settles_after_the_issuing_expiry() {
         .use_grant(call, &guest(library))
         .expect_err("the issuing grant stays expired");
     assert_eq!(later, Refuse::Expired);
+}
+
+#[test]
+fn model_reservation_id_that_does_not_fit_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let request = guest(handle);
+    let first = verifier.reserve(&call, &request, 1).expect("first hold");
+    assert_eq!(first.id, 1);
+    {
+        let mut ledger = verifier.ledger.lock().expect("ledger lock");
+        ledger.next_reservation = u64::MAX - 1;
+    }
+    let over = verifier
+        .reserve(&call, &request, 10)
+        .expect_err("past the ceiling");
+    assert_eq!(
+        over,
+        ReserveRefuse::OverCeiling {
+            ceiling: 10,
+            held: 1,
+            asked: 10,
+        }
+    );
+    {
+        let ledger = verifier.ledger.lock().expect("ledger lock");
+        assert_eq!(ledger.next_reservation, u64::MAX - 1);
+    }
+    let last = verifier.reserve(&call, &request, 1).expect("last id");
+    assert_eq!(last.id, u64::MAX);
+    {
+        let mut ledger = verifier.ledger.lock().expect("ledger lock");
+        ledger.next_reservation = u64::MAX;
+    }
+    let refusal = verifier
+        .reserve(&call, &request, 1)
+        .expect_err("the next id does not fit");
+    assert_eq!(refusal, ReserveRefuse::IdSpace);
+    assert_eq!(refusal.to_string(), "reservation id does not fit");
+    let after = books(&verifier);
+    assert_eq!(after.held, 2);
+    assert_eq!(after.open.get(&first.id), Some(&1));
+    assert_eq!(after.open.get(&last.id), Some(&1));
+    assert_eq!(after.open.len(), 2);
+    {
+        let ledger = verifier.ledger.lock().expect("ledger lock");
+        assert_eq!(ledger.next_reservation, u64::MAX);
+    }
+    assert_eq!(
+        verifier.settle(&call, &request, last, SettleOutcome::Known(1)),
+        Ok(1)
+    );
+    let closed = books(&verifier);
+    assert_eq!(closed.held, 1);
+    assert_eq!(closed.open.get(&first.id), Some(&1));
+    assert!(!closed.open.contains_key(&last.id));
 }
