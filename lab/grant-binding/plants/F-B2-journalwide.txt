@@ -1,0 +1,11 @@
+id: F-B2-journalwide
+file: src/lib.rs
+test: ops::model_issuing_effect_over_a_live_journal_is_refused
+test: model_issuing_use_path_over_a_live_journal_is_refused
+--- old
+                    || (path != owned_root
+                        && resource_name(identity, &stored.record.owned_root, Some(path))
+                            .is_ok())
+--- new
+                    || false
+--- end

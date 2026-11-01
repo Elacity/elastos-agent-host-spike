@@ -1,0 +1,8 @@
+id: F-A5-instid
+file: src/lib.rs
+test: model_instance_id_that_does_not_fit_is_refused
+--- old
+        let next_instance = self.next_instance.checked_add(1).ok_or(Refuse::InstanceSpace)?;
+--- new
+        let next_instance = self.next_instance + 1;
+--- end
