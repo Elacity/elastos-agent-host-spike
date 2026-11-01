@@ -5746,3 +5746,215 @@ fn model_reservation_id_that_does_not_fit_is_refused() {
     assert_eq!(closed.open.get(&first.id), Some(&1));
     assert!(!closed.open.contains_key(&last.id));
 }
+
+#[test]
+fn model_session_change_still_settles() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let library = verifier
+        .bind_for_session(photo, "UsersAI/photo/library", rights())
+        .expect("session grant");
+    let album = verifier
+        .bind_grant(photo, "UsersAI/photo/album", rights())
+        .expect("standing album");
+    let call = verifier.open_call(photo);
+    let sibling_call = verifier.open_call(sibling);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(library),
+            crate::ask::BudgetAsk { amount: 9 },
+            9,
+        )
+        .expect("ask");
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    let session_hold = verifier
+        .reserve(&call, &guest(library), 4)
+        .expect("session hold");
+    let child_hold = verifier
+        .reserve(&call, &guest(roll), 3)
+        .expect("child hold");
+    let standing_hold = verifier
+        .reserve(&call, &guest(album), 2)
+        .expect("standing hold");
+    verifier
+        .host_set_session(photo, "session-b")
+        .expect("session changes");
+    let ended = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("session grant has ended");
+    assert_eq!(ended, Refuse::UnknownHandle);
+    assert_eq!(ended.to_string(), "unknown handle");
+    let child_ended = verifier
+        .use_grant(call, &guest(roll))
+        .expect_err("child journal ended with the session grant");
+    assert_eq!(child_ended, Refuse::UnknownHandle);
+    let standing_use = verifier
+        .use_grant(call, &guest(album))
+        .expect_err("standing grant waits for the old session");
+    assert_eq!(standing_use, Refuse::Session);
+    assert_eq!(standing_use.to_string(), "session does not match the grant");
+    let sibling_settle = verifier
+        .settle(
+            &sibling_call,
+            &guest(library),
+            session_hold,
+            SettleOutcome::Known(4),
+        )
+        .expect_err("a sibling instance does not settle the hold");
+    assert_eq!(sibling_settle, SettleRefuse::Binding(Refuse::Instance));
+    assert_eq!(
+        sibling_settle.to_string(),
+        "instance does not match the grant"
+    );
+    assert_eq!(
+        books(&verifier).held,
+        9,
+        "the sibling settle stores nothing"
+    );
+    assert_eq!(
+        verifier.settle(
+            &call,
+            &guest(library),
+            session_hold,
+            SettleOutcome::Known(4)
+        ),
+        Ok(4),
+        "a hold opened before the session change still settles"
+    );
+    assert_eq!(
+        verifier.settle(&call, &guest(roll), child_hold, SettleOutcome::Known(3)),
+        Ok(3),
+        "a journal hold opened before the session change still settles"
+    );
+    let standing_settle = verifier
+        .settle(&call, &guest(album), standing_hold, SettleOutcome::Known(2))
+        .expect_err("a live standing grant still requires its session");
+    assert_eq!(standing_settle, SettleRefuse::Binding(Refuse::Session));
+    assert_eq!(
+        standing_settle.to_string(),
+        "session does not match the grant"
+    );
+    assert_eq!(books(&verifier).held, 2, "the standing hold stays counted");
+    assert_eq!(
+        books(&verifier).charged,
+        7,
+        "the two settled figures are charged"
+    );
+    let opened = verifier
+        .reserve(&call, &guest(library), 1)
+        .expect_err("an ended session grant opens no hold");
+    assert_eq!(opened, ReserveRefuse::Binding(Refuse::UnknownHandle));
+    verifier
+        .host_set_session(photo, "session-a")
+        .expect("restore session");
+    let still = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("restore does not revive the session grant");
+    assert_eq!(still, Refuse::UnknownHandle);
+    assert_eq!(
+        verifier.settle(&call, &guest(album), standing_hold, SettleOutcome::Known(2)),
+        Ok(2),
+        "the standing hold settles once its session is restored"
+    );
+    assert_eq!(books(&verifier).held, 0, "every hold has closed");
+    verifier
+        .use_grant(call, &guest(album))
+        .expect("standing grant revives");
+    verifier
+        .reserve(&call, &guest(album), 9)
+        .expect("the ceiling room returned");
+}
+
+#[test]
+fn model_session_change_still_releases() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let library = verifier
+        .bind_for_session(photo, "UsersAI/photo/library", rights())
+        .expect("session grant");
+    let call = verifier.open_call(photo);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(library),
+            crate::ask::BudgetAsk { amount: 4 },
+            4,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(library), 4).expect("hold");
+    verifier
+        .host_set_session(photo, "session-b")
+        .expect("session changes");
+    assert_eq!(
+        verifier.release(&call, &guest(library), reservation),
+        Ok(()),
+        "a hold opened before the session change still releases"
+    );
+    assert_eq!(
+        books(&verifier).held,
+        0,
+        "the released hold gives its amount back"
+    );
+    assert_eq!(books(&verifier).charged, 0, "release charges nothing");
+    let ended = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("release does not revive the session grant");
+    assert_eq!(ended, Refuse::UnknownHandle);
+    verifier
+        .reserve(&call, &guest(library), 1)
+        .expect_err("an ended session grant opens no hold");
+}
+
+#[test]
+fn model_session_change_still_times_out() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let library = verifier
+        .bind_for_session(photo, "UsersAI/photo/library", rights())
+        .expect("session grant");
+    let call = verifier.open_call(photo);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(library),
+            crate::ask::BudgetAsk { amount: 4 },
+            4,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(library), 4).expect("hold");
+    verifier.set_verifier_deadline(10);
+    verifier
+        .host_set_session(photo, "session-b")
+        .expect("session changes");
+    assert_eq!(
+        verifier.settle(&call, &guest(library), reservation, SettleOutcome::Unknown),
+        Err(SettleRefuse::UnknownOutcome)
+    );
+    assert_eq!(
+        verifier.timeout_hold(&call, &guest(library), reservation, 10),
+        Ok(TimeoutRecord),
+        "a hold opened before the session change still times out"
+    );
+    assert_eq!(
+        books(&verifier).timed_out.get(&reservation.id),
+        Some(&true),
+        "the kept uncertain hold records its timeout"
+    );
+    assert_eq!(books(&verifier).held, 4, "the uncertain hold stays counted");
+    let ended = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("timeout does not revive the session grant");
+    assert_eq!(ended, Refuse::UnknownHandle);
+}
