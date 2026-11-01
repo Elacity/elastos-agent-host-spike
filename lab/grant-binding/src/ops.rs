@@ -3513,3 +3513,118 @@ fn model_rate_holds_when_the_window_end_does_not_fit() {
         .use_grant(call, &guest(frames))
         .expect("the frames grant stays");
 }
+
+#[test]
+fn model_clock_before_the_window_start_keeps_the_count() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("library");
+    let frames = verifier
+        .bind_grant(photo, "UsersAI/photo/frames", rights())
+        .expect("frames has no rate");
+    verifier.set_verifier_now(10);
+    verifier
+        .set_rate(library, 1, 10)
+        .expect("window starts at 10");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal does not spend the rate");
+    verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect("one effect inside the window");
+    let spent = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("the rate is spent");
+    assert_eq!(spent, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(spent.to_string(), "rate limit is reached");
+    let child_spent = verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect_err("the journal spends the same rate");
+    assert_eq!(child_spent, OperateRefuse::Binding(Refuse::Rate));
+    verifier.set_verifier_now(9);
+    let early = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("an instant before the start keeps the count");
+    assert_eq!(early, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(early.to_string(), "rate limit is reached");
+    let child_early = verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect_err("the journal keeps the same count");
+    assert_eq!(child_early, OperateRefuse::Binding(Refuse::Rate));
+    verifier
+        .operate(
+            &call,
+            &guest(frames),
+            Operation::Append,
+            "UsersAI/photo/frames",
+        )
+        .expect("a grant with no rate still appends");
+    verifier.set_verifier_now(0);
+    let earlier = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("an earlier instant keeps the count");
+    assert_eq!(earlier, OperateRefuse::Binding(Refuse::Rate));
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the grant stays in the store");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("the journal stays in the store");
+    verifier.set_verifier_now(20);
+    verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect("the window end starts a new count");
+    let again = verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect_err("the new window has its own rate");
+    assert_eq!(again, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(again.to_string(), "rate limit is reached");
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the grant stays after the new window");
+}
