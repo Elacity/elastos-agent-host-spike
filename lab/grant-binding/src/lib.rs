@@ -3699,3 +3699,125 @@ fn model_first_rate_keeps_the_effect_count() {
         .use_grant(call, &guest(roll))
         .expect("the journal stays in the store");
 }
+
+#[test]
+fn model_session_and_identity_keep_the_rate_window() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("library");
+    let frames = verifier
+        .bind_grant(photo, "UsersAI/photo/frames", rights())
+        .expect("frames has no rate");
+    verifier.set_verifier_now(10);
+    verifier
+        .set_rate(library, 1, 10)
+        .expect("window starts at 10");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal does not spend the rate");
+    verifier
+        .operate(
+            &call,
+            &guest(library),
+            crate::ops::Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect("one effect inside the window");
+    let spent = verifier
+        .operate(
+            &call,
+            &guest(library),
+            crate::ops::Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("the rate is spent");
+    assert_eq!(spent, crate::ops::OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(spent.to_string(), "rate limit is reached");
+    verifier.set_verifier_now(15);
+    verifier
+        .host_set_session(photo, "session-b")
+        .expect("session changes");
+    let waiting = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("the standing grant waits for session-a");
+    assert_eq!(waiting, Refuse::Session);
+    assert_eq!(waiting.to_string(), "session does not match the grant");
+    verifier
+        .host_set_session(photo, "session-a")
+        .expect("restore session-a");
+    verifier
+        .host_set_identity(photo, "frames")
+        .expect("identity changes");
+    let identity_wait = verifier
+        .use_grant(call, &guest(roll))
+        .expect_err("the journal waits for photo");
+    assert_eq!(identity_wait, Refuse::Identity);
+    assert_eq!(
+        identity_wait.to_string(),
+        "identity does not match the grant"
+    );
+    verifier
+        .host_set_identity(photo, "photo")
+        .expect("restore photo");
+    verifier
+        .operate(
+            &call,
+            &guest(frames),
+            crate::ops::Operation::Append,
+            "UsersAI/photo/frames",
+        )
+        .expect("a grant with no rate still appends");
+    verifier.set_verifier_now(19);
+    let early = verifier
+        .operate(
+            &call,
+            &guest(library),
+            crate::ops::Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("the window that started at 10 has not ended");
+    assert_eq!(early, crate::ops::OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(early.to_string(), "rate limit is reached");
+    let child_early = verifier
+        .operate(
+            &call,
+            &guest(roll),
+            crate::ops::Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect_err("the journal keeps the same window");
+    assert_eq!(
+        child_early,
+        crate::ops::OperateRefuse::Binding(Refuse::Rate)
+    );
+    verifier.set_verifier_now(20);
+    verifier
+        .operate(
+            &call,
+            &guest(roll),
+            crate::ops::Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect("the window that started at 10 ends at 20");
+    let next = verifier
+        .operate(
+            &call,
+            &guest(library),
+            crate::ops::Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("that effect started the next window");
+    assert_eq!(next, crate::ops::OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(next.to_string(), "rate limit is reached");
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the grant stays in the store");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("the journal stays in the store");
+}
