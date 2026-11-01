@@ -1,0 +1,13 @@
+id: F-A5-rate
+file: src/ops.rs
+test: ops::model_rate_stops_the_next_effect_in_the_window
+--- old
+                        if used >= rate {
+                            return Err(OperateRefuse::Binding(Refuse::Rate));
+                        }
+--- new
+                        if used >= rate {
+                            let _ = used;
+                            let _ = rate;
+                        }
+--- end

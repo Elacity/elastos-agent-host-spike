@@ -1,0 +1,8 @@
+id: F-A5-sessinst
+file: src/lib.rs
+test: model_session_change_leaves_the_other_instance
+--- old
+            .filter(|(_, grant)| grant.record.instance == instance && grant.record.session_bound)
+--- new
+            .filter(|(_, grant)| grant.record.session_bound)
+--- end
