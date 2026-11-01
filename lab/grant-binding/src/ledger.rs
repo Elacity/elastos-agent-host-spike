@@ -6452,3 +6452,83 @@ fn model_overwrite_is_an_effect() {
         .use_grant(call, &guest(desk))
         .expect("the standing grant stays in the store");
 }
+
+#[test]
+fn model_bound_writes_keep_allow_once() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let library = verifier
+        .bind_once(photo, "UsersAI/photo/library", rights())
+        .expect("allow once");
+    let frames = verifier
+        .bind_once(photo, "UsersAI/photo/frames", rights())
+        .expect("allow once");
+    let desk = verifier
+        .bind_grant(photo, "UsersAI/photo/desk", rights())
+        .expect("standing desk");
+    verifier.set_rate(library, 10, 10).expect("library rate");
+    verifier
+        .set_effect_limit(library, 10)
+        .expect("library limit");
+    verifier.set_rate(frames, 10, 10).expect("frames rate");
+    verifier.set_effect_limit(frames, 10).expect("frames limit");
+    verifier.set_rate(desk, 10, 10).expect("desk rate");
+    verifier.set_effect_limit(desk, 10).expect("desk limit");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal does not end the grant");
+    let other = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/other")
+        .expect("sibling journal does not end the grant");
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the writes left the allow-once grant in the store");
+    verifier
+        .operate(
+            &call,
+            &guest(roll),
+            crate::ops::Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect("the journal append ends the allow-once grant");
+    let ended = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("the issuing allow-once grant has ended");
+    assert_eq!(ended, Refuse::UnknownHandle);
+    assert_eq!(ended.to_string(), "unknown handle");
+    let child_ended = verifier
+        .use_grant(call, &guest(roll))
+        .expect_err("the journal ended with the grant");
+    assert_eq!(child_ended, Refuse::UnknownHandle);
+    let sibling_ended = verifier
+        .use_grant(call, &guest(other))
+        .expect_err("the sibling ended with the grant");
+    assert_eq!(sibling_ended, Refuse::UnknownHandle);
+    verifier
+        .operate(
+            &call,
+            &guest(frames),
+            crate::ops::Operation::Append,
+            "UsersAI/photo/frames",
+        )
+        .expect("the direct append ends the allow-once grant");
+    let frames_ended = verifier
+        .use_grant(call, &guest(frames))
+        .expect_err("the direct allow-once grant has ended");
+    assert_eq!(frames_ended, Refuse::UnknownHandle);
+    assert_eq!(frames_ended.to_string(), "unknown handle");
+    verifier
+        .operate(
+            &call,
+            &guest(desk),
+            crate::ops::Operation::Append,
+            "UsersAI/photo/desk",
+        )
+        .expect("a standing grant still appends");
+    verifier
+        .use_grant(call, &guest(desk))
+        .expect("the standing grant stays in the store");
+}
