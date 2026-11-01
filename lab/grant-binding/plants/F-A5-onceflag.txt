@@ -1,0 +1,8 @@
+id: F-A5-onceflag
+file: src/ops.rs
+test: ops::model_child_effect_ends_the_allow_once_grant
+--- old
+                            .map(|stored| stored.record.once)
+--- new
+                            .map(|_stored| grant.once)
+--- end
