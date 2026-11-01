@@ -1,0 +1,15 @@
+id: F-A5-ratekeep
+file: src/lib.rs
+test: model_first_rate_keeps_the_effect_count
+--- old
+        if starting {
+            grant.record.window_start = self.verifier_now;
+            grant.record.window_effects = 0;
+        }
+--- new
+        if starting {
+            grant.record.window_start = self.verifier_now;
+            grant.record.window_effects = 0;
+            grant.record.effects = 0;
+        }
+--- end
