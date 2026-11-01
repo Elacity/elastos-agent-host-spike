@@ -3255,3 +3255,143 @@ fn model_later_grant_stores_the_new_identity() {
         .expect_err("the journal waits for frames");
     assert_eq!(page_waits, Refuse::Identity);
 }
+
+#[test]
+fn model_identity_change_leaves_the_session_grant() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let library = verifier
+        .bind_for_session(photo, "UsersAI/photo/library", rights())
+        .expect("session grant");
+    let album = verifier
+        .bind_grant(photo, "UsersAI/photo/album", rights())
+        .expect("standing album");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the session grant works");
+    verifier
+        .host_set_identity(photo, "frames")
+        .expect("identity changes");
+    let waiting = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("the session grant waits for photo");
+    assert_eq!(waiting, Refuse::Identity);
+    assert_eq!(waiting.to_string(), "identity does not match the grant");
+    let child_waiting = verifier
+        .use_grant(call, &guest(roll))
+        .expect_err("the journal waits for photo");
+    assert_eq!(child_waiting, Refuse::Identity);
+    let album_waiting = verifier
+        .use_grant(call, &guest(album))
+        .expect_err("the standing grant waits for photo");
+    assert_eq!(album_waiting, Refuse::Identity);
+    verifier
+        .host_set_identity(photo, "photo")
+        .expect("restore photo");
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the session grant revives");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("the journal revives");
+    let album_kept = verifier
+        .use_grant(call, &guest(album))
+        .expect("the standing grant revives");
+    assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
+    verifier
+        .host_set_session(photo, "session-b")
+        .expect("session changes");
+    let ended = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("a later session change still ends the session grant");
+    assert_eq!(ended, Refuse::UnknownHandle);
+    assert_eq!(ended.to_string(), "unknown handle");
+    let child_ended = verifier
+        .use_grant(call, &guest(roll))
+        .expect_err("the journal ends with the session grant");
+    assert_eq!(child_ended, Refuse::UnknownHandle);
+    let album_waits = verifier
+        .use_grant(call, &guest(album))
+        .expect_err("the standing grant waits for session-a");
+    assert_eq!(album_waits, Refuse::Session);
+    assert_eq!(album_waits.to_string(), "session does not match the grant");
+    verifier
+        .host_set_session(photo, "session-a")
+        .expect("restore session-a");
+    verifier
+        .use_grant(call, &guest(album))
+        .expect("the standing grant revives");
+    let still = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("restore does not revive the session grant");
+    assert_eq!(still, Refuse::UnknownHandle);
+}
+
+#[test]
+fn model_session_change_ends_under_a_different_identity() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let library = verifier
+        .bind_for_session(photo, "UsersAI/photo/library", rights())
+        .expect("session grant");
+    let album = verifier
+        .bind_grant(photo, "UsersAI/photo/album", rights())
+        .expect("standing album");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    verifier
+        .host_set_identity(photo, "frames")
+        .expect("identity changes");
+    let waiting = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("the session grant is still live");
+    assert_eq!(waiting, Refuse::Identity);
+    assert_eq!(waiting.to_string(), "identity does not match the grant");
+    verifier
+        .host_set_session(photo, "session-b")
+        .expect("session changes");
+    let ended = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("the session change ends the grant");
+    assert_eq!(ended, Refuse::UnknownHandle);
+    assert_eq!(ended.to_string(), "unknown handle");
+    let child_ended = verifier
+        .use_grant(call, &guest(roll))
+        .expect_err("the journal ends with the session grant");
+    assert_eq!(child_ended, Refuse::UnknownHandle);
+    let album_waits = verifier
+        .use_grant(call, &guest(album))
+        .expect_err("the standing grant waits for photo");
+    assert_eq!(album_waits, Refuse::Identity);
+    verifier
+        .host_set_identity(photo, "photo")
+        .expect("restore photo");
+    let still = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("restore does not revive the session grant");
+    assert_eq!(still, Refuse::UnknownHandle);
+    let album_still = verifier
+        .use_grant(call, &guest(album))
+        .expect_err("the standing grant still waits for session-a");
+    assert_eq!(album_still, Refuse::Session);
+    verifier
+        .host_set_session(photo, "session-a")
+        .expect("restore session-a");
+    verifier
+        .use_grant(call, &guest(album))
+        .expect("the standing grant revives");
+    let gone = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("the session grant stays ended");
+    assert_eq!(gone, Refuse::UnknownHandle);
+}
