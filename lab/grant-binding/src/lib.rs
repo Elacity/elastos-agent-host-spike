@@ -534,6 +534,7 @@ impl Verifier {
         .ok_or(Refuse::UnknownHandle)?;
         if let Some(live) = self.registry.get(&call.instance) {
             held.record.session = live.session.clone();
+            held.record.identity = live.identity.clone();
         }
         self.check_call(call, &held.record)?;
         Ok(held.record)
