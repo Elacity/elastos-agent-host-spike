@@ -199,6 +199,10 @@ fn run_test(crate_dir: &Path, plant_id: &str, test: &str) -> String {
         // A plant leaves the guarded value unused on purpose. The child must
         // judge the named test, not fail the build under the gate's -D warnings.
         .env_remove("RUSTFLAGS")
+        // The lane gate disables incremental compilation for its own build.
+        // Each plant rebuilds this crate in its own target dir, so the child
+        // keeps the incremental state that holds the gate inside its budget.
+        .env_remove("CARGO_INCREMENTAL")
         .env("CARGO_TARGET_DIR", &target_dir)
         .output()
         .unwrap_or_else(|error| panic!("plant {plant_id}: cannot run cargo for {test}: {error}"));
