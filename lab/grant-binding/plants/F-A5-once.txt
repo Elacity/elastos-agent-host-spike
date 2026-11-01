@@ -1,11 +1,10 @@
 id: F-A5-once
 file: src/ops.rs
 test: ops::model_allow_once_ends_after_one_effect
+test: ops::model_child_effect_ends_the_allow_once_grant
 --- old
-                    #[rustfmt::skip]
-                    self.revoke_grant(request.handle)
-                        .map_err(OperateRefuse::Binding)?;
+                            self.revoke_grant(ending)
+                                .map_err(OperateRefuse::Binding)?;
 --- new
-                    #[rustfmt::skip]
-                    let _ = request.handle;
+                            let _ = ending;
 --- end
