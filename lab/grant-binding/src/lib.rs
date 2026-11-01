@@ -3821,3 +3821,166 @@ fn model_session_and_identity_keep_the_rate_window() {
         .use_grant(call, &guest(roll))
         .expect("the journal stays in the store");
 }
+
+#[test]
+fn model_session_and_identity_keep_allow_once() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let library = verifier
+        .bind_once(photo, "UsersAI/photo/library", rights())
+        .expect("allow once");
+    let frames = verifier
+        .bind_once(photo, "UsersAI/photo/frames", rights())
+        .expect("allow once");
+    let desk = verifier
+        .bind_grant(photo, "UsersAI/photo/desk", rights())
+        .expect("standing desk");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal does not end the grant");
+    verifier
+        .host_set_session(photo, "session-b")
+        .expect("session changes");
+    let waiting = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("the standing grant waits for session-a");
+    assert_eq!(waiting, Refuse::Session);
+    assert_eq!(waiting.to_string(), "session does not match the grant");
+    verifier
+        .host_set_session(photo, "session-a")
+        .expect("restore session-a");
+    verifier
+        .host_set_identity(photo, "frames")
+        .expect("identity changes");
+    let identity_wait = verifier
+        .use_grant(call, &guest(roll))
+        .expect_err("the journal waits for photo");
+    assert_eq!(identity_wait, Refuse::Identity);
+    assert_eq!(
+        identity_wait.to_string(),
+        "identity does not match the grant"
+    );
+    verifier
+        .host_set_identity(photo, "photo")
+        .expect("restore photo");
+    verifier
+        .operate(
+            &call,
+            &guest(roll),
+            crate::ops::Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect("the journal append ends the allow-once grant");
+    let ended = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("the issuing allow-once grant has ended");
+    assert_eq!(ended, Refuse::UnknownHandle);
+    assert_eq!(ended.to_string(), "unknown handle");
+    let child_ended = verifier
+        .use_grant(call, &guest(roll))
+        .expect_err("the journal ended with the grant");
+    assert_eq!(child_ended, Refuse::UnknownHandle);
+    verifier
+        .operate(
+            &call,
+            &guest(frames),
+            crate::ops::Operation::Append,
+            "UsersAI/photo/frames",
+        )
+        .expect("the direct append ends the allow-once grant");
+    let frames_ended = verifier
+        .use_grant(call, &guest(frames))
+        .expect_err("the direct allow-once grant has ended");
+    assert_eq!(frames_ended, Refuse::UnknownHandle);
+    assert_eq!(frames_ended.to_string(), "unknown handle");
+    verifier
+        .operate(
+            &call,
+            &guest(desk),
+            crate::ops::Operation::Append,
+            "UsersAI/photo/desk",
+        )
+        .expect("a standing grant still appends");
+    verifier
+        .use_grant(call, &guest(desk))
+        .expect("the standing grant stays in the store");
+}
+
+#[test]
+fn model_session_and_identity_keep_the_expiry() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let library = verifier
+        .bind_until(photo, "UsersAI/photo/library", rights(), 10)
+        .expect("library expires at 10");
+    let desk = verifier
+        .bind_grant(photo, "UsersAI/photo/desk", rights())
+        .expect("desk has no expiry");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    verifier
+        .host_set_session(photo, "session-b")
+        .expect("session changes");
+    let waiting = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("the standing grant waits for session-a");
+    assert_eq!(waiting, Refuse::Session);
+    assert_eq!(waiting.to_string(), "session does not match the grant");
+    verifier
+        .host_set_session(photo, "session-a")
+        .expect("restore session-a");
+    verifier
+        .host_set_identity(photo, "frames")
+        .expect("identity changes");
+    let identity_wait = verifier
+        .use_grant(call, &guest(roll))
+        .expect_err("the journal waits for photo");
+    assert_eq!(identity_wait, Refuse::Identity);
+    assert_eq!(
+        identity_wait.to_string(),
+        "identity does not match the grant"
+    );
+    verifier
+        .host_set_identity(photo, "photo")
+        .expect("restore photo");
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the expiry is still ahead");
+    verifier
+        .use_path(&call, &guest(roll), "UsersAI/photo/library/roll")
+        .expect("the child path is inside before the expiry");
+    verifier.set_verifier_now(10);
+    let due = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("the issuing grant has expired");
+    assert_eq!(due, Refuse::Expired);
+    assert_eq!(due.to_string(), "grant has expired");
+    let child_due = verifier
+        .use_grant(call, &guest(roll))
+        .expect_err("the child journal follows the issuing expiry");
+    assert_eq!(child_due, Refuse::Expired);
+    assert_eq!(child_due.to_string(), "grant has expired");
+    let path_due = verifier
+        .use_path(&call, &guest(roll), "UsersAI/photo/library/roll")
+        .expect_err("the child path follows the issuing expiry");
+    assert_eq!(path_due, Refuse::Expired);
+    assert_eq!(path_due.to_string(), "grant has expired");
+    verifier
+        .operate(
+            &call,
+            &guest(desk),
+            crate::ops::Operation::Append,
+            "UsersAI/photo/desk",
+        )
+        .expect("a grant with no expiry still appends");
+    verifier
+        .use_grant(call, &guest(desk))
+        .expect("the standing grant stays in the store");
+}

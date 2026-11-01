@@ -1,0 +1,19 @@
+id: F-A5-sesslife
+file: src/lib.rs
+test: model_session_and_identity_keep_allow_once
+test: model_session_and_identity_keep_the_expiry
+--- old
+        for handle in ended {
+            self.revoke_grant(handle)?;
+        };
+--- new
+        for handle in ended {
+            self.revoke_grant(handle)?;
+        };
+        for grant in self.grants.values_mut() {
+            if grant.record.instance == instance {
+                grant.record.once = false;
+                grant.record.expiry = None;
+            }
+        }
+--- end
