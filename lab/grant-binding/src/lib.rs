@@ -421,9 +421,10 @@ impl Verifier {
         Ok(())
     }
 
-    /// The one handle check: resolves a handle and compares the stored grant
-    /// with the registry record of the call's instance, in order.
-    pub(crate) fn resolve(&self, call: Call, handle: Handle) -> Result<GrantRecord, Refuse> {
+    /// The live-handle prefix `resolve` runs before the expiry walk: the handle
+    /// must be known and not ended, and the call must match the stored binding.
+    /// It does not read the expiry, so an expired grant is still live here.
+    fn resolve_live(&self, call: Call, handle: Handle) -> Result<GrantRecord, Refuse> {
         let grant = self
             .grants
             .get(&handle)
@@ -434,6 +435,13 @@ impl Verifier {
         }
         let bound = live_record(grant);
         self.check_call(call, &bound)?;
+        Ok(bound)
+    }
+
+    /// The one handle check: resolves a handle and compares the stored grant
+    /// with the registry record of the call's instance, in order.
+    pub(crate) fn resolve(&self, call: Call, handle: Handle) -> Result<GrantRecord, Refuse> {
+        let bound = self.resolve_live(call, handle)?;
         #[rustfmt::skip]
         let _ = {
             let mut expiry = bound.expiry;
@@ -494,10 +502,14 @@ impl Verifier {
     /// it so a hold opened before its grant's end still closes. `reserve` and
     /// `admit_ask` call `resolve` and open nothing new on an ended grant.
     fn resolve_for_hold(&self, call: Call, handle: Handle) -> Result<GrantRecord, Refuse> {
-        self.resolve(call, handle).or_else(|refusal| match refusal {
-            Refuse::UnknownHandle => self.resolve_kept(call, handle),
-            refusal => Err(refusal),
-        })
+        #[rustfmt::skip]
+        let resolved = {
+            self.resolve_live(call, handle).or_else(|refusal| match refusal {
+                Refuse::UnknownHandle => self.resolve_kept(call, handle),
+                refusal => Err(refusal),
+            })
+        };
+        resolved
     }
 
     /// Uses a grant for one path. The path must be the stored owned root or a
