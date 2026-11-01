@@ -3628,3 +3628,85 @@ fn model_clock_before_the_window_start_keeps_the_count() {
         .use_grant(call, &guest(library))
         .expect("the grant stays after the new window");
 }
+
+#[test]
+fn model_later_limit_keeps_the_spent_rate() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("library");
+    let frames = verifier
+        .bind_grant(photo, "UsersAI/photo/frames", rights())
+        .expect("frames has no rate");
+    verifier
+        .set_rate(library, 1, 10)
+        .expect("one effect in the window");
+    verifier.set_effect_limit(library, 4).expect("four effects");
+    verifier
+        .set_effect_limit(frames, 4)
+        .expect("frames has a limit and no rate");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal does not spend the rate");
+    verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect("one effect inside the window");
+    let spent = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("the rate is spent");
+    assert_eq!(spent, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(spent.to_string(), "rate limit is reached");
+    verifier
+        .set_effect_limit(library, 6)
+        .expect("a later limit does not start the rate over");
+    verifier
+        .set_effect_limit(frames, 6)
+        .expect("a later limit on a grant with no rate");
+    let kept = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("the effect-limit write kept the spent rate");
+    assert_eq!(kept, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(kept.to_string(), "rate limit is reached");
+    let child_kept = verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect_err("the journal keeps the same rate");
+    assert_eq!(child_kept, OperateRefuse::Binding(Refuse::Rate));
+    verifier
+        .operate(
+            &call,
+            &guest(frames),
+            Operation::Append,
+            "UsersAI/photo/frames",
+        )
+        .expect("a grant with no rate still appends");
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the grant stays in the store");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("the journal stays in the store");
+}
