@@ -12,6 +12,7 @@ const MAX_ANSWER_CHARS: usize = 65536;
 /// Runs in Home's top page only. Passkey requests go to the app; anything else to
 /// WebKit as before. WebKitGTK has no WebAuthn, so there the script supplies the
 /// two names Home checks for.
+#[cfg_attr(windows, allow(dead_code))]
 pub const WINDOW_SCRIPT: &str = r#"(() => {
   if (window.location.origin !== "http://localhost:8090" || window.location.pathname !== "/home/"
     || !window.ipc) return;

@@ -11,6 +11,12 @@ case "$(uname -s)/$(uname -m)" in
 	Linux/x86_64) platform=x86_64-linux ;;
 	*) echo "unsupported build host $(uname -s)/$(uname -m)" >&2; exit 1 ;;
 esac
+# With LAB_WINDOWS_IMAGE (the Ubuntu WSL image) it makes
+# dist/elastos-lab-windows-x86_64.zip: the Windows app, and the release for the Linux
+# Runtime it runs in WSL.
+if [ -n "${LAB_WINDOWS_IMAGE:-}" ]; then
+	platform=x86_64-linux
+fi
 # The app, not the folder, names the release it installs: the head CID, its only
 # publisher, and the Runtime that runs the install are built into the executable.
 if [ -n "${LAB_RELEASE:-}" ]; then
@@ -52,6 +58,21 @@ PY
 	ELASTOS_RELEASE_SOURCES_SHA256="$(printf '%s\n' "$pins" | sed -n 5p)"
 	export ELASTOS_RELEASE_HEAD ELASTOS_RELEASE_PUBLISHER ELASTOS_RELEASE_RUNTIME \
 		ELASTOS_RELEASE_RUNTIME_SHA256 ELASTOS_RELEASE_SOURCES_SHA256
+fi
+if [ -n "${LAB_WINDOWS_IMAGE:-}" ]; then
+	: "${LAB_RELEASE:?LAB_RELEASE is required with LAB_WINDOWS_IMAGE}"
+	ELASTOS_WSL_IMAGE_SHA256="$(shasum -a 256 "$LAB_WINDOWS_IMAGE" | cut -d' ' -f1)"
+	export ELASTOS_WSL_IMAGE_SHA256
+	cargo xwin build --release --locked --features lab-diag --target x86_64-pc-windows-msvc
+	root="dist/ElastOS Lab"
+	rm -rf "$root" dist/elastos-lab-windows-x86_64.zip
+	mkdir -p "$root/bin" "$root/Resources/wsl"
+	cp target/x86_64-pc-windows-msvc/release/elastos-desktop-host.exe "$root/bin/ElastOS Lab.exe"
+	cp -Rp "$LAB_RELEASE" "$root/Resources/release"
+	cp "$LAB_WINDOWS_IMAGE" "$root/Resources/wsl/ubuntu-22.04.tar.gz"
+	(cd dist && COPYFILE_DISABLE=1 zip -qrX elastos-lab-windows-x86_64.zip "ElastOS Lab")
+	echo "Built dist/elastos-lab-windows-x86_64.zip (WSL image $ELASTOS_WSL_IMAGE_SHA256)"
+	exit 0
 fi
 cargo build --release --locked --features lab-diag
 

@@ -5,8 +5,10 @@
 //! SHA-256 of every file exactly as for a download; this app only runs it, and only
 //! into `ELASTOS_LAB_HOME`.
 
+#[cfg(unix)]
 use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
@@ -17,10 +19,14 @@ pub fn payload() -> Option<PathBuf> {
     release.is_dir().then_some(release)
 }
 
+#[cfg(windows)]
+pub use crate::wsl::install;
+
 /// Runs the release's own Runtime, a file named by its CID, to install from
 /// `release`. The folder is not trusted to name its own publisher, release or
 /// endpoints, or to supply the Runtime that checks them: `bundle.sh` builds all of
 /// them into this app, and only the Runtime bytes with the built-in SHA-256 run.
+#[cfg(unix)]
 pub fn install(release: &Path, home: &Path) -> io::Result<()> {
     let (Some(head), Some(publisher), Some(runtime), Some(runtime_sha256), Some(sources_sha256)) = (
         option_env!("ELASTOS_RELEASE_HEAD"),
@@ -75,6 +81,7 @@ pub fn install(release: &Path, home: &Path) -> io::Result<()> {
 
 /// Copies `source` to a new private `staged` file only if its bytes have `sha256`,
 /// reading it once without following a link.
+#[cfg(unix)]
 fn stage_runtime(source: &Path, sha256: &str, staged: &Path) -> io::Result<()> {
     use sha2::Digest;
     use std::io::{Read, Write};

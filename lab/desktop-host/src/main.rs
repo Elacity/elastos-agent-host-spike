@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod authenticator;
 /// No key store here yet: Home's passkey requests are refused.
@@ -27,6 +29,8 @@ mod passkey;
 mod runtime;
 #[cfg(target_os = "linux")]
 mod tpm;
+#[cfg(windows)]
+mod wsl;
 
 use std::thread;
 use std::time::{Duration, Instant};
@@ -62,8 +66,9 @@ fn main() {
     let release = firstrun::payload();
     // Only experiments with the lab Runtime packed inside the app start Home.
     let lab_start = lab_home.clone().zip(release);
-    let mut first_run = lab_start.clone().filter(|_| !runtime::installed());
-    if !runtime::installed() && first_run.is_none() {
+    let installed = runtime::installed();
+    let mut first_run = lab_start.clone().filter(|_| !installed);
+    if !installed && first_run.is_none() {
         alert(&checks::not_installed());
         return;
     }
@@ -407,9 +412,12 @@ fn new_home_window(
     #[cfg(not(feature = "lab-diag"))]
     let diag: Option<std::path::PathBuf> = None;
     #[allow(unused_mut)]
-    let mut builder = WebViewBuilder::new()
-        .with_initialization_script_for_main_only(passkey::WINDOW_SCRIPT, true)
-        .with_devtools(diag.is_some());
+    let mut builder = WebViewBuilder::new().with_devtools(diag.is_some());
+    // WebView2 offers Windows Hello passkeys itself.
+    #[cfg(not(windows))]
+    {
+        builder = builder.with_initialization_script_for_main_only(passkey::WINDOW_SCRIPT, true);
+    }
     #[cfg(feature = "lab-diag")]
     if diag.is_some() {
         builder = builder.with_initialization_script_for_main_only(DIAG_SCRIPT, false);

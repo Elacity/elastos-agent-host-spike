@@ -503,6 +503,7 @@ dependencies = [
  "tao",
  "tray-icon",
  "tss-esapi",
+ "windows-sys 0.61.2",
  "wry",
 ]
 

@@ -4,7 +4,10 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -18,13 +21,23 @@ pub fn home_dir() -> Option<PathBuf> {
 }
 
 /// A throwaway folder that stands in for the user's home folder in experiments.
+/// On Windows, where a shortcut cannot set it, `%LOCALAPPDATA%\ElastOS Lab`.
 pub fn lab_home() -> Option<PathBuf> {
-    std::env::var_os("ELASTOS_LAB_HOME").map(PathBuf::from)
+    let lab = std::env::var_os("ELASTOS_LAB_HOME").map(PathBuf::from);
+    #[cfg(windows)]
+    let lab = lab.or_else(|| {
+        std::env::var_os("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join("ElastOS Lab"))
+    });
+    lab
 }
+
+#[cfg(windows)]
+pub use crate::wsl::{installed, start_home};
 
 /// LAB DRAFT of `elastos service start`: `ELASTOS_SERVICE=1` keeps the lab Runtime
 /// from opening a browser, because this app shows Home itself. Home gets its own
 /// process group, so it keeps running when this app quits.
+#[cfg(unix)]
 pub fn start_home(home: &Path) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
     let log = std::fs::File::options()
@@ -45,6 +58,7 @@ pub fn start_home(home: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 pub fn installed() -> bool {
     home_dir().is_some_and(|home| home.join(".local/bin/elastos").is_file())
 }

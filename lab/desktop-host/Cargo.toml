@@ -22,6 +22,9 @@ wry = "0.57.1"
 [target.'cfg(target_os = "linux")'.dependencies]
 tss-esapi = "7.7"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }
+
 [features]
 # Lab builds only: Web Inspector and window-diag.log for the Home window.
 lab-diag = ["wry/devtools"]
