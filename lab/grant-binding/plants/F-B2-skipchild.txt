@@ -2,9 +2,9 @@ id: F-B2-skipchild
 file: src/ops.rs
 test: ops::model_forged_child_journal_does_not_skip_the_right
 --- old
-        self.operate(call, request, Operation::ChildJournal)?;
+        self.operate(call, request, Operation::ChildJournal, path)?;
 --- new
         if !request.forged_child_journal {
-            self.operate(call, request, Operation::ChildJournal)?;
+            self.operate(call, request, Operation::ChildJournal, path)?;
         }
 --- end
