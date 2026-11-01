@@ -1,0 +1,12 @@
+id: F-A5-overonce
+file: src/ops.rs
+test: ledger::model_overwrite_is_an_effect
+--- old
+                {
+                    if operation != Operation::ChildJournal {
+                        let ending = counted;
+--- new
+                {
+                    if operation == Operation::Append {
+                        let ending = counted;
+--- end

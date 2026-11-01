@@ -1,0 +1,11 @@
+id: F-A5-rollcount
+file: src/ops.rs
+test: ledger::model_rate_window_roll_keeps_the_effect_count
+--- old
+                        rolling.record.window_start = now;
+                        rolling.record.window_effects = 0;
+--- new
+                        rolling.record.window_start = now;
+                        rolling.record.window_effects = 0;
+                        rolling.record.effects = 0;
+--- end
