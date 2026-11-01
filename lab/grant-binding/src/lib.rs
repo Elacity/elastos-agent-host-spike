@@ -129,6 +129,7 @@ pub enum Refuse {
     Rate,
     IssuingRate,
     JournalHeld,
+    HandleSpace,
 }
 
 impl std::fmt::Display for Refuse {
@@ -151,6 +152,7 @@ impl std::fmt::Display for Refuse {
             Refuse::Rate => "rate limit is reached",
             Refuse::IssuingRate => "rate stays on the issuing grant",
             Refuse::JournalHeld => "a live journal holds that path",
+            Refuse::HandleSpace => "handle id does not fit",
         })
     }
 }
@@ -237,7 +239,8 @@ impl Verifier {
             return Err(Refuse::HomeMint);
         }
         let owned_root = resource_name(&record.identity, resource, None)?;
-        self.next_handle += 1;
+        let next_handle = self.next_handle.checked_add(1).ok_or(Refuse::HandleSpace)?;
+        self.next_handle = next_handle;
         let handle = Handle(self.next_handle);
         self.grants.insert(
             handle,
@@ -2761,4 +2764,76 @@ fn model_issuing_use_path_over_a_live_journal_is_refused() {
     verifier
         .use_grant(call, &guest(shot))
         .expect("the allow-once journal stays");
+}
+
+#[test]
+fn model_handle_id_that_does_not_fit_is_refused() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("library");
+    assert_eq!(library, Handle(1));
+    verifier.next_handle = u64::MAX - 1;
+    let frames = verifier
+        .bind_grant(photo, "UsersAI/photo/frames", rights())
+        .expect("the last handle");
+    assert_eq!(frames, Handle(u64::MAX));
+    let call = verifier.open_call(photo);
+    let refusal = verifier
+        .bind_grant(photo, "UsersAI/photo/album", rights())
+        .expect_err("the next handle does not fit");
+    assert_eq!(refusal, Refuse::HandleSpace);
+    assert_eq!(refusal.to_string(), "handle id does not fit");
+    assert_eq!(verifier.next_handle, u64::MAX);
+    let missing = verifier
+        .use_grant(call, &guest(Handle(2)))
+        .expect_err("no grant was stored at the next low handle");
+    assert_eq!(missing, Refuse::UnknownHandle);
+    let wrapped = verifier
+        .use_grant(call, &guest(Handle(0)))
+        .expect_err("the counter did not wrap");
+    assert_eq!(wrapped, Refuse::UnknownHandle);
+    let home = verifier.register_instance("home", "session-a");
+    let home_refusal = verifier
+        .bind_grant(home, "UsersAI/home/desk", rights())
+        .expect_err("home still does not mint");
+    assert_eq!(home_refusal, Refuse::HomeMint);
+    assert_eq!(
+        home_refusal.to_string(),
+        "home does not mint an app capability"
+    );
+    assert_eq!(verifier.next_handle, u64::MAX);
+    let host_path = verifier
+        .bind_grant(photo, "UsersAI/photo/../secret", rights())
+        .expect_err("a host-shaped name is still refused");
+    assert_eq!(host_path, Refuse::HostPath);
+    assert_eq!(host_path.to_string(), "owned root is a host path");
+    assert_eq!(verifier.next_handle, u64::MAX);
+    let child = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect_err("a journal needs a handle");
+    assert_eq!(child, ops::OperateRefuse::Binding(Refuse::HandleSpace));
+    assert_eq!(child.to_string(), "handle id does not fit");
+    assert_eq!(verifier.next_handle, u64::MAX);
+    verifier.next_handle = 1;
+    let album = verifier
+        .bind_grant(photo, "UsersAI/photo/album", rights())
+        .expect("the next ask is an issuing grant");
+    assert_eq!(album, Handle(2));
+    verifier
+        .set_rate(album, 1, 10)
+        .expect("an issuing grant stores a rate");
+    let library_kept = verifier
+        .use_grant(call, &guest(library))
+        .expect("the library grant stays");
+    assert_eq!(library_kept.owned_root, "UsersAI/photo/library");
+    let frames_kept = verifier
+        .use_grant(call, &guest(frames))
+        .expect("the last handle stays");
+    assert_eq!(frames_kept.owned_root, "UsersAI/photo/frames");
+    let album_kept = verifier
+        .use_grant(call, &guest(album))
+        .expect("the album grant stays");
+    assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
 }

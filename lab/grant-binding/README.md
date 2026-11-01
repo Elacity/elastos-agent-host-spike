@@ -11,7 +11,7 @@ every use.
 
 reference model, not the Runtime; counts toward no M1 check; the Runtime half is Anders's (#464, #463, #181)
 
-`Verifier::bind_grant` is the stand-in entry for a capability ask, and the stand-in's `seed_bound_grant` calls it too. The asker is the registered instance principal. A Home principal is refused and does not mint. An app principal stores the binding. A caller claim is not the principal and no caller names the asker. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+`Verifier::bind_grant` is the stand-in entry for a capability ask, and the stand-in's `seed_bound_grant` calls it too. The asker is the registered instance principal. A Home principal is refused and does not mint. An app principal stores the binding. A next handle id that does not fit is refused, and that refusal stores no grant. A caller claim is not the principal and no caller names the asker. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
 
 `Verifier::revoke_grant` ends one handle through the one `end_grant`. The store keeps the record. Another app's grant stays. The next effect on an ended handle is `Refuse::UnknownHandle`. This mirrors `end_live_grant`. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
 
