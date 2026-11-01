@@ -92,6 +92,10 @@ pub(crate) struct GrantRecord {
     expiry: Option<u64>,
     effect_limit: Option<u64>,
     effects: u64,
+    rate: Option<u64>,
+    window: u64,
+    window_start: u64,
+    window_effects: u64,
 }
 
 /// The binding copied out after a successful check.
@@ -121,6 +125,8 @@ pub enum Refuse {
     Expired,
     EffectLimit,
     IssuingLimit,
+    Rate,
+    IssuingRate,
 }
 
 impl std::fmt::Display for Refuse {
@@ -140,6 +146,8 @@ impl std::fmt::Display for Refuse {
             Refuse::Expired => "grant has expired",
             Refuse::EffectLimit => "effect limit is reached",
             Refuse::IssuingLimit => "effect limit stays on the issuing grant",
+            Refuse::Rate => "rate limit is reached",
+            Refuse::IssuingRate => "rate stays on the issuing grant",
         })
     }
 }
@@ -236,6 +244,10 @@ impl Verifier {
                     expiry,
                     effect_limit: None,
                     effects: 0,
+                    rate: None,
+                    window: 0,
+                    window_start: 0,
+                    window_effects: 0,
                 },
                 ended: false,
             },
@@ -327,9 +339,47 @@ impl Verifier {
     }
 
     #[rustfmt::skip]
+    pub fn set_rate(&mut self, handle: Handle, limit: u64, window: u64) -> Result<(), Refuse> {
+        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+        if grant.record.parent.is_some() {
+            return Err(Refuse::IssuingRate);
+        }
+        if grant.ended {
+            return Err(Refuse::UnknownHandle);
+        }
+        grant.record.rate = Some(limit);
+        grant.record.window = window;
+        grant.record.window_start = self.verifier_now;
+        grant.record.window_effects = 0;
+        Ok(())
+    }
+
+    #[rustfmt::skip]
     fn note_effect(&mut self, handle: Handle) -> Result<(), Refuse> {
         let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
         grant.record.effects += 1;
+        if grant.record.rate.is_some() {
+            grant.record.window_effects += 1;
+        }
+        Ok(())
+    }
+
+    #[rustfmt::skip]
+    fn open_rate_window(&mut self, handle: Handle) -> Result<(), Refuse> {
+        let now = self.verifier_now;
+        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+        let Some(rate) = grant.record.rate else {
+            return Ok(());
+        };
+        let _ = rate;
+        if grant.record.window == 0 {
+            return Ok(());
+        }
+        let end = grant.record.window_start.saturating_add(grant.record.window);
+        if now >= end {
+            grant.record.window_start = now;
+            grant.record.window_effects = 0;
+        }
         Ok(())
     }
 
