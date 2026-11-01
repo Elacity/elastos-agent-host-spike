@@ -1,0 +1,15 @@
+id: F-A5-idspend
+file: src/lib.rs
+test: model_session_and_identity_keep_the_spent_rate
+test: model_session_and_identity_keep_the_effect_count
+--- old
+            .identity = identity.to_owned();
+--- new
+            .identity = identity.to_owned();
+        for grant in self.grants.values_mut() {
+            if grant.record.instance == instance {
+                grant.record.effects = 0;
+                grant.record.window_effects = 0;
+            }
+        }
+--- end
