@@ -6296,3 +6296,159 @@ fn model_rate_window_roll_keeps_the_effect_count() {
         .use_grant(call, &guest(roll))
         .expect("the journal stays in the store");
 }
+
+#[test]
+fn model_overwrite_is_an_effect() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let overwrite_rights = crate::Rights {
+        append: true,
+        overwrite: true,
+        child_journal: true,
+    };
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", overwrite_rights)
+        .expect("library");
+    let frames = verifier
+        .bind_grant(photo, "UsersAI/photo/frames", overwrite_rights)
+        .expect("frames has no rate");
+    verifier
+        .set_rate(library, 1, 10)
+        .expect("one effect in the window");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal does not spend the rate");
+    verifier
+        .operate(
+            &call,
+            &guest(roll),
+            crate::ops::Operation::Overwrite,
+            "UsersAI/photo/library/roll",
+        )
+        .expect("the journal overwrite spends the rate");
+    let rated = verifier
+        .operate(
+            &call,
+            &guest(library),
+            crate::ops::Operation::Overwrite,
+            "UsersAI/photo/library",
+        )
+        .expect_err("the rate is spent");
+    assert_eq!(rated, crate::ops::OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(rated.to_string(), "rate limit is reached");
+    verifier
+        .operate(
+            &call,
+            &guest(frames),
+            crate::ops::Operation::Overwrite,
+            "UsersAI/photo/frames",
+        )
+        .expect("a grant with no rate still overwrites");
+    let album = verifier
+        .bind_grant(photo, "UsersAI/photo/album", overwrite_rights)
+        .expect("album");
+    let pages = verifier
+        .bind_grant(photo, "UsersAI/photo/pages", overwrite_rights)
+        .expect("pages has no effect count limit");
+    verifier.set_effect_limit(album, 1).expect("one effect");
+    let shot = verifier
+        .create_child_journal(&call, &guest(album), "UsersAI/photo/album/shot")
+        .expect("child journal does not spend the count");
+    verifier
+        .operate(
+            &call,
+            &guest(shot),
+            crate::ops::Operation::Overwrite,
+            "UsersAI/photo/album/shot",
+        )
+        .expect("the journal overwrite spends the count");
+    let limited = verifier
+        .operate(
+            &call,
+            &guest(album),
+            crate::ops::Operation::Append,
+            "UsersAI/photo/album",
+        )
+        .expect_err("the effect count is spent");
+    assert_eq!(
+        limited,
+        crate::ops::OperateRefuse::Binding(Refuse::EffectLimit)
+    );
+    assert_eq!(limited.to_string(), "effect limit is reached");
+    verifier
+        .operate(
+            &call,
+            &guest(pages),
+            crate::ops::Operation::Overwrite,
+            "UsersAI/photo/pages",
+        )
+        .expect("a grant with no effect count limit still overwrites");
+    let once = verifier
+        .bind_once(photo, "UsersAI/photo/once", overwrite_rights)
+        .expect("allow once");
+    let desk = verifier
+        .bind_grant(photo, "UsersAI/photo/desk", overwrite_rights)
+        .expect("standing desk");
+    verifier
+        .operate(
+            &call,
+            &guest(once),
+            crate::ops::Operation::Overwrite,
+            "UsersAI/photo/once",
+        )
+        .expect("the direct overwrite ends the allow-once grant");
+    let ended = verifier
+        .use_grant(call, &guest(once))
+        .expect_err("the allow-once grant has ended");
+    assert_eq!(ended, Refuse::UnknownHandle);
+    assert_eq!(ended.to_string(), "unknown handle");
+    let nested = verifier
+        .bind_once(photo, "UsersAI/photo/nested", overwrite_rights)
+        .expect("allow once with a journal");
+    let nested_roll = verifier
+        .create_child_journal(&call, &guest(nested), "UsersAI/photo/nested/roll")
+        .expect("child journal does not end the grant");
+    let nested_other = verifier
+        .create_child_journal(&call, &guest(nested), "UsersAI/photo/nested/other")
+        .expect("sibling journal does not end the grant");
+    verifier
+        .operate(
+            &call,
+            &guest(nested_roll),
+            crate::ops::Operation::Overwrite,
+            "UsersAI/photo/nested/roll",
+        )
+        .expect("the journal overwrite ends the issuing grant");
+    let nested_ended = verifier
+        .use_grant(call, &guest(nested))
+        .expect_err("the issuing allow-once grant has ended");
+    assert_eq!(nested_ended, Refuse::UnknownHandle);
+    let child_ended = verifier
+        .use_grant(call, &guest(nested_roll))
+        .expect_err("the journal ended with the grant");
+    assert_eq!(child_ended, Refuse::UnknownHandle);
+    let sibling_ended = verifier
+        .use_grant(call, &guest(nested_other))
+        .expect_err("the sibling ended with the grant");
+    assert_eq!(sibling_ended, Refuse::UnknownHandle);
+    verifier
+        .operate(
+            &call,
+            &guest(desk),
+            crate::ops::Operation::Overwrite,
+            "UsersAI/photo/desk",
+        )
+        .expect("a standing grant still overwrites");
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the rated grant stays in the store");
+    verifier
+        .use_grant(call, &guest(album))
+        .expect("the counted grant stays in the store");
+    verifier
+        .use_grant(call, &guest(desk))
+        .expect("the standing grant stays in the store");
+}
