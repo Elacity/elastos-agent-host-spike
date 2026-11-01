@@ -1,0 +1,11 @@
+id: F-A5-limcount
+file: src/lib.rs
+test: ops::model_later_writes_keep_the_effect_count
+--- old
+        grant.record.effect_limit = Some(limit);
+        Ok(())
+--- new
+        grant.record.effect_limit = Some(limit);
+        grant.record.effects = 0;
+        Ok(())
+--- end

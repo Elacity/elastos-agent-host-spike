@@ -1,0 +1,17 @@
+id: F-A5-idend
+file: src/lib.rs
+test: model_identity_change_leaves_the_session_grant
+--- old
+            .identity = identity.to_owned();
+--- new
+            .identity = identity.to_owned();
+        let ended: Vec<Handle> = self
+            .grants
+            .iter()
+            .filter(|(_, grant)| grant.record.instance == instance && grant.record.session_bound)
+            .map(|(handle, _)| *handle)
+            .collect();
+        for handle in ended {
+            self.revoke_grant(handle)?;
+        }
+--- end

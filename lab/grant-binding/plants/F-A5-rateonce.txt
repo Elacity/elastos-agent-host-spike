@@ -1,0 +1,11 @@
+id: F-A5-rateonce
+file: src/lib.rs
+test: ledger::model_bound_writes_keep_allow_once
+--- old
+        grant.record.rate = Some(limit);
+        grant.record.window = window;
+--- new
+        grant.record.rate = Some(limit);
+        grant.record.window = window;
+        grant.record.once = false;
+--- end

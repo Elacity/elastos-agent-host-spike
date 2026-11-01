@@ -1,0 +1,10 @@
+id: F-A5-overspend
+file: src/ops.rs
+test: ledger::model_overwrite_is_an_effect
+--- old
+                if operation != Operation::ChildJournal {
+                    self.open_rate_window(counted)
+--- new
+                if operation == Operation::Append {
+                    self.open_rate_window(counted)
+--- end

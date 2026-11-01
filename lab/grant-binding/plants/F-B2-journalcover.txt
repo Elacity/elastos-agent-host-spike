@@ -1,0 +1,34 @@
+id: F-B2-journalcover
+file: src/ops.rs
+test: ops::model_child_journal_covered_by_a_live_sibling_is_refused
+--- old
+        if self.grants.values().any(|stored| {
+            stored.record.parent == Some(request.handle)
+                && !stored.ended
+                && stored.record.owned_root != path
+                && (super::resource_name(&grant.identity, path, Some(&stored.record.owned_root))
+                    .is_ok()
+                    || super::resource_name(
+                        &grant.identity,
+                        &stored.record.owned_root,
+                        Some(path),
+                    )
+                    .is_ok())
+        }) {
+            return Err(OperateRefuse::JournalCover);
+        }
+--- new
+        let _ = self.grants.values().any(|stored| {
+            stored.record.parent == Some(request.handle)
+                && !stored.ended
+                && stored.record.owned_root != path
+                && (super::resource_name(&grant.identity, path, Some(&stored.record.owned_root))
+                    .is_ok()
+                    || super::resource_name(
+                        &grant.identity,
+                        &stored.record.owned_root,
+                        Some(path),
+                    )
+                    .is_ok())
+        });
+--- end

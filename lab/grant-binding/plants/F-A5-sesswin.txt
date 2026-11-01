@@ -1,0 +1,17 @@
+id: F-A5-sesswin
+file: src/lib.rs
+test: model_session_and_identity_keep_the_rate_window
+--- old
+        for handle in ended {
+            self.revoke_grant(handle)?;
+        };
+--- new
+        for handle in ended {
+            self.revoke_grant(handle)?;
+        };
+        for grant in self.grants.values_mut() {
+            if grant.record.instance == instance {
+                grant.record.window_start = self.verifier_now;
+            }
+        }
+--- end
