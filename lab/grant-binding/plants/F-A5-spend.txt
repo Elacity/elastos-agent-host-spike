@@ -6,12 +6,10 @@ test: ops::model_effect_limit_stops_the_next_effect
                         if grant.effects >= limit {
                             return Err(OperateRefuse::Binding(Refuse::EffectLimit));
                         }
-                        self.note_effect(counted).map_err(OperateRefuse::Binding)?;
                     }
 --- new
                     if let Some(limit) = grant.effect_limit {
                         let _ = limit;
                         let _ = grant.effects;
-                        let _ = counted;
                     }
 --- end
