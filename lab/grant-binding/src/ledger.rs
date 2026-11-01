@@ -6202,3 +6202,97 @@ fn model_identity_change_still_times_out() {
         .expect_err("timeout does not revive the ended grant");
     assert_eq!(ended, Refuse::UnknownHandle);
 }
+
+#[test]
+fn model_rate_window_roll_keeps_the_effect_count() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("library");
+    verifier.set_verifier_now(10);
+    verifier
+        .set_rate(library, 1, 10)
+        .expect("window starts at 10");
+    verifier.set_effect_limit(library, 2).expect("two effects");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal does not spend the count");
+    verifier
+        .operate(
+            &call,
+            &guest(library),
+            crate::ops::Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect("one effect inside the window");
+    let spent = verifier
+        .operate(
+            &call,
+            &guest(library),
+            crate::ops::Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("the rate is spent");
+    assert_eq!(spent, crate::ops::OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(spent.to_string(), "rate limit is reached");
+    let child_spent = verifier
+        .operate(
+            &call,
+            &guest(roll),
+            crate::ops::Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect_err("the journal spends the same rate");
+    assert_eq!(
+        child_spent,
+        crate::ops::OperateRefuse::Binding(Refuse::Rate)
+    );
+    verifier.set_verifier_now(20);
+    verifier
+        .operate(
+            &call,
+            &guest(roll),
+            crate::ops::Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect("the new window spends the second effect");
+    verifier
+        .set_rate(library, 4, 10)
+        .expect("a higher rate does not start the effect count over");
+    let limited = verifier
+        .operate(
+            &call,
+            &guest(library),
+            crate::ops::Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("the effect count survived the new window");
+    assert_eq!(
+        limited,
+        crate::ops::OperateRefuse::Binding(Refuse::EffectLimit)
+    );
+    assert_eq!(limited.to_string(), "effect limit is reached");
+    let child_limited = verifier
+        .operate(
+            &call,
+            &guest(roll),
+            crate::ops::Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect_err("the journal spends the same effect count");
+    assert_eq!(
+        child_limited,
+        crate::ops::OperateRefuse::Binding(Refuse::EffectLimit)
+    );
+    assert_eq!(child_limited.to_string(), "effect limit is reached");
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the grant stays in the store");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("the journal stays in the store");
+}
