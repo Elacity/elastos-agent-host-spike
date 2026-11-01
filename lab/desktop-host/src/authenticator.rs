@@ -5,8 +5,8 @@
 //! requests itself, as a browser's built-in authenticator does: keys live in this
 //! Mac's Secure Enclave and sign only after Touch ID or the Mac password. Home's
 //! server sees a normal passkey (`none` attestation, ES256) from its own origin.
+//! On Linux the keys live in the TPM security chip instead (`tpm.rs`).
 
-use std::ffi::CString;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -21,35 +21,96 @@ const RP_ID: &str = "localhost";
 const ORIGIN: &str = "http://localhost:8090";
 const ES256: i64 = -7;
 
-extern "C" {
-    fn elastos_enclave_epoch() -> u64;
-    fn elastos_enclave_cancel();
-    fn elastos_enclave_create(
-        expected: u64,
-        reason: *const libc::c_char,
-        blob: *mut u8,
-        blob_cap: usize,
-        blob_len: *mut usize,
-        public_key: *mut u8,
-    ) -> i32;
-    fn elastos_enclave_sign(
-        expected: u64,
-        blob: *const u8,
-        blob_len: usize,
-        message: *const u8,
-        message_len: usize,
-        reason: *const libc::c_char,
-        signature: *mut u8,
-        signature_cap: usize,
-        signature_len: *mut usize,
-    ) -> i32;
+#[cfg(target_os = "linux")]
+use crate::tpm as key;
+
+#[cfg(target_os = "macos")]
+mod key {
+    use std::ffi::CString;
+
+    extern "C" {
+        fn elastos_enclave_epoch() -> u64;
+        fn elastos_enclave_cancel();
+        fn elastos_enclave_create(
+            expected: u64,
+            reason: *const libc::c_char,
+            blob: *mut u8,
+            blob_cap: usize,
+            blob_len: *mut usize,
+            public_key: *mut u8,
+        ) -> i32;
+        fn elastos_enclave_sign(
+            expected: u64,
+            blob: *const u8,
+            blob_len: usize,
+            message: *const u8,
+            message_len: usize,
+            reason: *const libc::c_char,
+            signature: *mut u8,
+            signature_cap: usize,
+            signature_len: *mut usize,
+        ) -> i32;
+    }
+
+    pub fn epoch() -> u64 {
+        unsafe { elastos_enclave_epoch() }
+    }
+
+    pub fn cancel() {
+        unsafe { elastos_enclave_cancel() }
+    }
+
+    pub fn create(expected: u64) -> Result<(Vec<u8>, [u8; 65]), ()> {
+        let reason = CString::new("save a passkey for your ElastOS Home").unwrap();
+        let mut blob = vec![0u8; 4096];
+        let mut blob_len = 0usize;
+        let mut point = [0u8; 65];
+        let status = unsafe {
+            elastos_enclave_create(
+                expected,
+                reason.as_ptr(),
+                blob.as_mut_ptr(),
+                blob.len(),
+                &mut blob_len,
+                point.as_mut_ptr(),
+            )
+        };
+        if status != 0 {
+            return Err(());
+        }
+        blob.truncate(blob_len);
+        Ok((blob, point))
+    }
+
+    pub fn sign(expected: u64, blob: &[u8], message: &[u8], reason: &str) -> Result<Vec<u8>, ()> {
+        let reason = CString::new(reason).map_err(|_| ())?;
+        let mut signature = [0u8; 128];
+        let mut signature_len = 0usize;
+        let status = unsafe {
+            elastos_enclave_sign(
+                expected,
+                blob.as_ptr(),
+                blob.len(),
+                message.as_ptr(),
+                message.len(),
+                reason.as_ptr(),
+                signature.as_mut_ptr(),
+                signature.len(),
+                &mut signature_len,
+            )
+        };
+        if status != 0 {
+            return Err(());
+        }
+        Ok(signature[..signature_len].to_vec())
+    }
 }
 
 /// The answer to one request from the Home window, in the form the window script
 /// returns to Home: base64url JSON with the credential or a refusal name. A new
 /// passkey also returns its id: it stays pending until `settle`.
 pub fn answer(request: &str) -> (String, Option<String>) {
-    let epoch = unsafe { elastos_enclave_epoch() };
+    let epoch = key::epoch();
     let parsed = B64
         .decode(request)
         .ok()
@@ -87,7 +148,7 @@ pub fn answer(request: &str) -> (String, Option<String>) {
 /// Ends a Touch ID in progress for a page that is gone; a request still waiting
 /// (for example on the account dialog) is refused before Touch ID.
 pub fn cancel() {
-    unsafe { elastos_enclave_cancel() }
+    key::cancel()
 }
 
 /// Keeps a pending passkey once the page that asked has it; otherwise deletes it,
@@ -105,7 +166,11 @@ fn store() -> PathBuf {
     let home = crate::runtime::lab_home()
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
         .unwrap_or_default();
-    home.join("Library/Application Support/ElastOS Lab/passkeys")
+    if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/ElastOS Lab/passkeys")
+    } else {
+        home.join(".local/share/elastos-lab/passkeys")
+    }
 }
 
 fn credential_path(id: &str) -> Option<PathBuf> {
@@ -194,27 +259,17 @@ fn create(options: &Value, epoch: u64) -> Result<Value, &'static str> {
         }
     }
 
-    let reason = CString::new("save a passkey for your ElastOS Home").unwrap();
-    let mut blob = vec![0u8; 4096];
-    let mut blob_len = 0usize;
-    let mut point = [0u8; 65];
-    let status = unsafe {
-        elastos_enclave_create(
-            epoch,
-            reason.as_ptr(),
-            blob.as_mut_ptr(),
-            blob.len(),
-            &mut blob_len,
-            point.as_mut_ptr(),
-        )
-    };
-    if status != 0 {
-        return Err("NotAllowedError");
-    }
-    blob.truncate(blob_len);
+    let (blob, point) = key::create(epoch).map_err(|()| "NotAllowedError")?;
 
     let mut raw_id = [0u8; 32];
-    unsafe { libc::arc4random_buf(raw_id.as_mut_ptr().cast(), raw_id.len()) };
+    #[cfg(target_os = "macos")]
+    unsafe {
+        libc::arc4random_buf(raw_id.as_mut_ptr().cast(), raw_id.len())
+    };
+    #[cfg(target_os = "linux")]
+    if unsafe { libc::getrandom(raw_id.as_mut_ptr().cast(), raw_id.len(), 0) } != 32 {
+        return Err("UnknownError");
+    }
     let id = B64.encode(raw_id);
     let path = pending_path(&id).ok_or("UnknownError")?;
     fs::DirBuilder::new()
@@ -385,29 +440,9 @@ fn get(options: &Value, epoch: u64) -> Result<Value, &'static str> {
     let mut message = auth_data.clone();
     message.extend(Sha256::digest(client_data.as_bytes()));
 
-    let reason = CString::new(format!(
-        "sign in to your ElastOS Home as {}",
-        account(&record)
-    ))
-    .map_err(|_| "UnknownError")?;
-    let mut signature = [0u8; 128];
-    let mut signature_len = 0usize;
-    let status = unsafe {
-        elastos_enclave_sign(
-            epoch,
-            blob.as_ptr(),
-            blob.len(),
-            message.as_ptr(),
-            message.len(),
-            reason.as_ptr(),
-            signature.as_mut_ptr(),
-            signature.len(),
-            &mut signature_len,
-        )
-    };
-    if status != 0 {
-        return Err("NotAllowedError");
-    }
+    let reason = format!("sign in to your ElastOS Home as {}", account(&record));
+    let signature =
+        key::sign(epoch, &blob, &message, &reason).map_err(|()| "NotAllowedError")?;
 
     Ok(json!({
         "id": id,
@@ -416,7 +451,7 @@ fn get(options: &Value, epoch: u64) -> Result<Value, &'static str> {
         "response": {
             "clientDataJSON": B64.encode(client_data),
             "authenticatorData": B64.encode(auth_data),
-            "signature": B64.encode(&signature[..signature_len]),
+            "signature": B64.encode(&signature),
             "userHandle": record["user_id"],
         },
     }))

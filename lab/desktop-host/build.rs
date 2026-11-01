@@ -9,6 +9,9 @@ fn xcrun(args: &[&str]) -> String {
 
 fn main() {
     println!("cargo:rerun-if-changed=src/enclave.swift");
+    if std::env::var("CARGO_CFG_TARGET_OS").unwrap() != "macos" {
+        return;
+    }
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").unwrap().as_str() {
         "aarch64" => "arm64",

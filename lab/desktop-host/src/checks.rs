@@ -5,13 +5,11 @@ const MIN_FREE_BYTES: u64 = 8_000_000_000;
 
 /// A reason this computer cannot run ElastOS at all.
 pub fn refusal() -> Option<String> {
-    if std::env::consts::OS != "macos" {
-        return Some("This lab app runs on macOS only.".into());
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") | ("linux", "aarch64") | ("linux", "x86_64") => None,
+        ("macos", _) => Some("ElastOS needs a Mac with Apple silicon.".into()),
+        _ => Some("This lab app runs on macOS and Linux only.".into()),
     }
-    if std::env::consts::ARCH != "aarch64" {
-        return Some("ElastOS needs a Mac with Apple silicon.".into());
-    }
-    None
 }
 
 /// P1 does not install ElastOS; it says what is missing and what a first run needs.

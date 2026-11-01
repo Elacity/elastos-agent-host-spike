@@ -10,12 +10,17 @@ const MAX_REQUEST_CHARS: usize = 16384;
 const MAX_ANSWER_CHARS: usize = 65536;
 
 /// Runs in Home's top page only. Passkey requests go to the app; anything else to
-/// WebKit as before.
+/// WebKit as before. WebKitGTK has no WebAuthn, so there the script supplies the
+/// two names Home checks for.
 pub const WINDOW_SCRIPT: &str = r#"(() => {
   if (window.location.origin !== "http://localhost:8090" || window.location.pathname !== "/home/"
-    || !navigator.credentials || !window.ipc) return;
-  const create = navigator.credentials.create.bind(navigator.credentials);
-  const get = navigator.credentials.get.bind(navigator.credentials);
+    || !window.ipc) return;
+  const native = navigator.credentials;
+  const refuse = () => Promise.reject(new DOMException("Passkeys are not available here.", "NotSupportedError"));
+  const create = native ? native.create.bind(native) : refuse;
+  const get = native ? native.get.bind(native) : refuse;
+  if (!native) Object.defineProperty(navigator, "credentials", { value: {} });
+  if (!window.PublicKeyCredential) Object.defineProperty(window, "PublicKeyCredential", { value: class PublicKeyCredential {} });
   const pending = new Map();
   const names = ["NotAllowedError", "AbortError", "InvalidStateError", "SecurityError", "NotSupportedError"];
   let next = crypto.getRandomValues(new Uint32Array(1))[0];

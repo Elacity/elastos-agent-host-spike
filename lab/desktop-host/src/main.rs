@@ -1,8 +1,32 @@
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod authenticator;
+/// No key store here yet: Home's passkey requests are refused.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+mod authenticator {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+    use base64::Engine;
+
+    pub fn answer(request: &str) -> (String, Option<String>) {
+        let id = B64
+            .decode(request)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|value| value["id"].as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let body = serde_json::json!({ "v": 1, "id": id, "ok": false, "name": "NotSupportedError" });
+        (B64.encode(body.to_string()), None)
+    }
+
+    pub fn settle(_id: &str, _delivered: bool) {}
+
+    pub fn cancel() {}
+}
 mod checks;
 mod firstrun;
 mod passkey;
 mod runtime;
+#[cfg(target_os = "linux")]
+mod tpm;
 
 use std::thread;
 use std::time::{Duration, Instant};
@@ -136,14 +160,14 @@ fn main() {
                 let Some(menu) = menu.take() else {
                     return;
                 };
-                tray = Some(
-                    TrayIconBuilder::new()
-                        .with_menu(Box::new(menu))
-                        .with_tooltip("ElastOS Lab")
-                        .with_icon_templated(icon())
-                        .build()
-                        .expect("tray icon"),
-                );
+                let builder = TrayIconBuilder::new()
+                    .with_menu(Box::new(menu))
+                    .with_tooltip("ElastOS Lab");
+                #[cfg(target_os = "macos")]
+                let builder = builder.with_icon_templated(icon());
+                #[cfg(not(target_os = "macos"))]
+                let builder = builder.with_icon(icon());
+                tray = Some(builder.build().expect("tray icon"));
                 if lab_start.is_some() {
                     show_home(&mut home, target, &passkey_proxy);
                 }
@@ -392,7 +416,7 @@ fn new_home_window(
     }
     let lab_downloads = runtime::lab_home().map(|home| home.join("Downloads"));
     let page_proxy = proxy.clone();
-    let webview = builder
+    let builder = builder
         .with_on_page_load_handler(move |event, _url| {
             if let wry::PageLoadEvent::Started = event {
                 let _ = page_proxy.send_event(UserEvent::PageStarted);
@@ -438,8 +462,15 @@ fn new_home_window(
                 let _ = proxy.send_event(UserEvent::PasskeyAsk(id, request));
             }
         })
-        .with_html(STARTING)
-        .build(&window)?;
+        .with_html(STARTING);
+    #[cfg(target_os = "linux")]
+    let webview = {
+        use tao::platform::unix::WindowExtUnix;
+        use wry::WebViewBuilderExtUnix;
+        builder.build_gtk(window.default_vbox().ok_or("the window has no GTK box")?)?
+    };
+    #[cfg(not(target_os = "linux"))]
+    let webview = builder.build(&window)?;
     Ok((window, webview))
 }
 
@@ -465,7 +496,9 @@ fn icon() -> Icon {
             } else {
                 0
             };
-            rgba.extend_from_slice(&[0, 0, 0, alpha]);
+            // Linux panels are dark and do not tint tray icons.
+            let shade = if cfg!(target_os = "macos") { 0 } else { 255 };
+            rgba.extend_from_slice(&[shade, shade, shade, alpha]);
         }
     }
     Icon::from_rgba(rgba, SIZE, SIZE).expect("tray icon image")

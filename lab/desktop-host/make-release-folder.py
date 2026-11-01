@@ -2,16 +2,17 @@
 """Builds the release folder a desktop app carries (ELASTOS-DESKTOP-APP).
 
 The folder holds the signed release pair, the publisher's sources.json and every
-artifact for Apple silicon Macs, each checked against the signed release and saved
-under its CID. `elastos install --from <folder>` then installs it with the same checks
-as the online installer.
+artifact for one platform (Apple silicon Macs unless --platform says otherwise), each
+fetched by CID, checked against the signed release and saved under its CID.
+`elastos install --from <folder>` then installs it with the same checks as the online
+installer.
 
-    make-release-folder.py --sources SOURCES.json --out DIR
+    make-release-folder.py --sources SOURCES.json --out DIR [--platform aarch64-linux]
 
 LAB ONLY: --lab-runtime BIN --lab-key KEY --signer ELASTOS swaps in a locally built
 Runtime and re-signs the release pair with a throwaway lab key, trusted next to the
-publisher's key. A folder built that way must never ship. Lab releases carry Apple
-silicon Macs only. For a lab publisher (experiment P7) it can also set the version and
+publisher's key. A folder built that way must never ship. Lab releases carry that one
+platform only. For a lab publisher (experiment P7) it can also set the version and
 the previous publication, write the flat signed set `elastos publish-release` takes,
 and name that publisher in sources.json as install.sh does.
 """
@@ -32,8 +33,11 @@ import tempfile
 import time
 import urllib.request
 
+PLATFORMS = {"aarch64-darwin": ("darwin-arm64", "*"),
+             "aarch64-linux": ("linux-arm64", "*"),
+             "x86_64-linux": ("linux-amd64", "*")}
 RELEASE_PLATFORM = "aarch64-darwin"
-COMPONENT_PLATFORMS = ("darwin-arm64", "*")
+COMPONENT_PLATFORMS = PLATFORMS[RELEASE_PLATFORM]
 
 
 def raw_cid(digest):
@@ -114,6 +118,7 @@ def pack_capsule(source, capsule):
 
 
 def main():
+    global RELEASE_PLATFORM, COMPONENT_PLATFORMS
     parser = argparse.ArgumentParser()
     parser.add_argument("--sources", required=True, help="sources.json written by the official installer")
     parser.add_argument("--out", required=True)
@@ -132,7 +137,9 @@ def main():
     parser.add_argument("--publisher-node", help="lab publisher's Carrier node id, stamped into sources.json")
     parser.add_argument("--connect-ticket", help="lab publisher's Carrier ticket, stamped into sources.json")
     parser.add_argument("--gateway", help="lab publisher's gateway URL, stamped into sources.json")
+    parser.add_argument("--platform", choices=sorted(PLATFORMS), default=RELEASE_PLATFORM)
     args = parser.parse_args()
+    RELEASE_PLATFORM, COMPONENT_PLATFORMS = args.platform, PLATFORMS[args.platform]
     os.makedirs(args.out, exist_ok=True)
 
     sources = json.load(open(args.sources))
@@ -152,10 +159,11 @@ def main():
     platform = release["payload"]["platforms"][RELEASE_PLATFORM]
 
     binary = platform["binary"]
-    runtime = fetch(f"{gateway}/artifacts/elastos-{RELEASE_PLATFORM}", args.out, binary["cid"], binary["sha256"], binary["size"])
-    os.chmod(runtime, 0o755)
+    if not args.lab_runtime:
+        runtime = fetch(f"{gateway}/ipfs/{binary['cid']}", args.out, binary["cid"], binary["sha256"], binary["size"])
+        os.chmod(runtime, 0o755)
     descriptor = platform["components"]
-    components_path = fetch(f"{gateway}/artifacts/components-{RELEASE_PLATFORM}.json", args.out,
+    components_path = fetch(f"{gateway}/ipfs/{descriptor['cid']}", args.out,
                             descriptor["cid"], descriptor["sha256"], descriptor["size"])
     manifest = json.load(open(components_path))
     # Setup installs the release's signed capsule records where they exist, else
@@ -171,10 +179,10 @@ def main():
             wanted[p["cid"]] = (p["name"], p["release_path"], p["sha256"], p["size"])
     for cid, (name, release_path, checksum, size) in wanted.items():
         print(f"  {name}: {release_path} ({int(size) // (1 << 20)} MiB)", flush=True)
-        fetch(f"{gateway}/artifacts/{release_path}", args.out, cid, checksum, size)
+        fetch(f"{gateway}/ipfs/{cid}", args.out, cid, checksum, size)
     count = len(wanted)
-    fetch(f"{gateway}/artifacts/model-catalog.json", args.out, manifest["model_catalog"]["head_cid"])
-    fetch(f"{gateway}/artifacts/collaboration-network-release-v1.json", args.out,
+    fetch(f"{gateway}/ipfs/{manifest['model_catalog']['head_cid']}", args.out, manifest["model_catalog"]["head_cid"])
+    fetch(f"{gateway}/ipfs/{manifest['collaboration_network']['head_cid']}", args.out,
           manifest["collaboration_network"]["head_cid"])
     installer = open(args.installer, "rb").read() if args.installer else get("install.sh")
     if hashlib.sha256(installer).hexdigest() != release["payload"]["installer_sha256"]:
@@ -198,13 +206,13 @@ def main():
         payload = release["payload"]
         payload["platforms"] = {RELEASE_PLATFORM: payload["platforms"][RELEASE_PLATFORM]}
         payload["platforms"][RELEASE_PLATFORM]["binary"] = {"cid": cid, "sha256": digest.hex(), "size": len(data)}
-        def mac_only(value):
+        def one_platform(value):
             if isinstance(value, dict):
                 if isinstance(value.get("platforms"), dict):
                     value["platforms"] = {p: v for p, v in value["platforms"].items() if p in COMPONENT_PLATFORMS}
                 for child in value.values():
-                    mac_only(child)
-        mac_only(manifest["external"])
+                    one_platform(child)
+        one_platform(manifest["external"])
         payload["capsule_records"] = [r for r in payload.get("capsule_records", [])
                                       if r["payload"].get("platform") in COMPONENT_PLATFORMS]
         head_payload = head["payload"]

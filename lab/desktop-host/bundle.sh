@@ -1,15 +1,22 @@
 #!/bin/sh
 # Wraps the release binary as dist/ElastOS Lab.app: a local, ad-hoc signed
-# menu-bar app. No Developer ID, no notarization, no DMG.
+# menu-bar app. No Developer ID, no notarization, no DMG. On Linux it makes
+# dist/elastos-lab-<platform>.tar.gz: the binary, the release and a desktop file.
 set -eu
 
 cd "$(dirname "$0")"
+case "$(uname -s)/$(uname -m)" in
+	Darwin/arm64) platform=aarch64-darwin ;;
+	Linux/aarch64) platform=aarch64-linux ;;
+	Linux/x86_64) platform=x86_64-linux ;;
+	*) echo "unsupported build host $(uname -s)/$(uname -m)" >&2; exit 1 ;;
+esac
 # The app, not the folder, names the release it installs: the head CID, its only
 # publisher, and the Runtime that runs the install are built into the executable.
 if [ -n "${LAB_RELEASE:-}" ]; then
-	pins="$(python3 - "$LAB_RELEASE" <<'PY'
+	pins="$(python3 - "$LAB_RELEASE" "$platform" <<'PY'
 import base64, hashlib, json, os, re, stat, sys
-folder = sys.argv[1]
+folder, platform = sys.argv[1], sys.argv[2]
 def read(name):
     path = os.path.join(folder, name)
     if not stat.S_ISREG(os.lstat(path).st_mode):
@@ -20,7 +27,7 @@ release = read("release.json")
 head_payload = json.loads(head)
 if head_payload["payload"]["release_sha256"] != hashlib.sha256(release).hexdigest():
     sys.exit("release.json is not the release the head names")
-binary = json.loads(release)["payload"]["platforms"]["aarch64-darwin"]["binary"]
+binary = json.loads(release)["payload"]["platforms"][platform]["binary"]
 runtime = read(binary["cid"])
 if hashlib.sha256(runtime).hexdigest() != binary["sha256"] or len(runtime) != binary["size"]:
     sys.exit("the Runtime file is not the one the release names")
@@ -47,6 +54,29 @@ PY
 		ELASTOS_RELEASE_RUNTIME_SHA256 ELASTOS_RELEASE_SOURCES_SHA256
 fi
 cargo build --release --locked --features lab-diag
+
+if [ "$platform" != aarch64-darwin ]; then
+	: "${LAB_RELEASE:?LAB_RELEASE is required on Linux}"
+	: "${LAB_HOME:?LAB_HOME is required with LAB_RELEASE}"
+	root="dist/elastos-lab"
+	rm -rf "$root" "dist/elastos-lab-$platform.tar.gz"
+	mkdir -p "$root/bin" "$root/Resources"
+	cp target/release/elastos-desktop-host "$root/bin/elastos-desktop-host"
+	cp -Rp "$LAB_RELEASE" "$root/Resources/release"
+	# Installed by the user as ~/.local/share/applications/elastos-lab.desktop;
+	# @APP@ is where the folder was unpacked.
+	cat > "$root/elastos-lab.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=ElastOS Lab
+Exec=env ELASTOS_LAB_HOME=$LAB_HOME @APP@/bin/elastos-desktop-host
+Terminal=false
+Categories=Network;
+DESKTOP
+	tar -czf "dist/elastos-lab-$platform.tar.gz" -C dist elastos-lab
+	echo "Built dist/elastos-lab-$platform.tar.gz"
+	exit 0
+fi
 
 app="dist/ElastOS Lab.app"
 rm -rf "$app"

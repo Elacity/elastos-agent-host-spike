@@ -33,7 +33,15 @@ pub fn install(release: &Path, home: &Path) -> io::Result<()> {
             "this app was built without a release to install",
         ));
     };
-    std::fs::create_dir_all(home)?;
+    // Ubuntu's umask leaves new folders group-writable; the Runtime's providers
+    // refuse data under a group-writable ancestor.
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(home)?;
+    }
     let installer = home.join(format!(".elastos-installer-{}", std::process::id()));
     stage_runtime(&release.join(runtime), runtime_sha256, &installer)?;
     let log = std::fs::File::options()
