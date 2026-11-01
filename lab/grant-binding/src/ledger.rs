@@ -538,7 +538,9 @@ use crate::{guest, rights, InstanceId};
 /// Registers one instance with a fresh grant and returns both.
 #[cfg(test)]
 fn bound(verifier: &mut Verifier) -> (InstanceId, Handle) {
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -845,8 +847,12 @@ fn model_reported_usage_does_not_lower_the_hold() {
 #[test]
 fn model_reserve_on_a_sibling_instance_is_refused() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -863,8 +869,12 @@ fn model_reserve_on_a_sibling_instance_is_refused() {
 #[test]
 fn model_forged_instance_does_not_move_the_reserve() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -895,8 +905,12 @@ fn model_forged_instance_does_not_move_the_reserve() {
 #[test]
 fn model_forged_append_does_not_move_the_reserve() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -927,8 +941,12 @@ fn model_forged_append_does_not_move_the_reserve() {
 #[test]
 fn model_forged_overwrite_does_not_move_the_reserve() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -959,8 +977,12 @@ fn model_forged_overwrite_does_not_move_the_reserve() {
 #[test]
 fn model_forged_child_journal_does_not_move_the_reserve() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -991,8 +1013,12 @@ fn model_forged_child_journal_does_not_move_the_reserve() {
 #[test]
 fn model_forged_identity_does_not_move_the_reserve() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -1023,8 +1049,12 @@ fn model_forged_identity_does_not_move_the_reserve() {
 #[test]
 fn model_forged_session_does_not_move_the_reserve() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -1055,8 +1085,12 @@ fn model_forged_session_does_not_move_the_reserve() {
 #[test]
 fn model_forged_ceiling_does_not_move_the_reserve() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -1087,8 +1121,12 @@ fn model_forged_ceiling_does_not_move_the_reserve() {
 #[test]
 fn model_reported_usage_does_not_move_the_reserve() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -1255,8 +1293,12 @@ fn model_release_returns_the_unused_hold() {
 #[test]
 fn model_settle_on_a_sibling_instance_is_refused() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -1289,8 +1331,12 @@ fn model_settle_on_a_sibling_instance_is_refused() {
 #[test]
 fn model_release_on_a_sibling_instance_is_refused() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -1319,8 +1365,12 @@ fn model_release_on_a_sibling_instance_is_refused() {
 #[test]
 fn model_forged_instance_does_not_move_the_release() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -1352,8 +1402,12 @@ fn model_forged_instance_does_not_move_the_release() {
 #[test]
 fn model_forged_append_does_not_move_the_release() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -1385,8 +1439,12 @@ fn model_forged_append_does_not_move_the_release() {
 #[test]
 fn model_forged_overwrite_does_not_move_the_release() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -1418,8 +1476,12 @@ fn model_forged_overwrite_does_not_move_the_release() {
 #[test]
 fn model_forged_child_journal_does_not_move_the_release() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -1451,8 +1513,12 @@ fn model_forged_child_journal_does_not_move_the_release() {
 #[test]
 fn model_forged_identity_does_not_move_the_release() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -1484,8 +1550,12 @@ fn model_forged_identity_does_not_move_the_release() {
 #[test]
 fn model_forged_session_does_not_move_the_release() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -1517,8 +1587,12 @@ fn model_forged_session_does_not_move_the_release() {
 #[test]
 fn model_forged_ceiling_does_not_move_the_release() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -1550,8 +1624,12 @@ fn model_forged_ceiling_does_not_move_the_release() {
 #[test]
 fn model_reported_usage_does_not_move_the_release() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -1786,8 +1864,12 @@ fn model_settle_past_the_u64_charge_is_refused() {
 #[test]
 fn model_settle_on_another_handle_is_refused() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let holder = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -1836,8 +1918,12 @@ fn model_settle_on_another_handle_is_refused() {
 #[test]
 fn model_release_on_another_handle_is_refused() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let holder = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -2456,7 +2542,9 @@ fn model_forged_session_does_not_retarget_the_hold() {
 fn model_forged_instance_does_not_retarget_the_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let call = verifier.open_call(instance);
     verifier
@@ -3029,7 +3117,9 @@ fn model_forged_session_does_not_set_the_timeout_deadline() {
 fn model_forged_instance_does_not_set_the_timeout_deadline() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let call = verifier.open_call(instance);
     verifier
@@ -3248,7 +3338,9 @@ fn model_forged_session_does_not_skip_the_uncertain_mark() {
 fn model_forged_instance_does_not_skip_the_uncertain_mark() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let call = verifier.open_call(instance);
     verifier
@@ -3285,8 +3377,12 @@ fn model_forged_instance_does_not_skip_the_uncertain_mark() {
 #[test]
 fn model_forged_instance_does_not_move_the_settle() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -3319,8 +3415,12 @@ fn model_forged_instance_does_not_move_the_settle() {
 #[test]
 fn model_forged_append_does_not_move_the_settle() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -3353,8 +3453,12 @@ fn model_forged_append_does_not_move_the_settle() {
 #[test]
 fn model_forged_overwrite_does_not_move_the_settle() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -3387,8 +3491,12 @@ fn model_forged_overwrite_does_not_move_the_settle() {
 #[test]
 fn model_forged_child_journal_does_not_move_the_settle() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -3421,8 +3529,12 @@ fn model_forged_child_journal_does_not_move_the_settle() {
 #[test]
 fn model_forged_identity_does_not_move_the_settle() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -3455,8 +3567,12 @@ fn model_forged_identity_does_not_move_the_settle() {
 #[test]
 fn model_forged_session_does_not_move_the_settle() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -3489,8 +3605,12 @@ fn model_forged_session_does_not_move_the_settle() {
 #[test]
 fn model_forged_ceiling_does_not_move_the_settle() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -3523,8 +3643,12 @@ fn model_forged_ceiling_does_not_move_the_settle() {
 #[test]
 fn model_reported_usage_does_not_move_the_settle() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -3600,8 +3724,12 @@ fn model_timeout_twice_is_refused() {
 #[test]
 fn model_timeout_on_another_handle_is_refused() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let holder = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -3651,8 +3779,12 @@ fn model_timeout_on_another_handle_is_refused() {
 #[test]
 fn model_timeout_on_a_sibling_instance_is_refused() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -3693,8 +3825,12 @@ fn model_timeout_on_a_sibling_instance_is_refused() {
 #[test]
 fn model_forged_instance_does_not_move_the_timeout() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -3733,8 +3869,12 @@ fn model_forged_instance_does_not_move_the_timeout() {
 #[test]
 fn model_forged_append_does_not_move_the_timeout() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -3774,8 +3914,12 @@ fn model_forged_append_does_not_move_the_timeout() {
 #[test]
 fn model_forged_overwrite_does_not_move_the_timeout() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -3815,8 +3959,12 @@ fn model_forged_overwrite_does_not_move_the_timeout() {
 #[test]
 fn model_forged_child_journal_does_not_move_the_timeout() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -3856,8 +4004,12 @@ fn model_forged_child_journal_does_not_move_the_timeout() {
 #[test]
 fn model_forged_identity_does_not_move_the_timeout() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -3897,8 +4049,12 @@ fn model_forged_identity_does_not_move_the_timeout() {
 #[test]
 fn model_forged_session_does_not_move_the_timeout() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -3938,8 +4094,12 @@ fn model_forged_session_does_not_move_the_timeout() {
 #[test]
 fn model_forged_ceiling_does_not_move_the_timeout() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -3979,8 +4139,12 @@ fn model_forged_ceiling_does_not_move_the_timeout() {
 #[test]
 fn model_reported_usage_does_not_move_the_timeout() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -4020,8 +4184,12 @@ fn model_reported_usage_does_not_move_the_timeout() {
 #[test]
 fn model_unknown_from_another_handle_does_not_mark_the_hold() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let holder = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -4064,8 +4232,12 @@ fn model_unknown_from_another_handle_does_not_mark_the_hold() {
 #[test]
 fn model_forged_append_does_not_mark_another_handle() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let holder = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -4107,8 +4279,12 @@ fn model_forged_append_does_not_mark_another_handle() {
 #[test]
 fn model_forged_overwrite_does_not_mark_another_handle() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let holder = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -4150,8 +4326,12 @@ fn model_forged_overwrite_does_not_mark_another_handle() {
 #[test]
 fn model_forged_child_journal_does_not_mark_another_handle() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let holder = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -4193,8 +4373,12 @@ fn model_forged_child_journal_does_not_mark_another_handle() {
 #[test]
 fn model_forged_identity_does_not_mark_another_handle() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let holder = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -4236,8 +4420,12 @@ fn model_forged_identity_does_not_mark_another_handle() {
 #[test]
 fn model_forged_session_does_not_mark_another_handle() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let holder = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -4279,8 +4467,12 @@ fn model_forged_session_does_not_mark_another_handle() {
 #[test]
 fn model_forged_instance_does_not_mark_another_handle() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let holder = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -4322,8 +4514,12 @@ fn model_forged_instance_does_not_mark_another_handle() {
 #[test]
 fn model_forged_ceiling_does_not_mark_another_handle() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let holder = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -4365,8 +4561,12 @@ fn model_forged_ceiling_does_not_mark_another_handle() {
 #[test]
 fn model_reported_usage_does_not_mark_another_handle() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let holder = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -4408,8 +4608,12 @@ fn model_reported_usage_does_not_mark_another_handle() {
 #[test]
 fn model_second_agent_does_not_raise_the_ceiling() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-2", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-2", "session-a")
+        .expect("instance");
     assert_ne!(second, first);
     let first_handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
@@ -4463,7 +4667,9 @@ fn model_second_agent_does_not_raise_the_ceiling() {
 #[test]
 fn model_lower_admit_binds_an_asked_agent() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -4497,7 +4703,9 @@ fn model_lower_admit_binds_an_asked_agent() {
 #[test]
 fn model_admit_at_the_round_is_honoured_by_the_reserve() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -4532,9 +4740,15 @@ fn model_admit_at_the_round_is_honoured_by_the_reserve() {
 #[test]
 fn model_unasked_agent_does_not_inherit_the_last_admit() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-2", "session-a");
-    let third = verifier.register_instance("agent-3", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-2", "session-a")
+        .expect("instance");
+    let third = verifier
+        .register_instance("agent-3", "session-a")
+        .expect("instance");
     let first_handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -4598,8 +4812,12 @@ fn model_empty_ceilings_map_has_no_ceiling() {
 #[test]
 fn model_other_agent_hold_does_not_fill_the_ceiling() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-2", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-2", "session-a")
+        .expect("instance");
     assert_ne!(second, first);
     let first_handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
@@ -4656,8 +4874,12 @@ fn model_other_agent_hold_does_not_fill_the_ceiling() {
 #[test]
 fn model_second_agent_hold_past_the_shared_u64_total_is_refused() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-2", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-2", "session-a")
+        .expect("instance");
     let first_handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -4708,8 +4930,12 @@ fn model_second_agent_hold_past_the_shared_u64_total_is_refused() {
 #[test]
 fn model_same_identity_shares_one_ceiling() {
     let mut verifier = Verifier::new();
-    let asked = verifier.register_instance("agent-1", "session-a");
-    let other = verifier.register_instance("agent-1", "session-b");
+    let asked = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let other = verifier
+        .register_instance("agent-1", "session-b")
+        .expect("instance");
     assert_ne!(other, asked);
     let asked_handle = verifier
         .bind_grant(asked, "UsersAI/agent-1/notes", rights())
@@ -4753,8 +4979,12 @@ fn model_same_identity_shares_one_ceiling() {
 #[test]
 fn model_forged_identity_does_not_pick_the_reserve_ceiling() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-2", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-2", "session-a")
+        .expect("instance");
     assert_ne!(second, first);
     let first_handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
@@ -4808,8 +5038,12 @@ fn model_forged_identity_does_not_pick_the_reserve_ceiling() {
 #[test]
 fn model_forged_session_does_not_pick_the_reserve_ceiling() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-2", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-2", "session-a")
+        .expect("instance");
     assert_ne!(second, first);
     let first_handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
@@ -4863,8 +5097,12 @@ fn model_forged_session_does_not_pick_the_reserve_ceiling() {
 #[test]
 fn model_forged_instance_does_not_pick_the_reserve_ceiling() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-2", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-2", "session-a")
+        .expect("instance");
     assert_ne!(second, first);
     let first_handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
@@ -4918,8 +5156,12 @@ fn model_forged_instance_does_not_pick_the_reserve_ceiling() {
 #[test]
 fn model_forged_append_does_not_pick_the_reserve_ceiling() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-2", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-2", "session-a")
+        .expect("instance");
     assert_ne!(second, first);
     let first_handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
@@ -4973,8 +5215,12 @@ fn model_forged_append_does_not_pick_the_reserve_ceiling() {
 #[test]
 fn model_forged_overwrite_does_not_pick_the_reserve_ceiling() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-2", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-2", "session-a")
+        .expect("instance");
     assert_ne!(second, first);
     let first_handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
@@ -5028,8 +5274,12 @@ fn model_forged_overwrite_does_not_pick_the_reserve_ceiling() {
 #[test]
 fn model_forged_child_journal_does_not_pick_the_reserve_ceiling() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-2", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-2", "session-a")
+        .expect("instance");
     assert_ne!(second, first);
     let first_handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
@@ -5083,8 +5333,12 @@ fn model_forged_child_journal_does_not_pick_the_reserve_ceiling() {
 #[test]
 fn model_forged_ceiling_does_not_pick_the_reserve_ceiling() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-2", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-2", "session-a")
+        .expect("instance");
     assert_ne!(second, first);
     let first_handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
@@ -5138,8 +5392,12 @@ fn model_forged_ceiling_does_not_pick_the_reserve_ceiling() {
 #[test]
 fn model_reported_usage_does_not_pick_the_reserve_ceiling() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-2", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let second = verifier
+        .register_instance("agent-2", "session-a")
+        .expect("instance");
     assert_ne!(second, first);
     let first_handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
@@ -5231,7 +5489,9 @@ fn model_end_grant_with_no_hold_leaves_no_kept_binding() {
 #[test]
 fn model_expired_grant_still_settles() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_until(photo, "UsersAI/photo/library", rights(), 5)
         .expect("expiry");
@@ -5296,7 +5556,9 @@ fn model_expired_grant_still_settles() {
 #[test]
 fn model_expired_grant_still_releases() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_until(photo, "UsersAI/photo/library", rights(), 5)
         .expect("expiry");
@@ -5331,7 +5593,9 @@ fn model_expired_grant_still_releases() {
 #[test]
 fn model_expired_grant_still_times_out() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_until(photo, "UsersAI/photo/library", rights(), 5)
         .expect("expiry");
@@ -5371,7 +5635,9 @@ fn model_expired_grant_still_times_out() {
 #[test]
 fn model_child_hold_settles_after_the_issuing_expiry() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_until(photo, "UsersAI/photo/library", rights(), 5)
         .expect("issuing expiry");

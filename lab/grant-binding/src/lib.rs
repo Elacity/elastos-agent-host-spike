@@ -130,6 +130,7 @@ pub enum Refuse {
     IssuingRate,
     JournalHeld,
     HandleSpace,
+    InstanceSpace,
 }
 
 impl std::fmt::Display for Refuse {
@@ -153,6 +154,7 @@ impl std::fmt::Display for Refuse {
             Refuse::IssuingRate => "rate stays on the issuing grant",
             Refuse::JournalHeld => "a live journal holds that path",
             Refuse::HandleSpace => "handle id does not fit",
+            Refuse::InstanceSpace => "instance id does not fit",
         })
     }
 }
@@ -199,8 +201,14 @@ impl Verifier {
     }
 
     /// Registers an instance and returns its registry id.
-    pub fn register_instance(&mut self, identity: &str, session: &str) -> InstanceId {
-        self.next_instance += 1;
+    pub fn register_instance(
+        &mut self,
+        identity: &str,
+        session: &str,
+    ) -> Result<InstanceId, Refuse> {
+        #[rustfmt::skip]
+        let next_instance = self.next_instance.checked_add(1).ok_or(Refuse::InstanceSpace)?;
+        self.next_instance = next_instance;
         let instance = InstanceId(self.next_instance);
         self.registry.insert(
             instance,
@@ -209,7 +217,7 @@ impl Verifier {
                 session: session.to_owned(),
             },
         );
-        instance
+        Ok(instance)
     }
 
     /// Opens a host call for one instance.
@@ -724,8 +732,12 @@ fn manifests_that_link_this_crate(root: &std::path::Path) -> Vec<std::path::Path
 #[test]
 fn model_forged_identity_session_and_instance_have_no_effect() {
     let mut verifier = Verifier::new();
-    let agent = verifier.register_instance("agent-1", "session-a");
-    let other = verifier.register_instance("agent-2", "session-b");
+    let agent = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let other = verifier
+        .register_instance("agent-2", "session-b")
+        .expect("instance");
     let handle = verifier
         .bind_grant(agent, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -770,7 +782,9 @@ fn model_forged_identity_session_and_instance_have_no_effect() {
 #[test]
 fn model_different_identity_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -787,7 +801,9 @@ fn model_different_identity_is_refused() {
 #[test]
 fn model_extended_identity_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -812,7 +828,9 @@ fn model_extended_identity_is_refused() {
 #[test]
 fn model_case_different_identity_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -837,7 +855,9 @@ fn model_case_different_identity_is_refused() {
 #[test]
 fn model_extended_session_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -862,7 +882,9 @@ fn model_extended_session_is_refused() {
 #[test]
 fn model_case_different_session_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -888,7 +910,9 @@ fn model_case_different_session_is_refused() {
 #[test]
 fn model_new_session_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -905,8 +929,12 @@ fn model_new_session_is_refused() {
 #[test]
 fn model_sibling_instance_is_refused() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -922,12 +950,16 @@ fn model_sibling_instance_is_refused() {
 #[test]
 fn model_unknown_handle_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind first grant");
     let mut other = Verifier::new();
-    let other_instance = other.register_instance("agent-1", "session-a");
+    let other_instance = other
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     other
         .bind_grant(other_instance, "UsersAI/agent-1/notes", rights())
         .expect("bind elsewhere");
@@ -946,7 +978,9 @@ fn model_unknown_handle_is_refused() {
 #[test]
 fn model_unknown_instance_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(instance, InstanceId(0));
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -970,7 +1004,9 @@ fn model_unknown_instance_is_refused() {
 #[test]
 fn model_bind_unknown_instance_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(instance, InstanceId(0));
     let refusal = verifier
         .bind_grant(InstanceId(0), "UsersAI/agent-1/notes", rights())
@@ -990,7 +1026,9 @@ fn model_bind_unknown_instance_is_refused() {
 #[test]
 fn model_owned_root_under_the_agent_is_stored() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -1003,7 +1041,9 @@ fn model_owned_root_under_the_agent_is_stored() {
 #[test]
 fn model_host_path_root_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let refusal = verifier
         .bind_grant(instance, "UsersAI/agent-1/file\\name", rights())
         .expect_err("host path");
@@ -1014,7 +1054,9 @@ fn model_host_path_root_is_refused() {
 #[test]
 fn model_empty_segment_in_the_owned_root_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let refusal = verifier
         .bind_grant(instance, "UsersAI/agent-1//notes", rights())
         .expect_err("empty segment");
@@ -1032,7 +1074,9 @@ fn model_empty_segment_in_the_owned_root_is_refused() {
 #[test]
 fn model_dotdot_in_the_owned_root_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let refusal = verifier
         .bind_grant(instance, "UsersAI/agent-1/../notes", rights())
         .expect_err("dotdot");
@@ -1043,7 +1087,9 @@ fn model_dotdot_in_the_owned_root_is_refused() {
 #[test]
 fn model_owned_root_must_sit_under_the_agent() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let refusal = verifier
         .bind_grant(instance, "UsersAI/other/notes", rights())
         .expect_err("outside principal");
@@ -1057,7 +1103,9 @@ fn model_owned_root_must_sit_under_the_agent() {
 #[test]
 fn model_extended_agent_segment_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let refusal = verifier
         .bind_grant(instance, "UsersAI/agent-10/notes", rights())
         .expect_err("extended agent segment");
@@ -1071,7 +1119,9 @@ fn model_extended_agent_segment_is_refused() {
 #[test]
 fn model_case_different_agent_segment_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let refusal = verifier
         .bind_grant(instance, "UsersAI/Agent-1/notes", rights())
         .expect_err("case-different agent segment");
@@ -1085,7 +1135,9 @@ fn model_case_different_agent_segment_is_refused() {
 #[test]
 fn model_public_storage_read_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let refusal = verifier
         .bind_grant(instance, "Public/notes", rights())
         .expect_err("public storage read");
@@ -1111,7 +1163,9 @@ fn model_public_storage_read_is_refused() {
 #[test]
 fn model_public_prefix_is_not_a_public_read() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let refusal = verifier
         .bind_grant(instance, "Publicity/notes", rights())
         .expect_err("public prefix");
@@ -1125,7 +1179,9 @@ fn model_public_prefix_is_not_a_public_read() {
 #[test]
 fn model_case_different_public_segment_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let refusal = verifier
         .bind_grant(instance, "public/notes", rights())
         .expect_err("case-different Public segment");
@@ -1139,7 +1195,9 @@ fn model_case_different_public_segment_is_refused() {
 #[test]
 fn model_extended_usersai_segment_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let refusal = verifier
         .bind_grant(instance, "UsersAIextra/agent-1/notes", rights())
         .expect_err("extended UsersAI segment");
@@ -1153,7 +1211,9 @@ fn model_extended_usersai_segment_is_refused() {
 #[test]
 fn model_case_different_usersai_segment_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let refusal = verifier
         .bind_grant(instance, "usersai/agent-1/notes", rights())
         .expect_err("case-different UsersAI segment");
@@ -1167,7 +1227,9 @@ fn model_case_different_usersai_segment_is_refused() {
 #[test]
 fn model_use_path_under_the_owned_root_is_allowed() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -1184,7 +1246,9 @@ fn model_use_path_under_the_owned_root_is_allowed() {
 #[test]
 fn model_forged_identity_does_not_move_the_use_path() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -1205,7 +1269,9 @@ fn model_forged_identity_does_not_move_the_use_path() {
 #[test]
 fn model_forged_session_does_not_move_the_use_path() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -1227,11 +1293,15 @@ fn model_forged_session_does_not_move_the_use_path() {
 #[test]
 fn model_forged_instance_does_not_move_the_use_path() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let call = verifier.open_call(instance);
     let request = GuestRequest {
@@ -1252,7 +1322,9 @@ fn model_forged_instance_does_not_move_the_use_path() {
 #[test]
 fn model_reported_usage_does_not_widen_the_use_path() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -1272,7 +1344,9 @@ fn model_reported_usage_does_not_widen_the_use_path() {
 #[test]
 fn model_forged_ceiling_does_not_widen_the_use_path() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -1292,7 +1366,9 @@ fn model_forged_ceiling_does_not_widen_the_use_path() {
 #[test]
 fn model_forged_append_does_not_widen_the_use_path() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -1312,7 +1388,9 @@ fn model_forged_append_does_not_widen_the_use_path() {
 #[test]
 fn model_forged_overwrite_does_not_widen_the_use_path() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -1332,7 +1410,9 @@ fn model_forged_overwrite_does_not_widen_the_use_path() {
 #[test]
 fn model_forged_child_journal_does_not_widen_the_use_path() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -1352,11 +1432,15 @@ fn model_forged_child_journal_does_not_widen_the_use_path() {
 #[test]
 fn model_forged_append_does_not_move_the_use_call() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let call = verifier.open_call(instance);
     let request = GuestRequest {
@@ -1374,11 +1458,15 @@ fn model_forged_append_does_not_move_the_use_call() {
 #[test]
 fn model_forged_overwrite_does_not_move_the_use_call() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let call = verifier.open_call(instance);
     let request = GuestRequest {
@@ -1396,11 +1484,15 @@ fn model_forged_overwrite_does_not_move_the_use_call() {
 #[test]
 fn model_forged_child_journal_does_not_move_the_use_call() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let call = verifier.open_call(instance);
     let request = GuestRequest {
@@ -1418,11 +1510,15 @@ fn model_forged_child_journal_does_not_move_the_use_call() {
 #[test]
 fn model_forged_identity_does_not_move_the_use_call() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let call = verifier.open_call(instance);
     let request = GuestRequest {
@@ -1441,11 +1537,15 @@ fn model_forged_identity_does_not_move_the_use_call() {
 #[test]
 fn model_forged_session_does_not_move_the_use_call() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let call = verifier.open_call(instance);
     let request = GuestRequest {
@@ -1464,11 +1564,15 @@ fn model_forged_session_does_not_move_the_use_call() {
 #[test]
 fn model_forged_ceiling_does_not_move_the_use_call() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let call = verifier.open_call(instance);
     let request = GuestRequest {
@@ -1486,11 +1590,15 @@ fn model_forged_ceiling_does_not_move_the_use_call() {
 #[test]
 fn model_reported_usage_does_not_move_the_use_call() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let call = verifier.open_call(instance);
     let request = GuestRequest {
@@ -1508,8 +1616,12 @@ fn model_reported_usage_does_not_move_the_use_call() {
 #[test]
 fn model_forged_append_does_not_move_the_use_grant() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -1531,8 +1643,12 @@ fn model_forged_append_does_not_move_the_use_grant() {
 #[test]
 fn model_forged_child_journal_does_not_move_the_use_grant() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -1554,8 +1670,12 @@ fn model_forged_child_journal_does_not_move_the_use_grant() {
 #[test]
 fn model_forged_overwrite_does_not_move_the_use_grant() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -1577,8 +1697,12 @@ fn model_forged_overwrite_does_not_move_the_use_grant() {
 #[test]
 fn model_forged_identity_does_not_move_the_use_grant() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -1600,8 +1724,12 @@ fn model_forged_identity_does_not_move_the_use_grant() {
 #[test]
 fn model_forged_session_does_not_move_the_use_grant() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -1623,8 +1751,12 @@ fn model_forged_session_does_not_move_the_use_grant() {
 #[test]
 fn model_forged_ceiling_does_not_move_the_use_grant() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -1646,8 +1778,12 @@ fn model_forged_ceiling_does_not_move_the_use_grant() {
 #[test]
 fn model_reported_usage_does_not_move_the_use_grant() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
@@ -1669,7 +1805,9 @@ fn model_reported_usage_does_not_move_the_use_grant() {
 #[test]
 fn model_use_path_dotdot_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -1687,7 +1825,9 @@ fn model_use_path_dotdot_is_refused() {
 #[test]
 fn model_dotdot_prefix_segment_is_a_plain_name() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -1703,7 +1843,9 @@ fn model_dotdot_prefix_segment_is_a_plain_name() {
 #[test]
 fn model_dot_prefix_segment_is_a_plain_name() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -1719,7 +1861,9 @@ fn model_dot_prefix_segment_is_a_plain_name() {
 #[test]
 fn model_underscore_segment_is_a_plain_name() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -1735,7 +1879,9 @@ fn model_underscore_segment_is_a_plain_name() {
 #[test]
 fn model_use_path_outside_the_owned_root_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -1753,7 +1899,9 @@ fn model_use_path_outside_the_owned_root_is_refused() {
 #[test]
 fn model_case_different_use_path_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -1771,7 +1919,9 @@ fn model_case_different_use_path_is_refused() {
 #[test]
 fn model_symlink_shaped_use_path_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -1794,7 +1944,9 @@ fn model_symlink_shaped_use_path_is_refused() {
 #[test]
 fn model_symlink_shaped_owned_root_is_refused() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let refusal = verifier
         .bind_grant(instance, "UsersAI/agent-1/link->out", rights())
         .expect_err("symlink-shaped owned root");
@@ -1812,8 +1964,12 @@ fn model_symlink_shaped_owned_root_is_refused() {
 #[test]
 fn model_use_path_on_a_sibling_instance_is_refused() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -1831,7 +1987,9 @@ fn model_use_path_on_a_sibling_instance_is_refused() {
 #[test]
 fn model_grant_keeps_bound_rights() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let bound = Rights {
         append: true,
         overwrite: false,
@@ -1855,7 +2013,9 @@ fn model_grant_keeps_bound_rights() {
 #[test]
 fn model_forged_append_does_not_widen_the_returned_grant() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let bound = Rights {
         append: false,
         overwrite: true,
@@ -1879,7 +2039,9 @@ fn model_forged_append_does_not_widen_the_returned_grant() {
 #[test]
 fn model_forged_child_journal_does_not_widen_the_returned_grant() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let bound = Rights {
         append: true,
         overwrite: false,
@@ -1903,7 +2065,9 @@ fn model_forged_child_journal_does_not_widen_the_returned_grant() {
 #[test]
 fn model_forged_append_does_not_replace_the_returned_root() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -1921,7 +2085,9 @@ fn model_forged_append_does_not_replace_the_returned_root() {
 #[test]
 fn model_forged_child_journal_does_not_replace_the_returned_root() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
@@ -2068,8 +2234,12 @@ fn model_workspace_dependency_is_a_link_in_place() {
 #[test]
 fn model_registered_home_ask_is_refused() {
     let mut verifier = Verifier::new();
-    let home = verifier.register_instance("home", "session-a");
-    let photo = verifier.register_instance("photo", "session-a");
+    let home = verifier
+        .register_instance("home", "session-a")
+        .expect("instance");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(photo, "UsersAI/photo/library", rights())
         .expect("photo ask");
@@ -2101,8 +2271,12 @@ fn model_registered_home_ask_is_refused() {
 #[test]
 fn model_home_direct_mint_is_refused() {
     let mut verifier = Verifier::new();
-    let home = verifier.register_instance("home", "session-a");
-    let photo = verifier.register_instance("photo", "session-a");
+    let home = verifier
+        .register_instance("home", "session-a")
+        .expect("instance");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let direct = verifier
         .bind_grant(home, "UsersAI/home/desk", rights())
         .expect_err("home calls the mint");
@@ -2120,7 +2294,9 @@ fn model_home_direct_mint_is_refused() {
 #[test]
 fn model_expired_grant_is_refused() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_until(photo, "UsersAI/photo/library", rights(), 5)
         .expect("library ask");
@@ -2144,7 +2320,9 @@ fn model_expired_grant_is_refused() {
 #[test]
 fn model_unset_expiry_is_not_expired() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let leaked = verifier
         .bind_until(photo, "Public/photo/desk", rights(), 0)
         .expect_err("public storage does not bind");
@@ -2171,8 +2349,12 @@ fn model_unset_expiry_is_not_expired() {
 #[test]
 fn model_revoke_one_app_stops_only_that_app() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
-    let notes = verifier.register_instance("notes", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let notes = verifier
+        .register_instance("notes", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(photo, "UsersAI/photo/library", rights())
         .expect("photo ask");
@@ -2201,8 +2383,12 @@ fn model_revoke_one_app_stops_only_that_app() {
 #[test]
 fn model_revoke_stops_derived_child_journals() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
-    let notes = verifier.register_instance("notes", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let notes = verifier
+        .register_instance("notes", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(photo, "UsersAI/photo/library", rights())
         .expect("library ask");
@@ -2248,7 +2434,9 @@ fn model_revoke_stops_derived_child_journals() {
 #[test]
 fn model_revoke_child_journal_leaves_its_parent() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(photo, "UsersAI/photo/library", rights())
         .expect("library ask");
@@ -2279,7 +2467,9 @@ fn model_revoke_child_journal_leaves_its_parent() {
 #[test]
 fn model_failed_child_keeps_next_ask_independent() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(photo, "UsersAI/photo/library", rights())
         .expect("library ask");
@@ -2306,7 +2496,9 @@ fn model_failed_child_keeps_next_ask_independent() {
 #[test]
 fn model_successful_child_keeps_next_ask_independent() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(photo, "UsersAI/photo/library", rights())
         .expect("library ask");
@@ -2331,8 +2523,12 @@ fn model_successful_child_keeps_next_ask_independent() {
 #[test]
 fn model_end_grant_ends_derived_child_journals() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
-    let notes = verifier.register_instance("notes", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let notes = verifier
+        .register_instance("notes", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(photo, "UsersAI/photo/library", rights())
         .expect("library ask");
@@ -2392,8 +2588,12 @@ fn model_end_grant_ends_derived_child_journals() {
 #[test]
 fn model_session_grant_ends_when_the_session_changes() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
-    let home = verifier.register_instance("home", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let home = verifier
+        .register_instance("home", "session-a")
+        .expect("instance");
     let home_mint = verifier
         .bind_for_session(home, "UsersAI/home/desk", rights())
         .expect_err("home does not mint");
@@ -2446,7 +2646,9 @@ fn model_session_grant_ends_when_the_session_changes() {
 #[test]
 fn model_same_session_keeps_the_session_grant() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_for_session(photo, "UsersAI/photo/library", rights())
         .expect("session grant");
@@ -2462,8 +2664,12 @@ fn model_same_session_keeps_the_session_grant() {
 #[test]
 fn model_session_change_leaves_the_other_instance() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
-    let notes = verifier.register_instance("notes", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let notes = verifier
+        .register_instance("notes", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_for_session(photo, "UsersAI/photo/library", rights())
         .expect("photo session grant");
@@ -2494,7 +2700,9 @@ fn model_session_change_leaves_the_other_instance() {
 #[test]
 fn model_child_use_follows_the_issuing_expiry() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_until(photo, "UsersAI/photo/library", rights(), 5)
         .expect("issuing expiry");
@@ -2547,7 +2755,9 @@ fn model_child_use_follows_the_issuing_expiry() {
 #[test]
 fn model_unset_issuing_expiry_does_not_expire_the_child() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(photo, "UsersAI/photo/library", rights())
         .expect("no expiry");
@@ -2565,7 +2775,9 @@ fn model_unset_issuing_expiry_does_not_expire_the_child() {
 #[test]
 fn model_child_path_follows_the_issuing_expiry() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_until(photo, "UsersAI/photo/library", rights(), 10)
         .expect("issuing expiry");
@@ -2601,7 +2813,9 @@ fn model_child_path_follows_the_issuing_expiry() {
 #[test]
 fn model_issuing_use_path_inside_a_live_journal_is_refused() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("agent-1", "session-a");
+    let photo = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let parent = verifier
         .bind_grant(photo, "UsersAI/agent-1/journal", rights())
         .expect("issuing grant");
@@ -2686,7 +2900,9 @@ fn model_issuing_use_path_inside_a_live_journal_is_refused() {
 #[test]
 fn model_issuing_use_path_over_a_live_journal_is_refused() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("agent-1", "session-a");
+    let photo = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let parent = verifier
         .bind_grant(photo, "UsersAI/agent-1/journal", rights())
         .expect("issuing grant");
@@ -2769,7 +2985,9 @@ fn model_issuing_use_path_over_a_live_journal_is_refused() {
 #[test]
 fn model_handle_id_that_does_not_fit_is_refused() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(photo, "UsersAI/photo/library", rights())
         .expect("library");
@@ -2794,7 +3012,9 @@ fn model_handle_id_that_does_not_fit_is_refused() {
         .use_grant(call, &guest(Handle(0)))
         .expect_err("the counter did not wrap");
     assert_eq!(wrapped, Refuse::UnknownHandle);
-    let home = verifier.register_instance("home", "session-a");
+    let home = verifier
+        .register_instance("home", "session-a")
+        .expect("instance");
     let home_refusal = verifier
         .bind_grant(home, "UsersAI/home/desk", rights())
         .expect_err("home still does not mint");
@@ -2836,4 +3056,60 @@ fn model_handle_id_that_does_not_fit_is_refused() {
         .use_grant(call, &guest(album))
         .expect("the album grant stays");
     assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
+}
+
+#[test]
+fn model_instance_id_that_does_not_fit_is_refused() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    assert_eq!(photo, InstanceId(1));
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("library");
+    verifier.next_instance = u64::MAX - 1;
+    let frames = verifier
+        .register_instance("frames", "session-a")
+        .expect("instance");
+    assert_eq!(frames, InstanceId(u64::MAX));
+    let refusal = verifier
+        .register_instance("album", "session-a")
+        .expect_err("the next instance does not fit");
+    assert_eq!(refusal, Refuse::InstanceSpace);
+    assert_eq!(refusal.to_string(), "instance id does not fit");
+    assert_eq!(verifier.next_instance, u64::MAX);
+    let call = verifier.open_call(photo);
+    let kept = verifier
+        .use_grant(call, &guest(library))
+        .expect("the first instance stays");
+    assert_eq!(kept.identity, "photo");
+    assert_eq!(kept.owned_root, "UsersAI/photo/library");
+    let frames_grant = verifier
+        .bind_grant(frames, "UsersAI/frames/roll", rights())
+        .expect("the last instance still binds");
+    let frames_call = verifier.open_call(frames);
+    let frames_kept = verifier
+        .use_grant(frames_call, &guest(frames_grant))
+        .expect("the last instance stays");
+    assert_eq!(frames_kept.identity, "frames");
+    let wrapped = verifier
+        .bind_grant(InstanceId(0), "UsersAI/photo/album", rights())
+        .expect_err("the counter did not wrap");
+    assert_eq!(wrapped, Refuse::UnknownInstance);
+    assert_eq!(wrapped.to_string(), "unknown instance");
+    assert_eq!(verifier.next_instance, u64::MAX);
+    verifier.next_instance = 1;
+    let album = verifier
+        .register_instance("album", "session-a")
+        .expect("instance");
+    assert_eq!(album, InstanceId(2));
+    let desk = verifier
+        .bind_grant(album, "UsersAI/album/desk", rights())
+        .expect("the next register is a new instance");
+    let album_call = verifier.open_call(album);
+    let album_kept = verifier
+        .use_grant(album_call, &guest(desk))
+        .expect("the new instance stays");
+    assert_eq!(album_kept.identity, "album");
 }

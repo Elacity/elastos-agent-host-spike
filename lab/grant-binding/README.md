@@ -2,7 +2,9 @@
 
 This crate is the pure-Rust reference model for Bus v2 grade point A5 and for
 Rong's GB-1 and GB-2. One `Verifier` owns the instance registry, the grant store
-and the ledger. The host registers an instance with its identity and session,
+and the ledger.
+A next instance id that does not fit is refused, and that refusal stores no instance.
+The host registers an instance with its identity and session,
 binds a `UsersAI/<agent>/...` owned root and the append, overwrite and
 child-journal rights to an opaque `Handle`, and gives the guest only that
 handle. The guest may carry claims; `use_grant` reads the handle and nothing

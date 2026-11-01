@@ -256,7 +256,9 @@ use crate::{guest, rights, InstanceId, Rights};
 /// Registers one instance with a grant that carries `rights`.
 #[cfg(test)]
 fn bound_with(verifier: &mut Verifier, rights: Rights) -> (InstanceId, Handle) {
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/journal", rights)
         .expect("bind");
@@ -485,8 +487,12 @@ fn model_forged_session_does_not_grant_append() {
 #[test]
 fn model_forged_instance_does_not_grant_append() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(
@@ -520,8 +526,12 @@ fn model_forged_instance_does_not_grant_append() {
 #[test]
 fn model_operate_on_a_sibling_instance_is_refused() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(first, "UsersAI/agent-1/journal", rights())
         .expect("bind");
@@ -625,8 +635,12 @@ fn model_child_journal_does_not_permit_append_or_overwrite() {
 #[test]
 fn model_child_journal_on_a_sibling_instance_is_refused() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(
             first,
@@ -788,8 +802,12 @@ fn model_forged_overwrite_does_not_skip_the_right() {
 #[test]
 fn model_child_journal_create_on_a_sibling_instance_is_refused() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(
             first,
@@ -1122,7 +1140,9 @@ fn model_forged_instance_does_not_move_the_child_grant() {
             child_journal: true,
         },
     );
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let call = verifier.open_call(instance);
     let request = GuestRequest {
@@ -1300,7 +1320,9 @@ fn model_forged_overwrite_does_not_widen_the_child_root() {
 #[test]
 fn model_owned_root_needs_a_resource_segment() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let refusal = verifier
         .bind_grant(instance, "UsersAI/agent-1", rights())
         .expect_err("agent principal is not a resource");
@@ -1321,7 +1343,9 @@ fn model_owned_root_needs_a_resource_segment() {
 #[test]
 fn model_allow_once_ends_after_one_effect() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_once(photo, "UsersAI/photo/library", rights())
         .expect("allow once");
@@ -1366,8 +1390,12 @@ fn model_allow_once_ends_after_one_effect() {
 #[test]
 fn model_session_grant_allows_a_second_effect() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
-    let home = verifier.register_instance("home", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let home = verifier
+        .register_instance("home", "session-a")
+        .expect("instance");
     let public = verifier
         .bind_once(photo, "Public/photo/desk", rights())
         .expect_err("public storage does not bind");
@@ -1426,7 +1454,9 @@ fn model_session_grant_allows_a_second_effect() {
 #[test]
 fn model_effect_limit_stops_the_next_effect() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(
             photo,
@@ -1494,7 +1524,9 @@ fn model_effect_limit_stops_the_next_effect() {
 #[test]
 fn model_unset_effect_limit_does_not_stop() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(
             photo,
@@ -1553,7 +1585,9 @@ fn model_unset_effect_limit_does_not_stop() {
 #[test]
 fn model_child_effect_spends_the_issuing_limit() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(
             photo,
@@ -1630,7 +1664,9 @@ fn model_child_effect_spends_the_issuing_limit() {
 #[test]
 fn model_unset_issuing_limit_allows_a_child_effect() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(
             photo,
@@ -1691,7 +1727,9 @@ fn model_overwrite_outside_the_owned_root_is_refused() {
 #[test]
 fn model_append_outside_the_owned_root_is_refused() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_once(
             photo,
@@ -1803,7 +1841,9 @@ fn model_child_journal_effect_stays_inside_its_root() {
 #[test]
 fn model_rate_stops_the_next_effect_in_the_window() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(
             photo,
@@ -1872,7 +1912,9 @@ fn model_rate_stops_the_next_effect_in_the_window() {
 #[test]
 fn model_new_window_allows_one_effect() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(
             photo,
@@ -1929,7 +1971,9 @@ fn model_new_window_allows_one_effect() {
 #[test]
 fn model_child_effect_spends_the_issuing_rate() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(
             photo,
@@ -1992,7 +2036,9 @@ fn model_child_effect_spends_the_issuing_rate() {
 #[test]
 fn model_unset_rate_does_not_stop() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(
             photo,
@@ -2051,7 +2097,9 @@ fn model_unset_rate_does_not_stop() {
 #[test]
 fn model_child_effect_follows_the_issuing_window() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(
             photo,
@@ -2117,7 +2165,9 @@ fn model_child_effect_follows_the_issuing_window() {
 #[test]
 fn model_child_effect_ends_the_allow_once_grant() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_once(photo, "UsersAI/photo/library", rights())
         .expect("allow once");
@@ -2183,7 +2233,9 @@ fn model_child_effect_ends_the_allow_once_grant() {
 #[test]
 fn model_standing_child_allows_another_effect() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(photo, "UsersAI/photo/library", rights())
         .expect("standing library");
@@ -2223,7 +2275,9 @@ fn model_standing_child_allows_another_effect() {
 #[test]
 fn model_zero_window_starts_a_new_count() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(photo, "UsersAI/photo/library", rights())
         .expect("library");
@@ -2253,7 +2307,9 @@ fn model_zero_window_starts_a_new_count() {
 #[test]
 fn model_child_zero_window_starts_a_new_count() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(photo, "UsersAI/photo/library", rights())
         .expect("issuing grant");
@@ -2291,7 +2347,9 @@ fn model_child_zero_window_starts_a_new_count() {
 #[test]
 fn model_zero_rate_on_a_zero_window_still_stops() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let frames = verifier
         .bind_grant(photo, "UsersAI/photo/frames", rights())
         .expect("frames");
@@ -3216,7 +3274,9 @@ fn model_second_set_rate_keeps_the_window() {
 #[test]
 fn model_expired_grant_stores_no_new_bound() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_until(photo, "UsersAI/photo/library", rights(), 10)
         .expect("library");
@@ -3347,7 +3407,9 @@ fn model_expired_grant_stores_no_new_bound() {
 #[test]
 fn model_rate_holds_when_the_window_end_does_not_fit() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(
             photo,
