@@ -1,0 +1,13 @@
+id: F-A5-rateset
+file: src/lib.rs
+test: ops::model_second_set_rate_keeps_the_window
+--- old
+        if starting {
+            grant.record.window_start = self.verifier_now;
+            grant.record.window_effects = 0;
+        }
+--- new
+        let _ = starting;
+        grant.record.window_start = self.verifier_now;
+        grant.record.window_effects = 0;
+--- end
