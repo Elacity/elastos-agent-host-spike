@@ -1,0 +1,10 @@
+id: F-A7-sesshold
+file: src/lib.rs
+test: ledger::model_session_change_still_settles
+test: ledger::model_session_change_still_releases
+test: ledger::model_session_change_still_times_out
+--- old
+            held.record.session = live.session.clone();
+--- new
+            let _ = live.session.clone();
+--- end
