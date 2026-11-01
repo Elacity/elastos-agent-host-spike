@@ -1,0 +1,10 @@
+id: F-A7-idhold
+file: src/lib.rs
+test: ledger::model_identity_change_still_settles
+test: ledger::model_identity_change_still_releases
+test: ledger::model_identity_change_still_times_out
+--- old
+            held.record.identity = live.identity.clone();
+--- new
+            let _ = live.identity.clone();
+--- end
