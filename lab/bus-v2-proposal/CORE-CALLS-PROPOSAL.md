@@ -41,6 +41,8 @@ The Runtime resolves `Users/self` to a person principal and a localhost root. Th
         format!("person:local:{}", hex::encode(&digest[..16]))
     }
 
+The Runtime reaches the person principal through `elastos/crates/elastos-server/src/auth.rs::upsert_principal_for_binding`. That function asks the binding for its id at `elastos/crates/elastos-server/src/auth.rs:4743`, and it derives the principal id from that proof-binding id at `elastos/crates/elastos-server/src/auth.rs:4744` through `local_person_principal_id`. The `ProofBinding` record at `elastos/crates/elastos-auth/src/lib.rs:41` is the evidence the Runtime accepted as control of a principal, and it is not the principal. The derivation writes no grant and admits nothing; it names the principal that a later admission decision may use, and the agent principal stays a separate question in section 7.
+
 `elastos/crates/elastos-server/src/auth.rs::principal_localhost_root` builds the localhost root from a principal id. The body hashes that id with SHA-256 and returns `localhost://Users/` plus the hex of the first 12 bytes of the digest.
 
     pub fn principal_localhost_root(principal_id: &str) -> String {
