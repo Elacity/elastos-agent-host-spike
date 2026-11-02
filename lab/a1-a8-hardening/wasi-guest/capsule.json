@@ -1,0 +1,21 @@
+{
+  "schema": "elastos.capsule/v1",
+  "name": "a1-wasi-guest",
+  "version": "0.1.0",
+  "description": "Lab component for M1 A1. The default build imports only elastos:bus. The wasi-env build adds one wasi:cli/environment import, which Runtime admission must refuse.",
+  "author": "local-development",
+  "role": "app",
+  "type": "wasm",
+  "runtime_abi": "elastos.component/v1",
+  "bus_contract": "elastos:bus@v1",
+  "wit_world_sha256": "7a026e0a641c8c04214576dc85a677e0b52c9f02866d231119f9a3ba609d49e2",
+  "execution": "component",
+  "projections": ["facts"],
+  "entrypoint": "a1-wasi-guest.component.wasm",
+  "capabilities": [],
+  "resources": {
+    "memory_mb": 16,
+    "cpu_shares": 10,
+    "gpu": false
+  }
+}
