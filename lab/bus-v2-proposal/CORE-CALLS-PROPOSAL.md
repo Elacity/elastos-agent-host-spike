@@ -1950,12 +1950,13 @@ propose: the model operation uses the hosted-effect socket, and the five model o
 
 Section 5 shows the guest writes zeros, the journal check is room for history, the concurrency check counts non-terminal runs, the slot stores a time, and the usage function refuses an empty report. Section 5 states the account A7 asks for and cites no lab/grant-binding test.
 
-`lab/grant-binding/src/ledger.rs::reserve` holds an amount when the outstanding total plus the amount stays at or under the ceiling. `lab/grant-binding/src/ledger.rs:167` is the line that states that hold. The comparison is `total <= ledger.ceiling`.
+`lab/grant-binding/src/ledger.rs::reserve` holds an amount when the total it compares plus the amount stays at or under the ceiling. `lab/grant-binding/src/ledger.rs:236` is the first line of the comment that states that hold. The total it compares is the identity's own open holds when that identity has its own ceiling and the stored total of every open hold otherwise; `lab/grant-binding/src/ledger.rs:259` chooses that total, `lab/grant-binding/src/ledger.rs:265` takes that identity's ceiling, and `lab/grant-binding/src/ledger.rs:270` is the comparison that refuses the request.
 
-    /// Holds `amount` on the ledger when the outstanding total plus `amount`
-    /// stays at or under the ceiling. A binding refusal records nothing, a sum
-    /// that does not fit in `u64` is over the ceiling, and the request's
-    /// reported usage does not lower the hold.
+    /// Holds `amount` on the ledger when the total this identity compares plus
+    /// `amount` stays at or under the ceiling. A binding refusal records nothing,
+    /// a total that does not fit in `u64` is over the ceiling, a stored sum of
+    /// every open hold plus `amount` that does not fit in `u64` is a sum
+    /// overflow, and the request's reported usage does not lower the hold.
     pub fn reserve(
         &self,
         call: &Call,
