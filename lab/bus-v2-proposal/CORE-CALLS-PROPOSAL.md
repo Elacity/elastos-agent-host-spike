@@ -783,7 +783,7 @@ The error arm is this fault.
         "Runtime network authority is not available",
     ))
 
-The Runtime grants the call and carries it. `elastos/crates/elastos-server/src/api/model_provider_egress.rs::handle` calls `create_grant_after_decision` and `current_grant`. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:494` is the `create_grant_after_decision` call. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:503` is the `current_grant` check. An error denies the stream. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:509` calls `forward`, and that call is the carry.
+The Runtime grants the call and carries it. `elastos/crates/elastos-server/src/api/model_provider_egress.rs::handle` calls `create_grant_after_decision` and `current_grant`. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:494` is the `create_grant_after_decision` call. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:504` is the `current_grant` check. An error denies the stream. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:509` calls `forward`, and that call is the carry.
 
     async fn handle(
         mut stream: UnixStream,
@@ -792,32 +792,42 @@ The Runtime grants the call and carries it. `elastos/crates/elastos-server/src/a
         data_dir: &Path,
     ) -> io::Result<()> {
 
-The grant check denies the stream, and `forward` carries the call.
+The Runtime holds a grant before the decision. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:493` calls `RequestGrant::hold`. The decision refuses: `elastos/crates/elastos-server/src/api/model_provider_egress.rs:494` is the `create_grant_after_decision` call, and an error returns `deny`. The check refuses too: `elastos/crates/elastos-server/src/api/model_provider_egress.rs:504` is the `current_grant` check, and its error returns `deny` as well. The carry re-checks the grant while it runs: `elastos/crates/elastos-server/src/api/model_provider_egress.rs:524` is the third argument to `drive_forward`, which asks `current_grant` again. The grant check denies the stream, and `forward` carries the call.
 
-    if !operator_route
-        && create_grant_after_decision(
-            data_dir,
-            &request.offer_id,
-            &request.effect,
-            request.method.as_str(),
-            &destination,
-            None,
-            Some((&request.run_id, &request.request_id)),
-        )
-        .is_err()
+    let _grant = RequestGrant::hold(data_dir, &request, &destination);
+    if create_grant_after_decision(
+        data_dir,
+        &request.offer_id,
+        &request.effect,
+        request.method.as_str(),
+        &destination,
+        None,
+        Some((&request.run_id, &request.request_id)),
+    )
+    .is_err()
         || current_grant(data_dir, &request, &destination).is_err()
     {
         return deny(&mut stream).await;
     }
-    let result = {
-        let mut monitor = tokio::time::interval(Duration::from_millis(250));
-        let outbound = forward(&mut stream, data_dir, &request, &destination, || {
+    let result = drive_forward(
+        forward(&mut stream, data_dir, &request, &destination, || {
             bridge.confined_model_run_matches(
                 &request.offer_id,
                 &request.run_id,
                 &request.request_id,
             )
-        });
+        }),
+        || {
+            bridge.confined_model_identity().map(|(pid, _)| pid) == Some(provider_pid)
+                && bridge.confined_model_run_matches(
+                    &request.offer_id,
+                    &request.run_id,
+                    &request.request_id,
+                )
+        },
+        || current_grant(data_dir, &request, &destination).is_ok(),
+    )
+    .await;
 
 The model service is a separate Runtime path. `elastos/crates/elastos-server/src/api/gateway_model_service.rs:1` calls it the remote model service, the destination side of a `remote_model` grant. `elastos/crates/elastos-server/src/api/gateway_model_service.rs:4` says this Runtime owns the decision and verifies the grant. `elastos/crates/elastos-server/src/api/gateway_model_service.rs:32` names `MODEL_OPERATIONS`. The five strings are `offers_list`, `runs_create`, `runs_get`, `runs_events` and `runs_cancel`.
 
