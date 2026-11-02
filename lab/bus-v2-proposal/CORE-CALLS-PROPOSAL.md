@@ -1965,8 +1965,25 @@ Section 5 shows the guest writes zeros, the journal check is room for history, t
     ) -> Result<Reservation, ReserveRefuse> {
         self.resolve(*call, request.handle)
             .map_err(ReserveRefuse::Binding)?;
+        let identity = self
+            .grants
+            .get(&request.handle)
+            .expect("resolved grant")
+            .identity
+            .clone();
         let mut ledger = self.ledger.lock().expect("ledger lock");
         let held = ledger.held;
+        let shared = held;
+        let own = held_for_identity(&ledger.open, &self.grants, &identity);
+        let held = if ledger.ceilings.contains_key(&identity) {
+            own
+        } else {
+            shared
+        };
+        ledger.ceiling = ledger.admitted;
+        if let Some(agent_ceiling) = ledger.ceilings.get(&identity).copied() {
+            ledger.ceiling = agent_ceiling;
+        }
         let ledger: &mut Ledger = &mut ledger;
         let total = match held.checked_add(amount) {
             Some(total) if total <= ledger.ceiling => total,
@@ -1978,7 +1995,23 @@ Section 5 shows the guest writes zeros, the journal check is room for history, t
                 })
             }
         };
+        let put_back = if ledger.ceilings.contains_key(&identity) {
+            match shared.checked_add(amount) {
+                Some(shared_total) => Some(shared_total),
+                None => {
+                    return Err(ReserveRefuse::SumOverflow {
+                        held: shared,
+                        asked: amount,
+                    })
+                }
+            }
+        } else {
+            None
+        };
         ledger.held = total;
+        if let Some(shared_total) = put_back {
+            ledger.held = shared_total;
+        }
         ledger.next_reservation += 1;
         ledger.open.insert(
             ledger.next_reservation,
@@ -1986,6 +2019,8 @@ Section 5 shows the guest writes zeros, the journal check is room for history, t
                 handle: request.handle,
                 amount,
                 uncertain: false,
+                timed_out: false,
+                deadline: 0,
             },
         );
         Ok(Reservation {
