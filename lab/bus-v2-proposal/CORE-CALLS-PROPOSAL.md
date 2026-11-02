@@ -321,7 +321,7 @@ For the agent identity, a capability request calls `scope_current_user_alias` wi
     /// Runtime principal used to resolve capsule-facing `Users/self` aliases.
     pub principal_id: Option<String>,
 
-`elastos/crates/elastos-server/src/resource_bridge.rs:925` is the call in `handle_request`. The body handles a `request_capability` request. It calls `scope_current_user_alias` with the requested resource and `ctx.principal_id.as_deref()`. When the call returns an error, the body returns `principal_context_required` before it stores a pending request. When the call returns a name, the body runs `agents_area_capability_refusal`, parses the action, runs the wallet check, and runs the manifest check on that name. The body stores a pending request only after those checks pass, and the stored resource is the returned name.
+`elastos/crates/elastos-server/src/resource_bridge.rs:931` is the call in `handle_request`. The body handles a `request_capability` request. It calls `scope_current_user_alias` with the requested resource and `ctx.principal_id.as_deref()`. When the call returns an error, the body returns `principal_context_required` before it stores a pending request. When the call returns a name, the body runs `agents_area_capability_refusal`, parses the action, runs the wallet check, and runs the manifest check on that name. The body stores a pending request only after those checks pass, and the stored resource is the returned name.
 
                 let scoped_resource =
                     match scope_current_user_alias(resource, ctx.principal_id.as_deref()) {
@@ -354,7 +354,7 @@ For the agent identity, a capability request calls `scope_current_user_alias` wi
 
 For the session, the pending request's session id is the bridge capsule id. The identity host copies `capsule_id` into `session`. A status read of another session is refused. The shell grant passes `request.session_id` into `grant`.
 
-`elastos/crates/elastos-server/src/resource_bridge.rs:984` is the session id stored by that same `handle_request` body. The body builds a resource id from the scoped name and calls `create_request_with_reason`. The session argument is `SessionId` of `ctx.capsule_id.clone()`.
+`elastos/crates/elastos-server/src/resource_bridge.rs:990` is the session id stored by that same `handle_request` body. The body builds a resource id from the scoped name and calls `create_request_with_reason`. The session argument is `SessionId` of `ctx.capsule_id.clone()`.
 
                 let resource_id = elastos_runtime::capability::ResourceId::new(resource);
 
@@ -401,6 +401,16 @@ Resident A3 credit depends on the RA-6 path. `lab/agent-conformance/standin-runt
         constraints,
         None, // No expiry for now (session-scoped)
     );
+
+A grant ends only where the store ends it. `elastos/crates/elastos-runtime/src/capability/manager.rs:436` is the epoch test that `validate` runs on every call. That body audits the failure as epoch_revoked and returns TokenRevoked.
+
+        if !self.store.is_epoch_valid(token.constraints.epoch) {
+
+`elastos/crates/elastos-runtime/src/capability/manager.rs:442` is the per-token revocation test on that same `validate` path. That body audits the failure as individually_revoked and returns the same TokenRevoked.
+
+        if self.store.is_token_revoked(&token.id).await {
+
+The shell grant passes no expiry, so nothing times that token out: `elastos/crates/elastos-server/src/api/handlers/capability.rs:345` is the `None` argument in the grant block quoted above. A grant therefore lives for its session until the store moves the epoch or revokes that token. `test_wrong_capsule` shows the caller check, and no test in this section shows the epoch or the revocation path, so this paragraph claims none.
 
 For the capsule instance, `grant` stores its capsule id argument on the token. `validate` refuses a caller whose capsule id differs, and `test_wrong_capsule` shows that refusal. The component invoke passes `BridgeContext.capsule_id` as that caller. The bridge comment says this field is the capsule identity for token minting, a session id or a capsule name.
 
@@ -514,7 +524,7 @@ For the capsule instance, `grant` stores its capsule id argument on the token. `
         assert!(matches!(result, Err(ValidationError::WrongCapsule { .. })));
     }
 
-`elastos/crates/elastos-server/src/resource_bridge.rs:394` is the caller in `authorize_and_dispatch_resource_invoke`. The body decodes the presented token and calls `validate` with `&bridge_ctx.capsule_id`. When `validate` returns an error, the body denies the invoke with `capability_denied`.
+`elastos/crates/elastos-server/src/resource_bridge.rs:398` is the `validate` call in `authorize_and_dispatch_resource_invoke`. The body decodes the presented token and calls `validate` with `&bridge_ctx.capsule_id`. When `validate` returns an error, the body denies the invoke with `capability_denied`.
 
     if bridge_ctx
         .capability_manager
