@@ -680,7 +680,7 @@ The asks file declares two hosted resources. `examples/agent-host/asks.json:10` 
     {"kind": "hosted", "resource": "Models/"},
     {"kind": "hosted", "resource": "<principal>/.AppData/Models/"},
 
-The caller opens the model URL. `capsules/model-provider/src/adapters.rs::effect_request` is the one function that chooses the URL. A present `runtime_socket` uses `RUNTIME_HOSTED_EFFECT_URL`. The other branch uses `direct_url`. `capsules/model-provider/src/adapters.rs:42` sets that constant to `http://runtime.invalid/v1/hosted-effect`. `capsules/model-provider/src/adapters.rs:58` is the `direct_url` branch. That branch is request construction.
+The caller opens the model URL. `capsules/model-provider/src/adapters.rs::effect_request` is the one function that chooses the URL. A present `runtime_socket` uses `RUNTIME_HOSTED_EFFECT_URL`. The other branch uses `direct_url`. `capsules/model-provider/src/adapters.rs:44` sets that constant to `http://runtime.invalid/v1/hosted-effect`. `capsules/model-provider/src/adapters.rs:58` is `RUNTIME_HOSTED_EFFECT_URL`. The `direct_url` arm is `capsules/model-provider/src/adapters.rs:60`. That branch is request construction.
 
     fn effect_request(
         client: &reqwest::Client,
@@ -709,7 +709,7 @@ The caller opens the model URL. `capsules/model-provider/src/adapters.rs::effect
         }
     }
 
-The artifact-create worker, `run_http_artifact_create_worker_inner`, calls `require_external_http_containment` before `effect_request`. A production call with no Runtime socket is refused there, and `queued_external_workers_refuse_before_create_status_cancel_or_text_sockets` asserts zero requests in that case. The Runtime hosted transport is the production path. `capsules/model-provider/src/adapters.rs:1670` adds the authorization bearer. That line sits inside `if hosted_socket.is_none()`. The bearer is request construction on the `direct_url` branch.
+The artifact-create worker, `run_http_artifact_create_worker_inner`, calls `require_external_http_containment` before `effect_request`. A production call with no Runtime socket is refused there, and `queued_external_workers_refuse_before_create_status_cancel_or_text_sockets` asserts zero requests in that case. The Runtime hosted transport is the production path. `capsules/model-provider/src/adapters.rs:1670` is `if hosted_socket.is_none() {`. The authorization header is added at `capsules/model-provider/src/adapters.rs:1672`. The bearer is request construction on the `direct_url` branch.
 
     require_external_http_containment(hosted_socket)?;
     let client = backend_client_with_socket(offer.policy.runtime_ms_limit, hosted_socket)?;
@@ -756,7 +756,7 @@ On macOS, apply_local_model_sockets copies the stored hosted socket into the sam
             config.extra["runtime_hosted_socket"] = serde_json::json!(socket);
         }
 
-`capsules/model-provider/src/adapters.rs:125` is the error in require_external_http_containment: Hosted external HTTPS is paused. On macOS, a present runtime socket returns `Ok(())`. The error arm also says Runtime network authority is not available.
+`capsules/model-provider/src/adapters.rs:127` is the error in require_external_http_containment: Hosted external HTTPS is paused. On macOS, a present runtime socket returns `Ok(())`. The error arm also says Runtime network authority is not available.
 
     fn require_external_http_containment(
         runtime_socket: Option<&str>,
@@ -773,7 +773,7 @@ The error arm is this fault.
         "Runtime network authority is not available",
     ))
 
-The Runtime grants the call and carries it. `elastos/crates/elastos-server/src/api/model_provider_egress.rs::handle` calls `create_grant_after_decision` and `current_grant`. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:493` is the `create_grant_after_decision` call. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:503` is the `current_grant` check. An error denies the stream. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:509` calls `forward`, and that call is the carry.
+The Runtime grants the call and carries it. `elastos/crates/elastos-server/src/api/model_provider_egress.rs::handle` calls `create_grant_after_decision` and `current_grant`. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:494` is the `create_grant_after_decision` call. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:503` is the `current_grant` check. An error denies the stream. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:509` calls `forward`, and that call is the carry.
 
     async fn handle(
         mut stream: UnixStream,
