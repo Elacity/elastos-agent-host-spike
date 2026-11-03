@@ -502,6 +502,14 @@ def assert_source_home_provider_anchors(stamper):
             raise AssertionError("no-rights provider kept an anchor")
         if integrity.audit_provider_capsule_metadata(result, ["linux-amd64"], source_root=root, source_home=True):
             raise AssertionError("stamped anchors fail the integrity check")
+        # C4: an anchor row carries no extract_path; every release archive row must name one.
+        anchor_row = json.loads(json.dumps(result))
+        anchor_row["external"]["rights-provider"]["capsule_metadata"]["platforms"]["linux-amd64"].pop("extract_path", None)
+        if integrity.audit_provider_capsule_metadata(anchor_row, ["linux-amd64"], source_root=root, source_home=True):
+            raise AssertionError("the anchor row without extract_path failed the integrity check")
+        if not any("extract_path mismatch" in e for e in integrity.audit_provider_capsule_metadata(
+                anchor_row, ["linux-amd64"], source_root=root, source_home=False)):
+            raise AssertionError("a release archive row with no extract_path passed")
         row["extract_path"] = "../outside"  # refused in both modes
         for source_home in (True, False):
             if not any("extract_path mismatch" in e for e in integrity.audit_provider_capsule_metadata(
@@ -511,6 +519,49 @@ def assert_source_home_provider_anchors(stamper):
         if not any("install_path mismatch" in e for e in integrity.audit_provider_capsule_metadata(
                 result, ["linux-amd64"], source_root=root, source_home=True)):
             raise AssertionError("source-home mode accepted an unchecked install_path")
+        # C2: a selected name outside $DATA_DIR/capsules is refused before any file outside it is read.
+        scene, outside = data.parent / "scene", data.parent / "outside"
+        scene.mkdir()
+        write_json(outside / "capsule.json", installed_manifest("outside", True))
+        outside_hashes = tree_hashes(outside)
+        current = json.loads(components.read_text())
+
+        def unsafe_stamp(selected):
+            with redirect_stderr(io.StringIO()):
+                stamper.stamp_component_capsules(components, data, root, "linux-amd64", selected)
+        for unsafe in ("../outside", outside.as_posix(), "/outside"):
+            write_json(components, {"external": {**current["external"], "outside": external("outside")},
+                                    "profiles": {"source-home": {"components": [*names, unsafe]}}})
+            try:
+                unsafe_stamp([*names, unsafe])
+            except SystemExit as error:
+                if "unsafe source-home profile capsule name" not in str(error):
+                    raise AssertionError(f"{unsafe!r} refused for the wrong reason: {error}")
+            else:
+                raise AssertionError(f"{unsafe!r} escaped $DATA_DIR/capsules")
+            if "capsule_metadata" in json.loads(components.read_text())["external"]["outside"]:
+                raise AssertionError(f"{unsafe!r} was anchored before the refusal")
+        # A link inside $DATA_DIR/capsules must not carry the read to a manifest outside it.
+        read_through = data / "capsules" / "rights-provider" / "linked"
+        read_through.symlink_to(outside, target_is_directory=True)
+        write_json(outside / "linked" / "capsule.json", installed_manifest("linked", True))
+        outside_hashes = tree_hashes(outside)
+        write_json(components, {"external": {**current["external"], "linked": external("linked")},
+                                "profiles": {"source-home": {"components": [*names, "linked"]}}})
+        write_json(data / "capsules" / "linked" / "capsule.json", {"role": "provider"})  # a real dir would stamp
+        (data / "capsules" / "linked").rename(scene / "linked-real")
+        read_through.rename(data / "capsules" / "linked")  # capsules/linked -> capsules/rights-provider/linked -> outside
+        if not (data / "capsules" / "linked").resolve().is_relative_to(outside.resolve()):
+            raise AssertionError("the link row does not lead outside $DATA_DIR/capsules")
+        try:
+            unsafe_stamp([*names, "linked"])
+        except SystemExit as error:
+            if not str(error).startswith("refusing to anchor a linked capsule path"):
+                raise AssertionError(f"a linked installed capsule refused for the wrong reason: {error}")
+        else:
+            raise AssertionError("an installed capsule path that links outside $DATA_DIR/capsules was read")
+        if tree_hashes(outside) != outside_hashes:
+            raise AssertionError("an unsafe profile name or link read a file outside $DATA_DIR/capsules")
 
 
 def run_smoke():

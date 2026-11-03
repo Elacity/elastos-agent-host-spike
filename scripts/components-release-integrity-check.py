@@ -20,6 +20,7 @@ ALIASES = {
 
 CHECKSUM_RE = re.compile(r"^(sha256:[0-9a-fA-F]{64}|sha512:[0-9a-fA-F]{128})$")
 # setup-source-home.sh records a digest of the Home's own installed manifest here.
+SOURCE_HOME_ANCHOR_PREFIX = "source-home:"
 SOURCE_HOME_ANCHOR_RE = re.compile(r"^source-home:sha256:[0-9a-f]{64}$")
 DEV_STRATEGIES = {"source-build", "local-copy"}
 FETCH_FIELDS = ("release_path", "cid", "url")
@@ -304,8 +305,11 @@ def check_platform_rows(name, metadata, expected, errors, source_home_anchor=Fal
             continue
         if info.get("install_path") != expected:
             errors.append(f"{name}: capsule_metadata {platform} install_path mismatch")
-        # A row that names an extract_path must name its own capsule in every mode.
-        if "extract_path" in info and info.get("extract_path") != name:
+        # A release archive row names its own capsule and must name an extract_path. A source home ships no
+        # archive, so only its anchor row may omit it; a row that names one still names its own capsule.
+        checksum = info.get("checksum")
+        anchored = source_home_anchor and isinstance(checksum, str) and checksum.startswith(SOURCE_HOME_ANCHOR_PREFIX)
+        if ("extract_path" not in info and not anchored) or info.get("extract_path") not in (None, name):
             errors.append(f"{name}: capsule_metadata {platform} extract_path mismatch")
         # A checksum names the installed capsule, not an archive; a release profile holds ordinary digests only.
         if not source_home_anchor and non_empty(info.get("checksum")):
