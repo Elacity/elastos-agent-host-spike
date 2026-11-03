@@ -395,7 +395,9 @@ impl Verifier {
     #[rustfmt::skip]
     fn note_effect(&mut self, handle: Handle) -> Result<(), Refuse> {
         let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
-        grant.record.effects += 1;
+        if grant.record.effect_limit.is_some() {
+            grant.record.effects += 1;
+        }
         if grant.record.rate.is_some() {
             grant.record.window_effects += 1;
         }

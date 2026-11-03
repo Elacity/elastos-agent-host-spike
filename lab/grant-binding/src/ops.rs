@@ -2957,3 +2957,77 @@ fn model_issuing_effect_over_a_live_journal_is_refused() {
         .expect_err("the allow-once journal ended with the grant");
     assert_eq!(shot_ended, Refuse::UnknownHandle);
 }
+
+#[test]
+fn model_rate_does_not_spend_the_effect_count() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    assert_eq!(parent, Handle(1));
+    verifier.set_rate(parent, 10, 100).expect("rate");
+    let call = verifier.open_call(instance);
+    for _ in 0..3 {
+        verifier
+            .operate(
+                &call,
+                &guest(parent),
+                Operation::Append,
+                "UsersAI/agent-1/journal",
+            )
+            .expect("a rate-only root effect does not spend the effect count");
+    }
+    let roll = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/roll")
+        .expect("the journal mints");
+    assert_eq!(roll, Handle(2));
+    verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/agent-1/journal/roll/line",
+        )
+        .expect("a rate-only child effect does not spend the effect count");
+    verifier.set_effect_limit(parent, 2).expect("limit");
+    verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/agent-1/journal/roll/line",
+        )
+        .expect("the limit starts empty");
+    verifier
+        .set_effect_limit(parent, 2)
+        .expect("a second limit does not start the count over");
+    verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
+        .expect("the second counted effect reaches the limit");
+    let limited = verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
+        .expect_err("the effect count is reached");
+    assert_eq!(limited, OperateRefuse::Binding(Refuse::EffectLimit));
+    assert_eq!(limited.to_string(), "effect limit is reached");
+    verifier
+        .use_grant(call, &guest(parent))
+        .expect("the issuing grant stays");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("the journal stays");
+}
