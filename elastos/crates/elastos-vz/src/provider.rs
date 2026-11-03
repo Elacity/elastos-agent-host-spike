@@ -586,6 +586,7 @@ mod tests {
             viewer: None,
             window_policy: None,
             model_content: None,
+            agent: None,
             signature: None,
         }
     }

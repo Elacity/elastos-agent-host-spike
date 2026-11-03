@@ -207,6 +207,7 @@ mod tests {
             viewer: None,
             window_policy: None,
             model_content: None,
+            agent: None,
             signature: None,
         }
     }
@@ -258,6 +259,29 @@ mod tests {
         assert_eq!(
             verifier.verify_capsule(&manifest, &content_hash).unwrap(),
             Some(second)
+        );
+    }
+
+    /// The agent declaration is under the signature: adding it to a signed
+    /// manifest fails verification.
+    #[test]
+    fn agent_declaration_added_after_signing_fails_verification() {
+        let (signing_key, verifying_key) = generate_keypair();
+        let mut manifest = create_test_manifest();
+        let content_hash = hash_content(b"test content");
+        sign_capsule(&signing_key, &mut manifest, &content_hash).unwrap();
+        let mut verifier = SignatureVerifier::new();
+        verifier.add_trusted_key(verifying_key).unwrap();
+        assert!(verifier
+            .verify_capsule(&manifest, &content_hash)
+            .unwrap()
+            .is_some());
+        manifest.agent = Some(elastos_common::AgentDeclaration {
+            kind: elastos_common::AgentKind::Agent,
+        });
+        assert_eq!(
+            verifier.verify_capsule(&manifest, &content_hash).unwrap(),
+            None
         );
     }
 

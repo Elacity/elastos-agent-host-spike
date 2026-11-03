@@ -87,6 +87,13 @@ pub struct CapsuleManifest {
     #[serde(default)]
     pub authority: Option<ProviderAuthority>,
 
+    /// The signer's agent declaration (A5). Admission reads the agent kind only
+    /// from here, under the manifest signature, never from a launch request.
+    /// Skipped when absent so every existing signing message is unchanged; an
+    /// older Runtime refuses the field (`deny_unknown_fields`), failing closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentDeclaration>,
+
     /// Capabilities this capsule needs from other capsules (URI list)
     #[serde(default)]
     pub capabilities: Vec<String>,
@@ -442,6 +449,10 @@ impl CapsuleManifest {
 
         if self.version.trim().is_empty() {
             return Err("manifest version must not be empty".to_string());
+        }
+
+        if self.agent.is_some() && self.role != CapsuleRole::App {
+            return Err("an agent declaration requires role \"app\"".to_string());
         }
 
         if self.window_policy.is_some()
@@ -950,6 +961,20 @@ fn validate_json_schema(kind: &str, schema: Option<&Value>) -> Result<(), String
     Err(format!("{} schema must be a JSON object or boolean", kind))
 }
 
+/// What a capsule's signer declares about it as an agent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentDeclaration {
+    pub kind: AgentKind,
+}
+
+/// Declared agent kinds. An unknown kind fails to parse.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentKind {
+    Agent,
+}
+
 /// Provider-only authority metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -1317,6 +1342,51 @@ fn default_boot_args() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn agent_app_fixture() -> Value {
+        serde_json::json!({
+            "schema": "elastos.capsule/v1", "version": "0.1.0", "name": "agent-fixture",
+            "role": "app", "type": "wasm", "entrypoint": "main.wasm", "agent": {"kind": "agent"}
+        })
+    }
+
+    /// A5-S2: the declaration parses as a known kind on an app; an unknown kind,
+    /// an extra field or another role is refused.
+    #[test]
+    fn agent_declaration_parses_only_as_a_known_kind_on_an_app() {
+        let manifest: CapsuleManifest = serde_json::from_value(agent_app_fixture()).unwrap();
+        manifest.validate().unwrap();
+        let declared = Some(AgentDeclaration {
+            kind: AgentKind::Agent,
+        });
+        assert_eq!(manifest.agent, declared);
+        let mut unknown_kind = agent_app_fixture();
+        unknown_kind["agent"]["kind"] = serde_json::json!("human");
+        assert!(serde_json::from_value::<CapsuleManifest>(unknown_kind).is_err());
+        let mut extra = agent_app_fixture();
+        extra["agent"]["principal"] = serde_json::json!("localhost://UsersAI/other");
+        assert!(serde_json::from_value::<CapsuleManifest>(extra).is_err());
+        let mut viewer = agent_app_fixture();
+        viewer["role"] = serde_json::json!("viewer");
+        let manifest: CapsuleManifest = serde_json::from_value(viewer).unwrap();
+        assert!(manifest
+            .validate()
+            .unwrap_err()
+            .contains("agent declaration"));
+    }
+
+    /// An undeclared manifest serializes with no `agent` key, so existing
+    /// signatures still verify.
+    #[test]
+    fn undeclared_manifest_serializes_without_an_agent_key() {
+        let mut value = agent_app_fixture();
+        value.as_object_mut().unwrap().remove("agent");
+        let manifest: CapsuleManifest = serde_json::from_value(value).unwrap();
+        assert!(serde_json::to_value(&manifest)
+            .unwrap()
+            .get("agent")
+            .is_none());
+    }
 
     // ── Core parse/validation tests (strict v1 schema) ──────────────
 
