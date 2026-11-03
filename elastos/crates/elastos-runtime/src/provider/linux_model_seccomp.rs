@@ -724,7 +724,11 @@ mod tests {
     /// `VICTIM_PARENT_VAR`. A missing variable is a failure, never a silent
     /// `getppid()` fallback, because the helper's parent is not the harness.
     fn victim_token(parent: libc::pid_t, pid: libc::pid_t) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("elastos-row-victim-{parent}-{pid}"))
+        tagged_victim_token(&parent.to_string(), pid)
+    }
+
+    fn tagged_victim_token(tag: &str, pid: libc::pid_t) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("elastos-row-victim-{tag}-{pid}"))
     }
 
     /// The harness pid a helper process was given in `VICTIM_PARENT_VAR`.
@@ -1152,16 +1156,20 @@ mod tests {
         }
     }
 
-    /// Writes one readiness publication for this process and reads it back
-    /// through the path `Victim::start` polls.
-    fn published_readiness(line: &str) -> Option<usize> {
+    /// Writes one readiness publication under `tag` and reads it back through
+    /// the path `Victim::start` polls. The tag keeps each test's token and
+    /// staging file apart; the file is unlinked whatever the read does.
+    fn published_readiness(tag: &str, line: &str) -> Option<usize> {
         let pid = std::process::id() as libc::pid_t;
-        let token = victim_token(pid, pid);
+        let token = tagged_victim_token(tag, pid);
         let staging = token.with_extension("tmp");
         std::fs::write(&staging, line.replace("PID", &pid.to_string()))
             .expect("readiness publication");
-        std::fs::rename(&staging, &token).expect("readiness publication rename");
-        read_readiness(&token, pid)
+        std::fs::rename(&staging, &token).expect("readiness rename");
+        let address = read_readiness(&token, pid);
+        let _ = std::fs::remove_file(staging);
+        let _ = std::fs::remove_file(&token);
+        address
     }
 
     /// A line with no address fails by name instead of becoming a retry, so
@@ -1169,14 +1177,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "has no address field")]
     fn readiness_without_an_address_fails() {
-        assert_eq!(published_readiness("PID\n"), Some(1));
+        assert_eq!(published_readiness("no-address", "PID\n"), Some(1));
     }
 
     /// An address that is not a number fails by name.
     #[test]
     #[should_panic(expected = "has no address")]
     fn readiness_with_an_unparsable_address_fails() {
-        assert_eq!(published_readiness("PID invalid\n"), Some(1));
+        assert_eq!(published_readiness("unparsable", "PID invalid\n"), Some(1));
     }
 
     /// A published zero address fails by name: zero is the retry state and
@@ -1184,6 +1192,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "publishes address zero")]
     fn readiness_with_a_zero_address_fails() {
-        assert_eq!(published_readiness("PID 0\n"), Some(1));
+        assert_eq!(published_readiness("zero", "PID 0\n"), Some(1));
     }
 }
