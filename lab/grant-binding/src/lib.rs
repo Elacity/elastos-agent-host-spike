@@ -267,8 +267,6 @@ impl Verifier {
     pub fn revoke_grant(&mut self, handle: Handle) -> Result<(), Refuse> {
         #[rustfmt::skip]
         self.end_grant(handle);
-        #[rustfmt::skip]
-        self.end_derived_grants(handle);
         Ok(())
     }
 
@@ -2295,6 +2293,67 @@ fn model_successful_child_keeps_next_ask_independent() {
         .use_grant(photo_call, &guest(album))
         .expect("independent album stays");
     assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
+}
+
+#[test]
+fn model_end_grant_ends_derived_child_journals() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let notes = verifier.register_instance("notes", "session-a");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("library ask");
+    assert_eq!(library, Handle(1));
+    let album = verifier
+        .bind_grant(photo, "UsersAI/photo/album", rights())
+        .expect("album ask");
+    assert_eq!(album, Handle(2));
+    let notes_handle = verifier
+        .bind_grant(notes, "UsersAI/notes/pad", rights())
+        .expect("notes ask");
+    assert_eq!(notes_handle, Handle(3));
+    let photo_call = verifier.open_call(photo);
+    let notes_call = verifier.open_call(notes);
+    let roll = verifier
+        .create_child_journal(&photo_call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    assert_eq!(roll, Handle(4));
+    let other = verifier
+        .create_child_journal(&photo_call, &guest(library), "UsersAI/photo/library/other")
+        .expect("sibling journal");
+    assert_eq!(other, Handle(5));
+    verifier.end_grant(roll);
+    let one_child = verifier
+        .use_grant(photo_call, &guest(roll))
+        .expect_err("the ended journal stays ended");
+    assert_eq!(one_child, Refuse::UnknownHandle);
+    assert_eq!(one_child.to_string(), "unknown handle");
+    verifier
+        .use_grant(photo_call, &guest(library))
+        .expect("ending one journal leaves the issuing grant");
+    verifier
+        .use_grant(photo_call, &guest(other))
+        .expect("ending one journal leaves its sibling");
+    verifier.end_grant(library);
+    let parent_stopped = verifier
+        .use_grant(photo_call, &guest(library))
+        .expect_err("the issuing grant has ended");
+    assert_eq!(parent_stopped, Refuse::UnknownHandle);
+    assert_eq!(parent_stopped.to_string(), "unknown handle");
+    let sibling_stopped = verifier
+        .use_grant(photo_call, &guest(other))
+        .expect_err("end_grant ends the journal minted from that grant");
+    assert_eq!(sibling_stopped, Refuse::UnknownHandle);
+    assert_eq!(sibling_stopped.to_string(), "unknown handle");
+    let album_kept = verifier
+        .use_grant(photo_call, &guest(album))
+        .expect("another grant stays");
+    assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
+    let notes_kept = verifier
+        .use_grant(notes_call, &guest(notes_handle))
+        .expect("another app stays");
+    assert_eq!(notes_kept.identity, "notes");
+    assert_eq!(notes_kept.owned_root, "UsersAI/notes/pad");
 }
 
 #[test]
