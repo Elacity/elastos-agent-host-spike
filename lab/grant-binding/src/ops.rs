@@ -86,16 +86,7 @@ impl Verifier {
                 #[rustfmt::skip]
                 {
                     if operation != Operation::ChildJournal {
-                        if self.grants.values().any(|stored| {
-                            stored.record.parent == Some(request.handle)
-                                && !stored.ended
-                                && super::resource_name(
-                                    &grant.identity,
-                                    path,
-                                    Some(&stored.record.owned_root),
-                                )
-                                .is_ok()
-                        }) {
+                        if self.live_journal_holds(request.handle, &grant.identity, path) {
                             return Err(OperateRefuse::JournalHeld);
                         }
                     }
@@ -842,9 +833,11 @@ fn model_child_journal_returns_its_own_handle() {
         .use_grant(call, &guest(parent))
         .expect("parent grant");
     assert_eq!(parent_decision.owned_root, "UsersAI/agent-1/journal");
-    verifier
+    let parent_path = verifier
         .use_path(&call, &guest(parent), "UsersAI/agent-1/journal/page.md")
-        .expect("the parent handle keeps the parent root");
+        .expect_err("the issuing grant does not use the journal path");
+    assert_eq!(parent_path, Refuse::JournalHeld);
+    assert_eq!(parent_path.to_string(), "a live journal holds that path");
 }
 
 #[test]
