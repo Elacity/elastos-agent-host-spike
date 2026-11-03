@@ -1846,7 +1846,13 @@ def cli_capsule_archive(folder, name):
     return output.getvalue()
 
 
-def cli_previous_layout(output, release, component_platform, artifact, executable, receipt):
+# The signed release head and release name a source commit but no repository, so the
+# verified release signer names it: a maintainer publishes its releases from one repository.
+CLI_PREVIOUS_SOURCE_REPOSITORIES = {
+    "did:key:z6MkgwHd2BCWe1jHMXPiR6H1q1RFPcv1YzhMbK5G1kBarbfe": "https://github.com/elastos/elastos-runtime.git"}
+
+
+def cli_previous_layout(output, release, component_platform, artifact, executable, receipt, signer_did):
     """Complete a previous release output that holds its admitted release.json, elastos and
     components.json: add the installer of its signed source, and lay its Home support out like
     a source Home so a fixture can publish it. artifact(selected) returns the path of a signed
@@ -1856,8 +1862,13 @@ def cli_previous_layout(output, release, component_platform, artifact, executabl
     # A release signs its source; its installer is that source's install.sh.
     source, repository = release["source"], Path(__file__).resolve().parents[1]
     if subprocess.run(["git", "cat-file", "-e", source["commit"] + "^{commit}"], cwd=repository, capture_output=True).returncode:
-        subprocess.run(["git", "fetch", "--quiet", "--no-tags", "--depth=1", "origin", source["commit"]],
+        need(signer_did in CLI_PREVIOUS_SOURCE_REPOSITORIES, "previous release signer has no source repository")
+        remote = CLI_PREVIOUS_SOURCE_REPOSITORIES[signer_did]
+        print("previous release source: " + signer_did + " -> " + remote + " @ " + source["commit"], file=sys.stderr, flush=True)
+        subprocess.run(["git", "fetch", "--quiet", "--no-tags", "--depth=1", remote, source["commit"]],
                        cwd=repository, check=True, timeout=300)
+        need(subprocess.check_output(["git", "rev-parse", "FETCH_HEAD"], cwd=repository, text=True).strip() == source["commit"],
+             "previous release source fetch differs from its signed commit")
     need(subprocess.check_output(["git", "rev-parse", source["commit"] + "^{tree}"], cwd=repository, text=True).strip() == source["tree"],
          "previous release source tree differs")
     installer = subprocess.check_output(["git", "show", source["commit"] + ":scripts/install.sh"], cwd=repository)
@@ -1945,7 +1956,8 @@ def cli_fetch_previous_release(cache, output, pin_path=None):
     artifacts = release["platforms"][release_platform]
     for key, name in (("binary", "elastos"), ("components", "components.json")):
         fetch(artifacts[key]["cid"], artifacts[key]["sha256"], artifacts[key]["size"], name)
-    return cli_previous_layout(output, release, cli_component_platform(release_platform), artifact, executable, receipt)
+    return cli_previous_layout(output, release, cli_component_platform(release_platform), artifact, executable, receipt,
+                               pin["signer_did"])
 
 
 def cli_install_previous_release(home_path, output, pin_path=None):
@@ -2023,7 +2035,7 @@ def cli_install_previous_release(home_path, output, pin_path=None):
     artifacts = release["platforms"][release_platform]
     take(runtime, "elastos", artifacts["binary"]["sha256"])
     take(data / "components.json", "components.json", artifacts["components"]["sha256"])
-    receipt = cli_previous_layout(output, release, component_platform, artifact, executable, receipt)
+    receipt = cli_previous_layout(output, release, component_platform, artifact, executable, receipt, pin["signer_did"])
     shutil.rmtree(home_path)
     return receipt
 
