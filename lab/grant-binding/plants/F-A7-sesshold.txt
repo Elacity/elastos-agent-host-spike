@@ -1,10 +1,21 @@
 id: F-A7-sesshold
 file: src/lib.rs
-test: ledger::model_session_change_still_settles
-test: ledger::model_session_change_still_releases
-test: ledger::model_session_change_still_times_out
+test: ledger::model_session_change_settle_is_refused
+test: ledger::model_session_change_release_is_refused
+test: ledger::model_session_change_timeout_is_refused
 --- old
-            held.record.session = live.session.clone();
+        let held = {
+            let ledger = self.ledger.lock().expect("ledger lock");
+            ledger.ended.get(&handle).cloned()
+        }
+        .ok_or(Refuse::UnknownHandle)?;
 --- new
-            let _ = live.session.clone();
+        let mut held = {
+            let ledger = self.ledger.lock().expect("ledger lock");
+            ledger.ended.get(&handle).cloned()
+        }
+        .ok_or(Refuse::UnknownHandle)?;
+        if let Some(live) = self.registry.get(&call.instance) {
+            held.record.session = live.session.clone();
+        }
 --- end
