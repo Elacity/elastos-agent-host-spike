@@ -258,6 +258,8 @@ def stamp_component_capsules(components_path, data_dir, root, platform, capsules
     manifest = json.loads(components_path.read_text())
     capsule_entries = manifest.setdefault("capsules", {})
     obsolete_sidecars = []
+    # Each name is a path segment: refuse a bad one before any file is read (Codex 1407 @7ab96195).
+    validated_capsule_names(capsules, "source-home profile")
 
     for name in capsules:
         source_manifest_path = root / "capsules" / name / "capsule.json"
