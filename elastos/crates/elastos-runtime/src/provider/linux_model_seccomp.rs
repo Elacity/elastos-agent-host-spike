@@ -113,6 +113,8 @@ mod tests {
     /// zero without it exercised nothing and FAILS.
     const PROBE_TOKEN: &str = "elastos-seccomp-row-probe-passed";
     const ROW_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_ROW";
+    const TOKEN_ROW: &str = "socket+AF_INET";
+    const TOKEN_LINE: &str = "elastos-seccomp-row-probe-passed\n";
     /// Debug only: send each probe's stderr to its token file.
     const PROBE_LOG_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_LOG";
     /// The pid of a plain helper the harness starts beside the filtered probe.
@@ -132,6 +134,10 @@ mod tests {
     /// but takes no filter, so its success proves the position can reach the
     /// helper and only the deny entry refuses the filtered row.
     const UNFILTERED_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_UNFILTERED";
+    const CONTROL_STDERR: &str = "elastos-seccomp-control-stderr";
+    const CONTROL_EXIT: i32 = 7;
+    /// On a control child's own command only: it prints `n` bytes, exits [`CONTROL_EXIT`].
+    const CONTROL_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_CONTROL";
     /// The test that serves as the helper sibling.
     const VICTIM_TEST: &str =
         "provider::linux_model_seccomp::tests::helper_sibling_serves_the_victim_rows";
@@ -700,6 +706,8 @@ mod tests {
             if rc > 2 && wanted != READV_ROW {
                 close_all(&[rc as libc::c_int]);
             }
+            // Set on a test's own control child only.
+            planted_control();
         } else {
             check(row.name, row.outcome, rc);
         }
@@ -710,8 +718,7 @@ mod tests {
     async fn child_and_descendant_have_no_inet_sockets() {
         let name = DESCENDANT_TEST;
         let executable = std::env::current_exe().unwrap();
-        // A row that ends in a signal runs here, because the harness test
-        // proves the filter first and a killed process would fail that proof.
+        // A signal row runs here: the harness proves the filter.
         if let Ok(row) = std::env::var(ROW_VAR) {
             probe(&row);
             return;
@@ -796,16 +803,24 @@ mod tests {
         }
     }
 
-    /// Where one row's probe records its pass token. The filter closes the
-    /// child's inherited descriptors before exec, so a pipe from
-    /// `Stdio::piped` reaches the probe closed and its token is lost; this
-    /// file is opened before the fork. Each row starts and ends with none.
-    fn probe_token(name: &str) -> std::path::PathBuf {
+    /// A row's token file, opened before the fork; `tag` keeps two runs apart.
+    fn probe_token(tag: &str, name: &str) -> std::path::PathBuf {
         let safe: String = name
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
             .collect();
-        std::env::temp_dir().join(format!("elastos-row-probe-{}-{safe}", std::process::id()))
+        std::env::temp_dir().join(format!("field-probe-{}-{tag}-{safe}", std::process::id()))
+    }
+
+    /// The token file one child writes.
+    fn token_file(tag: &str, name: &str) -> std::fs::File {
+        std::fs::File::create(probe_token(tag, name)).expect("token")
+    }
+
+    /// One tag per control: no two controls share a token file.
+    fn next_tag() -> u64 {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Where the helper publishes its readiness line, keyed by the harness pid
@@ -1068,13 +1083,15 @@ mod tests {
 
     /// The pass rule for a row that ends by exit: it exits zero and its token
     /// file holds the pass token. A child that exits zero without the token
-    /// exercised nothing.
-    fn row_result(name: &str, success: bool) -> Result<(), String> {
+    /// exercised nothing. A refusal has already emptied the file at the fork,
+    /// so it reads no pass; the token is removed before every return.
+    fn row_result(tag: &str, name: &str, success: bool) -> Result<(), String> {
+        let path = probe_token(tag, name);
+        let stdout = std::fs::read_to_string(&path).unwrap_or_default();
+        let _ = std::fs::remove_file(path);
         if !success {
             return Err(format!("row {name} failed"));
         }
-        let stdout = std::fs::read_to_string(probe_token(name)).unwrap_or_default();
-        let _ = std::fs::remove_file(probe_token(name));
         if stdout.contains(PROBE_TOKEN) {
             Ok(())
         } else {
@@ -1085,6 +1102,7 @@ mod tests {
     /// Runs one row's probe to its end: a killed row ends in SIGSYS and any
     /// other row exits zero with its pass token written.
     async fn finish_probe(
+        tag: &str,
         name: &str,
         row: &Row,
         child: &mut tokio::process::Child,
@@ -1101,7 +1119,7 @@ mod tests {
                 }
             }
             // The child must also prove it exercised the row.
-            (Some(status), _) => row_result(name, status.success()),
+            (Some(status), _) => row_result(tag, name, status.success()),
         };
         result.err()
     }
@@ -1130,6 +1148,7 @@ mod tests {
             .then(Victim::start);
         let total = all.len();
         let mut failures = Vec::new();
+        let tag = next_tag().to_string();
         // Victim rows also get one unfiltered sibling control each; their
         // failures are separate lines, never new rows in `rows()`.
         let mut defects = Vec::new();
@@ -1196,8 +1215,8 @@ mod tests {
             // position the host refuses (Yama scope 1 for a non-ancestor) then
             // fails here by name instead of passing the row vacuously.
             if is_victim(name) {
-                if let Err(failure) = sibling_control(victim.as_ref().expect("helper"), &row).await
-                {
+                let run = sibling_control(victim.as_ref().expect("helper"), &row, "").await;
+                if let Err(failure) = run {
                     defects.push(failure);
                 }
             }
@@ -1212,9 +1231,7 @@ mod tests {
                 .arg(filter)
                 .arg("--nocapture")
                 .env(ROW_VAR, row.name)
-                .stdout(std::process::Stdio::from(
-                    std::fs::File::create(probe_token(row.name)).expect("probe token file"),
-                ));
+                .stdout(std::process::Stdio::from(token_file(&tag, row.name)));
             if is_victim(name) {
                 let helper = victim.as_ref().expect("a victim row starts the helper");
                 command
@@ -1227,7 +1244,7 @@ mod tests {
                         std::fs::OpenOptions::new()
                             .append(true)
                             .create(true)
-                            .open(probe_token(name))
+                            .open(probe_token(&tag, name))
                             .expect("probe log file"),
                     ))
                     .stderr(std::process::Stdio::from(
@@ -1242,9 +1259,11 @@ mod tests {
             }
             install_on_command(&mut command).expect("filter attach failed");
             let mut child = spawn_row(&mut command);
-            if let Some(failure) = finish_probe(name, &row, &mut child).await {
+            if let Some(failure) = finish_probe(&tag, name, &row, &mut child).await {
                 failures.push(failure);
             }
+            // A killed row reads no token, so this side removes it.
+            let _ = std::fs::remove_file(probe_token(&tag, name));
         }
         println!("ROWS: {total} checked, {} failed", failures.len());
         println!(
@@ -1262,9 +1281,8 @@ mod tests {
     }
 
     /// The unfiltered control from the filtered probe's position: a sibling of
-    /// the helper, same command, no filter, which must get a real descriptor. A
-    /// failed control names its row in a failure.
-    async fn sibling_control(victim: &Victim, row: &Row) -> Result<(), String> {
+    /// the helper, same command, no filter, which must get a real descriptor.
+    async fn sibling_control(victim: &Victim, row: &Row, control: &str) -> Result<(), String> {
         let name = row.name;
         let mut command = Command::new(std::env::current_exe().expect("test executable path"));
         command
@@ -1275,12 +1293,26 @@ mod tests {
             .env(VICTIM_PID_VAR, victim.pid.to_string())
             .env(VICTIM_ADDRESS_VAR, victim.address.to_string())
             .env(UNFILTERED_VAR, "1")
-            .stdout(std::process::Stdio::from(
-                std::fs::File::create(probe_token(name)).expect("control token file"),
-            ))
-            .stderr(std::process::Stdio::null());
+            // Planted on this one child's command only.
+            .env(CONTROL_VAR, control)
+            .stdout(std::process::Stdio::from(token_file("control", name)))
+            .stderr(std::process::Stdio::piped());
         let mut child = spawn_row(&mut command);
-        match finish_probe(name, row, &mut child).await {
+        // Read on the same runtime: a full pipe would block the child's write.
+        let mut stderr = child.stderr.take().expect("control stderr pipe");
+        let drain = tokio::spawn(async move {
+            let mut diagnostics = String::new();
+            match tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut diagnostics).await {
+                Ok(_) => diagnostics,
+                Err(error) => format!("stderr did not read: {error}"),
+            }
+        });
+        let failure = finish_probe("control", name, row, &mut child).await;
+        // The child is reaped, so its pipe end is here and the read ends.
+        let diagnostics = drain
+            .await
+            .unwrap_or_else(|_| "stderr drain panicked".to_owned());
+        match failure {
             None => {
                 // The readv row's control checks its own bytes.
                 if name != READV_ROW {
@@ -1288,10 +1320,68 @@ mod tests {
                 }
                 Ok(())
             }
-            Some(_) => Err(format!(
-                "row {name} sibling: unfiltered sibling control failed"
+            Some(reason) => Err(format!(
+                "row {name} sibling: unfiltered sibling control failed: {reason}; stderr {diagnostics:?}"
             )),
         }
+    }
+
+    /// Ends a [`CONTROL_VAR`] child: it writes its stderr and exits [`CONTROL_EXIT`].
+    fn planted_control() {
+        if let Ok(Some(bytes)) = std::env::var(CONTROL_VAR).map(|value| value.parse::<usize>().ok())
+        {
+            control_stderr(&control_text(bytes));
+            std::process::exit(CONTROL_EXIT);
+        }
+    }
+
+    /// Writes `text` to stderr, retried when interrupted, until every byte
+    /// has been accepted by the pipe.
+    fn control_stderr(text: &str) {
+        let mut rest = text.as_bytes();
+        while !rest.is_empty() {
+            let written =
+                unsafe { libc::write(2, rest.as_ptr() as *const libc::c_void, rest.len()) };
+            if written <= 0 {
+                if written == 0 || errno() != libc::EINTR {
+                    return;
+                }
+                continue;
+            }
+            rest = &rest[written as usize..];
+        }
+    }
+
+    /// The stderr a [`CONTROL_VAR`] control writes: the marker line, then
+    /// `bytes` bytes, then a line end.
+    fn control_text(bytes: usize) -> String {
+        let mut text = format!("{CONTROL_STDERR}\n");
+        text.extend(std::iter::repeat_n('f', bytes));
+        text.push('\n');
+        text
+    }
+
+    /// Runs the helper row's control once to its end.
+    fn control_failure(control: &str) -> Result<(), String> {
+        let row = rows()
+            .into_iter()
+            .find(|row| row.name == "pidfd_getfd sibling")
+            .expect("a sibling row");
+        let control = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("control runtime")
+            .block_on(sibling_control(&Victim::start(), &row, control));
+        // No control token survives: one left here would read as a pass.
+        let token = probe_token("control", TOKEN_ROW);
+        assert!(!token.exists(), "a refused control left a token {token:?}");
+        let kept = std::fs::read_dir(std::env::temp_dir())
+            .expect("temp dir")
+            .flatten()
+            .map(|entry| entry.path().to_string_lossy().into_owned())
+            .find(|path| path.contains(&format!("-{}-control-", std::process::id())));
+        assert_eq!(kept, None, "a control left its token");
+        control
     }
 
     /// Writes one readiness publication under `tag` and reads it back through
@@ -1331,5 +1421,49 @@ mod tests {
     #[should_panic(expected = "publishes address zero")]
     fn readiness_with_a_zero_address_fails() {
         assert_eq!(published_readiness("zero", "PID 0\n"), Some(1));
+    }
+
+    /// Runs one planted control and asserts the whole failure: the harness's
+    /// text, the reason `finish_probe` returned (`row_result` keeps a bool, so
+    /// an exit names no number) and the whole stderr written.
+    #[track_caller]
+    fn refused_control(bytes: usize) -> String {
+        let failure = control_failure(&bytes.to_string()).expect_err("a control passed");
+        let expected = format!(
+            "row pidfd_getfd sibling sibling: unfiltered sibling control failed: \
+             row pidfd_getfd sibling failed; stderr {:?}",
+            control_text(bytes)
+        );
+        assert_eq!(failure, expected);
+        failure
+    }
+
+    /// A control's exit 7 fails with `finish_probe`'s whole reason and stderr.
+    #[test]
+    fn a_control_that_exits_seven_reports_its_reason_and_stderr() {
+        refused_control(0);
+    }
+
+    /// A 100 KiB flood still reports the exit reason with the whole stderr.
+    #[test]
+    fn a_control_that_floods_stderr_still_reports_its_exit() {
+        let failure = refused_control(102_400);
+        assert!(!failure.contains("not finish"), "{failure:?}");
+    }
+
+    /// One row under two tags reaches two files: no run shares a token.
+    #[test]
+    fn one_row_under_two_tags_reaches_two_probe_files() {
+        let (one, two) = (next_tag(), next_tag());
+        let path = probe_token(&one.to_string(), TOKEN_ROW);
+        let other = probe_token(&two.to_string(), TOKEN_ROW);
+        assert!(!path.exists(), "a token exists before the spawn");
+        assert_ne!(one, two);
+        assert_ne!(path, other);
+        std::fs::write(&path, TOKEN_LINE).expect("token");
+        assert!(!other.exists(), "fresh token exists");
+        let got = std::fs::read_to_string(&path).unwrap_or_default();
+        assert_eq!(got, TOKEN_LINE);
+        let _ = std::fs::remove_file(&path);
     }
 }
