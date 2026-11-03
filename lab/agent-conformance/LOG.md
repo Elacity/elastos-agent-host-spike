@@ -9693,3 +9693,53 @@ A passing row gives the real Runtime no A3 credit. Two-capsule-run owns the real
 
 - 139: `bridge_envelope` records the capsule's capability line and spends the invoke amount through `use_grant`; a `once` hold is settled and a `session` hold stays open.
 
+## 141
+
+Comparison base, recorded before the first edit: `fc9f75ef44f30143631a2556979a67acb580b181`. `fc9f75ef` is an ancestor. `fff8f1761eb851f642f8e9b680ea1c6747974060` and `80a2405624121eef3404fe3b3814a558be4b7cb5` are not. `git status --short -- elastos capsules scripts examples` was empty before the edit and after `cargo fetch --locked --manifest-path elastos/Cargo.toml`, which completed with no output. wasmtime in `elastos/Cargo.lock` is `36.0.20`.
+
+Allow once: "Allow once authorizes one exact operation." Allow for this session: "Allow for this session authorizes a bounded operation set until the session ends or the grant is revoked." This task is the spend half of Allow for this session. It adds no mandate service and it does not revoke.
+
+The four refusal strings: `budget ask exceeds the admission cap: asked {asked}, cap {cap}`; `reservation exceeds the ceiling`; `measured figure exceeds the reservation`; `uncertain hold is not released`.
+
+`bridge_envelope` no longer compares `amount > 4_096` and does not name `EFFECT_BUDGET_CAP`. `admit_effect` remains the one cap check. `use_grant` reads one `#[cfg(test)]` flag after `admit_effect` reserves, then clears it. `arm_settle_fault(false)` treats that settle as `AboveReservation` and does not call the ledger. `arm_settle_fault(true)` settles `Unknown`, so the hold is uncertain. Both arms use the one release match: `Ok(())` returns the settle error, and `Err(release)` returns `Err((403, release.to_string()))`. `NotOutstanding` still skips release. A clear flag keeps a session hold and still settles a `once` grant with `SettleOutcome::Known`. The hostcall still calls `use_grant` with the body amount, `None`, and `None`.
+
+### Plants
+
+Each plant was restored before the next. Restored, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` has no plant: the working file has no `let _ = self.ledger.release` and no `amount > 4_096`. The planted crate compiled. The named test failed on the assertion below.
+
+- F-release-skip. Old: `match self.ledger.release(&call, &request, reservation) { Ok(()) => return Err((403, refusal.to_string())), Err(release) => return Err((403, release.to_string())), }`. New: `return Err((403, refusal.to_string()));`. The drain test passed. `standin-runtime/mod.rs:10723` `the once ask of the full amount answers with type and data`, left `{"code", "message", "type"}`. The once invoke of 4096 stayed `(Live, false)` and the message was `reservation exceeds the ceiling`. The session invoke of 3996 was refused with that same message and stayed `(Live, false)`. The surfaces row also went red, at `:10786`, with `unknown outcome keeps the hold`, because that row reads the release result.
+- F-release-discard. Old: the same match. New: `let _ = self.ledger.release(&call, &request, reservation); return Err((403, refusal.to_string()));`. The drain test and `standin_failed_settle_releases_only_that_hold` passed. `standin-runtime/mod.rs:10786` `the uncertain settle`, left `unknown outcome keeps the hold` against `uncertain hold is not released`.
+- Bridge compare, restored, not left in. Old: the invoke goes straight to `use_grant`. New: `if amount > 4_096` returns `admit_text` of `OverBudget` before `use_grant`. `standin-runtime/mod.rs:10665` `the sibling ask above the cap`, left `budget ask exceeds the admission cap: asked 4097, cap 4096`. With that sibling assertion removed, the owner ask of 4097 still passed. Restored, the compare is absent and the sibling assertion is back.
+
+### Docs
+
+`standin-runtime/README.md` adds one paragraph immediately before `## Callers`. Six session asks of 1 are admitted, 4091 is `reservation exceeds the ceiling`, a failed settle releases only that hold, an earlier session hold stays counted, the bridge keeps no second cap compare, and `use_grant` returns a release error. A PASS gives the Runtime no A6 credit. The bridge paragraph stays. `RUNBOOK.md` adds one paragraph after the last stand-in paragraph naming `standin_session_drain_refuses_past_the_remainder`, `standin_failed_settle_releases_only_that_hold` and `standin_failed_settle_surfaces_release_error`. Every other paragraph keeps its bytes.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged. `git diff` for `elastos`, `capsules`, `scripts`, `examples`, `tests/standin_grants.rs`, `tests/standin_contract.rs`, `tests/effects.rs`, `GAPS.md` and `falsifiers.json` printed nothing. The changed files are `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.34 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 266.33 seconds, inside the 600-second bound. Targets: lib 93 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; content_cid 2 passed; effects 63 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 14 passed; standin_grants 11 passed; standin_plan 8 passed; standin_residents 2 passed; probe 3 passed; doc-tests 0. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+
+### Proof
+
+After the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.29 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_session_drain_refuses_past_the_remainder -- --exact` exit 0, 1 passed, real 0.20 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_failed_settle_releases_only_that_hold -- --exact` exit 0, 1 passed, real 0.08 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_bridge_envelope_records_the_capsule_request -- --exact` exit 0, 1 passed, real 0.08 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_calls_use_grant -- --exact` exit 0, 1 passed, real 0.08 seconds. `git diff -- elastos` is empty. `fc9f75ef` is an ancestor.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | The invoke still passes the body amount at `standin-runtime/mod.rs:1497`. The new rows name a request id and an amount, not code or content. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `authorise` still runs before any hold at `:1323`. `arm_settle_fault` at `:1300` is `#[cfg(test)]` and grants nothing. |
+| 3. A second path or a second copy of one rule? | No | The bridge compare is gone. `admit_effect` at `:1955` is the one cap check. The one release match is at `:1366`. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`. `git diff -- elastos` is empty. |
+| 5. Refusals deny by default with a clear reason? | Yes | An ask past the remainder is `reservation exceeds the ceiling`. An ask of 4097 is the admission-cap text from `:1955`. A refused release returns that refusal at `:1368`, and the grant stays `Live`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The one hostcall stays `bridge_envelope` at `:1421`. It calls `use_grant` and adds no world import. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `:10619`, `:10701` and `:10776`. F-release-skip fails `:10723`. F-release-discard fails `:10786`. Restored, those tests pass, and the drain row stayed green while the skip plant was in. |
+| 8. Identity, admission and allowance stay separate? | Yes | A sibling ask of 4097 is `wrong capsule` from `authorise` at `:1323` before `admit_effect` at `:1332`. The cap check at `:1955` is admission. `reserve` is the session allowance. A failed settle returns that hold and does not spend the grant. |
+
+A passing row gives the real Runtime no A6 credit.
+
+- 141: a session grant spends each body amount against the one ceiling, and a failed settle releases only that hold.
+
