@@ -122,6 +122,8 @@ mod tests {
     /// The harness pid, keyed into the helper's token path so the harness and
     /// each row read one file.
     const VICTIM_PARENT_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_VICTIM_PARENT";
+    /// The helper's published buffer address.
+    const VICTIM_ADDRESS_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_VICTIM_ADDRESS";
     /// Set only in the helper process it starts, so a row that inherits the row
     /// variable still names the live sibling.
     const VICTIM_SELF_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_VICTIM_SELF";
@@ -149,6 +151,12 @@ mod tests {
     const EPERM: u8 = 0;
     const PERMITTED: u8 = 1;
     const KILLED: u8 = 2;
+
+    /// The helper's published pattern size.
+    const PATTERN_LEN: usize = 64;
+
+    /// The row that reads the pattern.
+    const READV_ROW: &str = "process_vm_readv sibling";
 
     /// A row body is a plain `fn` taking the row's three syscall arguments, so
     /// the table stays a table and no row captures state.
@@ -490,10 +498,16 @@ mod tests {
             .unwrap_or_else(|| panic!("row has no live helper pid in {VICTIM_PID_VAR}"))
     }
 
-    /// The three cross-process calls the deny list refuses, one body each. Each
-    /// names the helper sibling, never this process or its own child. This piece
-    /// keeps the `pidfd_getfd` row; `process_vm_readv`/`process_vm_writev`
-    /// follow in a later piece.
+    /// The helper's own buffer address.
+    fn victim_address() -> usize {
+        std::env::var(VICTIM_ADDRESS_VAR)
+            .ok()
+            .and_then(|address| address.parse().ok())
+            .unwrap_or_else(|| panic!("row has no helper buffer in {VICTIM_ADDRESS_VAR}"))
+    }
+
+    /// The cross-process calls the deny list refuses: each names the helper
+    /// sibling, never this process or its own child.
     fn pidfd_getfd_body(_: libc::c_int, _: libc::c_int, _: libc::c_int) -> libc::c_long {
         let pid = victim_pid();
         let pidfd = sys(libc::SYS_pidfd_open, [pid as _, 0, 0, 0, 0, 0]);
@@ -518,6 +532,77 @@ mod tests {
         }
         unsafe { *libc::__errno_location() = failed };
         borrowed
+    }
+
+    /// An `iovec` over a whole buffer.
+    fn iovec(base: *mut u8, len: usize) -> libc::iovec {
+        libc::iovec {
+            iov_base: base as _,
+            iov_len: len,
+        }
+    }
+
+    /// Byte `i` of the pattern holds `i + 1`.
+    fn pattern_bytes() -> Vec<u8> {
+        (1..=PATTERN_LEN as u8).collect()
+    }
+
+    /// Checks a whole read of the pattern.
+    fn check_pattern(got: &[u8]) {
+        let expected = pattern_bytes();
+        assert_eq!(
+            got.len(),
+            PATTERN_LEN,
+            "process_vm_readv control moved {} bytes, expected {PATTERN_LEN}",
+            got.len()
+        );
+        if let Some(index) = got
+            .iter()
+            .zip(&expected)
+            .position(|(read, want)| read != want)
+        {
+            panic!(
+                "process_vm_readv control read bytes 1..={PATTERN_LEN} of the wrong memory: byte {} expected {}, read {}",
+                index + 1,
+                expected[index],
+                got[index]
+            );
+        }
+    }
+
+    /// Reads the helper's buffer here.
+    fn process_vm_readv_body(_: libc::c_int, _: libc::c_int, _: libc::c_int) -> libc::c_long {
+        process_vm_body(libc::SYS_process_vm_readv)
+    }
+
+    /// One whole `PATTERN_LEN` read from the helper into this process.
+    fn process_vm_body(nr: libc::c_long) -> libc::c_long {
+        let pid = victim_pid();
+        let mut local = [0u8; PATTERN_LEN];
+        let mut remote = iovec(victim_address() as *mut u8, PATTERN_LEN);
+        let mut here = iovec(local.as_mut_ptr(), PATTERN_LEN);
+        let rc = sys(
+            nr,
+            [
+                pid as _,
+                &mut here as *mut _ as _,
+                1,
+                &mut remote as *mut _ as _,
+                1,
+                0,
+            ],
+        );
+        if rc >= 0 {
+            // A short copy is the control's own failure.
+            assert_eq!(
+                rc,
+                PATTERN_LEN as libc::c_long,
+                "process_vm control nr {nr} moved {rc} bytes, errno {}",
+                errno()
+            );
+            check_pattern(&local);
+        }
+        rc
     }
 
     /// Each denied family through `socket`, the Unix controls through both
@@ -548,6 +633,7 @@ mod tests {
             row("recvmmsg+cmsg", recv_body, 1, 0, 0, EPERM),
             row("io_uring_setup", io_uring_body, 0, 0, 0, EPERM),
             row("pidfd_getfd sibling", pidfd_getfd_body, 0, 0, 0, EPERM),
+            row(READV_ROW, process_vm_readv_body, 0, 0, 0, EPERM),
             row("getpid", getpid_body, 0, 0, 0, PERMITTED),
             row("nr==0x40000000", x32_body, 0, 0, 0, KILLED),
         ]
@@ -575,9 +661,7 @@ mod tests {
 
     /// Runs one named row in the filtered probe.
     fn probe(wanted: &str) {
-        // The redirection runs the probe with the row variable in this
-        // process, so the filter's own state is the first proof here. The
-        // unfiltered sibling control takes no filter on purpose.
+        // The unfiltered sibling control takes no filter on purpose.
         let unfiltered = std::env::var_os(UNFILTERED_VAR).is_some();
         if !unfiltered {
             assert_eq!(
@@ -598,16 +682,22 @@ mod tests {
             .unwrap_or_else(|| panic!("row {wanted} was not requested by the harness"));
         let rc = (row.body)(row.domain, row.kind, row.protocol);
         if unfiltered {
-            // The control expects the call to work here: a refusal of the
-            // position (Yama, for example) must fail loudly, never skip.
+            // The control expects the whole call to work here: a refusal of
+            // the position (Yama, for example) fails loudly, never skips; the
+            // errno is read before any other call.
+            let failed = errno();
+            let moved = if wanted == READV_ROW {
+                rc == PATTERN_LEN as libc::c_long
+            } else {
+                rc >= 0
+            };
             assert!(
-                rc >= row.outcome as libc::c_long,
-                "unfiltered sibling control for row {wanted}: rc {rc}, errno {}",
-                errno()
+                moved && rc >= row.outcome as libc::c_long,
+                "unfiltered sibling control for row {wanted}: rc {rc}, errno {failed}"
             );
-            if rc >= 0 {
-                // A real descriptor, never a zero success code: closing it here
-                // also closes the one the row body kept open for this control.
+            // A real descriptor: closing it here also closes the one the row
+            // body kept. The readv row returns a byte count.
+            if rc > 2 && wanted != READV_ROW {
                 close_all(&[rc as libc::c_int]);
             }
         } else {
@@ -859,10 +949,18 @@ mod tests {
     /// helper, made by this unfiltered process, must succeed, so only the
     /// filter can refuse the probe's call.
     fn victim_control(victim: &Victim, row: &Row) {
+        if row.name == READV_ROW {
+            process_vm_control(victim, row);
+            return;
+        }
+        let previous_pid = std::env::var(VICTIM_PID_VAR).ok();
         std::env::set_var(VICTIM_PID_VAR, victim.pid.to_string());
         let rc = (row.body)(0, 0, 0);
         let failed = errno();
-        std::env::remove_var(VICTIM_PID_VAR);
+        match previous_pid {
+            Some(value) => std::env::set_var(VICTIM_PID_VAR, value),
+            None => std::env::remove_var(VICTIM_PID_VAR),
+        }
         assert!(
             rc >= 0,
             "row {} is not valid unfiltered: rc {rc}, errno {failed}",
@@ -870,12 +968,39 @@ mod tests {
         );
         if rc > 2 {
             close_all(&[rc as libc::c_int]);
+            unsafe { *libc::__errno_location() = failed };
         }
+    }
+
+    /// The `process_vm_readv` control: the body returns the whole pattern, so
+    /// no descriptor is involved.
+    fn process_vm_control(victim: &Victim, row: &Row) {
+        let previous_pid = std::env::var(VICTIM_PID_VAR).ok();
+        let previous_address = std::env::var(VICTIM_ADDRESS_VAR).ok();
+        // Post what the harness posts; the body reads the environment.
+        std::env::set_var(VICTIM_PID_VAR, victim.pid.to_string());
+        std::env::set_var(VICTIM_ADDRESS_VAR, victim.address.to_string());
+        let rc = (row.body)(0, 0, 0);
+        let failed = errno();
+        for (name, previous) in [
+            (VICTIM_PID_VAR, previous_pid),
+            (VICTIM_ADDRESS_VAR, previous_address),
+        ] {
+            match previous {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        assert_eq!(
+            rc, PATTERN_LEN as libc::c_long,
+            "row {} is not valid unfiltered: rc {rc}, errno {failed}",
+            row.name
+        );
     }
 
     /// Reads the helper's bytes at the published address and checks them.
     fn pattern_control(victim: &Victim) {
-        let mut got = [0u8; 64];
+        let mut got = [0u8; PATTERN_LEN];
         let l = libc::iovec {
             iov_base: got.as_mut_ptr().cast(),
             iov_len: got.len(),
@@ -889,25 +1014,29 @@ mod tests {
             libc::SYS_process_vm_readv,
             [victim.pid as _, io[0] as _, 1, io[1] as _, 1, 0],
         );
-        assert!(
-            read == 64 && (1u8..=64).eq(got),
-            "helper pattern at {} unreadable: read {read}, errno {}",
-            victim.address,
-            errno()
-        );
+        let failed = errno();
+        if read != PATTERN_LEN as libc::c_long {
+            panic!(
+                "helper pattern at {} unreadable: read {read}, errno {failed}",
+                victim.address
+            );
+        }
+        check_pattern(&got);
     }
 
     /// The helper served by `VICTIM_TEST`. Without the flag it is a plain test.
-    /// With it the helper publishes its pid in its token file once, through a
-    /// rename, then sleeps until the harness ends it. The publication is the
-    /// readiness line the harness reads and then unlinks.
+    /// With it the helper publishes its pid once through a rename, then sleeps
+    /// until the harness ends it; that line is the readiness line.
     #[test]
     fn helper_sibling_serves_the_victim_rows() {
         if std::env::var(VICTIM_SELF_VAR).is_err() {
             return;
         }
         let pid = std::process::id() as libc::pid_t;
-        let pattern = std::hint::black_box((1u8..=64).collect::<Vec<u8>>());
+        let mut pattern = std::hint::black_box(vec![0u8; 64]);
+        for (i, byte) in pattern.iter_mut().enumerate() {
+            *byte = i as u8 + 1;
+        }
         // pidfd_getfd needs ptrace-attach access. The probe is a sibling, not
         // an ancestor, so Yama scope 1 (the Jetson) refuses it. Allow any
         // tracer: test fixture only. A host without Yama answers EINVAL.
@@ -920,8 +1049,11 @@ mod tests {
         );
         let token = victim_token(victim_parent(), pid);
         let staging = token.with_extension("tmp");
-        std::fs::write(&staging, format!("{pid} {}\n", pattern.as_ptr() as usize))
-            .expect("helper publication");
+        std::fs::write(
+            &staging,
+            format!("{pid} {}\n", pattern.as_mut_ptr() as usize),
+        )
+        .expect("helper publication");
         std::fs::rename(&staging, &token).expect("helper publication rename");
         let start = std::time::Instant::now();
         while start.elapsed() < std::time::Duration::from_secs(120) {
@@ -1084,8 +1216,10 @@ mod tests {
                     std::fs::File::create(probe_token(row.name)).expect("probe token file"),
                 ));
             if is_victim(name) {
-                let pid = victim.as_ref().expect("a victim row starts the helper").pid;
-                command.env(VICTIM_PID_VAR, pid.to_string());
+                let helper = victim.as_ref().expect("a victim row starts the helper");
+                command
+                    .env(VICTIM_PID_VAR, helper.pid.to_string())
+                    .env(VICTIM_ADDRESS_VAR, helper.address.to_string());
             }
             if let Ok(path) = std::env::var(PROBE_LOG_VAR) {
                 command
@@ -1128,8 +1262,8 @@ mod tests {
     }
 
     /// The unfiltered control from the filtered probe's position: a sibling of
-    /// the helper, same row command, no filter. Its body must get a real
-    /// descriptor back; any other answer names this control in a failure.
+    /// the helper, same command, no filter, which must get a real descriptor. A
+    /// failed control names its row in a failure.
     async fn sibling_control(victim: &Victim, row: &Row) -> Result<(), String> {
         let name = row.name;
         let mut command = Command::new(std::env::current_exe().expect("test executable path"));
@@ -1139,6 +1273,7 @@ mod tests {
             .arg("--nocapture")
             .env(ROW_VAR, name)
             .env(VICTIM_PID_VAR, victim.pid.to_string())
+            .env(VICTIM_ADDRESS_VAR, victim.address.to_string())
             .env(UNFILTERED_VAR, "1")
             .stdout(std::process::Stdio::from(
                 std::fs::File::create(probe_token(name)).expect("control token file"),
@@ -1147,7 +1282,10 @@ mod tests {
         let mut child = spawn_row(&mut command);
         match finish_probe(name, row, &mut child).await {
             None => {
-                pattern_control(victim);
+                // The readv row's control checks its own bytes.
+                if name != READV_ROW {
+                    pattern_control(victim);
+                }
                 Ok(())
             }
             Some(_) => Err(format!(
@@ -1182,7 +1320,7 @@ mod tests {
 
     /// An address that is not a number fails by name.
     #[test]
-    #[should_panic(expected = "has no address")]
+    #[should_panic(expected = "has no address: ")]
     fn readiness_with_an_unparsable_address_fails() {
         assert_eq!(published_readiness("unparsable", "PID invalid\n"), Some(1));
     }
