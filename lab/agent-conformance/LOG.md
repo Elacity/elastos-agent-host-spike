@@ -11594,3 +11594,216 @@ review, then removal condition. The staging fixture launched zero children.
 The sandbox loopback preflight returned `Operation not permitted` before any
 full-suite test. This is an infrastructure result; full gates need the task's
 authorized local process and loopback access with Cargo kept offline.
+
+### Round 2 — Complete the three plant records
+
+Supplied round-2 HEAD: `2ed05c9e7d2c4e58832cce200ed44d3a0e12bab7`.
+Supplied round-2 tree: `5f4e2adb8daba149bc5787a61116126761f86298`.
+Supplied dirty paths: none. The task branch and its existing staging test and
+RUNBOOK remain as supplied. The review found that this LOG stopped before the
+required plant records. This round reproduces the corrected baseline, each
+isolated plant and its restored control, then runs the restored lane gates.
+Only this LOG section needs a final change. Each temporary plant changes
+`src/identity.rs::stage_probe`; a `finally` block restores its supplied bytes.
+The existing test keeps all six refusal cases and same-Home repair controls.
+Earlier task records and product acceptance blockers keep their owners.
+
+All seven focused runs below use this exact command from the repository root:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report staging_uses_manifest_entrypoint_and_refuses_escape -- --exact
+```
+
+The environment is `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+CARGO_NET_OFFLINE=true`, with both Cargo output directories set to this lane's
+existing `target/host` and `target/host-build`, and TMPDIR under
+`target/task-168/round-2-tmp`. The parent holds the shared exclusive
+`fcntl.flock` lease, gives children zero lease descriptors, checks the 12 GiB
+build estimate plus 2 GiB reserve before each command, and bounds each command
+at 600 seconds. A timed-out or interrupted command group is settled before
+source restoration and lease release. The supplied stager SHA-256 is
+`aa26c40a1004cf729013f36060f03712f8ee47425f40dd96a434a6114ac32e1a`.
+
+The three isolated replacements use these exact UTF-8 bytes, including four
+leading spaces and the final newline in each code block. Each old block
+occurs once in the supplied source. Each plant changes only `stage_probe`.
+The shared falsifier list and runner retain their supplied bytes.
+
+F-entrypoint-selected, old:
+
+```rust
+    let path = home.root().join(format!("sha256-{}", sha256(bytes)));
+```
+
+New (after validation, select the module-local `ENTRYPOINT`):
+
+```rust
+    let entrypoint = ENTRYPOINT;
+    let path = home.root().join(format!("sha256-{}", sha256(bytes)));
+```
+
+F-entrypoint-empty, old:
+
+```rust
+    if entrypoint.is_empty()
+        || !Path::new(entrypoint)
+```
+
+New (keep the component-kind condition):
+
+```rust
+    if !Path::new(entrypoint)
+```
+
+F-entrypoint-components, old:
+
+```rust
+    if entrypoint.is_empty()
+        || !Path::new(entrypoint)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+```
+
+New (keep the empty-entrypoint condition):
+
+```rust
+    if entrypoint.is_empty()
+```
+
+The first two lease attempts started zero builds. The successful batch acquired
+the lease after 145.950 s, passed the local loopback preflight, and had
+33.738 GiB free. Focused proof results from the command above:
+
+| Run | Exit | Seconds | Result |
+| --- | --- | --- | --- |
+| Supplied corrected baseline | 0 | 0.211 | One test passed. |
+| F-entrypoint-selected | 101 | 1.666 | One test failed at `tests/report.rs:390`: `flat: allowed selected entrypoint has payload`. |
+| Selected-path exact restoration | 0 | 1.356 | One test passed. |
+| F-entrypoint-empty | 101 | 1.293 | One test failed at `tests/report.rs:474`: `empty: bundle absent before refusal`. |
+| Empty-condition exact restoration | 0 | 1.070 | One test passed. |
+| F-entrypoint-components | 101 | 1.298 | One test failed at `tests/report.rs:469`: `parent: owned marker unchanged before refusal`. |
+| Component-kind exact restoration | 0 | 1.191 | One test passed. |
+
+All three plants are CAUGHT: each command compiled, executed exactly the named
+test, and failed an allowed assertion identifying the removed condition.
+The selected-path plant reached the labelled file assertion that replaced the
+earlier unlabelled unwrap. The empty-condition plant created the bundle before
+its later filesystem refusal, so the absent-bundle assertion caught it. The
+component-kind plant overwrote the Home's harmless marker through `../escape.wasm`,
+so the unchanged-marker assertion caught it before the returned result was
+checked. Later filesystem or bundle-check errors supply zero early-refusal
+credit. The exact-refusal assertion remains required in every restored case.
+
+After each plant, `finally` restored the complete supplied source, byte for
+byte, and the focused command passed before the next plant. All four passing
+controls record the supplied SHA-256 above. The three planted source SHA-256
+values, in order, were `6bb82957b5abb244b52b3a6caada8465f6bd2874d03dba352afa113bc26289d5`,
+`ddf3494420aecd570395c0617d9adad516bfb3e41cfb26ecb6e5e87a6b414104`
+and `55e871b2c32f47bd4bded3dee8296dbb9d4772af17cb3f311518ae1260c45d33`.
+The focused fixtures start zero children and build zero capsules; their
+temporary writes stay inside each owned Home. Passing Homes finish only after
+the selected-path, exact-byte, identity, marker and same-Home repair assertions.
+
+Each failed Home below stays private in the lane's ignored `target/`. The
+retention decision for each row is **keep for supervisor review, then remove
+after a process-holder check**. The existing local inventory records each
+owner, path, size and cleanup condition. This round preserves the earlier
+four failed Homes and owns the three new ones; it removes zero directories.
+
+| Failed Home under `lab/agent-conformance/target/` | Owner / purpose |
+| --- | --- |
+| `home-38017-1793748463334797000-0` | Initial selected-path attempt; unlabelled unwrap, zero caught credit. |
+| `home-39804-1793748512932215000-0` | Earlier corrected selected-path plant. |
+| `home-39931-1793748515221017000-4` | Earlier empty-condition plant. |
+| `home-40049-1793748517699924000-2` | Earlier component-kind plant. |
+| `home-30777-1793749351219516000-0` | Round-2 selected-path plant. |
+| `home-30960-1793749353904765000-4` | Round-2 empty-condition plant. |
+| `home-31031-1793749356271509000-2` | Round-2 component-kind plant. |
+
+Exact command captures are local and uncommitted under `target/task-168/`:
+`round-2-baseline.txt`, `round-2-F-entrypoint-{selected,empty,components}.txt`
+and each corresponding `-restored.txt`. `round-2-results.json` records their
+commands, exits, durations, assertion labels, source hashes and retained
+Homes. The LOG records above are the durable proof; these captures remain
+until supervisor review, then removal.
+
+Principles check for the preserved staging candidate and this proof record:
+
+| Question | Answer | Evidence (lane-relative file:line) |
+| --- | --- | --- |
+| 1. New name or URL where a content hash belongs? | No | `tests/report.rs:380` requires the payload-hash directory; `:417` and `:423` check component SHA-256 and checked bundle lab CID. |
+| 2. New capsule, Home or UI ambient authority? | No | `src/identity.rs:59` keeps the shared Home guard; `tests/report.rs:428` requires zero child starts. |
+| 3. A second operation path or copied rule? | No | `tests/report.rs:374` and `:463` call the one `stage_probe`; `src/identity.rs:66` keeps the single early path check and `:79` keeps the identity dependency. |
+| 4. Runtime core growth? | No | `src/identity.rs:53` remains byte-identical; this round's sole final edit is this lane LOG section. |
+| 5. Refusals fail closed with a clear reason? | Yes | `tests/report.rs:469`, `:474` and `:481` require the unchanged marker, absent bundle and exact early refusal for all six fixed cases. |
+| 6. Capsule logic stays self-contained with granted Bus calls? | Yes | `tests/report.rs:371` supplies synthetic bytes; `:428` proves fixture-only staging. Capsule and Bus sources retain their supplied bytes. |
+| 7. Each new proof has a named test and caught falsifier? | Yes | `tests/report.rs:370` is the unchanged test name; the three compiling plants above each failed its labelled assertion and passed after exact restoration. |
+| 8. Identity, admission and allowance stay separate? | Yes | `src/identity.rs:52` gives the lab CID identity scope; `RUNBOOK.md:261` keeps Runtime admission and grant ownership separate from fixture hashes. |
+
+Restored gates ran under the same lease, offline environment, output bounds
+and per-command free-space check. Each command below exited 0:
+
+| Command | Seconds | Result |
+| --- | --- | --- |
+| `git diff --check` | 0.049 | Passed. |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report` | 0.707 | 23 passed; zero failed. |
+| `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` | 0.201 | Passed. |
+| `node scripts/check-product-data.mjs` | 0.083 | Passed. |
+| `node --test scripts/check-product-data.test.mjs` | 0.412 | Passed. |
+| `(cd elastos && cargo fmt --all -- --check)` | 2.785 | Passed. |
+| `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` | 0.151 | Passed. |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` | 267.180 | 254 passed; zero failed; 14 existing ignores. |
+
+The complete locked gate's effects target passed 66 tests and kept 12 ignores;
+its Runtime target passed 11 and kept two ignores. These 14 ignored journeys
+retain their existing product blockers. The staging fixture supplies only
+synthetic selected-path and artifact-identity proof. Installed releases,
+Browser media, and the principal-bound real Agent Host journey keep their
+acceptance gates with their owners.
+
+`lab/agent-conformance/run.sh` passed restored: exit 0 in 261.911 s. Its table
+has 255 PASS rows (254 tests plus `versions_receipt (A14)`), 14 BLOCKED rows,
+zero FAIL and zero SKIPPED. The local, uncommitted receipt is
+`target/run-table.kmbkyU/VERSIONS.json`, SHA-256
+`fce070d15bf1f68675cc844f2eefe7e4a27fefd334caac6a07aa59129c4a9ecc`.
+It records `identity_status: complete`, an empty `missing_or_invalid`, both
+success flags true, 15 build-only and 16 launched probe identities, and
+`suite_outcome: BLOCKED`. Its repository identity is the supplied round-2
+HEAD with `dirty: true`, which describes this local LOG edit. This receipt
+adds fixture evidence while the existing blocked journeys retain their gates.
+
+The batch released the shared lease after verifying exact stager restoration.
+The final inventory confirms the supplied HEAD/tree and index, unchanged LOG
+content before section 168, and matching preservation hashes for the test,
+RUNBOOK, stager, falsifier registration, GAPS, Cargo files and runner. Only
+this LOG has a final tracked edit in round 2. The task branch has no upstream;
+cached `spike/spike/agent-host` versus HEAD is 0 / 7 (base-only / HEAD-only).
+The supervisor owns current remote verification under the offline task rule.
+Free space after both full gates is 32.725 GiB, above the 14 GiB requirement.
+
+All seven failed-test Homes in the table retain their individual review and
+removal conditions. Passing fixture Homes finish through the existing path;
+the restored gates retained zero new failed Homes. The proof captures, local
+receipt and task-local temporary output stay under supervisor review, then
+removal. The existing lane build caches keep their supervisor-owned lifecycle;
+this round creates zero worktrees, refs, installed runtimes or rollback sets.
+
+Candidate: supplied round-2 HEAD/tree plus this LOG correction; the test,
+RUNBOOK and stager retain their supplied bytes.
+Exercised checks: corrected baseline, three compiling caught plants, each
+restored control, 23 report tests, lane formatting, full locked lane gate,
+report/receipt gate and repository basic checks. The 14 ignores keep their
+named blockers; installed-product acceptance stays with its owners.
+Reviews: round-1 Claude missing-proof finding is addressed by the exact edits,
+failed assertions, restoration results and per-Home retention records above;
+independent review of this correction remains with the supervisor.
+Installed release evidence: fixture staging only; product acceptance remains
+open under its existing blockers.
+Remaining gate: independent reviews and supervisor integration.
+Next owner: lane supervisor.
+
+- 168 round 2: Completed the three isolated entrypoint plant records, proved each labelled failure and exact restored pass, recorded every owned failed Home's retention decision, and passed the report, formatting, locked lane and report/receipt gates with the supplied candidate preserved.
+
+Final handoff `git diff --check` passed. The final preservation checks confirm
+exact supplied stager bytes, the eight protected file hashes, earlier LOG
+sections, HEAD, tree and index; the local inventory records the sole LOG edit.
