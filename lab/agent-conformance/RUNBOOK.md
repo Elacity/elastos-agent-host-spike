@@ -597,6 +597,20 @@ restoration. LOG.md records the commands and libtest results.
 F-overlap-second-barrier inserts the stage-1 shortcut in `Overlap::ready`;
 both the synthetic wiring test and the existing live journey must fail.
 F-overlap-sessions and F-overlap-alive remove the corresponding barrier checks.
+`overlap_barrier_refuses_when_a_client_has_exited` proves the early live check.
+`overlap_last_observation_refuses_a_client_exit` uses a private, default-empty
+callback after request acceptance to observe both owned clients, then kill and
+reap index 0 before the final real observation, at each barrier. The isolated
+hand-run F-overlap-last-observation removes only `|| !running.all_alive(2)?`
+from the final condition. It retains the first live check and the timeout;
+the refusal test must fail with `Ok(true)` instead of
+`overlap: clients left the barrier before its decision`.
+`overlap_last_observation_accepts_live_controls` passes with that plant and
+after restoration, through both the empty and observation-only callbacks.
+It also requires a lone second-stage request to wait without another decision.
+Each fixture collects and drains its bounded system children before result
+assertions. The controller owns these observations; Runtime owns resident
+capsule isolation and grants.
 F-overlap-sibling-new and F-sibling-one-rule each plant one bug in the shared
 sibling-read rule. The alive test starts bounded `true` and `sleep`
 children through `RunningInstances::start` with its fixed system PATH.

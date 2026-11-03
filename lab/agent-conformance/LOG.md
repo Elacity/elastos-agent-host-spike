@@ -10794,3 +10794,240 @@ formatting from `elastos/` (`cargo fmt --all -- --check`), exit 0 in 2.777 s;
 and `git diff --check`, exit 0 in 0.026 s. Exact Rust-source, fixture-writer
 and falsifier-list restoration was verified. Only the three authorized paths
 differ. The report hard stop and five retained idle Homes keep their gates.
+
+
+## 166 — Final overlap liveness observation
+
+Supplied HEAD: `aff7528c65949752a8697a1c6c5f5a9c6ae91f3b`.
+Supplied tree: `8c8273ecc11c7ffb9f5406de9de2bb0b9cc006ab`.
+Initial dirty paths: none. The supplied task branch is
+`spark/cx-agent-conformance/166-overlap-decision-rechecks-the-live-clients`;
+it has no upstream. Cached `spike/spike/agent-host` is four commits behind
+HEAD (base...HEAD: 0 / 4); this task uses read-only Git and offline builds.
+The checkout and all supplied refs, worktrees and artifacts keep their owners.
+
+Plan: retain the existing request decision, both actual child observations,
+ten-second bound and success recording. Add one private, default-empty test
+callback after accepted request shape. Exercise real owned child exits at
+stages 0 and 1, live controls and an incomplete second snapshot. Run a plant
+that removes only the final live observation and the existing F-overlap-alive,
+restore exact bytes, then run the controller and complete lane gates.
+Only `tests/common/grants.rs`, RUNBOOK's existing overlap paragraph and this
+LOG section are task edits. Task 033 owns the shared sibling rule; task 029's
+remaining final-observation proof is this task. Runtime owns capsule isolation
+and grants; these tests prove the lab controller's process observation.
+
+### Candidate and baseline
+
+`Overlap::new` leaves `before_last_observation` empty. `ready` calls it only
+after the first actual `all_alive(2)` observation and accepted request shape.
+The final condition, success recording and both F-overlap-alive anchors keep
+their supplied bytes. The callback takes only the owned `RunningInstances`.
+The refusal fixture observes both clients there, then calls `kill_worker(0)`
+once; that existing API kills and reaps index 0 before the callback returns.
+Both stage fixtures collect through the existing five-second group-draining
+collector before either final-refusal assertion. Their sibling was observed
+live at the seam, has no kill record, and exits successfully. Stage 1 first
+completes stage 0 with the empty seam and keeps that wait. The control test
+uses the empty seam and a callback that only observes both real children; its
+incomplete second snapshot keeps the wait, duration and stage unchanged.
+These fixtures launch only bounded `/bin/sleep 3` system children, with the
+Home guard and existing launcher. They build zero probes and start zero
+Runtime/provider processes. The seam, rather than a scheduling sleep, selects
+the observation boundary.
+
+Cargo uses `CARGO_NET_OFFLINE=true RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`,
+lane `target/host` and `target/host-build`, and task-local `TMPDIR` under
+`target/task-166/tmp`. Each command has a 600-second limit. A Python parent
+owns the existing exclusive `fcntl.flock` build lease on its read-only file
+descriptor; children inherit zero lease descriptors. Each build batch checks
+the 12 GiB estimate plus 2 GiB reserve. Local proof output and the lifecycle
+inventory are ignored artifacts under `target/task-166/`, retained until
+supervisor review, then removed. They are separate from the committed proof.
+
+Initial lease attempts were busy and started zero builds. The sandbox
+preflight refused loopback binding and process inspection before any test;
+this is infrastructure evidence with zero caught credit. Host loopback
+preflight then passed. The baseline lease wait was 36.214 s, with 37.251 GiB
+free. All three baseline commands executed one selected test, zero failures
+and zero ignored:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::overlap_last_observation_refuses_a_client_exit -- --exact
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::overlap_last_observation_accepts_live_controls -- --exact
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::overlap_barrier_refuses_when_a_client_has_exited -- --exact
+```
+
+| Baseline test | Exit | Command seconds | Test seconds |
+| --- | --- | --- | --- |
+| `overlap_last_observation_refuses_a_client_exit` | 0 | 8.494 | 6.11 |
+| `overlap_last_observation_accepts_live_controls` | 0 | 6.283 | 6.14 |
+| `overlap_barrier_refuses_when_a_client_has_exited` | 0 | 2.185 | 2.04 |
+
+Each passing Home finished. Native harness SHA-256 before plants:
+`f4b3a95bcab48d66040cb7b46669a2dd329fc3467ac8dcd4bf673e612524b6a7`.
+Falsifier-list SHA-256:
+`29c87a0076e20bb8c68496dca5034f17860b0c72b86a3bed0e2503581c292059`.
+Candidate grants-source SHA-256:
+`bdcbcf32c5ebea7840928a4a76d0175e3126e988843a7d17661875f4772f5a12`.
+
+### Hand-run plants and restoration
+
+The plant/gate lease was acquired after 153.978 s, with 37.234 GiB free.
+The preceding busy attempt started zero plants. Each plant compiled and ran
+one selected test; neither an empty selection nor infrastructure supplied
+caught credit. The source copy stayed in the Python parent's memory and
+`finally` restored exact bytes after each plant. No Git state changed.
+
+F-overlap-last-observation (hand-run only, CAUGHT) changed exactly one line:
+
+```text
+old:         if self.barrier_started.elapsed() >= OVERLAP_BOUND || !running.all_alive(2)? {
+new:         if self.barrier_started.elapsed() >= OVERLAP_BOUND {
+```
+
+The whole first observation retained its exact bytes. The new refusal test
+ran both stage fixtures, killed/reaped index 0 and collected all four children
+before its result assertions. It then failed at
+`tests/common/grants.rs:2241`, after the stage-0 hook, kill/status, sibling
+success and elapsed-bound assertions passed:
+
+```text
+assertion `left == right` failed: final observation refuses the real exit at stage 0
+  left: Ok(true)
+ right: Err("overlap: clients left the barrier before its decision")
+```
+
+The live control passed while the plant was active. After restoration, both
+new tests passed. F-overlap-alive (CAUGHT) then used both exact edits from
+the unchanged registration: remove the complete first `all_alive(2)` refusal
+block, and remove only the final condition's `|| !running.all_alive(2)?`.
+Its complete registered test set is the single
+`grants::tests::overlap_barrier_refuses_when_a_client_has_exited`. That test
+failed at `tests/common/grants.rs:2161` with `left: Ok(true)` and
+`right: Err("overlap: both clients must remain alive through both barriers")`.
+After exact restoration it passed. The list, anchors and shared runner keep
+their supplied bytes; the isolated plant adds zero registrations.
+
+All commands are the exact `cargo test --locked --manifest-path
+lab/agent-conformance/Cargo.toml --test effects TEST -- --exact` commands
+listed above, with the same environment, lease and bounds. Actual results:
+
+| Phase / selected test | Exit | Command seconds | Result |
+| --- | --- | --- | --- |
+| isolated plant / new refusal | 101 | 7.886 | 1 failed at the required assertion |
+| isolated plant / live control | 0 | 6.337 | 1 passed, zero ignored |
+| restored / new refusal | 0 | 8.897 | 1 passed, zero ignored |
+| restored / live control | 0 | 6.269 | 1 passed, zero ignored |
+| F-overlap-alive / early exit | 101 | 3.363 | 1 failed at the required assertion |
+| restored / early exit | 0 | 3.165 | 1 passed, zero ignored |
+
+Both restorations matched candidate source SHA-256
+`bdcbcf32c5ebea7840928a4a76d0175e3126e988843a7d17661875f4772f5a12`.
+The two isolated-plant Homes and the old-plant Home are expected-failure
+artifacts, retained for supervisor review. Their children completed collection
+and group drain before assertion failures. Their exact relative paths and
+cleanup conditions are in the ignored lifecycle inventory.
+
+### Principles check
+
+| Question | Yes/No | Evidence (lane-relative) |
+| --- | --- | --- |
+| 1. New code/content name or URL where a hash belongs? | No | `tests/common/grants.rs:325` adds an in-memory test callback; the new system children at `:2181` are bounded fixtures, separate from capsule identity. |
+| 2. Capsule, Home or UI gains ambient authority? | No | `tests/common/grants.rs:350` passes only the existing owned child group to the callback; it grants zero capsule access. |
+| 3. A second path or copy of a rule? | No | `tests/common/grants.rs:369` still calls the one `barrier_decision`; `:380` still makes the final real observation. |
+| 4. Runtime core grows? | No | `tests/common/grants.rs:325` keeps the seam in lab test code; the three-file diff contains no Runtime implementation. |
+| 5. Refusals deny by default with a clear reason? | Yes | `tests/common/grants.rs:365` retains the early refusal and `:380` retains the exact final refusal before success recording. |
+| 6. Capsule keeps its logic and granted Bus calls? | Yes | Unchanged `probe/src/lib.rs:138` requests authority and `:146` invokes the provider through the Bus. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/common/grants.rs:2172` fails at its final-refusal assertion with the isolated plant; `:2257` passes planted and restored as the live control. The old registered test also fails planted and passes restored. |
+| 8. Identity, admission and allowance remain separate? | Yes | `tests/common/grants.rs:362` checks the existing observation bound, while `:369` checks request shape; neither decision supplies capsule identity, execution admission or a Runtime resource grant. |
+
+The repository skill search found no humanizer skill source. This record uses
+direct actor and ownership statements. Process-isolation and shared-journey
+labels, receipt and credential checks, and product blockers retain their
+supplied scope. Tasks 134 to 138 and 161 keep their supplied states and gates;
+tasks 152 and 158 keep their supplied source.
+
+### Restored checks
+
+The restored controller command was:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests
+cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check
+git diff --check
+(cd elastos && cargo fmt --all -- --check)
+cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml
+```
+
+All commands used the same host access, offline environment, exclusive lease,
+free-space rule and 600-second command bounds. Actual results:
+
+| Check | Exit | Command seconds | Result |
+| --- | --- | --- | --- |
+| `controller-restored` | 0 | 9.776 | 40 passed, zero failed/ignored |
+| `format-restored` | 0 | 0.211 | PASS |
+| `diff-restored` | 0 | 0.024 | PASS |
+| `runtime-format` | 0 | 2.788 | PASS |
+| `chain-format` | 0 | 0.143 | PASS |
+| `locked-lane` | 0 | 264.508 | 254 passed, zero failed, 14 existing blocked/ignored |
+
+The locked suite passed on its first execution. Its effects target reported
+66 passed, zero failed and 12 existing ignored rows in 207.75 s; the Runtime
+target reported 11 passed, zero failed and two existing ignored rows.
+`node scripts/check-product-data.mjs` also passed (42 capsules, two profiles,
+28 method contracts), and `node --test scripts/check-product-data.test.mjs`
+passed all 99 tests. These light checks used the supplied repository inputs.
+
+`lab/agent-conformance/run.sh` passed on its first execution: exit 0 in
+258.848 s. Its local, uncommitted receipt is
+`target/run-table.SxHHNs/VERSIONS.json`, SHA-256
+`6e19b807537efa859801df36c94150dd7393ebc3b5e1cd004628bb503044f02c`.
+The receipt's outcome is `BLOCKED`, retaining the existing 14 blocker rows;
+the command and receipt gate passed. It supplies zero new product-isolation
+or installed-release acceptance.
+
+### Cleanup and handoff
+
+Both plants are restored, both original anchors occur once, and the grants
+source matches the recorded candidate SHA-256. The harness, falsifier list,
+Cargo inputs and shared runner match HEAD byte for byte. Only the three
+authorized files differ. The shared build lease was released after the
+completed gate batch. Final light-check free space was 37.109 GiB.
+
+The three expected-failure Homes remain review artifacts. A final
+`lsof -t +D <owned-root>` check returned exit 1, empty stderr and zero holders
+for each. All owned children completed the existing collection and group
+drain. Three older supplied Homes observed in the metadata census also had
+zero holders; they keep their existing owner and retention decision. The
+ignored lifecycle inventory distinguishes those supplied roots from this
+task's three roots and records cleanup conditions for the proof and receipt.
+Successful fixture Homes finished through the existing path. Existing build
+artifacts remain under the supervisor's active review lifecycle.
+
+Read-only branch/worktree inventory confirmed supplied HEAD
+`aff7528c65949752a8697a1c6c5f5a9c6ae91f3b` and tree
+`8c8273ecc11c7ffb9f5406de9de2bb0b9cc006ab`. The task branch has no upstream;
+its cached divergence against `spike/spike/agent-host` remains four ahead,
+zero behind. Network access stayed disabled; the supervisor owns current
+remote verification, independent reviews and publication. All unrelated refs
+and worktrees retain their supplied ownership. This task created zero Git
+refs, worktrees, installed runtimes or rollback sets.
+
+Candidate: supplied HEAD/tree plus the three-file local candidate, with
+restored Rust-source SHA-256 recorded above.
+Exercised checks: baseline, planted, restored, controller, formatting,
+repository light checks, full locked suite and report/receipt gate above; all
+required checks executed. The sandbox preflight remains infrastructure evidence.
+Reviews: independent development and adversarial review remain supervisor-owned.
+Installed release evidence: these bounded fixture and controller checks support
+the lab process-isolation prerequisite; product acceptance stays with its owner.
+Remaining gate: independent reviews and supervisor integration.
+Next owner: lane supervisor.
+
+- 166: Added the default-empty final-observation seam and real-child refusal/live controls; caught and restored the isolated final-check plant and F-overlap-alive; all 40 controller tests, 254 locked-suite tests, formatting and the report gate passed, with the 14 existing blockers preserved.
+
+Final lane formatting and `git diff --check` were repeated under the shared
+lease after the handoff record: exits 0 in 0.206 s and 0.034 s respectively.
+The source SHA-256 still matches the restored candidate. The lease is released.

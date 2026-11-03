@@ -321,6 +321,8 @@ struct Overlap {
     cancel: bool,
     kill: bool,
     cancelled_at: Option<Instant>,
+    #[cfg(test)]
+    before_last_observation: Option<Box<dyn FnMut(&mut RunningInstances<'_>) -> Result<()>>>,
 }
 
 impl Overlap {
@@ -336,6 +338,8 @@ impl Overlap {
             cancel: false,
             kill: false,
             cancelled_at: None,
+            #[cfg(test)]
+            before_last_observation: None,
         }
     }
 
@@ -367,6 +371,10 @@ impl Overlap {
         };
         if self.stage == 0 {
             self.first = ordered;
+        }
+        #[cfg(test)]
+        if let Some(observe) = self.before_last_observation.as_mut() {
+            observe(running)?;
         }
         // The listing and both alive observations must fit the same monotonic bound.
         if self.barrier_started.elapsed() >= OVERLAP_BOUND || !running.all_alive(2)? {
@@ -2158,6 +2166,141 @@ mod tests {
             Err("overlap: both clients must remain alive through both barriers")
         );
         home.finish().unwrap();
+    }
+
+    #[test]
+    fn overlap_last_observation_refuses_a_client_exit() {
+        let (fixture, first, sibling) = barrier_fixture();
+        let mut cases = Vec::new();
+        for stage in 0..2 {
+            let home = ThrowawayHome::new().unwrap();
+            let launches: Vec<_> = (0..2)
+                .map(|_| agent_conformance::harness::Launch {
+                    home: &home,
+                    program: Path::new("/bin/sleep"),
+                    args: vec!["3"],
+                })
+                .collect();
+            let mut running = RunningInstances::start(&launches, None).unwrap();
+            let mut overlap = Overlap::new();
+            let first_result = if stage == 1 {
+                let result = overlap.ready(&first, &fixture, &mut running);
+                overlap.advance();
+                Some(result)
+            } else {
+                None
+            };
+            let before = (overlap.waits.clone(), overlap.duration, overlap.stage);
+            let observed = std::rc::Rc::new(std::cell::Cell::new((0, false)));
+            let hook_observed = observed.clone();
+            overlap.before_last_observation = Some(Box::new(move |running| {
+                let alive = running.all_alive(2)?;
+                hook_observed.set((hook_observed.get().0 + 1, alive));
+                if !alive {
+                    return Err("test seam requires both owned clients alive");
+                }
+                running.kill_worker(0)
+            }));
+            let pending = if stage == 0 { &first } else { &sibling };
+            let result = overlap.ready(pending, &fixture, &mut running);
+            let elapsed = overlap.barrier_started.elapsed();
+            let kills = (running.kill_recorded(0), running.kill_recorded(1));
+            let completions = running.collect(Duration::from_secs(5)).unwrap();
+            cases.push((
+                home,
+                overlap,
+                first_result,
+                before,
+                observed,
+                result,
+                elapsed,
+                kills,
+                completions,
+            ));
+        }
+        // Collect and drain both stages before checking either refusal. A plant
+        // therefore exercises both real kills, even when stage 0 is accepted.
+        for (home, overlap, first_result, before, observed, result, elapsed, kills, completions) in
+            cases
+        {
+            if before.2 == 1 {
+                assert_eq!(first_result, Some(Ok(true)));
+                assert_eq!(before.0.len(), 1, "retain the completed first wait");
+            }
+            assert_eq!(observed.get(), (1, true), "both clients live at the seam");
+            assert_eq!(kills, (true, false), "only index 0 has a recorded kill");
+            assert_eq!(completions.len(), 2);
+            assert_eq!(completions[0].output.status.signal(), Some(9));
+            assert!(completions[0].kill_requested_at.is_some());
+            assert!(
+                completions[1].output.status.success(),
+                "live sibling exits normally"
+            );
+            assert!(completions[1].kill_requested_at.is_none());
+            assert!(elapsed < OVERLAP_BOUND, "refusal precedes the timeout");
+            assert_eq!(
+                result,
+                Err("overlap: clients left the barrier before its decision"),
+                "final observation refuses the real exit at stage {}",
+                before.2
+            );
+            assert_eq!(
+                (overlap.waits, overlap.duration, overlap.stage),
+                before,
+                "refusal preserves decisions, duration and stage"
+            );
+            home.finish().unwrap();
+        }
+    }
+
+    #[test]
+    fn overlap_last_observation_accepts_live_controls() {
+        let (fixture, first, sibling) = barrier_fixture();
+        for with_hook in [false, true] {
+            let home = ThrowawayHome::new().unwrap();
+            let launches: Vec<_> = (0..2)
+                .map(|_| agent_conformance::harness::Launch {
+                    home: &home,
+                    program: Path::new("/bin/sleep"),
+                    args: vec!["3"],
+                })
+                .collect();
+            let mut running = RunningInstances::start(&launches, None).unwrap();
+            let mut overlap = Overlap::new();
+            let observations = std::rc::Rc::new(std::cell::Cell::new(0));
+            if with_hook {
+                let observations = observations.clone();
+                overlap.before_last_observation = Some(Box::new(move |running| {
+                    if !running.all_alive(2)? {
+                        return Err("test seam requires both owned clients alive");
+                    }
+                    observations.set(observations.get() + 1);
+                    Ok(())
+                }));
+            }
+            let first_result = overlap.ready(&first, &fixture, &mut running);
+            overlap.advance();
+            let before = (overlap.waits.clone(), overlap.duration, overlap.stage);
+            let lone = overlap.ready(&sibling[..1], &fixture, &mut running);
+            let after_lone = (overlap.waits.clone(), overlap.duration, overlap.stage);
+            let second_result = overlap.ready(&sibling, &fixture, &mut running);
+            overlap.advance();
+            let completions = running.collect(Duration::from_secs(5)).unwrap();
+            assert_eq!(completions.len(), 2);
+            assert!(completions
+                .iter()
+                .all(|item| item.output.status.success() && item.kill_requested_at.is_none()));
+            assert_eq!(first_result, Ok(true));
+            assert_eq!(lone, Ok(false), "second barrier waits for both requests");
+            assert_eq!(after_lone, before, "a lone sibling records no decision");
+            assert_eq!(before.0.len(), 1);
+            assert_eq!(second_result, Ok(true));
+            assert_eq!(overlap.waits.len(), 2);
+            assert_eq!(overlap.stage, 2);
+            assert!(overlap.duration > Duration::ZERO);
+            assert_eq!(observations.get(), if with_hook { 2 } else { 0 });
+            home.finish().unwrap();
+        }
     }
 
     #[test]
