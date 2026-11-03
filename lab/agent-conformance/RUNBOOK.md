@@ -371,6 +371,13 @@ grant body after the server thread joins. The selected duration reaches the
 request even after a refused approval reply. These tests prove the fixture-only
 A6 grant-control prerequisite; Runtime owns grants and duration enforcement.
 They build and launch neither Runtime, providers nor probe capsules.
+Required string fields use fixed reasons that name the protocol key to repair.
+The reason contains only code-owned text; field values, response bodies,
+credentials and peer-provided keys stay private. Attach and coordinates checks
+keep their scope-specific reasons. The shared-reader, malformed-fixture and
+scripted-controller tests check refusals, repair and credential privacy through
+the existing checker. A refused client or grant response returns its field
+reason before any approval count or fixture entry changes.
 
 - `granted_read_succeeds`: seeds `Public/agent-conformance-grants/granted.txt`,
   observes exactly one matching request and grant, and requires exit 0 after

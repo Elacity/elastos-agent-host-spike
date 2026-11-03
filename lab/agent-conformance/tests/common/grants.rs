@@ -27,7 +27,22 @@ fn field<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
     value[name]
         .as_str()
         .filter(|text| !text.is_empty())
-        .ok_or("grant protocol requires a nonempty string field")
+        .ok_or(match name {
+            "resource" => "grant protocol requires nonempty string resource",
+            "action" => "grant protocol requires nonempty string action",
+            "reason" => "grant protocol requires nonempty string reason",
+            "duration" => "grant protocol requires nonempty string duration",
+            "request_id" => "grant protocol requires nonempty string request_id",
+            "session_id" => "grant protocol requires nonempty string session_id",
+            "session_type" => "grant protocol requires nonempty string session_type",
+            "status" => "grant protocol requires nonempty string status",
+            "capsule_id" => "grant protocol requires nonempty string capsule_id",
+            "content" => "grant protocol requires nonempty string content",
+            "deny_reason" => "grant protocol requires nonempty string deny_reason",
+            "token" => "grant protocol requires nonempty string token",
+            "attach_secret" => "grant protocol requires nonempty string attach_secret",
+            _ => "grant protocol requires a nonempty string field",
+        })
 }
 
 impl Fixture {
@@ -1990,6 +2005,227 @@ mod tests {
         json!({"resource":"localhost://Public/test/one","action":"read","reason":"test read"})
     }
 
+    #[test]
+    fn grant_fields_name_the_missing_key() {
+        let canary = format!("synthetic-field-credential-{}", std::process::id());
+        let mut controller = idle_controller(0);
+        controller.credentials.push(canary.clone());
+        let cases = [
+            (
+                "resource",
+                "grant protocol requires nonempty string resource",
+            ),
+            ("action", "grant protocol requires nonempty string action"),
+            ("reason", "grant protocol requires nonempty string reason"),
+            (
+                "duration",
+                "grant protocol requires nonempty string duration",
+            ),
+            (
+                "request_id",
+                "grant protocol requires nonempty string request_id",
+            ),
+            (
+                "session_id",
+                "grant protocol requires nonempty string session_id",
+            ),
+            (
+                "session_type",
+                "grant protocol requires nonempty string session_type",
+            ),
+            ("status", "grant protocol requires nonempty string status"),
+            (
+                "capsule_id",
+                "grant protocol requires nonempty string capsule_id",
+            ),
+            ("content", "grant protocol requires nonempty string content"),
+            (
+                "deny_reason",
+                "grant protocol requires nonempty string deny_reason",
+            ),
+            ("token", "grant protocol requires nonempty string token"),
+            (
+                "attach_secret",
+                "grant protocol requires nonempty string attach_secret",
+            ),
+        ];
+        for (index, &(key, expected)) in cases.iter().enumerate() {
+            for malformed in [
+                None,
+                Some(Value::Null),
+                Some(json!("")),
+                Some(json!(42)),
+                Some(json!([canary])),
+                Some(json!({"credential": canary})),
+            ] {
+                let mut value = json!({"neighbor": canary});
+                if let Some(malformed) = malformed {
+                    value[key] = malformed;
+                }
+                let refusal = field(&value, key);
+                assert!(refusal == Err(expected), "named-key assertion");
+                assert!(
+                    refusal != Err(cases[(index + 1) % cases.len()].1),
+                    "different keys have distinct reasons"
+                );
+                assert!(
+                    controller
+                        .check_bytes(refusal.unwrap_err().as_bytes(), Surface::Printed)
+                        .is_ok(),
+                    "field refusal keeps credentials private"
+                );
+            }
+            for valid in ["exact valid string", " \t "] {
+                let value = json!({key: valid});
+                assert!(
+                    field(&value, key) == Ok(valid),
+                    "exact nonempty string accepted"
+                );
+            }
+        }
+        let value = json!({canary.clone(): {"credential": canary}, "neighbor": canary});
+        let refusal = field(&value, &canary);
+        assert!(
+            refusal == Err("grant protocol requires a nonempty string field"),
+            "peer-provided keys use a fixed fallback"
+        );
+        assert!(
+            controller
+                .check_bytes(refusal.unwrap_err().as_bytes(), Surface::Printed)
+                .is_ok(),
+            "peer-provided keys stay private"
+        );
+    }
+
+    #[test]
+    fn malformed_fixture_rules_name_the_field() {
+        let canary = format!("synthetic-fixture-credential-{}", std::process::id());
+        let mut controller = idle_controller(0);
+        controller.credentials.push(canary.clone());
+        let fixture = fixture();
+        let mut value = json!({
+            "deny_reason": fixture.deny_reason,
+            "grants": fixture.entries,
+            "files": [{
+                "resource": "localhost://Public/agent-conformance-grants/seed.txt",
+                "content": "synthetic seed bytes"
+            }],
+            "neighbor": canary
+        });
+        assert!(
+            Fixture::parse(&value.to_string()).is_ok(),
+            "valid fixture control"
+        );
+        for (path, expected) in [
+            (
+                "/deny_reason",
+                "grant protocol requires nonempty string deny_reason",
+            ),
+            (
+                "/grants/0/resource",
+                "grant protocol requires nonempty string resource",
+            ),
+            (
+                "/grants/0/action",
+                "grant protocol requires nonempty string action",
+            ),
+            (
+                "/grants/0/reason",
+                "grant protocol requires nonempty string reason",
+            ),
+            (
+                "/grants/0/duration",
+                "grant protocol requires nonempty string duration",
+            ),
+            (
+                "/files/0/resource",
+                "grant protocol requires nonempty string resource",
+            ),
+            (
+                "/files/0/content",
+                "grant protocol requires nonempty string content",
+            ),
+        ] {
+            let original = value.pointer(path).unwrap().clone();
+            let (parent, key) = path.rsplit_once('/').unwrap();
+            for malformed in [
+                None,
+                Some(Value::Null),
+                Some(json!("")),
+                Some(json!(42)),
+                Some(json!({"credential": canary})),
+            ] {
+                let object = value.pointer_mut(parent).unwrap().as_object_mut().unwrap();
+                object.remove(key);
+                if let Some(malformed) = malformed {
+                    object.insert(key.into(), malformed);
+                }
+                let refusal = Fixture::parse(&value.to_string()).err();
+                assert!(
+                    refusal == Some(expected),
+                    "malformed fixture empty-field refusal"
+                );
+                assert!(
+                    controller
+                        .check_bytes(refusal.unwrap().as_bytes(), Surface::Printed)
+                        .is_ok(),
+                    "fixture refusal keeps credentials private"
+                );
+                value
+                    .pointer_mut(parent)
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(key.into(), original.clone());
+                assert!(
+                    Fixture::parse(&value.to_string()).is_ok(),
+                    "same fixture parses after repair"
+                );
+            }
+        }
+        for (path, malformed, expected) in [
+            (
+                "/grants/0/duration",
+                json!("forever"),
+                "grant fixture duration must be once or session",
+            ),
+            (
+                "/files/0/resource",
+                json!("localhost://Public/agent-conformance-grants/../outside"),
+                "seed fixture refuses a parent-directory segment",
+            ),
+            (
+                "/files/0/resource",
+                json!("localhost://Public/outside"),
+                "seed fixture escaped its Home directory",
+            ),
+        ] {
+            let original = value.pointer(path).unwrap().clone();
+            *value.pointer_mut(path).unwrap() = malformed;
+            assert!(
+                Fixture::parse(&value.to_string()).err() == Some(expected),
+                "existing fixture refusal preserved"
+            );
+            *value.pointer_mut(path).unwrap() = original;
+            assert!(
+                Fixture::parse(&value.to_string()).is_ok(),
+                "fixture control repaired"
+            );
+        }
+        let duplicate = value["grants"][0].clone();
+        value["grants"].as_array_mut().unwrap().push(duplicate);
+        assert!(
+            Fixture::parse(&value.to_string()).err()
+                == Some("grant fixture repeats an exact match"),
+            "duplicate match refusal preserved"
+        );
+        value["grants"].as_array_mut().unwrap().pop();
+        assert!(
+            Fixture::parse(&value.to_string()).is_ok(),
+            "duplicate match repaired"
+        );
+    }
+
     fn barrier_fixture() -> (Fixture, Vec<Value>, Vec<Value>) {
         let first: Vec<_> = (1..=2)
             .map(|index| json!({
@@ -2640,6 +2876,100 @@ mod tests {
     }
 
     #[test]
+    fn controller_keeps_the_refused_field_reason() {
+        let canary = format!("synthetic-controller-credential-{}", std::process::id());
+        for (key, expected) in [
+            (
+                "session_id",
+                "grant protocol requires nonempty string session_id",
+            ),
+            (
+                "request_id",
+                "grant protocol requires nonempty string request_id",
+            ),
+        ] {
+            for malformed in [None, Some(json!({"credential": canary}))] {
+                let attached = json!({"session_type": "capsule", "token": canary});
+                let info = json!({"session_type": "capsule", "session_id": "client-session"});
+                let mut damaged = if key == "session_id" {
+                    json!({"session_type": "capsule", "neighbor": canary})
+                } else {
+                    json!({"status": "pending", "neighbor": canary})
+                };
+                if let Some(malformed) = malformed {
+                    damaged[key] = malformed;
+                }
+                let mut frames = vec![framed("200 OK", &attached.to_string())];
+                if key == "session_id" {
+                    frames.extend([
+                        framed("200 OK", &damaged.to_string()),
+                        framed("200 OK", &attached.to_string()),
+                        framed("200 OK", &info.to_string()),
+                    ]);
+                } else {
+                    frames.extend([
+                        framed("200 OK", &info.to_string()),
+                        framed("200 OK", &damaged.to_string()),
+                        framed("200 OK", r#"{"status":"pending","request_id":"req-1"}"#),
+                        framed("200 OK", r#"{"requests":[{"request_id":"req-1","session_id":"client-session"}]}"#),
+                        framed("200 OK", &json!({"success": true, "token": canary}).to_string()),
+                        framed("200 OK", &json!({"status": "granted", "token": canary}).to_string()),
+                    ]);
+                }
+                with_frames(frames, |port| {
+                    let mut controller = idle_controller(port);
+                    controller.credentials.push(canary.clone());
+                    let session = if key == "session_id" {
+                        None
+                    } else {
+                        Some(
+                            controller
+                                .client_session()
+                                .expect("successful client attach control"),
+                        )
+                    };
+                    let refusal = match &session {
+                        None => controller.client_session().err(),
+                        Some(session) => controller
+                            .open_session_read(session, "localhost://Public/test/one", "test read")
+                            .err(),
+                    };
+                    let unchanged = controller.decisions.matched == 0
+                        && controller.decisions.granted == 0
+                        && controller.decisions.denied == 0
+                        && controller.used.is_empty();
+                    let repaired = match &session {
+                        None => controller
+                            .client_session()
+                            .is_ok_and(|session| session.session_id == "client-session"),
+                        Some(session) => controller
+                            .open_session_read(session, "localhost://Public/test/one", "test read")
+                            .is_ok_and(|grant| {
+                                grant.session_id() == "client-session"
+                                    && controller.credentials[grant.capability] == canary
+                            }),
+                    };
+                    assert!(refusal == Some(expected), "controller propagated reason");
+                    assert!(
+                        unchanged,
+                        "refusal preserves approval counters and fixture entries"
+                    );
+                    assert!(
+                        repaired,
+                        "repaired controller response returns the corresponding handle"
+                    );
+                    assert!(
+                        controller
+                            .check_bytes(refusal.unwrap().as_bytes(), Surface::Printed)
+                            .is_ok(),
+                        "controller refusal keeps credentials private"
+                    );
+                });
+            }
+        }
+    }
+
+    #[test]
     fn attach_refusal_names_the_scope() {
         assert_eq!(
             shell_attach(0, "fixture-canary", "shell"),
@@ -2724,7 +3054,7 @@ mod tests {
             (r#"{"requests":[]}"#, "pending request is missing"),
             (
                 r#"{"requests":[{"request_id":"req-1"}]}"#,
-                "grant protocol requires a nonempty string field",
+                "grant protocol requires nonempty string session_id",
             ),
         ] {
             with_frames(vec![framed("200 OK", body)], |port| {
@@ -2871,7 +3201,7 @@ mod tests {
             ),
             (
                 framed("200 OK", r#"{"status":"granted"}"#),
-                Err("grant protocol requires a nonempty string field"),
+                Err("grant protocol requires nonempty string token"),
             ),
             (
                 framed("200 OK", r#"{"status":"granted","token":"invalid token"}"#),
