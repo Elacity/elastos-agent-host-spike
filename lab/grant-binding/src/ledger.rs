@@ -6678,3 +6678,25 @@ fn model_rate_window_roll_keeps_the_expiry() {
         .use_grant(call, &guest(desk))
         .expect("the standing grant stays in the store");
 }
+
+#[test]
+fn model_home_expiry_bind_leaves_the_standing_grant() {
+    let mut verifier = Verifier::new();
+    let home = verifier
+        .register_instance("home", "session-a")
+        .expect("instance");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    verifier
+        .bind_until(home, "UsersAI/home/desk", rights(), 10)
+        .expect_err("home does not mint");
+    let album = verifier
+        .bind_grant(photo, "UsersAI/photo/album", rights())
+        .expect("standing album");
+    verifier.set_verifier_now(10);
+    let decision = verifier
+        .use_grant(verifier.open_call(photo), &guest(album))
+        .expect("unset expiry is not due");
+    assert_eq!(decision.owned_root, "UsersAI/photo/album");
+}
