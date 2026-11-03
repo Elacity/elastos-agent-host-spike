@@ -6,7 +6,11 @@ test: model_issuing_use_path_inside_a_live_journal_is_refused
         self.grants.values().any(|stored| {
             stored.record.parent == Some(issuing)
                 && !stored.ended
-                && resource_name(identity, path, Some(&stored.record.owned_root)).is_ok()
+                && (resource_name(identity, path, Some(&stored.record.owned_root)).is_ok()
+                    || (path != owned_root
+                        && resource_name(identity, &stored.record.owned_root, Some(path))
+                            .is_ok())
+                )
         })
 --- new
         false
