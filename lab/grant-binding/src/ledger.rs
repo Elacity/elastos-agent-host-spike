@@ -6159,56 +6159,6 @@ fn model_identity_change_release_is_refused() {
 }
 
 #[test]
-fn model_identity_change_timeout_is_refused() {
-    let mut verifier = Verifier::new();
-    let photo = verifier
-        .register_instance("photo", "session-a")
-        .expect("instance");
-    let library = verifier
-        .bind_grant(photo, "UsersAI/photo/library", rights())
-        .expect("library");
-    let call = verifier.open_call(photo);
-    verifier
-        .admit_ask(
-            &call,
-            &guest(library),
-            crate::ask::BudgetAsk { amount: 4 },
-            4,
-        )
-        .expect("ask");
-    let reservation = verifier.reserve(&call, &guest(library), 4).expect("hold");
-    verifier.set_verifier_deadline(10);
-    verifier.revoke_grant(library).expect("library ends");
-    assert_eq!(
-        verifier.settle(&call, &guest(library), reservation, SettleOutcome::Unknown),
-        Err(SettleRefuse::UnknownOutcome)
-    );
-    verifier
-        .host_set_identity(photo, "frames")
-        .expect("identity changes");
-    assert_eq!(
-        verifier.timeout_hold(&call, &guest(library), reservation, 10),
-        Err(TimeoutRefuse::Binding(Refuse::Identity)),
-        "the new identity is refused on the saved hold"
-    );
-    assert_eq!(
-        books(&verifier).timed_out.get(&reservation.id),
-        None,
-        "the refused timeout records nothing"
-    );
-    assert_eq!(books(&verifier).held, 4, "the uncertain hold stays counted");
-    assert_eq!(
-        books(&verifier).charged,
-        0,
-        "the refused timeout charges nothing"
-    );
-    let ended = verifier
-        .use_grant(call, &guest(library))
-        .expect_err("timeout does not revive the ended grant");
-    assert_eq!(ended, Refuse::UnknownHandle);
-}
-
-#[test]
 fn model_kept_hold_old_principal_settles() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
@@ -6286,4 +6236,54 @@ fn model_kept_hold_grant_end_gap_keeps_orphan() {
         0,
         "the due timeout charges nothing"
     );
+}
+
+#[test]
+fn model_identity_change_timeout_is_refused() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("library");
+    let call = verifier.open_call(photo);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(library),
+            crate::ask::BudgetAsk { amount: 4 },
+            4,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(library), 4).expect("hold");
+    verifier.set_verifier_deadline(10);
+    verifier.revoke_grant(library).expect("library ends");
+    assert_eq!(
+        verifier.settle(&call, &guest(library), reservation, SettleOutcome::Unknown),
+        Err(SettleRefuse::UnknownOutcome)
+    );
+    verifier
+        .host_set_identity(photo, "frames")
+        .expect("identity changes");
+    assert_eq!(
+        verifier.timeout_hold(&call, &guest(library), reservation, 10),
+        Err(TimeoutRefuse::Binding(Refuse::Identity)),
+        "the new identity is refused on the saved hold"
+    );
+    assert_eq!(
+        books(&verifier).timed_out.get(&reservation.id),
+        None,
+        "the refused timeout records nothing"
+    );
+    assert_eq!(books(&verifier).held, 4, "the uncertain hold stays counted");
+    assert_eq!(
+        books(&verifier).charged,
+        0,
+        "the refused timeout charges nothing"
+    );
+    let ended = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("timeout does not revive the ended grant");
+    assert_eq!(ended, Refuse::UnknownHandle);
 }
