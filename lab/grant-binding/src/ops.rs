@@ -3016,7 +3016,11 @@ fn model_rate_does_not_spend_the_effect_count() {
 }
 
 #[cfg(test)]
-const LIVE_JOURNAL: &str = "UsersAI/agent-1/journal/a/b";
+const OVERLAP_ROWS: [&str; 3] = [
+    "UsersAI/agent-1/journal/a/b",
+    "UsersAI/agent-1/journal/a/b/c",
+    "UsersAI/agent-1/journal/a",
+];
 
 #[cfg(test)]
 fn live_journal_at_a_b() -> (Verifier, Call, Handle) {
@@ -3031,28 +3035,56 @@ fn live_journal_at_a_b() -> (Verifier, Call, Handle) {
     );
     let call = verifier.open_call(instance);
     verifier
-        .create_child_journal(&call, &guest(parent), LIVE_JOURNAL)
+        .create_child_journal(&call, &guest(parent), OVERLAP_ROWS[0])
         .expect("the journal mints");
     (verifier, call, parent)
 }
 
 #[test]
-fn model_one_overlap_rule_refuses_mint_on_a_journal() {
-    let (mut verifier, call, parent) = live_journal_at_a_b();
-    let mint = verifier.create_child_journal(&call, &guest(parent), LIVE_JOURNAL);
-    assert_eq!(mint, Err(OperateRefuse::JournalSame));
+fn model_one_overlap_rule_refuses_mint_rows() {
+    use OperateRefuse::{JournalCover, JournalSame};
+    for (path, want) in OVERLAP_ROWS
+        .into_iter()
+        .zip([JournalSame, JournalCover, JournalCover])
+    {
+        let (mut verifier, call, parent) = live_journal_at_a_b();
+        let mint = verifier.create_child_journal(&call, &guest(parent), path);
+        assert_eq!(mint, Err(want), "equal, descendant, containing: {path}");
+    }
 }
 
 #[test]
-fn model_one_overlap_rule_refuses_effect_on_a_journal() {
-    let (mut verifier, call, parent) = live_journal_at_a_b();
-    let effect = verifier.operate(&call, &guest(parent), Operation::Append, LIVE_JOURNAL);
-    assert_eq!(effect, Err(OperateRefuse::JournalHeld));
+fn model_one_overlap_rule_refuses_effect_rows() {
+    for path in OVERLAP_ROWS {
+        let (mut verifier, call, parent) = live_journal_at_a_b();
+        let effect = verifier.operate(&call, &guest(parent), Operation::Append, path);
+        assert_eq!(effect, Err(OperateRefuse::JournalHeld), "{path}");
+    }
 }
 
 #[test]
-fn model_one_overlap_rule_refuses_use_path_on_a_journal() {
+fn model_one_overlap_rule_refuses_use_path_rows() {
+    for path in OVERLAP_ROWS {
+        let (verifier, call, parent) = live_journal_at_a_b();
+        let used = verifier.use_path(&call, &guest(parent), path);
+        assert_eq!(used, Err(Refuse::JournalHeld), "{path}");
+    }
     let (verifier, call, parent) = live_journal_at_a_b();
-    let used = verifier.use_path(&call, &guest(parent), LIVE_JOURNAL);
-    assert_eq!(used, Err(Refuse::JournalHeld));
+    verifier
+        .use_path(&call, &guest(parent), "UsersAI/agent-1/journal")
+        .expect("the issuing root stays allowed");
+}
+
+#[test]
+fn model_journal_refusal_spends_no_rate() {
+    let (mut verifier, call, parent) = live_journal_at_a_b();
+    verifier.set_rate(parent, 1, 10).expect("rate");
+    let append = |verifier: &mut Verifier, path: &str| {
+        verifier.operate(&call, &guest(parent), Operation::Append, path)
+    };
+    let held = append(&mut verifier, OVERLAP_ROWS[2]);
+    assert_eq!(held, Err(OperateRefuse::JournalHeld));
+    append(&mut verifier, "UsersAI/agent-1/journal/z").expect("the refusal spent no rate");
+    let rated = append(&mut verifier, "UsersAI/agent-1/journal/z");
+    assert_eq!(rated, Err(OperateRefuse::Binding(Refuse::Rate)));
 }
