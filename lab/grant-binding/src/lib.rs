@@ -400,11 +400,11 @@ impl Verifier {
     #[rustfmt::skip]
     fn rate_expiry(&self, handle: Handle) -> Result<Option<u64>, Refuse> {
         let grant = self.grants.get(&handle).ok_or(Refuse::UnknownHandle)?;
-        if grant.record.parent.is_some() {
-            return Err(Refuse::IssuingRate);
-        }
         if grant.ended {
             return Err(Refuse::UnknownHandle);
+        }
+        if grant.record.parent.is_some() {
+            return Err(Refuse::IssuingRate);
         }
         Ok(grant.record.expiry)
     }
@@ -445,10 +445,12 @@ impl Verifier {
             return Ok(());
         };
         let _ = rate;
-        self.window_due = match grant.record.window_start.checked_add(grant.record.window) {
-            Some(end) => now >= end,
-            None => false,
-        };
+        // The elapsed time, not a sum, so a window that starts at the largest
+        // instant still runs to its end.
+        let elapsed = now.saturating_sub(grant.record.window_start);
+        if elapsed >= grant.record.window {
+            self.window_due = true;
+        }
         Ok(())
     }
 
