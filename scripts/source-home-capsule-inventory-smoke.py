@@ -422,13 +422,16 @@ def assert_source_home_provider_anchors(stamper):
 
         # A wildcard row sits where exact-only selection would look first: a binary-only provider.
         star = {"version": "0.1.0", "install_path": "bin/star-provider", "platforms": {"*": {"install_path": "bin/star-provider"}}}
-        for key in ("platformless-provider", "install_path-provider", "star-provider", "empty-row-provider"):
+        for key in ("platformless-provider", "install_path-provider", "star-provider", "empty-row-provider",
+                    "null-row-provider"):
             (data / "bin" / key).write_bytes(b"")  # each needs an installed binary
             write_json(data / "capsules" / key / "capsule.json", installed_manifest(key, True))
         platformless = {"version": "0.1.0", "install_path": "bin/platformless-provider"}
         empty_row = {**star, "install_path": "bin/empty-row-provider", "platforms": {"linux-amd64": {"install_path": ""}}}  # R7
         top_level = external("install_path-provider")
         del top_level["platforms"]["linux-amd64"]["install_path"]  # its row has only a top-level install_path
+        null_row = external("null-row-provider")  # R8: a null row path falls back to the top-level one
+        null_row["platforms"]["linux-amd64"]["install_path"] = None
         write_json(root / "capsules" / "install_path-provider" / "capsule.json", {"role": "provider"})
         write_json(data / "capsules" / "install_path-provider" / "capsule.json",
                    installed_manifest("install_path-provider", True))
@@ -473,7 +476,7 @@ def assert_source_home_provider_anchors(stamper):
             if "capsule_metadata" in result["external"][shape]:
                 raise AssertionError(f"{shape} kept an anchor")
         resolved_by_path = {"install_path-provider": top_level, "platformless-provider": platformless, "star-provider": star,
-                            "empty-row-provider": empty_row}
+                            "empty-row-provider": empty_row, "null-row-provider": null_row}
         write_json(components, {"external": resolved_by_path,
                                 "profiles": {"source-home": {"components": list(resolved_by_path)}}})
         skipped = stamp(selected=list(resolved_by_path))
@@ -487,6 +490,10 @@ def assert_source_home_provider_anchors(stamper):
         if ("stamp: skip empty-row-provider: no linux-amd64 row or alias with install_path" not in skipped
                 or "capsule_metadata" in result["external"]["empty-row-provider"]):
             raise AssertionError(f"an explicit empty row path was anchored: {skipped!r}")  # F-Y0p-7
+        null_meta = (result["external"]["null-row-provider"].get("capsule_metadata") or {}).get("platforms", {})
+        if (null_meta.get("linux-amd64") or {}).get("checksum") != "source-home:sha256:" + sha256(
+                data / "capsules" / "null-row-provider" / "capsule.json"):
+            raise AssertionError(f"a null row path suppressed the top-level fallback: {skipped!r}")  # F-1403-null
         write_json(components, {"external": externals,
                                 "profiles": {"source-home": {"components": names + list(shapes)}}})
         stamp()
@@ -507,6 +514,19 @@ def assert_source_home_provider_anchors(stamper):
             raise AssertionError("no-rights provider kept an anchor")
         if integrity.audit_provider_capsule_metadata(result, ["linux-amd64"], source_root=root, source_home=True):
             raise AssertionError("stamped anchors fail the integrity check")
+        # C4: an anchor row carries no extract_path; every release archive row must name one.
+        anchor_row = json.loads(json.dumps(result))
+        anchor_row["external"]["rights-provider"]["capsule_metadata"]["platforms"]["linux-amd64"].pop("extract_path", None)
+        if integrity.audit_provider_capsule_metadata(anchor_row, ["linux-amd64"], source_root=root, source_home=True):
+            raise AssertionError("the anchor row without extract_path failed the integrity check")
+        if not any("extract_path mismatch" in e for e in integrity.audit_provider_capsule_metadata(
+                anchor_row, ["linux-amd64"], source_root=root, source_home=False)):
+            raise AssertionError("a release archive row with no extract_path passed")
+        anchor_row["external"]["rights-provider"]["capsule_metadata"]["platforms"]["linux-amd64"]["extract_path"] = None
+        for source_home in (True, False):  # an explicit null is not a missing key
+            if not any("extract_path mismatch" in e for e in integrity.audit_provider_capsule_metadata(
+                    anchor_row, ["linux-amd64"], source_root=root, source_home=source_home)):
+                raise AssertionError(f"explicit extract_path null accepted: source-home={source_home}")
         row["extract_path"] = "../outside"  # refused in both modes
         for source_home in (True, False):
             if not any("extract_path mismatch" in e for e in integrity.audit_provider_capsule_metadata(
@@ -516,6 +536,64 @@ def assert_source_home_provider_anchors(stamper):
         if not any("install_path mismatch" in e for e in integrity.audit_provider_capsule_metadata(
                 result, ["linux-amd64"], source_root=root, source_home=True)):
             raise AssertionError("source-home mode accepted an unchecked install_path")
+        # C2: a selected name outside $DATA_DIR/capsules is refused before any file outside it is read.
+        scene, outside = data.parent / "scene", data.parent / "outside"
+        scene.mkdir()
+        write_json(outside / "capsule.json", installed_manifest("outside", True))
+        outside_hashes = tree_hashes(outside)
+        # Unparsable manifests where ../outside resolves: a read before the name check fails here.
+        for spy in (root / "outside", data / "outside"):
+            spy.mkdir(parents=True, exist_ok=True)
+            (spy / "capsule.json").write_text("{not json")
+        current = json.loads(components.read_text())
+
+        def unsafe_stamp(selected):
+            with redirect_stderr(io.StringIO()):
+                stamper.stamp_component_capsules(components, data, root, "linux-amd64", selected)
+        for unsafe in ("../outside", outside.as_posix(), "/outside"):
+            write_json(components, {"external": {**current["external"], "outside": external("outside")},
+                                    "profiles": {"source-home": {"components": [*names, unsafe]}}})
+            try:
+                unsafe_stamp([*names, unsafe])
+            except SystemExit as error:
+                if "unsafe source-home profile capsule name" not in str(error):
+                    raise AssertionError(f"{unsafe!r} refused for the wrong reason: {error}")
+            else:
+                raise AssertionError(f"{unsafe!r} escaped $DATA_DIR/capsules")
+            if "capsule_metadata" in json.loads(components.read_text())["external"]["outside"]:
+                raise AssertionError(f"{unsafe!r} was anchored before the refusal")
+        # A link inside $DATA_DIR/capsules must not carry the read to a manifest outside it.
+        read_through = data / "capsules" / "rights-provider" / "linked"
+        read_through.symlink_to(outside, target_is_directory=True)
+        write_json(outside / "linked" / "capsule.json", installed_manifest("linked", True))
+        outside_hashes = tree_hashes(outside)
+        write_json(components, {"external": {**current["external"], "linked": external("linked")},
+                                "profiles": {"source-home": {"components": [*names, "linked"]}}})
+        write_json(data / "capsules" / "linked" / "capsule.json", {"role": "provider"})  # a real dir would stamp
+        write_json(root / "capsules" / "linked" / "capsule.json", {"runtime_abi": "elastos.component/v1"})  # the source-capsule read
+        (data / "capsules" / "linked").rename(scene / "linked-real")
+        read_through.rename(data / "capsules" / "linked")  # capsules/linked -> capsules/rights-provider/linked -> outside
+        if not (data / "capsules" / "linked").resolve().is_relative_to(outside.resolve()):
+            raise AssertionError("the link row does not lead outside $DATA_DIR/capsules")
+        try:
+            unsafe_stamp([*names, "linked"])
+        except SystemExit as error:
+            if not str(error).startswith("refusing to anchor a linked capsule path"):
+                raise AssertionError(f"a linked installed capsule refused for the wrong reason: {error}")
+        else:
+            raise AssertionError("an installed capsule path that links outside $DATA_DIR/capsules was read")
+        (data / "capsules" / "linked").unlink()  # now only the capsule.json file links outside
+        (data / "capsules" / "linked").mkdir()
+        (data / "capsules" / "linked" / "capsule.json").symlink_to(outside / "capsule.json")
+        try:
+            unsafe_stamp([*names, "linked"])
+        except SystemExit as error:
+            if not str(error).startswith("refusing to anchor a linked capsule path"):
+                raise AssertionError(f"a linked capsule.json refused for the wrong reason: {error}")
+        else:
+            raise AssertionError("a capsule.json that links outside $DATA_DIR/capsules was read")
+        if tree_hashes(outside) != outside_hashes:
+            raise AssertionError("an unsafe profile name or link read a file outside $DATA_DIR/capsules")
 
 
 def run_smoke():

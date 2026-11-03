@@ -43,7 +43,8 @@ def browser_assets(capsule_root):
 
 STAMPS_RUNTIME_ABIS = {"elastos.component/v1", "elastos.runtime-projection/v1"}
 MANAGED_STATE_SCHEMA = "elastos.source-home.managed-capsules/v1"
-SAFE_CAPSULE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# A capsule name stays one path segment: dot-only names cannot name a parent directory.
+SAFE_CAPSULE_NAME = re.compile(r"^(?!\.+$)[A-Za-z0-9][A-Za-z0-9._-]*$")
 # Match Runtime setup.rs: exact platform, then its alias, then wildcard.
 PLATFORM_ALIASES = {
     "x86_64-linux": "linux-amd64",
@@ -86,6 +87,17 @@ def validated_capsule_names(names, label):
         if not SAFE_CAPSULE_NAME.fullmatch(name):
             raise SystemExit(f"unsafe {label} capsule name: {name!r}")
     return values
+
+
+def installed_capsule_manifest(data_dir, name):
+    """Resolve the installed manifest inside $DATA_DIR/capsules, refusing links that leave it."""
+    # A link anywhere at or below the capsules root, capsule.json included, would carry the read elsewhere.
+    path = data_dir
+    for segment in ("capsules", *name.split("/"), "capsule.json"):
+        path = path / segment
+        if path.is_symlink():
+            raise SystemExit(f"refusing to anchor a linked capsule path below $DATA_DIR/capsules: {path}")
+    return path
 
 
 def load_managed_capsules(path):
@@ -190,21 +202,25 @@ def load_integrity_checker():
 def stamp_provider_spawn_anchors(manifest, data_dir, platform):
     """Anchor a rights-declaring provider on its installed manifest digest; print each skip."""
     profiles = manifest.get("profiles") or {}
-    selected = (profiles.get("source-home") or {}).get("components") or []
+    # A profile name is a path segment under $DATA_DIR/capsules; validate every one before any file is read.
+    selected = validated_capsule_names(
+        (profiles.get("source-home") or {}).get("components") or [], "source-home profile"
+    )
     integrity = load_integrity_checker()
     for name, component in sorted(manifest.get("external", {}).items()):
         if name not in selected:
             continue
         # The binary row decides whether the provider resolves; a top-level install_path is its last step.
         resolved, info = integrity.resolve_platform_info(component, platform)
-        if (not isinstance(info, dict) or "install_path" not in info) and isinstance(
+        # A null row path counts as absent, as the Runtime resolver reads it; "" stays refused below.
+        if (not isinstance(info, dict) or info.get("install_path") is None) and isinstance(
                 component.get("install_path"), str):
             info = {"install_path": component["install_path"],
                     "release_path": (info or {}).get("release_path")}
         if not isinstance(info, dict) or not info.get("install_path"):
             print(f"stamp: skip {name}: no {platform} row or alias with install_path", file=sys.stderr)
             continue
-        installed_manifest = data_dir / "capsules" / name / "capsule.json"
+        installed_manifest = installed_capsule_manifest(data_dir, name)
         # A bin-only provider may ship no installed manifest; skip it by name.
         if not installed_manifest.is_file():
             print(f"stamp: skip {name}: no installed capsule.json", file=sys.stderr)
@@ -243,11 +259,13 @@ def stamp_component_capsules(components_path, data_dir, root, platform, capsules
     manifest = json.loads(components_path.read_text())
     capsule_entries = manifest.setdefault("capsules", {})
     obsolete_sidecars = []
+    # Each name is a path segment: refuse a bad one before any file is read (Codex 1407 @7ab96195).
+    validated_capsule_names(capsules, "source-home profile")
 
     for name in capsules:
         source_manifest_path = root / "capsules" / name / "capsule.json"
         installed_root = data_dir / "capsules" / name
-        installed_manifest_path = installed_root / "capsule.json"
+        installed_manifest_path = installed_capsule_manifest(data_dir, name)
         if not source_manifest_path.is_file() or not installed_manifest_path.is_file():
             continue
         source_manifest = json.loads(source_manifest_path.read_text())
