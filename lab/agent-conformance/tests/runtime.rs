@@ -4,6 +4,7 @@ use agent_conformance::build::lane;
 use agent_conformance::harness::ThrowawayHome;
 use agent_conformance::runtime::{localhost_provider_under_test, runtime_under_test};
 use sha2::{Digest, Sha256};
+use std::cell::Cell;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::TcpListener;
@@ -97,6 +98,165 @@ fn assert_no_materialized_capsule(home: &ThrowawayHome) {
             .starts_with("elastos-capsule-")),
         "refused CID launch must leave no materialized capsule in TMPDIR"
     );
+}
+
+fn assert_operator_home_bytes(home: &ThrowawayHome, installed: &std::path::Path, bytes: &[u8]) {
+    assert_eq!(installed, home.data().join("bin/localhost-provider"));
+    assert_eq!(fs::read(installed).unwrap(), bytes);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(home.data().join("components.json")).unwrap()).unwrap();
+    let info = &manifest["external"]["localhost-provider"]["platforms"]
+        [common::operator_platform().unwrap()];
+    assert_eq!(
+        info["checksum"],
+        format!("sha256:{:x}", Sha256::digest(bytes))
+    );
+    assert_eq!(info["size"], bytes.len());
+    assert_eq!(info["install_path"], "bin/localhost-provider");
+    assert_eq!(
+        fs::read(home.data().join("config.toml")).unwrap(),
+        include_bytes!("../fixtures/operator-config.toml")
+    );
+}
+
+#[test]
+fn operator_home_guard_precedes_provider_load() {
+    let home = ThrowawayHome::new().unwrap();
+    let decoy = ThrowawayHome::new().unwrap();
+    let marker = decoy.data().join("marker");
+    let marker_bytes = b"keep the decoy Home bytes\n";
+    fs::write(&marker, marker_bytes).unwrap();
+    let bytes = b"synthetic operator provider\n";
+    let calls = Cell::new(0);
+    let load_provider = || {
+        calls.set(calls.get() + 1);
+        Ok(bytes.to_vec())
+    };
+    let saved_data = home.root().join("saved-data");
+    fs::rename(home.data(), &saved_data).unwrap();
+    std::os::unix::fs::symlink(decoy.data(), home.data()).unwrap();
+
+    let result = common::write_operator_home_with_loader(&home, &load_provider)
+        .map_err(|error| error.to_string());
+    let outputs = [
+        "bin",
+        "bin/localhost-provider",
+        "components.json",
+        "config.toml",
+    ]
+    .map(|name| fs::symlink_metadata(home.data().join(name)));
+    let saved_marker = fs::read(&marker);
+    // Repair the selected Home before assertions, also under a compiling plant.
+    fs::remove_file(home.data()).expect("remove the owned data-directory symlink");
+    fs::rename(&saved_data, home.data()).expect("restore the selected Home directory");
+
+    assert_eq!(calls.get(), 0, "Home guard must precede provider loading");
+    assert_eq!(
+        result,
+        Err("data directory must use directories without symlinks".into()),
+        "operator writer must return the existing guard refusal"
+    );
+    for output in outputs {
+        assert!(
+            output.is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            "guard refusal must leave installed and config outputs absent"
+        );
+    }
+    assert_eq!(saved_marker.unwrap(), marker_bytes, "keep the decoy bytes");
+    let installed = common::write_operator_home_with_loader(&home, &load_provider)
+        .expect("prepare the repaired Home through the same path");
+    assert_eq!(
+        calls.get(),
+        1,
+        "repaired Home loads the provider exactly once"
+    );
+    assert_operator_home_bytes(&home, &installed, bytes);
+    assert_eq!(fs::read(&marker).unwrap(), marker_bytes);
+    home.finish().unwrap();
+    decoy.finish().unwrap();
+}
+
+#[test]
+fn operator_home_config_collision_is_reported() {
+    let bytes = b"synthetic config-collision provider\n";
+    let marker_bytes = b"keep the existing config destination\n";
+    for symlink in [false, true] {
+        let home = ThrowawayHome::new().unwrap();
+        let config = home.data().join("config.toml");
+        let marker = home.root().join("config-decoy");
+        fs::write(&marker, marker_bytes).unwrap();
+        if symlink {
+            std::os::unix::fs::symlink(&marker, &config).unwrap();
+        } else {
+            fs::write(&config, marker_bytes).unwrap();
+        }
+        let result = common::write_operator_home_with_loader(&home, || Ok(bytes.to_vec()));
+        let saved_config = fs::read(&config);
+        let saved_marker = fs::read(&marker);
+        let metadata = fs::symlink_metadata(&config).unwrap();
+        let link = symlink.then(|| fs::read_link(&config).unwrap());
+        fs::remove_file(&config).expect("repair the owned config collision");
+
+        let error = result
+            .expect_err("operator writer must refuse the existing config")
+            .to_string();
+        assert!(
+            error.contains(config.to_str().unwrap()),
+            "config refusal must name the selected config path; error: {error}"
+        );
+        assert!(
+            error.starts_with("create operator config "),
+            "config refusal must name the create operation; error: {error}"
+        );
+        let cause = std::io::Error::from_raw_os_error(17).to_string();
+        assert!(
+            error.ends_with(&format!(": {cause}")),
+            "config refusal must keep the underlying I/O cause; error: {error}"
+        );
+        assert_eq!(saved_config.unwrap(), marker_bytes, "keep config bytes");
+        assert_eq!(saved_marker.unwrap(), marker_bytes, "keep decoy bytes");
+        if let Some(target) = link {
+            assert!(metadata.file_type().is_symlink(), "keep the config symlink");
+            assert_eq!(target, marker, "keep the config symlink target");
+        } else {
+            assert!(metadata.is_file(), "keep the regular config file");
+        }
+        // Completed component writes stay in this refused fixture until finish.
+        assert_eq!(
+            fs::read(home.data().join("bin/localhost-provider")).unwrap(),
+            bytes
+        );
+        home.finish().unwrap();
+
+        let fresh = ThrowawayHome::new().unwrap();
+        let installed = common::write_operator_home_with_loader(&fresh, || Ok(bytes.to_vec()))
+            .expect("prepare a fresh Home after repairing the collision");
+        assert_operator_home_bytes(&fresh, &installed, bytes);
+        fresh.finish().unwrap();
+    }
+
+    let home = ThrowawayHome::new().unwrap();
+    let error = common::write_operator_home_with_loader(&home, || {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "synthetic provider load cause",
+        )
+        .into())
+    })
+    .expect_err("provider load failure must propagate before installation");
+    assert_eq!(error.to_string(), "synthetic provider load cause");
+    assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::NotFound,
+        "preserve the loader's underlying error"
+    );
+    for name in ["bin", "components.json", "config.toml"] {
+        assert!(!home.data().join(name).try_exists().unwrap());
+    }
+    let installed = common::write_operator_home_with_loader(&home, || Ok(bytes.to_vec()))
+        .expect("prepare the Home after repairing provider loading");
+    assert_operator_home_bytes(&home, &installed, bytes);
+    home.finish().unwrap();
 }
 
 #[test]

@@ -10928,3 +10928,76 @@ The final branch/worktree inventory keeps this checkout on the supplied HEAD and
 155: One checked helper now copies the Agent Host and relative Bus inputs, with exact-byte refusal tests, four caught plants, and a passing real copied-capsule build and staging proof.
 
 Candidate: the local five-path diff against the supplied HEAD. Exercised checks: build target, four caught compiling plants and their restored exact checks, opt-in real-capsule build/staging, full locked lane gate, formatting and basic repository checks pass. Review links: pending with the lane supervisor. Installed release evidence: skipped because this is a lab artifact-input prerequisite; Runtime owns installed acceptance and the existing principal-bound journey. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.
+
+
+## 157
+
+Before editing: supplied HEAD `edbf64ea6d50a30f232ef7ed898843933687de90`, tree `d391534de826f7cc10f8dd0a72d826439181766c`. The supplied branch is `spark/cx-agent-conformance/157-guard-operator-home-before-provider-load`. `git status --short --branch` showed zero dirty paths. This HEAD is the comparison base; the task preserves Git refs, history and index. This branch has no upstream, so remote divergence is unmeasured; network access stays disabled.
+
+Read the task and supplied BACKLOG item 14, the 012/014/013 and 150/151 handoffs, the RUNBOOK operator-writer description, architecture Harness conformance, all operator-writer callers, the component writer and the existing Home guard and cleanup APIs. The repository has no humanizer skill source; this record uses direct behavior and ownership statements.
+
+Plan: keep the public wrapper and existing component installer, and put one private byte-loading seam around the shared guard/load/install/config sequence. Add the two named Runtime-target tests for pre-load guard order, collision preservation and repair, plus synthetic loader-error propagation. Add context to config create/write errors. Run each of the three compiling plants separately and restore exact candidate bytes after each, then run restored exact tests, formatting, diff checks and the full locked lane gate. Final edits stay in `tests/common/mod.rs`, `tests/runtime.rs`, the existing RUNBOOK operator paragraph and this section.
+
+Initial free space: 50,630,672 KiB. Reuse the lane caches; the existing 12 GiB output estimate plus 2 GiB reserve fit. Cargo commands use offline inputs, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, lane-local outputs, the existing shared exclusive heavy-build lease and a 600-second command bound. The supervisor owns supplied worktree/cache lifecycle; task-created fixture roots retain the existing finish-or-review cleanup rule.
+
+Both exact baseline tests passed under the shared lease: guard exit 0 in 2.874 seconds; config collision exit 0 in 0.197 seconds. Each command ran one named test. These synthetic paths built and started zero native providers or Runtime processes. Passing fixtures reached `finish()` and removed their roots.
+
+F-operator-home-skip-outer-guard — CAUGHT. Exact plant bytes as JSON strings, scoped to `tests/common/mod.rs::write_operator_home_with_loader`:
+
+- Old: `"    home.guard(home.home(), home.data())?;\n    let bytes = load_provider()?;"`
+- New: `"    let bytes = load_provider()?;"`
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime operator_home_guard_precedes_provider_load -- --exact`. Exit 101 in 1.989 seconds. One named test ran and failed the assertion `Home guard must precede provider loading`. Compilation and fixture setup succeeded. The full candidate source was restored byte for byte in `finally` before the next plant.
+
+F-operator-home-truncate-config — CAUGHT. Exact plant bytes as JSON strings, scoped to `tests/common/mod.rs::write_operator_home_with_loader`:
+
+- Old: `"File::create_new(&config)"`
+- New: `"File::create(&config)"`
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime operator_home_config_collision_is_reported -- --exact`. Exit 101 in 0.857 seconds. One named test ran and failed the assertion `operator writer must refuse the existing config`. Compilation and fixture setup succeeded. The full candidate source was restored byte for byte in `finally` before the next plant.
+
+F-operator-home-bare-config-create — CAUGHT. Exact plant bytes as JSON strings, scoped to `tests/common/mod.rs::write_operator_home_with_loader`:
+
+- Old: `"    File::create_new(&config)\n        .map_err(|error| format!(\"create operator config {}: {error}\", config.display()))?"`
+- New: `"    File::create_new(&config)?"`
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime operator_home_config_collision_is_reported -- --exact`. Exit 101 in 0.87 seconds. One named test ran and failed the assertion `config refusal must name the selected config path`. Compilation and fixture setup succeeded. The full candidate source was restored byte for byte in `finally` before the next plant.
+
+Restored check: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime operator_home_guard_precedes_provider_load -- --exact` exited 0 in 1.905 seconds.
+
+Restored check: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime operator_home_config_collision_is_reported -- --exact` exited 0 in 0.128 seconds.
+
+Restored check: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exited 0 in 0.223 seconds.
+
+Restored check: `cargo fmt --all -- --check` from `elastos/` exited 0 in 2.996 seconds.
+
+Restored check: `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` exited 0 in 0.115 seconds.
+
+Sandbox preflight refused a local fixture bind (`Operation not permitted`) and process-group inspection (`Cannot get process list`) before any Runtime/provider launch. These are infrastructure results with zero behavior credit. The full gate uses host loopback and process visibility after a successful preflight. Basic repository checks passed: `git diff --check`, product-data validation and all 99 product-data tests.
+
+
+Principles check (answers follow the task's question wording):
+
+| Check | Answer and evidence |
+| --- | --- |
+| 1. New name or URL where a hash belongs? | No. `tests/common/mod.rs:46` stamps the loaded bytes with SHA-256; `tests/runtime.rs:110` verifies that checksum independently. |
+| 2. Capsule, Home or UI gains authority? | No. `tests/common/mod.rs:38` reuses the contained-Home guard before fixture preparation; the seam supplies bytes only. |
+| 3. Second operation path or rule? | No. `tests/common/mod.rs:27` delegates to one shared preparation path, which calls the existing component writer at line 41. |
+| 4. Runtime core grows? | No. `tests/common/mod.rs:34` contains the seam in lab test support; the four changed files belong to this lane's tests and documentation. |
+| 5. New refusals fail closed with a reason? | Yes. `tests/common/mod.rs:38` propagates the existing guard refusal, and line 49 exclusively creates the config with operation/path/cause context. |
+| 6. Capsule stays self-contained and uses granted Bus calls? | Yes. `tests/runtime.rs:131` substitutes synthetic provider bytes inside the fixture; capsule logic and Bus contracts keep their supplied bytes. |
+| 7. Tests and caught falsifiers prove new rules? | Yes. `tests/runtime.rs:123` and line 180 pass restored; the three separate compiling plants above fail their named behavior assertions. |
+| 8. Identity, admission and allowance stay separate? | Yes. `tests/common/mod.rs:29` verifies native identity before reading bytes; line 46 stamps fixture identity and makes zero admission, grant or budget decisions. |
+
+Final source review confirms `write_component_home` is byte-identical to the supplied HEAD. The native verification operation, checksum calculation, installed path and committed config input retain their original behavior. Falsifier registration, runner, provider/harness policy, blockers and blocked task records keep their supplied bytes. The task branch has no upstream. Against fetched `spike/spike/agent-host` at `eb2129162bec0881ad0b6e1e5672dc44b17b8cff`, the supplied HEAD has 2 base-only and 16 task-only commits. Network access is outside this builder task; the supervisor owns the fresh remote comparison and integration.
+
+Restored full gate: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` exited 0 in 344.0 seconds, with 265 passed, 0 failed and 14 ignored. Initial free space was 51765575680 bytes. Shared lease, offline dependencies, lane-local targets and the two-thread/non-incremental settings applied. New retained fixture roots: 0.
+
+
+Final lifecycle: every passing new fixture reached `finish()` after its assertions. The guard fixture repaired the selected data directory before the planted assertion; both config plants removed their owned collision after recording preservation observations. Four failed-plant roots remain for review, containing 2,542 logical bytes. Each final host `lsof -nP -Fpn +D <owned-root>` check exited 1 with empty stdout/stderr. Host executable-name inspection found zero active executables from this lane target. The full gate created zero new retained roots. The ignored `target/task-157-lifecycle.json` records exact private paths, source identities, dirty paths, size, holder checks, owner and review-then-remove conditions. The supervisor removes those four exact synthetic roots and the inventory after review; supplied caches and the supplied branch/worktree retain their existing owner. This task creates zero installed artifacts, rollback sets, branches or worktrees. The task's shared heavy-build lease is released.
+
+The final inventory retains the supplied branch, commit and tree and has exactly the four allowed dirty paths. The branch has no upstream; the fetched-base divergence remains 2 base-only and 16 task-only commits. Git refs, history and index were preserved. Source review and the restored gates cover this fixture-preparation prerequisite; Runtime owns product storage and installed acceptance. Existing blocker IDs, ignored journeys and task states retain their supplied gates.
+
+157: Added one guarded operator preparation seam, contextual config errors, two refusal/recovery tests and three caught hand-run plants; all restored checks and the full locked lane gate pass.
+
+Candidate: the local four-path diff against the supplied HEAD. Exercised checks: both exact tests, three separately caught compiling plants, restored exact tests, lane formatting, full locked lane gate and all basic repository checks pass. Review links: pending with the lane supervisor. Installed release evidence: skipped because this change proves a lab fixture prerequisite; the task leaves installed Homes with their owners. Remaining gate: supervisor rerun, independent reviews and integration of the recorded divergence. Next owner: lane supervisor.

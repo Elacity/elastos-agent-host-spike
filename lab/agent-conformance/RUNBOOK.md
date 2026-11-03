@@ -81,7 +81,10 @@ lab/agent-conformance/Cargo.toml --test build
 offline_build_overrides_inherited_output_settings -- --exact`.
 
 `tests/common::write_operator_home` owns the operator fixture for this test and
-the ready-operator tests. It uses `write_component_home`, the shared entry-copy
+the ready-operator tests. Its shared preparation path checks the selected Home
+with the existing guard before preparing or reading the native provider. Tests
+use a counted byte loader on that same path to prove refusal and repair without
+starting a provider or Runtime. It uses `write_component_home`, the shared entry-copy
 and stamping helper, which also prepares the CID refusal fixture. The helper
 checks the Home guard before source reads or destination writes and installs
 executable bytes. For the operator fixture,
@@ -91,6 +94,16 @@ It stamps the current Mac platform with the
 copy's checksum, size and install path. The repository entry owns all other fields.
 The writer supports `darwin-arm64` and `darwin-amd64` and refuses other platforms
 with a reason. Exclusive creation keeps existing paths and symlinks intact.
+The operator writer then exclusively creates `config.toml` with the committed
+fixture bytes. A config create or write refusal names the operation, selected
+path and I/O cause; a loader error preserves its cause before installation.
+Repair the selected Home directory or remove its owned config collision, then
+use a fresh Home when component outputs already exist. Completed component
+writes stay in a refused fixture until its cleanup; the writer owns fixture
+preparation and Runtime owns product storage policy. The runtime-target tests
+`operator_home_guard_precedes_provider_load` and
+`operator_home_config_collision_is_reported` prove these refusal and recovery
+paths with lane-owned Homes and decoys.
 
 `component_home_writer_checks_guard_before_writing` replaces the owned Home
 with an in-root symlink and calls this writer. It captures the exact guard

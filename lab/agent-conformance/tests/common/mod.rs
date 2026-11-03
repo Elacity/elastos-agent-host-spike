@@ -24,9 +24,19 @@ pub fn operator_platform() -> Result<&'static str, &'static str> {
 /// Prepare a fresh Home only. Exclusive creation refuses existing destinations,
 /// including symlinks, before a copy or manifest write can follow them.
 pub fn write_operator_home(home: &ThrowawayHome) -> Result<PathBuf, Box<dyn Error>> {
+    write_operator_home_with_loader(home, || {
+        let provider = localhost_provider_under_test()?;
+        Ok(fs::read(provider.verified_path()?)?)
+    })
+}
+
+// Keep native preparation replaceable in tests while sharing the full writer.
+pub(super) fn write_operator_home_with_loader(
+    home: &ThrowawayHome,
+    load_provider: impl FnOnce() -> Result<Vec<u8>, Box<dyn Error>>,
+) -> Result<PathBuf, Box<dyn Error>> {
     home.guard(home.home(), home.data())?;
-    let provider = localhost_provider_under_test()?;
-    let bytes = fs::read(provider.verified_path()?)?;
+    let bytes = load_provider()?;
     let installed = home.data().join("bin/localhost-provider");
     write_component_home(
         home,
@@ -35,8 +45,11 @@ pub fn write_operator_home(home: &ThrowawayHome) -> Result<PathBuf, Box<dyn Erro
         &bytes,
         &format!("{:x}", Sha256::digest(&bytes)),
     )?;
-    File::create_new(home.data().join("config.toml"))?
-        .write_all(include_bytes!("../../fixtures/operator-config.toml"))?;
+    let config = home.data().join("config.toml");
+    File::create_new(&config)
+        .map_err(|error| format!("create operator config {}: {error}", config.display()))?
+        .write_all(include_bytes!("../../fixtures/operator-config.toml"))
+        .map_err(|error| format!("write operator config {}: {error}", config.display()))?;
     Ok(installed)
 }
 
