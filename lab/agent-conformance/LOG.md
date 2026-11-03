@@ -10808,3 +10808,123 @@ Passing fixtures used their existing cleanup paths. Exactly five new failed synt
 154 round 3: Repeated the five caught plants and all restored gates; the supervisor's sibling-read census case passed alone and in the full locked suite, with the implementation unchanged.
 
 Candidate: the supplied three-path task diff plus this LOG retry record. Exercised checks: exact baseline, five caught plants, five restored exact checks, build target, harness target, exact sibling-read retry, full locked lane gate, formatting and basic repository checks pass. Review links: pending with the lane supervisor. Installed release evidence: skipped because this is lab build-containment proof; Runtime owns capsule storage and installed acceptance. Remaining gate: supervisor rerun, Git-only checks and independent reviews. Next owner: lane supervisor.
+
+
+## 155 — one helper owns the Agent Host build inputs
+
+Supplied HEAD: `5542660c806a618b5cfe98c97d4da0e355e43012`. Supplied tree: `f4cc3329789b221042cbfe67489c83dbb0800e89`. Supplied dirty paths: none (clean checkout). The active task branch keeps its supplied history and checkout. Its fetched private lane base is 15 commits behind this HEAD (15 local-only, zero base-only); this offline task leaves remote refresh with the supervisor.
+
+Plan: extend the existing copy helper to check both repository input branches before it creates a fresh build root, return the copied capsule path, and migrate its callers. Extend the existing exact-tree test, add relative-contract and invalid-Bus-input checks, then build and stage the real copy through the existing offline path. Run the four separate compiling plants, restore each before the next, and run the restored build target and full locked lane gate. Final source edits stay in the five task paths.
+
+Initial free space: 59740651520 bytes. Reuse existing lane caches; a 12 GiB output estimate plus the required 2 GiB reserve fit. Cargo tests use the shared exclusive heavy-build lease, offline inputs, lane-local outputs, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, and a 600-second bound per command. Existing ignored proofs and prior lifecycle inventories retain their supervisor owner.
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build`: exit 0 in 2.143 seconds. test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+### Four separate compiling plants
+
+All commands use the offline two-thread environment, disabled incremental compilation, lane-local host/build/temp outputs, and the shared exclusive heavy-build lease. Exact old/new bytes below use JSON string encoding. Each plant is restored in `finally` before its passing check and the next plant. Existing falsifier lists and runners keep their bytes.
+
+Plant `omit-wit` in `src/build.rs`:
+
+```json
+{
+  "old": "        (\"elastos/wit/elastos-bus-v1.wit\", InputKind::File),\n",
+  "new": ""
+}
+```
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build agent_host_copy_keeps_the_relative_bus_contract -- --exact`: exit 101 in 1.692 seconds. test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+Failed assertion: `relative Bus contract must be copied`. The named test ran and compiled. This plant is CAUGHT.
+Restored the complete candidate helper bytes (SHA-256 `a58a33dc78f570025f4b748978b901f2af5994cd76c1094c16387c75257af78e`).
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build agent_host_copy_keeps_the_relative_bus_contract -- --exact`: exit 0 in 1.146 seconds. test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+
+Plant `wrong-wit` in `src/build.rs`:
+
+```json
+{
+  "old": "fs::copy(&path, &target)",
+  "new": "fs::copy(if path.ends_with(\"elastos/wit/elastos-bus-v1.wit\") { source.join(\"examples/agent-host/Cargo.toml\") } else { path.clone() }, &target)"
+}
+```
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build agent_host_copy_keeps_the_relative_bus_contract -- --exact`: exit 101 in 1.378 seconds. test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+Failed assertion: `relative Bus contract must keep complete bytes`. The named test ran and compiled. This plant is CAUGHT.
+Restored the complete candidate helper bytes (SHA-256 `a58a33dc78f570025f4b748978b901f2af5994cd76c1094c16387c75257af78e`).
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build agent_host_copy_keeps_the_relative_bus_contract -- --exact`: exit 0 in 1.099 seconds. test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+
+Plant `allow-readme` in `src/build.rs`:
+
+```json
+{
+  "old": "        (\"examples/agent-host/Cargo.toml\", InputKind::File),\n",
+  "new": "        (\"examples/agent-host/Cargo.toml\", InputKind::File),\n        (\"examples/agent-host/README.md\", InputKind::File),\n"
+}
+```
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build agent_host_copy_takes_only_listed_files -- --exact`: exit 101 in 1.514 seconds. test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+Failed assertion: `only listed inputs may be copied`. The named test ran and compiled. This plant is CAUGHT.
+Restored the complete candidate helper bytes (SHA-256 `a58a33dc78f570025f4b748978b901f2af5994cd76c1094c16387c75257af78e`).
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build agent_host_copy_takes_only_listed_files -- --exact`: exit 0 in 1.137 seconds. test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+
+Plant `follow-leaf` in `src/build.rs`:
+
+```json
+{
+  "old": "fs::symlink_metadata(path)",
+  "new": "fs::metadata(path)"
+}
+```
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build agent_host_copy_refuses_bad_bus_inputs -- --exact`: exit 101 in 1.313 seconds. test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+Failed assertion: `leaf-symlink: bad Bus input must be refused`. The named test ran and compiled. This plant is CAUGHT.
+Restored the complete candidate helper bytes (SHA-256 `a58a33dc78f570025f4b748978b901f2af5994cd76c1094c16387c75257af78e`).
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build agent_host_copy_refuses_bad_bus_inputs -- --exact`: exit 0 in 1.062 seconds. test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build`: exit 0 in 0.140 seconds. test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --features agent-host --test agent_host agent_host_copy_builds_with_relative_bus_contract -- --exact --show-output`: exit 0 in 23.171 seconds. test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out; finished in 21.26s
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101 in 3.422 seconds. test result: FAILED. 96 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s
+
+The first full gate ran inside the builder sandbox and stopped in the existing `runtime::tests::native_identity_refuses_changed_or_missing_bytes`: `Managed original: launch` returned `could not inspect child process group`. Its 96 earlier unit passes supply partial proof only; later targets did not run. This is an infrastructure result, with zero falsifier credit. The same full gate is retried with host process visibility and local fixture sockets, under the same lease and offline settings.
+
+### Implementation and principles
+
+`src/build.rs::copy_agent_host` now accepts the source repository root and a fresh build-tree root, checks both input branches with `checked_directories` and `copy_inputs`, and returns `examples/agent-host` under that tree. Its literal allowlist owns the four capsule inputs and the Bus WIT file. `copy_inputs` keeps leaf metadata checks and enforces file/tree expectations before destination creation. `tests/agent_host.rs::build_agent_host` uses that returned path and keeps its existing offline command, error classification and artifact reads.
+
+`tests/build.rs::agent_host_copy_takes_only_listed_files` compares all copied file paths and exact bytes, including nested source and binary Bus bytes, while preserving the source, collision, capsule-symlink and escape checks. The new `agent_host_copy_keeps_the_relative_bus_contract` resolves two different complete contracts from two returned capsule paths after both copies exist. The new `agent_host_copy_refuses_bad_bus_inputs` checks the missing file, leaf symlink, directory symlink and directory leaf, with named operation/path/cause, absent destinations, unchanged owned decoys and successful repaired copies. The opt-in `agent_host_copy_builds_with_relative_bus_contract` compiles the real copy, validates its component and stages its exact manifest and payload in the same Home before cleanup. Runtime owns the separate principal-bound journey and acceptance gate.
+
+| Principles question | Yes/No | Evidence (lane-relative) |
+| --- | --- | --- |
+| 1. New code/content name or URL where a hash belongs? | No | `tests/agent_host.rs:65` uses the existing hash-bound `stage_probe`; `:75` checks the staged payload digest. |
+| 2. New capsule, Home or UI ambient authority? | No | `tests/agent_host.rs:26` runs only the existing offline build; `:65` stages in the owned Home. |
+| 3. Second path or copy of an operation rule? | No | `src/build.rs:37` owns the one literal input list, consumed by `tests/agent_host.rs:24`. |
+| 4. Does the trusted Runtime core grow? | No | `src/build.rs:18` implements this lab-only change; the five changed paths remain inside this lane. |
+| 5. Do new refusals deny by default with a clear reason? | Yes | `src/build.rs:90` checks leaf metadata and `:95` enforces types before destination creation at `:48`; `tests/build.rs:351` checks named refusals. |
+| 6. Does capsule logic stay inside with granted Bus calls? | Yes | `tests/agent_host.rs:24` builds the unchanged capsule source with its relative typed Bus input, and `tests/build.rs:242` proves source preservation. |
+| 7. Named tests and caught falsifiers prove the new rules? | Yes | `tests/build.rs:278`, `:208` and `:316` catch all four separately compiled plants recorded above; each restored named test passes. |
+| 8. Do identity, admission and allowance stay separate? | Yes | `tests/agent_host.rs:65` constructs bundle identity; the blocked journey still has its existing ignore at `:109`, with Runtime owning admission, principal binding and grants. |
+
+Basic author checks passed with exit 0: `git diff --check`; `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`; `node scripts/check-product-data.mjs` (42 capsules, two profiles, 28 method contracts); `node --test scripts/check-product-data.test.mjs` (99 passed); `(cd elastos && cargo fmt --all -- --check)`; and `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`.
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0 in 299.572 seconds. test result: ok. 97 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s; test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s; test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 39.92s; test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s; test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.58s; test result: ok. 65 passed; 0 failed; 12 ignored; 0 measured; 0 filtered out; finished in 220.30s; test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.89s; test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s; test result: ok. 12 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 16.79s; test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s; test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s; test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s; test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s; test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s; test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s; test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+### Restored gates and lifecycle
+
+The host-access full locked gate passed with exit 0 in 299.572 seconds: 263 passed, zero failed and 14 existing ignored rows. The same offline two-thread settings, lane-local outputs, disabled incremental compilation, 600-second bound and shared exclusive heavy-build lease applied. The real Agent Host build took 21.110 seconds inside its passing 23.171-second command. It compiled the unchanged capsule from copied inputs, validated the component, staged exact manifest/payload bytes and completed `home.finish()`. The sandbox process-inspection result above stays an infrastructure result.
+
+The four plants restored the complete helper to SHA-256 `a58a33dc78f570025f4b748978b901f2af5994cd76c1094c16387c75257af78e` before the final gates. Byte comparisons against the supplied HEAD also confirm the offline-build function, controller, probe selectors, manifests, locks, falsifier list, runner and blocked rows retain their supplied bytes. The candidate changes exactly the five task paths.
+
+Passing fixtures removed their own roots. After the restored gates passed, host `lsof -nP -Fpn +D <owned-root>` checks returned exit 1 with empty stdout/stderr for each of the five retained synthetic/sandbox roots and the new real-agent-host build directory; those six directories were then removed. The first cleanup stopped at a nonempty scratch check after those removals, before it saved the size measurements. A metadata check identified one 495-byte tool cache in the owned scratch. A separate empty holder check then passed, and that cache, its scratch directory and the transient gate script were removed. The inventory records the missing pre-removal size measurements explicitly. Host process inspection found zero executables active from this lane target, and the final scan found zero new retained roots.
+
+The ignored `target/task-155-current-lifecycle.json` records exact private paths, source identities, ownership, holder checks and removal decisions. The finite proof outputs and that inventory stay for supervisor review, then the supervisor removes their exact paths. Earlier roots, inventories and supplied caches retain their existing supervisor owner. The shared lease is released. This task creates zero installed artifacts, rollback sets, branches or worktrees.
+
+The final branch/worktree inventory keeps this checkout on the supplied HEAD and tree, with only the five task paths dirty. The task branch has no upstream. Compared with fetched `spike/spike/agent-host` at `321cc698a21543c7cfe2895fecf9c2ef99e2b33c`, HEAD has 15 local-only commits and 0 base-only commits. Network access is outside this builder task, so the supervisor owns a fresh remote comparison and publication.
+
+155: One checked helper now copies the Agent Host and relative Bus inputs, with exact-byte refusal tests, four caught plants, and a passing real copied-capsule build and staging proof.
+
+Candidate: the local five-path diff against the supplied HEAD. Exercised checks: build target, four caught compiling plants and their restored exact checks, opt-in real-capsule build/staging, full locked lane gate, formatting and basic repository checks pass. Review links: pending with the lane supervisor. Installed release evidence: skipped because this is a lab artifact-input prerequisite; Runtime owns installed acceptance and the existing principal-bound journey. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.

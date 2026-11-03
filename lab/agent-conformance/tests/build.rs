@@ -179,31 +179,58 @@ fn contents(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     files
 }
 
-#[test]
-fn agent_host_copy_takes_only_listed_files() {
-    let home = ThrowawayHome::new().unwrap();
+fn agent_host_source(home: &ThrowawayHome) -> PathBuf {
     let source = home.root().join("source");
-    fs::create_dir_all(source.join("src/nested")).unwrap();
-    let listed = [
+    let capsule = source.join("examples/agent-host");
+    fs::create_dir_all(capsule.join("src/nested")).unwrap();
+    fs::create_dir_all(source.join("elastos/wit")).unwrap();
+    for name in [
         "Cargo.toml",
         "Cargo.lock",
         "capsule.json",
         "src/lib.rs",
         "src/nested/module.rs",
-    ];
-    for name in listed
-        .into_iter()
-        .chain(["README.md", "agent-host.component.wasm", "asks.json"])
-    {
-        fs::write(source.join(name), name).unwrap();
+        "README.md",
+        "agent-host.component.wasm",
+        "asks.json",
+    ] {
+        fs::write(capsule.join(name), name).unwrap();
     }
+    fs::write(
+        source.join("elastos/wit/elastos-bus-v1.wit"),
+        b"Bus contract\0\xff",
+    )
+    .unwrap();
+    source
+}
+
+#[test]
+fn agent_host_copy_takes_only_listed_files() {
+    let home = ThrowawayHome::new().unwrap();
+    let source = agent_host_source(&home);
     let before = contents(&source);
     let destination = home.root().join("copy");
-    copy_agent_host(&source, &destination).unwrap();
-    let expected = listed
-        .into_iter()
-        .map(|name| (PathBuf::from(name), name.as_bytes().to_vec()))
-        .collect();
+    let capsule = copy_agent_host(&source, &destination).unwrap();
+    assert_eq!(capsule, destination.join("examples/agent-host"));
+    let mut expected: BTreeMap<_, _> = [
+        "Cargo.toml",
+        "Cargo.lock",
+        "capsule.json",
+        "src/lib.rs",
+        "src/nested/module.rs",
+    ]
+    .into_iter()
+    .map(|name| {
+        (
+            PathBuf::from("examples/agent-host").join(name),
+            name.as_bytes().to_vec(),
+        )
+    })
+    .collect();
+    expected.insert(
+        "elastos/wit/elastos-bus-v1.wit".into(),
+        b"Bus contract\0\xff".to_vec(),
+    );
     assert_eq!(
         contents(&destination),
         expected,
@@ -214,22 +241,18 @@ fn agent_host_copy_takes_only_listed_files() {
         before,
         "copy leaves the source unchanged"
     );
-    fs::write(
-        destination.join("Cargo.toml"),
-        b"preserve existing destination",
-    )
-    .unwrap();
+    fs::write(capsule.join("Cargo.toml"), b"preserve existing destination").unwrap();
     let existing = contents(&destination);
     let refusal = copy_agent_host(&source, &destination).unwrap_err();
     assert!(
-        refusal.contains(destination.to_str().unwrap()),
-        "destination refusal names its path"
+        refusal.contains(destination.to_str().unwrap()) && refusal.contains("exists"),
+        "destination refusal names its path and cause"
     );
     assert_eq!(contents(&destination), existing);
     for name in ["Cargo.toml", "src/nested/module.rs"] {
-        let path = source.join(name);
+        let path = source.join("examples/agent-host").join(name);
         fs::remove_file(&path).unwrap();
-        symlink(source.join("README.md"), &path).unwrap();
+        symlink(source.join("examples/agent-host/README.md"), &path).unwrap();
         let refused = home.root().join("refused");
         let reason = copy_agent_host(&source, &refused).unwrap_err();
         assert!(reason.contains(path.to_str().unwrap()) && reason.contains("symlink"));
@@ -248,5 +271,124 @@ fn agent_host_copy_takes_only_listed_files() {
     let outside = home.root().join("../escape");
     assert!(copy_agent_host(&source, &outside).is_err());
     assert_eq!(contents(&source), before);
+    home.finish().unwrap();
+}
+
+#[test]
+fn agent_host_copy_keeps_the_relative_bus_contract() {
+    let home = ThrowawayHome::new().unwrap();
+    let source = agent_host_source(&home);
+    let contracts: [&[u8]; 2] = [
+        b"first complete Bus\0\xff\n",
+        b"second complete Bus\0\xfe\n",
+    ];
+    let copies = contracts
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| {
+            fs::write(source.join("elastos/wit/elastos-bus-v1.wit"), bytes).unwrap();
+            let before = contents(&source);
+            let destination = home.root().join(format!("copy-{index}"));
+            let capsule = copy_agent_host(&source, &destination).unwrap();
+            assert_eq!(capsule, destination.join("examples/agent-host"));
+            assert_eq!(
+                contents(&source),
+                before,
+                "relative copy preserves source bytes"
+            );
+            capsule
+        })
+        .collect::<Vec<_>>();
+    for (capsule, expected) in copies.iter().zip(contracts) {
+        // This is the unchanged guest's wit_bindgen path, relative to its crate.
+        let contract = capsule.join("../../elastos/wit/elastos-bus-v1.wit");
+        assert!(contract.is_file(), "relative Bus contract must be copied");
+        assert_eq!(
+            fs::read(&contract).expect("read the copied relative Bus contract"),
+            expected,
+            "relative Bus contract must keep complete bytes"
+        );
+    }
+    home.finish().unwrap();
+}
+
+#[test]
+fn agent_host_copy_refuses_bad_bus_inputs() {
+    let home = ThrowawayHome::new().unwrap();
+    let source = agent_host_source(&home);
+    let original = contents(&source);
+    let wit = source.join("elastos/wit/elastos-bus-v1.wit");
+    let decoy = home.root().join("bus-decoy");
+    fs::create_dir(&decoy).unwrap();
+    fs::write(decoy.join("elastos-bus-v1.wit"), b"decoy Bus stays\0\xff").unwrap();
+    let decoy_before = contents(&decoy);
+    for case in [
+        "missing",
+        "leaf-symlink",
+        "directory-symlink",
+        "directory-leaf",
+    ] {
+        fs::remove_file(&wit).unwrap();
+        let (refused_path, cause) = match case {
+            "missing" => (wit.clone(), "No such file"),
+            "leaf-symlink" => {
+                symlink(decoy.join("elastos-bus-v1.wit"), &wit).unwrap();
+                (wit.clone(), "symlink")
+            }
+            "directory-symlink" => {
+                fs::remove_dir(wit.parent().unwrap()).unwrap();
+                symlink(&decoy, wit.parent().unwrap()).unwrap();
+                (wit.parent().unwrap().to_path_buf(), "symlink")
+            }
+            "directory-leaf" => {
+                fs::create_dir(&wit).unwrap();
+                (wit.clone(), "regular input")
+            }
+            _ => unreachable!(),
+        };
+        let destination = home.root().join(format!("refused-{case}"));
+        let result = copy_agent_host(&source, &destination);
+        assert!(result.is_err(), "{case}: bad Bus input must be refused");
+        let reason = result.unwrap_err();
+        assert!(
+            reason.contains("copy")
+                && reason.contains(refused_path.to_str().unwrap())
+                && reason.contains(cause),
+            "{case}: refusal names operation, path and cause: {reason}"
+        );
+        assert!(
+            !destination.exists(),
+            "{case}: refusal precedes destination creation"
+        );
+        assert_eq!(
+            contents(&decoy),
+            decoy_before,
+            "{case}: decoy bytes stay unchanged"
+        );
+        match case {
+            "leaf-symlink" => fs::remove_file(&wit).unwrap(),
+            "directory-symlink" => {
+                fs::remove_file(wit.parent().unwrap()).unwrap();
+                fs::create_dir(wit.parent().unwrap()).unwrap();
+            }
+            "directory-leaf" => fs::remove_dir(&wit).unwrap(),
+            _ => {}
+        }
+        fs::write(&wit, &original[Path::new("elastos/wit/elastos-bus-v1.wit")]).unwrap();
+        assert_eq!(contents(&source), original, "{case}: source repaired");
+        let capsule = copy_agent_host(&source, &destination).expect("repaired Bus input copies");
+        assert_eq!(capsule, destination.join("examples/agent-host"));
+        assert_eq!(
+            contents(&destination).len(),
+            6,
+            "repaired tree has all six inputs"
+        );
+        assert_eq!(
+            fs::read(capsule.join("../../elastos/wit/elastos-bus-v1.wit")).unwrap(),
+            original[Path::new("elastos/wit/elastos-bus-v1.wit")]
+        );
+        assert_eq!(contents(&decoy), decoy_before);
+        assert_eq!(contents(&source), original);
+    }
     home.finish().unwrap();
 }

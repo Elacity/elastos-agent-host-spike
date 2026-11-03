@@ -758,11 +758,29 @@ Sasha can select the additional real-capsule journey with:
 bash lab/agent-conformance/run.sh --agent-host
 ```
 
-The plain command includes the P7 manifest gap row. The opt-in journey, when
-forced with Cargo's `--ignored`, copies only `Cargo.toml`, `Cargo.lock`,
-`capsule.json` and `src/` under the lane target,
-places the read-only Bus contract beside that build tree, and uses the shared
-offline builder, bundle stager, operator, controller and cleanup census.
+The plain command includes the P7 manifest gap row. One `copy_agent_host`
+helper checks the source repository and a fresh destination under the lane
+target. It copies exactly `examples/agent-host/{Cargo.toml,Cargo.lock,capsule.json,src/**}`
+and `elastos/wit/elastos-bus-v1.wit` into that build root, then returns the
+copied capsule path. Directory, leaf-type and symlink checks run before
+destination creation. Existing destinations keep their bytes. Synthetic tests
+compare the complete file map, exact bytes and the guest's relative Bus lookup;
+invalid Bus inputs are refused before a destination is created.
+
+The opt-in `agent_host_copy_builds_with_relative_bus_contract` test compiles
+the real copy through the existing offline builder, validates the component
+and stages its manifest and payload through `stage_probe` in the same owned
+Home. It starts zero Runtime or provider processes and removes its Home after
+success. Under the shared heavy-build lease, run:
+
+```bash
+RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --locked \
+  --manifest-path lab/agent-conformance/Cargo.toml --features agent-host \
+  --test agent_host agent_host_copy_builds_with_relative_bus_contract -- --exact
+```
+
+The opt-in journey, when forced with Cargo's `--ignored`, uses this same copy
+and build path, bundle stager, operator, controller and cleanup census.
 A passing row requires exactly the journal write and read requests in that
 order, both fixture denials, exit 0, and an empty journal-path census. Its
 launched component SHA-256 and bundle lab CID belong to the same-run receipt.
@@ -778,6 +796,9 @@ The active agent-host checks under `--agent-host` include
 `agent_host_journal_census_detects_planted_paths`,
 `agent_host_grants::request_sequence_requires_exact_order_and_one_session`,
 `agent_host_copy_takes_only_listed_files`,
+`agent_host_copy_keeps_the_relative_bus_contract`,
+`agent_host_copy_refuses_bad_bus_inputs`,
+`agent_host_copy_builds_with_relative_bus_contract`,
 `agent_host_row_requires_its_launched_identity`, and
 `staging_uses_manifest_entrypoint_and_refuses_escape`. The shared
 `agent_host_grants::tests` also run. These exercise the harness with fixtures;

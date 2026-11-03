@@ -20,16 +20,8 @@ const JOURNAL: &str = "localhost://Users/self/.AppData/Agents/agent-host/tasks/d
 
 fn build_agent_host(home: &ThrowawayHome) -> (Vec<u8>, Vec<u8>) {
     let tree = home.root().join("build-inputs");
-    fs::create_dir_all(tree.join("examples")).unwrap();
-    let copy = tree.join("examples/agent-host");
-    copy_agent_host(&repository().join("examples/agent-host"), &copy)
-        .expect("copy the real capsule's listed inputs");
-    // Preserve the guest's relative WIT lookup without editing its source or
-    // writing into the repository contract. The contract is outside the copy.
-    fs::create_dir_all(tree.join("elastos/wit")).unwrap();
-    let wit = repository().join("elastos/wit/elastos-bus-v1.wit");
-    assert!(fs::symlink_metadata(&wit).unwrap().is_file());
-    fs::copy(wit, tree.join("elastos/wit/elastos-bus-v1.wit")).unwrap();
+    let copy =
+        copy_agent_host(&repository(), &tree).expect("copy the real capsule's listed inputs");
     let started = Instant::now();
     let output = offline_build("bash", &lane().join("target/real-agent-host-build"))
         .expect("prepare lane-owned build output")
@@ -56,6 +48,36 @@ fn build_agent_host(home: &ThrowawayHome) -> (Vec<u8>, Vec<u8>) {
         fs::read(copy.join("agent-host.component.wasm")).expect("built real component"),
         fs::read(copy.join("capsule.json")).expect("copied real manifest"),
     )
+}
+
+#[test]
+fn agent_host_copy_builds_with_relative_bus_contract() {
+    let home = ThrowawayHome::new().unwrap();
+    let root = home.root().to_path_buf();
+    let (bytes, manifest) = build_agent_host(&home);
+    assert!(
+        wasmparser::Parser::is_component(&bytes),
+        "built Agent Host is a component"
+    );
+    wasmparser::Validator::new()
+        .validate_all(&bytes)
+        .expect("built Agent Host component validates");
+    let capsule = stage_probe(&home, &bytes, &manifest, "agent-host")
+        .expect("stage the built Agent Host through the shared bundle stager");
+    assert_eq!(
+        fs::read(capsule.path.join("capsule.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(
+        fs::read(capsule.path.join("agent-host.component.wasm")).unwrap(),
+        bytes
+    );
+    assert_eq!(
+        capsule.identity.component_sha256,
+        agent_conformance::identity::sha256(&bytes)
+    );
+    home.finish().unwrap();
+    assert!(!root.exists(), "passed Agent Host build fixture removed");
 }
 
 // Inspect names and metadata only, including the Runtime's data directories.
