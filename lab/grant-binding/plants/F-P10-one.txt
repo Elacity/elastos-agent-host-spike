@@ -1,13 +1,13 @@
 id: F-P10-one
 file: src/lib.rs
-test: ops::model_one_overlap_rule_refuses_mint_on_a_journal
-test: ops::model_one_overlap_rule_refuses_effect_on_a_journal
-test: ops::model_one_overlap_rule_refuses_use_path_on_a_journal
+test: ops::model_one_overlap_rule_refuses_mint_rows
+test: ops::model_one_overlap_rule_refuses_effect_rows
+test: ops::model_one_overlap_rule_refuses_use_path_rows
 --- old
-        .max()
+            .max()
     }
 --- new
-        .max()
-        .and(None)
+            .max()
+            .and(None)
     }
 --- end
