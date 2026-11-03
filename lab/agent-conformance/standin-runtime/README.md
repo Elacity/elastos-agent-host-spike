@@ -70,6 +70,8 @@ Six session asks of 1 on one session grant are admitted. An ask of 4091 is `rese
 
 `post_capability_request` denies a system-backend resource and a generic wallet resource after the live-instance check and before `declared_ask`. Its Ok body contains only `status` `denied` and the handler's `reason`. The exact `elastos://wallet/meta/status` resource with `read` and a declared `elastos://content/...` ask still store through the signed-ask check. A stopped instance stays `instance is not live`. A PASS gives the Runtime no A6 credit for this denial.
 
+`get_capability_pending` answers `GET /api/capability/pending`. A client is refused with status 403 and `This endpoint requires shell privileges`. The shell list contains the pending records of every session, sorted by `session_id` then `request_id`. `expires_at` is `requested_at` plus `REQUEST_TIMEOUT_SECS`, saturated, so `u64::MAX - 10` expires at `u64::MAX` and not at `289`. A granted, denied or expired record stays off this list and stays on `get_capability_requests`. The list does not grant and does not settle. A PASS gives the Runtime no A15 credit.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.

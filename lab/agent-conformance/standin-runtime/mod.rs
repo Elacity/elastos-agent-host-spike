@@ -902,6 +902,38 @@ impl StandIn {
         Ok(json!({ "requests": requests }))
     }
 
+    /// GET /api/capability/pending.
+    ///
+    /// The shell reads every session's pending requests. Ok means status 200.
+    pub fn get_capability_pending(&self, caller: Caller<'_>) -> Result<Value, (u16, String)> {
+        require_shell(caller)?;
+        let mut listed: Vec<&Request> = self
+            .requests
+            .iter()
+            .filter(|request| request.status == RequestStatus::Pending)
+            .collect();
+        listed.sort_by(|left, right| {
+            left.session_id
+                .cmp(&right.session_id)
+                .then_with(|| left.request_id.cmp(&right.request_id))
+        });
+        let requests = listed
+            .into_iter()
+            .map(|request| {
+                json!({
+                    "request_id": request.request_id,
+                    "session_id": request.session_id,
+                    "resource": request.resource,
+                    "action": request.action,
+                    "reason": request.reason,
+                    "requested_at": request.requested_at,
+                    "expires_at": pending_expires_at(request.requested_at),
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({ "requests": requests }))
+    }
+
     /// `POST /api/capability/request`.
     ///
     /// A client instance that is `starting` or `running` stores one pending
@@ -2109,6 +2141,10 @@ fn body(shell: bool, capabilities: Vec<Value>) -> Value {
     } else {
         json!({ "capabilities": capabilities })
     }
+}
+
+fn pending_expires_at(requested_at: u64) -> u64 {
+    requested_at.saturating_add(REQUEST_TIMEOUT_SECS)
 }
 
 fn request_entry(request: &Request) -> Value {
@@ -7906,6 +7942,266 @@ mod tests {
             launch_finished(&shared, standin),
             launch_finished(&shared, standin),
         )
+    }
+
+    #[test]
+    fn standin_shell_lists_every_pending_request() {
+        let mut standin = StandIn::new();
+        let (first, second) = launch_two_running_ids(&mut standin);
+        assert_eq!(
+            (&*first, &*second),
+            ("component-1", "component-2"),
+            "the stand-in did the work: two launches have distinct instance ids"
+        );
+        for id in [&first, &second] {
+            assert_capsule(
+                &standin,
+                id,
+                "running",
+                "",
+                "the stand-in did the work: both instances start running with an empty cause",
+            );
+        }
+        let pending = |standin: &StandIn| {
+            let before = (
+                request_entries(standin, &first),
+                request_entries(standin, &second),
+                standin.get_capability_list(Caller::Shell, None),
+                standin.get_capsules(Caller::Shell),
+            );
+            let listed = standin
+                .get_capability_pending(Caller::Shell)
+                .expect("the stand-in did the work: the shell reads pending requests");
+            assert_eq!(
+                listed
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                ["requests"],
+                "the stand-in did the work: the pending body has only requests"
+            );
+            assert_eq!(
+                (
+                    request_entries(standin, &first),
+                    request_entries(standin, &second),
+                    standin.get_capability_list(Caller::Shell, None),
+                    standin.get_capsules(Caller::Shell),
+                ),
+                before,
+                "the stand-in did the work: listing preserves records, grants and instances"
+            );
+            listed
+        };
+        let request_ids = |listed: &Value| {
+            listed["requests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["request_id"].clone())
+                .collect::<Vec<_>>()
+        };
+        let refused = Err((403, "This endpoint requires shell privileges".to_owned()));
+        assert_eq!(
+            pending(&standin),
+            json!({"requests": []}),
+            "the stand-in did the work: the shell starts with an empty pending list"
+        );
+        assert_eq!(
+            standin.get_capability_pending(Caller::Client { session_id: &first }),
+            refused,
+            "the stand-in did the work: component-1 is refused before reading the list"
+        );
+        for (id, session, resource, action, reason) in [
+            (
+                "req-c",
+                &first,
+                "localhost://Public/resident-instances/c.txt",
+                "write",
+                "reason-c",
+            ),
+            (
+                "req-a",
+                &first,
+                "localhost://Public/resident-instances/a.txt",
+                "read",
+                "reason-a",
+            ),
+            (
+                "req-b",
+                &second,
+                "localhost://Public/resident-instances/b.txt",
+                "read",
+                "reason-b",
+            ),
+        ] {
+            standin
+                .seed_request(id, session, resource, action, reason)
+                .expect("the stand-in did the work: each distinct pending request is stored");
+        }
+        let listed = pending(&standin);
+        assert_eq!(
+            request_ids(&listed),
+            json!(["req-a", "req-c", "req-b"])
+                .as_array()
+                .unwrap()
+                .clone(),
+            "the stand-in did the work: pending requests sort by session then request id"
+        );
+        for (entry, id, session, resource, action, reason) in [
+            (
+                &listed["requests"][0],
+                "req-a",
+                &first,
+                "localhost://Public/resident-instances/a.txt",
+                "read",
+                "reason-a",
+            ),
+            (
+                &listed["requests"][1],
+                "req-c",
+                &first,
+                "localhost://Public/resident-instances/c.txt",
+                "write",
+                "reason-c",
+            ),
+            (
+                &listed["requests"][2],
+                "req-b",
+                &second,
+                "localhost://Public/resident-instances/b.txt",
+                "read",
+                "reason-b",
+            ),
+        ] {
+            assert_eq!(
+                entry.as_object().unwrap().keys().map(String::as_str).collect::<BTreeSet<_>>(),
+                BTreeSet::from(["request_id", "session_id", "resource", "action", "reason", "requested_at", "expires_at"]),
+                "the stand-in did the work: a pending entry has exactly the seven presentation keys"
+            );
+            assert_eq!(
+                entry,
+                &json!({
+                    "request_id": id, "session_id": session, "resource": resource,
+                    "action": action, "reason": reason, "requested_at": 0, "expires_at": 300,
+                }),
+                "the stand-in did the work: each pending entry carries its own request fields and expiry"
+            );
+        }
+        assert_eq!(
+            standin.get_capability_pending(Caller::Client {
+                session_id: &second
+            }),
+            refused,
+            "the stand-in did the work: component-2 is refused with pending records present"
+        );
+        assert_eq!(
+            pending(&standin),
+            listed,
+            "the stand-in did the work: a client refusal preserves the shell list and order"
+        );
+        assert_eq!(
+            standin.post_capability_deny(
+                Caller::Shell,
+                &json!({"request_id": "req-b", "reason": "keep this deny"})
+            ),
+            Ok(json!({"success": true})),
+            "the stand-in did the work: the shell denies req-b through the existing route"
+        );
+        assert_eq!(
+            request_ids(&pending(&standin)),
+            vec![json!("req-a"), json!("req-c")],
+            "the stand-in did the work: a denied record leaves the pending list"
+        );
+        assert_eq!(
+            request_entries(&standin, &second),
+            vec![json!({
+                "request_id": "req-b", "session_id": second,
+                "resource": "localhost://Public/resident-instances/b.txt",
+                "action": "read", "reason": "reason-b", "status": "denied",
+                "decision_reason": "keep this deny", "settled_by": "shell", "plan": null,
+            })],
+            "the stand-in did the work: the session record keeps the shell deny and its reason"
+        );
+        assert_eq!(
+            standin.post_capability_grant(
+                Caller::Shell,
+                &json!({"request_id": "req-c", "duration": "once", "rationale": "grant once"})
+            ),
+            Ok(json!({"success": true})),
+            "the stand-in did the work: the shell grants req-c through the existing route"
+        );
+        assert_eq!(
+            request_ids(&pending(&standin)),
+            vec![json!("req-a")],
+            "the stand-in did the work: a granted record leaves the pending list"
+        );
+        standin.set_instant(299);
+        assert_eq!(
+            pending(&standin), json!({"requests": [listed["requests"][0].clone()]}),
+            "the stand-in did the work: req-a keeps requested_at 0 and expires_at 300 at instant 299"
+        );
+        standin.set_instant(300);
+        assert_eq!(
+            pending(&standin),
+            json!({"requests": []}),
+            "the stand-in did the work: expired requests leave the pending list at instant 300"
+        );
+        assert_eq!(
+            request_entries(&standin, &first)
+                .iter()
+                .map(|entry| entry["status"].clone())
+                .collect::<Vec<_>>(),
+            vec![json!("expired"), json!("granted")],
+            "the stand-in did the work: expired and granted records stay on the session record"
+        );
+        standin
+            .seed_request(
+                "req-late",
+                &second,
+                "localhost://Public/resident-instances/late.txt",
+                "read",
+                "reason-late",
+            )
+            .expect("the stand-in did the work: a later request is stored");
+        assert_eq!(
+            pending(&standin), json!({"requests": [{
+                "request_id": "req-late", "session_id": second,
+                "resource": "localhost://Public/resident-instances/late.txt",
+                "action": "read", "reason": "reason-late", "requested_at": 300, "expires_at": 600,
+            }]}),
+            "the stand-in did the work: the later request expires one timeout after its own requested_at"
+        );
+        standin.set_instant(u64::MAX - 10);
+        standin
+            .seed_request(
+                "req-sat",
+                &first,
+                "localhost://Public/resident-instances/sat.txt",
+                "read",
+                "reason-sat",
+            )
+            .expect("the stand-in did the work: a request near u64::MAX is stored");
+        assert_eq!(
+            pending(&standin),
+            json!({"requests": [{
+                "request_id": "req-sat", "session_id": first,
+                "resource": "localhost://Public/resident-instances/sat.txt",
+                "action": "read", "reason": "reason-sat",
+                "requested_at": u64::MAX - 10, "expires_at": u64::MAX,
+            }]}),
+            "the stand-in saturates the pending expiry at u64::MAX"
+        );
+        for id in [&first, &second] {
+            assert_capsule(
+                &standin,
+                id,
+                "running",
+                "",
+                "the stand-in did the work: both instances stay running with an empty cause",
+            );
+        }
     }
 
     /// An absent grant id is status 400 with the fixed reason `unknown grant`.
