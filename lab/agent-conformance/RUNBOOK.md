@@ -119,6 +119,25 @@ Task 013 adds these rows to the same Cargo-derived table:
 - `socket_census_requires_parseable_loopback_endpoints_and_api_listener`: checks field-format parsing with IPv4/IPv6, connected sockets, wildcard and remote addresses, malformed listings and missing API visibility.
 - `managed_child_stop_reaps_its_process_group`: checks SIGTERM and group cleanup with a parent and child fixture.
 - `managed_child_drop_kills_its_group_and_keeps_root`: checks emergency group cleanup and root retention when a handle is dropped before stop.
+- `managed_stop_escalates_and_keeps_root`: the leader and descendant ignore SIGTERM. Stop must return the exact ten-second timeout reason in at least ten and less than fifteen seconds, reap the leader, empty the group and retain the failed Home.
+- `managed_stop_waits_for_descendants`: the leader exits on SIGTERM while its descendant ignores it. The same timeout, escalation, group-drain and retention checks apply.
+
+The two stop-bound rows extend `child_group` through the existing Home APIs.
+Each signal handler is set before its readiness marker is written inside the
+fresh Home. A two-second readiness check matches both recorded PIDs against
+the managed group; startup delay alone supplies zero readiness evidence.
+The descendants run for 120 seconds, beyond the ten-second stop bound.
+Each row captures the stop result, monotonic elapsed time, leader state and
+group state before assertions or emergency cleanup. Bounded emergency cleanup
+signals only that fixture's group through `home.launch`, then checks leader
+reaping and group drain before any behavior assertion. Saved observations
+still fail a planted stop that leaves processes alive. Passing rows remove
+their retained roots only after the retention and empty-group checks pass;
+ordinary failures keep their roots for review. Setup and cleanup errors carry
+their own reasons and supply zero behavior or falsifier credit.
+These rows support the lab harness's physical-cleanup part of M1 A12.
+Capsule cancellation, grant settlement and installed Runtime acceptance keep
+their existing owners under the architecture's Harness conformance contract.
 
 The [operator recipe](GAPS.md#operator-in-a-throwaway-home) owns the ordered
 setup and its measurement limits. `fixtures/operator-config.toml` selects
@@ -136,9 +155,15 @@ the wildcard-socket refusal, then restore the fixture and require PASS.
 Run F-ac1k only against `launch_env_is_only_the_throwaway_home`; it removes the
 mDNS-off entry for that environment test alone. Restore it before any operator
 launch. F-census-a removes the API visibility requirement. F-managed-stop omits
-SIGTERM and checks the timeout failure and forced cleanup. F-managed-drop omits
+SIGTERM; its old test proves timeout refusal at `stop().expect(...)`, before
+its later cleanup assertions. The two stop-bound rows above prove escalation,
+group drain and retention. F-managed-drop omits
 the retained-root marker. Their exact edits and named tests are in
 `falsifiers.json`; each named test must fail planted and pass restored.
+Task 149's four hand-run plants omit the stop's kill or retention marker,
+accept an exited leader with a live descendant, or shorten the wait to zero.
+Their exact bytes, single-test commands and measured results belong in
+`LOG.md` under `## 149`; restore each plant before the next run.
 
 
 Task 003 adds these rows to the same table:

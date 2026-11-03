@@ -10105,3 +10105,152 @@ The final branch/worktree inventory keeps HEAD `518a8409129e3ada9047417af29198f5
 - 148: prove all eight real Git dirty-state transitions in the existing receipt path, with three caught compiling plants and a passing restored full lane gate.
 
 Final `git diff --check` passed (exit 0). The three source/document paths are the complete final diff.
+
+## 149
+
+Before editing: supplied HEAD `67c58415575fee35e51945c8db110568e1ede56c`, tree `a3114e569d77187554810ffdc9cedcd391df4b02`. `git status --short --branch` showed `spark/cx-agent-conformance/149-managed-stop-escalation-and-group-drain` with zero dirty paths, including zero unrelated dirty paths. This task uses that checkout and preserves its refs, index and history.
+
+Read the architecture's Harness conformance section, the managed-child implementation and tests, 013's handoff and F-managed-stop result, the three existing falsifier records and the RUNBOOK managed-child section. A lane search found the existing `child_group` launcher and the owned-group cleanup pattern in `parallel_collection_refuses_live_descendants`. Plan: extend that fixture for two ready signal modes, record stop observations before emergency cleanup and assertions, run four separate compiling plants with exact restoration, then run the restored harness and full lane gates. Final edits belong to the existing test file, managed-child RUNBOOK section and this LOG section. The repository has no humanizer skill; this handoff uses direct behavior and ownership statements.
+
+Initial lease checks found the shared heavy-build lease busy and started zero builds. The existing target cache is reused; the initial space check showed 32,430,924 KiB available, which fits an estimated 8 GiB of new build outputs plus the required 2 GiB reserve. Every Cargo test below uses `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane-local `target/host` and `target/host-build`, the shared exclusive lease and a 600-second command bound. Exact-test observations use `RUST_TEST_NOCAPTURE=1`; full-suite captures keep the normal test capture policy.
+
+Basic checks passed: `git diff --check` (exit 0), `node scripts/check-product-data.mjs` (exit 0), `node --test scripts/check-product-data.test.mjs` (exit 0, 99 passed), `(cd elastos && cargo fmt --all -- --check)` (exit 0), `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` (exit 0), and `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` (exit 0). Product source remains with its existing owners; these checks are read-only.
+
+Baseline exact command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness managed_stop_escalates_and_keeps_root -- --exact`, exit 0, 12.46 seconds.
+`stop observed: result=Err("managed child or its group exceeded the 10 second stop bound") elapsed=10.051759417s leader_alive=Ok(false) group_alive=Ok(false)`
+`fixture cleanup: pgid=73681 leader reaped and group empty`
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 10.16s`
+
+Baseline exact command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness managed_stop_waits_for_descendants -- --exact`, exit 0, 10.70 seconds.
+`stop observed: result=Err("managed child or its group exceeded the 10 second stop bound") elapsed=10.075322708s leader_alive=Ok(false) group_alive=Ok(false)`
+`fixture cleanup: pgid=74188 leader reaped and group empty`
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 10.46s`
+
+### F-stop-skip-kill — CAUGHT
+
+Only `RunningChild::stop` in `src/harness.rs` was planted. Exact old bytes (JSON): `"            self.kill_group()?;\n"`. Exact new bytes (JSON): `""`.
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness managed_stop_escalates_and_keeps_root -- --exact`, exit 101, 12.42 seconds. Expected failed assertion: `stop must reap the leader before emergency cleanup`.
+`stop observed: result=Err("managed child or its group exceeded the 10 second stop bound") elapsed=10.004110875s leader_alive=Ok(true) group_alive=Ok(true)`
+`fixture cleanup: pgid=77319 leader reaped and group empty`
+``assertion `left == right` failed: stop must reap the leader before emergency cleanup``
+`  left: Ok(true)`
+` right: Ok(false)`
+`test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 10.16s`
+
+The original source bytes were restored immediately after this command.
+
+Restored same command: exit 0, 11.18 seconds. `git diff --exit-code -- lab/agent-conformance/src/harness.rs` passed with empty output.
+`stop observed: result=Err("managed child or its group exceeded the 10 second stop bound") elapsed=10.047528583s leader_alive=Ok(false) group_alive=Ok(false)`
+`fixture cleanup: pgid=77966 leader reaped and group empty`
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 10.14s`
+
+### F-stop-forget-root — CAUGHT
+
+Only `RunningChild::stop` in `src/harness.rs` was planted. Exact old bytes (JSON): `"            self.home.keep.set(true);\n"`. Exact new bytes (JSON): `""`.
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness managed_stop_escalates_and_keeps_root -- --exact`, exit 101, 12.32 seconds. Expected failed assertion: `failed stop must retain its Home`.
+`stop observed: result=Err("managed child or its group exceeded the 10 second stop bound") elapsed=10.068735792s leader_alive=Ok(false) group_alive=Ok(false)`
+`fixture cleanup: pgid=78638 leader reaped and group empty`
+``assertion `left == right` failed: failed stop must retain its Home``
+`  left: Ok(())`
+` right: Err("keep the root after an unstopped child or failed stop")`
+`test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 10.16s`
+
+The original source bytes were restored immediately after this command.
+
+Restored same command: exit 0, 11.85 seconds. `git diff --exit-code -- lab/agent-conformance/src/harness.rs` passed with empty output.
+`stop observed: result=Err("managed child or its group exceeded the 10 second stop bound") elapsed=10.049789917s leader_alive=Ok(false) group_alive=Ok(false)`
+`fixture cleanup: pgid=79256 leader reaped and group empty`
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 10.14s`
+
+### F-stop-leader-only — CAUGHT
+
+Only `RunningChild::stop_within_bound` in `src/harness.rs` was planted. Exact old bytes (JSON): `"            if !self.is_alive()? && !self.home.group_is_alive(self.pgid())? {\n"`. Exact new bytes (JSON): `"            if !self.is_alive()? {\n"`.
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness managed_stop_waits_for_descendants -- --exact`, exit 101, 2.43 seconds. Expected failed assertion: `stop must refuse the undrained group at its bound`.
+`stop observed: result=Ok(()) elapsed=12.86475ms leader_alive=Ok(false) group_alive=Ok(true)`
+`fixture cleanup: pgid=80465 leader reaped and group empty`
+``assertion `left == right` failed: stop must refuse the undrained group at its bound``
+`  left: Ok(())`
+` right: Err("managed child or its group exceeded the 10 second stop bound")`
+`test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.14s`
+
+The original source bytes were restored immediately after this command.
+
+Restored same command: exit 0, 11.28 seconds. `git diff --exit-code -- lab/agent-conformance/src/harness.rs` passed with empty output.
+`stop observed: result=Err("managed child or its group exceeded the 10 second stop bound") elapsed=10.074912208s leader_alive=Ok(false) group_alive=Ok(false)`
+`fixture cleanup: pgid=80540 leader reaped and group empty`
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 10.20s`
+
+### F-stop-short-bound — CAUGHT
+
+Only `RunningChild::stop_within_bound` in `src/harness.rs` was planted. Exact old bytes (JSON): `"        while started.elapsed() < Duration::from_secs(10) {\n"`. Exact new bytes (JSON): `"        while started.elapsed() < Duration::from_secs(0) {\n"`.
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness managed_stop_escalates_and_keeps_root -- --exact`, exit 101, 2.96 seconds. Expected failed assertion: `stop must wait at least ten seconds`.
+`stop observed: result=Err("managed child or its group exceeded the 10 second stop bound") elapsed=49.790792ms leader_alive=Ok(false) group_alive=Ok(false)`
+`fixture cleanup: pgid=81187 leader reaped and group empty`
+`test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.14s`
+
+The original source bytes were restored immediately after this command.
+
+Restored same command: exit 0, 11.17 seconds. `git diff --exit-code -- lab/agent-conformance/src/harness.rs` passed with empty output.
+`stop observed: result=Err("managed child or its group exceeded the 10 second stop bound") elapsed=10.072876917s leader_alive=Ok(false) group_alive=Ok(false)`
+`fixture cleanup: pgid=81328 leader reaped and group empty`
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 10.16s`
+
+Restored gate `restored-format`: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`, exit 0, 0.38 seconds; available bytes 33161523200.
+
+Restored gate `restored-harness`: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness`, exit 0, 12.07 seconds; available bytes 33161482240.
+`test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.87s`
+
+
+### Scope and principles
+
+`child_group` keeps the existing graceful shell and both callers, and adds the two signal modes through the same `home.start` call. Each new descendant sleeps for 120 seconds. Signal handlers precede the readiness markers; the two-second poll accepts the recorded leader and descendant only when both belong to the managed group. An incomplete marker is retried within that same bound. `managed_stop_times_out` shares the observations and assertions between the two named tests. It records all four stop observations before emergency cleanup, and the cleanup checks drain before any behavior assertion. Setup failures use `fixture setup failed`; cleanup failures use `fixture cleanup failed` and give zero caught credit.
+
+All four planted crates compiled and each command ran exactly its one named test. The short-bound assertion failed with `stop must wait at least ten seconds: 49.790792ms`. The skip-kill and leader-only runs recorded a live group before emergency cleanup, and then proved that group empty before failing their saved behavior assertion. The forget-root plant drained its group but returned `Ok(())` from `home.finish()`, which caught loss of retention. Every restored exact run returned the timeout reason in 10.047–10.075 seconds, with the leader reaped and group empty before test cleanup. Passing runs proved the retained-root refusal and root existence, then removed that root. This is harness-only physical-cleanup evidence for M1 A12; the architecture's cancellation, grant-settlement and installed Runtime journeys keep their current owners.
+
+| Principles question | Answer | Evidence |
+| --- | --- | --- |
+| 1. Anything new uses a name or URL where a hash belongs? | No | `tests/harness.rs:160` starts the prescribed inert shell fixture; capsule and content identity paths keep their supplied bytes. |
+| 2. Capsule, Home or UI gains ambient authority? | No | `tests/harness.rs:242` owns a fresh throwaway Home; `:160` and `:257` use its existing guarded launch APIs. |
+| 3. A second path or copy of an operation rule? | No | `tests/harness.rs:147` extends the one fixture launcher; `:317` and `:322` share the same stop-assertion helper. |
+| 4. Runtime core grows? | No | `RUNBOOK.md:138` scopes the new evidence to the lab harness; the final source change is in `tests/harness.rs`. |
+| 5. New refusals deny by default with a clear reason? | Yes | `tests/harness.rs:205` names a setup refusal; `:281` and `:305` require the exact timeout and retention reasons. |
+| 6. Capsules stay self-contained and use granted Bus calls? | Yes | `tests/harness.rs:153` and `:156` add only inert shell/sleep fixtures; capsule logic and Bus contracts keep their supplied bytes. |
+| 7. Each new rule has a named test and caught falsifier? | Yes | `tests/harness.rs:316` and `:321` catch all four compiling plants above at the stop-result, elapsed-time, leader-state or retention assertions. |
+| 8. Identity, admission and allowance stay separate? | Yes | `RUNBOOK.md:138` limits this to physical cleanup, and `:144` keeps admission separate from a resource grant. |
+
+Restored gate `full-locked`: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`, exit 0, 284.34 seconds; available bytes 33158115328.
+`test result: ok. 96 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s`
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.96s`
+`test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.02s`
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s`
+`test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.51s`
+`test result: ok. 63 passed; 0 failed; 12 ignored; 0 measured; 0 filtered out; finished in 214.11s`
+`test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.83s`
+`test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.97s`
+`test result: ok. 10 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 14.54s`
+`test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s`
+`test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s`
+`test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s`
+`test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s`
+`test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s`
+`test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s`
+`test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s`
+
+
+### Cleanup and handoff
+
+The restored harness suite passed all 11 tests, including the existing graceful-stop and dropped-handle rows. The full locked lane gate passed 253 tests, with zero failures and 14 existing ignored rows, in 284.34 seconds. All ten exact baseline, planted and restored fixture runs recorded their owned groups empty after cleanup. All four plants failed at the specified behavior assertions; setup and cleanup completed in each run. The implementation and existing falsifier records keep their supplied bytes after restoration; their named tests continue to pass.
+
+Passing new-test roots were removed after retention and empty-group assertions passed. Three planted failures keep their roots for review. The forget-root plant removed its root through the deliberately broken `finish()` path, and the retention assertion caught that removal. The full lane gate left zero new retained roots. The private, ignored `target/task-149-lifecycle.json` records the three retained paths, sizes, group-cleanup observations, branch/worktree identity and gate-output ownership. The supervisor keeps these roots and small outputs through candidate review, then removes those exact paths. Existing lane build caches stay under the supervisor's cache lifecycle. The shared heavy-build lease is released. Earlier Homes and their processes remain with their owners; this task's emergency signals target only each newly started fixture group.
+
+Final inventory: HEAD `67c58415575fee35e51945c8db110568e1ede56c` and committed tree `a3114e569d77187554810ffdc9cedcd391df4b02` are unchanged. The supplied task branch and worktree hold unique uncommitted work for review. The index path list is empty. The final dirty source paths are exactly `lab/agent-conformance/tests/harness.rs`, `lab/agent-conformance/RUNBOOK.md` and `lab/agent-conformance/LOG.md`; unrelated dirty paths remain empty. `git diff --exit-code -- lab/agent-conformance/src/harness.rs` passed with empty output. The branch upstream is unset. At the final local observation, cached `spike/spike/agent-host` is `321cc698a21543c7cfe2895fecf9c2ef99e2b33c`: this task HEAD is 8 commits ahead and 9 behind that ref. This comparison uses the shared cached ref; remote operations stay with the supervisor. Existing refs and other worktrees keep their owners and state.
+
+Candidate: local task diff against the supplied HEAD above. Exercised checks: both exact tests, all four caught plants and restored exact tests, the restored harness suite, full locked lane gate, format and basic repository checks pass. Independent reviews: pending with the lane supervisor. Installed release evidence: skipped because this change proves the lab harness only; capsule cancellation, grant settlement, Browser and installed Runtime acceptance keep their current product owners. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.
+
+- 149: extend `child_group` with ready SIGTERM-resistant fixtures and prove managed-stop escalation, descendant drain, stop bounds and retained Homes with two named tests and four caught hand-run plants.
+
+Final `git diff --check` and lane `cargo fmt -- --check` passed (exit 0). The three permitted paths are the complete final source/document diff.
