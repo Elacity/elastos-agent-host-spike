@@ -10584,6 +10584,31 @@ pub(crate) fn store_test_principal_root_protection(
     store_test_principal_root_protection_for(data_dir, principal_id, &localhost_root)
 }
 
+/// Stores a Human record under a fixed test principal id, so a test that
+/// names its own id has the stored record a kind check reads. Test-only.
+#[cfg(test)]
+pub(crate) fn store_test_human_principal(data_dir: &Path, principal_id: &str) -> PrincipalRecord {
+    let now = now_ts();
+    let record = PrincipalRecord {
+        principal_id: principal_id.to_string(),
+        proof_binding_id: format!("test-binding:{principal_id}"),
+        proof_binding: ProofBinding::evm_account(20, &format!("0x{}", "0".repeat(40)), now),
+        display_name: String::new(),
+        initial_profile_display_name: None,
+        role: RuntimePrincipalRole::Guest,
+        localhost_root: principal_localhost_root(principal_id),
+        kind: PrincipalKind::Human,
+        created_at: now,
+        updated_at: now,
+    };
+    mutate_auth_state(data_dir, |state| {
+        state.principals.push(record.clone());
+        Ok(())
+    })
+    .unwrap();
+    record
+}
+
 /// The test protection written under a caller-named root, so a test can put
 /// an object under a root the human default does not name.
 #[cfg(test)]
@@ -10687,7 +10712,7 @@ mod object_class_tests;
 mod scan_tests;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -15451,7 +15476,7 @@ mod tests {
 
     /// Makes the existing record for `principal_id` an Agent record that keeps
     /// `root` as its stored root.
-    fn mint_agent_record(
+    pub(crate) fn mint_agent_record(
         data_dir: &Path,
         principal_id: &str,
         root: Option<&str>,

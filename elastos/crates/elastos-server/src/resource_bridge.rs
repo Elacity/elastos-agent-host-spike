@@ -2329,6 +2329,7 @@ mod tests {
         let mut ctx = bridge_context();
         ctx.principal_id = Some(principal_id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
+        crate::auth::store_test_human_principal(temp.path(), principal_id);
 
         let object_uri = format!(
             "{}/.AppData/LocalHost/Chat/state.json",
@@ -2398,6 +2399,7 @@ mod tests {
         let mut ctx = bridge_context();
         ctx.principal_id = Some(principal_id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
+        crate::auth::store_test_human_principal(temp.path(), principal_id);
         ctx.manifest_capabilities = vec![format!(
             "{}/.AppData/Agents/demo-agent/*",
             protection.localhost_root
@@ -2679,6 +2681,7 @@ mod tests {
         let mut ctx = bridge_context();
         ctx.principal_id = Some(principal_id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
+        crate::auth::store_test_human_principal(temp.path(), principal_id);
         ctx.manifest_capabilities = vec![format!("{root}/*")];
         let provider = Arc::new(CapturingProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
@@ -2785,6 +2788,7 @@ mod tests {
         let mut ctx = bridge_context();
         ctx.principal_id = Some(principal_id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
+        crate::auth::store_test_human_principal(temp.path(), principal_id);
         ctx.manifest_capabilities = vec![format!("{root}/*")];
         let provider = Arc::new(CapturingProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
@@ -2819,6 +2823,7 @@ mod tests {
         let mut ctx = bridge_context();
         ctx.principal_id = Some(principal_id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
+        crate::auth::store_test_human_principal(temp.path(), principal_id);
         ctx.manifest_capabilities = vec![format!("{root}/*")];
         let provider = Arc::new(CapturingProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
