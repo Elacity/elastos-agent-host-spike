@@ -381,11 +381,11 @@ impl Verifier {
     #[rustfmt::skip]
     pub fn set_rate(&mut self, handle: Handle, limit: u64, window: u64) -> Result<(), Refuse> {
         let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
-        if grant.record.parent.is_some() {
-            return Err(Refuse::IssuingRate);
-        }
         if grant.ended {
             return Err(Refuse::UnknownHandle);
+        }
+        if grant.record.parent.is_some() {
+            return Err(Refuse::IssuingRate);
         }
         grant.record.rate = Some(limit);
         grant.record.window = window;
@@ -412,8 +412,10 @@ impl Verifier {
             return Ok(());
         };
         let _ = rate;
-        let end = grant.record.window_start.saturating_add(grant.record.window);
-        if now >= end {
+        // The elapsed time, not a sum, so a window that starts at the largest
+        // instant still runs to its end.
+        let elapsed = now.saturating_sub(grant.record.window_start);
+        if elapsed >= grant.record.window {
             grant.record.window_start = now;
             grant.record.window_effects = 0;
         }
