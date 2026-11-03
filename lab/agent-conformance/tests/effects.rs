@@ -64,7 +64,9 @@ fn assert_refusal_as(
         .expect("operator ready and first census");
     let output = home
         .launch(
-            &runtime.binary,
+            runtime
+                .verified_path()
+                .expect("verify the recorded Runtime bytes"),
             &["run", capsule.path.to_str().unwrap()],
             // A refusal returns at once. The bound passes the probe's own
             // 30-second pending wait, so a declared request still reports its
@@ -297,7 +299,9 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
         .zip(&launch_homes)
         .map(|(capsule, home)| Launch {
             home,
-            program: &runtime.binary,
+            program: runtime
+                .verified_path()
+                .expect("verify the recorded Runtime bytes"),
             args: vec!["run", capsule.path.to_str().unwrap()],
         })
         .collect();

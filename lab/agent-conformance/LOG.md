@@ -10254,3 +10254,66 @@ Candidate: local task diff against the supplied HEAD above. Exercised checks: bo
 - 149: extend `child_group` with ready SIGTERM-resistant fixtures and prove managed-stop escalation, descendant drain, stop bounds and retained Homes with two named tests and four caught hand-run plants.
 
 Final `git diff --check` and lane `cargo fmt -- --check` passed (exit 0). The three permitted paths are the complete final source/document diff.
+
+
+## 150
+
+Before editing: supplied HEAD `6963609128611b59b008bd806ef7b0a3fa9a3d84`, tree `bda701a44e07b94f7fc0c704614da9b1260f9b4a`. The supplied branch is `spark/cx-agent-conformance/150-native-launch-rechecks-recorded-hash`. `git status --short --branch` showed zero dirty paths, including zero unrelated dirty paths. This HEAD is the comparison base; this task preserves refs, index and history.
+
+Read the task, architecture Current implementation status, 009/011/014 handoffs, native builders, identity observation and report receipt contracts, launch ownership and shell fixtures. A repository-wide Rust caller search found cached native paths only inside this lane. Plan: make the raw path private, add one per-use check through the existing hash helper, migrate all seven caller files, and exercise original/changed/restored/missing shell bytes through bounded, managed and parallel harness APIs. Then run the compiling skip-compare plant, restore the comparison, run all required gates, and record same-run receipt and cleanup. Final edits stay in the authorized runtime, caller, README, RUNBOOK and task LOG sections. The repository has no humanizer skill; this handoff uses direct behavior and ownership statements.
+
+Initial free space: 31,964,152 KiB. Reuse the lane target cache; an estimated 12 GiB of generated files plus the required 2 GiB reserve fit. Builds will use the existing shared heavy-build lease, offline Cargo, lane-local targets, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, and a 600-second command bound.
+
+
+Migrated call sites: `tests/runtime.rs::{run_probe,run_by_synthetic_cid,serve_refuses_provider_whose_bytes_differ_from_its_hash}` check immediately before bounded launch; `tests/common/operator.rs::Operator::start` checks before managed start. `tests/effects.rs::{assert_refusal_as,exercise_read}`, `tests/common/parallel.rs::exercise`, `tests/common/host_key.rs::exercise` and `tests/agent_host.rs::real_agent_host_gets_no_ungranted_authority` check each Runtime `Launch` entry during construction. Existing path inspections in `tests/runtime.rs` and the provider read in `tests/common/mod.rs::write_operator_home` use the same method. Errors preserve their cause through the existing Result or assertion path. The installed copy keeps its existing checksum verification. A new search found raw path access only in the private identity implementation.
+
+The first exact-test command compiled, then exited 101 in 3.95 seconds because sandbox process-group inspection was unavailable (`Managed original: launch`, `could not inspect child process group`). This is infrastructure evidence, with zero identity/falsifier credit. With Mac process visibility, the same command passed: exit 0, one named test passed, 1.40 seconds. `git diff --check` and the lane format check passed. The fixture uses fixed known shell bytes and an independent `sha2` digest, emits zero native identity observations, builds neither Runtime nor probe, and starts zero operator or network services.
+
+F-native-identity-skip-compare changes only the inequality refusal condition, preserving the hash read and every fixture. Exact edit bytes as JSON strings:
+
+- Old: `"if sha256_file(&self.binary)? != self.sha256 {"`
+- New: `"if sha256_file(&self.binary)? != self.sha256 && false {"`
+
+
+Exact command for the baseline, plant and restored proof: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib runtime::tests::native_identity_refuses_changed_or_missing_bytes -- --exact`. F-native-identity-skip-compare: exit 101 in 2.62 seconds; compilation succeeded and exactly one named test failed at `src/runtime.rs:248`, `Bounded changed: refused bytes reached the marker`. The changed script actually ran after a successful original-byte launch. This is a behavior failure, with zero compilation, setup or cleanup failure. The original comparison was restored in `finally`; the identical command then exited 0 in 2.17 seconds, one named test passed. `falsifiers.json` keeps its supplied bytes.
+
+The fixture checks each of the original, changed, restored and missing states with one fixed identity per launch form. Parallel attempts construct two checked entries per batch. Managed attempts wait up to two seconds for a complete readiness marker, then stop and drain the owned group before behavior assertions. The parallel collector drains its groups; the bounded script has no descendants. Successful fixtures call `home.finish()` only after every state passes. Ordinary failures retain the fixture root through the existing rule. Synthetic digests stay out of live observations.
+
+
+Restored candidate checks use offline Cargo, two test threads, incremental compilation disabled, lane `target/host` and `target/host-build`, the existing exclusive heavy-build lease, Mac process visibility and isolated loopback fixtures. Available bytes before the sequence: 32,532,586,496, above the 12 GiB output estimate plus 2 GiB reserve. Each command has a 600-second bound.
+
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime`: exit 0, 19.12 seconds; 10 passed, 0 failed, 2 blocked rows ignored.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --features agent-host --test agent_host --no-run`: exit 0, 1.35 seconds; feature-gated callers compile.
+- Basic repository gate: `git diff --check`, `node scripts/check-product-data.mjs`, `node --test scripts/check-product-data.test.mjs` (99 passed), `cargo fmt --all --manifest-path elastos/Cargo.toml -- --check`, `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`, and `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` all exited 0.
+
+Principles check (evidence paths below are relative to `lab/agent-conformance/`):
+
+| Question | Answer | Evidence |
+| --- | --- | --- |
+| 1. New code/content identity by name or URL instead of hash? | No | `src/runtime.rs:19` compares actual native SHA-256 with the recorded build identity; the private path is a locator. |
+| 2. Capsule, Home or UI gains ambient authority? | No | `tests/common/operator.rs:30` checks identity before the existing launch owner; the harness and grants retain their supplied code. |
+| 3. Second path or copy of a rule? | No | `src/runtime.rs:18` is the single per-use method; `tests/common/mod.rs:29` shares it for provider staging and the existing hash helper keeps its bytes. |
+| 4. Runtime core grows? | No | `src/runtime.rs:18` is lab-only; every edited file is inside this lane and the Runtime core keeps its supplied bytes. |
+| 5. New refusal denies with a clear reason? | Yes | `src/runtime.rs:19` propagates hash errors and `:20` returns the exact mismatch reason before returning a path. |
+| 6. Capsule keeps its logic and granted Bus calls? | Yes | `RUNBOOK.md:281` preserves the identity/admission/allowance boundary; probe and capsule code keep their supplied bytes. |
+| 7. Named test and caught falsifier prove the rule? | Yes | `src/runtime.rs:188` proves all four byte states through all three launch forms; F-native-identity-skip-compare compiled and failed `:248` on changed-script behavior. |
+| 8. Identity, admission and allowance stay separate? | Yes | `RUNBOOK.md:261` keeps installed acceptance with its journey; `src/runtime.rs:18` checks native identity only, while `RUNBOOK.md:281` states the separate decisions. |
+
+
+First full locked gate: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`, exit 101, 267.61 seconds. The 97 library tests, including the new identity proof, passed. The effects target had 62 passed, 1 failed and 12 ignored: existing `grants::tests::attach_refusal_names_the_scope` failed at `tests/common/grants.rs:2430`, `client missing token`, because it received `fixture client attach failed` instead of `fixture client attach returned no token`. This is the scripted loopback response test in an unchanged file; its assertion stays intact. Cargo stopped before later targets and the runner was held.
+
+The unchanged targeted recheck, `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::attach_refusal_names_the_scope -- --exact`, passed: exit 0, 0.37 seconds, 1 passed / 0 failed. One full-gate retry follows with the same candidate, environment, lease and 600-second bound. Available bytes before that sequence: 32,054,910,976. The first failure remains recorded; its transport timing is outside this task's source scope.
+
+
+The one unchanged full-gate retry passed: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`, exit 0, 287.00 seconds. Actual target summaries total 254 passed, 0 failed and 14 ignored. The effects target passed all 63 active tests, including the earlier attach-response failure; the library passed 97 tests, including the new identity proof; the Runtime target passed 10 active tests with its 2 blocked rows ignored. Existing blocked labels and assertions stay intact. The required `lab/agent-conformance/run.sh` follows under the same lease to produce its own same-run A14 receipt.
+
+
+`lab/agent-conformance/run.sh` passed: exit 0, 284.87 seconds. Its own same-run table reports `versions_receipt (A14) | PASS`. Local, uncommitted receipt: `target/run-table.6fv9nG/VERSIONS.json`, SHA-256 `37a74cc703aa8c74aec3d198c22641f02ea532637a16db7fc71d41964be30cc8`. It records source HEAD `6963609128611b59b008bd806ef7b0a3fa9a3d84`, `dirty: true`, `identity_status: complete`, `command_success: true` and the preserved `suite_outcome: BLOCKED`. Native fields: Runtime `f747a43701d19479948e8e770fa0931d8b89430d8e5a9f78b3fffdba25befb38`; localhost-provider `2ff07b37721c97631e2f84a31c7408c8edb45f80c8fddde7f7cef1e367d09ab4`. These are the runner's observed native identities; the shell fixtures emit none. Receipt fields and blocked acceptance rows keep their existing meaning. The Runtime workspace format check also passed from `elastos/` with `cargo fmt --all -- --check` (exit 0).
+
+Passing identity-fixture Homes reached `home.finish()` after all owned groups drained. The caught-plant root and the sandbox infrastructure root remain for review under the existing retention rule; they total 617 logical file bytes. For each, `lsof -nP -Fpn +D <root>` returned exit 1 with empty stdout/stderr, proving zero open handles. Their exact private paths, sizes, task ownership and cleanup conditions are in ignored `target/task-150-lifecycle.json`. The ledger also covers the small gate outputs, measured-result JSON, same-run receipt, supplied worktree and supervisor-owned caches. Keep proof through candidate review, then remove the exact proof paths and empty receipt directory. The shared build lease is released. This task leaves zero active fixture children; other test roots keep their existing owners.
+
+Final branch/worktree inventory: supplied HEAD and tree remain `6963609128611b59b008bd806ef7b0a3fa9a3d84` / `bda701a44e07b94f7fc0c704614da9b1260f9b4a`. The supplied task branch/worktree holds unique uncommitted task work for review. Its eleven dirty paths are exactly `src/runtime.rs`, the seven migrated caller files, README, RUNBOOK and LOG, all inside this lane; the index has zero staged paths. The supplied upstream is unset. Against the observed cached `spike/spike/agent-host` at `321cc698a21543c7cfe2895fecf9c2ef99e2b33c`, this task is 10 commits ahead / 0 behind. This offline task fetched and published nothing and moved zero refs. The complete branch/worktree inventory ran; other refs and worktrees retain their existing owners and roles. The supplied LOG prefix and all excluded launcher, identity, receipt, census, blocked-row, runner, falsifier, manifest and lock files retain their exact bytes.
+
+Candidate: the local task diff against the supplied comparison base above. Exercised checks: exact identity test, caught compiling plant, restored exact test, Runtime regression, feature-gated compile, full locked gate, runner with same-run A14 receipt, format and basic repository checks pass; the first full-gate attach-response failure remains recorded above. Independent reviews: pending with the lane supervisor. Installed release evidence: skipped because this task proves the lab native artifact; its installed journey keeps installed-product acceptance. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.
+
+- 150: make cached native paths private, re-hash each Runtime launch and provider fixture read, and prove changed/restored/missing bytes with a caught compiling plant through the existing harness.

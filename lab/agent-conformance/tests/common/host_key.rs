@@ -75,7 +75,9 @@ pub fn exercise() {
     let running = RunningInstances::start(
         &[Launch {
             home: &home,
-            program: &runtime.binary,
+            program: runtime
+                .verified_path()
+                .expect("verify the recorded Runtime bytes"),
             args: vec!["run", capsule.path.to_str().unwrap()],
         }],
         Some(&home),

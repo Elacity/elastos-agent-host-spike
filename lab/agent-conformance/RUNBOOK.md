@@ -248,6 +248,18 @@ the commands and measured outcomes; this adds no second runner.
 
 ## Version receipt for each run
 
+Each cached native identity keeps its build digest. `BinaryUnderTest::verified_path`
+uses the existing hash helper immediately before each path-based Runtime launch
+and provider fixture copy. A changed digest refuses with `native binary SHA-256
+differs from recorded build`; an open or hash failure keeps its cause. Restoring
+the recorded bytes permits a later use. This per-use check preserves the build
+cache and receipt fields. `runtime::tests::native_identity_refuses_changed_or_missing_bytes`
+proves the original, changed, restored and missing states through bounded launch,
+managed start and parallel launch, with independent marker and run-start checks.
+F-native-identity-skip-compare disables only the digest comparison refusal and
+fails that named test on changed-script behavior. The check precedes path-based
+launch; installed-product acceptance stays with its installed journey.
+
 The existing report command writes `VERSIONS.json` into the fresh ignored
 `target/run-table.*` directory and prints its lane-relative path. Reviewers cite
 that path for the tested candidate. The report reads the full repository commit

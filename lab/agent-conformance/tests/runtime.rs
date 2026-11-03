@@ -26,7 +26,9 @@ fn run_probe(home: &ThrowawayHome) -> String {
         .collect();
     let output = home
         .launch(
-            &runtime.binary,
+            runtime
+                .verified_path()
+                .expect("verify the recorded Runtime bytes"),
             &["run", probe.to_str().unwrap()],
             Duration::from_secs(10),
         )
@@ -48,11 +50,14 @@ fn run_without_operator_is_refused_with_reason() {
     let runtime = runtime_under_test().expect("build the checkout Runtime offline");
     // Identification only: compare the returned digest against the actual bytes
     // with the existing test dependency, and check repeated access shares it.
-    assert!(runtime.binary.is_absolute());
+    assert!(runtime.verified_path().unwrap().is_absolute());
     assert!(std::ptr::eq(runtime, runtime_under_test().unwrap()));
     assert_eq!(
         runtime.sha256,
-        format!("{:x}", Sha256::digest(fs::read(&runtime.binary).unwrap()))
+        format!(
+            "{:x}",
+            Sha256::digest(fs::read(runtime.verified_path().unwrap()).unwrap())
+        )
     );
     let home = ThrowawayHome::new().unwrap();
     let stderr = run_probe(&home);
@@ -72,7 +77,9 @@ fn run_by_synthetic_cid(home: &ThrowawayHome) -> String {
     .to_string();
     let output = home
         .launch(
-            &runtime.binary,
+            runtime
+                .verified_path()
+                .expect("verify the recorded Runtime bytes"),
             &["run", "--cid", &cid],
             Duration::from_secs(10),
         )
@@ -180,7 +187,7 @@ fn serve_refuses_provider_whose_bytes_differ_from_its_hash() {
     let home = ThrowawayHome::new().unwrap();
     let installed = common::write_operator_home(&home).expect("install the operator fixture");
     let provider = localhost_provider_under_test().unwrap();
-    assert!(provider.binary.is_absolute());
+    assert!(provider.verified_path().unwrap().is_absolute());
     assert!(std::ptr::eq(
         provider,
         localhost_provider_under_test().unwrap()
@@ -220,7 +227,9 @@ fn serve_refuses_provider_whose_bytes_differ_from_its_hash() {
     let storage = home.root().join("storage");
     let output = home
         .launch(
-            &runtime.binary,
+            runtime
+                .verified_path()
+                .expect("verify the recorded Runtime bytes"),
             &[
                 "serve",
                 "--addr",

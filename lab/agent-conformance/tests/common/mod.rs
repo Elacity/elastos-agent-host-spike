@@ -26,7 +26,7 @@ pub fn operator_platform() -> Result<&'static str, &'static str> {
 pub fn write_operator_home(home: &ThrowawayHome) -> Result<PathBuf, Box<dyn Error>> {
     home.guard(home.home(), home.data())?;
     let provider = localhost_provider_under_test()?;
-    let bytes = fs::read(&provider.binary)?;
+    let bytes = fs::read(provider.verified_path()?)?;
     let installed = home.data().join("bin/localhost-provider");
     write_component_home(
         home,
