@@ -52,10 +52,18 @@ def checksum_error(name, platform, info, release=False, source_home_anchor=False
     )
     if not non_empty(checksum):
         return f"{name} {platform} {artifact}: missing checksum"
-    if not CHECKSUM_RE.fullmatch(checksum):
-        bad = not (source_home_anchor and SOURCE_HOME_ANCHOR_RE.fullmatch(checksum))
-        return bad and f"{name} {platform} {artifact}: unsupported checksum format {checksum!r}"
-    return None
+    # The format is decided by the one recorded rule (Codex 1409 @df2aef3f, P10).
+    return recorded_checksum_error(name, f"{platform} {artifact}", checksum, source_home_anchor)
+
+
+def recorded_checksum_error(name, platform, checksum, source_home):
+    # One rule for every recorded checksum, fetch fields or not (Codex C1). The mode comes only from
+    # --source-home-data-dir; a source-home: prefix outside that mode is refused, never a mode switch.
+    if checksum is None or CHECKSUM_RE.fullmatch(str(checksum)):
+        return None
+    if source_home and SOURCE_HOME_ANCHOR_RE.fullmatch(str(checksum)):
+        return None
+    return f"{name} {platform}: unsupported checksum format {checksum!r}"
 
 
 def resolve_platform_info(component, platform):
@@ -165,7 +173,8 @@ def audit_release_artifacts(data, platforms, artifact_root):
             return
         checksum = info.get("checksum")
         size = info.get("size")
-        if not isinstance(checksum, str) or not CHECKSUM_RE.fullmatch(checksum):
+        # A release artifact is checked by the one recorded rule, never in source-home mode (Rong 19:55 §5).
+        if not isinstance(checksum, str) or recorded_checksum_error(label, "artifact", checksum, False):
             errors.append(f"{label}: invalid artifact checksum")
             return
         if type(size) is not int or size <= 0:
@@ -237,6 +246,10 @@ def audit_provider_capsule_metadata(
         metadata = component.get("capsule_metadata")
         if not isinstance(metadata, dict):
             continue
+        for platform, info in sorted((metadata.get("platforms") or {}).items()):
+            error = isinstance(info, dict) and recorded_checksum_error(name, platform, info.get("checksum"), source_home)
+            if error:
+                errors.append(error)
 
         errors.extend(
             audit_manifest(
@@ -726,6 +739,30 @@ def run_self_test():
             "platforms": {"linux-amd64": {"install_path": "capsules/provider-demo", "checksum": digest}}}}}}
         if not any("unsupported checksum format" in e for e in audit_provider_capsule_metadata(no_fetch, ["linux-amd64"])):
             raise AssertionError("release mode accepted a stamped row without fetch fields")
+        bad_anchor = json.loads(json.dumps(no_fetch))
+        bad_anchor["external"]["provider-demo"]["capsule_metadata"]["platforms"]["linux-amd64"]["checksum"] = (
+            "source-home:sha256:bad")
+        if not any("unsupported checksum format" in e
+                   for e in audit_provider_capsule_metadata(bad_anchor, ["linux-amd64"], source_home=True)):
+            raise AssertionError("C1 case 1: a malformed source-home digest passed in source-home mode")
+        content_anchor = {"external": {"content-demo": {"capsule_metadata": {
+            "role": "content", "type": "data", "install_path": "capsules/content-demo", "platforms": {"*": {
+                "install_path": "capsules/content-demo", "extract_path": "content-demo", "checksum": digest}}}}}}
+        if not any("unsupported checksum format" in e
+                   for e in audit_provider_capsule_metadata(content_anchor, ["linux-amd64"])):
+            raise AssertionError("C1 case 2: a source-home digest passed without --source-home-data-dir")
+        if audit_provider_capsule_metadata(content_anchor, ["linux-amd64"], source_home=True):
+            raise AssertionError("C1: a source-home digest refused in source-home mode")
+        for ok in (None, "sha512:" + "a" * 128):  # a missing or plain SHA-512 digest passes
+            assert recorded_checksum_error("fixture", "*", ok, False) is None, f"C1: {ok!r} refused"
+        assert checksum_error("fixture", "*", {"release_path": "a", "checksum": "sha256:bad"}) == (
+            "fixture * a: unsupported checksum format 'sha256:bad'"), "C1: checksum_error has its own rule"
+        with tempfile.TemporaryDirectory() as art:  # C1 :176: the artifact row takes the same rule
+            for bad in (digest, "sha256:" + "a" * 63):
+                row = {"release_path": "a.bin", "checksum": bad, "size": 1}
+                errs = audit_release_artifacts({"external": {"art": {"platforms": {"linux-amd64": row}}}},
+                                               ["linux-amd64"], art)
+                assert "art linux-amd64: invalid artifact checksum" in errs, f"C1 artifact: {bad!r} {errs}"
         with tempfile.TemporaryDirectory() as empty_root:
             release_missing = audit_provider_capsule_metadata(provider_good, ["linux-amd64"], source_root=empty_root)
         if "provider-demo: provider capsule source manifest missing" not in release_missing:
