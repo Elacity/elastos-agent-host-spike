@@ -724,7 +724,11 @@ mod tests {
     /// `VICTIM_PARENT_VAR`. A missing variable is a failure, never a silent
     /// `getppid()` fallback, because the helper's parent is not the harness.
     fn victim_token(parent: libc::pid_t, pid: libc::pid_t) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("elastos-row-victim-{parent}-{pid}"))
+        tagged_victim_token(&parent.to_string(), pid)
+    }
+
+    fn tagged_victim_token(tag: &str, pid: libc::pid_t) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("elastos-row-victim-{tag}-{pid}"))
     }
 
     /// The harness pid a helper process was given in `VICTIM_PARENT_VAR`.
@@ -738,24 +742,47 @@ mod tests {
     /// Reads the helper's readiness line, then unlinks the file: the open
     /// descriptor is the file the check and the read share, so no path is
     /// re-resolved after the check. The helper writes the line once, through a
-    /// rename, so a poll reads a whole line or no file. A line that names
-    /// another pid fails.
-    fn read_readiness(token: &std::path::Path, pid: libc::pid_t) -> bool {
-        let file = std::fs::File::open(token);
-        let _ = std::fs::remove_file(token);
-        let Ok(mut file) = file else {
-            return false;
+    /// rename, so a poll reads a whole line or no file. Only a file that is not
+    /// there yet is a retry: every other cause fails here, by name, with the
+    /// text it read, because the next poll would otherwise report a missing
+    /// publication after a publication was already consumed. A line that names
+    /// another pid, lacks the address, or carries an address of zero fails.
+    fn read_readiness(token: &std::path::Path, pid: libc::pid_t) -> Option<usize> {
+        let file = match std::fs::File::open(token) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) => panic!("readiness token {token:?} did not open: {error}"),
         };
+        // The opened file is the one this read and the unlink name, so no path
+        // is re-resolved after the check.
+        let _ = std::fs::remove_file(token);
+        let mut file = file;
         let mut text = String::new();
-        if std::io::Read::read_to_string(&mut file, &mut text).is_err() {
-            return false;
+        if let Err(error) = std::io::Read::read_to_string(&mut file, &mut text) {
+            panic!("readiness token {token:?} did not read: {error}");
         }
+        let mut fields = text.split_whitespace();
+        let named = match fields.next() {
+            Some(field) => field.parse().ok(),
+            None => panic!("readiness line {text:?} is empty"),
+        };
         assert_eq!(
-            text.trim().parse::<libc::pid_t>(),
-            Ok(pid),
+            named,
+            Some(pid),
             "readiness line {text:?} is not helper {pid}"
         );
-        true
+        let address = match fields.next() {
+            Some(field) => match field.parse::<usize>() {
+                Ok(address) => address,
+                Err(error) => panic!("readiness line {text:?} has no address: {error}"),
+            },
+            None => panic!("readiness line {text:?} has no address field"),
+        };
+        assert!(
+            address != 0,
+            "readiness line {text:?} publishes address zero"
+        );
+        Some(address)
     }
 
     /// `true` for a row that acts on the helper sibling.
@@ -769,6 +796,7 @@ mod tests {
     /// harness kills and reaps it on every path.
     struct Victim {
         pid: libc::pid_t,
+        address: usize,
         /// `process::Child` owns the wait and the kill.
         child: std::process::Child,
     }
@@ -793,10 +821,20 @@ mod tests {
                     .spawn()
                     .expect("helper sibling did not start");
             let pid = child.id() as libc::pid_t;
-            let mut victim = Victim { pid, child };
+            let mut victim = Victim {
+                pid,
+                address: 0,
+                child,
+            };
             let token = victim_token(std::process::id() as libc::pid_t, pid);
             let start = std::time::Instant::now();
-            while !read_readiness(&token, pid) {
+            // Only a publication that is not there yet is retried; every other
+            // cause fails inside `read_readiness` with its own text.
+            loop {
+                if let Some(address) = read_readiness(&token, pid) {
+                    victim.address = address;
+                    break;
+                }
                 assert!(
                     start.elapsed() < std::time::Duration::from_secs(30),
                     "helper sibling published no readiness line: token {:?} parent {} child {:?}",
@@ -835,6 +873,30 @@ mod tests {
         }
     }
 
+    /// Reads the helper's bytes at the published address and checks them.
+    fn pattern_control(victim: &Victim) {
+        let mut got = [0u8; 64];
+        let l = libc::iovec {
+            iov_base: got.as_mut_ptr().cast(),
+            iov_len: got.len(),
+        };
+        let r = libc::iovec {
+            iov_base: victim.address as *mut _,
+            iov_len: got.len(),
+        };
+        let io = [&l as *const _, &r as *const _];
+        let read = sys(
+            libc::SYS_process_vm_readv,
+            [victim.pid as _, io[0] as _, 1, io[1] as _, 1, 0],
+        );
+        assert!(
+            read == 64 && (1u8..=64).eq(got),
+            "helper pattern at {} unreadable: read {read}, errno {}",
+            victim.address,
+            errno()
+        );
+    }
+
     /// The helper served by `VICTIM_TEST`. Without the flag it is a plain test.
     /// With it the helper publishes its pid in its token file once, through a
     /// rename, then sleeps until the harness ends it. The publication is the
@@ -845,6 +907,7 @@ mod tests {
             return;
         }
         let pid = std::process::id() as libc::pid_t;
+        let pattern = std::hint::black_box((1u8..=64).collect::<Vec<u8>>());
         // pidfd_getfd needs ptrace-attach access. The probe is a sibling, not
         // an ancestor, so Yama scope 1 (the Jetson) refuses it. Allow any
         // tracer: test fixture only. A host without Yama answers EINVAL.
@@ -857,7 +920,8 @@ mod tests {
         );
         let token = victim_token(victim_parent(), pid);
         let staging = token.with_extension("tmp");
-        std::fs::write(&staging, format!("{pid}\n")).expect("helper publication");
+        std::fs::write(&staging, format!("{pid} {}\n", pattern.as_ptr() as usize))
+            .expect("helper publication");
         std::fs::rename(&staging, &token).expect("helper publication rename");
         let start = std::time::Instant::now();
         while start.elapsed() < std::time::Duration::from_secs(120) {
@@ -1082,10 +1146,52 @@ mod tests {
             .stderr(std::process::Stdio::null());
         let mut child = spawn_row(&mut command);
         match finish_probe(name, row, &mut child).await {
-            None => Ok(()),
+            None => {
+                pattern_control(victim);
+                Ok(())
+            }
             Some(_) => Err(format!(
                 "row {name} sibling: unfiltered sibling control failed"
             )),
         }
+    }
+
+    /// Writes one readiness publication under `tag` and reads it back through
+    /// the path `Victim::start` polls. The tag keeps each test's token and
+    /// staging file apart; the file is unlinked whatever the read does.
+    fn published_readiness(tag: &str, line: &str) -> Option<usize> {
+        let pid = std::process::id() as libc::pid_t;
+        let token = tagged_victim_token(tag, pid);
+        let staging = token.with_extension("tmp");
+        std::fs::write(&staging, line.replace("PID", &pid.to_string()))
+            .expect("readiness publication");
+        std::fs::rename(&staging, &token).expect("readiness rename");
+        let address = read_readiness(&token, pid);
+        let _ = std::fs::remove_file(staging);
+        let _ = std::fs::remove_file(&token);
+        address
+    }
+
+    /// A line with no address fails by name instead of becoming a retry, so
+    /// the wait reports the missing field rather than a lost publication.
+    #[test]
+    #[should_panic(expected = "has no address field")]
+    fn readiness_without_an_address_fails() {
+        assert_eq!(published_readiness("no-address", "PID\n"), Some(1));
+    }
+
+    /// An address that is not a number fails by name.
+    #[test]
+    #[should_panic(expected = "has no address")]
+    fn readiness_with_an_unparsable_address_fails() {
+        assert_eq!(published_readiness("unparsable", "PID invalid\n"), Some(1));
+    }
+
+    /// A published zero address fails by name: zero is the retry state and
+    /// must never come from a publication.
+    #[test]
+    #[should_panic(expected = "publishes address zero")]
+    fn readiness_with_a_zero_address_fails() {
+        assert_eq!(published_readiness("zero", "PID 0\n"), Some(1));
     }
 }
