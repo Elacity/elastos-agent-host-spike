@@ -88,11 +88,11 @@ impl<'a> Operator<'a> {
 
     pub fn census(&mut self) -> Result<usize, String> {
         let result = self.sample();
-        if result.is_err() {
+        if let Err(reason) = &result {
             // Refuse immediately and stop even when the listing cannot be read.
-            self.child
-                .stop()
-                .map_err(|reason| format!("socket census failed; {reason}"))?;
+            self.child.stop().map_err(|stop_reason| {
+                format!("socket census failed: {reason}; operator stop failed: {stop_reason}")
+            })?;
         }
         result
     }
@@ -138,5 +138,132 @@ fn health_is_ok(port: u16) -> bool {
                 || response[..len].starts_with(b"HTTP/1.0 200 ")
         }
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+
+    const SAMPLE_REASON: &str = "census tool failed or returned a warning";
+    const STOP_REASON: &str = "managed child or its group exceeded the 10 second stop bound";
+
+    fn socket_free_operator(home: &ThrowawayHome, ignore_term: bool) -> Operator<'_> {
+        let script = if ignore_term {
+            "trap '' TERM; printf '%s\\n' \"$$\" > \"$HOME/census-ready\"; exec /bin/sleep 120"
+        } else {
+            "printf '%s\\n' \"$$\" > \"$HOME/census-ready\"; exec /bin/sleep 120"
+        };
+        let child = home
+            .start(Path::new("/bin/sh"), &["-c", script])
+            .expect("fixture setup failed: start socket-free child");
+        let mut operator = Operator {
+            child,
+            home,
+            port: 0,
+        };
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(2) {
+            operator
+                .require_alive()
+                .expect("fixture setup failed: child must stay alive");
+            if fs::read_to_string(home.home().join("census-ready"))
+                .is_ok_and(|pid| pid.trim() == operator.child.pgid().to_string())
+            {
+                return operator;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("fixture setup failed: child must write its ready marker within two seconds");
+    }
+
+    #[test]
+    fn census_refusal_preserves_reason_after_clean_stop() {
+        let home = ThrowawayHome::new().expect("fixture setup failed: fresh Home required");
+        let root = home.root().to_path_buf();
+        let mut operator = socket_free_operator(&home, false);
+        let pgid = operator.child.pgid();
+        let result = operator.census();
+        // Observe before Drop so emergency cleanup cannot hide an omitted stop.
+        let leader_alive = operator.child.is_alive();
+        let group_alive = home.group_is_alive(pgid);
+        assert_eq!(
+            leader_alive,
+            Ok(false),
+            "census refusal must reap the leader before Drop"
+        );
+        assert_eq!(
+            group_alive,
+            Ok(false),
+            "census refusal must empty the group before Drop"
+        );
+        assert_eq!(
+            result,
+            Err(SAMPLE_REASON.into()),
+            "clean stop must preserve the exact census refusal"
+        );
+        drop(operator);
+        home.finish().expect("clean stop must allow Home removal");
+        assert!(!root.exists(), "clean stop Home must be removed");
+    }
+
+    #[test]
+    fn census_refusal_preserves_reason_after_failed_stop() {
+        let home = ThrowawayHome::new().expect("fixture setup failed: fresh Home required");
+        let root = home.root().to_path_buf();
+        let mut operator = socket_free_operator(&home, true);
+        let pgid = operator.child.pgid();
+        let started = Instant::now();
+        let result = operator.census();
+        let elapsed = started.elapsed();
+        let leader_alive = operator.child.is_alive();
+        let group_alive = home.group_is_alive(pgid);
+        eprintln!("census stop observed: result={result:?} elapsed={elapsed:?} leader_alive={leader_alive:?} group_alive={group_alive:?}");
+        let reason = result.expect_err("failed stop must keep the census refusal");
+        assert_eq!(
+            reason.matches(SAMPLE_REASON).count(),
+            1,
+            "failed stop must preserve the complete census cause exactly once"
+        );
+        assert_eq!(
+            reason.matches(STOP_REASON).count(),
+            1,
+            "failed stop must preserve the complete operator-stop cause exactly once"
+        );
+        assert_eq!(
+            reason,
+            format!("socket census failed: {SAMPLE_REASON}; operator stop failed: {STOP_REASON}"),
+            "census cause must precede the labelled operator-stop cause"
+        );
+        assert!(
+            elapsed >= Duration::from_secs(10),
+            "census stop must reach the ten-second bound: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(15),
+            "census stop must finish within fifteen seconds: {elapsed:?}"
+        );
+        assert_eq!(
+            leader_alive,
+            Ok(false),
+            "failed census stop must reap the leader before Drop"
+        );
+        assert_eq!(
+            group_alive,
+            Ok(false),
+            "failed census stop must empty the group before Drop"
+        );
+        assert!(root.is_dir(), "failed stop Home must remain before Drop");
+        drop(operator);
+        assert_eq!(
+            home.finish(),
+            Err("keep the root after an unstopped child or failed stop"),
+            "failed census stop must retain its Home"
+        );
+        assert!(root.is_dir(), "failed stop Home must remain after finish");
+        // Retention and the empty group are proven; remove only this fixture.
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -173,8 +173,13 @@ unsigned admission and a loopback Carrier bind. Admission grants no resource.
 Readiness checks coordinates existence. The grant controller reads its fixture
 credentials into memory and checks the harness-owned captures after group drain. System `kill`, `pgrep` and `lsof` use
 the same guarded spawn site, null stdin, capture files and fixed environment.
-Census failures stop the operator immediately and fail with a reason. The
-census samples internet sockets in the group; it is not a packet capture.
+Census refusals keep their original cause while the managed-child stop runs.
+A failed stop adds a labelled operator-stop reason after the census cause;
+the existing failed-stop rule retains the Home. The module-local
+`census_refusal_preserves_reason_after_clean_stop` and
+`census_refusal_preserves_reason_after_failed_stop` tests use ready, socket-free
+children to prove both paths, group cleanup and Home removal or retention.
+The census samples internet sockets in the group; it is not a packet capture.
 
 Run F-ac1j only against `fixture_operator_sockets_are_loopback_only`: it changes
 the committed API host to a wildcard for that short test, while Carrier stays

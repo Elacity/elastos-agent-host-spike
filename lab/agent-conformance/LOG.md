@@ -10928,3 +10928,127 @@ The final branch/worktree inventory keeps this checkout on the supplied HEAD and
 155: One checked helper now copies the Agent Host and relative Bus inputs, with exact-byte refusal tests, four caught plants, and a passing real copied-capsule build and staging proof.
 
 Candidate: the local five-path diff against the supplied HEAD. Exercised checks: build target, four caught compiling plants and their restored exact checks, opt-in real-capsule build/staging, full locked lane gate, formatting and basic repository checks pass. Review links: pending with the lane supervisor. Installed release evidence: skipped because this is a lab artifact-input prerequisite; Runtime owns installed acceptance and the existing principal-bound journey. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.
+
+## 159
+
+Before editing: supplied HEAD `edbf64ea6d50a30f232ef7ed898843933687de90`, tree `d391534de826f7cc10f8dd0a72d826439181766c`. The supplied branch is `spark/cx-agent-conformance/159-census-keeps-stop-failure-causes`; the checkout has zero dirty paths. It has no upstream. Against the fetched `spike/spike/agent-host` comparison ref, HEAD is 2 commits behind and 16 ahead. Network access stays with the supervisor, so this is local-ref evidence. Existing branches and worktrees retain their supervisor ownership; this task preserves Git state.
+
+Read BACKLOG item 14 supplied with the task, 013's handoff, the architecture's Harness conformance section, the operator census and stop paragraph, `Operator::census`, the shared census listing, managed-child implementation and 149's ready/group/retention fixtures. A lane search found the existing operation owners. Plan: preserve the sample cause in the caller's double-failure branch, add two module-local real-child checks, run four separate compiling plants with restoration, then the recovery control and restored lane gates. Final tracked edits belong to `tests/common/operator.rs`, the existing RUNBOOK operator paragraph and this section. The repository has no humanizer skill; this record uses direct behavior and ownership statements.
+
+Initial free space is 50,492,448,768 bytes, above the existing 12 GiB build estimate plus 2 GiB reserve. Reuse the lane's native caches. Cargo commands use offline dependencies, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, lane-local outputs, a 600-second command bound and the existing shared exclusive heavy-build lease. Synthetic fixtures prepare neither Runtime nor providers. Runtime owns installed acceptance and existing product blockers keep their gates.
+
+### Restored baseline
+
+The shared exclusive lease covered both exact runtime-target commands, with offline inputs and lane `target/host` and `target/host-build` outputs. Host process visibility was available. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime common::operator::tests::census_refusal_preserves_reason_after_clean_stop -- --exact` passed: exit 0 in 4.148 seconds, one test passed. It observed the reaped leader and empty group before Drop, preserved the listing refusal exactly and removed its Home through `finish`.
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime common::operator::tests::census_refusal_preserves_reason_after_failed_stop -- --exact` passed: exit 0 in 10.509 seconds, one test passed. The real census returned `socket census failed: census tool failed or returned a warning; operator stop failed: managed child or its group exceeded the 10 second stop bound`; elapsed census/stop time was 10.125715875 seconds, leader alive was `Ok(false)` and group alive was `Ok(false)`. The test required the existing `finish` retention refusal, then removed its exact saved synthetic root after the retention and group-drain assertions. This is the retention decision for each passing failed-stop fixture; a failed assertion keeps its root for supervisor review.
+
+### Four compiling plants
+
+All four plants changed only `tests/common/operator.rs`, one at a time under the shared exclusive lease. The driver required one exact old-byte match and restored the complete candidate bytes in `finally` before the restored command and next plant. All commands used the baseline offline/two-thread settings and a 600-second bound. Each selected test compiled, ran exactly once and failed its named behavior assertion; setup, compile and empty-selection failures supply zero caught credit. The falsifier list and runner keep their supplied bytes.
+
+#### stop-only — CAUGHT
+
+Exact old bytes (JSON): `"format!(\"socket census failed: {reason}; operator stop failed: {stop_reason}\")"`.
+
+Exact new bytes (JSON): `"format!(\"operator stop failed: {stop_reason}\")"`.
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime common::operator::tests::census_refusal_preserves_reason_after_failed_stop -- --exact`. Exit 101 in 13.247 seconds; `FAILED. 0 passed; 1 failed`. Failed assertion: `failed stop must preserve the complete census cause exactly once`.
+
+`census stop observed: result=Err("operator stop failed: managed child or its group exceeded the 10 second stop bound") elapsed=10.106397458s leader_alive=Ok(false) group_alive=Ok(false)`
+
+The complete source bytes were restored. The same exact command passed after restoration: exit 0 in 12.395 seconds, one test passed.
+
+#### sample-only — CAUGHT
+
+Exact old bytes (JSON): `"format!(\"socket census failed: {reason}; operator stop failed: {stop_reason}\")"`.
+
+Exact new bytes (JSON): `"format!(\"socket census failed: {reason}\")"`.
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime common::operator::tests::census_refusal_preserves_reason_after_failed_stop -- --exact`. Exit 101 in 12.423 seconds; `FAILED. 0 passed; 1 failed`. Failed assertion: `failed stop must preserve the complete operator-stop cause exactly once`.
+
+`census stop observed: result=Err("socket census failed: census tool failed or returned a warning") elapsed=10.151324958s leader_alive=Ok(false) group_alive=Ok(false)`
+
+The complete source bytes were restored. The same exact command passed after restoration: exit 0 in 12.533 seconds, one test passed.
+
+#### skip-stop — CAUGHT
+
+Exact old bytes (JSON): `"            self.child\n                .stop()\n                .map_err(|stop_reason| {\n                    format!(\"socket census failed: {reason}; operator stop failed: {stop_reason}\")\n                })?;\n"`.
+
+Exact new bytes (JSON): `""`.
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime common::operator::tests::census_refusal_preserves_reason_after_clean_stop -- --exact`. Exit 101 in 1.41 seconds; `FAILED. 0 passed; 1 failed`. Failed assertion: `census refusal must reap the leader before Drop`.
+
+The complete source bytes were restored. The same exact command passed after restoration: exit 0 in 0.709 seconds, one test passed.
+
+#### ok-zero — CAUGHT
+
+Exact old bytes (JSON): `"        result\n    }\n\n    fn sample"`.
+
+Exact new bytes (JSON): `"        result.or(Ok(0))\n    }\n\n    fn sample"`.
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime common::operator::tests::census_refusal_preserves_reason_after_clean_stop -- --exact`. Exit 101 in 1.248 seconds; `FAILED. 0 passed; 1 failed`. Failed assertion: `clean stop must preserve the exact census refusal`.
+
+The complete source bytes were restored. The same exact command passed after restoration: exit 0 in 0.684 seconds, one test passed.
+
+The restored operator file SHA-256 is `8d726b26ba6281adad52aae97e4282d012d33fee5c43cd8e470c6b689f0b1b75`. The existing emergency Drop path stayed active for every plant. In the skip-stop run the leader observation was `Ok(true)` before Drop, which triggered the required assertion; the saved group observation was also made before Drop. After each failed test process exited, `/usr/bin/pgrep -g <fixture-pgid>` and `/usr/sbin/lsof -nP -Fpn +D <owned-root>` returned exit 1 with empty stdout and stderr. Each owned group was empty and each retained root was free of holders.
+
+Retained planted-fixture roots, relative to the lane:
+
+- `target/home-32627-1793730104677969000-0`: 159 stop-only failed synthetic fixture, 6 logical file bytes; keep through supervisor review, then remove this exact root.
+
+- `target/home-36985-1793730130095989000-0`: 159 sample-only failed synthetic fixture, 6 logical file bytes; keep through supervisor review, then remove this exact root.
+
+- `target/home-39853-1793730154571683000-0`: 159 skip-stop failed synthetic fixture, 12 logical file bytes; keep through supervisor review, then remove this exact root.
+
+- `target/home-40851-1793730157151184000-0`: 159 ok-zero failed synthetic fixture, 6 logical file bytes; keep through supervisor review, then remove this exact root.
+
+The ignored `target/task-159-lifecycle.json` records exact private paths, source identities, observations, ownership and terminal decisions. These four small synthetic roots stay for review under the existing failed-fixture rule. Passing failed-stop controls remove their saved roots only after retention and group-drain assertions pass.
+
+### Format correction and restored candidate
+
+The first lane format check returned exit 1 in 0.397 seconds and requested the standard chained-call layout for `self.child.stop().map_err(...)`. That whitespace change is applied. A later diff check found one trailing space in this LOG; it is removed. These are author corrections and carry zero falsifier credit. The three other plant anchors keep their exact bytes. The changed skip-stop anchor was separately planted again against the formatted candidate.
+
+Formatted skip-stop exact old bytes (JSON): `"            self.child.stop().map_err(|stop_reason| {\n                format!(\"socket census failed: {reason}; operator stop failed: {stop_reason}\")\n            })?;\n"`. Exact new bytes (JSON): `""`. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime common::operator::tests::census_refusal_preserves_reason_after_clean_stop -- --exact`. Exit 101 in 1.41 seconds; the required `census refusal must reap the leader before Drop` assertion failed with `left: Ok(true)` and `right: Ok(false)`. The complete formatted bytes were restored in `finally`.
+
+This additional failed plant retained `target/home-47715-1793730204608548000-0`, 12 logical file bytes. Its group and holder checks both returned exit 1 with empty output after Drop. It shares the supervisor review-then-remove condition above. The formatted operator SHA-256 is `646d21482fddd1cbabbe5a010158e4f97aa26870152bc40632f386053b9ffab0`.
+
+### Principles check
+
+| Check | Answer | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a code/content hash belongs? | No | `tests/common/operator.rs:89`: only existing census and stop reasons are composed; code/content identity owners keep their interfaces. |
+| 2. New capsule, Home or UI authority? | No | `tests/common/operator.rs:159`: synthetic children use the existing guarded `ThrowawayHome::start`; capsule, Home and UI code keep their supplied bytes. |
+| 3. Second operation path or copied rule? | No | `tests/common/operator.rs:90`: the one sample is followed by the one existing stop call on refusal; `sample` still calls the shared listing and parser at lines 102 and 116. |
+| 4. Runtime core growth? | No | `tests/common/operator.rs:93`: the correction belongs to the lab operator caller; final tracked changes are confined to the three named lane files. |
+| 5. Clear fail-closed refusal? | Yes | `tests/common/operator.rs:94`: both safe causes have labels and order; line 97 returns the original result after a clean stop. |
+| 6. Capsule logic and granted Bus boundary preserved? | Yes | `tests/common/operator.rs:153`: the new fixtures are synthetic host children; capsule logic and Bus calls keep their existing owners. |
+| 7. Named tests and caught falsifiers for the rule? | Yes | `tests/common/operator.rs:183` and `:213`: real census and stop tests; this section records all four compiling plants, their failed assertions and restored passes. |
+| 8. Identity, admission and allowance remain separate? | Yes | `RUNBOOK.md:172`: unsigned fixture admission grants zero resource authority; `tests/common/operator.rs:89` only observes sockets and handles cleanup. |
+
+### Restored checks
+
+All restored Cargo commands use `CARGO_NET_OFFLINE=true RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, lane `target/host` and `target/host-build` outputs, the shared exclusive lease and a 600-second bound. The formatted candidate passed:
+
+| Command | Exit | Result | Seconds |
+| --- | --- | --- | --- |
+| `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` | 0 | formatting accepted | 0.224 |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime common::operator::tests::census_refusal_preserves_reason_after_clean_stop -- --exact` | 0 | 1 passed | 0.868 |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime common::operator::tests::census_refusal_preserves_reason_after_failed_stop -- --exact` | 0 | 1 passed | 10.233 |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime fixture_operator_starts_ready_and_stops_cleanly -- --exact` | 0 | 1 passed | 10.485 |
+
+The recovery control uses the unchanged `begin_check` and `finish_check`: two successful samples with the API listener, a live child between them, the existing stop and cleanup census, and normal Home removal. The new tests use synthetic children and prepare zero native components. The recovery control and full suite retain their existing native preparation path.
+
+Basic repository checks passed after the LOG whitespace correction: `git diff --check`, `node scripts/check-product-data.mjs`, `node --test scripts/check-product-data.test.mjs` (99 passed), `(cd elastos && cargo fmt --all -- --check)`, and `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`, each exit 0. The two Rust format commands used the same offline/two-thread environment and disabled incremental compilation; they are read-only checks.
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` passed: exit 0 in 350.603 seconds, 269 passed, zero failed and 14 existing ignored rows. The complete gate included both new tests through each target that imports the common operator module, the existing successful operator control, 149's shutdown checks and the existing census journeys. The shared lease, free-space reserve, offline dependencies, two test threads and disabled incremental compilation applied throughout. Existing blocker IDs, acceptance assertions, report grades, stop bounds and retention policy keep their supplied meanings.
+
+### Final lifecycle and handoff
+
+Final host checks found all five retained synthetic roots free of holders and their five owned groups empty. Each `/usr/bin/pgrep -g <fixture-pgid>` and `/usr/sbin/lsof -nP -Fpn +D <owned-root>` returned exit 1 with empty stdout and stderr. The lane target has zero active executables. The five failed-plant roots hold 42 logical file bytes in total and remain through supervisor review, then the supervisor removes those exact paths. Passing fixtures removed their own roots; the failed-stop test did so only after the existing retention refusal and group-drain assertions passed. Existing caches and earlier retained roots keep their supervisor owner.
+
+The final read-only branch/worktree inventory preserves HEAD `edbf64ea6d50a30f232ef7ed898843933687de90` and tree `d391534de826f7cc10f8dd0a72d826439181766c`. The active branch has no upstream and remains 2 commits behind and 16 ahead of the cached `spike/spike/agent-host` ref. Exactly the three named files are dirty. The ignored `target/task-159-lifecycle.json` records this checkout, private retained-root paths, source hashes, observations, inventory digests and review-then-remove decisions. Keep that finite local evidence through review, then remove it with the listed failed roots. Supplied refs and other worktrees remain with the supervisor. The task's shared build lease is released; this task creates zero branches, worktrees, installed artifacts or rollback sets.
+
+159: Updated `Operator::census` to keep the sample cause before the labelled stop cause, added two real-child refusal tests, documented cleanup ownership, and caught all four separate plants with restored exact checks and the full locked gate passing.
+
+Candidate: the local three-file diff against the supplied HEAD, with the formatted operator SHA-256 recorded above. Exercised checks: both exact refusal tests, the successful operator recovery control, four caught compiling plants plus the formatted skip-stop anchor check, full locked lane gate, lane formatting and basic repository checks pass. Review links: pending with the lane supervisor. Installed release evidence: skipped because this is lab operator-cleanup proof; Runtime owns installed acceptance. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.
