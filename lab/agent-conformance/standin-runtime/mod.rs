@@ -1415,6 +1415,25 @@ impl StandIn {
         Ok(index)
     }
 
+    /// Both hostcall reply closures pass their serialized envelope here.
+    fn limit_bridge_response(id: u64, text: String) -> String {
+        if text.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {
+            serde_json::to_string(&json!({
+                "id": id,
+                "response": {
+                    "type": "error",
+                    "code": "response_too_large",
+                    "message": "resource response exceeds maximum size",
+                }
+            }))
+            .expect("the bridge response limit envelope is one JSON object")
+        } else {
+            text
+        }
+    }
+
+    const RESOURCE_FRAME_BYTE_LIMIT: usize = 1_048_576;
+
     /// Lab test seam, not a route.
     ///
     /// The one hostcall. A capability line calls `post_capability_request`
@@ -1427,7 +1446,26 @@ impl StandIn {
         capsule_id: &str,
         principal: Option<&str>,
     ) -> Result<String, String> {
+        let denied = |id: u64, code: &str, message: &str| {
+            let text = serde_json::to_string(&json!({
+                "id": id,
+                "response": {
+                    "type": "error",
+                    "code": code,
+                    "message": message,
+                }
+            }))
+            .expect("the bridge error envelope is one JSON object");
+            Self::limit_bridge_response(id, text)
+        };
         let _ = principal;
+        if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {
+            return Ok(denied(
+                0,
+                "request_too_large",
+                "resource frame exceeds maximum size",
+            ));
+        }
         let parsed: Value =
             serde_json::from_str(line).map_err(|err| format!("Invalid JSON: {err}"))?;
         let Some(request) = parsed.get("request").filter(|request| request.is_object()) else {
@@ -1440,26 +1478,16 @@ impl StandIn {
                 .ok_or_else(|| "bridge id must be a number".to_owned())?,
         };
         let request = request.as_object().expect("the request object was checked");
-        let denied = |message: &str| {
-            serde_json::to_string(&json!({
-                "id": id,
-                "response": {
-                    "type": "error",
-                    "code": "denied",
-                    "message": message,
-                }
-            }))
-            .expect("the bridge error envelope is one JSON object")
-        };
         let accepted = |data: Value| {
-            serde_json::to_string(&json!({
+            let text = serde_json::to_string(&json!({
                 "id": id,
                 "response": {
                     "type": "ok",
                     "data": data,
                 }
             }))
-            .expect("the bridge ok envelope is one JSON object")
+            .expect("the bridge ok envelope is one JSON object");
+            Self::limit_bridge_response(id, text)
         };
         let caller = Caller::Client {
             session_id: capsule_id,
@@ -1474,7 +1502,7 @@ impl StandIn {
                 }
                 match self.post_capability_request(caller, &Value::Object(body)) {
                     Ok(data) => Ok(accepted(data)),
-                    Err((_, reason)) => Ok(denied(&reason)),
+                    Err((_, reason)) => Ok(denied(id, "denied", &reason)),
                 }
             }
             Some("resource_invoke") => {
@@ -1487,22 +1515,30 @@ impl StandIn {
                     Some(Value::Object(object)) if object.contains_key("amount") => {
                         match ask_amount(object.get("amount")) {
                             Ok(0) => {
-                                return Ok(denied("budget ask needs a positive integer amount"));
+                                return Ok(denied(
+                                    id,
+                                    "denied",
+                                    "budget ask needs a positive integer amount",
+                                ));
                             }
                             Ok(amount) => amount,
-                            Err((_, reason)) => return Ok(denied(&reason)),
+                            Err((_, reason)) => return Ok(denied(id, "denied", &reason)),
                         }
                     }
                     _ => {
-                        return Ok(denied("budget ask needs a non-negative integer amount"));
+                        return Ok(denied(
+                            id,
+                            "denied",
+                            "budget ask needs a non-negative integer amount",
+                        ));
                     }
                 };
                 match self.use_grant(caller, token, None, None, amount) {
                     Ok(()) => Ok(accepted(Value::Null)),
-                    Err((_, reason)) => Ok(denied(&reason)),
+                    Err((_, reason)) => Ok(denied(id, "denied", &reason)),
                 }
             }
-            _ => Ok(denied("unsupported bridge request")),
+            _ => Ok(denied(id, "denied", "unsupported bridge request")),
         }
     }
 
@@ -10712,6 +10748,234 @@ mod tests {
             "",
             "the stand-in did the work: component-2 stays running",
         );
+    }
+
+    /// Raw frame bytes are bounded by this stand-in. A PASS gives the Runtime
+    /// no A15 credit. The success reply uses the shared limiter directly because
+    /// the hostcall's current success bodies are small; both closures are wired
+    /// to that same limiter below.
+    #[test]
+    fn standin_hostcall_frame_fails_closed() {
+        const LIMIT: usize = 1_048_576;
+        let shared = Shared::new();
+        let mut standin = StandIn::new();
+        launch_two_running(&shared, &mut standin);
+        for id in ["component-1", "component-2"] {
+            assert_capsule(
+                &standin,
+                id,
+                "running",
+                "",
+                "the stand-in did the work: both instances start running",
+            );
+        }
+        standin.seed_grant(
+            "req-once",
+            "component-1",
+            SHARED_RESOURCE,
+            "read",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        let request_limit = json!({
+            "id": 0,
+            "response": {
+                "type": "error",
+                "code": "request_too_large",
+                "message": "resource frame exceeds maximum size",
+            }
+        });
+        let padded = format!(
+            "{}{}",
+            " ".repeat(LIMIT),
+            r#"{"id":3,"request":{"type":"request_capability","resource":"localhost://Public/resident-instances/shared.txt","action":"read","reason":"read shared"}}"#
+        );
+        for (note, line) in [
+            ("oversized ASCII", "x".repeat(LIMIT + 1)),
+            ("oversized multibyte", "á".repeat(524_289)),
+            ("padded declared request", padded),
+        ] {
+            assert!(
+                line.len() > LIMIT,
+                "the stand-in did the work: {note} exceeds the byte limit"
+            );
+            let text = standin
+                .bridge_envelope(&line, "component-1", None)
+                .expect("the stand-in did the work: an oversized frame returns Ok before parsing");
+            assert!(
+                request_entries(&standin, "component-1").is_empty(),
+                "the stand-in did the work: {note} stores no request"
+            );
+            assert_eq!(
+                grant_record(&standin, "req-once"),
+                (Life::Live, false),
+                "the stand-in did the work: {note} leaves the once grant live"
+            );
+            assert!(
+                !text.ends_with('\n'),
+                "the stand-in did the work: {note} returns no trailing newline"
+            );
+            let value: Value = serde_json::from_str(&text)
+                .expect("the stand-in did the work: the request refusal is JSON");
+            assert_eq!(
+                value, request_limit,
+                "the stand-in did the work: {note} returns the complete request limit envelope"
+            );
+        }
+        let exact = "x".repeat(LIMIT);
+        let error = standin
+            .bridge_envelope(&exact, "component-1", None)
+            .expect_err("the stand-in did the work: exactly 1048576 bytes still reaches parsing");
+        assert!(
+            error.contains("Invalid JSON") && !error.contains("request_too_large"),
+            "the stand-in did the work: the exact-size invalid line stays Invalid JSON"
+        );
+
+        let long = format!("localhost://{}", "a".repeat(1_048_453));
+        let line = format!(
+            r#"{{"id":9,"request":{{"type":"request_capability","resource":"{long}","action":"read","reason":"x"}}}}"#
+        );
+        assert_eq!(
+            line.len(),
+            1_048_556,
+            "the stand-in did the work: the exact-reply request fits the frame"
+        );
+        let text = standin
+            .bridge_envelope(&line, "component-1", None)
+            .expect("the stand-in did the work: the exact-reply request returns Ok");
+        assert_eq!(
+            text.len(),
+            LIMIT,
+            "the stand-in did the work: exactly 1048576 reply bytes stays unchanged"
+        );
+        let expected = json!({
+            "id": 9,
+            "response": {
+                "type": "error",
+                "code": "denied",
+                "message": format!("ask not declared in the signed manifest: {long} read"),
+            }
+        });
+        assert_eq!(
+            text,
+            serde_json::to_string(&expected).unwrap(),
+            "the stand-in did the work: the exact-size denied reply stays byte identical"
+        );
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            value["response"]["code"], "denied",
+            "the stand-in did the work: the exact-size reply keeps denied"
+        );
+
+        let response_limit = json!({
+            "id": 9,
+            "response": {
+                "type": "error",
+                "code": "response_too_large",
+                "message": "resource response exceeds maximum size",
+            }
+        });
+        for (note, resource) in [
+            ("ASCII", format!("localhost://{}", "a".repeat(1_048_454))),
+            ("multibyte", format!("localhost://{}", "á".repeat(524_228))),
+        ] {
+            let line = format!(
+                r#"{{"id":9,"request":{{"type":"request_capability","resource":"{resource}","action":"read","reason":"x"}}}}"#
+            );
+            assert!(
+                line.len() <= LIMIT,
+                "the stand-in did the work: the {note} denied request fits the frame"
+            );
+            if note == "ASCII" {
+                assert_eq!(
+                    line.len(),
+                    1_048_557,
+                    "the stand-in did the work: LONGER keeps the specified request length"
+                );
+            }
+            let text = standin
+                .bridge_envelope(&line, "component-1", None)
+                .expect("the stand-in did the work: the oversized denied reply returns Ok");
+            assert!(
+                !text.ends_with('\n'),
+                "the stand-in did the work: the {note} response replacement has no trailing newline"
+            );
+            assert!(
+                !text.contains("ask not declared"),
+                "the stand-in did the work: the {note} oversized denied reply is replaced"
+            );
+            let value: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(
+                value, response_limit,
+                "the stand-in did the work: the {note} denied reply keeps the full replacement envelope"
+            );
+        }
+
+        let empty_success = serde_json::to_string(&json!({
+            "id": 9, "response": { "type": "ok", "data": "" }
+        }))
+        .unwrap();
+        let exact_success = serde_json::to_string(&json!({
+            "id": 9,
+            "response": { "type": "ok", "data": "x".repeat(LIMIT - empty_success.len()) }
+        }))
+        .unwrap();
+        assert_eq!(
+            StandIn::limit_bridge_response(9, exact_success.clone()),
+            exact_success,
+            "the stand-in did the work: an exact-size success reply stays byte identical"
+        );
+        for (note, data) in [
+            ("ASCII", "x".repeat(LIMIT)),
+            ("multibyte", "á".repeat(524_289)),
+        ] {
+            let success = serde_json::to_string(&json!({
+                "id": 9, "response": { "type": "ok", "data": data }
+            }))
+            .unwrap();
+            let text = StandIn::limit_bridge_response(9, success);
+            assert!(
+                !text.ends_with('\n'),
+                "the stand-in did the work: the {note} success replacement has no trailing newline"
+            );
+            let value: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(
+                value, response_limit,
+                "the stand-in did the work: the {note} success reply keeps the full replacement envelope"
+            );
+        }
+        let source = include_str!("mod.rs");
+        let bridge = source.split("pub fn bridge_envelope(").nth(1).unwrap();
+        let denied = bridge.split("let denied =").nth(1).unwrap();
+        let accepted = bridge.split("let accepted =").nth(1).unwrap();
+        for (note, closure) in [("error", denied), ("success", accepted)] {
+            let closure = closure.split("\n        };").next().unwrap();
+            assert!(
+                closure.contains("Self::limit_bridge_response(id, text)"),
+                "the stand-in did the work: the {note} closure uses the shared reply limiter"
+            );
+        }
+        assert!(
+            request_entries(&standin, "component-1").is_empty()
+                && request_entries(&standin, "component-2").is_empty(),
+            "the stand-in did the work: the frame journey stores no requests"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Live, false),
+            "the stand-in did the work: the frame journey leaves the once grant live"
+        );
+        for id in ["component-1", "component-2"] {
+            assert_capsule(
+                &standin,
+                id,
+                "running",
+                "",
+                "the stand-in did the work: both instances stay running after the frame journey",
+            );
+        }
     }
 
     /// The hostcall text calls `use_grant` with the body amount. `use_grant`
