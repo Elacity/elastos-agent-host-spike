@@ -304,8 +304,14 @@ The receipt contains native hashes, every observed probe's effect, component
 SHA-256 and the complete bundle's lab CID (as `lab/capsule-identity` prints it),
 the suite outcome, and the exact graded table plus its SHA-256. The sibling
 identity library owns the bundle walk, manifest validation and encoding. The
-staging path uses its checked entries for the component bytes. The lab CID
-covers `capsule.json` and the payload;
+staging path uses its checked entries for the component bytes. When the bundle
+checker refuses the input, staging retains its complete cause after
+`probe staging: bundle identity refused: `.
+The refused directory remains under its component hash in the guarded Home.
+To repair that fixture, the caller explicitly removes its known hash-named
+bundle directory, corrects the input, and calls `stage_probe` again. A retry
+that keeps the prior directory receives `probe staging: create bundle directory`.
+The lab CID covers `capsule.json` and the payload;
 Runtime CID launch remains BACKLOG item 13. Identity, admission and resource
 allowance remain separate decisions. The receipt's description gives the lab
 CID and any separate signed record zero admission or permission credit.

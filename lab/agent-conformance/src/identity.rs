@@ -77,7 +77,7 @@ pub fn stage_probe(
         .map_err(|_| "probe staging: create entrypoint directory")?;
     fs::write(path.join(entrypoint), bytes).map_err(|_| "probe staging: write component")?;
     let checked = capsule_identity::checked_bundle(&path)
-        .map_err(|_| "probe staging: bundle identity refused")?;
+        .map_err(|refusal| format!("probe staging: bundle identity refused: {refusal}"))?;
     let component = checked
         .entries()
         .iter()

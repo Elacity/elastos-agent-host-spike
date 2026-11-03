@@ -10928,3 +10928,80 @@ The final branch/worktree inventory keeps this checkout on the supplied HEAD and
 155: One checked helper now copies the Agent Host and relative Bus inputs, with exact-byte refusal tests, four caught plants, and a passing real copied-capsule build and staging proof.
 
 Candidate: the local five-path diff against the supplied HEAD. Exercised checks: build target, four caught compiling plants and their restored exact checks, opt-in real-capsule build/staging, full locked lane gate, formatting and basic repository checks pass. Review links: pending with the lane supervisor. Installed release evidence: skipped because this is a lab artifact-input prerequisite; Runtime owns installed acceptance and the existing principal-bound journey. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.
+
+## 160
+
+Supplied checkout before edits: HEAD `edbf64ea6d50a30f232ef7ed898843933687de90`, tree `d391534de826f7cc10f8dd0a72d826439181766c`, branch `spark/cx-agent-conformance/160-staging-keeps-bundle-refusal`. `git status --porcelain=v1` is empty: zero dirty paths. The branch has no upstream. Against the cached `spike/spike/agent-host` at `eb2129162bec0881ad0b6e1e5672dc44b17b8cff`, HEAD has 16 local-only and 2 remote-only commits. A fresh remote comparison stays with the supervisor under the offline task rule.
+
+Read the supplied task and BACKLOG item 14, the 018 and 028 handoffs, RUNBOOK staging and version-receipt descriptions, architecture conformance/status sections, all staging callers and assertions, and the identity library's checker/refusal contract. The repository has no humanizer skill; communication uses direct statements of behavior and ownership. Existing stopped/blocked tasks, including the 134–138 merge gate, retain their states.
+
+Plan: retain the checker's complete Display cause in the existing stager, add synthetic parse/validation refusal and explicit repair proof in the report target, and migrate the content-CID consumer to that same returned cause. Then hand-run F-staging-cause-erased against both exact named tests, restore the exact source bytes, and run the restored targeted, full and report-command gates. Final source edits stay in the five task paths. Initial free space is 49,475,604 KiB; the existing 12 GiB build estimate plus 2 GiB reserve fit. Cargo commands will use the shared exclusive heavy-build lease, offline dependencies, lane-local outputs, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, and a 600-second bound per command.
+
+### Refusal, repair and consumer checks
+
+`src/identity.rs::stage_probe` adds operation context to the existing checker's Display cause. Its single checker call, guarded writes, exclusive directory creation and checked-entry identity derivation retain their order. `tests/report.rs::staging_keeps_the_bundle_checker_reason` uses separate fresh Homes for a missing name and an empty version. The dependency oracle reads the actual hash-named staged directory and distinguishes `ManifestUnparsed` from `ManifestInvalid`. Exact prefixed-cause and literal-field assertions check the reporting rule. A retry with the repaired manifest still refuses the existing directory and preserves its bytes. The test explicitly removes only that known bundle, stages the original manifest through the same API, and compares component hash, bundle lab CID and checked payload bytes before `home.finish()`.
+
+`tests/content_cid.rs::requires_cid_is_refused_today` now checks the staging result's `` unknown field `cid` `` and `` expected `name` or `kind` `` cause and prefix, then uses that same result in its handoff output. The redundant `manifest_refusal` writer and `target/content-cid-manifest-check` path are removed. Template helpers, content listing/CID assertions and the plain-requirement control retain their behavior. RUNBOOK's existing staging paragraph describes cause retention and explicit fixture repair; Runtime owns admission, grants and installed acceptance.
+
+### F-staging-cause-erased
+
+The shared exclusive heavy-build lease covered all Cargo commands. Initial command free space was 50,679,971,840 bytes. Commands used `CARGO_NET_OFFLINE=true RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, lane-local `target/host`, `target/host-build` and `target/task-160-tmp`, with a 600-second bound. The hand-run plant changed exactly one match in `src/identity.rs`; the falsifier list and runner retain their supplied bytes.
+
+Exact candidate bytes:
+
+```rust
+        .map_err(|refusal| format!("probe staging: bundle identity refused: {refusal}"))?;
+```
+
+Exact planted bytes:
+
+```rust
+        .map_err(|_| "probe staging: bundle identity refused")?;
+```
+
+The two commands were run separately before the plant, under the plant and after restoration:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report staging_keeps_the_bundle_checker_reason -- --exact
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test content_cid requires_cid_is_refused_today -- --exact
+```
+
+| Exact test | Baseline | Plant | Restored |
+| --- | --- | --- | --- |
+| `staging_keeps_the_bundle_checker_reason` | exit 0, one passed, 2.544 s | exit 101, one failed, 1.504 s | exit 0, one passed, 1.147 s |
+| `requires_cid_is_refused_today` | exit 0, one passed, 3.484 s | exit 101, one failed, 1.547 s | exit 0, one passed, 1.329 s |
+
+Both named tests reached their missing-cause assertions, so the plant is CAUGHT. Report failed at `tests/report.rs:455`: `staging must retain the complete bundle checker cause exactly once`; its left value was the generic error and its right value included the parser's missing-name cause. Content-CID failed at `tests/content_cid.rs:178`: `the refusal must be the manifest reader's own field refusal, got: probe staging: bundle identity refused`. Compilation, setup and test selection succeeded in each run. A `finally` block restored the complete source bytes before reruns; restored `identity.rs` SHA-256 is `96a05e308c2bc43ede096ac7c3a5dba01b5a147a4b8fcd77575841ba1c9542f2`.
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report --test content_cid` passed, exit 0 in 2.924 s: 25 report and 2 content-CID tests passed. Lane formatting passed, exit 0 in 0.202 s. Basic repository checks also passed: `git diff --check`; `node scripts/check-product-data.mjs` (42 capsules, 2 profiles, 28 method contracts); `node --test scripts/check-product-data.test.mjs` (99 passed); `cargo fmt --all -- --check` from `elastos/`; and `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`.
+
+### Principles check
+
+| Question | Yes/No | Evidence (lane-relative) |
+| --- | --- | --- |
+| 1. New name or URL in place of a code/content hash? | No | `src/identity.rs:73` keeps the component-hash directory; `:90` and `:91` keep separate checked component SHA-256 and bundle lab CID fields. |
+| 2. New ambient capsule, Home or UI authority? | No | `src/identity.rs:59` keeps the existing Home guard; `tests/report.rs:424` uses fresh guarded fixture Homes. |
+| 3. Second path or copy of an operation rule? | No | `src/identity.rs:79` keeps the single bundle check; `tests/content_cid.rs:177` consumes that stager's result in place of the scratch writer. |
+| 4. Does the trusted Runtime core grow? | No | `src/identity.rs:80` changes only lab error context; the candidate's five paths are all under this lane. |
+| 5. Do refusals fail closed with a clear reason? | Yes | `src/identity.rs:80` returns the complete dependency cause before identity construction; `tests/report.rs:455` requires its exact text. |
+| 6. Does capsule logic stay inside with granted Bus calls? | Yes | `tests/report.rs:422` uses synthetic component bytes to test host staging; capsule source, imports and launch paths retain their supplied bytes. |
+| 7. Named tests and a caught falsifier prove the new rule? | Yes | `tests/report.rs:421` and `tests/content_cid.rs:173` both pass restored and fail their missing-cause assertions under F-staging-cause-erased. |
+| 8. Are identity, admission and allowance separate? | Yes | `src/identity.rs:52` defines the lab CID as identity; `:79` gates checked identity only, with Runtime retaining admission and grant ownership. |
+
+### Restored full gate
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` passed, exit 0 in 292.911 seconds: 264 passed, zero failed and 14 existing ignored tests. It ran with host process visibility and loopback access for the isolated Homes, the shared exclusive heavy-build lease, offline inputs, two test threads, disabled incremental compilation and lane-local outputs. Free space before this command was 50,658,177,024 bytes. The full gate left zero new retained roots. The report command used the same lease and settings.
+
+`lab/agent-conformance/run.sh` passed, exit 0 in 282.904 seconds. Its table has 265 PASS rows (including A14), 14 existing BLOCKED rows, zero FAIL rows and zero SKIPPED rows. Both named staging/content-CID rows pass. The local, uncommitted receipt is `target/run-table.PSbnuQ/VERSIONS.json`, SHA-256 `f0bcc6b0889d950e9d0c57b2cced00ef59327e98239cf4270e90da590dd67ac6`. It reports `identity_status: complete`, `command_success: true` and `suite_outcome: BLOCKED`; the existing blockers retain their owners and gates. Receipt schema, coverage and grading policy retain their supplied implementation.
+
+### Cleanup and handoff
+
+Passing fixtures completed their existing cleanup paths. The two caught-plant Homes remain for supervisor review under the existing failed-assertion retention rule, with 25,639 logical file bytes total. Final `lsof -nP -Fpn +D <owned-root>` checks returned exit 1 with empty stdout/stderr for both; the lane target has zero active executables. The new test kept its failed roots without a cleanup override. The obsolete scratch-bundle path is absent. The task-owned Cargo scratch directory held one 653-byte tool cache; its holder check was empty, then it was removed. The shared build lease is released.
+
+The ignored `target/task-160-lifecycle.json` records exact private paths, source identity and hashes, dirty paths, ownership, observations, holder checks and terminal decisions for this checkout, branch, finite command outputs, retained roots, receipt and supplied rebuildable caches. The supervisor reviews the caught-plant roots, receipt and proof files, then removes their exact paths. Supplied caches and earlier fixtures retain their supervisor lifecycle. This task creates zero branches, worktrees, installed artifacts or rollback sets.
+
+Final branch/worktree inventory keeps HEAD `edbf64ea6d50a30f232ef7ed898843933687de90` and tree `d391534de826f7cc10f8dd0a72d826439181766c`, with exactly the five task paths dirty. The task branch has no upstream. The cached integration ref moved during the checks to `spike/spike/agent-host` at `b818579644fc5b0dac063ac85adc1ed346cffedb`: this checkout has 16 local-only and 4 remote-only commits. The supervisor owns a fresh remote comparison, publication and integration. This builder preserved Git state and used offline dependency inputs.
+
+160: The single stager retains the bundle checker's cause, report tests prove refusal and explicit repair, and the content-CID consumer uses that same cause; both named tests catch F-staging-cause-erased and all restored gates pass.
+
+Candidate: the local five-path diff against the supplied HEAD. Exercised checks: both exact tests, the caught plant against each test, restored exact tests, both integration targets, formatting, full locked lane gate, `run.sh` and basic repository checks pass. Review links: pending with the lane supervisor. Installed release evidence: skipped because this change proves lab staging and identity reporting; Runtime owns admission, grants and installed-product acceptance. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.
