@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import hashlib
 import importlib.util
+import io
 import json
 import re
 import shutil
 import tempfile
+from contextlib import redirect_stderr
 from pathlib import Path
 
 
@@ -368,6 +370,75 @@ def assert_setup_order():
         raise AssertionError("source-home integrity must validate the stamped source-home profile")
 
 
+def assert_source_home_provider_anchors(stamper):
+    def provider_manifest(name, rights):
+        manifest = {
+            "schema": "elastos.capsule/v1", "name": name, "version": "0.1.0", "author": "elastos",
+            "description": f"{name} Runtime boundary", "role": "provider", "entrypoint": name,
+            "type": "native-provider", "provides": f"elastos://{name}/*", "permissions": {},
+        }
+        if rights:
+            manifest["authority"] = {
+                "reason": f"{name} owns its Runtime boundary.",
+                "capabilities": [{"resource": f"elastos://{name}/*", "actions": ["execute"],
+                                  "operations": ["status"]}],
+                "rights": [{"id": "storage",
+                            "rules": ['(allow file-read* (literal (param "STORAGE_PARENT")))']}],
+            }
+        return manifest
+
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp) / "repo"
+        data = Path(temp) / "data"
+        components = data / "components.json"
+        names = ["rights-provider", "plain-provider"]
+        for name in names:
+            manifest = provider_manifest(name, rights=name == "rights-provider")
+            write_json(root / "capsules" / name / "capsule.json", manifest)
+            (root / "capsules" / name / name).write_bytes(name.encode("utf-8"))
+            (data / "bin").mkdir(parents=True, exist_ok=True)
+            (data / "bin" / name).write_bytes(name.encode("utf-8"))
+            # Contract materialization copies the source manifest bytes verbatim.
+            write_json(data / "capsules" / name / "capsule.json", manifest)
+        write_json(
+            components,
+            {
+                "external": {
+                    name: {
+                        "version": "0.1.0",
+                        "install_path": f"bin/{name}",
+                        "platforms": {
+                            "linux-amd64": {
+                                "checksum": "sha256:" + "0" * 64,
+                                "release_path": f"{name}-linux-amd64",
+                                "install_path": f"bin/{name}",
+                            }
+                        },
+                    }
+                    for name in names
+                },
+                "capsules": {},
+            },
+        )
+        anchored = data / "capsules" / "rights-provider" / "capsule.json"
+        digest = "source-home:sha256:" + sha256(anchored)
+
+        for _ in range(2):
+            skipped = io.StringIO()
+            with redirect_stderr(skipped):
+                stamper.stamp_component_capsules(components, data, root, "linux-amd64", names)
+            if "stamp: skip plain-provider: no declared rights" not in skipped.getvalue():
+                raise AssertionError(f"no-rights provider skip is silent: {skipped.getvalue()!r}")
+            result = json.loads(components.read_text(encoding="utf-8"))
+            row = result["external"]["rights-provider"]["capsule_metadata"]["platforms"]["linux-amd64"]
+            if row.get("checksum") != digest:
+                raise AssertionError(f"rights provider anchor is not its manifest digest: {row.get('checksum')!r}")
+            if row.get("release_path") != "rights-provider-linux-amd64":
+                raise AssertionError("rights provider anchor lost its release_path")
+            if "capsule_metadata" in result["external"]["plain-provider"]:
+                raise AssertionError("provider without rights kept a source-home anchor")
+
+
 def run_smoke():
     stamper = load_stamper()
     player_manifest = json.loads(
@@ -535,6 +606,7 @@ def run_smoke():
 
     assert_source_archive_overlay(stamper)
     assert_setup_order()
+    assert_source_home_provider_anchors(stamper)
     print("PASS source-home capsule inventory smoke")
 
 
