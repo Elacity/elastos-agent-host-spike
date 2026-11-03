@@ -198,11 +198,11 @@ fn run_verify_capsule(path: PathBuf, public_key: PathBuf) -> anyhow::Result<()> 
     let content_hash = hash_content(&content);
 
     match verifier.verify_capsule(&manifest, &content_hash) {
-        Ok(true) => {
+        Ok(Some(_)) => {
             println!("Signature VALID for capsule '{}'", manifest.name);
             Ok(())
         }
-        Ok(false) => {
+        Ok(None) => {
             println!("Signature INVALID - key mismatch or tampered content");
             std::process::exit(1);
         }
