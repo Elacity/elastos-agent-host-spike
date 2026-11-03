@@ -1,0 +1,10 @@
+id: F-A5-rateoverflow
+file: src/lib.rs
+test: ops::model_max_instant_still_stops_the_next_effect
+--- old
+        let elapsed = now.saturating_sub(grant.record.window_start);
+        if elapsed >= grant.record.window {
+--- new
+        let end = grant.record.window_start.saturating_add(grant.record.window);
+        if now >= end {
+--- end
