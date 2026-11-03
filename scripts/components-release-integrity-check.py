@@ -173,7 +173,8 @@ def audit_release_artifacts(data, platforms, artifact_root):
             return
         checksum = info.get("checksum")
         size = info.get("size")
-        if not isinstance(checksum, str) or not CHECKSUM_RE.fullmatch(checksum):
+        # A release artifact is checked by the one recorded rule, never in source-home mode (Rong 19:55 §5).
+        if not isinstance(checksum, str) or recorded_checksum_error(label, "artifact", checksum, False):
             errors.append(f"{label}: invalid artifact checksum")
             return
         if type(size) is not int or size <= 0:
@@ -756,6 +757,12 @@ def run_self_test():
             assert recorded_checksum_error("fixture", "*", ok, False) is None, f"C1: {ok!r} refused"
         assert checksum_error("fixture", "*", {"release_path": "a", "checksum": "sha256:bad"}) == (
             "fixture * a: unsupported checksum format 'sha256:bad'"), "C1: checksum_error has its own rule"
+        with tempfile.TemporaryDirectory() as art:  # C1 :176: the artifact row takes the same rule
+            for bad in (digest, "sha256:" + "a" * 63):
+                row = {"release_path": "a.bin", "checksum": bad, "size": 1}
+                errs = audit_release_artifacts({"external": {"art": {"platforms": {"linux-amd64": row}}}},
+                                               ["linux-amd64"], art)
+                assert "art linux-amd64: invalid artifact checksum" in errs, f"C1 artifact: {bad!r} {errs}"
         with tempfile.TemporaryDirectory() as empty_root:
             release_missing = audit_provider_capsule_metadata(provider_good, ["linux-amd64"], source_root=empty_root)
         if "provider-demo: provider capsule source manifest missing" not in release_missing:
