@@ -1,0 +1,8 @@
+id: F-A5-rateissue
+file: src/ops.rs
+test: ops::model_child_effect_follows_the_issuing_window
+--- old
+                    self.open_rate_window(counted)
+--- new
+                    self.open_rate_window(request.handle)
+--- end
