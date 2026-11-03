@@ -483,7 +483,12 @@ fn protected_principal_root_resource_response(
             "localhost://Users requires a principal-scoped launch context",
         ));
     };
-    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    let data_dir = bridge_ctx.data_dir.as_deref();
+    let localhost_root = match crate::auth::principal_stored_localhost_root(data_dir, principal_id)
+    {
+        Ok(root) => root,
+        Err(err) => return Some(resource_error_response("principal_context_required", &err)),
+    };
     if rooted != localhost_root && !rooted.starts_with(&format!("{localhost_root}/")) {
         return Some(resource_error_response(
             "principal_context_required",
@@ -822,43 +827,41 @@ fn scope_current_user_alias(
         return Ok(uri_or_resource.to_string());
     };
 
-    if is_unscoped_current_user_alias(&rooted) {
-        let Some(principal_id) = principal_id else {
-            return Err(
-                "localhost://Users/self requires a principal-scoped launch context".to_string(),
-            );
-        };
-        let principal_root = crate::auth::principal_stored_localhost_root(data_dir, principal_id)?;
-        if rooted == "localhost://Users/self" {
-            return Ok(principal_root);
-        }
-        let rest = rooted
-            .strip_prefix("localhost://Users/self/")
-            .ok_or_else(|| format!("Invalid current-user alias: {uri_or_resource}"))?;
-        return Ok(format!("{principal_root}/{rest}"));
+    // A5-S3a-2: the stored record's kind picks the one root area a principal may use.
+    let Some(area) = ["Users", "UsersAI"]
+        .into_iter()
+        .find(|area| rooted.starts_with(&format!("localhost://{area}/")))
+    else {
+        return Ok(rooted);
+    };
+    let alias = format!("localhost://{area}/self");
+    let is_alias = rooted == alias || rooted.starts_with(&format!("{alias}/"));
+    let Some(principal_id) = principal_id else {
+        let what = format!("localhost://{area}{}", if is_alias { "/self" } else { "" });
+        return Err(format!("{what} requires a principal-scoped launch context"));
+    };
+    let principal_root = crate::auth::principal_stored_localhost_root(data_dir, principal_id)?;
+    if !principal_root.starts_with(&format!("localhost://{area}/")) {
+        return Err(format!("{area} is not this principal's root area"));
     }
-
-    if rooted.starts_with("localhost://Users/") {
-        let Some(principal_id) = principal_id else {
-            return Err("localhost://Users requires a principal-scoped launch context".to_string());
-        };
-        let principal_root = crate::auth::principal_stored_localhost_root(data_dir, principal_id)?;
-        if rooted == principal_root || rooted.starts_with(&format!("{principal_root}/")) {
-            return Ok(rooted);
-        }
-        return Err(
-            "localhost://Users roots must use Users/self or the active principal root".to_string(),
-        );
+    if is_alias {
+        return Ok(format!("{principal_root}{}", &rooted[alias.len()..]));
     }
-
-    Ok(rooted)
+    if rooted == principal_root || rooted.starts_with(&format!("{principal_root}/")) {
+        return Ok(rooted);
+    }
+    Err(format!(
+        "localhost://{area} roots must use {area}/self or the active principal root"
+    ))
 }
 
 fn is_unscoped_current_user_alias(uri_or_resource: &str) -> bool {
     let Some(rooted) = rooted_localhost_uri(uri_or_resource) else {
         return false;
     };
-    rooted == "localhost://Users/self" || rooted.starts_with("localhost://Users/self/")
+    ["localhost://Users/self", "localhost://UsersAI/self"]
+        .iter()
+        .any(|alias| rooted == *alias || rooted.starts_with(&format!("{alias}/")))
 }
 
 fn provider_scheme_for_resource_uri(uri: &str) -> Result<String, String> {
@@ -1711,7 +1714,54 @@ mod tests {
         let missing = resolve(tempfile::tempdir().unwrap().path()).err().unwrap();
         assert!(missing.contains("has no stored record"), "{missing}");
         std::fs::write(crate::auth::auth_state_path(temp.path()).unwrap(), b"{").unwrap();
-        assert!(resolve(temp.path()).is_err());
+        let unparsed = resolve(temp.path()).err().unwrap();
+        assert!(unparsed.contains("failed to parse"), "{unparsed}");
+    }
+
+    /// A5-S3a-2: a stored Agent owns UsersAI/self only; a Human owns no UsersAI root.
+    #[test]
+    fn a_stored_agent_is_scoped_to_its_own_usersai_root() {
+        let id = "agent:local:scoped";
+        let temp = stored_human_dir(id);
+        let root = crate::auth::tests::mint_agent_record(temp.path(), id, None).localhost_root;
+        let (want, dir) = (format!("{root}/a.md"), Some(temp.path()));
+        assert!(root.starts_with("localhost://UsersAI/"), "{root}");
+        let scope = |uri: &str| scope_current_user_alias(uri, Some(id), dir);
+        let not_area = |area: &str| format!("{area} is not this principal's root area");
+        assert_eq!(scope("localhost://UsersAI/self/a.md").unwrap(), want);
+        assert_eq!(scope(&want).unwrap(), want);
+        let human_root = format!("{}/a.md", crate::auth::principal_localhost_root(id));
+        for uri in ["localhost://Users/self/a.md", &human_root] {
+            assert_eq!(scope(uri).unwrap_err(), not_area("Users"));
+        }
+        let foreign = scope("localhost://UsersAI/000000000000000000000000/a.md").unwrap_err();
+        assert!(foreign.contains("roots must use UsersAI/self"), "{foreign}");
+        let allows =
+            |bound: &str, r: &str| manifest_allows_resource(&[bound.into()], r, Some(id), dir);
+        assert!(allows("localhost://UsersAI/self/*", &want));
+        assert!(!allows("localhost://Users/self/*", &human_root));
+        let (h, human) = ("person:local:h", stored_human_dir("person:local:h"));
+        let refused =
+            scope_current_user_alias("localhost://UsersAI/self", Some(h), Some(human.path()));
+        assert_eq!(refused.unwrap_err(), not_area("UsersAI"));
+    }
+
+    /// F-S3-protected: the protected write path takes the stored Agent root,
+    /// so the same id's Users root is refused with a data dir present.
+    #[test]
+    fn the_protected_path_refuses_a_stored_agent_the_users_root_of_its_id() {
+        let id = "agent:local:protected";
+        let temp = stored_human_dir(id);
+        crate::auth::tests::mint_agent_record(temp.path(), id, None);
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some(id.to_string());
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        let path = format!("{}/a.md", crate::auth::principal_localhost_root(id));
+        let request = serde_json::json!({"path": path, "content": "x"});
+        let refused = protected_principal_root_resource_response(&ctx, "write", &request).unwrap();
+        assert_eq!(refused["code"], "principal_context_required", "{refused}");
+        let message = refused["message"].as_str().unwrap();
+        assert!(message.starts_with("localhost://Users roots"), "{message}");
     }
 
     fn bridge_token(ctx: &BridgeContext, resource: &str, action: Action) -> String {
