@@ -469,11 +469,20 @@ before claiming their M1 results.
 
 Task 004 adds the agent-memory rows to the same Cargo-derived table:
 
-- `agent_cannot_read_human_space_without_grant`: the existing read feature asks for `Users/self` and requires the Runtime's principal-context refusal. This is the current unbound CLI's refusal half.
+- `agent_cannot_read_human_space_without_grant`: the `human-read` subselector of `read` asks for the trimmed `fixtures/human-read.txt` target through the one read Bus request. Ordinary read selects the trimmed `fixtures/ungranted-read.txt` target. The shared probe selector uses fixture bytes only; build labels and environment values supply zero resource authority. This live row requires Runtime's principal-context refusal for today's unbound CLI launch. Runtime owns principal binding and grants; the blocked principal journeys keep their acceptance gates.
 - `ungranted_memory_write_is_refused`: the new memory-write feature requests authority through the Bus and requires the Runtime's manifest refusal.
 - `no_policy_file_does_not_mean_allow`: one in-manifest read receives zero controller decisions when `fixtures/no-policy.json` is absent. The natural pending-request refusal must arrive within 40 seconds. A harness timeout fails.
 - `agent_memory_under_own_principal`, `agent_cannot_read_other_agent_memory`, and `agent_can_read_human_space_with_grant`: BLOCKED (UsersAI binding; AC-002-ARGS). GAPS.md names the Runtime changes and the future checks. These rows supply zero principal-isolation evidence today.
 - `real_agent_host_journal_under_usersai_principal`: BLOCKED (UsersAI binding), the P7 gap in the default table. Forced with `--ignored`, it reads the real manifest and requires every capability under `UsersAI/self`; agent-host moves its journal when the Runtime binding lands.
+
+The native `probe_read_targets_ignore_legacy_override` artifact test runs
+`tests::read_target_is_the_selected_fixture` with Cargo feature `read`, then
+`human-read`, each with a fixed harmless legacy environment override. It
+requires the complete selected fixture and one passing child test per build.
+`human_read_subselector_requires_read` requires the exact compile refusal
+`human-read requires read` for the raw subselector alone. These native checks
+start neither Runtime nor providers. Component hash and import tests still
+require distinct, reproducible variants with Bus-only imports.
 
 F-ac2a grants agent-b agent-a's exact memory path. F-ac2b gives both fixture
 instances the same principal. Both are retired under `UsersAI binding;

@@ -10484,3 +10484,116 @@ Final inventory: HEAD `1c0a289bfaa7b78fe139ad09471b4b5729afa0f3`, tree `da7484db
 Candidate: local task diff against the supplied comparison base. Exercised checks: both exact tests, five caught compiling plants and their restored exact tests, the controller regression, feature-gated compile, full locked gate, format and basic repository checks pass. Review links: pending with the lane supervisor. Installed release evidence: skipped because these tests prove fixture approval requests only; Runtime owns installed grant enforcement. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.
 
 - 152: capture complete bounded grant requests in the existing scripted listener, prove each matched fixture duration and refusal retry, and catch all five separate plants with production bytes restored.
+
+
+## 153 — One fixture source for each probe read target (2026-11-03)
+
+Supplied HEAD: `bd5eac0d3da2d118c00a7f57292621d272e8279c`.
+Supplied tree: `ab103af4fb89c4652cbd4bf0853a7c12265b5595`.
+Supplied branch: `spark/cx-agent-conformance/153-one-source-for-probe-read-targets`.
+Initial `git status --short --branch` showed that branch and zero dirty paths.
+The cached `spike/spike/agent-host` comparison is 13 commits ahead, zero behind.
+This task preserves the supplied checkout and history; the supervisor owns integration.
+
+Plan: add the human-read subselector and one fixture-only selection function shared by component and host tests; remove read-target environment selection from both probe and build helper. Add native poisoned-override and raw-selector checks in the existing artifact target. Move only F-ac2-human's anchor, then run its existing runner, a separate compiling override plant, restored checks, artifact and live rows, full locked gate and run.sh. Keep principal-binding blockers, receipt fields and cleanup owners as supplied.
+
+Initial volume free space: 28,706,532 KiB. The existing target cache is reused; the 12 GiB build estimate plus 2 GiB reserve fit. Builds use the existing shared exclusive heavy-build lease, offline Cargo, lane-local targets, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0` and a 600-second bound per Cargo gate command.
+
+153: Added fixture-only read selection, the human-read subselector, native selector and poisoned-override checks, and the moved F-ac2-human request anchor.
+
+### Native baselines and compiling plants
+
+Both new exact artifact baselines passed: `override-baseline` exit 0 in 2.988 seconds (1 passed, 0 failed); `selector-baseline` exit 0 in 0.165 seconds (1 passed, 0 failed).
+All commands below use the gate environment and shared lease described above. Each plant matched once and was restored byte for byte in a `finally` block before the next command. No falsifier ID or runner was added.
+
+Hand-run plant `legacy-override`, in `probe/src/lib.rs`. Exact old/new UTF-8 bytes use JSON string encoding:
+
+```json
+{
+  "old": "fn read_target() -> &'static str {\n",
+  "new": "fn read_target() -> &'static str {\n    if let Some(resource) = option_env!(\"AC_PROBE_READ_RESOURCE\") {\n        return resource;\n    }\n"
+}
+```
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact probe_read_targets_ignore_legacy_override -- --exact`. Planted exit 101 in 1.203 seconds; restored exit 0 in 0.674 seconds. Each planted outer test ran and failed; each restored run reported 1 passed, 0 failed.
+The child compiled and ran `tests::read_target_is_the_selected_fixture`, then failed `assert_eq!(super::read_target(), expected.trim())`: left `localhost://Public/agent-conformance-ignored-override`, right `localhost://Public/agent-conformance-ungranted/outside-fixture.txt`. The outer failure was `read selected-target test failed`. This is selected-target assertion evidence, rather than a build or empty-selection result. The restored outer test ran and passed both native feature builds.
+
+Hand-run plant `missing-read-guard`, in `probe/src/lib.rs`. Exact old/new UTF-8 bytes use JSON string encoding:
+
+```json
+{
+  "old": "#[cfg(all(feature = \"human-read\", not(feature = \"read\")))]\ncompile_error!(\"human-read requires read\");\n",
+  "new": ""
+}
+```
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact human_read_subselector_requires_read -- --exact`. Planted exit 101 in 0.162 seconds; restored exit 0 in 0.132 seconds. Each planted outer test ran and failed; each restored run reported 1 passed, 0 failed.
+The raw subselector check compiled after removal of the guard; `human_read_subselector_requires_read` then failed `human-read without read must be refused`. The restored guard rejected the raw cfg with `human-read requires read`.
+
+### Artifact and live setup checks
+
+The complete artifact target passed: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact`, exit 0 in 37.678 seconds; 9 passed, 0 failed. This includes unchanged exclusive-effect and instance-subselector checks, both component reproducibility rounds and Bus-only import validation.
+
+The first live human-read command returned exit 101 in 3.434 seconds: `SKIPPED agent_cannot_read_human_space_without_grant: operator prerequisite: Operation not permitted (os error 1)`. Operator setup stopped before the live refusal assertion. This supplies zero Runtime or falsifier credit. The retry uses local process visibility and loopback access for the same isolated fixture.
+
+The basic repository checks passed: `node scripts/check-product-data.mjs` (42 capsules, 2 profiles, 28 method contracts), `node --test scripts/check-product-data.test.mjs` (99 passed), `(cd elastos && cargo fmt --all -- --check)` and `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`, all exit 0. Lane formatting and `git diff --check` also passed after formatting the new assertion.
+
+### Live refusal and existing falsifier runner
+
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects agent_cannot_read_human_space_without_grant -- --exact --show-output`: exit 0, 11.187 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects ungranted_effect_is_refused -- --exact --show-output`: exit 0, 9.763 seconds.
+- `python3 -I examples/agent-host/falsify.py --from lab/agent-conformance/falsifiers.json --list`: exit 0, 0.182 seconds.
+- `python3 -I examples/agent-host/falsify.py --from lab/agent-conformance/falsifiers.json F-ac2-human`: exit 0, 26.653 seconds.
+
+Both live rows ran one test and passed with `exit:Some(1) reason_present:true`. The list command loaded the existing list and retained F-ac2-human as `agent-conformance caught`. The runner reported:
+
+```text
+baseline: 1 named tests pass without an edit, 0 do not
+F-ac2-human CAUGHT                            11s  make the human-space refusal activation succeed
+summary: 1 CAUGHT of 1
+```
+
+Only F-ac2-human's edit anchor moved; its ID, command and named live test are unchanged. Exact edit bytes in `probe/src/lib.rs` (JSON string encoding):
+
+```json
+{
+  "file": "../../lab/agent-conformance/probe/src/lib.rs",
+  "old": "    #[cfg(feature = \"read\")]\n    let (resource, action) = (read_target(), \"read\");",
+  "new": "    if cfg!(feature = \"human-read\") {\n        return Ok(());\n    }\n    #[cfg(feature = \"read\")]\n    let (resource, action) = (read_target(), \"read\");"
+}
+```
+
+The compiling plant returns success before the existing Bus capability request only when the human-read subselector is selected. The runner checks its passing unmutated baseline and reports CAUGHT. A separate hand-run of the same edit records the live assertion, followed by the exact restored human row.
+
+### Restored candidate checks
+
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects agent_cannot_read_human_space_without_grant -- --exact --show-output` (`human-assertion-plant`): exit 101, 10.645 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects agent_cannot_read_human_space_without_grant -- --exact --show-output` (`human-restored`): exit 0, 9.778 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact probe_read_targets_ignore_legacy_override -- --exact` (`override-final`): exit 0, 1.286 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact human_read_subselector_requires_read -- --exact` (`selector-final`): exit 0, 0.158 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` (`full-locked`): exit 0, 274.139 seconds.
+
+The repeated human plant compiled and ran exactly its named live test, then failed at `tests/effects.rs:113` on `expected nonzero exit and lifecycle refusal Internal("localhost://Users/self requires a principal-scoped launch context")`. Its observation was `probe refusal effect:human-read exit:Some(0) reason_present:false`. Restoring the source bytes changed that observation to `exit:Some(1) reason_present:true` and the exact row passed. The existing runner and this hand-run use the same F-ac2-human edit. The restored source SHA-256 is `54b97b1f2ad92c866f890e53a1b5060b4f1cd6d8c198d5cba0c3bf895ea3d15c`.
+
+Both required exact artifact commands passed after restoration. The full locked gate passed on its first host-capable run: 260 passed, 0 failed, 14 existing ignored rows across 16 target summaries, exit 0 in 274.139 seconds. Existing blockers and ignored rows keep their states. The native selector children start neither Runtime nor providers; live tests retain their one isolated operator and launch path. Dependencies, pins and Cargo locks retain their supplied bytes.
+
+### Principles check
+
+| Question | Yes/No | Evidence (lane-relative) |
+| --- | --- | --- |
+| 1. New name or URL where a code/content hash belongs? | No | `src/identity.rs:79` still derives the bundle CID from checked bytes; `tests/artifact.rs:133` retains distinct, reproducible component hashes. |
+| 2. Capsule, Home or UI gains ambient authority? | No | `probe/src/lib.rs:243` selects compiled fixture bytes; `probe/src/lib.rs:261` still requests a Runtime grant through the Bus. |
+| 3. Second operation path or copy of a rule? | No | `probe/src/lib.rs:255` calls the one `read_target` function; `tests/common/probe.rs:99` supplies feature flags with zero read-resource environment input. |
+| 4. Does the trusted Runtime core grow? | No | `probe/src/lib.rs:243` keeps selection in the lane capsule; the final diff is limited to the seven task-approved lane files. |
+| 5. Do new refusals fail closed with a clear reason? | Yes | `probe/src/lib.rs:20` refuses the raw human-read selector with `human-read requires read`; `tests/artifact.rs:274` proves the refusal. |
+| 6. Does capsule logic stay inside with granted Bus calls? | Yes | `probe/src/lib.rs:243` embeds the target; `probe/src/lib.rs:261` remains the one read capability request. |
+| 7. Do named tests and caught plants prove each new rule? | Yes | `tests/artifact.rs:229` catches the environment plant, `tests/artifact.rs:274` catches the removed guard, and `tests/effects.rs:755` catches the moved F-ac2-human Bus bypass. |
+| 8. Are identity, admission and allowance separate? | Yes | `src/identity.rs:52` keeps the CID as identity evidence; `probe/src/lib.rs:261` separately requests resource authority; this change adds zero admission or budget decisions. |
+
+### Final report and lifecycle
+
+`lab/agent-conformance/run.sh` passed, exit 0 in 276.272 seconds. It reported the expected human and ordinary read refusals and zero FAIL or SKIPPED rows. The 14 existing BLOCKED rows keep their blocker IDs. The generated receipt is local and uncommitted: `target/run-table.qI9a1D/VERSIONS.json`, SHA-256 `ec5f4a5651941823e194228db5073630b4da10143aacef9e5d5ceb9af4e782ba`. Receipt fields and the report path retain their existing owners and format.
+
+The final branch/worktree inventory preserves supplied HEAD `bd5eac0d3da2d118c00a7f57292621d272e8279c` and tree `ab103af4fb89c4652cbd4bf0853a7c12265b5595`. The current task branch remains the unique review/merge work line. Its seven intended dirty files are the complete diff; dependencies, locks, fixture bytes and out-of-lane source are unchanged. The cached remote `spike/spike/agent-host` is `321cc698a21543c7cfe2895fecf9c2ef99e2b33c`; this checkout is 13 ahead and zero behind. Network access stayed disabled. The supervisor owns current-base integration and independent reviews; this record contains author checks. Git history, index, branches and remotes were preserved.
+
+Final host process inspection found zero executables active from this lane target. Three finite roots remain from the isolated setup failure and the two caught human plants, with 4,370,947 logical file bytes total. `lsof -nP -Fpn +D <owned-root>` returned exit 1 and empty stdout/stderr for each. The private ignored inventory `target/task-153-lifecycle.json` records exact paths, source identity, dirty state, ownership, sizes, protection and cleanup conditions for this checkout, task outputs, retained roots, supplied build caches and the new receipt. The lane supervisor removes the exact task-owned proof paths and roots after review; supplied caches keep their existing supervisor lifecycle. The shared build lease is released. This task creates zero installed artifacts or rollback sets.
