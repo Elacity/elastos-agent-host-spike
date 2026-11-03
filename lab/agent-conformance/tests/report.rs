@@ -668,6 +668,257 @@ fn versions_receipt_binds_current_run() {
 }
 
 #[test]
+fn versions_receipt_outcome_uses_graded_rows() {
+    let home = ThrowawayHome::new().unwrap();
+    let (observations, git) = synthetic(1, true);
+    for (index, (label, listed, rows, cargo_ok, gaps, outcome, success, displayed)) in [
+        (
+            "all PASS",
+            "case: test\n",
+            "test case ... ok\n",
+            true,
+            "",
+            "PASS",
+            true,
+            "case | PASS\n",
+        ),
+        (
+            "valid BLOCKED",
+            "case: test\n",
+            "test case ... ignored, blocked: RT3\n",
+            true,
+            "| `case` | RT3 | Fixture change. |",
+            "BLOCKED",
+            true,
+            "case | BLOCKED (RT3)\n",
+        ),
+        (
+            "multi-word blocker with SKIPPED data",
+            "case: test\n",
+            "test case ... ignored, blocked: RT3 SKIPPED prerequisite\n",
+            true,
+            "| `case` | RT3 SKIPPED prerequisite | Fixture change. |",
+            "BLOCKED",
+            true,
+            "case | BLOCKED (RT3 SKIPPED prerequisite)\n",
+        ),
+        (
+            "failed row before blocked row",
+            "case: test\nz_blocked: test\n",
+            "test case ... FAILED\ntest z_blocked ... ignored, blocked: RT3\n",
+            true,
+            "| `z_blocked` | RT3 | Fixture change. |",
+            "FAIL",
+            false,
+            "case | FAIL\nz_blocked | BLOCKED (RT3)\n",
+        ),
+        (
+            "blocked row before failed row",
+            "a_blocked: test\ncase: test\n",
+            "test a_blocked ... ignored, blocked: RT3\ntest case ... FAILED\n",
+            true,
+            "| `a_blocked` | RT3 | Fixture change. |",
+            "FAIL",
+            false,
+            "a_blocked | BLOCKED (RT3)\ncase | FAIL\n",
+        ),
+        (
+            "Cargo failure beside passing rows",
+            "case: test\n",
+            "test case ... ok\n",
+            false,
+            "",
+            "FAIL",
+            false,
+            "cargo | FAIL\ncase | PASS\n",
+        ),
+        (
+            "genuine SKIPPED row paired with FAILED",
+            "case: test\n",
+            "SKIPPED case: fixture prerequisite\ntest case ... FAILED\n",
+            true,
+            "",
+            "FAIL",
+            false,
+            "case | SKIPPED (fixture prerequisite)\n",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = home.root().join(format!("outcome-{index}.json"));
+        let evidence = output(&observations).replace(&format!("test {LIVE} ... ok\n"), rows);
+        let report = write_run(
+            listed,
+            &evidence,
+            cargo_ok,
+            Ok(git.clone()),
+            &path,
+            Some(gaps),
+        );
+        assert!(report.receipt_written, "{label}: receipt write");
+        assert_eq!(report.passed, success, "{label}: command result");
+        let receipt = read_receipt(&path);
+        assert_eq!(receipt["suite_outcome"], outcome, "{label}: suite outcome");
+        assert_eq!(
+            receipt["command_success"], success,
+            "{label}: command success"
+        );
+        assert_eq!(receipt["identity_status"], "complete", "{label}: identity");
+        assert_eq!(
+            report.table,
+            format!("test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\n{displayed}versions_receipt (A14) | PASS\n"),
+            "{label}: displayed row grades"
+        );
+        assert_eq!(
+            receipt["report"]["table"], report.table,
+            "{label}: stored table"
+        );
+        assert_eq!(
+            receipt["report"]["sha256"],
+            sha256(report.table.as_bytes()),
+            "{label}: table hash"
+        );
+    }
+    for reason in ["RT3 | SKIPPED", "RT3 | PASS", "RT3 | BLOCKED"] {
+        let report = gaps_report(
+            &format!("ignored, blocked: {reason}"),
+            Some("| `case` | RT3 | Fixture change. |"),
+        );
+        let receipt: Value = serde_json::from_slice(&report.receipt_bytes).unwrap();
+        assert!(!report.passed, "{reason}: invalid blocker must fail");
+        assert_eq!(
+            receipt["identity_status"], "incomplete",
+            "{reason}: invalid evidence"
+        );
+        assert_eq!(receipt["report"]["table"], report.table);
+        assert_eq!(receipt["report"]["sha256"], sha256(report.table.as_bytes()));
+        assert_gap_failure(
+            report,
+            &format!("GAPS.md: case: missing blocker IDs: [{reason}]; extra blocker IDs: [RT3]"),
+        );
+    }
+    let mut missing = observations;
+    missing.remove(0);
+    let path = home.root().join("identity-failure.json");
+    let report = write_run(
+        &format!("{LIVE}: test\n"),
+        &output(&missing),
+        true,
+        Ok(git),
+        &path,
+        Some(""),
+    );
+    assert!(report.receipt_written);
+    assert!(!report.passed, "identity failure fails the command");
+    assert_eq!(report.failures, ["missing Runtime SHA-256"]);
+    let receipt = read_receipt(&path);
+    assert_eq!(
+        receipt["suite_outcome"], "PASS",
+        "identity preserves row outcome"
+    );
+    assert_eq!(receipt["command_success"], false);
+    assert_eq!(receipt["identity_status"], "incomplete");
+    assert!(report.table.contains(&format!("{LIVE} | PASS\n")));
+    assert!(report.table.contains("versions_receipt (A14) | FAIL\n"));
+    assert_eq!(receipt["report"]["table"], report.table);
+    assert_eq!(receipt["report"]["sha256"], sha256(report.table.as_bytes()));
+    home.finish().unwrap();
+}
+
+#[test]
+fn report_cli_preserves_outcome_and_failure_reason() {
+    let home = ThrowawayHome::new().unwrap();
+    let (observations, _) = synthetic(2, true);
+    for (label, name, result, reason, cargo_status, exit, outcome, success, displayed) in [
+        (
+            "passing",
+            "plain_pass",
+            "ok",
+            "",
+            "0",
+            0,
+            "PASS",
+            true,
+            "plain_pass | PASS\n",
+        ),
+        (
+            "blocked",
+            "ungranted_model_call_is_refused",
+            "ignored, blocked: RT3",
+            "",
+            "0",
+            0,
+            "BLOCKED",
+            true,
+            "ungranted_model_call_is_refused | BLOCKED (RT3)\n",
+        ),
+        (
+            "failed",
+            "failed_case",
+            "FAILED",
+            "FAILURE failed_case: fixture reason | SKIPPED | BLOCKED | PASS\n",
+            "1",
+            1,
+            "FAIL",
+            false,
+            "cargo | FAIL\nfailed_case | FAIL | fixture reason / SKIPPED / BLOCKED / PASS\n",
+        ),
+    ] {
+        let listed = home.root().join(format!("{label}-list"));
+        let results = home.root().join(format!("{label}-results"));
+        let path = home.root().join(format!("{label}-receipt.json"));
+        fs::write(&listed, format!("{name}: test\n")).unwrap();
+        fs::write(
+            &results,
+            format!(
+                "{}{reason}",
+                output(&observations).replace(
+                    &format!("test {LIVE} ... ok\n"),
+                    &format!("test {name} ... {result}\n"),
+                )
+            ),
+        )
+        .unwrap();
+        assert!(!path.exists(), "{label}: exclusive receipt starts absent");
+        let command = std::process::Command::new(env!("CARGO_BIN_EXE_report"))
+            .arg(&listed)
+            .arg(&results)
+            .arg(cargo_status)
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert_eq!(
+            command.status.code(),
+            Some(exit),
+            "{label}: actual exit code"
+        );
+        assert!(command.stderr.is_empty(), "{label}: complete evidence");
+        let receipt = read_receipt(&path);
+        assert_eq!(receipt["suite_outcome"], outcome, "{label}: suite outcome");
+        assert_eq!(
+            receipt["command_success"], success,
+            "{label}: command success"
+        );
+        assert_eq!(receipt["identity_status"], "complete", "{label}: identity");
+        let table = receipt["report"]["table"].as_str().unwrap();
+        assert_eq!(
+            table,
+            format!("test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\n{displayed}versions_receipt (A14) | PASS\n"),
+            "{label}: displayed grade and full failure reason"
+        );
+        assert_eq!(receipt["report"]["sha256"], sha256(table.as_bytes()));
+        let relative = path.strip_prefix(agent_conformance::build::lane()).unwrap();
+        assert_eq!(
+            String::from_utf8(command.stdout).unwrap(),
+            format!("{table}versions receipt: {}\n", relative.display()),
+            "{label}: printed table equals receipt table"
+        );
+    }
+    home.finish().unwrap();
+}
+
+#[test]
 fn versions_receipt_rejects_incomplete_identity() {
     let home = ThrowawayHome::new().unwrap();
     let (observations, git) = synthetic(1, true);

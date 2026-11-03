@@ -197,19 +197,21 @@ impl Evidence {
         self.gaps.get(name).map(Vec::as_slice).unwrap_or_default()
     }
 
-    fn table(&self, cargo_ok: bool) -> (String, bool) {
+    fn table(&self, cargo_ok: bool) -> (String, bool, &'static str) {
         let mut text = String::from("test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\n");
         if self.duplicate_inventory {
             text.push_str("cargo | FAIL\n");
-            return (text, false);
+            return (text, false, "FAIL");
         }
         let mut passed = cargo_ok && !self.rows.is_empty() && self.gaps_readable;
         if !passed {
             text.push_str("cargo | FAIL\n");
         }
+        let mut blocked = false;
         for (name, values) in &self.rows {
             let result = self.result(name, values);
             passed &= result == "PASS" || result.starts_with("BLOCKED (");
+            blocked |= result.starts_with("BLOCKED (");
             text.push_str(&format!("{name} | {result}"));
             if result == "FAIL" {
                 if let Some(reasons) = self.reasons.get(name) {
@@ -254,7 +256,14 @@ impl Evidence {
             }
             text.push('\n');
         }
-        (text, passed)
+        let outcome = if !passed {
+            "FAIL"
+        } else if blocked {
+            "BLOCKED"
+        } else {
+            "PASS"
+        };
+        (text, passed, outcome)
     }
 
     fn result(&self, name: &str, values: &[String]) -> String {
@@ -463,7 +472,8 @@ impl GitIdentity {
 /// A missing, repeated or unlisted result fails closed. Cargo failure is also
 /// visible even if compilation or a test binary failed before reporting a row.
 pub fn table(listed: &str, output: &str, cargo_ok: bool, gaps: Option<&str>) -> (String, bool) {
-    Evidence::parse(listed, output, gaps).table(cargo_ok)
+    let (text, passed, _) = Evidence::parse(listed, output, gaps).table(cargo_ok);
+    (text, passed)
 }
 
 pub struct RunReport {
@@ -507,7 +517,7 @@ pub fn render_run(
     gaps: Option<&str>,
 ) -> RunReport {
     let mut evidence = Evidence::parse(listed, output, gaps);
-    let (mut table, suite_ok) = evidence.table(cargo_ok);
+    let (mut table, suite_ok, outcome) = evidence.table(cargo_ok);
     evidence.require_identities();
     let git = match git.and_then(|git| git.validate().map(|()| git)) {
         Ok(git) => Some(git),
@@ -524,15 +534,6 @@ pub fn render_run(
     } else {
         "versions_receipt (A14) | FAIL\n"
     });
-    let outcome = if !suite_ok {
-        "FAIL"
-    } else if table.contains(" | SKIPPED") {
-        "SKIPPED"
-    } else if table.contains(" | BLOCKED") {
-        "BLOCKED"
-    } else {
-        "PASS"
-    };
     let document = serde_json::json!({
         "schema": "agent-conformance.versions/v1",
         "description": "Version evidence only. The bundle lab CID and any separate signed record give zero admission or permission credit. Runtime decides admission; resource authority requires a Runtime grant for the requesting session. Only the observed Runtime journey supplies that evidence.",

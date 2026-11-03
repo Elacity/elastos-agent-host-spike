@@ -10928,3 +10928,272 @@ The final branch/worktree inventory keeps this checkout on the supplied HEAD and
 155: One checked helper now copies the Agent Host and relative Bus inputs, with exact-byte refusal tests, four caught plants, and a passing real copied-capsule build and staging proof.
 
 Candidate: the local five-path diff against the supplied HEAD. Exercised checks: build target, four caught compiling plants and their restored exact checks, opt-in real-capsule build/staging, full locked lane gate, formatting and basic repository checks pass. Review links: pending with the lane supervisor. Installed release evidence: skipped because this is a lab artifact-input prerequisite; Runtime owns installed acceptance and the existing principal-bound journey. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.
+
+
+## 156 — A14 suite outcome from graded rows
+
+Supplied checkout before edits: HEAD `edbf64ea6d50a30f232ef7ed898843933687de90`,
+tree `d391534de826f7cc10f8dd0a72d826439181766c`, branch
+`spark/cx-agent-conformance/156-suite-outcome-from-graded-rows`.
+`git status --porcelain=v1 --untracked-files=all` and `git diff --name-only`
+were empty. The branch has zero upstream; the fetched `spike/spike/agent-host`
+comparison is 16 local-only commits and 0 base-only commits. Remote freshness
+stays with the supervisor because this task permits offline work only.
+
+Read task 156, supplied BACKLOG item 14, LOG sections 018, 022 and 034,
+the RUNBOOK table/receipt/SKIPPED descriptions, the architecture's Harness
+conformance section, and the existing parser, grader, report CLI and tests.
+The permitted repository has zero humanizer skill files; this handoff uses
+direct statements of behavior and ownership.
+
+Plan: extend the private table result with its row-derived outcome, preserve
+the public table API and existing grade checks, add receipt and CLI regression
+cases, then run four separate compiling plants and restore each exact edit.
+Final source changes stay in `src/report.rs`, `tests/report.rs`, the existing
+RUNBOOK receipt paragraph and this LOG section. The supplied ignored target
+artifacts, including an older task-156 inventory, keep their existing owners.
+This task preserves the supplied HEAD, tree, index and unrelated paths.
+
+### Commands and hand-run plants
+
+The shared exclusive `fcntl.flock` lease was held through each sequential Cargo
+command. The parent opened the existing common-Git lock read-only and kept
+its descriptor private. Offline Cargo, `RUST_TEST_THREADS=2`,
+`CARGO_INCREMENTAL=0`, lane `target/host` and `target/host-build` outputs, and
+a 600-second bound applied. Each command checks a 12 GiB build estimate plus
+2 GiB reserve; the initial available space was 59005337600 bytes.
+
+Baseline `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report versions_receipt_outcome_uses_graded_rows -- --exact`: exit 0 in 1.606 seconds; the exact named test ran and passed.
+
+Baseline `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report report_cli_preserves_outcome_and_failure_reason -- --exact`: exit 0 in 0.387 seconds; the exact named test ran and passed.
+
+Plant `blocked-only-pass` in `src/report.rs`:
+
+```json
+{
+  "old": "        } else if blocked {\n            \"BLOCKED\"\n",
+  "new": "        } else if blocked {\n            \"PASS\"\n"
+}
+```
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report versions_receipt_outcome_uses_graded_rows -- --exact`: exit 101 in 1.467 seconds.
+The named test compiled and ran; failed assertion: `valid BLOCKED: suite outcome`.
+Result: CAUGHT. Exact candidate bytes were restored in
+a `finally` block (SHA-256 `f33783d02904c55ce898e45cd7238e0968534c0bd804861f15296b47e22636f6`) before the next command.
+
+Restored `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report versions_receipt_outcome_uses_graded_rows -- --exact`: exit 0 in 1.101 seconds; 1 passed, 0 failed.
+
+Plant `blocked-overrides-failure` in `src/report.rs`:
+
+```json
+{
+  "old": "        let outcome = if !passed {\n            \"FAIL\"\n        } else if blocked {\n            \"BLOCKED\"\n",
+  "new": "        let outcome = if blocked {\n            \"BLOCKED\"\n        } else if !passed {\n            \"FAIL\"\n"
+}
+```
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report versions_receipt_outcome_uses_graded_rows -- --exact`: exit 101 in 1.304 seconds.
+The named test compiled and ran; failed assertion: `failed row before blocked row: suite outcome`.
+Result: CAUGHT. Exact candidate bytes were restored in
+a `finally` block (SHA-256 `f33783d02904c55ce898e45cd7238e0968534c0bd804861f15296b47e22636f6`) before the next command.
+
+Restored `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report versions_receipt_outcome_uses_graded_rows -- --exact`: exit 0 in 1.052 seconds; 1 passed, 0 failed.
+
+Plant `bypass-gap-check` in `src/report.rs`:
+
+```json
+{
+  "old": "            check_blocked_gap(name, reason, gaps)?;\n",
+  "new": "            // Plant: accept blocker without GAPS validation.\n"
+}
+```
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report versions_receipt_outcome_uses_graded_rows -- --exact`: exit 101 in 1.238 seconds.
+The named test compiled and ran; failed assertion: `RT3 | SKIPPED: invalid blocker must fail`.
+Result: CAUGHT. Exact candidate bytes were restored in
+a `finally` block (SHA-256 `f33783d02904c55ce898e45cd7238e0968534c0bd804861f15296b47e22636f6`) before the next command.
+
+Restored `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report versions_receipt_outcome_uses_graded_rows -- --exact`: exit 0 in 1.047 seconds; 1 passed, 0 failed.
+
+Plant `drop-failure-reason` in `src/report.rs`:
+
+```json
+{
+  "old": "            if result == \"FAIL\" {\n                if let Some(reasons) = self.reasons.get(name) {\n                    text.push_str(&format!(\" | {}\", reasons.join(\"; \")));\n                }\n            }\n",
+  "new": ""
+}
+```
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report report_cli_preserves_outcome_and_failure_reason -- --exact`: exit 101 in 1.782 seconds.
+The named test compiled and ran; failed assertion: `failed: displayed grade and full failure reason`.
+Result: CAUGHT. Exact candidate bytes were restored in
+a `finally` block (SHA-256 `f33783d02904c55ce898e45cd7238e0968534c0bd804861f15296b47e22636f6`) before the next command.
+
+Restored `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report report_cli_preserves_outcome_and_failure_reason -- --exact`: exit 0 in 1.317 seconds; 1 passed, 0 failed.
+
+### Restored candidate gates
+
+The sandbox preflight refused a loopback bind before a test ran. This is an
+infrastructure result with zero caught credit. The full gates use host fixture
+permission, the same shared exclusive lease, offline two-thread settings,
+lane-local outputs and 600-second limits. Existing isolated Git fixtures in
+the full report tests own their own Git operations; this checkout stays fixed.
+
+`git diff --check`: exit 2 in 0.046 seconds; free space before command 59003768832 bytes.
+
+`git diff --check`: exit 0 in 0.043 seconds; free space before command 59003748352 bytes.
+
+`cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0 in 0.375 seconds; free space before command 59003736064 bytes.
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report`: exit 0 in 1.123 seconds; free space before command 59003715584 bytes.
+
+```text
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.92s
+```
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0 in 293.976 seconds; free space before command 59003719680 bytes.
+
+```text
+test result: ok. 97 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.09s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.92s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 29.68s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.69s
+test result: ok. 65 passed; 0 failed; 12 ignored; 0 measured; 0 filtered out; finished in 222.41s
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.85s
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.22s
+test result: ok. 12 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 17.02s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+`lab/agent-conformance/run.sh`: exit 1 in 326.755 seconds; free space before command 58996150272 bytes.
+
+```text
+versions receipt: target/run-table.rDeM5m/VERSIONS.json
+retained Cargo output: target/run-table.rDeM5m
+```
+
+The first diff check found a trailing blank line in this new LOG section
+(exit 2); the line was removed before the passing diff check above.
+The product-data command returned `{"ok":true,"capsules":42,"profiles":2,"method_contracts":28}`;
+`node --test scripts/check-product-data.test.mjs` passed all 99 tests (exit 0).
+
+The first `run.sh` attempt failed only `attach_secret_stays_in_memory` and
+`killed_worker_settlement_recorded_without_retry` at their physical cleanup
+census: respectively `stderr-32`/`stdout-32` and `stderr-135` capture holders.
+The full locked gate had passed these same journeys. The failed receipt and
+four failed Homes remain under the existing retention rule. Host `lsof -nP
+-Fpn +D <owned-root>` returned exit 1 with empty stdout/stderr for all five
+retained paths after the command ended. The tests settled their child groups;
+this task applied zero process or census changes. One outer retry below uses
+the exact restored source and original command; this lab census result gives
+zero falsifier credit. The machine-readable inventory records each exact root
+and its review/removal condition.
+
+`lab/agent-conformance/run.sh` (run-sh-retry): exit 0 in 286.22 seconds; free space before command 58979233792 bytes.
+
+```text
+versions receipt: target/run-table.rtoll1/VERSIONS.json
+```
+
+`(cd elastos && cargo fmt --all -- --check)` (workspace-format): exit 0 in 3.163 seconds; free space before command 57221226496 bytes.
+
+`cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` (chain-provider-format): exit 0 in 0.129 seconds; free space before command 57204375552 bytes.
+
+### Implementation, receipt and cleanup
+
+`Evidence::table` now returns its row-derived suite outcome with the existing
+text and success flag. `render_run` uses that value directly. The public
+`table` wrapper keeps its `(String, bool)` API. The parser, `grade`,
+`check_blocked_gap`, receipt schema, identity requirements and write gate keep
+their existing rules. Status words in failure reasons remain display data;
+genuine SKIPPED rows continue to yield FAIL. The RUNBOOK receipt paragraph
+states that policy.
+
+`versions_receipt_outcome_uses_graded_rows` covers PASS, valid BLOCKED,
+a multi-word SKIPPED blocker, mixed failures/blocks in both name orders,
+Cargo failure, genuine SKIPPED, the three literal-pipe blocker refusals and
+identity failure beside passing rows. The cases state their expected outcomes
+directly and check table grades, identity status, command result and hash.
+`report_cli_preserves_outcome_and_failure_reason` runs the existing report
+executable for passing, real RT3-blocked and failed synthetic rows, checking
+actual exit codes, receipt outcomes, exact printed/stored table equality,
+hashes and the full pipe-to-slash failure reason. Both use the existing
+synthetic helpers; these two tests start neither Runtime nor providers.
+
+All four plants compiled and failed their exact named test. The first returned
+PASS instead of BLOCKED; the second returned BLOCKED instead of FAIL; the third
+accepted an invalid literal-pipe blocker; the fourth omitted the full rendered
+failure reason. Each restored named test passed before the next plant.
+The final report source SHA-256 is `f33783d02904c55ce898e45cd7238e0968534c0bd804861f15296b47e22636f6`.
+The falsifier list, shared runner, report CLI, run.sh, GAPS, Cargo files,
+probe, build/launch helpers, controller, census and stand-in retain their
+supplied source bytes. The task edits exactly its four permitted paths.
+
+The full locked lane command passed 265 tests, with 14 existing ignored rows.
+The report target passed 26 tests. The unchanged `run.sh` retry returned exit 0
+in 286.220 seconds after the separate retained capture-census failure above.
+The first failed receipt has complete identity coverage, outcome FAIL and
+command success false. The successful receipt is local, uncommitted evidence:
+`target/run-table.rtoll1/VERSIONS.json`,
+SHA-256 `d44589e0161ac6319b3a32aa88fee9f70ecaf759313605b2084546446fee57e8`.
+Its suite outcome is BLOCKED, identity status is complete, command success is
+true, Cargo success is true, and missing/invalid evidence is empty. Its commit
+matches the supplied HEAD and its dirty flag is true. The printed table equals
+the stored table byte for byte; table SHA-256 is
+`18d7345f9a93bdce9a6d255bc8d4259ded97d846b108681c550e3a150ff8f2d2`.
+
+Passing fixture Homes removed themselves with `finish`. Four plant Homes and
+four capture-census failure Homes remain for review, together with the first
+failed run's output and the successful receipt. Final host `lsof` checks for
+all ten retained Home/run directories returned exit 1 with empty stdout/stderr.
+The successful run directory contains only VERSIONS.json. The private ignored
+`target/task-156-current-lifecycle.json` records exact paths, ownership, sizes,
+source identities, empty holder checks and finite removal conditions. The
+finite command outputs in `target/task-156-current-proof` stay through candidate
+review, then the supervisor removes that exact directory. Supplied caches and
+earlier evidence keep their existing owners and retention decisions. The shared
+lease is released; this task creates zero branches, worktrees, installations or
+rollback sets. Retained-output paths in this LOG are lane-relative.
+
+### Principles check
+
+Answers follow the task's question wording; file references are lane-relative.
+
+| # | Answer | Evidence |
+| --- | --- | --- |
+| 1. New name/URL where a code/content hash belongs? | No | `src/report.rs:552` binds the table to SHA-256; synthetic labels describe report cases. |
+| 2. Capsule or UI gains ambient authority? | No | `tests/report.rs:831` uses a throwaway host-side CLI fixture; Runtime grants and Home ownership stay with their existing paths. |
+| 3. Second path or grading rule? | No | `src/report.rs:212` uses the existing row result; `src/report.rs:520` consumes that same pass's outcome. |
+| 4. Runtime core grows? | No | `src/report.rs:512` keeps the change in the lab report; the four-path diff contains the complete implementation. |
+| 5. Refusals fail closed with clear reasons? | Yes | `src/report.rs:34` retains exact GAPS validation; `tests/report.rs:789` checks invalid blocker refusal. |
+| 6. Capsule logic stays self-contained with granted Bus calls? | Yes | `tests/artifact.rs:87` retains the Bus import proof and passed in the full lane gate. |
+| 7. Named tests and caught falsifiers prove the rules? | Yes | `tests/report.rs:671` and `tests/report.rs:830` passed restored; all four exact compiling plants above failed their named assertions. |
+| 8. Identity, admission and allowance stay separate? | Yes | `src/report.rs:539` keeps Runtime admission/grant ownership; `src/report.rs:548` and `src/report.rs:549` keep suite and identity command gates separate. |
+
+156: The existing table pass now supplies the receipt outcome from graded rows;
+two regression tests and four caught, restored plants prove outcome and reason
+fidelity through the public report path.
+
+Candidate: the local four-path diff at the supplied HEAD/tree, with the restored
+report-source digest above. Exercised checks: both exact named tests, four
+plants and their restored tests, report target, full locked lane gate,
+run.sh retry, lane/workspace/chain-provider formatting, diff check and 99
+product-data tests pass. Review links: pending with the lane supervisor.
+Installed release evidence: outside this synthetic reporting task; the existing
+installed-product acceptance and blocked journeys stay with their owners.
+Remaining gate: supervisor rerun and independent reviews. Next owner: lane
+supervisor.
+
+The final branch/worktree inventory preserves the supplied HEAD and tree and
+has exactly the four task paths dirty. The task branch has no upstream.
+The cached `spike/spike/agent-host` ref moved during the gates; at the final
+observation it is `eb2129162bec0881ad0b6e1e5672dc44b17b8cff`, with 16 local-only commits
+and 2 base-only commits. This task made zero network requests. The supplied checkout's Git state is
+unchanged. The supervisor owns fresh remote comparison and base compatibility.

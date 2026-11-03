@@ -330,8 +330,12 @@ command. A write refusal names its cause, including `AlreadyExists` or
 and symlink targets. A report-build failure stops before suite execution and
 retains its build output; the command cannot issue a receipt without its writer.
 
-`identity_status` describes identity coverage. `suite_outcome` describes the
-Cargo rows, including FAIL and BLOCKED; `command_success` combines both gates.
+`identity_status` describes identity coverage. The existing table pass derives
+`suite_outcome` from its Cargo row grades: any Cargo, inventory, GAPS or row
+failure yields FAIL, including a genuine SKIPPED row; otherwise a valid BLOCKED
+row yields BLOCKED, and all passing rows yield PASS. Display reasons remain
+data, including words such as SKIPPED, BLOCKED and PASS. `command_success`
+combines the suite and identity gates; receipt-write success is also required.
 A complete identity record preserves each journey's grade. The parser accepts
 only typed identity fields and graded test rows for the receipt. Child captures,
 HTTP bodies and environment dumps stay outside that data model. Synthetic
