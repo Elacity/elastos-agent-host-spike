@@ -52,10 +52,8 @@ def checksum_error(name, platform, info, release=False, source_home_anchor=False
     )
     if not non_empty(checksum):
         return f"{name} {platform} {artifact}: missing checksum"
-    if not CHECKSUM_RE.fullmatch(checksum):
-        bad = not (source_home_anchor and SOURCE_HOME_ANCHOR_RE.fullmatch(checksum))
-        return bad and f"{name} {platform} {artifact}: unsupported checksum format {checksum!r}"
-    return None
+    # The format is decided by the one recorded rule (Codex 1409 @df2aef3f, P10).
+    return recorded_checksum_error(name, f"{platform} {artifact}", checksum, source_home_anchor)
 
 
 def recorded_checksum_error(name, platform, checksum, source_home):
@@ -754,6 +752,10 @@ def run_self_test():
             raise AssertionError("C1 case 2: a source-home digest passed without --source-home-data-dir")
         if audit_provider_capsule_metadata(content_anchor, ["linux-amd64"], source_home=True):
             raise AssertionError("C1: a source-home digest refused in source-home mode")
+        for ok in (None, "sha512:" + "a" * 128):  # a missing or plain SHA-512 digest passes
+            assert recorded_checksum_error("fixture", "*", ok, False) is None, f"C1: {ok!r} refused"
+        assert checksum_error("fixture", "*", {"release_path": "a", "checksum": "sha256:bad"}) == (
+            "fixture * a: unsupported checksum format 'sha256:bad'"), "C1: checksum_error has its own rule"
         with tempfile.TemporaryDirectory() as empty_root:
             release_missing = audit_provider_capsule_metadata(provider_good, ["linux-amd64"], source_root=empty_root)
         if "provider-demo: provider capsule source manifest missing" not in release_missing:
