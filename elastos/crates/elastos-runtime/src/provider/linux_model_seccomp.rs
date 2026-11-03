@@ -738,23 +738,47 @@ mod tests {
     /// Reads the helper's readiness line, then unlinks the file: the open
     /// descriptor is the file the check and the read share, so no path is
     /// re-resolved after the check. The helper writes the line once, through a
-    /// rename, so a poll reads a whole line or no file. A line that names
-    /// another pid fails.
+    /// rename, so a poll reads a whole line or no file. Only a file that is not
+    /// there yet is a retry: every other cause fails here, by name, with the
+    /// text it read, because the next poll would otherwise report a missing
+    /// publication after a publication was already consumed. A line that names
+    /// another pid, lacks the address, or carries an address of zero fails.
     fn read_readiness(token: &std::path::Path, pid: libc::pid_t) -> Option<usize> {
-        let file = std::fs::File::open(token);
-        let _ = std::fs::remove_file(token);
-        let Ok(mut file) = file else {
-            return None;
+        let file = match std::fs::File::open(token) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) => panic!("readiness token {token:?} did not open: {error}"),
         };
+        // The opened file is the one this read and the unlink name, so no path
+        // is re-resolved after the check.
+        let _ = std::fs::remove_file(token);
+        let mut file = file;
         let mut text = String::new();
-        std::io::Read::read_to_string(&mut file, &mut text).ok()?;
+        if let Err(error) = std::io::Read::read_to_string(&mut file, &mut text) {
+            panic!("readiness token {token:?} did not read: {error}");
+        }
         let mut fields = text.split_whitespace();
+        let named = match fields.next() {
+            Some(field) => field.parse().ok(),
+            None => panic!("readiness line {text:?} is empty"),
+        };
         assert_eq!(
-            fields.next().and_then(|f| f.parse().ok()),
+            named,
             Some(pid),
             "readiness line {text:?} is not helper {pid}"
         );
-        fields.next()?.parse().ok()
+        let address = match fields.next() {
+            Some(field) => match field.parse::<usize>() {
+                Ok(address) => address,
+                Err(error) => panic!("readiness line {text:?} has no address: {error}"),
+            },
+            None => panic!("readiness line {text:?} has no address field"),
+        };
+        assert!(
+            address != 0,
+            "readiness line {text:?} publishes address zero"
+        );
+        Some(address)
     }
 
     /// `true` for a row that acts on the helper sibling.
@@ -800,7 +824,13 @@ mod tests {
             };
             let token = victim_token(std::process::id() as libc::pid_t, pid);
             let start = std::time::Instant::now();
-            while victim.address == 0 {
+            // Only a publication that is not there yet is retried; every other
+            // cause fails inside `read_readiness` with its own text.
+            loop {
+                if let Some(address) = read_readiness(&token, pid) {
+                    victim.address = address;
+                    break;
+                }
                 assert!(
                     start.elapsed() < std::time::Duration::from_secs(30),
                     "helper sibling published no readiness line: token {:?} parent {} child {:?}",
@@ -808,7 +838,6 @@ mod tests {
                     std::process::id(),
                     victim.child.try_wait()
                 );
-                victim.address = read_readiness(&token, pid).unwrap_or(0);
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
             victim
@@ -1121,5 +1150,40 @@ mod tests {
                 "row {name} sibling: unfiltered sibling control failed"
             )),
         }
+    }
+
+    /// Writes one readiness publication for this process and reads it back
+    /// through the path `Victim::start` polls.
+    fn published_readiness(line: &str) -> Option<usize> {
+        let pid = std::process::id() as libc::pid_t;
+        let token = victim_token(pid, pid);
+        let staging = token.with_extension("tmp");
+        std::fs::write(&staging, line.replace("PID", &pid.to_string()))
+            .expect("readiness publication");
+        std::fs::rename(&staging, &token).expect("readiness publication rename");
+        read_readiness(&token, pid)
+    }
+
+    /// A line with no address fails by name instead of becoming a retry, so
+    /// the wait reports the missing field rather than a lost publication.
+    #[test]
+    #[should_panic(expected = "has no address field")]
+    fn readiness_without_an_address_fails() {
+        assert_eq!(published_readiness("PID\n"), Some(1));
+    }
+
+    /// An address that is not a number fails by name.
+    #[test]
+    #[should_panic(expected = "has no address")]
+    fn readiness_with_an_unparsable_address_fails() {
+        assert_eq!(published_readiness("PID invalid\n"), Some(1));
+    }
+
+    /// A published zero address fails by name: zero is the retry state and
+    /// must never come from a publication.
+    #[test]
+    #[should_panic(expected = "publishes address zero")]
+    fn readiness_with_a_zero_address_fails() {
+        assert_eq!(published_readiness("PID 0\n"), Some(1));
     }
 }
