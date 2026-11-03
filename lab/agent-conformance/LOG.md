@@ -10317,3 +10317,111 @@ Final branch/worktree inventory: supplied HEAD and tree remain `6963609128611b59
 Candidate: the local task diff against the supplied comparison base above. Exercised checks: exact identity test, caught compiling plant, restored exact test, Runtime regression, feature-gated compile, full locked gate, runner with same-run A14 receipt, format and basic repository checks pass; the first full-gate attach-response failure remains recorded above. Independent reviews: pending with the lane supervisor. Installed release evidence: skipped because this task proves the lab native artifact; its installed journey keeps installed-product acceptance. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.
 
 - 150: make cached native paths private, re-hash each Runtime launch and provider fixture read, and prove changed/restored/missing bytes with a caught compiling plant through the existing harness.
+
+## 151
+
+Before editing: supplied HEAD `52cab432f2e8a27a554fa31509aac8f658353a08`, tree `ae52230d2608f278eab0515edc8bafddfe036534`. The supplied branch is `spark/cx-agent-conformance/151-guard-component-home-writes`. `git status --short --branch` showed zero dirty paths, including zero unrelated dirty paths. This HEAD is the comparison base. The task preserves refs, history and index.
+
+Read the task, the 012/014/025 handoffs and writer parity, architecture Harness conformance, the shared writer, Home guard and finish APIs, existing Runtime callers and Home symlink tests. A lane search found one shared component writer and the existing Home guard. Plan: preserve that guard as the first operation, add operation/path/cause context to the writer's existing file operations, add the two fixed-byte tests, run four separate compiling plants with restoration, then run restored exact, Runtime and full locked gates. Final edits stay in the writer function, the two new Runtime tests, the existing RUNBOOK fixture description and this LOG section. The repository has no humanizer skill source; this record uses direct behavior and ownership statements.
+
+Initial free space: 30,151,684 KiB. Reuse the lane's existing target cache; an estimated 12 GiB of new outputs plus the required 2 GiB reserve fit. Cargo checks use the existing shared heavy-build lease, offline dependencies, lane-local targets, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0` and a 600-second command bound.
+
+Both exact baseline tests passed before planting: the guard test exited 0 in 2.17 seconds and the destination test exited 0 in 0.09 seconds. Initial format inspection identified layout changes; the two edited Rust files were formatted, then the lane format and `git diff --check` passed. Every Cargo run below uses offline dependencies, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, lane `target/host` and `target/host-build`, the exclusive shared heavy-build lease and a 600-second command bound.
+
+F-component-writer-skip-guard — CAUGHT. Exact edit bytes as JSON strings, scoped to `tests/common/mod.rs::write_component_home`:
+
+- Old: `"    home.guard(home.home(), home.data())?;\n"`
+- New: `""`
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_writer_checks_guard_before_writing -- --exact`. Exit 101 in 1.42 seconds. Failed behavior assertion: `writer must return the existing Home-symlink refusal`. Compilation and fixture setup succeeded; the named behavior assertion supplies caught credit. The candidate writer was restored byte for byte in `finally` before the next plant. The owned Home directory was repaired before the guard assertions; retained fixture Homes are directories and their moved-Home paths are absent.
+
+F-component-writer-late-guard — CAUGHT. Exact edit bytes as JSON strings, scoped to `tests/common/mod.rs::write_component_home`:
+
+- Old: `"    home.guard(home.home(), home.data())?;\n"`
+- New: `""`
+- Old: `"    fs::create_dir(&bin)\n        .map_err(|error| format!(\"create component directory {}: {error}\", bin.display()))?;\n"`
+- New: `"    fs::create_dir(&bin)\n        .map_err(|error| format!(\"create component directory {}: {error}\", bin.display()))?;\n    home.guard(home.home(), home.data())?;\n"`
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_writer_checks_guard_before_writing -- --exact`. Exit 101 in 0.69 seconds. Failed behavior assertion: `writer must guard before creating bin`. Compilation and fixture setup succeeded; the named behavior assertion supplies caught credit. The candidate writer was restored byte for byte in `finally` before the next plant. The owned Home directory was repaired before the guard assertions; retained fixture Homes are directories and their moved-Home paths are absent.
+
+F-component-writer-overwrite — CAUGHT. Exact edit bytes as JSON strings, scoped to `tests/common/mod.rs::write_component_home`:
+
+- Old: `"File::create_new(installed)"`
+- New: `"File::create(installed)"`
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_writer_names_refused_destinations -- --exact`. Exit 101 in 0.69 seconds. Failed behavior assertion: `installed: writer must refuse the existing destination`. Compilation and fixture setup succeeded; the named behavior assertion supplies caught credit. The candidate writer was restored byte for byte in `finally` before the next plant. The owned Home directory was repaired before the guard assertions; retained fixture Homes are directories and their moved-Home paths are absent.
+
+F-component-writer-bare-error — CAUGHT. Exact edit bytes as JSON strings, scoped to `tests/common/mod.rs::write_component_home`:
+
+- Old: `"    let mut copy = File::create_new(installed)\n        .map_err(|error| format!(\"create component file {}: {error}\", installed.display()))?;\n"`
+- New: `"    let mut copy = File::create_new(installed)?;\n"`
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_writer_names_refused_destinations -- --exact`. Exit 101 in 0.69 seconds. Failed behavior assertion: `installed: refusal must name the exact destination`. Compilation and fixture setup succeeded; the named behavior assertion supplies caught credit. The candidate writer was restored byte for byte in `finally` before the next plant. The owned Home directory was repaired before the guard assertions; retained fixture Homes are directories and their moved-Home paths are absent.
+
+Restored exact tests passed: guard exit 0 in 1.37 seconds; destinations exit 0 in 0.09 seconds. Both passing runs removed every owned root. The first Runtime regression exited 101 in 8.37 seconds: 7 passed, 5 infrastructure failures, 2 existing blocked rows ignored. Local binds returned `Operation not permitted`, and process-group inspection returned `could not inspect child process group`; the full gate was held. These sandbox failures supply zero behavior/falsifier credit. Retry the unchanged candidate with Mac loopback and process visibility. Basic gates passed: product-data check, its 99 Node tests, Runtime workspace format from `elastos/`, chain-provider format, lane format and `git diff --check`.
+
+The two restored exact commands are the same named commands recorded above. The host Runtime regression passed: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime`, exit 0 in 19.22 seconds, 12 passed / 0 failed / 2 existing blocked rows ignored. It left zero new retained roots. The full locked gate follows on the same restored candidate, with the same environment and exclusive lease.
+
+`write_component_home` remains the single writer. Its guard stays first at `tests/common/mod.rs:52`, and its source read and JSON decode each run once. Exclusive creation, mode 0755, the current Mac platform rule, source entry metadata and checksum/size/install-path stamps keep their supplied behavior. Error strings add the operation and path and retain the underlying cause text. The two new tests use fixed harmless bytes and the repository's existing `ipfs-provider` entry; they start zero providers or Runtime processes. The guard test records the moved directory before repair, restores it before assertions even under both guard plants, then checks bytes, permissions and the minimal manifest on the repaired Home. Each collision captures error, marker bytes and destination metadata before `finish`; the installed-file case selects the owned root directly while `data/bin` starts absent. Later refusals keep earlier new fixture outputs under the existing policy.
+
+Principles check (evidence paths relative to `lab/agent-conformance/`):
+
+| Question | Answer | Evidence |
+| --- | --- | --- |
+| 1. New code/content name or URL where a hash belongs? | No | `tests/common/mod.rs:83` preserves the supplied SHA-256 stamp; `tests/runtime.rs:106` supplies a digest of fixed fixture bytes. |
+| 2. Capsule, Home or UI gains ambient authority? | No | `tests/common/mod.rs:52` keeps the existing Home guard first; `tests/runtime.rs:108` keeps the symlink target inside the owned root. |
+| 3. Second operation path or copy of a rule? | No | `tests/common/mod.rs:45` remains the shared writer; `tests/runtime.rs:113` tests that writer directly through the existing Home APIs. |
+| 4. Runtime core grows? | No | `tests/common/mod.rs:55` adds lab error context only; the four edited files all belong to this lane. |
+| 5. Refusals fail closed with a clear reason? | Yes | `tests/common/mod.rs:69` and `:71` keep exclusive creation and add operation/path/cause context; `tests/runtime.rs:126` checks the unchanged guard reason. |
+| 6. Capsule logic stays self-contained and uses granted Bus calls? | Yes | `tests/runtime.rs:105` and `:164` supply inert bytes without a launch; capsule logic and Bus contracts retain their supplied bytes. |
+| 7. Named tests and caught falsifiers prove each rule? | Yes | `tests/runtime.rs:103` catches skip/late guard; `:163` catches overwrite/bare-error. All four plants compiled and failed their named behavior assertion. |
+| 8. Identity, admission and allowance stay separate? | Yes | `tests/common/mod.rs:83` stamps fixture identity only; `RUNBOOK.md:93` keeps Runtime storage and installed acceptance with their owners. |
+
+Restored full locked gate: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`, exit 0 in 405.26 seconds. Actual target summaries total 256 passed, 0 failed and 14 existing ignored rows. The full run includes both new tests, the existing provider-refusal callers and all other active lane tests. It left zero new retained roots. All four plants compiled, failed the specified named behavior assertion and were restored before regression checks. `falsifiers.json` and the shared runner retain their supplied bytes.
+
+Owned-root cleanup: passing exact, Runtime and full-gate runs removed their roots through the existing `finish` paths. Four fixed-byte plant roots (2,402 logical bytes total) and six sandbox-infrastructure roots remain under the existing failure-retention rule for candidate review. Both guard plants repaired their owned Home before assertions. Final `lsof -nP -Fpn +D <owned-root>` checks for all ten retained roots exited 1 with empty stdout/stderr; process inspection found zero executables active from this lane target. The ignored `target/task-151-lifecycle.json` records each exact private path, size, owner, source identity, protection source and cleanup condition. The lane supervisor keeps those finite fixtures and small gate outputs through review, then removes the exact owned paths. Supplied build caches keep their supervisor lifecycle. The shared heavy-build lease is released. This task creates no rollback set.
+
+Final branch/worktree inventory: HEAD `52cab432f2e8a27a554fa31509aac8f658353a08`, tree `ae52230d2608f278eab0515edc8bafddfe036534`; the supplied task branch/worktree holds unique uncommitted task work for review. Its four dirty paths are exactly `tests/common/mod.rs`, `tests/runtime.rs`, `RUNBOOK.md` and `LOG.md`, all inside this lane; the index is empty. The branch upstream is unset. Against cached `spike/spike/agent-host` at `321cc698a21543c7cfe2895fecf9c2ef99e2b33c`, it is 11 commits ahead / 0 behind. This offline task fetched and published nothing and moved zero refs. The complete inventory observed 1598 branches and 157 worktrees; other refs and worktrees keep their existing owners. Scope checks confirm the operator wrapper, existing tests, harness, native hashing, acceptance labels, Cargo manifests and locks, falsifier list, shared runner and supplied LOG prefix retain their supplied bytes.
+
+Candidate: local task diff against the supplied comparison HEAD above. Exercised checks: both exact tests, four caught compiling plants, restored exact tests, Runtime regression, full locked lane gate, format and basic repository checks pass; the initial sandbox infrastructure result remains recorded. Review links: pending with the lane supervisor. Installed release evidence: skipped because this task proves the lab writer; Runtime storage and installed-product acceptance keep their existing owners. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.
+
+- 151: keep the shared component writer guard first, add operation/path/cause errors, and prove owned-Home repair plus exclusive destination refusals with two tests and four caught hand-run plants.
+
+Round 2 starts from the same supplied HEAD `52cab432f2e8a27a554fa31509aac8f658353a08` and tree `ae52230d2608f278eab0515edc8bafddfe036534`. The supplied dirty paths are this task's `tests/common/mod.rs`, `tests/runtime.rs`, `RUNBOOK.md` and `LOG.md`; unrelated dirty paths are absent. The supervisor full gate exited 101 at `runtime::tests::native_identity_refuses_changed_or_missing_bytes`: `Parallel original: launch` returned `instances exceeded their shared time bound; harness cleanup is not a Runtime stop`. Its 96 other library tests passed. This replaces the prior full-pass claim for that supervisor invocation. The failed native identity test and harness belong to their existing owners and keep their supplied bytes, assertions and two-second bound.
+
+Round 2 plan: retry the exact existing native identity test, both writer tests, four separate compiling plants with byte-for-byte restoration, both restored writer tests, Runtime regression and full locked gate. Keep one shared heavy-build lease and offline dependencies, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, lane-local host/build outputs and a 600-second bound per command. Host process visibility and local loopback are needed by the existing harness tests. Free space before retry is 29,007,940 KiB, above the existing 12 GiB output estimate plus 2 GiB reserve. This round adds evidence in this section and changes source only if the writer checks expose a defect within task scope.
+
+Round 2 results on the restored candidate:
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib runtime::tests::native_identity_refuses_changed_or_missing_bytes -- --exact` passed unchanged: exit 0 in 1.13 seconds, one named test passed. The same test also passed in the full gate; its two-second launch bound and the shared collector retain their supplied implementation. The supervisor timeout remains a recorded failed invocation.
+
+The guard and destination baseline commands both passed (exit 0, 0.14 and 0.09 seconds). Each compiling plant reused the exact old/new JSON bytes recorded above in this section. Each run used its full named command below, and a `finally` block restored the supplied candidate writer byte for byte before the next run. Compilation and setup succeeded; the required behavior assertion supplies caught credit.
+
+- F-component-writer-skip-guard: **CAUGHT**, exit 101 in 0.90 seconds. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_writer_checks_guard_before_writing -- --exact`. Failed assertion: `writer must return the existing Home-symlink refusal`.
+
+- F-component-writer-late-guard: **CAUGHT**, exit 101 in 0.77 seconds. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_writer_checks_guard_before_writing -- --exact`. Failed assertion: `writer must guard before creating bin`.
+
+- F-component-writer-overwrite: **CAUGHT**, exit 101 in 0.73 seconds. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_writer_names_refused_destinations -- --exact`. Failed assertion: `installed: writer must refuse the existing destination`.
+
+- F-component-writer-bare-error: **CAUGHT**, exit 101 in 0.75 seconds. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_writer_names_refused_destinations -- --exact`. Failed assertion: `installed: refusal must name the exact destination`.
+
+
+Both guard plants repaired their owned Home before assertions. The candidate writer SHA-256 matches the supplied round-1 candidate after all four restorations.
+
+Restored guard test: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_writer_checks_guard_before_writing -- --exact`, exit 0 in 0.73 seconds. One passed, zero failed. Each passing invocation left zero new retained roots.
+
+Restored destination test: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_writer_names_refused_destinations -- --exact`, exit 0 in 0.15 seconds. One passed, zero failed. Each passing invocation left zero new retained roots.
+
+Runtime regression: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime`, exit 0 in 16.01 seconds. 12 passed, zero failed, two existing ignored rows. Each passing invocation left zero new retained roots.
+
+Full locked lane gate: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`, exit 0 in 279.49 seconds. 256 passed, zero failed, 14 existing ignored rows. Each passing invocation left zero new retained roots.
+
+Basic checks passed with exit 0: `git diff --check`; `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`; `node scripts/check-product-data.mjs`; `node --test scripts/check-product-data.test.mjs` (99 passed); `cargo fmt --all -- --check` from `elastos/`; and `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`. Cargo tests used the offline environment and lane-local outputs recorded at round start. The shared heavy-build lease covered each test command and is released.
+
+Round 2 lifecycle: both restored named tests, Runtime regression and full gate removed their owned roots through `finish`. Four new fixed-byte plant roots remain through candidate review. The existing ledger now also accounts for the supervisor's retained native-identity fixture. All 15 recorded retained roots passed `lsof -nP -Fpn +D <owned-root>` with exit 1 and empty stdout/stderr; their total logical file size is 4,278,432 bytes. Host process inspection found zero executables active from this lane target. Exact private paths, ownership, source identity, sizes and cleanup conditions remain in ignored `target/task-151-lifecycle.json`; review completion triggers removal of these exact finite fixtures and gate outputs. The generated round-2 command results are in ignored `target/task-151/round-2/results.json`. Supplied caches keep their supervisor lifecycle.
+
+Final round-2 inventory: supplied HEAD, tree, branch and index remain unchanged. The task has the same four dirty paths and zero unrelated source changes. The task branch is 11 commits ahead and zero behind cached `spike/spike/agent-host`; its upstream remains unset. This offline run fetched and published nothing. The inventory observed 1599 branches and 157 worktrees; their existing owners retain all other refs and worktrees. Scope comparison proves `write_operator_home`, pre-existing Runtime tests, native hashing, harness, census, report, stand-in implementation, acceptance labels, manifests, locks, falsifier list and runner retain their supplied bytes. This round changes only the task's LOG evidence.
+
+Author checks now pass on the restored candidate. The eight principles answers above still apply. Runtime storage and installed-product acceptance keep their existing owners. Supervisor rerun and independent reviews remain with the lane supervisor.
+
+- 151 round 2: reproduce the native identity test unchanged, recatch all four writer plants, and pass both restored tests, Runtime regression and the full locked gate; record finite-fixture cleanup and source scope.

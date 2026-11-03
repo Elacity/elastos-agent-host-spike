@@ -70,13 +70,28 @@ the grant and effect rows below extend it. Runtime bundle-CID launch stays separ
 `tests/common::write_operator_home` owns the operator fixture for this test and
 the ready-operator tests. It uses `write_component_home`, the shared entry-copy
 and stamping helper, which also prepares the CID refusal fixture. The helper
-checks the Home guard and installs executable bytes. For the operator fixture,
+checks the Home guard before source reads or destination writes and installs
+executable bytes. For the operator fixture,
 it writes a manifest containing only the repository's `external.localhost-provider`
 entry and an empty `profiles` map; the CID fixture selects `external.ipfs-provider`.
 It stamps the current Mac platform with the
 copy's checksum, size and install path. The repository entry owns all other fields.
 The writer supports `darwin-arm64` and `darwin-amd64` and refuses other platforms
 with a reason. Exclusive creation keeps existing paths and symlinks intact.
+
+`component_home_writer_checks_guard_before_writing` replaces the owned Home
+with an in-root symlink and calls this writer. It captures the exact guard
+reason and absence of outputs before repairing the Home, then proves the
+repaired Home accepts the same bytes and checksum/size stamp.
+`component_home_writer_names_refused_destinations` uses fresh Homes for an
+existing `bin` directory, installed file, manifest file and manifest symlink.
+It checks the operation, exact refused path and underlying I/O cause, plus
+preserved marker bytes and the symlink. Source read/decode and destination
+directory, file, write, permission, metadata and manifest errors carry their
+operation and path; the Home guard keeps its existing reason. The writer may
+leave its earlier new fixture outputs after a later refusal. These fixed-byte
+tests support M1 A9's contained-fixture prerequisite in the lab. Runtime storage
+and installed-product acceptance keep their existing owners.
 
 The checksum test passes both `--addr 127.0.0.1:<free port>` and an in-root
 `--storage-path`. Provider verification stops startup before Carrier and HTTP
