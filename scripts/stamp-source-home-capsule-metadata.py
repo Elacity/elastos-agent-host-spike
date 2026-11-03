@@ -197,7 +197,7 @@ def stamp_provider_spawn_anchors(manifest, data_dir, platform):
             continue
         # The binary row decides whether the provider resolves; a top-level install_path is its last step.
         resolved, info = integrity.resolve_platform_info(component, platform)
-        if (not isinstance(info, dict) or not info.get("install_path")) and isinstance(
+        if (not isinstance(info, dict) or "install_path" not in info) and isinstance(
                 component.get("install_path"), str):
             info = {"install_path": component["install_path"],
                     "release_path": (info or {}).get("release_path")}
