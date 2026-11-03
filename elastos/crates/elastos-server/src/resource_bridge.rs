@@ -727,7 +727,12 @@ fn principal_root_read_write_uri(operation: &str, request: &serde_json::Value) -
         .and_then(|value| value.as_str())
         .unwrap_or_default();
     let rooted = rooted_localhost_uri(object_uri)?;
-    rooted.starts_with("localhost://Users/").then_some(rooted)
+    // A5-S3b: both principal-root areas take the protected path.
+    let areas = ["localhost://Users/", "localhost://UsersAI/"];
+    areas
+        .iter()
+        .any(|area| rooted.starts_with(area))
+        .then_some(rooted)
 }
 
 fn request_content_bytes(request: &serde_json::Value) -> Result<Vec<u8>, String> {
@@ -1762,6 +1767,74 @@ mod tests {
         assert_eq!(refused["code"], "principal_context_required", "{refused}");
         let message = refused["message"].as_str().unwrap();
         assert!(message.starts_with("localhost://Users roots"), "{message}");
+    }
+
+    /// Codex FOLLOWUP (a) on #1442: UsersAI refusals with no principal.
+    #[test]
+    fn usersai_without_a_principal_is_refused_with_its_area_named() {
+        let refuse = |uri: &str| scope_current_user_alias(uri, None, None).unwrap_err();
+        let need = " requires a principal-scoped launch context";
+        let alias = refuse("localhost://UsersAI/self/a.md");
+        assert_eq!(alias, format!("localhost://UsersAI/self{need}"));
+        let explicit = refuse("localhost://UsersAI/000000000000000000000000/a.md");
+        assert_eq!(explicit, format!("localhost://UsersAI{need}"));
+    }
+
+    /// Codex FOLLOWUP (b) on #1442: the protected path refuses a missing
+    /// record and an auth state that does not load.
+    #[test]
+    fn the_protected_path_refuses_a_missing_record_and_a_malformed_state() {
+        let id = "person:local:protected-lookup";
+        let temp = stored_human_dir("person:local:someone-else");
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some(id.to_string());
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        let path = format!("{}/a.md", crate::auth::principal_localhost_root(id));
+        let request = serde_json::json!({"path": path, "content": "x"});
+        let refused = |ctx: &BridgeContext| {
+            let r = protected_principal_root_resource_response(ctx, "write", &request).unwrap();
+            assert_eq!(r["code"], "principal_context_required", "{r}");
+            r["message"].as_str().unwrap().to_string()
+        };
+        assert!(refused(&ctx).contains("has no stored record"));
+        std::fs::write(crate::auth::auth_state_path(temp.path()).unwrap(), b"{").unwrap();
+        assert!(refused(&ctx).contains("failed to parse"));
+    }
+
+    /// F-S3b-area: UsersAI paths take the protected path. A stored Agent is
+    /// refused a foreign UsersAI root there, and the remote bridge refuses
+    /// UsersAI root storage instead of dispatching it.
+    #[tokio::test]
+    async fn usersai_root_storage_takes_the_protected_path() {
+        let id = "agent:local:protected-ai";
+        let temp = stored_human_dir(id);
+        let root = crate::auth::tests::mint_agent_record(temp.path(), id, None).localhost_root;
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some(id.to_string());
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        let foreign = "localhost://UsersAI/000000000000000000000000/a.md";
+        let request = serde_json::json!({"path": foreign, "content": "x"});
+        let refused = protected_principal_root_resource_response(&ctx, "write", &request).unwrap();
+        assert_eq!(refused["code"], "principal_context_required", "{refused}");
+        let line = r#"{"id":31,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/a.md","operation":"read","token":"tok","body":{}}}"#;
+        let bounds = [format!("{root}/a.md")];
+        let remote = handle_remote_request_with_audit_dir(
+            line,
+            "http://127.0.0.1:12345",
+            "client-token",
+            "test-capsule",
+            &bounds,
+            Some(id),
+            Some(temp.path()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            remote["response"]["code"], "principal_context_required",
+            "{remote}"
+        );
+        let message = remote["response"]["message"].as_str().unwrap();
+        assert!(message.contains("protected storage bridge"), "{message}");
     }
 
     fn bridge_token(ctx: &BridgeContext, resource: &str, action: Action) -> String {
