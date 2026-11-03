@@ -2,7 +2,7 @@ id: F-A5-earlywin
 file: src/lib.rs
 test: ops::model_clock_before_the_window_start_keeps_the_count
 --- old
-            Some(end) => now >= end,
+        if elapsed >= grant.record.window {
 --- new
-            Some(end) => now < grant.record.window_start || now >= end,
+        if now < grant.record.window_start || elapsed >= grant.record.window {
 --- end

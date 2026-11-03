@@ -1969,6 +1969,87 @@ fn model_new_window_allows_one_effect() {
 }
 
 #[test]
+fn model_max_instant_still_stops_the_next_effect() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let library = verifier
+        .bind_grant(
+            photo,
+            "UsersAI/photo/library",
+            Rights {
+                append: true,
+                overwrite: false,
+                child_journal: false,
+            },
+        )
+        .expect("standing library");
+    verifier.set_verifier_now(u64::MAX);
+    verifier
+        .set_rate(library, 1, 10)
+        .expect("a window that starts at the largest instant");
+    let call = verifier.open_call(photo);
+    verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect("the first effect fits the window");
+    let again = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("the window has not ended at the largest instant");
+    assert_eq!(again, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(again.to_string(), "rate limit is reached");
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the grant stays in the store");
+}
+
+#[test]
+fn model_revoked_journal_rate_is_unknown() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let library = verifier
+        .bind_grant(
+            photo,
+            "UsersAI/photo/library",
+            Rights {
+                append: true,
+                overwrite: false,
+                child_journal: true,
+            },
+        )
+        .expect("issuing grant");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    verifier.revoke_grant(roll).expect("revoke the journal");
+    let refused = verifier
+        .set_rate(roll, 1, 10)
+        .expect_err("an ended journal stores no rate");
+    assert_eq!(refused, Refuse::UnknownHandle);
+    assert_eq!(refused.to_string(), "unknown handle");
+    let limit = verifier
+        .set_effect_limit(roll, 1)
+        .expect_err("an ended journal stores no limit");
+    assert_eq!(limit, Refuse::UnknownHandle);
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the issuing grant stays");
+}
+
+#[test]
 fn model_child_effect_spends_the_issuing_rate() {
     let mut verifier = Verifier::new();
     let photo = verifier
@@ -3405,7 +3486,7 @@ fn model_expired_grant_stores_no_new_bound() {
 }
 
 #[test]
-fn model_rate_holds_when_the_window_end_does_not_fit() {
+fn model_window_at_the_top_of_the_clock_holds_the_rate() {
     let mut verifier = Verifier::new();
     let photo = verifier
         .register_instance("photo", "session-a")
@@ -3429,7 +3510,7 @@ fn model_rate_holds_when_the_window_end_does_not_fit() {
     verifier.set_verifier_now(u64::MAX - 5);
     verifier
         .set_rate(library, 1, 10)
-        .expect("the window end does not fit");
+        .expect("the window starts at the top of the clock");
     let call = verifier.open_call(photo);
     let roll = verifier
         .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
@@ -3442,7 +3523,7 @@ fn model_rate_holds_when_the_window_end_does_not_fit() {
             Operation::Append,
             "UsersAI/photo/library",
         )
-        .expect("one effect while the end does not fit");
+        .expect("one effect inside the window at the top of the clock");
     let held = verifier
         .operate(
             &call,
@@ -3500,7 +3581,7 @@ fn model_rate_holds_when_the_window_end_does_not_fit() {
             Operation::Append,
             "UsersAI/photo/frames",
         )
-        .expect_err("the new window does not fit");
+        .expect_err("the new window holds at the same instant");
     assert_eq!(fitted, OperateRefuse::Binding(Refuse::Rate));
     assert_eq!(fitted.to_string(), "rate limit is reached");
     verifier
