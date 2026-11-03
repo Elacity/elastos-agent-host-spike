@@ -534,6 +534,10 @@ def assert_source_home_provider_anchors(stamper):
         scene.mkdir()
         write_json(outside / "capsule.json", installed_manifest("outside", True))
         outside_hashes = tree_hashes(outside)
+        # Unparsable manifests where ../outside resolves: a read before the name check fails here.
+        for spy in (root / "outside", data / "outside"):
+            spy.mkdir(parents=True, exist_ok=True)
+            (spy / "capsule.json").write_text("{not json")
         current = json.loads(components.read_text())
 
         def unsafe_stamp(selected):
