@@ -742,6 +742,8 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 
 `standin_session_drain_refuses_past_the_remainder`, `standin_failed_settle_releases_only_that_hold` and `standin_failed_settle_surfaces_release_error` are this stand-in, and a PASS there gives the Runtime no A6 credit.
 
+`standin_system_and_wallet_requests_never_become_pending` is this stand-in, and a PASS there gives the Runtime no A6 credit for this denial.
+
 ## Content capsule named by its CID (M2 exit (e), PH6)
 
 - `requires_cid_is_refused_today` stages the viewer probe through the staging route and records the refusal the manifest reader gives now (`unknown field cid`). It goes red when the Runtime reads `requires[].cid`.

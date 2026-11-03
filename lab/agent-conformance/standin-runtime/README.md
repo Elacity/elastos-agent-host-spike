@@ -68,6 +68,8 @@ A request may carry `plan`, the `sha256` that `plan_approval::preview` returned;
 
 Six session asks of 1 on one session grant are admitted. An ask of 4091 is `reservation exceeds the ceiling` and holds nothing, so the remaining 4090 is still admitted. A failed settle releases only that hold. A session grant's earlier hold stays counted. The bridge does not keep a second cap compare. `use_grant` returns a release error instead of discarding it. A PASS gives the Runtime no A6 credit.
 
+`post_capability_request` denies a system-backend resource and a generic wallet resource after the live-instance check and before `declared_ask`. Its Ok body contains only `status` `denied` and the handler's `reason`. The exact `elastos://wallet/meta/status` resource with `read` and a declared `elastos://content/...` ask still store through the signed-ask check. A stopped instance stays `instance is not live`. A PASS gives the Runtime no A6 credit for this denial.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.

@@ -955,6 +955,9 @@ impl StandIn {
         if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
             return Err(not_live(phase));
         }
+        if let Some(reason) = prestore_denial(resource, &action) {
+            return Ok(json!({ "status": "denied", "reason": reason }));
+        }
         self.declared_ask(session_id, resource, &action)?;
         let plan = plan.map(str::to_owned);
         let request_id = format!("request-{}", self.next_request);
@@ -2928,6 +2931,23 @@ fn stop_reason(body: &Value) -> Result<&str, (u16, String)> {
         return Err((400, "stop reason must be a string".to_owned()));
     }
     reason.ok_or_else(|| (400, "stop body misses reason".to_owned()))
+}
+
+const SYSTEM_BACKEND_REASON: &str =
+    "system backends are not app capabilities; use elastos://content";
+const GENERIC_WALLET_REASON: &str = "generic Wallet access is limited to read-only elastos://wallet/meta/status; use the private Runtime Wallet Bus for authority-bound operations";
+
+fn prestore_denial(resource: &str, action: &str) -> Option<&'static str> {
+    let rest = resource.strip_prefix("elastos://")?;
+    let segment = rest.split(['/', '?', '#']).next()?;
+    match segment {
+        "elacity" | "elacity-sdk" | "gateway" | "ipfs" | "ipfs-cluster" | "ipfs-provider"
+        | "kubo" => Some(SYSTEM_BACKEND_REASON),
+        "wallet" if resource != "elastos://wallet/meta/status" || action != "read" => {
+            Some(GENERIC_WALLET_REASON)
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -9308,6 +9328,198 @@ mod tests {
             request_ids(&listed).is_empty(),
             "the stand-in did the work: {message}"
         );
+    }
+
+    #[test]
+    fn standin_system_and_wallet_requests_never_become_pending() {
+        let shared = Shared::new();
+        declare_asks(
+            shared.path(),
+            &[
+                (SHARED_RESOURCE, "read"),
+                (SHARED_RESOURCE, "write"),
+                ("elastos://IPFS/x", "read"),
+                ("elastos://ipfs-extra/x", "read"),
+                ("elastos://wallet/meta/status", "read"),
+                ("elastos://content/demo", "read"),
+            ],
+        );
+        let mut standin = StandIn::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let first = launch_starting(&shared, &mut standin);
+        assert_eq!(first, "component-1", "the stand-in did the work: first id");
+        assert_capsule(
+            &standin,
+            &first,
+            "starting",
+            "",
+            "the stand-in did the work: the first instance is still starting",
+        );
+        let client = Caller::Client { session_id: &first };
+        let body = |resource: &str, action: &str| json!({ "resource": resource, "action": action, "reason": "read shared" });
+        for (resource, reason) in [
+            ("elastos://ipfs/x", SYSTEM_BACKEND_REASON),
+            ("elastos://wallet/open", GENERIC_WALLET_REASON),
+        ] {
+            assert_eq!(
+                standin.post_capability_request(client, &body(resource, "read")),
+                Ok(json!({ "status": "denied", "reason": reason })),
+                "the stand-in did the work: starting {resource} is denied before the signed-ask check"
+            );
+            assert_eq!(
+                standin.next_request, 1,
+                "the stand-in did the work: a starting denial keeps the request id"
+            );
+        }
+        assert_eq!(
+            request_entries(&standin, &first),
+            Vec::<Value>::new(),
+            "the stand-in did the work: starting denials store nothing"
+        );
+        assert_eq!(
+            standin.post_capability_request(client, &body("elastos://content/demo", "read")),
+            Ok(json!({ "status": "pending", "request_id": "request-1" })),
+            "the stand-in did the work: a declared content ask still stores while starting"
+        );
+        standin
+            .finish_start(&first)
+            .expect("the stand-in did the work: finish the first start");
+        assert_capsule(
+            &standin,
+            &first,
+            "running",
+            "",
+            "the stand-in did the work: the first instance is running",
+        );
+        for resource in [
+            "elastos://elacity/x",
+            "elastos://elacity-sdk/x",
+            "elastos://gateway/x",
+            "elastos://ipfs-cluster/x",
+            "elastos://ipfs-provider/x",
+            "elastos://kubo/x",
+            "elastos://ipfs",
+            "elastos://ipfs?hash",
+            "elastos://ipfs#hash",
+        ] {
+            assert_eq!(
+                standin.post_capability_request(client, &body(resource, "read")),
+                Ok(json!({ "status": "denied", "reason": SYSTEM_BACKEND_REASON })),
+                "the stand-in did the work: running {resource} has only denied status and system reason"
+            );
+        }
+        for (resource, action) in [
+            ("elastos://wallet/meta/status", "write"),
+            ("elastos://wallet/meta/status/extra", "read"),
+            ("elastos://wallet/meta/status?x", "read"),
+            ("elastos://wallet/meta/status#x", "read"),
+        ] {
+            assert_eq!(
+                standin.post_capability_request(client, &body(resource, action)),
+                Ok(json!({ "status": "denied", "reason": GENERIC_WALLET_REASON })),
+                "the stand-in did the work: running {resource} {action} has only denied status and wallet reason"
+            );
+        }
+        assert_eq!(
+            standin.next_request, 2,
+            "the stand-in did the work: running denials keep the next request id"
+        );
+        for (resource, action, request_id) in [
+            ("elastos://IPFS/x", "read", "request-2"),
+            ("elastos://wallet/meta/status", "Read", "request-3"),
+            ("elastos://ipfs-extra/x", "read", "request-4"),
+        ] {
+            assert_eq!(
+                standin.post_capability_request(client, &body(resource, action)),
+                Ok(json!({ "status": "pending", "request_id": request_id })),
+                "the stand-in did the work: declared {resource} {action} still stores as {request_id}"
+            );
+        }
+        for resource in ["elastos://content/other", "elastos://Wallet/open"] {
+            assert_eq!(
+                standin.post_capability_request(client, &body(resource, "read")),
+                Err((
+                    403,
+                    format!("ask not declared in the signed manifest: {resource} read")
+                )),
+                "the stand-in did the work: {resource} still needs a declared ask"
+            );
+        }
+        assert_eq!(
+            standin.post_capability_request(client, &body("elastos://ipfs/x", "read")),
+            Ok(json!({ "status": "denied", "reason": SYSTEM_BACKEND_REASON })),
+            "the stand-in did the work: a further system denial stores nothing"
+        );
+        let expected = [
+            ("request-1", "elastos://content/demo"),
+            ("request-2", "elastos://IPFS/x"),
+            ("request-3", "elastos://wallet/meta/status"),
+            ("request-4", "elastos://ipfs-extra/x"),
+        ]
+        .into_iter()
+        .map(|(request_id, resource)| {
+            json!({
+                "request_id": request_id,
+                "session_id": first,
+                "resource": resource,
+                "action": "read",
+                "reason": "read shared",
+                "status": "pending",
+                "decision_reason": "",
+                "settled_by": Value::Null,
+                "plan": Value::Null,
+            })
+        })
+        .collect::<Vec<_>>();
+        assert_eq!(
+            request_entries(&standin, &first),
+            expected,
+            "the stand-in did the work: the shell sees exactly four pending records in order"
+        );
+        assert_eq!(
+            standin.next_request, 5,
+            "the stand-in did the work: only four accepted asks spend request ids"
+        );
+        let second = launch_finished(&shared, &mut standin);
+        assert_eq!(
+            second, "component-2",
+            "the stand-in did the work: second id"
+        );
+        assert_capsule(
+            &standin,
+            &second,
+            "running",
+            "",
+            "the stand-in did the work: the second instance is running",
+        );
+        assert_eq!(
+            standin.delete_capsule(Caller::Shell, &second, &json!({ "reason": "stop one" })),
+            Ok(Value::Null),
+            "the stand-in did the work: the shell stops component-2"
+        );
+        assert_eq!(
+            standin.post_capability_request(
+                Caller::Client {
+                    session_id: &second
+                },
+                &body("elastos://ipfs/x", "read"),
+            ),
+            Err((400, "instance is not live: stopped".to_owned())),
+            "the stand-in did the work: the live-instance refusal precedes a system denial"
+        );
+        assert_eq!(
+            request_entries(&standin, &second),
+            Vec::<Value>::new(),
+            "the stand-in did the work: the stopped instance stores nothing"
+        );
+        assert_capsule(
+            &standin,
+            &first,
+            "running",
+            "",
+            "the stand-in did the work: component-1 keeps running with an empty cause",
+        );
+        assert_live_request_ids_empty(&standin, "the request route mints no live grant");
     }
 
     #[test]

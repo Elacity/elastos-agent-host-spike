@@ -9743,3 +9743,144 @@ A passing row gives the real Runtime no A6 credit.
 
 - 141: a session grant spends each body amount against the one ceiling, and a failed settle releases only that hold.
 
+
+## 145
+
+Comparison base: `8da39dce977a12e97d8d32a0ecc3a881766ef865`, recorded before the first edit. HEAD remains that commit; its tree is `2243bccd1ad639e0a60b6b60ce330d071eac0c83`. The task branch owns this local change. The initial worktree is clean. `git merge-base --is-ancestor fc9f75ef44f30143631a2556979a67acb580b181 HEAD` returned 0. The same command for `fff8f1761eb851f642f8e9b680ea1c6747974060` and `80a2405624121eef3404fe3b3814a558be4b7cb5` returned 1 each.
+
+The required `env -u CARGO_NET_OFFLINE RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo fetch --locked --manifest-path elastos/Cargo.toml` ran once, exit 0, real 0.49 seconds. `elastos/Cargo.lock:6516` pins wasmtime `36.0.20`. The protected-path status check was empty before and after fetch. The probe and `offline_build` retain offline mode.
+
+Request flow step 7: “Runtime verifies the exact resource, action, operation, principal, session, capsule, grant, expiry, and revocation state.” Step 8: “If additional consent is required, Runtime records a pending request and Home or Inbox presents it. The UI does not mint the grant itself.” (`docs/AGENT_ARCHITECTURE.md:232-235`.) This task implements only the stand-in denial before that pending record.
+
+Read-only route evidence: `request_capability` in `elastos/crates/elastos-server/src/api/handlers/capability.rs:97-115` returns `status` `denied`, the reason, and absent request id and token before insertion. System reason: `system backends are not app capabilities; use elastos://content`. `is_system_only_backend_resource` in `elastos/crates/elastos-common/src/localhost.rs:36-53` compares the first segment before `/`, `?` or `#` as given against `elacity`, `elacity-sdk`, `gateway`, `ipfs`, `ipfs-cluster`, `ipfs-provider` and `kubo`. Wallet reason: `generic Wallet access is limited to read-only elastos://wallet/meta/status; use the private Runtime Wallet Bus for authority-bound operations`. `ensure_generic_wallet_capability` in `elastos/crates/elastos-server/src/provider_resource.rs:584-594` allows the exact `WALLET_STATUS_RESOURCE` (`elastos://wallet/meta/status`, line 12) with `read`.
+
+Plan: add one private `prestore_denial` after the live-instance refusal and before the existing `declared_ask`. Keep the existing signed-ask and store bodies. Exercise starting, running and stopped clients in one named journey, run each of the nine plants separately and restore each, then run the lane gates. Update the two existing documentation files and keep Runtime A6 credit separate.
+
+The first targeted build stopped at E0282 on the new empty-vector assertion (2.14 seconds). Both new empty expectations now state `Vec::<Value>::new()`; the full equality assertions remain. This was a source correction before the plant runs.
+
+### Change and named test
+
+`standin-runtime/mod.rs` adds the private `prestore_denial` and calls it once between the live-instance check and `declared_ask`. Each reason has one literal. The helper compares the first segment as given, checks system resources first, and permits only the exact read-only wallet status request. Every protected method body matches the comparison base. The only other added function is `standin_system_and_wallet_requests_never_become_pending` in `mod tests`. It signs exactly the six declared pairs, exercises starting, running and stopped clients, compares the complete denial and pending bodies, checks the request counter, and checks the ordered shell records and empty live-grant set. It builds neither an operator nor a probe.
+
+`standin-runtime/README.md` adds one paragraph immediately before `## Callers`. `RUNBOOK.md` adds one paragraph after the last stand-in paragraph. Removing each new paragraph reproduces its base file byte for byte, preserving the grant paragraph, plan approval and `declared_ask` sentence.
+
+### Hand-run falsifiers
+
+Each plant ran alone with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`, under the shared heavy-build lease. Command for every plant and restore: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_system_and_wallet_requests_never_become_pending -- --exact`. Each planted crate compiled and reported 0 passed / 1 failed on this named assertion; each restored run reported 1 passed / 0 failed. The corrected baseline passed in 2.00 seconds. No `falsifiers.json` id was added. Old and new bytes below are exact JSON string encodings, including whitespace and newline bytes.
+
+
+#### F-prestore-stub
+
+Old bytes: `"        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"`
+
+New bytes: `""`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9361:13`: assertion `left == right` failed: the stand-in did the work: starting elastos://ipfs/x is denied before the signed-ask check. Plant exit 101, 1.71 seconds; restored exit 0, 1.28 seconds.
+
+
+#### F-prestore-keep
+
+Old bytes: `"        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"`
+
+New bytes: `"        if let Some(reason) = prestore_denial(resource, &action) {\n            let request_id = format!(\"denied-{}\", self.requests.len());\n            self.seed_request(&request_id, session_id, resource, &action, reason)?;\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9376:9`: assertion `left == right` failed: the stand-in did the work: starting denials store nothing. Plant exit 101, 1.77 seconds; restored exit 0, 1.22 seconds.
+
+An initial keep plant used old bytes `"        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"` and new bytes `"        if let Some(reason) = prestore_denial(resource, &action) {\n            let request_id = format!(\"request-{}\", self.next_request);\n            self.seed_request(&request_id, session_id, resource, &action, reason)?;\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"`. It also compiled and failed (1.56 seconds) at `src/../standin-runtime/mod.rs:9366:13`, `starting elastos://wallet/open is denied before the signed-ask check`, because the second insertion reused the id. Restored, it passed in 1.49 seconds. The refined plant above uses distinct stored ids to reach the empty-store assertion directly.
+
+
+#### F-prestore-ask-first
+
+Old bytes: `"        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n        self.declared_ask(session_id, resource, &action)?;\n"`
+
+New bytes: `"        self.declared_ask(session_id, resource, &action)?;\n        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9364:13`: assertion `left == right` failed: the stand-in did the work: starting elastos://ipfs/x is denied before the signed-ask check. Plant exit 101, 1.62 seconds; restored exit 0, 1.2 seconds.
+
+
+#### F-prestore-wallet-read
+
+Old bytes: `"\"wallet\" if resource != \"elastos://wallet/meta/status\" || action != \"read\" => {"`
+
+New bytes: `"\"wallet\" => {"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9432:13`: assertion `left == right` failed: the stand-in did the work: declared elastos://wallet/meta/status Read still stores as request-3. Plant exit 101, 1.46 seconds; restored exit 0, 1.5 seconds.
+
+
+#### F-prestore-prefix
+
+Old bytes: `"let segment = rest.split(['/', '?', '#']).next()?;"`
+
+New bytes: `"let segment = rest.split(['/', '?', '#']).next()?;\n    let segment = if segment.starts_with(\"ipfs\") { \"ipfs\" } else { segment };"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9433:13`: assertion `left == right` failed: the stand-in did the work: declared elastos://ipfs-extra/x read still stores as request-4. Plant exit 101, 1.49 seconds; restored exit 0, 1.31 seconds.
+
+
+#### F-prestore-wallet-bypass
+
+Old bytes: `"Some(GENERIC_WALLET_REASON)"`
+
+New bytes: `"None"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9364:13`: assertion `left == right` failed: the stand-in did the work: starting elastos://wallet/open is denied before the signed-ask check. Plant exit 101, 1.46 seconds; restored exit 0, 2.0 seconds.
+
+
+#### F-prestore-running-only
+
+Old bytes: `"        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"`
+
+New bytes: `"        if matches!(phase, ResidentStatus::Running) {\n            if let Some(reason) = prestore_denial(resource, &action) {\n                return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n            }\n        }\n"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9366:13`: assertion `left == right` failed: the stand-in did the work: starting elastos://ipfs/x is denied before the signed-ask check. Plant exit 101, 1.52 seconds; restored exit 0, 1.81 seconds.
+
+
+#### F-prestore-before-live
+
+Old bytes: `"        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {\n            return Err(not_live(phase));\n        }\n        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"`
+
+New bytes: `"        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {\n            return Err(not_live(phase));\n        }\n"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9500:9`: assertion `left == right` failed: the stand-in did the work: the live-instance refusal precedes a system denial. Plant exit 101, 1.45 seconds; restored exit 0, 1.22 seconds.
+
+
+#### F-prestore-raw-action
+
+Old bytes: `"prestore_denial(resource, &action)"`
+
+New bytes: `"prestore_denial(resource, given_action)"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9432:13`: assertion `left == right` failed: the stand-in did the work: declared elastos://wallet/meta/status Read still stores as request-3. Plant exit 101, 2.11 seconds; restored exit 0, 1.35 seconds.
+
+
+All plants are restored. The candidate `standin-runtime/mod.rs` SHA-256 is `284142bf3296a412586ebba1f50b376da9119b1f3d3f9094ab18297448a74973`, matching the bytes before the first plant. The production diff contains only the gate, constants and helper.
+
+### Principles check
+
+| Question | Yes/No | Evidence (standin-runtime/mod.rs unless specified) |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `:9335-9352` changes the fixture asks before signed admission through `admit_shared`; resource strings describe operations and preserve the existing bundle identity. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `:958-960` returns the denial before any store; `:9522` checks the empty live-grant set. |
+| 3. A second path or copy of one rule? | No | `:958` is the single call to `prestore_denial`; `:2940-2950` is the single new predicate, and `declared_ask` keeps its body and place on the success path. Each reason has one literal at `:2936-2938`. |
+| 4. Runtime core grows? | No | `:2940` is lab-only. `git diff -- elastos capsules scripts examples` is empty. |
+| 5. New refusals fail closed with a clear reason? | Yes | `:958-960` returns only denied status and the reason defined at `:2936-2938`, ahead of id creation and storage. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `:918-974` retains the existing request route. The capsule, Bus and bridge stay unchanged; `:9334` exercises this stand-in alone. |
+| 7. Named tests and caught falsifiers prove each rule? | Yes | `:9334` is `standin_system_and_wallet_requests_never_become_pending`; all nine plants above compile and fail that test, and every restored run passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | `:9335-9352` admits the signed bundle; the accepted asks at `:9380-9384` and `:9427-9438` create pending records, and `:9522` checks that the route creates no live grant. Budget methods keep their bodies. |
+
+The branch/worktree inventory still identifies task 145 at the comparison base and its original tree. This branch has no upstream. Against the existing fetched `spike/spike/agent-host` ref (`3a3e5381f96fcbd33f7383d066d693bf4222c922`), `git rev-list --left-right --count refs/remotes/spike/spike/agent-host...HEAD` is `1471 1` (remote-only, local-only). These counts describe the available shallow history; no network refresh or branch change was made. The task branch holds unique local work for supervisor review. Other worktrees remain outside this task.
+
+### Gates and final proof
+
+All Cargo checks used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`, and the shared heavy-build lease. Gate commands ran in sequence.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.20 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 285.44 seconds, within 600 seconds. The suite reported 248 passed, 0 failed and 14 ignored. Its existing blocked rows stay ignored. The first full run passed, so the permitted outer rerun was unused.
+- After every plant was restored, `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.27 seconds.
+- Final `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_system_and_wallet_requests_never_become_pending -- --exact`: exit 0, 1 passed, real 0.21 seconds.
+- Basic repository gate: `git diff --check`, `node scripts/check-product-data.mjs`, `node --test scripts/check-product-data.test.mjs` (99 passed), `(cd elastos && cargo fmt --all -- --check)`, and `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` all passed. The first Node invocation used the workspace directory; the root-directory invocations above passed.
+
+`git diff -- elastos capsules scripts examples` is empty. The protected lane files, manifests and locks have empty diffs. The protected method bodies match the comparison base. Only `prestore_denial` is new above `mod tests`; only the named journey is added under it. HEAD remains the comparison base. The required ancestor check returns 0, and both excluded ancestors return 1. The source SHA-256 still matches the pre-plant candidate. The branch has no upstream and the fetched integration divergence remains `1471 1`; those are existing shallow refs, not a current-base compatibility claim.
+
+The local lifecycle inventory retains this branch as task 145 work for review, records existing lane build outputs for the supervisor's active gates, and marks task-owned proof scratch removed after its results were transferred here. Other branches, worktrees, test roots and existing caches were preserved. Installed Runtime acceptance stays with the Runtime owner; a passing stand-in denial gives the Runtime no A6 credit. Next owner: lane supervisor for its gates and independent reviews.
+
+- 145: the stand-in denies system-backend and generic-wallet requests before signed-ask checks and storage, with one journey and nine caught plants.
