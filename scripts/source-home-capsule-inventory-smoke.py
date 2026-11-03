@@ -422,10 +422,11 @@ def assert_source_home_provider_anchors(stamper):
 
         # A wildcard row sits where exact-only selection would look first: a binary-only provider.
         star = {"version": "0.1.0", "install_path": "bin/star-provider", "platforms": {"*": {"install_path": "bin/star-provider"}}}
-        for key in ("platformless-provider", "install_path-provider", "star-provider"):
+        for key in ("platformless-provider", "install_path-provider", "star-provider", "empty-row-provider"):
             (data / "bin" / key).write_bytes(b"")  # each needs an installed binary
             write_json(data / "capsules" / key / "capsule.json", installed_manifest(key, True))
         platformless = {"version": "0.1.0", "install_path": "bin/platformless-provider"}
+        empty_row = {**star, "install_path": "bin/empty-row-provider", "platforms": {"linux-amd64": {"install_path": ""}}}  # R7
         top_level = external("install_path-provider")
         del top_level["platforms"]["linux-amd64"]["install_path"]  # its row has only a top-level install_path
         write_json(root / "capsules" / "install_path-provider" / "capsule.json", {"role": "provider"})
@@ -471,10 +472,11 @@ def assert_source_home_provider_anchors(stamper):
         for shape in shapes:
             if "capsule_metadata" in result["external"][shape]:
                 raise AssertionError(f"{shape} kept an anchor")
-        resolved_by_path = {"install_path-provider": top_level, "platformless-provider": platformless, "star-provider": star}
+        resolved_by_path = {"install_path-provider": top_level, "platformless-provider": platformless, "star-provider": star,
+                            "empty-row-provider": empty_row}
         write_json(components, {"external": resolved_by_path,
                                 "profiles": {"source-home": {"components": list(resolved_by_path)}}})
-        stamp(selected=list(resolved_by_path))
+        skipped = stamp(selected=list(resolved_by_path))
         result = json.loads(components.read_text())
         top, plain, star_row = (result["external"][n] for n in ("install_path-provider", "platformless-provider", "star-provider"))
         if "capsule_metadata" not in plain or "*" not in (star_row.get("capsule_metadata") or {}).get("platforms", {}):
@@ -482,6 +484,9 @@ def assert_source_home_provider_anchors(stamper):
         row = (top.get("capsule_metadata") or {}).get("platforms", {}).get("linux-amd64")
         if not row or row.get("checksum") != "source-home:sha256:" + sha256(data / "capsules" / "install_path-provider" / "capsule.json"):
             raise AssertionError(f"top-level install_path provider carries no anchor: {top!r}")  # F-Y0p-6
+        if ("stamp: skip empty-row-provider: no linux-amd64 row or alias with install_path" not in skipped
+                or "capsule_metadata" in result["external"]["empty-row-provider"]):
+            raise AssertionError(f"an explicit empty row path was anchored: {skipped!r}")  # F-Y0p-7
         write_json(components, {"external": externals,
                                 "profiles": {"source-home": {"components": names + list(shapes)}}})
         stamp()
