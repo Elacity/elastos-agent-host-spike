@@ -460,6 +460,8 @@ impl Verifier {
     /// with `unknown handle`, the same refusal an unbound handle gets. A
     /// handle that already ended is not an error. A stop or revoke path is its
     /// only caller and passes the handle the grant route stored.
+    /// It ends every child journal minted from that handle through this same
+    /// function. A journal ended on its own leaves the grant that minted it.
     ///
     /// The record also goes to the ledger, so a hold the handle opened before
     /// the end still resolves through `settle`, `release` and `timeout_hold`
@@ -476,6 +478,8 @@ impl Verifier {
                 .or_insert_with(|| held_binding(grant));
             Self::clear_gone(&mut ledger, handle);
         }
+        #[rustfmt::skip]
+        self.end_derived_grants(handle);
     }
 
     /// Returns one hold's amount to the ceiling and drops the hold.

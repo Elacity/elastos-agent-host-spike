@@ -267,8 +267,6 @@ impl Verifier {
     pub fn revoke_grant(&mut self, handle: Handle) -> Result<(), Refuse> {
         #[rustfmt::skip]
         self.end_grant(handle);
-        #[rustfmt::skip]
-        self.end_derived_grants(handle);
         Ok(())
     }
 
@@ -397,7 +395,9 @@ impl Verifier {
     #[rustfmt::skip]
     fn note_effect(&mut self, handle: Handle) -> Result<(), Refuse> {
         let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
-        grant.record.effects += 1;
+        if grant.record.effect_limit.is_some() {
+            grant.record.effects += 1;
+        }
         if grant.record.rate.is_some() {
             grant.record.window_effects += 1;
         }
@@ -514,22 +514,33 @@ impl Verifier {
     }
 
     #[rustfmt::skip]
-    fn live_journal_holds(&self, issuing: Handle, identity: &str, path: &str) -> bool {
+    fn live_journal_holds(
+        &self,
+        issuing: Handle,
+        identity: &str,
+        path: &str,
+        owned_root: &str,
+    ) -> bool {
         self.grants.values().any(|stored| {
             stored.record.parent == Some(issuing)
                 && !stored.ended
-                && resource_name(identity, path, Some(&stored.record.owned_root)).is_ok()
+                && (resource_name(identity, path, Some(&stored.record.owned_root)).is_ok()
+                    || (path != owned_root
+                        && resource_name(identity, &stored.record.owned_root, Some(path))
+                            .is_ok())
+                )
         })
     }
 
     /// Uses a grant for one path. The path must be the stored owned root or a
-    /// child under it. A path a live journal minted from this grant holds is
-    /// refused. The guest's claims are not read.
+    /// child under it. A path a live journal minted from this grant holds, or
+    /// a path that contains that journal, is refused. The issuing root stays
+    /// allowed. The guest's claims are not read.
     pub fn use_path(&self, call: &Call, request: &GuestRequest, path: &str) -> Result<(), Refuse> {
         let record = self.resolve(*call, request.handle)?;
         resource_name(&record.identity, path, Some(&record.owned_root))?;
         #[rustfmt::skip]
-        if self.live_journal_holds(request.handle, &record.identity, path) {
+        if self.live_journal_holds(request.handle, &record.identity, path, &record.owned_root) {
             return Err(Refuse::JournalHeld);
         };
         Ok(())
@@ -2287,6 +2298,67 @@ fn model_successful_child_keeps_next_ask_independent() {
 }
 
 #[test]
+fn model_end_grant_ends_derived_child_journals() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let notes = verifier.register_instance("notes", "session-a");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("library ask");
+    assert_eq!(library, Handle(1));
+    let album = verifier
+        .bind_grant(photo, "UsersAI/photo/album", rights())
+        .expect("album ask");
+    assert_eq!(album, Handle(2));
+    let notes_handle = verifier
+        .bind_grant(notes, "UsersAI/notes/pad", rights())
+        .expect("notes ask");
+    assert_eq!(notes_handle, Handle(3));
+    let photo_call = verifier.open_call(photo);
+    let notes_call = verifier.open_call(notes);
+    let roll = verifier
+        .create_child_journal(&photo_call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    assert_eq!(roll, Handle(4));
+    let other = verifier
+        .create_child_journal(&photo_call, &guest(library), "UsersAI/photo/library/other")
+        .expect("sibling journal");
+    assert_eq!(other, Handle(5));
+    verifier.end_grant(roll);
+    let one_child = verifier
+        .use_grant(photo_call, &guest(roll))
+        .expect_err("the ended journal stays ended");
+    assert_eq!(one_child, Refuse::UnknownHandle);
+    assert_eq!(one_child.to_string(), "unknown handle");
+    verifier
+        .use_grant(photo_call, &guest(library))
+        .expect("ending one journal leaves the issuing grant");
+    verifier
+        .use_grant(photo_call, &guest(other))
+        .expect("ending one journal leaves its sibling");
+    verifier.end_grant(library);
+    let parent_stopped = verifier
+        .use_grant(photo_call, &guest(library))
+        .expect_err("the issuing grant has ended");
+    assert_eq!(parent_stopped, Refuse::UnknownHandle);
+    assert_eq!(parent_stopped.to_string(), "unknown handle");
+    let sibling_stopped = verifier
+        .use_grant(photo_call, &guest(other))
+        .expect_err("end_grant ends the journal minted from that grant");
+    assert_eq!(sibling_stopped, Refuse::UnknownHandle);
+    assert_eq!(sibling_stopped.to_string(), "unknown handle");
+    let album_kept = verifier
+        .use_grant(photo_call, &guest(album))
+        .expect("another grant stays");
+    assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
+    let notes_kept = verifier
+        .use_grant(notes_call, &guest(notes_handle))
+        .expect("another app stays");
+    assert_eq!(notes_kept.identity, "notes");
+    assert_eq!(notes_kept.owned_root, "UsersAI/notes/pad");
+}
+
+#[test]
 fn model_session_grant_ends_when_the_session_changes() {
     let mut verifier = Verifier::new();
     let photo = verifier.register_instance("photo", "session-a");
@@ -2570,6 +2642,89 @@ fn model_issuing_use_path_inside_a_live_journal_is_refused() {
     assert_eq!(shot, Handle(5));
     let held_once = verifier
         .use_path(&call, &guest(once), "UsersAI/agent-1/album/shot")
+        .expect_err("a refused use does not end the allow-once grant");
+    assert_eq!(held_once, Refuse::JournalHeld);
+    verifier
+        .use_grant(call, &guest(once))
+        .expect("the allow-once grant stays");
+    verifier
+        .use_grant(call, &guest(shot))
+        .expect("the allow-once journal stays");
+}
+
+#[test]
+fn model_issuing_use_path_over_a_live_journal_is_refused() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("agent-1", "session-a");
+    let parent = verifier
+        .bind_grant(photo, "UsersAI/agent-1/journal", rights())
+        .expect("issuing grant");
+    assert_eq!(parent, Handle(1));
+    let call = verifier.open_call(photo);
+    let page = verifier
+        .create_child_journal(
+            &call,
+            &guest(parent),
+            "UsersAI/agent-1/journal/album/page.md",
+        )
+        .expect("the journal mints");
+    assert_eq!(page, Handle(2));
+    let over = verifier
+        .use_path(&call, &guest(parent), "UsersAI/agent-1/journal/album")
+        .expect_err("the issuing grant does not use a path over a live journal");
+    assert_eq!(over, Refuse::JournalHeld);
+    assert_eq!(over.to_string(), "a live journal holds that path");
+    let other = verifier
+        .bind_grant(photo, "UsersAI/agent-1/journal", rights())
+        .expect("another issuing grant");
+    assert_eq!(other, Handle(3));
+    verifier
+        .use_path(&call, &guest(other), "UsersAI/agent-1/journal/album")
+        .expect("another issuing grant still uses that path");
+    verifier
+        .use_path(
+            &call,
+            &guest(page),
+            "UsersAI/agent-1/journal/album/page.md/line",
+        )
+        .expect("the journal's own use stays allowed");
+    verifier
+        .use_path(&call, &guest(parent), "UsersAI/agent-1/journal")
+        .expect("a use of the issuing root stays allowed");
+    verifier
+        .use_path(&call, &guest(parent), "UsersAI/agent-1/journal/album/page")
+        .expect("a string prefix of the journal path is not a cover");
+    verifier
+        .use_path(&call, &guest(parent), "UsersAI/agent-1/journal/albu")
+        .expect("a string prefix of the containing path is not a cover");
+    verifier
+        .use_path(&call, &guest(parent), "UsersAI/agent-1/journal/other.md")
+        .expect("a path beside a live journal stays allowed");
+    verifier.revoke_grant(page).expect("end the journal");
+    verifier
+        .use_path(&call, &guest(parent), "UsersAI/agent-1/journal/album")
+        .expect("an ended journal frees that path");
+    let ended = verifier
+        .use_grant(call, &guest(page))
+        .expect_err("the ended journal stays ended");
+    assert_eq!(ended, Refuse::UnknownHandle);
+    assert_eq!(ended.to_string(), "unknown handle");
+    verifier
+        .use_grant(call, &guest(parent))
+        .expect("the issuing grant stays");
+    verifier
+        .use_grant(call, &guest(other))
+        .expect("the other issuing grant stays");
+    let once = verifier
+        .bind_once(photo, "UsersAI/agent-1/album", rights())
+        .expect("allow once");
+    assert_eq!(once, Handle(4));
+    let shot = verifier
+        .create_child_journal(&call, &guest(once), "UsersAI/agent-1/album/roll/shot")
+        .expect("the allow-once journal mints");
+    assert_eq!(shot, Handle(5));
+    let held_once = verifier
+        .use_path(&call, &guest(once), "UsersAI/agent-1/album/roll")
         .expect_err("a refused use does not end the allow-once grant");
     assert_eq!(held_once, Refuse::JournalHeld);
     verifier
