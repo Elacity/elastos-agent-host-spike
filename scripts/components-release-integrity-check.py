@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import re
 import stat
@@ -50,8 +52,8 @@ def checksum_error(name, platform, info, release=False, source_home_anchor=False
     if not non_empty(checksum):
         return f"{name} {platform} {artifact}: missing checksum"
     if not CHECKSUM_RE.fullmatch(checksum):
-        if not (source_home_anchor and SOURCE_HOME_ANCHOR_RE.fullmatch(checksum)):
-            return f"{name} {platform} {artifact}: unsupported checksum format {checksum!r}"
+        bad = not (source_home_anchor and SOURCE_HOME_ANCHOR_RE.fullmatch(checksum))
+        return bad and f"{name} {platform} {artifact}: unsupported checksum format {checksum!r}"
     return None
 
 
@@ -109,9 +111,8 @@ def source_capsule_root(source_root, name):
     return None
 
 
-def audit_manifest(
-    data, platforms, selected_components=None, source_home_capsules=None, source_home_anchor=False
-):
+def audit_manifest(data, platforms, selected_components=None, source_home_capsules=None,
+                   source_home_anchor=False):
     external = data.get("external") or {}
     errors = []
     source_home_capsules = source_home_capsules or set()
@@ -120,9 +121,7 @@ def audit_manifest(
         for name, component in sorted(external.items()):
             if selected_components is not None and name not in selected_components:
                 continue
-            if name in source_home_capsules:
-                continue
-            if not isinstance(component, dict):
+            if name in source_home_capsules or not isinstance(component, dict):
                 continue
             for platform in platforms:
                 resolved_key, info = resolve_platform_info(component, platform)
@@ -137,9 +136,7 @@ def audit_manifest(
     for name, component in sorted(external.items()):
         if selected_components is not None and name not in selected_components:
             continue
-        if name in source_home_capsules:
-            continue
-        if not isinstance(component, dict):
+        if name in source_home_capsules or not isinstance(component, dict):
             continue
         for platform, info in sorted((component.get("platforms") or {}).items()):
             error = checksum_error(name, platform, info, source_home_anchor=source_home_anchor)
@@ -268,10 +265,11 @@ def audit_provider_capsule_metadata(
         if "role" in metadata or "type" in metadata:
             errors.append(f"{name}: capsule_metadata content role/type mismatch")
             continue
-        # A source home anchors its own install, so the source tree may not carry
-        # the provider; its platform rows are still checked either way.
+        # A source home anchors its own install; rows are still checked.
         capsule_root = source_capsule_root(source_root, name) if source_root else None
         if capsule_root is None:
+            if source_root is not None and not source_home:
+                errors.append(f"{name}: provider capsule source manifest missing")
             check_platform_rows(name, metadata, expected_install_path, source_home, errors)
             continue
 
@@ -297,13 +295,14 @@ def audit_provider_capsule_metadata(
     return errors
 
 
-def check_platform_rows(name, metadata, expected_install_path, source_home, errors):
+def check_platform_rows(name, metadata, expected, source_home, errors):
     for platform, info in sorted((metadata.get("platforms") or {}).items()):
         if not isinstance(info, dict):
             errors.append(f"{name}: capsule_metadata {platform} must be an object")
             continue
-        if info.get("install_path") != expected_install_path:
+        if info.get("install_path") != expected:
             errors.append(f"{name}: capsule_metadata {platform} install_path mismatch")
+        # A source home has no release archive, so its rows carry no extract_path; copy rows are checked.
         if not source_home and info.get("extract_path") != name:
             errors.append(f"{name}: capsule_metadata {platform} extract_path mismatch")
 
@@ -341,18 +340,12 @@ AUDITED_RUNTIME_ABIS = {"elastos.component/v1", "elastos.runtime-projection/v1"}
 
 
 def is_audited_source_capsule(manifest):
-    if manifest.get("runtime_abi") in AUDITED_RUNTIME_ABIS:
-        return True
-    return manifest.get("role") == "content" and manifest.get("type") == "data"
+    return manifest.get("runtime_abi") in AUDITED_RUNTIME_ABIS or (
+        manifest.get("role"), manifest.get("type")) == ("content", "data")
 
 
-def audit_capsule_artifact_metadata(
-    data,
-    source_root,
-    selected_components=None,
-    installed_data_dir=None,
-    require_selected=False,
-):
+def audit_capsule_artifact_metadata(data, source_root, selected_components=None,
+                                    installed_data_dir=None, require_selected=False):
     if source_root is None:
         return []
 
@@ -388,9 +381,7 @@ def audit_capsule_artifact_metadata(
                 errors.append(f"{name}: installed capsule manifest missing at {installed_manifest_path}")
                 continue
             try:
-                installed_manifest = json.loads(
-                    installed_manifest_path.read_text(encoding="utf-8")
-                )
+                installed_manifest = json.loads(installed_manifest_path.read_text(encoding="utf-8"))
             except Exception as exc:
                 errors.append(f"{name}: failed to read installed manifest: {exc}")
                 continue
@@ -546,7 +537,7 @@ def run_self_test():
         }
     }
     if audit_manifest(clean_manifest, ["linux-amd64"]):
-        raise AssertionError("alias-resolved stamped manifest should pass")
+        raise AssertionError("alias-resolved manifest should pass")
     mac_manifest = {
         "external": {
             "mac": {"platforms": {"aarch64-darwin": {"cid": "bafy-mac"}}},
@@ -702,9 +693,7 @@ def run_self_test():
         if audit_manifest(provider_good, ["linux-amd64"]):
             raise AssertionError("provider binary metadata must survive the external merge")
         if provider_good["external"]["provider-demo"]["platforms"]["linux-amd64"] != {
-            "release_path": "provider-demo-linux-amd64",
-            "checksum": f"sha256:{good_hash}",
-        }:
+            "release_path": "provider-demo-linux-amd64", "checksum": f"sha256:{good_hash}"}:
             raise AssertionError("provider capsule metadata must not replace binary platform data")
         if audit_provider_capsule_metadata(
             provider_good,
@@ -712,24 +701,24 @@ def run_self_test():
             source_root=root,
         ):
             raise AssertionError("matching provider capsule metadata should pass")
-        # Self-test row "source-home digest record": accepted on a source home,
-        # refused by a release manifest.
-        source_home_provider = json.loads(json.dumps(provider_good))
-        source_home_row = source_home_provider["external"]["provider-demo"]["capsule_metadata"]
-        source_home_row["platforms"]["linux-amd64"] = {
-            "install_path": "capsules/provider-demo",
-            "release_path": "provider-demo-linux-amd64",
-            "checksum": "source-home:sha256:" + "a" * 64,
-        }
-        anchor_errors = audit_provider_capsule_metadata(
-            source_home_provider, ["linux-amd64"], source_root=root, source_home=True
-        )
-        if anchor_errors:
-            raise AssertionError(f"source-home digest record refused on its own Home: {anchor_errors}")
-        if not any("unsupported checksum format" in error for error in audit_provider_capsule_metadata(
-            source_home_provider, ["linux-amd64"], source_root=root
-        )):
-            raise AssertionError("release manifest accepted a source-home digest record")
+        source_home_provider, digest = json.loads(json.dumps(provider_good)), "source-home:sha256:" + "a" * 64
+        source_home_provider["external"]["provider-demo"]["capsule_metadata"]["platforms"]["linux-amd64"] = {
+            "install_path": "capsules/provider-demo", "release_path": "provider-demo-linux-amd64", "checksum": digest}
+        if audit_provider_capsule_metadata(source_home_provider, ["linux-amd64"], source_home=True):
+            raise AssertionError("source-home digest refused in source-home mode")
+        release_errors = audit_provider_capsule_metadata(source_home_provider, ["linux-amd64"])
+        if not any("unsupported checksum format" in e for e in release_errors):
+            raise AssertionError("source-home digest accepted in release mode")
+        with tempfile.TemporaryDirectory() as empty_root:
+            release_missing = audit_provider_capsule_metadata(provider_good, ["linux-amd64"], source_root=empty_root)
+        if "provider-demo: provider capsule source manifest missing" not in release_missing:
+            raise AssertionError(f"release mode accepted a missing provider source manifest: {release_missing}")
+        err, manifest = io.StringIO(), root / "components.json"
+        manifest.write_text(json.dumps({**provider_good, "profiles": {"release": {"components": ["provider-demo"]}}}))
+        with contextlib.redirect_stderr(err):
+            code = main(["--manifest", str(manifest), "--profile", "release", "--source-home-data-dir", tmp])
+        if code != 2 or "cannot check the release profile" not in err.getvalue():
+            raise AssertionError(f"release profile accepted with --source-home-data-dir: {code}")
         source_home_kubo_manifest = {
             "external": {
                 "kubo": {
@@ -886,6 +875,11 @@ def main(argv):
         print("[components-integrity] self-test OK")
         return 0
 
+    if args.source_home_data_dir and "release" in args.profile:
+        print("[components-integrity] --source-home-data-dir is a source-home install; "
+              "it cannot check the release profile", file=sys.stderr)
+        return 2
+
     path = Path(args.manifest)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -903,12 +897,7 @@ def main(argv):
     if args.source_home_data_dir:
         source_home_capsules = stamped_source_home_capsules(data, selected_components)
 
-    errors = audit_manifest(
-        data,
-        args.platform,
-        selected_components,
-        source_home_capsules,
-    )
+    errors = audit_manifest(data, args.platform, selected_components, source_home_capsules)
     if args.artifact_root:
         errors.extend(audit_release_artifacts(data, args.platform, args.artifact_root))
     errors.extend(
@@ -922,11 +911,8 @@ def main(argv):
     )
     errors.extend(
         audit_capsule_artifact_metadata(
-            data,
-            args.source_root,
-            selected_components=selected_components,
-            installed_data_dir=args.source_home_data_dir,
-            require_selected=bool(args.source_home_data_dir and selected_components),
+            data, args.source_root, selected_components,
+            args.source_home_data_dir, bool(args.source_home_data_dir and selected_components)
         )
     )
     if errors:

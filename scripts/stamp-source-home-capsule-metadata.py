@@ -174,66 +174,43 @@ def copy_declared_icon_set(source_root, installed_root, manifest):
         atomic_copy_file(source, installed_root / icon_dir / f"icon-{size}.png")
 
 
-SOURCE_HOME_ANCHOR = re.compile(r"source-home:sha256:[0-9a-f]{64}")
 SOURCE_HOME_ANCHOR_PREFIX = "source-home:"
-# Keys this Home's capsule manifests carry beyond a components.json row. The
-# Runtime deserialises a row into `CapsuleManifest` with `deny_unknown_fields`,
-# so a manifest key outside this set and the row means a spawn refusal that
-# setup-source-home.sh must report instead of hiding behind an anchor.
-CAPSULE_MANIFEST_ONLY_KEYS = {
-    "schema", "name", "version", "description", "author", "role", "type",
-    "entrypoint", "provides", "permissions", "requires", "resources", "icon",
-    "interfaces", "window_policy", "authority", "projections", "execution",
-    "runtime_abi", "bus_contract", "wit_world_sha256", "service", "capabilities",
-    "microvm", "model_content", "providers", "signature", "viewer",
-}
 
 
 def stamp_provider_spawn_anchors(manifest, data_dir, platform):
-    """Record each rights-declaring provider's own manifest digest where the
-    Runtime spawn gate reads its anchor: the `capsule_metadata` platform row that
-    carries `release_path` plus `checksum`. The Runtime hashes the installed
-    capsule.json at spawn and compares, so an edited manifest is still refused.
-    The `source-home:` prefix marks a digest of this Home's own install, never a
-    release artifact."""
+    """Anchor a rights-declaring provider on its installed manifest digest; print each skip."""
+    profiles = manifest.get("profiles") or {}
+    selected = (profiles.get("source-home") or {}).get("components") or []
     for name, component in sorted(manifest.get("external", {}).items()):
+        if name not in selected:
+            continue
         info = (component.get("platforms") or {}).get(platform)
         if not isinstance(info, dict) or not info.get("install_path"):
+            print(f"stamp: skip {name}: no exact {platform} row with install_path", file=sys.stderr)
             continue
-        # Bin-only providers (this script's own source list includes retired ones)
-        # have no installed manifest, so the Runtime gate never reads one.
         installed_manifest = data_dir / "capsules" / name / "capsule.json"
+        # A bin-only provider may ship no installed manifest; skip it by name.
         if not installed_manifest.is_file():
             print(f"stamp: skip {name}: no installed capsule.json", file=sys.stderr)
             continue
         try:
             capsule = json.loads(installed_manifest.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            print(f"stamp: skip {name}: unreadable capsule.json", file=sys.stderr)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            print(f"stamp: skip {name}: unreadable capsule.json: {exc}", file=sys.stderr)
             continue
-        # The Runtime reads the row with deny_unknown_fields, so a manifest key
-        # outside this component's row refuses the spawn and gets no anchor.
-        known = set(component) | set(component.get("capsule_metadata") or {}) | CAPSULE_MANIFEST_ONLY_KEYS
-        if not isinstance(capsule, dict) or set(capsule) - known:
-            print(f"stamp: skip {name}: capsule.json has keys the Runtime row rejects", file=sys.stderr)
-            continue
-        rights = (capsule.get("authority") or {}).get("rights") or []
-        if capsule.get("role") != "provider" or not rights:
+        # Runtime validation stays authoritative; the anchor records only what it reads.
+        authority = capsule.get("authority") if isinstance(capsule, dict) else None
+        rights = authority.get("rights") if isinstance(authority, dict) else None
+        if capsule.get("role") != "provider" or not isinstance(rights, list) or not rights:
             print(f"stamp: skip {name}: no declared rights", file=sys.stderr)
             continue
-        # `sha256_file` already returns the `sha256:<hex>` form the gate compares.
-        digest = SOURCE_HOME_ANCHOR_PREFIX + sha256_file(installed_manifest)
+        install_path = f"capsules/{name}"
         metadata = component["capsule_metadata"] = component.get("capsule_metadata") or {"platforms": {}}
-        if metadata.get("install_path") not in (None, f"capsules/{name}"):
+        if metadata.setdefault("install_path", install_path) != install_path:
             raise SystemExit(f"{name} capsule_metadata install path conflicts with its source capsule")
-        metadata["install_path"] = f"capsules/{name}"
-        row = metadata.setdefault("platforms", {}).setdefault(platform, {})
-        # The gate also needs a release_path on the anchor row, so the anchor
-        # names the row that holds this Home's own install.
-        row["release_path"] = info.get("release_path") or f"{name}-{platform}"
-        row["checksum"] = digest
-        if not SOURCE_HOME_ANCHOR.fullmatch(digest):
-            raise SystemExit(f"{name} source-home anchor is not a sha256 digest")
+        row = metadata.setdefault("platforms", {}).setdefault(platform, {"install_path": install_path,
+            "release_path": info.get("release_path") or f"{name}-{platform}"})
+        row["checksum"] = SOURCE_HOME_ANCHOR_PREFIX + sha256_file(installed_manifest)
 
 
 def stamp_component_capsules(components_path, data_dir, root, platform, capsules):

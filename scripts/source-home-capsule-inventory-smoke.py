@@ -222,6 +222,10 @@ def make_kubo_rewritten_components(path):
 
 
 def assert_source_archive_overlay(stamper):
+    path = ROOT / "scripts" / "components-release-integrity-check.py"
+    spec = importlib.util.spec_from_file_location("capsule_integrity", path)
+    integrity = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(integrity)
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp) / "repo"
         data = Path(temp) / "data"
@@ -369,74 +373,81 @@ def assert_setup_order():
     if "--profile source-home" not in integrity_call:
         raise AssertionError("source-home integrity must validate the stamped source-home profile")
 
+def installed_manifest(name, rights):
+    manifest = {
+        "schema": "elastos.capsule/v1", "name": name, "version": "0.1.0", "author": "elastos",
+        "description": name, "role": "provider", "entrypoint": name, "type": "native-provider",
+        "provides": f"elastos://{name}/*", "permissions": {},
+    }
+    if rights:
+        resource = [{"resource": f"elastos://{name}/*", "actions": ["execute"], "operations": ["status"]}]
+        rule = [{"id": "storage", "rules": ['(allow file-read* (literal (param "STORAGE_PARENT")))']}]
+        manifest["authority"] = {"reason": name, "capabilities": resource, "rights": rule}
+    return manifest
+
 
 def assert_source_home_provider_anchors(stamper):
-    def provider_manifest(name, rights):
-        manifest = {
-            "schema": "elastos.capsule/v1", "name": name, "version": "0.1.0", "author": "elastos",
-            "description": f"{name} Runtime boundary", "role": "provider", "entrypoint": name,
-            "type": "native-provider", "provides": f"elastos://{name}/*", "permissions": {},
-        }
-        if rights:
-            manifest["authority"] = {
-                "reason": f"{name} owns its Runtime boundary.",
-                "capabilities": [{"resource": f"elastos://{name}/*", "actions": ["execute"],
-                                  "operations": ["status"]}],
-                "rights": [{"id": "storage",
-                            "rules": ['(allow file-read* (literal (param "STORAGE_PARENT")))']}],
-            }
-        return manifest
-
+    path = ROOT / "scripts" / "components-release-integrity-check.py"
+    spec = importlib.util.spec_from_file_location("capsule_integrity", path)
+    integrity = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(integrity)
     with tempfile.TemporaryDirectory() as temp:
-        root = Path(temp) / "repo"
-        data = Path(temp) / "data"
-        components = data / "components.json"
-        names = ["rights-provider", "plain-provider"]
+        root, data = Path(temp) / "repo", Path(temp) / "data"
+        components, names = data / "components.json", ["rights-provider", "wildcard-provider", "alpha-provider"]
+        installed = {n: {**installed_manifest(n, n != "alpha-provider"), "icon": "icons"} for n in names}
         for name in names:
-            manifest = provider_manifest(name, rights=name == "rights-provider")
-            write_json(root / "capsules" / name / "capsule.json", manifest)
-            (root / "capsules" / name / name).write_bytes(name.encode("utf-8"))
-            (data / "bin").mkdir(parents=True, exist_ok=True)
-            (data / "bin" / name).write_bytes(name.encode("utf-8"))
-            # Contract materialization copies the source manifest bytes verbatim.
-            write_json(data / "capsules" / name / "capsule.json", manifest)
-        write_json(
-            components,
-            {
-                "external": {
-                    name: {
-                        "version": "0.1.0",
-                        "install_path": f"bin/{name}",
-                        "platforms": {
-                            "linux-amd64": {
-                                "checksum": "sha256:" + "0" * 64,
-                                "release_path": f"{name}-linux-amd64",
-                                "install_path": f"bin/{name}",
-                            }
-                        },
-                    }
-                    for name in names
-                },
-                "capsules": {},
-            },
-        )
-        anchored = data / "capsules" / "rights-provider" / "capsule.json"
-        digest = "source-home:sha256:" + sha256(anchored)
+            (root / "capsules" / name / "icons").mkdir(parents=True)
+            for size in (32, 64, 128, 256):
+                (root / "capsules" / name / "icons" / f"icon-{size}.png").write_bytes(b"icon")
+            # Distinct source/installed copies show which one is hashed.
+            source_copy = {**installed[name], "version": "0.0.9"} if name == "rights-provider" else installed[name]
+            write_json(root / "capsules" / name / "capsule.json", source_copy)
+            (root / "capsules" / name / name).write_bytes(name.encode())
+            write_json(data / "capsules" / name / "capsule.json", installed[name])
+            (data / "bin").mkdir(exist_ok=True)
+            (data / "bin" / name).write_bytes(name.encode())
+        def external(name):
+            row = {"install_path": f"bin/{name}", "release_path": f"{name}-linux-amd64", "checksum": "sha256:"}
+            return {"version": "0.1.0", **row, "platforms": {"*": {**row, "release_path": f"{name}-any"}}
+                    if name == "wildcard-provider" else {"linux-amd64": row}}
 
-        for _ in range(2):
+        # Only providers the source-home profile selects are anchored.
+        write_json(components, {"external": {n: external(n) for n in names},
+                                "profiles": {"source-home": {"components": names}}})
+        digest = "source-home:sha256:" + sha256(data / "capsules" / "rights-provider" / "capsule.json")
+
+        def stamp():
             skipped = io.StringIO()
             with redirect_stderr(skipped):
                 stamper.stamp_component_capsules(components, data, root, "linux-amd64", names)
-            if "stamp: skip plain-provider: no declared rights" not in skipped.getvalue():
-                raise AssertionError(f"no-rights provider skip is silent: {skipped.getvalue()!r}")
-            result = json.loads(components.read_text(encoding="utf-8"))
-            row = result["external"]["rights-provider"]["capsule_metadata"]["platforms"]["linux-amd64"]
-            if row.get("checksum") != digest:
-                raise AssertionError(f"rights provider anchor is not its manifest digest: {row.get('checksum')!r}")
-            if row.get("release_path") != "rights-provider-linux-amd64":
-                raise AssertionError("rights provider anchor lost its release_path")
-            if "capsule_metadata" in result["external"]["plain-provider"]:
-                raise AssertionError("provider without rights kept a source-home anchor")
+            return skipped.getvalue()
+        skipped = stamp()
+        for reason in ("alpha-provider: no declared rights", "wildcard-provider: no exact linux-amd64 row with install_path"):
+            if f"stamp: skip {reason}" not in skipped:
+                raise AssertionError(f"{reason} skip is silent: {skipped!r}")
+        (data / "capsules" / "rights-provider" / "capsule.json").unlink()  # the one anchored provider loses its manifest
+        (data / "capsules" / "alpha-provider" / "capsule.json").write_text("{")  # unreadable JSON
+        skipped = stamp()
+        for name, reason in (("rights-provider", "no installed capsule.json"), ("alpha-provider", "unreadable capsule.json")):
+            if f"stamp: skip {name}: {reason}" not in skipped:
+                raise AssertionError(f"{reason} skip is silent: {skipped!r}")
+        result = json.loads(components.read_text())
+        meta = result["external"]["rights-provider"]["capsule_metadata"]
+        row = meta["platforms"]["linux-amd64"]
+        if {**row, "release_path": "rights-provider-linux-amd64", "install_path": "capsules/rights-provider",
+                "checksum": digest} != row:
+            raise AssertionError(f"rights provider anchor row is wrong: {row!r}")
+        if "capsule_metadata" in result["external"]["alpha-provider"]:
+            raise AssertionError("no-rights provider kept an anchor")
+        if integrity.audit_provider_capsule_metadata(result, ["linux-amd64"], source_root=root, source_home=True):
+            raise AssertionError("stamped anchors fail the integrity check")
+        if not any("extract_path mismatch" in e for e in integrity.audit_provider_capsule_metadata(
+                result, ["linux-amd64"], source_root=root)):
+            raise AssertionError("release mode accepted a source-home row without extract_path")
+        row["install_path"] = "capsules/other"  # a source home still checks the row it anchors
+        if not any("install_path mismatch" in e for e in integrity.audit_provider_capsule_metadata(
+                result, ["linux-amd64"], source_root=root, source_home=True)):
+            raise AssertionError("source-home mode accepted an unchecked install_path")
 
 
 def run_smoke():
