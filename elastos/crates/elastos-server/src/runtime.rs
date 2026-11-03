@@ -810,7 +810,11 @@ mod tests {
             .verify_capsule_signature(&declared, &release_dir)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("declares an agent"), "{error}");
+        let expected = format!(
+            "Capsule '{}' declares an agent but no trusted key signed it",
+            declared.name
+        );
+        assert!(error.to_string().contains(&expected), "{error}");
 
         let signed_by = |key: u8| {
             let mut signed = manifest.clone();
