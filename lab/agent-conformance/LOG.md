@@ -10488,3 +10488,309 @@ Remaining gate: supervisor commit, independent reviews and integration.
 Next owner: lane supervisor.
 
 - 164: Kept native hash status and escaped stdout/stderr in one output decision, added refusal/recovery and exact-file tests, caught/restored all three compiling plants, updated native-identity prose, and passed every restored lane gate and the report receipt.
+
+## 165 — checksum refusal binds the installed provider
+
+Before source edits, the supplied checkout is HEAD `7ac89090f4841b7f97e92139fda4c348610f7b43`,
+tree `260aaa04e18f3f652c6c8d7bf7c56e94b4e365b2`, on the supplied task-165 branch.
+Dirty paths: none. Cached divergence against `spike/spike/agent-host` is
+3 ahead / 0 behind; network access stays disabled. The checkout and unrelated
+work remain under the supervisor's ownership. Task 163 and 164 are present;
+150, 151 and 157 are absent, so their shared helpers retain the supplied bytes.
+
+### Shared checksum assertion
+
+Read BACKLOG item 14's 014 follow-up, LOG sections 012 and 014, RUNBOOK's
+native checksum/F-ac1i paragraphs, the two existing journeys, shared fixture
+writers, native build helper, Home launcher and the two named architecture
+sections before editing. The chosen change extracts the CID journey's existing
+line check into `tests/runtime.rs::checksum_refusal_matches`. Both journeys
+use that same private decision with the original paths and raw stderr.
+The operator journey computes its match before the existing `<lane>` display
+replacement. A nonzero exit remains a separate assertion in each journey.
+
+The CID fixture retains its pre-spawn marker and materialization checks.
+The operator retains its manifest shape, hash, size, mode, install-path,
+storage and absent-coordinates checks. It requests the existing provider
+helper before the Runtime helper so the cold command below builds the provider
+first. Shared writers, build/hash helpers, launch policy, report/receipt schema,
+probe, stand-in, Cargo inputs, GAPS and the falsifier list retain their supplied
+behavior. RUNBOOK's checksum paragraph names the shared line and matching-byte
+recovery. Runtime owns component verification and launch; this lab check owns
+which diagnostic counts as refusal evidence.
+
+`checksum_refusal_requires_one_component_path_and_manifest` calls that actual
+helper for localhost-provider and ipfs-provider using harmless synthetic paths
+with spaces. Complete bare and prefixed lines pass. Separate component/checksum
+lines, split checksum or manifest fragments, missing-provider plus another
+component's checksum error, a near-match name, wrong installed path, wrong
+manifest and empty output are refused. The prefixed valid line is restored
+after every refusal case. Fixed labels identify each assertion. These synthetic
+diagnostics supply zero Runtime acceptance.
+
+### Execution conditions and fully cold provider proof
+
+All executed Cargo/test gates below used the exclusive existing shared
+`local-ai-heavy-build.lock` lease and these settings from the repository root:
+
+```sh
+export CARGO_NET_OFFLINE=true RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+export CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host"
+export CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build"
+export TMPDIR="$PWD/lab/agent-conformance/target/task-165/tmp"
+```
+
+An initial busy lease deferred compilation. The sandbox-only loopback
+preflight returned `Operation not permitted` before execution. That is an
+infrastructure result with zero Runtime acceptance. The approved host preflight
+then passed loopback binding and process visibility. Each gate checks a 12 GiB
+build estimate plus 2 GiB reserve and has a 600-second command bound. The
+parent owns the lease descriptor, starts a command group, and settles that group
+on timeout; children receive the descriptor's normal close-on-exec behavior.
+Every test keeps the existing Home launch and group-cleanup bounds.
+
+Under the lease, `lsof -t +D "$PWD/lab/agent-conformance/target/runtime"`
+returned exit 1 with empty stdout/stderr: zero open-file users of the native
+target. Its path and parent were checked as ordinary directories. Cargo cleaned
+only that rebuildable lane target with both build-output settings pinned to it:
+
+```sh
+CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/runtime" \
+CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/runtime/build" \
+cargo clean --locked --offline --manifest-path elastos/Cargo.toml --target-dir $PWD/lab/agent-conformance/target/runtime
+```
+
+The full clean exited 0 in 8.442 s. The entire
+`target/runtime` path was then confirmed absent before the next fresh test
+process. This was a full target clean, rather than a package-only clean.
+Homes and unrelated outputs stayed in place. The exact cold command was:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime serve_refuses_provider_whose_bytes_differ_from_its_hash -- --exact --nocapture
+```
+
+The cold command exited 0 in 188.076 s with one passed test.
+The existing native helper reported localhost-provider build plus hash at
+**8.48 s**, before Runtime build plus hash at **175.78 s**. The resulting
+provider was 1,422,688 bytes, SHA-256
+`2ff07b37721c97631e2f84a31c7408c8edb45f80c8fddde7f7cef1e367d09ab4`.
+Runtime SHA-256 was
+`6b912d8767be13f078fd825012aa7fea8a018e0b982082d8f94bba23f8072aec`.
+The changed installed provider produced the complete component/path/manifest
+checksum refusal and an unsuccessful Runtime exit. Its successful fixture
+Home was finished.
+
+The next two commands each ran a fresh test process and fresh Home:
+
+| Exact command | Exit | Seconds | Result |
+| --- | --- | --- | --- |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime fixture_operator_starts_ready_and_stops_cleanly -- --exact --nocapture` | 0 | 17.454 | matching-byte readiness, socket census, group stop and Home finish |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime run_by_cid_refuses_content_provider_whose_bytes_differ_from_its_hash -- --exact --nocapture` | 0 | 4.448 | shared line check, absent pre-spawn marker and zero materialized capsules |
+
+These are the actual native journeys; the synthetic helper test is separate.
+
+### Three separate compiling matcher plants
+
+The unchanged new test command for every plant and restoration was:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime checksum_refusal_requires_one_component_path_and_manifest -- --exact
+```
+
+The initial baseline exited 0 in 3.281 s with one passed test.
+Each edit below replaces this exact byte string once inside the private helper:
+
+```rust
+    let refusal = format!(
+        "installed component '{component}' at {} failed checksum verification against {}",
+        installed.display(),
+        manifest.display()
+    );
+    stderr.lines().any(|line| line.contains(&refusal))
+```
+
+**loose-conjunction**, exact replacement bytes:
+
+```rust
+    let _ = (installed, manifest);
+    stderr.contains(component) && stderr.contains("failed checksum verification")
+```
+
+Planted: exit 101 in 1.979 s, one executed test,
+0 passed / 1 failed at `separate component and checksum lines must be refused`.
+Restored: exit 0 in 0.631 s, one passed test.
+
+**omit-installed-path**, exact replacement bytes:
+
+```rust
+    let _ = installed;
+    stderr.lines().any(|line| {
+        line.contains(&format!("installed component '{component}' at "))
+            && line.contains(&format!(
+                " failed checksum verification against {}",
+                manifest.display()
+            ))
+    })
+```
+
+Planted: exit 101 in 0.714 s, one executed test,
+0 passed / 1 failed at `wrong installed path must be refused`.
+Restored: exit 0 in 0.444 s, one passed test.
+
+**omit-manifest-path**, exact replacement bytes:
+
+```rust
+    let _ = manifest;
+    let refusal = format!(
+        "installed component '{component}' at {} failed checksum verification against ",
+        installed.display()
+    );
+    stderr.lines().any(|line| line.contains(&refusal))
+```
+
+Planted: exit 101 in 0.705 s, one executed test,
+0 passed / 1 failed at `wrong manifest path must be refused`.
+Restored: exit 0 in 0.459 s, one passed test.
+
+Each plant compiled and failed its named decoy assertion. Compilation/setup
+failures and empty selections supplied zero caught credit. A `finally` block
+restored the complete source bytes before the next plant, and the exact test
+passed after each restoration. These plants created zero Homes. The restored
+`tests/runtime.rs` SHA-256 is
+`934b646f358b8a963e4828839a4a4070ab585d5726b586c1199c9998709a8801`.
+The three plants remain hand-run evidence; registration and the shared runner
+keep their supplied bytes.
+
+### Existing F-ac1i baseline, plant and restoration
+
+F-ac1i used the same real refusal command shown in the cold proof. Its exact
+existing `tests/common/mod.rs` edit remains owned by `falsifiers.json`:
+
+```text
+old:     let installed = home.data().join("bin/localhost-provider");
+new:     let installed = home.data().join("bin/localhost-provider-copy");
+```
+
+| State | Exit | Seconds | Executed result |
+| --- | --- | --- | --- |
+| Baseline | 0 | 3.460 | 1 passed / 0 failed |
+| Planted | 101 | 3.295 | 0 passed / 1 failed at the checksum-reason assertion |
+| Restored | 0 | 2.935 | 1 passed / 0 failed |
+
+The compiling plant returned `localhost-provider not installed.` and failed at
+`expected the complete provider checksum refusal on one line`. The changed
+copy and unchanged manifest therefore supplied a different refusal reason.
+The complete writer bytes were restored in `finally`, then the real journey
+passed. The failed Home stayed until the assertion result was reviewed; its
+launch had returned through the existing group check, and a separate `lsof -t
++D <owned root>` returned exit 1 with empty streams. That one idle retained
+fixture was then removed. All successful journeys called `home.finish()`.
+
+### Principles check
+
+| Question | Answer | Evidence |
+| --- | --- | --- |
+| 1. New name/URL used where code or content needs a hash? | No | `tests/runtime.rs:276` retains the independent provider-byte SHA-256 check; line 15 uses the component name only to bind its Runtime diagnostic. |
+| 2. Capsule, Home or UI gains ambient authority? | No | `tests/runtime.rs:308` retains the existing guarded Home launch; the change stays in the host-side test module. |
+| 3. Second path or second copy of an operation's rule? | No | `tests/runtime.rs:15` is the one line check called by the CID journey at line 215 and operator journey at line 322. |
+| 4. Runtime trusted core grows? | No | `tests/runtime.rs:15` adds the private lab assertion; Runtime and provider sources retain their supplied bytes. |
+| 5. New refusal fails closed with a clear reason? | Yes | `tests/runtime.rs:334` requires the complete component, installed file and manifest diagnostic, separately from the exit check at line 331. |
+| 6. Capsule logic stays self-contained and uses granted Bus calls? | Yes | `tests/runtime.rs:31` uses host-only synthetic diagnostics; capsule logic and Bus imports retain their existing owners and paths. |
+| 7. Named test and caught falsifiers prove each new rule? | Yes | `tests/runtime.rs:30` and line 90 catch all three compiling matcher plants; line 334 catches the real F-ac1i plant, with every named test executed and failed. |
+| 8. Identity, admission and allowance remain separate? | Yes | `tests/runtime.rs:276` checks native bytes, line 331 checks the Runtime's exit, and `RUNBOOK.md:90` limits diagnostic evidence; these checks supply zero grant or resource-budget credit. |
+
+The repository supplies no humanizer skill source. This handoff uses plain
+actor and ownership statements. Tasks 134 to 138 and 161 keep their supplied
+states and gates; Runtime product blockers and installed acceptance stay with
+their named owners.
+
+### Restored gates and hard-stop result
+
+The restored runtime target and full locked lane gate passed on their first
+runs. The full gate executed 252 passed tests with 14 existing blocked tests
+ignored and zero failures. Runtime integration executed 11 passed tests and
+kept its two blocked journeys ignored. Product-data validation and all 99
+product-data tests passed. Source formatting and whitespace checks passed.
+Each command used the same offline environment, shared lease, free-space rule
+and 600-second bound stated above. Free space at these gate starts ranged
+from 37.021 to 38.990 GiB.
+
+| Exact command | Exit | Seconds |
+| --- | --- | --- |
+| `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` | 0 | 0.200 |
+| `git diff --check` | 0 | 0.049 |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime` | 0 | 14.429 |
+| `node scripts/check-product-data.mjs` | 0 | 0.078 |
+| `node --test scripts/check-product-data.test.mjs` | 0 | 1.460 |
+| `cargo fmt --manifest-path elastos/Cargo.toml --all -- --check` | 0 | 3.013 |
+| `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` | 0 | 0.116 |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` | 0 | 270.398 |
+| `lab/agent-conformance/run.sh` | 1 | 252.328 |
+
+The report command reached the actual test suite and then returned exit 1.
+Its sole failed journey was the existing
+`process_isolation::runaway_trap_is_bounded_while_siblings_finish`, at
+`tests/common/parallel.rs:88`, in the final census/operator stop. The census
+reported one process leftover holding the fixture's `host-process.lock`.
+The lane's hard-stop rule applies to that path. This task stays incomplete;
+there was zero retry, assertion change or cleanup-policy change. The owning
+supervisor must review that retained cleanup result before another attempt.
+This is a lab fixture result, rather than a shipping-product finding.
+
+The report table contains 252 PASS rows (including the version-identity row),
+2 FAIL rows (the journey and Cargo), 14 BLOCKED and 0 SKIPPED. The same run's
+native checksum, CID and new synthetic rows all passed. The complete identity
+receipt correctly retains `suite_outcome: FAIL`, `cargo_success: false` and
+`command_success: false`. The local, uncommitted receipt is
+[`target/run-table.kUr9PD/VERSIONS.json`](target/run-table.kUr9PD/VERSIONS.json),
+SHA-256 `3946df237f1bbcf488fa5211a96728d937f71edc49cb28f7396c089e0a4cb172`.
+It identifies supplied HEAD with `dirty: true`; it describes this local
+candidate, rather than a new committed tree. Raw failed-run output stays in
+that ignored report directory under its existing local access controls.
+
+### Retention and handoff
+
+Every successful run finished its Homes. The reviewed F-ac1i fixture was
+removed after its expected assertion and idle-holder check. The failed report
+retains five Homes for the existing hard-stop review. After the report exited,
+`lsof -t +D <each retained root>` returned exit 1 with empty streams for all
+five; the two lane-native executable paths likewise had zero active holders.
+There are zero remaining owned test children to stop. Their present idle state
+supplies zero acceptance for the earlier failed census, so that gate stays
+failed. The five Homes remain private and their contents were left intact.
+
+The ignored machine-readable `target/task-165/inventory.json` binds this
+branch/worktree, exact commit/tree and dirty paths to task 165. Its cleanup
+record names each retained failed Home with the review condition. Rebuildable
+native/host/probe outputs, task proof and report scratch remain active gate
+artifacts for supervisor review; removal follows that review and the owning
+retention decisions. Supplied older Homes and other worktrees retain their
+existing owners. The shared lease was released when the failed parent exited.
+Final formatting and diff checks follow this record.
+
+The supplied HEAD and tree remain unchanged. The current branch owns the
+three-file candidate for supervisor review: `tests/runtime.rs`, the existing
+RUNBOOK checksum paragraph, and this LOG section. Cached base divergence is
+3 ahead / 0 behind against `spike/spike/agent-host`; network access stayed
+disabled and this task branch has no upstream. The supervisor owns the other
+supplied refs/worktrees. Cargo inputs, falsifier registration, shared runner,
+shared fixture writer and other source paths retain their supplied bytes.
+
+Candidate: supplied HEAD/tree plus these three local edits.
+Exercised checks: exact commands, exits, times and assertions above; all
+required checks executed, with the report command failed at its hard stop.
+Reviews: supervisor-owned independent reviews remain pending.
+Installed release evidence: isolated checksum/refusal/recovery fixtures only;
+release acceptance remains with its owner.
+Remaining gate: supervisor review of the report cleanup hard stop, then a
+passing report gate and the normal independent reviews/integration.
+Next owner: lane supervisor.
+
+- 165: Shared the native checksum line assertion, added component/path/manifest decoys, proved a fully cold provider build and matching-byte recovery, caught/restored three matcher plants and F-ac1i, and passed the locked lane gate; report acceptance stopped at the existing fixture-lock cleanup gate.
+
+Final light checks held the same shared lease and passed after the handoff
+record was written: lane formatting, exit 0 in 0.335 s; Runtime workspace
+formatting from `elastos/` (`cargo fmt --all -- --check`), exit 0 in 2.777 s;
+and `git diff --check`, exit 0 in 0.026 s. Exact Rust-source, fixture-writer
+and falsifier-list restoration was verified. Only the three authorized paths
+differ. The report hard stop and five retained idle Homes keep their gates.

@@ -36,7 +36,7 @@ A backticked table line inside a fenced code block in `GAPS.md` still counts as 
 - `run_by_cid_refuses_content_provider_whose_bytes_differ_from_its_hash`: stamps a different byte string's SHA-256 on the installed marker script; requires the complete checksum refusal on one stderr line, an absent marker, and zero materialized capsule entries.
 - `capsule_named_by_hash`: BLOCKED (AC-025-CID). Still required, in order: a measured Kubo v0.40.1 match for the staged probe bundle's lab CID; the offline content fixture (installed, checksum-verified `ipfs-provider`, a local-only Kubo policy and a socket census); `--cid` reaching the directory launch's activation. The verdict is in [GAPS.md](GAPS.md#launch-by-bundle-cid-025).
 - `launch_refuses_bytes_unlike_signed_record`: BLOCKED (AC-040-RECORD-LAUNCH). `elastos run` does not compare the launched bytes with the signed record. The record-to-launch repair is in [GAPS.md](GAPS.md#record-to-launch-040). An unsigned refusal happens before that comparison and is not this row.
-- `serve_refuses_provider_whose_bytes_differ_from_its_hash`: installs the provider and its hash, appends one byte to the copy, and requires a nonzero `serve` exit with `localhost-provider` and `failed checksum verification` on stderr. It also checks that storage exists inside the root and the readiness file is absent.
+- `serve_refuses_provider_whose_bytes_differ_from_its_hash`: installs the provider and its hash, appends one byte to the copy, and requires a nonzero `serve` exit with the complete checksum refusal described below. It also checks that storage exists inside the root and the readiness file is absent.
 - `run_table_requires_cargo_results`: checks PASS, BLOCKED and FAIL grading against Cargo-format result fixtures.
 - `run_table_grades_blocker_lists_by_one_rule`: checks whole multi-word blocker reasons, trimmed semicolon lists and FAIL for empty reasons or parts. F-report-blocker-list keeps only the first whitespace word; the named test must fail planted and pass restored.
 - `foreign_and_wrong_version_imports_are_refused`: rejects imports outside the probe's Bus subset.
@@ -83,8 +83,15 @@ The checksum test passes both `--addr 127.0.0.1:<free port>` and an in-root
 bind (`server_infra.rs:768-776,1547`; `serve_cmd.rs:295,462`). F-ac1i changes the
 writer's destination to `bin/localhost-provider-copy` while the manifest keeps
 the required path. Runtime then reports the provider as missing, so the test
-fails on its reason check. Both cases stop before network startup. Task 013
-adds the matching-byte ready operator and closes AC-010-OFFLINE below.
+fails on its reason check. Both cases stop before network startup. Both native
+checksum journeys share one private line check over raw stderr and original
+paths: `installed component '<component>' at <installed path> failed checksum
+verification against <manifest path>` must be contiguous on one line. Each
+journey also requires a nonzero exit. Synthetic decoys test this lab assertion
+and supply zero Runtime acceptance. After the changed-byte refusal,
+`fixture_operator_starts_ready_and_stops_cleanly` uses matching bytes in a fresh
+Home as the recovery control; it proves readiness and clean group shutdown.
+Task 013 closes AC-010-OFFLINE below.
 
 F-ac1f changes the single data-dir rule to the Linux form. The decoy must remain
 and `runtime_data_dir_is_under_throwaway_home` must fail. F-ac1g changes only the
