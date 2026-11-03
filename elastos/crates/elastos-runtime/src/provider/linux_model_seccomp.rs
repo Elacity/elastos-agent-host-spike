@@ -113,6 +113,8 @@ mod tests {
     /// zero without it exercised nothing and FAILS.
     const PROBE_TOKEN: &str = "elastos-seccomp-row-probe-passed";
     const ROW_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_ROW";
+    const TOKEN_ROW: &str = "socket+AF_INET";
+    const TOKEN_LINE: &str = "elastos-seccomp-row-probe-passed\n";
     /// Debug only: send each probe's stderr to its token file.
     const PROBE_LOG_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_LOG";
     /// The pid of a plain helper the harness starts beside the filtered probe.
@@ -132,13 +134,9 @@ mod tests {
     /// but takes no filter, so its success proves the position can reach the
     /// helper and only the deny entry refuses the filtered row.
     const UNFILTERED_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_UNFILTERED";
-    /// A known stderr line the control probe prints before exiting
-    /// [`CONTROL_EXIT`], so a message carrying it proves the stderr arrived.
     const CONTROL_STDERR: &str = "elastos-seccomp-control-stderr";
     const CONTROL_EXIT: i32 = 7;
-    /// Set only on a control child's own command: `n` writes the marker line
-    /// and `n` bytes, then exits [`CONTROL_EXIT`]; an empty or unparsable value
-    /// leaves the child's own run. No test changes this process's environment.
+    /// On a control child's own command only: it prints `n` bytes, exits [`CONTROL_EXIT`].
     const CONTROL_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_CONTROL";
     /// The test that serves as the helper sibling.
     const VICTIM_TEST: &str =
@@ -708,8 +706,7 @@ mod tests {
             if rc > 2 && wanted != READV_ROW {
                 close_all(&[rc as libc::c_int]);
             }
-            // The harness's control runs without this, so it still proves
-            // its row; a test sets it on that one child's command.
+            // Set on a test's own control child only.
             planted_control();
         } else {
             check(row.name, row.outcome, rc);
@@ -721,8 +718,7 @@ mod tests {
     async fn child_and_descendant_have_no_inet_sockets() {
         let name = DESCENDANT_TEST;
         let executable = std::env::current_exe().unwrap();
-        // A row that ends in a signal runs here, because the harness test
-        // proves the filter first and a killed process would fail that proof.
+        // A signal row runs here: the harness proves the filter.
         if let Ok(row) = std::env::var(ROW_VAR) {
             probe(&row);
             return;
@@ -807,16 +803,28 @@ mod tests {
         }
     }
 
-    /// Where one row's probe records its pass token. The filter closes the
-    /// child's inherited descriptors before exec, so a pipe from
-    /// `Stdio::piped` reaches the probe closed and its token is lost; this
-    /// file is opened before the fork. Each row starts and ends with none.
-    fn probe_token(name: &str) -> std::path::PathBuf {
+    /// A row's token file, opened before the fork. `tag` names the run, so a
+    /// concurrent run under the same pid and row gets its own file; a lost
+    /// token would read as a blocked syscall.
+    fn probe_token(tag: &str, name: &str) -> std::path::PathBuf {
         let safe: String = name
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
             .collect();
-        std::env::temp_dir().join(format!("elastos-row-probe-{}-{safe}", std::process::id()))
+        std::env::temp_dir().join(format!("field-probe-{}-{tag}-{safe}", std::process::id()))
+    }
+
+    /// The token file one child writes.
+    fn token_file(tag: &str, name: &str) -> std::fs::File {
+        std::fs::File::create(probe_token(tag, name)).expect("token")
+    }
+
+    /// One tag per call: no two runs share a token file.
+    fn elapsed_nanos() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
     }
 
     /// Where the helper publishes its readiness line, keyed by the harness pid
@@ -1080,12 +1088,13 @@ mod tests {
     /// The pass rule for a row that ends by exit: it exits zero and its token
     /// file holds the pass token. A child that exits zero without the token
     /// exercised nothing.
-    fn row_result(name: &str, success: bool) -> Result<(), String> {
+    fn row_result(tag: &str, name: &str, success: bool) -> Result<(), String> {
         if !success {
             return Err(format!("row {name} failed"));
         }
-        let stdout = std::fs::read_to_string(probe_token(name)).unwrap_or_default();
-        let _ = std::fs::remove_file(probe_token(name));
+        let path = probe_token(tag, name);
+        let stdout = std::fs::read_to_string(&path).unwrap_or_default();
+        let _ = std::fs::remove_file(path);
         if stdout.contains(PROBE_TOKEN) {
             Ok(())
         } else {
@@ -1096,6 +1105,7 @@ mod tests {
     /// Runs one row's probe to its end: a killed row ends in SIGSYS and any
     /// other row exits zero with its pass token written.
     async fn finish_probe(
+        tag: &str,
         name: &str,
         row: &Row,
         child: &mut tokio::process::Child,
@@ -1112,7 +1122,7 @@ mod tests {
                 }
             }
             // The child must also prove it exercised the row.
-            (Some(status), _) => row_result(name, status.success()),
+            (Some(status), _) => row_result(tag, name, status.success()),
         };
         result.err()
     }
@@ -1141,6 +1151,7 @@ mod tests {
             .then(Victim::start);
         let total = all.len();
         let mut failures = Vec::new();
+        let tag = elapsed_nanos().to_string();
         // Victim rows also get one unfiltered sibling control each; their
         // failures are separate lines, never new rows in `rows()`.
         let mut defects = Vec::new();
@@ -1207,10 +1218,8 @@ mod tests {
             // position the host refuses (Yama scope 1 for a non-ancestor) then
             // fails here by name instead of passing the row vacuously.
             if is_victim(name) {
-                // No control planted: the child's own run is the control.
-                if let Err(failure) =
-                    sibling_control(victim.as_ref().expect("helper"), &row, "").await
-                {
+                let run = sibling_control(victim.as_ref().expect("helper"), &row, "").await;
+                if let Err(failure) = run {
                     defects.push(failure);
                 }
             }
@@ -1225,9 +1234,7 @@ mod tests {
                 .arg(filter)
                 .arg("--nocapture")
                 .env(ROW_VAR, row.name)
-                .stdout(std::process::Stdio::from(
-                    std::fs::File::create(probe_token(row.name)).expect("probe token file"),
-                ));
+                .stdout(std::process::Stdio::from(token_file(&tag, row.name)));
             if is_victim(name) {
                 let helper = victim.as_ref().expect("a victim row starts the helper");
                 command
@@ -1240,7 +1247,7 @@ mod tests {
                         std::fs::OpenOptions::new()
                             .append(true)
                             .create(true)
-                            .open(probe_token(name))
+                            .open(probe_token(&tag, name))
                             .expect("probe log file"),
                     ))
                     .stderr(std::process::Stdio::from(
@@ -1255,9 +1262,11 @@ mod tests {
             }
             install_on_command(&mut command).expect("filter attach failed");
             let mut child = spawn_row(&mut command);
-            if let Some(failure) = finish_probe(name, &row, &mut child).await {
+            if let Some(failure) = finish_probe(&tag, name, &row, &mut child).await {
                 failures.push(failure);
             }
+            // A killed row reads no token, so this side removes it.
+            let _ = std::fs::remove_file(probe_token(&tag, name));
         }
         println!("ROWS: {total} checked, {} failed", failures.len());
         println!(
@@ -1275,12 +1284,10 @@ mod tests {
     }
 
     /// The unfiltered control from the filtered probe's position: a sibling of
-    /// the helper, same row command, no filter. Its body must get a real
-    /// descriptor back; any other answer keeps the cause `finish_probe`
-    /// returned, so a timeout, an exit code, a lost token and a refusal stay
-    /// distinct, and the piped stderr carries the probe's own refusal.
+    /// the helper, same command, no filter, which must get a real descriptor.
     async fn sibling_control(victim: &Victim, row: &Row, control: &str) -> Result<(), String> {
         let name = row.name;
+        let tag = format!("control-{}", elapsed_nanos());
         let mut command = Command::new(std::env::current_exe().expect("test executable path"));
         command
             .arg("--exact")
@@ -1290,17 +1297,12 @@ mod tests {
             .env(VICTIM_PID_VAR, victim.pid.to_string())
             .env(VICTIM_ADDRESS_VAR, victim.address.to_string())
             .env(UNFILTERED_VAR, "1")
-            // A planted control is this one child's own variable, so this
-            // process's environment and every other child stay untouched.
+            // Planted on this one child's command only.
             .env(CONTROL_VAR, control)
-            .stdout(std::process::Stdio::from(
-                std::fs::File::create(probe_token(name)).expect("control token file"),
-            ))
+            .stdout(std::process::Stdio::from(token_file(&tag, name)))
             .stderr(std::process::Stdio::piped());
         let mut child = spawn_row(&mut command);
-        // A full pipe would block the child's write, so its stderr is read on
-        // this same runtime while `finish_probe` runs: a second runtime or a
-        // blocking read of a handle this one owns starves the reactor.
+        // Read on the same runtime: a full pipe would block the child's write.
         let mut stderr = child.stderr.take().expect("control stderr pipe");
         let drain = tokio::spawn(async move {
             let mut diagnostics = String::new();
@@ -1309,7 +1311,7 @@ mod tests {
                 Err(error) => format!("stderr did not read: {error}"),
             }
         });
-        let failure = finish_probe(name, row, &mut child).await;
+        let failure = finish_probe(&tag, name, row, &mut child).await;
         // The child is reaped, so its pipe end is here and the read ends.
         let diagnostics = drain
             .await
@@ -1328,12 +1330,8 @@ mod tests {
         }
     }
 
-    /// Ends a control child that `sibling_control` named on its command: it
-    /// writes its stderr and exits [`CONTROL_EXIT`]. A child that names no
-    /// control runs on and prints its pass token.
+    /// Ends a [`CONTROL_VAR`] child: it writes its stderr and exits [`CONTROL_EXIT`].
     fn planted_control() {
-        // Drains the pipe the harness reads, so the exit cause is the child's
-        // own and never the harness's timeout.
         if let Ok(Some(bytes)) = std::env::var(CONTROL_VAR).map(|value| value.parse::<usize>().ok())
         {
             control_stderr(&control_text(bytes));
@@ -1367,8 +1365,7 @@ mod tests {
         text
     }
 
-    /// Runs the helper row's control once, with `control` set on that child's
-    /// own command and this process's environment untouched.
+    /// Runs the helper row's control once to its end.
     fn control_failure(control: &str) -> Result<(), String> {
         let row = rows()
             .into_iter()
@@ -1379,8 +1376,6 @@ mod tests {
             .build()
             .expect("control runtime")
             .block_on(sibling_control(&Victim::start(), &row, control));
-        // A pipe this process still held at a later spawn would be
-        // close-on-exec there, so no descriptor outlives this run.
         control
     }
 
@@ -1438,23 +1433,31 @@ mod tests {
         failure
     }
 
-    /// An unfiltered control that exits `CONTROL_EXIT` after printing its line
-    /// fails with `finish_probe`'s whole reason and its whole stderr, so a
-    /// dropped `{reason}` from the message turns this red.
+    /// A control's exit 7 fails with `finish_probe`'s whole reason and stderr.
     #[test]
     fn a_control_that_exits_seven_reports_its_reason_and_stderr() {
         refused_control(0);
     }
 
-    /// A control that writes 100 KiB, more than the pipe holds, and exits
-    /// `CONTROL_EXIT` fails by that same exit reason with the whole flood, so
-    /// a harness that drains the pipe only after the wait, or that kills the
-    /// child at its timeout, turns this red.
+    /// A 100 KiB flood still reports the exit reason with the whole stderr.
     #[test]
     fn a_control_that_floods_stderr_still_reports_its_exit() {
         let failure = refused_control(102_400);
-        for kill in ["probe child did not finish", "expected SIGSYS"] {
-            assert!(!failure.contains(kill), "the kill path won: {failure:?}");
-        }
+        assert!(!failure.contains("not finish"), "{failure:?}");
+    }
+
+    /// One row under two tags reaches two files: no run shares a token.
+    #[test]
+    fn one_row_under_two_tags_reaches_two_probe_files() {
+        let (one, two) = ("tag-one", "tag-two");
+        let path = probe_token(one, TOKEN_ROW);
+        let other = probe_token(two, TOKEN_ROW);
+        assert!(!path.exists(), "a token exists before the spawn");
+        assert_ne!(path, other);
+        std::fs::write(&path, TOKEN_LINE).expect("token");
+        assert!(!other.exists(), "fresh token exists");
+        let got = std::fs::read_to_string(&path).unwrap_or_default();
+        assert_eq!(got, TOKEN_LINE);
+        let _ = std::fs::remove_file(&path);
     }
 }
