@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -177,16 +178,26 @@ def copy_declared_icon_set(source_root, installed_root, manifest):
 SOURCE_HOME_ANCHOR_PREFIX = "source-home:"
 
 
+def load_integrity_checker():
+    """Reuse the release checker's own platform resolution, so the stamp cannot drift from it."""
+    path = Path(__file__).with_name("components-release-integrity-check.py")
+    spec = importlib.util.spec_from_file_location("capsule_integrity", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def stamp_provider_spawn_anchors(manifest, data_dir, platform):
     """Anchor a rights-declaring provider on its installed manifest digest; print each skip."""
     profiles = manifest.get("profiles") or {}
     selected = (profiles.get("source-home") or {}).get("components") or []
+    integrity = load_integrity_checker()
     for name, component in sorted(manifest.get("external", {}).items()):
         if name not in selected:
             continue
-        info = (component.get("platforms") or {}).get(platform)
-        if not isinstance(info, dict) or not info.get("install_path"):
-            print(f"stamp: skip {name}: no exact {platform} row with install_path", file=sys.stderr)
+        row_key, info = integrity.resolve_platform_info(component, platform)
+        if not isinstance(info, dict) or not (info.get("install_path") or component.get("install_path")):
+            print(f"stamp: skip {name}: no {platform} row or alias with install_path", file=sys.stderr)
             continue
         installed_manifest = data_dir / "capsules" / name / "capsule.json"
         # A bin-only provider may ship no installed manifest; skip it by name.
@@ -198,8 +209,11 @@ def stamp_provider_spawn_anchors(manifest, data_dir, platform):
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             print(f"stamp: skip {name}: unreadable capsule.json: {exc}", file=sys.stderr)
             continue
+        if not isinstance(capsule, dict):
+            print(f"stamp: skip {name}: capsule.json is not an object", file=sys.stderr)
+            continue
         # Runtime validation stays authoritative; the anchor records only what it reads.
-        authority = capsule.get("authority") if isinstance(capsule, dict) else None
+        authority = capsule.get("authority")
         rights = authority.get("rights") if isinstance(authority, dict) else None
         if capsule.get("role") != "provider" or not isinstance(rights, list) or not rights:
             print(f"stamp: skip {name}: no declared rights", file=sys.stderr)
@@ -208,8 +222,8 @@ def stamp_provider_spawn_anchors(manifest, data_dir, platform):
         metadata = component["capsule_metadata"] = component.get("capsule_metadata") or {"platforms": {}}
         if metadata.setdefault("install_path", install_path) != install_path:
             raise SystemExit(f"{name} capsule_metadata install path conflicts with its source capsule")
-        row = metadata.setdefault("platforms", {}).setdefault(platform, {"install_path": install_path,
-            "release_path": info.get("release_path") or f"{name}-{platform}"})
+        row = metadata.setdefault("platforms", {}).setdefault(row_key, {"install_path": install_path,
+            "release_path": info.get("release_path") or f"{name}-{row_key}"})
         row["checksum"] = SOURCE_HOME_ANCHOR_PREFIX + sha256_file(installed_manifest)
 
 

@@ -393,7 +393,8 @@ def assert_source_home_provider_anchors(stamper):
     spec.loader.exec_module(integrity)
     with tempfile.TemporaryDirectory() as temp:
         root, data = Path(temp) / "repo", Path(temp) / "data"
-        components, names = data / "components.json", ["rights-provider", "wildcard-provider", "alpha-provider"]
+        components = data / "components.json"
+        names = ["rights-provider", "wildcard-provider", "alias-provider", "alpha-provider"]
         installed = {n: {**installed_manifest(n, n != "alpha-provider"), "icon": "icons"} for n in names}
         for name in names:
             (root / "capsules" / name / "icons").mkdir(parents=True)
@@ -408,23 +409,72 @@ def assert_source_home_provider_anchors(stamper):
             (data / "bin" / name).write_bytes(name.encode())
         def external(name):
             row = {"install_path": f"bin/{name}", "release_path": f"{name}-linux-amd64", "checksum": "sha256:"}
-            return {"version": "0.1.0", **row, "platforms": {"*": {**row, "release_path": f"{name}-any"}}
-                    if name == "wildcard-provider" else {"linux-amd64": row}}
+            platforms = {"linux-amd64": row}
+            if name == "wildcard-provider":
+                platforms = {"*": {**row, "release_path": f"{name}-any"}}
+            elif name == "alias-provider":
+                platforms = {"x86_64-linux": row}
+            return {"version": "0.1.0", **row, "platforms": platforms}
 
+        # The top-level install_path is the checker's last resolution step: install_path-provider.
+        top_level = external("install_path-provider")
+        top_level["platforms"] = {"linux-amd64": {"release_path": "install_path-provider-linux-amd64", "checksum": "sha256:"}}
+        write_json(root / "capsules" / "install_path-provider" / "capsule.json", {"role": "provider"})
+        write_json(data / "capsules" / "install_path-provider" / "capsule.json",
+                   installed_manifest("install_path-provider", True))
+        # Valid JSON that is not an object: each shape is skipped by name and stamping carries on.
+        shapes = {"shape-list": "[]", "shape-null": "null", "shape-zero": "0", "shape-string": '"x"'}
+        for shape, payload in shapes.items():
+            (data / "capsules" / shape).mkdir(parents=True)
+            (data / "capsules" / shape / "capsule.json").write_text(payload, encoding="utf-8")
+        externals = {n: external(n) for n in names}
+        externals["install_path-provider"] = top_level
+        externals.update((shape, external(shape)) for shape in shapes)
         # Only providers the source-home profile selects are anchored.
-        write_json(components, {"external": {n: external(n) for n in names},
-                                "profiles": {"source-home": {"components": names}}})
+        write_json(components, {"external": externals,
+                                "profiles": {"source-home": {"components": names + list(shapes)}}})
         digest = "source-home:sha256:" + sha256(data / "capsules" / "rights-provider" / "capsule.json")
 
         def stamp():
             skipped = io.StringIO()
             with redirect_stderr(skipped):
-                stamper.stamp_component_capsules(components, data, root, "linux-amd64", names)
+                stamper.stamp_component_capsules(components, data, root, "linux-amd64", names + list(shapes))
             return skipped.getvalue()
         skipped = stamp()
-        for reason in ("alpha-provider: no declared rights", "wildcard-provider: no exact linux-amd64 row with install_path"):
+        for reason in ("alpha-provider: no declared rights",) + tuple(
+                f"{shape}: capsule.json is not an object" for shape in shapes):
             if f"stamp: skip {reason}" not in skipped:
                 raise AssertionError(f"{reason} skip is silent: {skipped!r}")
+        result = json.loads(components.read_text())
+        # The checker resolves the wildcard, alias and top-level rows, so the anchor sits on the row it reads.
+        for name, key in (("wildcard-provider", "*"), ("alias-provider", "x86_64-linux")):
+            anchor = "source-home:sha256:" + sha256(data / "capsules" / name / "capsule.json")
+            rows = (result["external"][name].get("capsule_metadata") or {}).get("platforms") or {}
+            if rows.get(key, {}).get("checksum") != anchor:
+                raise AssertionError(f"external {name} resolved row {key} carries no anchor: {rows!r}")
+            # The resolver also judges the capsules entry; it must never hold a stale anchor.
+            if anchor in {row.get("checksum") for row in
+                          ((result["capsules"].get(name) or {}).get("capsule_metadata") or {}).get("platforms", {}).values()}:
+                raise AssertionError(f"capsules {name} kept a stale anchor after the external row moved")
+            if integrity.audit_provider_capsule_metadata(
+                    result, ["linux-amd64"], source_root=root, source_home=True):
+                raise AssertionError(f"{name} anchor fails the integrity check")
+        for shape in shapes:
+            if "capsule_metadata" in result["external"][shape]:
+                raise AssertionError(f"{shape} kept an anchor")
+        # A top-level install_path alone still resolves the row the anchor lands on.
+        write_json(components, {"external": {**externals, "install_path-provider": top_level},
+                                "profiles": {"source-home": {"components": ["install_path-provider"]}}})
+        stamp()
+        top_row = (json.loads(components.read_text())["external"]["install_path-provider"]
+                   .get("capsule_metadata") or {}).get("platforms", {}).get("linux-amd64", {})
+        if top_row.get("checksum") != "source-home:sha256:" + sha256(
+                data / "capsules" / "install_path-provider" / "capsule.json"):
+            raise AssertionError(f"top-level install_path provider carries no anchor: {top_row!r}")
+        write_json(components, {"external": externals,
+                                "profiles": {"source-home": {"components": names + list(shapes)}}})
+        stamp()
+        result = json.loads(components.read_text())
         (data / "capsules" / "rights-provider" / "capsule.json").unlink()  # the one anchored provider loses its manifest
         (data / "capsules" / "alpha-provider" / "capsule.json").write_text("{")  # unreadable JSON
         skipped = stamp()
