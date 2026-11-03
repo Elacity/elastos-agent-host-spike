@@ -10597,3 +10597,214 @@ Both required exact artifact commands passed after restoration. The full locked 
 The final branch/worktree inventory preserves supplied HEAD `bd5eac0d3da2d118c00a7f57292621d272e8279c` and tree `ab103af4fb89c4652cbd4bf0853a7c12265b5595`. The current task branch remains the unique review/merge work line. Its seven intended dirty files are the complete diff; dependencies, locks, fixture bytes and out-of-lane source are unchanged. The cached remote `spike/spike/agent-host` is `321cc698a21543c7cfe2895fecf9c2ef99e2b33c`; this checkout is 13 ahead and zero behind. Network access stayed disabled. The supervisor owns current-base integration and independent reviews; this record contains author checks. Git history, index, branches and remotes were preserved.
 
 Final host process inspection found zero executables active from this lane target. Three finite roots remain from the isolated setup failure and the two caught human plants, with 4,370,947 logical file bytes total. `lsof -nP -Fpn +D <owned-root>` returned exit 1 and empty stdout/stderr for each. The private ignored inventory `target/task-153-lifecycle.json` records exact paths, source identity, dirty state, ownership, sizes, protection and cleanup conditions for this checkout, task outputs, retained roots, supplied build caches and the new receipt. The lane supervisor removes the exact task-owned proof paths and roots after review; supplied caches keep their existing supervisor lifecycle. The shared build lease is released. This task creates zero installed artifacts or rollback sets.
+
+## 154 — Build output settings override the parent (2026-11-03)
+
+Supplied comparison HEAD: `252c99428e9c21b43f04e562e4cc4152f348f223`.
+Supplied tree: `8ff7afce2709e81a88041a569675c10a03fed63f`.
+Supplied branch: `spark/cx-agent-conformance/154-build-output-settings-override-the-parent`.
+Initial `git status --short --branch` showed zero dirty paths. The index and supplied history stay with the supervisor. The branch has 14 commits ahead and zero behind cached `spike/spike/agent-host`, with upstream unset; remote freshness is unverified under the offline task rule.
+
+Plan: extend the existing build integration target with one bounded re-entry of its own named test. The worker runs the real `offline_build` shell command, observes the five settings and repository directory, and writes fixed markers through the actual output settings after an owned-path preflight. Run each of the five compiling plants separately, restore the complete helper bytes after each, then run exact, build, harness and full locked gates. Final tracked edits belong to this section, `tests/build.rs` and the existing RUNBOOK build paragraph. Runtime owns capsule storage and product acceptance.
+
+Initial free space: 29,718,652 KiB. The existing lane target cache is reused; the 12 GiB output estimate plus 2 GiB reserve fit. Cargo gates use the shared exclusive heavy-build lease, offline dependencies, lane-local host/build outputs, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0` and a 600-second command bound. Existing `target/task-154-*` proof files are supplied supervisor state; this run preserves them and uses separate `task-154-current-*` evidence names.
+
+154: Added a bounded synthetic-parent build-settings witness, exact output and decoy checks, and five hand-run removal plants for the existing build helper.
+
+Two initial lease checks found the shared lease busy and started zero builds. Light checks passed: `git diff --check`; `node scripts/check-product-data.mjs` (42 capsules, 2 profiles, 28 method contracts); `node --test scripts/check-product-data.test.mjs` (99 passed); `cargo fmt --all -- --check` from `elastos/`; and `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`. An initial `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml --test build` exited 2 because Cargo fmt has no test-selector argument; `rustfmt --edition 2021 lab/agent-conformance/tests/build.rs` formatted only the edited test, then the required `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` passed.
+
+### Exact baseline and five compiling plants
+
+A third lease check acquired the lease. The exact baseline passed: exit 0 in 1.497 seconds, one named test passed. Every Cargo command below uses `CARGO_NET_OFFLINE=true RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, lane-local `target/host`, `target/host-build` and `target/task-154-current-tmp`, the shared exclusive lease, and a 600-second command bound.
+
+All five plants and all five restored checks ran this exact command:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build offline_build_overrides_inherited_output_settings -- --exact
+```
+
+Each plant removed only one `.env` call from `src/build.rs`, after checking one exact byte match. Old and new bytes below use JSON string encoding. A `finally` block restored the complete original file before the restored check and the next plant. Each compiling plant reached the worker, ran exactly its one named test, and failed on the specified observed-value assertion; empty selection, compile, start, setup and timeout failures earned zero credit.
+
+**F-build-override-CARGO_BUILD_BUILD_DIR**
+
+```json
+{
+  "old": "\n        .env(\"CARGO_BUILD_BUILD_DIR\", target.join(\"build\"))",
+  "new": ""
+}
+```
+
+Planted: exit `101` in 2.183 seconds; the worker and outer result failed with `CARGO_BUILD_BUILD_DIR observed-value assertion`. Restored exact check: exit `0` in 1.016 seconds, one named test passed.
+
+The retained synthetic decoy contains `output.marker` with the exact bytes `owned build output`, showing the output destination after the override was removed.
+
+**F-build-override-CARGO_TARGET_DIR**
+
+```json
+{
+  "old": "\n        .env(\"CARGO_TARGET_DIR\", target)",
+  "new": ""
+}
+```
+
+Planted: exit `101` in 1.198 seconds; the worker and outer result failed with `CARGO_TARGET_DIR observed-value assertion`. Restored exact check: exit `0` in 1.007 seconds, one named test passed.
+
+The retained synthetic decoy contains `output.marker` with the exact bytes `owned build output`, showing the output destination after the override was removed.
+
+**F-build-override-TMPDIR**
+
+```json
+{
+  "old": "\n        .env(\"TMPDIR\", target.join(\"tmp\"))",
+  "new": ""
+}
+```
+
+Planted: exit `101` in 1.257 seconds; the worker and outer result failed with `TMPDIR observed-value assertion`. Restored exact check: exit `0` in 1.047 seconds, one named test passed.
+
+The retained synthetic decoy contains `output.marker` with the exact bytes `owned build output`, showing the output destination after the override was removed.
+
+**F-build-override-CARGO_NET_OFFLINE**
+
+```json
+{
+  "old": "\n        .env(\"CARGO_NET_OFFLINE\", \"true\")",
+  "new": ""
+}
+```
+
+Planted: exit `101` in 1.238 seconds; the worker and outer result failed with `CARGO_NET_OFFLINE observed-value assertion`. Restored exact check: exit `0` in 0.953 seconds, one named test passed.
+
+**F-build-override-CARGO_INCREMENTAL**
+
+```json
+{
+  "old": "\n        .env(\"CARGO_INCREMENTAL\", \"0\")",
+  "new": ""
+}
+```
+
+Planted: exit `101` in 1.268 seconds; the worker and outer result failed with `CARGO_INCREMENTAL observed-value assertion`. Restored exact check: exit `0` in 0.95 seconds, one named test passed.
+
+All five complete-file restorations have SHA-256 `58e8f2bae9827f0a9a35a12bda880c37fe5f8bdccfeb454a4abb292a942820fd`. The source helper matches the supplied comparison base; `falsifiers.json` and its runner keep their supplied bytes. The five failed roots remain under the existing failure-retention rule for review.
+
+### Restored regression and host prerequisites
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build` passed: exit 0 in 0.286 seconds, 2 passed and zero retained roots. The first harness-target run exited 101 in 6.710 seconds because the sandbox blocked process-group inspection (`could not inspect child process group`); 3 tests passed and 8 failed. That is infrastructure evidence, with zero harness behavior credit. The full gate stayed unstarted in that attempt. The 13 retained infrastructure roots each passed host `lsof -nP -Fpn +D <owned-root>` inspection with exit 1 and empty stdout/stderr.
+
+With host process visibility and local fixture sockets, the same restored `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness` passed: exit 0 in 12.109 seconds, 11 passed, zero failed and zero new retained roots. The shared exclusive lease covered every Cargo command. Free space before the host full gate was 30,782,918,656 bytes, above the 12 GiB estimate plus 2 GiB reserve.
+
+### Principles check
+
+1. Named by hash — No new name or URL replaces a code/content hash. `/bin/sh` and `current_exe` are test process locators; this task claims fixture behavior only (`tests/build.rs:24`, `tests/build.rs:102`).
+2. Ambient authority — No capsule, Home or UI gains access. The existing cleared Home launcher owns the synthetic worker environment (`tests/build.rs:123`).
+3. One path — No second build setup or launch path. The worker runs `offline_build`, and its parent calls `ThrowawayHome::launch` (`tests/build.rs:24`, `tests/build.rs:124`).
+4. Trusted core — No Runtime source grows. This test and its lab-only scope stay in the lane (`RUNBOOK.md:77`).
+5. Fails closed — Yes. A differing setting has a fixed refusal label, and success requires one named worker result before fixture removal (`tests/build.rs:61`, `tests/build.rs:140`, `tests/build.rs:159`).
+6. Self-contained — Yes. Capsule logic and granted Bus calls keep their owners; the new executable work is a fixed lab shell witness (`tests/build.rs:31`, `RUNBOOK.md:78`).
+7. Tests prove it — Yes. The named integration test covers all five settings, and all five separate removal plants above fail their own observed-value assertion (`tests/build.rs:54`, `tests/build.rs:86`).
+8. Separate decisions — Yes. These checks prove build-fixture containment. Runtime keeps admission, resource grants and allowance separate from artifact identity (`RUNBOOK.md:77`).
+
+### Full gate and final handoff
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` passed: exit 0 in 293.411 seconds, 261 passed, zero failed and 14 existing ignored rows. The offline two-thread environment, disabled incremental compilation, lane-local outputs, shared exclusive lease and 600-second command bound remained in effect. Existing receipt fields, acceptance labels and blocked rows keep their supplied meanings.
+
+Final source restoration: `src/build.rs` matches supplied HEAD byte for byte, SHA-256 `58e8f2bae9827f0a9a35a12bda880c37fe5f8bdccfeb454a4abb292a942820fd`. The final diff is limited to `tests/build.rs`, the existing RUNBOOK build description and this task LOG section. The harness, native/probe builders, manifests, locks, falsifier list and runner keep their supplied bytes.
+
+Passing new-test roots reached `home.finish()` after all assertions; the build, host harness and full gate left zero new retained roots. Five caught-plant roots and 13 sandbox-infrastructure roots remain for review, with 32286 logical bytes total. Final host `lsof -nP -Fpn +D <owned-root>` checks of all 18 roots returned exit 1 with empty stdout/stderr. Host process inspection found zero executables active from this lane target. The ignored `target/task-154-current-lifecycle.json` records exact private paths, observations, sizes, ownership, protection sources and cleanup conditions. The supervisor keeps these finite roots and current-run proof files through review, then removes their exact paths. Task scratch remains in that review cleanup set. Supplied proof files and build caches retain their supervisor owner. The shared build lease is released; this task creates zero installed artifacts or rollback sets.
+
+Final branch/worktree inventory: HEAD `252c99428e9c21b43f04e562e4cc4152f348f223`, tree `8ff7afce2709e81a88041a569675c10a03fed63f` and the supplied branch are unchanged. Exactly the three intended files are dirty, with an unchanged index. The inventory observed 1601 local branches and 157 worktrees; their other owners keep their existing lifecycle decisions. The current branch is the active task work line for review/merge. It remains 14 commits ahead and 0 behind cached `spike/spike/agent-host`, with upstream unset. Remote freshness remains unverified under the offline rule. Git history, refs and remote state were preserved.
+
+Candidate: local three-path diff against the supplied comparison HEAD. Exercised checks: exact baseline, five caught compiling plants, five restored exact checks, build target, host harness target, full locked lane gate, format and basic repository checks pass. The sandbox process-inspection failure remains an infrastructure result. Review links: pending with the lane supervisor. Installed release evidence: skipped because this is lab build-containment proof; Runtime owns capsule storage and installed-product acceptance. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.
+
+Final scratch check: the retained Cargo scratch contains one regular file, 495 logical bytes, with zero open handles. Its exact path and review-then-remove decision are in the ignored lifecycle inventory. Final `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` and `git diff --check` pass. The complete earlier LOG prefix and existing build-test bodies are byte-identical to the supplied HEAD.
+
+### Round 2 — Supervisor census retry
+
+The supervisor's full gate reached and passed both build tests, including `offline_build_overrides_inherited_output_settings`. It then failed only `standin_a12_census_catches_planted_leftovers` on a retained `stdout-204` process handle. This is the existing census case for which the lane permits one outer rerun. The census, its assertions and the task 154 implementation retain their supplied bytes.
+
+Round 2 starts at supplied HEAD `252c99428e9c21b43f04e562e4cc4152f348f223`, tree `8ff7afce2709e81a88041a569675c10a03fed63f`. Its three supplied dirty paths are `lab/agent-conformance/tests/build.rs`, `lab/agent-conformance/RUNBOOK.md` and this LOG. The branch has no upstream; the previous inventory records 14 ahead and 0 behind the cached private integration ref. Network access stays disabled, so remote freshness remains unverified.
+
+Plan: repeat the exact build test and the five separate removal plants, restore the helper bytes after each, then run the restored build and harness targets and the full locked lane gate. Use offline dependencies, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, the existing shared exclusive heavy-build lease and a 600-second bound per command. Free space is 29,973,056 KiB; the existing 12 GiB output estimate plus 2 GiB reserve fit. Reuse the lane caches and keep finite failed-fixture evidence under the existing retention rule. This round changes the task LOG only if these checks confirm the current implementation.
+
+Six lease checks found another active gate and started zero builds. The next attempt acquired the same persistent exclusive lease and kept it through every Cargo test below. All commands used `CARGO_NET_OFFLINE=true RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, lane `target/host`, `target/host-build` and `target/task-154-round2-tmp`. The exact command and five old/new byte edits are the same as recorded above in this task section. Each plant removed its single named `.env` call, reached the named test and failed its observed-value assertion. The complete helper bytes were restored in `finally` before each restored check and the next plant.
+
+| Removal plant | Exit | Failed behavior assertion | Seconds | Restored exact check |
+| --- | --- | --- | --- | --- |
+| `CARGO_BUILD_BUILD_DIR` | 101 | `CARGO_BUILD_BUILD_DIR observed-value assertion` | 1.678 | exit 0; 1 passed; 1.181 s |
+| `CARGO_TARGET_DIR` | 101 | `CARGO_TARGET_DIR observed-value assertion` | 1.211 | exit 0; 1 passed; 0.977 s |
+| `TMPDIR` | 101 | `TMPDIR observed-value assertion` | 1.207 | exit 0; 1 passed; 1.071 s |
+| `CARGO_NET_OFFLINE` | 101 | `CARGO_NET_OFFLINE observed-value assertion` | 1.216 | exit 0; 1 passed; 1.151 s |
+| `CARGO_INCREMENTAL` | 101 | `CARGO_INCREMENTAL observed-value assertion` | 1.164 | exit 0; 1 passed; 0.936 s |
+
+The baseline exact command passed one named test in 0.174 seconds. Each of the three output-path plants left `output.marker` with the exact fixed bytes `owned build output` in its corresponding synthetic decoy. All five plants earn caught credit from their named behavior assertions, rather than from compilation, setup, selection or timeout errors.
+
+Restored commands and actual results:
+
+| Command | Result |
+| --- | --- |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build` | exit 0; 2 passed; 0.086 s |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness` | exit 0; 11 passed; 12.516 s |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` | exit 0; 261 passed; 14 existing ignored rows; 296.567 s |
+
+The full gate includes `standin_a12_census_catches_planted_leftovers ... ok`, so the one permitted outer rerun passes the supervisor's failed case. The earlier failure remains recorded above. The existing census, tests, receipt fields, ignored rows and acceptance labels keep their supplied bytes and meanings.
+
+The lane format check, Runtime workspace format check, chain-provider format check, `node scripts/check-product-data.mjs` (42 capsules, 2 profiles, 28 method contracts) and `node --test scripts/check-product-data.test.mjs` (99 passed) all exited 0. Repeating `git diff --check` and the final Git ref inventory is skipped under the round-2 instruction to use no Git commands; the earlier pass and identity inventory remain above. A direct whitespace and final-newline check covers the three candidate files after this LOG addition.
+
+Final source restoration: `src/build.rs` has SHA-256 `58e8f2bae9827f0a9a35a12bda880c37fe5f8bdccfeb454a4abb292a942820fd`, identical to the supplied helper. Hash comparisons also confirm that this round preserved the supplied build test, RUNBOOK, harness, falsifier list, Cargo manifest and lockfile. This round's tracked addition is confined to this task's LOG section; the candidate retains its three intended paths.
+
+The five new retained synthetic plant roots contain 3,312 logical file bytes in total. Each final `lsof -nP -Fpn +D <owned-root>` check exited 1 with empty stdout and stderr; the lane target has zero active executables. Successful baseline, restored and regression fixtures reached their existing cleanup paths, leaving exactly those five new failed-plant roots. The ignored `target/task-154-round2-lifecycle.json` records their exact private paths, sizes, observations, source identities, source hashes, owner and review-then-remove condition. It also records the 16 finite round-2 evidence/scratch entries. The supervisor removes these exact owned paths after candidate review; supplied caches and earlier roots keep their existing lifecycle. The shared lease is released. Git state and installed artifacts were preserved.
+
+154 round 2: Repeated all five caught plants and restored gates; the supervisor's census case passed in the complete locked gate without a source change.
+
+Candidate: the supplied three-path task diff plus this LOG retry record. Exercised checks: exact baseline, five caught plants, five restored exact checks, build target, harness target, full locked lane gate, format and basic repository checks pass; the Git-only repeats are skipped for the reason above. Review links: pending with the lane supervisor. Installed release evidence: skipped because these are lab build-containment checks; Runtime owns capsule storage and installed acceptance. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.
+
+### Round 3 — Supervisor sibling-read census retry
+
+The supervisor passed both build tests, then failed `ungranted_sibling_read_is_refused` when the existing cleanup census saw one open `stdout-297` handle. The task 154 worker had passed before that failure. The census and its assertions keep their existing owners and bytes.
+
+This round receives HEAD `252c99428e9c21b43f04e562e4cc4152f348f223`, tree `8ff7afce2709e81a88041a569675c10a03fed63f` and three dirty paths: `lab/agent-conformance/tests/build.rs`, `lab/agent-conformance/RUNBOOK.md` and this LOG. At round start, read-only `git status` and `git rev-parse` calls confirmed those identities despite the round's no-Git-command constraint. Further checks use file hashes and leave Git commands to the supervisor. The branch, history and supplied edits are preserved. Cached divergence remains 14 ahead and zero behind the private integration ref, with upstream unset; remote freshness remains unverified under the offline rule.
+
+Plan: rerun the exact build test, each of the five separate compiling plants and restored checks, then the restored build and harness targets, the failed sibling-read test and the full locked gate. Preserve the build helper byte for byte after each plant. This round changes only this LOG if the candidate passes. Commands use offline dependencies, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, lane-local output paths, the shared exclusive heavy-build lease and a 600-second command bound. Free space is 28,102,533,120 bytes; the 12 GiB estimate plus 2 GiB reserve fit. The existing failure-retention rule owns failed roots; passing fixtures use their existing cleanup paths.
+
+The shared exclusive lease covered every Cargo command. Its descriptor stayed with the gate process; child commands received zero lease descriptors. The gate used these child-command settings from the supplied repository root:
+
+```sh
+CARGO_NET_OFFLINE=true RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host"
+CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build"
+TMPDIR="$PWD/lab/agent-conformance/target/task-154-round3-tmp"
+```
+
+The exact baseline passed one named test in 1.999 seconds. Each plant used the exact old/new bytes and command recorded in this task's five compiling-plant entries above. Each removed only its own `.env` call from `src/build.rs`; complete-file restoration ran in `finally` before the restored check and the next plant.
+
+| Removal plant | Exit | Failed behavior assertion | Seconds | Restored exact check |
+| --- | --- | --- | --- | --- |
+| `CARGO_BUILD_BUILD_DIR` | 101 | `CARGO_BUILD_BUILD_DIR observed-value assertion` | 1.707 | exit 0; 1 passed; 1.816 s |
+| `CARGO_TARGET_DIR` | 101 | `CARGO_TARGET_DIR observed-value assertion` | 1.625 | exit 0; 1 passed; 1.362 s |
+| `TMPDIR` | 101 | `TMPDIR observed-value assertion` | 1.628 | exit 0; 1 passed; 1.502 s |
+| `CARGO_NET_OFFLINE` | 101 | `CARGO_NET_OFFLINE observed-value assertion` | 1.579 | exit 0; 1 passed; 1.437 s |
+| `CARGO_INCREMENTAL` | 101 | `CARGO_INCREMENTAL observed-value assertion` | 1.789 | exit 0; 1 passed; 1.398 s |
+
+For every plant, both the outer result and the captured synthetic worker result selected exactly `offline_build_overrides_inherited_output_settings` and reported one failed test with that setting's assertion. These are five caught behavior plants. Each output-path plant also left `output.marker` with the exact bytes `owned build output` in its corresponding decoy. Compilation, setup, empty-selection and timeout failures supplied zero caught credit. The existing falsifier list and runner retain their supplied bytes.
+
+Restored commands and actual results:
+
+| Command | Result |
+| --- | --- |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build` | exit 0; 2 passed; 0.106 s |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness` | exit 0; 11 passed; 12.550 s |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects ungranted_sibling_read_is_refused -- --exact` | exit 0; 1 passed; 14.248 s |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` | exit 0; 261 passed; 14 existing ignored rows; 307.867 s |
+
+The supervisor's failed sibling-read case passed both its exact rerun and the complete locked gate. This records a passing rerun; the earlier census failure remains above. The census, its assertions, receipt fields, ignored rows and acceptance labels retain their supplied behavior.
+
+`cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` passed before the baseline and after all regression checks. `node scripts/check-product-data.mjs`, `node --test scripts/check-product-data.test.mjs`, `(cd elastos && cargo fmt --all -- --check)` and `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` each exited 0. Repeating `git diff --check` and the branch/worktree inventory is left to the supervisor under the round's no-Git-command constraint; direct trailing-whitespace and final-newline checks cover the three candidate files.
+
+Final source restoration: `src/build.rs` has SHA-256 `58e8f2bae9827f0a9a35a12bda880c37fe5f8bdccfeb454a4abb292a942820fd`, matching the supplied helper. Hash comparisons also confirm this round preserved `tests/build.rs`, RUNBOOK, harness, native/probe builders, artifact/effects tests, falsifier list, Cargo manifest and lockfile. The eight principles answers above retain their file/line evidence. This round's tracked change is confined to this task's LOG section.
+
+Passing fixtures used their existing cleanup paths. Exactly five new failed synthetic plant roots remain for review, with 3,312 logical file bytes total. Each final `lsof -nP -Fpn +D <owned-root>` check exited 1 with empty stdout/stderr. The lane target has zero active executables. The round's empty Cargo scratch directory is removed after the final metadata check. The ignored `target/task-154-round3-lifecycle.json` records exact owned paths, sizes, source hashes, observed state and cleanup decisions. The supervisor removes that inventory and the five named roots after candidate review. Earlier roots, caches and supplied evidence retain their existing owners. The shared lease is released; installed artifacts and Git state are preserved.
+
+154 round 3: Repeated the five caught plants and all restored gates; the supervisor's sibling-read census case passed alone and in the full locked suite, with the implementation unchanged.
+
+Candidate: the supplied three-path task diff plus this LOG retry record. Exercised checks: exact baseline, five caught plants, five restored exact checks, build target, harness target, exact sibling-read retry, full locked lane gate, formatting and basic repository checks pass. Review links: pending with the lane supervisor. Installed release evidence: skipped because this is lab build-containment proof; Runtime owns capsule storage and installed acceptance. Remaining gate: supervisor rerun, Git-only checks and independent reviews. Next owner: lane supervisor.

@@ -67,6 +67,19 @@ returns before the storage constructor; AC-006-STORAGE remains open. The
 ready-operator rows below prove the operator fixture;
 the grant and effect rows below extend it. Runtime bundle-CID launch stays separate.
 
+`offline_build_overrides_inherited_output_settings` runs one synthetic-parent
+worker through the bounded Home launcher. The shared `build::offline_build`
+sets offline Cargo, disabled incremental compilation and the selected target,
+build and temporary directories despite conflicting inherited settings. A shell
+witness observes those five values and the repository working directory, writes
+fixed markers under the selected target (with a space in its name), and leaves
+three owned decoys intact. The helper creates the selected `tmp` directory.
+Five separate removal plants prove these overrides. This is lab-only proof of
+M1 A9's contained-fixture prerequisite; Runtime owns capsule storage and product
+acceptance. Run it with `cargo test --locked --manifest-path
+lab/agent-conformance/Cargo.toml --test build
+offline_build_overrides_inherited_output_settings -- --exact`.
+
 `tests/common::write_operator_home` owns the operator fixture for this test and
 the ready-operator tests. It uses `write_component_home`, the shared entry-copy
 and stamping helper, which also prepares the CID refusal fixture. The helper
