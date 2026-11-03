@@ -38,6 +38,12 @@ Rust flags. Its one target is `target/runtime`, with intermediates in `build/`
 and temporary files in `tmp/` below that target. It returns the absolute binary
 path and a SHA-256 computed from its bytes by macOS `shasum`. This identifies
 the Runtime tested on this machine; it is separate from capsule bundle identity.
+If the tool fails or returns a malformed digest, `binary SHA-256 failed` keeps
+the exit status and labelled stdout and stderr. Both streams use lossy UTF-8
+and escaped string formatting, so empty streams and line breaks stay visible
+on one diagnostic line. The builder repairs the input or tool setup named by
+the cause, then reruns the same command. Native identity is emitted only after
+a successful hash.
 
 `probe_imports_only_the_bus` validates the built component and checks its outer
 imports against the five-interface Bus v1 subset. `probe_hash_is_stable` makes two

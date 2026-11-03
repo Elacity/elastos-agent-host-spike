@@ -10262,3 +10262,229 @@ restored checks; the cleanup implementation retains its existing owner.
 - 163 round 2: Preserved the fixed host-file decision and its tests; recorded a passing killed-worker rerun, 249 passing locked-suite tests, the passing table receipt and complete failed-fixture retention inventory.
 
 Final `git diff --check` passed (exit 0) after the round-2 result record.
+
+## 164 — native hash refusal keeps the tool cause
+
+### Supplied checkout and plan
+
+Before editing, HEAD was `088fedf9b8d94b15cac67a58815c9253512577c7` and its tree was
+`08c02af6af3db90f09fe59c7656535c9535236e5`. Dirty paths: none (clean checkout).
+The supplied branch owns this task's unique work for supervisor review/merge.
+Cached upstream divergence is 2 ahead / 0 behind against
+`spike/spike/agent-host`; network access stays disabled. The supervisor owns
+the other supplied refs and worktrees. History and unrelated work stay intact.
+
+Read the supplied task and BACKLOG item 14, LOG sections 009 and 012, the
+RUNBOOK receipt section, the existing runtime/build/Home helpers and all
+`sha256_file` callers. Task 150's `verified_path` API is absent here. Plan:
+extract the existing output decision privately, retain status and escaped
+stdout/stderr on refusal, add deterministic refusal/recovery and real harmless
+file checks, update the two existing native-identity paragraphs, then exercise
+three separate compiling plants and restore each before the lane gates.
+
+### Change and focused checks
+
+`sha256_file` calls the private `sha256_output` immediately after the existing
+`/usr/bin/shasum -a 256` command. One decision still requires a successful
+process and a first token of exactly 64 ASCII hexadecimal bytes. Refusals keep
+the existing prefix, actual exit status and both labelled streams, with the
+same lossy UTF-8 conversion and escaped formatting. File-open/start causes,
+public API, caches, native callers and identity emission order stay intact.
+The README native-identity paragraph and RUNBOOK receipt section describe the
+fields and the builder's repair-and-rerun action. Receipt fields, report grades,
+blocked journeys and installed acceptance retain their existing owners.
+
+`native_hash_refusal_keeps_tool_result` drives that same decision with failed
+exits (valid-looking digest and empty streams), successful malformed results
+(empty, short, long and non-hex) and invalid UTF-8/newline/quote/backslash
+streams. Fixed harmless fixtures and labelled assertions inspect the returned
+error without printing streams or emitting native observations. The ordinary
+success control follows every refusal case and preserves its first token.
+`native_hash_reads_exact_fixture_bytes` uses a fresh guarded Home, the real
+hash command and `identity::sha256` as its independent oracle: original bytes,
+changed bytes, missing file/open cause, then restored bytes/original digest.
+It finishes the Home after the successful sequence. These two checks build
+zero Runtime/probe binaries and launch zero providers.
+
+Initial exact checks passed (exit 0): `native_hash_refusal_keeps_tool_result`
+in 2.624 s and `native_hash_reads_exact_fixture_bytes` in 0.125 s. The shared
+lease was acquired without waiting and free space was 42.243 GiB, above the
+12 GiB estimate plus 2 GiB reserve. The file check removed its Home.
+
+### Three separate compiling plants
+
+Each command used the shared exclusive `fcntl.flock` build lease with
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`,
+`CARGO_TARGET_DIR=$PWD/lab/agent-conformance/target/host`,
+`CARGO_BUILD_BUILD_DIR=$PWD/lab/agent-conformance/target/host-build` and
+`TMPDIR=$PWD/lab/agent-conformance/target/task-164`. Acquisition was immediate;
+free space was 42.235 GiB. Each exact old byte string occurred once. The
+builder applied one replacement, ran the named test, restored the full original
+source bytes in `finally`, then reran the identical test before the next plant.
+The existing falsifier list and shared runner remain byte-for-byte unchanged.
+
+All six runs used this exact command:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib runtime::tests::native_hash_refusal_keeps_tool_result -- --exact
+```
+
+**stderr-only** — exact old bytes (UTF-8, LF):
+
+```rust
+            "binary SHA-256 failed ({}): stdout={:?}; stderr={:?}",
+            output.status,
+            text,
+            String::from_utf8_lossy(&output.stderr)
+```
+
+Exact new bytes:
+
+```rust
+            "binary SHA-256 failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+```
+
+CAUGHT: exit 101 in 2.304 s, one named test ran and
+failed at `failed exit with digest: refusal must retain status and both escaped streams`.
+Restored: exit 0 in 1.337 s; that named test passed.
+
+**drop-process-success** — exact old bytes (UTF-8, LF):
+
+```rust
+if !output.status.success() || hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit())
+```
+
+Exact new bytes:
+
+```rust
+if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit())
+```
+
+CAUGHT: exit 101 in 1.418 s, one named test ran and
+failed at `failed exit with digest: tool result must be refused without a digest`.
+Restored: exit 0 in 1.204 s; that named test passed.
+
+**drop-digest-check** — exact old bytes (UTF-8, LF):
+
+```rust
+if !output.status.success() || hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit())
+```
+
+Exact new bytes:
+
+```rust
+if !output.status.success()
+```
+
+CAUGHT: exit 101 in 1.439 s, one named test ran and
+failed at `empty digest: tool result must be refused without a digest`.
+Restored: exit 0 in 1.225 s; that named test passed.
+
+All restored source bytes match SHA-256
+`8d0171ea31df5b8a488ef950f5027df82d0b1c9da3ac597236bdf7f6d93c9c3a`.
+Each planted candidate compiled and reached its cause/refusal assertion;
+compilation, empty selections and host failures earned zero caught credit.
+The plants created zero Homes, providers or observation lines. There are zero
+plant fixture roots to remove. Local ignored output and lifecycle inventory
+stay in `target/task-164` until supervisor review, then removal.
+
+### Principles check
+
+| Question | Answer | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `src/runtime.rs:65` still identifies native bytes with SHA-256 before recording them at line 70. |
+| 2. Added capsule, Home or UI authority? | No | `src/runtime.rs:82` retains the fixed lab-owned tool and file stdin; changes stay in the lab helper and its documentation. |
+| 3. A second path or copy of one rule? | No | `src/runtime.rs:87` delegates directly to the one output decision at line 90, which the synthetic test calls at line 175. |
+| 4. Runtime core grows? | No | `src/runtime.rs:90` is lab artifact observation code; Runtime retains capsule admission and grants. |
+| 5. Refusal denies with a clear reason? | Yes | `src/runtime.rs:93` retains both refusal checks; line 96 adds status and both escaped streams to the existing error. |
+| 6. Capsule stays self-contained and calls down through granted Bus operations? | Yes | `src/runtime.rs:79` changes only host-side lab hashing; capsule and Bus code keep their existing paths. |
+| 7. Named tests and caught falsifiers prove the rules? | Yes | `src/runtime.rs:114` catches all three separate plants; line 204 checks the real harmless-byte/missing/restored journey. The exact bytes and results appear above. |
+| 8. Identity, admission and allowance stay separate? | Yes | `src/runtime.rs:65` and line 70 record native identity only; `RUNBOOK.md:245` retains Runtime admission and grant ownership. |
+
+The repository supplies no humanizer skill source. This handoff uses direct
+ownership statements and plain technical wording. Product readiness and
+installed acceptance remain with their named owners.
+
+### Restored candidate gates
+
+The final gate set used the same offline environment, lane-owned target/build
+directories and shared exclusive build lease as the plants. Local loopback
+and process visibility passed preflight for the named integration journeys.
+The lease was acquired immediately; each command checked the 12 GiB build
+estimate plus 2 GiB reserve. Free space ranged from 42.180 to 42.224 GiB at
+gate start. Each command stayed inside its 600-second limit.
+
+| Exact command | Exit | Seconds |
+| --- | --- | --- |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib runtime::tests::native_hash_refusal_keeps_tool_result -- --exact` | 0 | 0.310 |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib runtime::tests::native_hash_reads_exact_fixture_bytes -- --exact` | 0 | 0.143 |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib runtime::tests` | 0 | 0.248 |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime` | 0 | 17.345 |
+| `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` | 0 | 0.298 |
+| `git diff --check` | 0 | 0.043 |
+| `node scripts/check-product-data.mjs` | 0 | 0.089 |
+| `node --test scripts/check-product-data.test.mjs` | 0 | 0.470 |
+| `(cd elastos && cargo fmt --all -- --check)` | 0 | 2.881 |
+| `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` | 0 | 0.149 |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` | 0 | 268.733 |
+| `lab/agent-conformance/run.sh` | 0 | 265.184 |
+
+Both exact new tests passed after restoration. The `--lib runtime::tests`
+filter passed 92 matching library tests, including the new two and the
+existing `standin_runtime::tests` matches. Runtime integration passed 10 tests
+with its two existing blocked tests ignored. The full locked lane gate passed
+251 tests, with 14 existing blocked tests ignored and zero failures, on its
+first run. Product-data validation and all 99 product-data tests passed; both
+Runtime and chain-provider formatting passed. The restored source SHA-256
+stayed `8d0171ea31df5b8a488ef950f5027df82d0b1c9da3ac597236bdf7f6d93c9c3a`
+through every gate. Cargo manifests, lockfiles and the falsifier list retain
+their supplied bytes. Every required check ran; skipped checks: none.
+
+The report command passed on its first run in 265.184 s. Its table contains
+252 PASS, 0 FAIL, 14 BLOCKED and 0 SKIPPED rows, including both new tests and
+`versions_receipt (A14)` as PASS. The receipt has complete identity,
+15 build-only and 16 launched probe identities, `cargo_success: true` and
+`command_success: true`. Its report SHA-256 matches the exact table bytes.
+The 14 existing product blockers keep `suite_outcome: BLOCKED`.
+
+The local, uncommitted receipt is
+[`target/run-table.lCJ3sz/VERSIONS.json`](target/run-table.lCJ3sz/VERSIONS.json), SHA-256
+`adc5f2b7971f74764d4d98e768110a3ea3aa9330c6cfe8182f9cda87fd78fe35`.
+It records supplied HEAD `088fedf9b8d94b15cac67a58815c9253512577c7` with
+`dirty: true`; it describes this uncommitted candidate, rather than a new
+committed tree. Receipt fields and authority boundaries keep their existing
+meaning. The actual installed product remains under its owners' acceptance.
+
+### Cleanup and handoff
+
+Every successful check finished its Homes; the final gate set retained zero
+new Homes. All three synthetic plants created zero Homes. Both lane-native
+executable paths have zero open-file holders (`lsof -t`, exit 1), and the
+shared lease was released and checked with an immediate read-only acquisition.
+The private ignored machine-readable inventory in `target/task-164` records
+the task branch/worktree, exact source identities and dirt, proof output,
+receipt, reused native/host caches and probe build caches. Their terminal
+decision is supervisor review/merge for the supplied branch/worktree, and
+removal after supervisor gates/review for generated artifacts. Supplied failed
+roots and other operational state retain their existing owners and retention
+rules. Final free space was 42.128 GiB.
+
+The final branch/worktree inventory preserves supplied HEAD and tree
+`08c02af6af3db90f09fe59c7656535c9535236e5`. The four authorized dirty paths
+are `src/runtime.rs`, `README.md`, `RUNBOOK.md` and `LOG.md` in this lane.
+Cached divergence remains 2 ahead / 0 behind against
+`spike/spike/agent-host`; network access stayed disabled. The current branch
+owns unique task 164 work for supervisor review/merge. The supervisor retains
+ownership of the other supplied refs and worktrees. Git state and supplied
+history stay intact. Final whitespace and lane-format checks follow this
+record; the Rust source and standing prose retain their tested bytes.
+
+Candidate: supplied HEAD/tree plus these four local edits.
+Exercised checks: the exact commands and results above; skipped checks: none.
+Reviews: supervisor-owned independent reviews remain pending.
+Installed release evidence: outside this lab hash-observation task.
+Remaining gate: supervisor commit, independent reviews and integration.
+Next owner: lane supervisor.
+
+- 164: Kept native hash status and escaped stdout/stderr in one output decision, added refusal/recovery and exact-file tests, caught/restored all three compiling plants, updated native-identity prose, and passed every restored lane gate and the report receipt.

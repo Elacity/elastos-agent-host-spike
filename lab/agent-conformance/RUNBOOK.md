@@ -228,6 +228,14 @@ The existing report command writes `VERSIONS.json` into the fresh ignored
 that path for the tested candidate. The report reads the full repository commit
 and dirty state for this invocation; local edits set `dirty: true`.
 
+The shared native hash helper emits identity after a successful hash. A failed
+tool exit or malformed digest returns `binary SHA-256 failed` with the actual
+exit status and labelled stdout and stderr. Both byte streams use lossy UTF-8
+and escaped string formatting: empty streams appear as `""`, and a newline
+appears as `\n` within the diagnostic line. File-open and command-start failures
+keep their separate causes. The builder repairs the input or tool setup named
+by the cause and reruns the same command before citing native identity.
+
 The receipt contains native hashes, every observed probe's effect, component
 SHA-256 and the complete bundle's lab CID (as `lab/capsule-identity` prints it),
 the suite outcome, and the exact graded table plus its SHA-256. The sibling
