@@ -777,10 +777,14 @@ mod tests {
             .configure_capsule_admission(&home.data, &[], true)
             .await
             .unwrap();
-        runtime
-            .verify_capsule_signature(&manifest, &release_dir)
-            .await
-            .unwrap();
+        // The installed signed release is named as such, not as a key or dev.
+        assert_eq!(
+            runtime
+                .verify_capsule_signature(&manifest, &release_dir)
+                .await
+                .unwrap(),
+            Signer::InstalledRelease
+        );
         let error = runtime
             .verify_capsule_signature(&manifest, &local_dir)
             .await
