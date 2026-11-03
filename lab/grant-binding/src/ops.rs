@@ -1863,6 +1863,77 @@ fn model_new_window_allows_one_effect() {
 }
 
 #[test]
+fn model_overflowing_window_keeps_the_count() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("library ask");
+    verifier.set_verifier_now(u64::MAX - 5);
+    verifier.set_rate(library, 1, 10).expect("rate");
+    let call = verifier.open_call(photo);
+    verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect("one effect inside the saturated window");
+    verifier.set_verifier_now(u64::MAX);
+    let refused = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("an end past the clock never starts a new count");
+    assert_eq!(refused, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(refused.to_string(), "rate limit is reached");
+    let again = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("the count is not cleared on a repeated instant");
+    assert_eq!(again, OperateRefuse::Binding(Refuse::Rate));
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the grant stays in the store");
+}
+
+#[test]
+fn model_revoked_child_rate_is_refused() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("library ask");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    verifier
+        .revoke_grant(roll)
+        .expect("revoke the child journal");
+    let rate = verifier
+        .set_rate(roll, 1, 10)
+        .expect_err("a revoked child stores no rate");
+    assert_eq!(rate, Refuse::UnknownHandle);
+    assert_eq!(rate.to_string(), "unknown handle");
+    let limit = verifier
+        .set_effect_limit(roll, 1)
+        .expect_err("a revoked child stores no limit");
+    assert_eq!(limit, Refuse::UnknownHandle);
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the issuing grant stays");
+}
+
+#[test]
 fn model_child_effect_spends_the_issuing_rate() {
     let mut verifier = Verifier::new();
     let photo = verifier.register_instance("photo", "session-a");

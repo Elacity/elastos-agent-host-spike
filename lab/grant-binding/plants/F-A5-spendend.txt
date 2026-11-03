@@ -5,8 +5,8 @@ test: ops::model_effect_limit_stops_the_next_effect
         if grant.ended {
             return Err(Refuse::UnknownHandle);
         }
-        if grant.record.parent.is_some() {
+        Ok(grant)
 --- new
         let _ = grant.ended;
-        if grant.record.parent.is_some() {
+        Ok(grant)
 --- end

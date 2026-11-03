@@ -1,0 +1,10 @@
+id: F-A5-rateoverflow
+file: src/lib.rs
+test: ops::model_overflowing_window_keeps_the_count
+--- old
+        let Some(end) = grant.record.window_start.checked_add(grant.record.window) else {
+            return Ok(());
+        };
+--- new
+        let end = grant.record.window_start.saturating_add(grant.record.window);
+--- end

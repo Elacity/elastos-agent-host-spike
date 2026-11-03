@@ -1,0 +1,19 @@
+id: F-A5-raterevoked
+file: src/lib.rs
+test: ops::model_revoked_child_rate_is_refused
+--- old
+        let now = self.verifier_now;
+        let grant = self.live_grant_mut(handle)?;
+        if grant.record.parent.is_some() {
+            return Err(Refuse::IssuingRate);
+        }
+--- new
+        let now = self.verifier_now;
+        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+        if grant.record.parent.is_some() {
+            return Err(Refuse::IssuingRate);
+        }
+        if grant.ended {
+            return Err(Refuse::UnknownHandle);
+        }
+--- end

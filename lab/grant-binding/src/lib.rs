@@ -363,12 +363,20 @@ impl Verifier {
         self.bind_grant(instance, resource, rights)
     }
 
+    /// The one live-handle check the `set_*` calls share: a missing or ended
+    /// handle stores nothing, so the end mark decides before parentage.
     #[rustfmt::skip]
-    pub fn set_effect_limit(&mut self, handle: Handle, limit: u64) -> Result<(), Refuse> {
+    fn live_grant_mut(&mut self, handle: Handle) -> Result<&mut EndedGrant, Refuse> {
         let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
         if grant.ended {
             return Err(Refuse::UnknownHandle);
         }
+        Ok(grant)
+    }
+
+    #[rustfmt::skip]
+    pub fn set_effect_limit(&mut self, handle: Handle, limit: u64) -> Result<(), Refuse> {
+        let grant = self.live_grant_mut(handle)?;
         if grant.record.parent.is_some() {
             return Err(Refuse::IssuingLimit);
         }
@@ -378,16 +386,14 @@ impl Verifier {
 
     #[rustfmt::skip]
     pub fn set_rate(&mut self, handle: Handle, limit: u64, window: u64) -> Result<(), Refuse> {
-        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+        let now = self.verifier_now;
+        let grant = self.live_grant_mut(handle)?;
         if grant.record.parent.is_some() {
             return Err(Refuse::IssuingRate);
         }
-        if grant.ended {
-            return Err(Refuse::UnknownHandle);
-        }
         grant.record.rate = Some(limit);
         grant.record.window = window;
-        grant.record.window_start = self.verifier_now;
+        grant.record.window_start = now;
         grant.record.window_effects = 0;
         Ok(())
     }
@@ -410,7 +416,9 @@ impl Verifier {
             return Ok(());
         };
         let _ = rate;
-        let end = grant.record.window_start.saturating_add(grant.record.window);
+        let Some(end) = grant.record.window_start.checked_add(grant.record.window) else {
+            return Ok(());
+        };
         if now >= end {
             grant.record.window_start = now;
             grant.record.window_effects = 0;
