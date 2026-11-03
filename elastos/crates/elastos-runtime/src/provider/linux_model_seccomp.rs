@@ -132,6 +132,15 @@ mod tests {
     /// but takes no filter, so its success proves the position can reach the
     /// helper and only the deny entry refuses the filtered row.
     const UNFILTERED_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_UNFILTERED";
+    /// A known stderr line the unfiltered control's probe prints before it
+    /// exits [`CONTROL_EXIT`], so a failure message carrying it proves the
+    /// captured stderr reached the harness whole.
+    const CONTROL_STDERR: &str = "elastos-seccomp-control-stderr";
+    const CONTROL_EXIT: i32 = 7;
+    /// Set only in a regressed control child: it writes `n` bytes (the stderr
+    /// line first) before the same exit, so a harness that drains the pipe
+    /// only after the wait is killed at its timeout with the line truncated.
+    const CONTROL_FLOOD_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_CONTROL_FLOOD";
     /// The test that serves as the helper sibling.
     const VICTIM_TEST: &str =
         "provider::linux_model_seccomp::tests::helper_sibling_serves_the_victim_rows";
@@ -699,6 +708,12 @@ mod tests {
             // body kept. The readv row returns a byte count.
             if rc > 2 && wanted != READV_ROW {
                 close_all(&[rc as libc::c_int]);
+            }
+            // The harness's control runs without this, so it still proves
+            // its row; a test sets it to fail the control on purpose.
+            if let Ok(bytes) = std::env::var(CONTROL_FLOOD_VAR) {
+                control_flood(bytes.parse().unwrap_or(0));
+                std::process::exit(CONTROL_EXIT);
             }
         } else {
             check(row.name, row.outcome, rc);
@@ -1283,17 +1298,15 @@ mod tests {
             ))
             .stderr(std::process::Stdio::piped());
         let mut child = spawn_row(&mut command);
+        // Drained while the child runs: a full pipe would block its write
+        // and the timeout would kill it with its line still in the pipe.
+        let stderr = child.stderr.take().expect("control stderr pipe");
+        let drain = std::thread::spawn(move || drain_stderr(stderr));
         let failure = finish_probe(name, row, &mut child).await;
-        // `finish_probe` reaps the child before it returns, so its pipe is
-        // whole here; reading it closes the pipe.
-        let mut diagnostics = String::new();
-        if let Some(mut stderr) = child.stderr.take() {
-            if let Err(error) =
-                tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut diagnostics).await
-            {
-                diagnostics = format!("stderr did not read: {error}");
-            }
-        }
+        // The child is reaped, so the draining thread sees its pipe end.
+        let diagnostics = drain
+            .join()
+            .unwrap_or_else(|_| "stderr drain panicked".to_owned());
         match failure {
             None => {
                 // The readv row's control checks its own bytes.
@@ -1306,6 +1319,69 @@ mod tests {
                 "row {name} sibling: unfiltered sibling control failed: {reason}; stderr {diagnostics:?}"
             )),
         }
+    }
+
+    /// Reads a control child's pipe to its end while the child runs.
+    fn drain_stderr(mut stderr: tokio::process::ChildStderr) -> String {
+        let mut diagnostics = String::new();
+        let read = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("drain runtime")
+            .block_on(tokio::io::AsyncReadExt::read_to_string(
+                &mut stderr,
+                &mut diagnostics,
+            ));
+        match read {
+            Ok(_) => diagnostics,
+            Err(error) => format!("stderr did not read: {error}"),
+        }
+    }
+
+    /// Writes `text` to stderr in one call, retried when interrupted, so the
+    /// pipe takes one partial write and the call blocks for the rest.
+    fn control_stderr(text: &str) {
+        let mut rest = text.as_bytes();
+        while !rest.is_empty() {
+            let written =
+                unsafe { libc::write(2, rest.as_ptr() as *const libc::c_void, rest.len()) };
+            if written <= 0 {
+                if written == 0 || errno() != libc::EINTR {
+                    return;
+                }
+                continue;
+            }
+            rest = &rest[written as usize..];
+        }
+    }
+
+    /// Writes the marker line and then `bytes` more bytes to a full pipe. Every
+    /// write waits for the harness to read, so a harness that drains only
+    /// after the wait leaves this child blocked and it is killed.
+    fn control_flood(bytes: usize) {
+        let mut text = format!("{CONTROL_STDERR}\n");
+        text.extend(std::iter::repeat_n('f', bytes));
+        text.push('\n');
+        control_stderr(&text);
+    }
+
+    /// Runs the helper row's control once with `flood` bytes on the child's
+    /// stderr, as the harness drives it.
+    fn control_failure(flood: &str) -> Result<(), String> {
+        let row = rows()
+            .into_iter()
+            .find(|row| is_victim(row.name))
+            .expect("a sibling row");
+        std::env::set_var(UNFILTERED_VAR, "1");
+        std::env::set_var(CONTROL_FLOOD_VAR, flood);
+        let control = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("control runtime")
+            .block_on(sibling_control(&Victim::start(), &row));
+        std::env::remove_var(CONTROL_FLOOD_VAR);
+        std::env::remove_var(UNFILTERED_VAR);
+        control
     }
 
     /// Writes one readiness publication under `tag` and reads it back through
@@ -1345,5 +1421,30 @@ mod tests {
     #[should_panic(expected = "publishes address zero")]
     fn readiness_with_a_zero_address_fails() {
         assert_eq!(published_readiness("zero", "PID 0\n"), Some(1));
+    }
+
+    /// An unfiltered control that exits `CONTROL_EXIT` after printing its line
+    /// fails with `finish_probe`'s reason and that whole line.
+    #[test]
+    fn a_control_that_exits_seven_reports_its_reason_and_stderr() {
+        let failure = control_failure("0").expect_err("an exit-7 control passed");
+        assert!(failure.contains("failed;"), "no reason: {failure}");
+        assert!(
+            failure.contains(&format!("{CONTROL_STDERR}\\n")),
+            "no stderr: {failure}"
+        );
+    }
+
+    /// A control that writes 100 KiB (more than a pipe holds) and exits
+    /// `CONTROL_EXIT` fails by its reason, never by the kill path.
+    #[test]
+    fn a_control_that_floods_stderr_still_reports_its_exit() {
+        let failure = control_failure("102400").expect_err("a flooding control passed");
+        assert!(failure.contains("failed;"), "the kill path won: {failure}");
+        assert!(
+            failure.len() > 102400,
+            "the drain stopped early: {}",
+            failure.len()
+        );
     }
 }
