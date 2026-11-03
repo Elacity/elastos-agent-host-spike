@@ -43,6 +43,24 @@ The Runtime resolves `Users/self` to a person principal and a localhost root. Th
 
 The Runtime reaches the person principal through `elastos/crates/elastos-server/src/auth.rs::upsert_principal_for_binding`. That function asks the binding for its id at `elastos/crates/elastos-server/src/auth.rs:4743`, and it derives the principal id from that proof-binding id at `elastos/crates/elastos-server/src/auth.rs:4744` through `local_person_principal_id`. The `ProofBinding` record at `elastos/crates/elastos-auth/src/lib.rs:41` is the evidence the Runtime accepted as control of a principal, and it is not the principal. The derivation writes no grant and admits nothing; it names the principal that a later admission decision may use, and the agent principal stays a separate question in section 7.
 
+`ProofBinding::id` returns the binding's evidence string. A passkey with a passkey record uses `proof:passkey:{rp_id}:{hash}`, where `hash` is the hex of the first 16 bytes of SHA-256 over `rp_id:credential_id`; without that record, it uses `proof:passkey:unknown:{hash}`, with the hash taken from `subject`. An EVM account uses `proof:wallet:eip155:{chain}:{subject}`, with an absent `chain_id` read as zero. A BTC address uses `proof:wallet:bip122:{subject}`. A DID key or Elastos binding uses `proof:{subject}`. An Essentials binding uses `proof:essentials:{subject}`. The id is the evidence string `local_person_principal_id` hashes, the evidence is distinct from the principal, and the derivation writes no grant. The agent principal stays a separate question in section 7. A3 stays open.
+
+The method that builds the evidence string starts at `elastos/crates/elastos-auth/src/lib.rs:85`.
+
+        pub fn id(&self) -> String {
+
+The passkey format line is `elastos/crates/elastos-auth/src/lib.rs:94`.
+
+                            "proof:passkey:{}:{}",
+
+The EVM account format line is `elastos/crates/elastos-auth/src/lib.rs:105`.
+
+                        "proof:wallet:eip155:{}:{}",
+
+The BTC address format line is `elastos/crates/elastos-auth/src/lib.rs:110`.
+
+                ProofBindingKind::BtcAddress => format!("proof:wallet:bip122:{}", self.subject),
+
 `elastos/crates/elastos-server/src/auth.rs::principal_localhost_root` builds the localhost root from a principal id. The body hashes that id with SHA-256 and returns `localhost://Users/` plus the hex of the first 12 bytes of the digest.
 
     pub fn principal_localhost_root(principal_id: &str) -> String {
