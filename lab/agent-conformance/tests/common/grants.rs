@@ -2528,6 +2528,73 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "agent-host")]
+    fn controller_sequence_uses_recorded_requests() {
+        let expected = [
+            ("fixture-journal", "write", "fixture reason"),
+            ("fixture-journal", "read", "fixture reason"),
+        ];
+        let requests = vec![
+            json!({"request_id":"request-a", "session_id":"session-a", "resource":"fixture-journal", "action":"write", "reason":"fixture reason"}),
+            json!({"request_id":"request-b", "session_id":"session-a", "resource":"fixture-journal", "action":"read", "reason":"fixture reason"}),
+        ];
+        let sequence_reason =
+            "request sequence: one session, distinct requests and exact ordered fields required";
+        let check = |controller: &Controller, result, label: &str| {
+            let recorded = controller.requests.clone();
+            let counts = || {
+                let decisions = &controller.decisions;
+                (decisions.matched, decisions.granted, decisions.denied)
+            };
+            let before = counts();
+            assert_eq!(controller.check_requests(&expected), result, "{label}");
+            assert!(controller.requests == recorded, "{label}: store unchanged");
+            assert_eq!(counts(), before, "{label}: decision counts unchanged");
+        };
+        let mut controller = idle_controller(0);
+        controller.requests = requests.clone();
+        check(
+            &controller,
+            Ok(()),
+            "controller accepts valid recorded pair",
+        );
+
+        let mut reversed = requests.clone();
+        reversed.reverse();
+        let mut another_session = requests.clone();
+        another_session[1]["session_id"] = "other-session".into();
+        let mut repeated_id = requests.clone();
+        repeated_id[1]["request_id"] = "request-a".into();
+        for (recorded, reason, label) in [
+            (
+                reversed,
+                sequence_reason,
+                "controller refuses reversed order",
+            ),
+            (
+                another_session,
+                sequence_reason,
+                "controller refuses another session",
+            ),
+            (
+                repeated_id,
+                sequence_reason,
+                "controller refuses repeated ID",
+            ),
+            (
+                requests[..1].to_vec(),
+                "request sequence: exact request count required",
+                "controller refuses missing request",
+            ),
+        ] {
+            controller.requests = recorded;
+            check(&controller, Err(reason), label);
+            controller.requests = requests.clone();
+            check(&controller, Ok(()), "controller accepts repaired store");
+        }
+    }
+
+    #[test]
     fn attach_refusal_names_the_scope() {
         assert_eq!(
             shell_attach(0, "fixture-canary", "shell"),
@@ -3529,16 +3596,67 @@ fn request_sequence_requires_exact_order_and_one_session() {
         json!({"request_id":"request-a", "session_id":"session-a", "resource":"fixture-journal", "action":"write", "reason":"fixture reason"}),
         json!({"request_id":"request-b", "session_id":"session-a", "resource":"fixture-journal", "action":"read", "reason":"fixture reason"}),
     ];
+    let count_reason = "request sequence: exact request count required";
+    let sequence_reason =
+        "request sequence: one session, distinct requests and exact ordered fields required";
     check_request_sequence(&requests, &expected).unwrap();
+    assert_eq!(
+        check_request_sequence(&requests, &expected),
+        Ok(()),
+        "request sequence accepts valid write/read pair"
+    );
+    assert_eq!(
+        check_request_sequence(&requests[..1], &expected),
+        Err(count_reason),
+        "request sequence refuses missing request"
+    );
     assert!(check_request_sequence(&requests[..1], &expected).is_err());
+    assert_eq!(
+        check_request_sequence(&requests, &expected),
+        Ok(()),
+        "request sequence recovers after missing request"
+    );
+    assert_eq!(
+        check_request_sequence(
+            &[requests.clone(), vec![requests[0].clone()]].concat(),
+            &expected
+        ),
+        Err(count_reason),
+        "request sequence refuses extra request"
+    );
     assert!(check_request_sequence(
         &[requests.clone(), vec![requests[0].clone()]].concat(),
         &expected
     )
     .is_err());
+    assert_eq!(
+        check_request_sequence(&requests, &expected),
+        Ok(()),
+        "request sequence recovers after extra request"
+    );
+    assert_eq!(
+        check_request_sequence(&[], &[]),
+        Err(count_reason),
+        "request sequence refuses empty requests and expectations"
+    );
+    assert_eq!(
+        check_request_sequence(&requests, &expected),
+        Ok(()),
+        "request sequence recovers after empty sequence"
+    );
     let mut reversed = requests.clone();
     reversed.reverse();
+    assert_eq!(
+        check_request_sequence(&reversed, &expected),
+        Err(sequence_reason),
+        "request sequence refuses reversed order"
+    );
     assert!(check_request_sequence(&reversed, &expected).is_err());
+    assert_eq!(
+        check_request_sequence(&requests, &expected),
+        Ok(()),
+        "request sequence recovers after reversed order"
+    );
     for (field, value) in [
         ("session_id", "other-session"),
         ("request_id", "request-a"),
@@ -3548,9 +3666,19 @@ fn request_sequence_requires_exact_order_and_one_session() {
     ] {
         let mut wrong = requests.clone();
         wrong[1][field] = value.into();
+        assert_eq!(
+            check_request_sequence(&wrong, &expected),
+            Err(sequence_reason),
+            "request sequence refuses {field}"
+        );
         assert!(
             check_request_sequence(&wrong, &expected).is_err(),
             "request sequence refuses {field}"
+        );
+        assert_eq!(
+            check_request_sequence(&requests, &expected),
+            Ok(()),
+            "request sequence recovers after {field}"
         );
     }
 }

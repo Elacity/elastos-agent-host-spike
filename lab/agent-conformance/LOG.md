@@ -11031,3 +11031,521 @@ Next owner: lane supervisor.
 Final lane formatting and `git diff --check` were repeated under the shared
 lease after the handoff record: exits 0 in 0.206 s and 0.034 s respectively.
 The source SHA-256 still matches the restored candidate. The lease is released.
+
+## 167 — Prove the one request-sequence check
+
+Supplied HEAD: `94f4fe53a3bea3f71f2091c263e71dd4f20a3bea`.
+Supplied tree: `057ab88a66cc9f9c75ec9e2f713726df0ad94e37`. Initial dirty paths: none.
+The supplied branch is `spark/cx-agent-conformance/167-prove-the-one-request-sequence-check`; it has no upstream.
+Cached `spike/spike/agent-host` is five commits behind HEAD (base...HEAD: 0 / 5).
+Network access stays disabled; the supervisor owns current remote verification.
+All supplied refs, worktrees and artifacts retain their owners.
+
+Plan: extend the existing direct sequence test with exact refusals and repaired
+controls, then exercise the actual Controller method with its in-memory request
+store. Hand-run six isolated checker plants and one delegation plant; restore
+exact bytes and pass the named proof before each next plant. Run the controller,
+formatting, locked lane and report gates under the shared build lease.
+Final edits stay in `tests/common/grants.rs`, RUNBOOK's existing Agent Host
+paragraph and this section. Runtime owns admission, identity binding and grants;
+these tests prove fixture observation. The real Agent Host journey retains its
+UsersAI binding blocker. Tasks 134 to 138 and 161 retain their supplied states.
+
+The ignored machine-readable `target/task-167/inventory.json` records the
+checkout, protected source hashes, purpose and cleanup condition for local
+proof artifacts. The repository skill search found no humanizer skill source;
+this handoff uses direct actor and ownership statements.
+
+### Fixture proof and execution bounds
+
+The direct test retains its original assertions and adds fixed-label exact
+refusals for count, empty sequence, order, session, request ID and each field.
+Each refused case is followed by the original valid pair returning `Ok(())`.
+The feature-gated controller test calls the actual `Controller::check_requests`
+through `idle_controller(0)`. It replaces the recorded store for every case,
+checks exact reasons and valid recovery, and observes an unchanged store and
+all three decision counts after each call. Assertions print fixed labels and
+result reasons; request and session values stay out of diagnostics. This test
+opens zero sockets and starts zero children.
+
+The first two lease attempts started zero build commands because another
+operator held the shared lease. Sandbox loopback preflight returned
+`Operation not permitted` before any named test. That result is infrastructure
+evidence and supplies zero caught credit. The gate batch uses authorized
+host loopback/process access and the existing exclusive `fcntl.flock` lease.
+Each command has a 600-second limit; the parent settles its command group
+before closing the lease descriptor, which children do not inherit. Each
+command checks a 12 GiB build estimate plus the 2 GiB reserve. Cargo uses:
+
+```sh
+export RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true
+export CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host"
+export CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build"
+export TMPDIR="$PWD/lab/agent-conformance/target/task-167/tmp"
+```
+
+Repository light checks already passed: `node scripts/check-product-data.mjs`
+(42 capsules, two profiles, 28 method contracts) and
+`node --test scripts/check-product-data.test.mjs` (99 passed).
+
+### Baseline, isolated plants and restoration
+
+Host loopback preflight passed. The first host lease was acquired after
+52.299 s, with 34.184 GiB free. Both named proofs passed (one selected test
+each). The first format check requested three multiline layouts in the new
+controller test; that check exited 1. Those test-only layouts were corrected.
+The second batch acquired the lease immediately with 34.184 GiB free; both
+named proofs and formatting passed before any plant.
+
+Restored candidate grants-source SHA-256: `0cc0cb429e31d683b18a78b46d7f84cadf7d67fac73d4c8e23946a954da1febe`.
+Supplied checker SHA-256: `e6f82ccffd21c795ad15862dd5d4f3e931392d94c62659bd29f9496183efc866`.
+Supplied wrapper SHA-256: `f2839907c8b9ba474564da18f554e3ceac44597d52e449f56c5f017dd7f8a7e4`.
+
+Each plant ran alone. The parent kept the candidate source in memory and
+restored it in `finally`, checked exact byte identity, then ran the named
+proof successfully before the next plant. Every plant compiled and ran
+exactly one test, which failed at its intended assertion (exit 101). The
+restored test ran once and passed (exit 0). Setup failures, empty selections
+and the sandbox preflight supply zero caught credit. Falsifier registration
+and the shared runner keep their supplied bytes. The following seven plants
+are hand-run only. JSON strings below give the exact old/new bytes, including
+indentation and line endings.
+
+#### F-sequence-count — CAUGHT
+
+```json
+{
+  "old": "requests.len() != expected.len() || ",
+  "new": ""
+}
+```
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::request_sequence_requires_exact_order_and_one_session -- --exact
+```
+
+Plant: exit 101 in 1.489 s, one failed test at
+`tests/common/grants.rs:3608:5`, assertion `request sequence refuses missing request`.
+The actual result was `Ok(())`; the expected result was the existing
+count refusal.
+
+Restoration command:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::request_sequence_requires_exact_order_and_one_session -- --exact
+```
+
+Restored: exit 0 in 1.056 s; one passed,
+zero failed and zero ignored. The candidate source matched its recorded
+SHA-256 before that run.
+
+#### F-sequence-session — CAUGHT
+
+```json
+{
+  "old": "field(request, \"session_id\")? != session",
+  "new": "false"
+}
+```
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::request_sequence_requires_exact_order_and_one_session -- --exact
+```
+
+Plant: exit 101 in 1.233 s, one failed test at
+`tests/common/grants.rs:3669:9`, assertion `request sequence refuses session_id`.
+The actual result was `Ok(())`; the expected result was the existing
+sequence refusal.
+
+Restoration command:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::request_sequence_requires_exact_order_and_one_session -- --exact
+```
+
+Restored: exit 0 in 1.006 s; one passed,
+zero failed and zero ignored. The candidate source matched its recorded
+SHA-256 before that run.
+
+#### F-sequence-id — CAUGHT
+
+```json
+{
+  "old": "!ids.insert(field(request, \"request_id\")?)",
+  "new": "{ ids.insert(field(request, \"request_id\")?); false }"
+}
+```
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::request_sequence_requires_exact_order_and_one_session -- --exact
+```
+
+Plant: exit 101 in 1.273 s, one failed test at
+`tests/common/grants.rs:3669:9`, assertion `request sequence refuses request_id`.
+The actual result was `Ok(())`; the expected result was the existing
+sequence refusal.
+
+Restoration command:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::request_sequence_requires_exact_order_and_one_session -- --exact
+```
+
+Restored: exit 0 in 1.137 s; one passed,
+zero failed and zero ignored. The candidate source matched its recorded
+SHA-256 before that run.
+
+The ID plant retains the existing field read and set insertion, and removes
+only the duplicate-result refusal. This keeps the set type inferred and the
+plant compiling; the checker gains no alternate path.
+
+#### F-sequence-resource — CAUGHT
+
+```json
+{
+  "old": "            || field(request, \"resource\")? != *resource\n",
+  "new": ""
+}
+```
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::request_sequence_requires_exact_order_and_one_session -- --exact
+```
+
+Plant: exit 101 in 1.328 s, one failed test at
+`tests/common/grants.rs:3668:9`, assertion `request sequence refuses resource`.
+The actual result was `Ok(())`; the expected result was the existing
+sequence refusal.
+
+Restoration command:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::request_sequence_requires_exact_order_and_one_session -- --exact
+```
+
+Restored: exit 0 in 1.026 s; one passed,
+zero failed and zero ignored. The candidate source matched its recorded
+SHA-256 before that run.
+
+#### F-sequence-action — CAUGHT
+
+```json
+{
+  "old": "            || field(request, \"action\")? != *action\n",
+  "new": ""
+}
+```
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::request_sequence_requires_exact_order_and_one_session -- --exact
+```
+
+Plant: exit 101 in 1.230 s, one failed test at
+`tests/common/grants.rs:3648:5`, assertion `request sequence refuses reversed order`.
+The actual result was `Ok(())`; the expected result was the existing
+sequence refusal.
+
+Restoration command:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::request_sequence_requires_exact_order_and_one_session -- --exact
+```
+
+Restored: exit 0 in 1.012 s; one passed,
+zero failed and zero ignored. The candidate source matched its recorded
+SHA-256 before that run.
+
+#### F-sequence-reason — CAUGHT
+
+```json
+{
+  "old": "            || field(request, \"reason\")? != *reason\n",
+  "new": ""
+}
+```
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::request_sequence_requires_exact_order_and_one_session -- --exact
+```
+
+Plant: exit 101 in 1.322 s, one failed test at
+`tests/common/grants.rs:3668:9`, assertion `request sequence refuses reason`.
+The actual result was `Ok(())`; the expected result was the existing
+sequence refusal.
+
+Restoration command:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::request_sequence_requires_exact_order_and_one_session -- --exact
+```
+
+Restored: exit 0 in 1.046 s; one passed,
+zero failed and zero ignored. The candidate source matched its recorded
+SHA-256 before that run.
+
+#### F-sequence-delegation — CAUGHT
+
+```json
+{
+  "old": "        check_request_sequence(&self.requests, expected)\n",
+  "new": "        Ok(())\n"
+}
+```
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --features agent-host --test effects grants::tests::controller_sequence_uses_recorded_requests -- --exact
+```
+
+Plant: exit 101 in 1.339 s, one failed test at
+`tests/common/grants.rs:2550:13`, assertion `controller refuses reversed order`.
+The actual result was `Ok(())`; the expected result was the existing
+sequence refusal.
+
+Restoration command:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --features agent-host --test effects grants::tests::controller_sequence_uses_recorded_requests -- --exact
+```
+
+Restored: exit 0 in 1.083 s; one passed,
+zero failed and zero ignored. The candidate source matched its recorded
+SHA-256 before that run.
+
+While delegation returned `Ok(())`, the direct checker proof still passed
+with the same feature enabled:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --features agent-host --test effects grants::request_sequence_requires_exact_order_and_one_session -- --exact
+```
+
+That control exited 0 in 0.090 s, with one passed test.
+After exact restoration the default direct command also exited 0 in
+1.093 s, with one passed test; the feature-gated controller
+command above then passed. Thus the controller proof detects a bypass while
+the direct proof still tests the unchanged checker.
+
+### Principles check
+
+| Question | Yes/No | Evidence (lane-relative) |
+| --- | --- | --- |
+| 1. New code/content name or URL where a hash belongs? | No | `tests/common/grants.rs:3590` reuses harmless synthetic request resources; executable and content identity keep their existing owners. |
+| 2. Capsule, Home or UI gains ambient authority? | No | `tests/common/grants.rs:2554` uses an idle in-memory controller; the test opens zero sockets and starts zero children. |
+| 3. Second path or copy of a rule? | No | `tests/common/grants.rs:845` delegates to the one unchanged checker at `:142`; the new closure only calls that method and observes state. |
+| 4. Runtime core grows? | No | `tests/common/grants.rs:2532` adds only a fixture proof; the complete diff stays in the three named lane files. |
+| 5. Refusals deny by default with a clear reason? | Yes | `tests/common/grants.rs:142` retains the exact count and sequence refusals; `:3590` proves both plus valid recovery. |
+| 6. Capsule keeps its logic and granted Bus calls? | Yes | `tests/agent_host.rs:119` keeps the real caller and journal expectations; this task changes only fixture observations and their documentation. |
+| 7. Named tests and caught falsifiers prove the rules? | Yes | `tests/common/grants.rs:3590` catches all six checker plants; `:2532` catches the delegation plant, with exact restoration and passing controls recorded above. |
+| 8. Identity, admission and allowance remain separate? | Yes | `RUNBOOK.md:737` scopes these as fixture observations; Runtime owns admission, identity binding and grants, and `tests/common/grants.rs:2545` observes unchanged decision counts. |
+
+The real journey, journal sequence, blocker IDs, report grades, receipt identity
+coverage and credential checks retain their supplied bytes. Task 166's overlap
+seam and task 158's field checks, as supplied, keep their scope. Stopped and
+blocked task records, including 134 to 138 and 161, are unchanged. These
+proofs supply fixture request-correlation evidence for M1 A6. Installed
+product acceptance remains with its owner.
+
+### Restored author checks
+
+All commands below used the same offline environment, shared lease,
+free-space rule and 600-second command bounds. The Runtime format command
+ran from `elastos/`; all other commands ran from the repository root.
+
+| Check / exact command | Exit | Seconds |
+| --- | --- | --- |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests` | 0 | 9.715 |
+| `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` | 0 | 0.202 |
+| `git diff --check` | 0 | 0.024 |
+| `(cd elastos && cargo fmt --all -- --check)` | 0 | 2.973 |
+| `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` | 0 | 0.144 |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` | 0 | 268.466 |
+
+The default controller selection passed all 40 tests. The complete locked
+lane gate passed on its first run: 254 passed, 0 failed and 14 existing
+ignored rows. Its effects target reported 66 passed, zero failed and 12
+ignored in 213.25 s. Both named proofs also passed after exact restoration
+as recorded above. This candidate needed zero test retries.
+
+### Report gate and final handoff
+
+`lab/agent-conformance/run.sh` passed on its first execution: exit 0 in
+262.699 s. Its local, uncommitted receipt is
+`target/run-table.wqsa7V/VERSIONS.json`, SHA-256
+`aa17e14a66a229270250bfc04720e7e3e6d0dcd3b80e9d41aa0f87b5772200d0`.
+The receipt has complete identity, an empty missing/invalid list,
+`cargo_success: true`, `command_success: true` and `suite_outcome: BLOCKED`.
+The table retains 14 existing blocker rows, with zero FAIL or SKIPPED rows.
+Receipt completeness supplies version evidence for these runs; the real
+Agent Host and installed-product acceptance remain with their owners.
+
+All seven plants are restored. The checker and wrapper match their supplied
+bytes and recorded hashes; the complete restored Rust source matches the
+candidate hash. The real Agent Host test, Cargo inputs, falsifier list and
+shared runner match the supplied hashes. Read-only diff checks prove every
+tracked path outside the three allowed files matches supplied HEAD, the
+earlier LOG prefix is byte-identical, and the grants diff adds test lines
+only. The checkout retains supplied HEAD/tree and its task branch.
+
+Final branch and worktree inventories are recorded in the ignored
+`target/task-167/inventory.json`. The task branch has no upstream; cached
+`spike/spike/agent-host` remains five commits behind HEAD (base...HEAD: 0 / 5).
+The supervisor owns current remote verification and publication. Unrelated
+refs and worktrees keep their owners; this task changed zero Git refs,
+checkouts, installed runtimes or rollback sets.
+
+The successful full journeys use their existing Home cleanup paths. The two
+named proofs create zero fixture Homes, sockets or children. Local proof
+captures, plant records and the receipt remain under their explicit
+supervisor-review cleanup condition. Shared build outputs retain the active
+lane review lifecycle. The full batch released its shared lease at process
+exit. Final inventory free space was 33.893 GiB.
+
+Candidate: supplied HEAD/tree plus this three-file local candidate, with
+restored Rust-source SHA-256 recorded above.
+Exercised checks: both named proofs, seven isolated plants and their restored
+controls, all 40 default controller tests, lane and repository formatting,
+product-data checks, the 254-test locked suite and report/receipt gate.
+The 14 existing ignores retain their recorded blockers; the sandbox refusal
+is infrastructure evidence.
+Reviews: independent development and adversarial reviews remain supervisor-owned.
+Installed release evidence: fixture request observation only; acceptance
+stays with the installed-product owner.
+Remaining gate: independent reviews and supervisor integration.
+Next owner: lane supervisor.
+
+- 167: Extended the exact request-sequence refusal/recovery proof and added the in-memory Controller delegation proof; all seven isolated plants were caught and restored, and the focused, locked-lane, formatting and report gates passed with 14 existing blockers preserved.
+
+Final handoff formatting and diff checks also passed under the shared lease.
+The source and protected-byte checks still pass; the lease is released at
+this final check process exit.
+
+
+### Round 2 — supervisor census failure and gate retry
+
+Round 2 supplied HEAD: `94f4fe53a3bea3f71f2091c263e71dd4f20a3bea`.
+Supplied tree: `057ab88a66cc9f9c75ec9e2f713726df0ad94e37`.
+Supplied dirty paths: `tests/common/grants.rs`, `RUNBOOK.md` and `LOG.md`,
+all under this lane. The existing task candidate and unrelated work stay intact.
+The checker, Controller wrapper and protected-source hashes match the task's
+supplied inventory before this round's work.
+
+The supervisor's locked gate exited 101: the effects target passed 65 tests,
+failed `ungranted_memory_write_is_refused`, and kept 12 existing ignores.
+Its final census reported one process holding `host-process.lock` in the
+retained fixture Home. This is a failed cleanup result, separate from both
+request-sequence proofs, which passed. The earlier author runs above remain
+historical results; supervisor acceptance was still open after that failure.
+
+Plan: keep the current source, rerun the named baseline proofs, isolate each
+of the seven existing plants, restore exact bytes after each plant, then run
+the controller tests, formatting, locked lane gate and report gate. The shared
+lease, offline settings, 600-second bounds and 12 GiB plus 2 GiB free-space
+rule apply to this retry. A repeat cleanup failure stays a blocker with its
+exact result. The census, shutdown path, ignored journeys and acceptance
+policy keep their supplied bytes.
+
+
+The sandbox loopback preflight refused its bind before any named test ran.
+Three host attempts found the shared lease busy and started zero build commands.
+A bounded wait then acquired it. Successful host loopback preflights preceded
+the proof batches. Each command retained the offline environment above,
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, its 600-second bound, and the
+12 GiB estimate plus 2 GiB reserve. Free space was 33.878 GiB at the first
+baseline and 33.814 GiB before the report gate.
+
+The first retry recorder stopped after the delegation test failed with the
+correct current label, because the recorder still expected an older label.
+Its `finally` restored exact source bytes and released the lease. This local
+recording error supplies zero completed-gate credit. The next batch used
+`controller refuses reversed order`, repeated the delegation plant, passed
+the direct checker while that plant was active, and restored and passed both
+named proofs. The six checker plants had each already compiled, run exactly
+one named test, failed its intended assertion and passed after restoration.
+
+The seven exact old/new edits are the `F-sequence-*` JSON entries above;
+this round verified each old anchor occurred exactly once and applied one
+edit at a time. Their bytes and commands are unchanged. The direct checker
+command for baseline, every checker plant and every checker restoration was:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::request_sequence_requires_exact_order_and_one_session -- --exact
+```
+
+The controller baseline, delegation plant and restoration command was:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --features agent-host --test effects grants::tests::controller_sequence_uses_recorded_requests -- --exact
+```
+
+| Plant | Planted exit / seconds | Failed assertion | Restored exit / seconds |
+| --- | --- | --- | --- |
+| F-sequence-count | 101 / 1.718 | `request sequence refuses missing request` | 0 / 1.228 |
+| F-sequence-session | 101 / 1.254 | `request sequence refuses session_id` | 0 / 1.073 |
+| F-sequence-id | 101 / 1.214 | `request sequence refuses request_id` | 0 / 1.078 |
+| F-sequence-resource | 101 / 1.328 | `request sequence refuses resource` | 0 / 1.312 |
+| F-sequence-action | 101 / 1.347 | `request sequence refuses reversed order` | 0 / 1.048 |
+| F-sequence-reason | 101 / 1.266 | `request sequence refuses reason` | 0 / 1.013 |
+| F-sequence-delegation | 101 / 0.981 | `controller refuses reversed order` | 0 / 0.948 |
+
+The direct control while delegation returned `Ok(())` used:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --features agent-host --test effects grants::request_sequence_requires_exact_order_and_one_session -- --exact
+```
+
+It passed one test (exit 0, 0.088 s). After exact restoration,
+the default direct test and feature-gated controller test each passed once.
+The restored Rust-source SHA-256 remains
+`0cc0cb429e31d683b18a78b46d7f84cadf7d67fac73d4c8e23946a954da1febe`.
+
+| Restored check / exact command | Exit | Seconds |
+| --- | --- | --- |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests` | 0 | 9.757 |
+| `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` | 0 | 0.250 |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` | 0 | 261.927 |
+| `lab/agent-conformance/run.sh` | 0 | 260.255 |
+
+The default controller selection passed all 40 tests. The complete locked
+gate passed 254 tests, failed zero, and retained 14 existing ignores; its
+effects target passed 66 tests and retained 12 ignores. The previously failed
+`ungranted_memory_write_is_refused` passed in both the locked gate and the
+report run. The supervisor failure remains evidence above; this retry changes
+neither the cleanup policy nor that earlier result.
+
+The report gate passed with 247 PASS rows, 14 BLOCKED rows and zero FAIL or
+SKIPPED rows. Its local, uncommitted receipt is
+`target/run-table.RdVhrp/VERSIONS.json`, SHA-256
+`aa17e14a66a229270250bfc04720e7e3e6d0dcd3b80e9d41aa0f87b5772200d0`.
+Identity coverage is complete, `missing_or_invalid` is empty, both success
+flags are true, and `suite_outcome` remains `BLOCKED`.
+
+The request checker, Controller method, real Agent Host caller, ignored
+journey and expected journal sequence retain their supplied bytes. The
+candidate test code and RUNBOOK paragraph are unchanged from round 1; this
+round adds only this LOG record and ignored local proof captures. Task 158's
+field checks, task 166's overlap seam, all blocker IDs, receipt and credential
+rules, and stopped/blocked task records including 134 to 138 and 161 retain
+their supplied bytes. The principles answers and file:line evidence above
+remain current. The proof batches restored source bytes before releasing
+the lease. Their captures stay under the existing supervisor-review cleanup
+condition; the supervisor's retained failed Home keeps its owner and data.
+
+Candidate: supplied HEAD/tree plus the same three-file local candidate and
+this round's LOG addition; restored Rust-source SHA-256 is recorded above.
+Exercised checks: both named proofs, all seven isolated plants and their
+restored controls, 40 default controller tests, formatting, the locked gate
+and the report/receipt gate. The 14 ignored rows retain their blockers.
+Reviews: independent reviews and supervisor integration remain open.
+Installed release evidence: fixture request observation; installed-product
+acceptance and the real Agent Host journey remain with their owners.
+Remaining gate: independent reviews and the supervisor's current candidate gate.
+Next owner: lane supervisor.
+
+- 167 round 2: Preserved the request-sequence candidate, recorded the supervisor census failure, caught and restored all seven plants again, and passed the focused, formatting, locked-lane and report gates with existing blockers intact.
+
+Round 2 final `git diff --check` and lane formatting both passed under the
+shared lease. Read-only inventories confirm the supplied HEAD/tree, the
+three allowed dirty paths, exact protected bytes and unchanged earlier LOG
+records. The task branch has no upstream; cached `spike/spike/agent-host`
+versus HEAD is 0 / 5 (base-only / HEAD-only commits). Network stays disabled;
+the supervisor owns current remote verification. The local ledger records
+the final inventory and proof-retention conditions. Final free space: 33.804 GiB.

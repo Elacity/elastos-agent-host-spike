@@ -734,7 +734,16 @@ The active agent-host checks under `--agent-host` include
 `agent_host_row_requires_its_launched_identity`, and
 `staging_uses_manifest_entrypoint_and_refuses_escape`. The shared
 `agent_host_grants::tests` also run. These exercise the harness with fixtures;
-the real capsule's shell-denial journey stays BLOCKED.
+the real capsule's shell-denial journey stays BLOCKED. The default effects
+target's `grants::request_sequence_requires_exact_order_and_one_session`
+proves exact count, ordered resource/action/reason, one session and distinct
+request IDs, with refusal and repaired-input controls. With `--features
+agent-host`, `grants::tests::controller_sequence_uses_recorded_requests` in
+that target proves the actual Controller method checks its recorded store
+without changing requests or decision counts. This in-memory controller test
+opens zero sockets and starts zero children. The six checker plants and the
+delegation plant prove fixture request observation; Runtime owns capsule
+admission, identity binding and grants.
 
 ## Session binding of a Runtime grant (M1 A5 half)
 
