@@ -1262,8 +1262,11 @@ mod tests {
     }
 
     /// The unfiltered control from the filtered probe's position: a sibling of
-    /// the helper, same command, no filter, which must get a real descriptor. A
-    /// failed control names its row in a failure.
+    /// the helper, same row command, no filter. Its body must get a real
+    /// descriptor back; any other answer names this control in a failure and
+    /// keeps the cause `finish_probe` returned, so a timeout, an exit code, a
+    /// missing pass token and a refusal stay distinct. The child's stderr is a
+    /// pipe here, so that cause carries the probe's own refusal.
     async fn sibling_control(victim: &Victim, row: &Row) -> Result<(), String> {
         let name = row.name;
         let mut command = Command::new(std::env::current_exe().expect("test executable path"));
@@ -1278,9 +1281,20 @@ mod tests {
             .stdout(std::process::Stdio::from(
                 std::fs::File::create(probe_token(name)).expect("control token file"),
             ))
-            .stderr(std::process::Stdio::null());
+            .stderr(std::process::Stdio::piped());
         let mut child = spawn_row(&mut command);
-        match finish_probe(name, row, &mut child).await {
+        let failure = finish_probe(name, row, &mut child).await;
+        // `finish_probe` reaps the child before it returns, so its pipe is
+        // whole here; reading it closes the pipe.
+        let mut diagnostics = String::new();
+        if let Some(mut stderr) = child.stderr.take() {
+            if let Err(error) =
+                tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut diagnostics).await
+            {
+                diagnostics = format!("stderr did not read: {error}");
+            }
+        }
+        match failure {
             None => {
                 // The readv row's control checks its own bytes.
                 if name != READV_ROW {
@@ -1288,8 +1302,8 @@ mod tests {
                 }
                 Ok(())
             }
-            Some(_) => Err(format!(
-                "row {name} sibling: unfiltered sibling control failed"
+            Some(reason) => Err(format!(
+                "row {name} sibling: unfiltered sibling control failed: {reason}; stderr {diagnostics:?}"
             )),
         }
     }
