@@ -3920,3 +3920,25 @@ fn model_later_writes_keep_the_effect_count() {
         .use_grant(call, &guest(roll))
         .expect("the journal stays in the store");
 }
+
+#[test]
+fn model_public_path_leaves_the_standing_grant() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    verifier
+        .bind_for_session(photo, "Public/photo/desk", rights())
+        .expect_err("public storage does not bind");
+    let album = verifier
+        .bind_grant(photo, "UsersAI/photo/album", rights())
+        .expect("standing album");
+    let call = verifier.open_call(photo);
+    verifier
+        .host_set_session(photo, "session-b")
+        .expect("session changes");
+    let waiting = verifier
+        .use_grant(call, &guest(album))
+        .expect_err("the standing grant waits for session-a");
+    assert_eq!(waiting, Refuse::Session);
+}
