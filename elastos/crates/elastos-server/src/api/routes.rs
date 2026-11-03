@@ -61,7 +61,10 @@ pub async fn list_capsules(
     Json(CapsuleListResponse { capsules })
 }
 
+/// Unknown fields are refused: a launch request carries no principal kind. The
+/// agent kind is read only from the signed manifest at admission (F-A5-kind).
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LaunchRequest {
     path: String,
     #[serde(default)]
@@ -231,6 +234,22 @@ mod tests {
         )
         .unwrap();
         capsule_dir
+    }
+
+    /// A5-S2b forged-kind row: a request naming an agent kind is refused.
+    #[test]
+    fn launch_request_carrying_an_agent_kind_is_refused() {
+        let grant = serde_json::json!({"path": "/capsules/chat-wasm", "launch_grant": "t"});
+        assert!(serde_json::from_value::<LaunchRequest>(grant.clone()).is_ok());
+        for (field, forged) in [
+            ("agent", serde_json::json!({"kind": "agent"})),
+            ("kind", serde_json::json!("agent")),
+            ("principal_kind", serde_json::json!("Agent")),
+        ] {
+            let mut request = grant.clone();
+            request[field] = forged;
+            assert!(serde_json::from_value::<LaunchRequest>(request).is_err());
+        }
     }
 
     #[test]
