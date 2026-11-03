@@ -352,7 +352,12 @@ reason must match an entry in `fixtures/grants.json` exactly. The entry supplies
 `fixture denies unlisted read`; a pending `elastos://net/stream` request
 receives `fixture denies unlisted elastos://net/stream`. An ambiguous match
 denies the whole pending snapshot with a reason. A consumed entry also refuses
-a later matching request.
+a later matching request. The scripted loopback tests capture each complete
+request under byte and time bounds, discard its headers, and check the decoded
+grant body after the server thread joins. The selected duration reaches the
+request even after a refused approval reply. These tests prove the fixture-only
+A6 grant-control prerequisite; Runtime owns grants and duration enforcement.
+They build and launch neither Runtime, providers nor probe capsules.
 
 - `granted_read_succeeds`: seeds `Public/agent-conformance-grants/granted.txt`,
   observes exactly one matching request and grant, and requires exit 0 after
@@ -365,6 +370,12 @@ a later matching request.
   prevents approval, including a resource that merely shares a path prefix.
 - `grants::tests::controller_refuses_ambiguous_requests_before_deciding`: two
   matches or reuse of an entry fail before a grant is selected.
+- `grants::tests::controller_sends_each_fixture_duration`: reversed pending order
+  and exchanged `once`/`session` entries send each request id's selected duration
+  with exactly the grant route's three body fields; both entries are consumed.
+- `grants::tests::controller_keeps_fixture_duration_after_refused_grant`: a
+  refused approval consumes zero entries; a second poll sends the same exact
+  request and grants once, for both durations. Match counts remain attempts.
 - `grants::tests::controller_requires_explicit_fixture_and_credentials`: missing
   coordinates, missing or empty attach data, and incomplete fixture rules refuse.
 - `grants::tests::controller_refuses_failed_attach_and_http_responses`: failed
