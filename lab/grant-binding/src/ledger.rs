@@ -5960,7 +5960,7 @@ fn model_session_change_still_times_out() {
 }
 
 #[test]
-fn model_identity_change_still_settles() {
+fn model_identity_change_settle_is_refused() {
     let mut verifier = Verifier::new();
     let photo = verifier
         .register_instance("photo", "session-a")
@@ -6064,13 +6064,13 @@ fn model_identity_change_still_settles() {
             library_hold,
             SettleOutcome::Known(4)
         ),
-        Ok(4),
-        "a hold on an ended grant still settles after the identity change"
+        Err(SettleRefuse::Binding(Refuse::Identity)),
+        "the new identity is refused on the saved hold"
     );
     assert_eq!(
         verifier.settle(&call, &guest(roll), child_hold, SettleOutcome::Known(3)),
-        Ok(3),
-        "a journal hold on an ended grant still settles"
+        Err(SettleRefuse::Binding(Refuse::Identity)),
+        "the new identity is refused on the journal hold"
     );
     let album_settle = verifier
         .settle(&call, &guest(album), album_hold, SettleOutcome::Known(2))
@@ -6080,11 +6080,11 @@ fn model_identity_change_still_settles() {
         album_settle.to_string(),
         "identity does not match the grant"
     );
-    assert_eq!(books(&verifier).held, 2, "the live hold stays counted");
+    assert_eq!(books(&verifier).held, 9, "every refused hold stays counted");
     assert_eq!(
         books(&verifier).charged,
-        7,
-        "the two settled figures are charged"
+        0,
+        "the refused settles charge nothing"
     );
     let opened = verifier
         .reserve(&call, &guest(library), 1)
@@ -6102,7 +6102,7 @@ fn model_identity_change_still_settles() {
         Ok(2),
         "the live hold settles once its identity is restored"
     );
-    assert_eq!(books(&verifier).held, 0, "every hold has closed");
+    assert_eq!(books(&verifier).held, 7, "the kept holds stay counted");
     verifier
         .use_grant(call, &guest(album))
         .expect("the live grant revives");
@@ -6111,12 +6111,12 @@ fn model_identity_change_still_settles() {
         .expect_err("the frames grant waits for frames");
     assert_eq!(desk_waits, Refuse::Identity);
     verifier
-        .reserve(&call, &guest(album), 9)
-        .expect("the ceiling room returned");
+        .reserve(&call, &guest(album), 2)
+        .expect("only the settled hold's ceiling room returned");
 }
 
 #[test]
-fn model_identity_change_still_releases() {
+fn model_identity_change_release_is_refused() {
     let mut verifier = Verifier::new();
     let photo = verifier
         .register_instance("photo", "session-a")
@@ -6140,13 +6140,13 @@ fn model_identity_change_still_releases() {
         .expect("identity changes");
     assert_eq!(
         verifier.release(&call, &guest(library), reservation),
-        Ok(()),
-        "a hold on an ended grant still releases after the identity change"
+        Err(ReleaseRefuse::Binding(Refuse::Identity)),
+        "the new identity is refused on the saved hold"
     );
     assert_eq!(
         books(&verifier).held,
-        0,
-        "the released hold gives its amount back"
+        4,
+        "the refused release keeps the hold"
     );
     assert_eq!(books(&verifier).charged, 0, "release charges nothing");
     let ended = verifier
@@ -6159,7 +6159,87 @@ fn model_identity_change_still_releases() {
 }
 
 #[test]
-fn model_identity_change_still_times_out() {
+fn model_kept_hold_old_principal_settles() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 4 },
+            4,
+        )
+        .expect("ask");
+    let hold = verifier.reserve(&call, &guest(handle), 4).expect("hold");
+    verifier.revoke_grant(handle).expect("grant ends");
+    verifier
+        .host_set_identity(instance, "agent-2")
+        .expect("identity changes");
+    // The grant also binds its instance, so restore its saved identity on that
+    // instance rather than present the same identity from a sibling instance.
+    verifier
+        .host_set_identity(instance, "agent-1")
+        .expect("old principal returns");
+    assert_eq!(
+        verifier.settle(&call, &guest(handle), hold, SettleOutcome::Known(4)),
+        Ok(4)
+    );
+    assert_eq!(
+        books(&verifier).charged,
+        4,
+        "the measured amount is charged"
+    );
+    assert_eq!(books(&verifier).held, 0, "the hold closes");
+    assert!(!books(&verifier).open.contains_key(&hold.id));
+}
+
+#[test]
+fn model_kept_hold_grant_end_gap_keeps_orphan() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 4 },
+            4,
+        )
+        .expect("ask");
+    let hold = verifier.reserve(&call, &guest(handle), 4).expect("hold");
+    verifier.set_verifier_deadline(10);
+    assert_eq!(
+        verifier.settle(&call, &guest(handle), hold, SettleOutcome::Unknown),
+        Err(SettleRefuse::UnknownOutcome)
+    );
+    verifier
+        .host_set_identity(instance, "agent-2")
+        .expect("identity changes");
+    verifier.revoke_grant(handle).expect("grant ends");
+    // GAP(no-end-path): end_grant retains the binding and hold; only settle
+    // adds a charge. The required Runtime close and full charge have no path.
+    assert_eq!(books(&verifier).held, 4, "grant end keeps the orphan open");
+    assert_eq!(books(&verifier).charged, 0, "grant end charges nothing");
+    assert_eq!(books(&verifier).open.get(&hold.id), Some(&4));
+    verifier
+        .host_set_identity(instance, "agent-1")
+        .expect("old principal returns");
+    assert_eq!(
+        verifier.timeout_hold(&call, &guest(handle), hold, 10),
+        Ok(TimeoutRecord)
+    );
+    assert_eq!(books(&verifier).timed_out.get(&hold.id), Some(&true));
+    assert_eq!(books(&verifier).held, 4, "the due timeout keeps the hold");
+    assert_eq!(
+        books(&verifier).charged,
+        0,
+        "the due timeout charges nothing"
+    );
+}
+
+#[test]
+fn model_identity_change_timeout_is_refused() {
     let mut verifier = Verifier::new();
     let photo = verifier
         .register_instance("photo", "session-a")
@@ -6188,15 +6268,20 @@ fn model_identity_change_still_times_out() {
         .expect("identity changes");
     assert_eq!(
         verifier.timeout_hold(&call, &guest(library), reservation, 10),
-        Ok(TimeoutRecord),
-        "a hold on an ended grant still times out after the identity change"
+        Err(TimeoutRefuse::Binding(Refuse::Identity)),
+        "the new identity is refused on the saved hold"
     );
     assert_eq!(
         books(&verifier).timed_out.get(&reservation.id),
-        Some(&true),
-        "the kept uncertain hold records its timeout"
+        None,
+        "the refused timeout records nothing"
     );
     assert_eq!(books(&verifier).held, 4, "the uncertain hold stays counted");
+    assert_eq!(
+        books(&verifier).charged,
+        0,
+        "the refused timeout charges nothing"
+    );
     let ended = verifier
         .use_grant(call, &guest(library))
         .expect_err("timeout does not revive the ended grant");
