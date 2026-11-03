@@ -132,15 +132,14 @@ mod tests {
     /// but takes no filter, so its success proves the position can reach the
     /// helper and only the deny entry refuses the filtered row.
     const UNFILTERED_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_UNFILTERED";
-    /// A known stderr line the unfiltered control's probe prints before it
-    /// exits [`CONTROL_EXIT`], so a failure message carrying it proves the
-    /// captured stderr reached the harness whole.
+    /// A known stderr line the control probe prints before exiting
+    /// [`CONTROL_EXIT`], so a message carrying it proves the stderr arrived.
     const CONTROL_STDERR: &str = "elastos-seccomp-control-stderr";
     const CONTROL_EXIT: i32 = 7;
-    /// Set only in a regressed control child: it writes `n` bytes (the stderr
-    /// line first) before the same exit, so a harness that drains the pipe
-    /// only after the wait is killed at its timeout with the line truncated.
-    const CONTROL_FLOOD_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_CONTROL_FLOOD";
+    /// Set only on a control child's own command: `n` writes the marker line
+    /// and `n` bytes, then exits [`CONTROL_EXIT`]; an empty or unparsable value
+    /// leaves the child's own run. No test changes this process's environment.
+    const CONTROL_VAR: &str = "ELASTOS_LINUX_MODEL_SECCOMP_CONTROL";
     /// The test that serves as the helper sibling.
     const VICTIM_TEST: &str =
         "provider::linux_model_seccomp::tests::helper_sibling_serves_the_victim_rows";
@@ -710,11 +709,8 @@ mod tests {
                 close_all(&[rc as libc::c_int]);
             }
             // The harness's control runs without this, so it still proves
-            // its row; a test sets it to fail the control on purpose.
-            if let Ok(bytes) = std::env::var(CONTROL_FLOOD_VAR) {
-                control_flood(bytes.parse().unwrap_or(0));
-                std::process::exit(CONTROL_EXIT);
-            }
+            // its row; a test sets it on that one child's command.
+            planted_control();
         } else {
             check(row.name, row.outcome, rc);
         }
@@ -1211,7 +1207,9 @@ mod tests {
             // position the host refuses (Yama scope 1 for a non-ancestor) then
             // fails here by name instead of passing the row vacuously.
             if is_victim(name) {
-                if let Err(failure) = sibling_control(victim.as_ref().expect("helper"), &row).await
+                // No control planted: the child's own run is the control.
+                if let Err(failure) =
+                    sibling_control(victim.as_ref().expect("helper"), &row, "").await
                 {
                     defects.push(failure);
                 }
@@ -1278,11 +1276,10 @@ mod tests {
 
     /// The unfiltered control from the filtered probe's position: a sibling of
     /// the helper, same row command, no filter. Its body must get a real
-    /// descriptor back; any other answer names this control in a failure and
-    /// keeps the cause `finish_probe` returned, so a timeout, an exit code, a
-    /// missing pass token and a refusal stay distinct. The child's stderr is a
-    /// pipe here, so that cause carries the probe's own refusal.
-    async fn sibling_control(victim: &Victim, row: &Row) -> Result<(), String> {
+    /// descriptor back; any other answer keeps the cause `finish_probe`
+    /// returned, so a timeout, an exit code, a lost token and a refusal stay
+    /// distinct, and the piped stderr carries the probe's own refusal.
+    async fn sibling_control(victim: &Victim, row: &Row, control: &str) -> Result<(), String> {
         let name = row.name;
         let mut command = Command::new(std::env::current_exe().expect("test executable path"));
         command
@@ -1293,19 +1290,29 @@ mod tests {
             .env(VICTIM_PID_VAR, victim.pid.to_string())
             .env(VICTIM_ADDRESS_VAR, victim.address.to_string())
             .env(UNFILTERED_VAR, "1")
+            // A planted control is this one child's own variable, so this
+            // process's environment and every other child stay untouched.
+            .env(CONTROL_VAR, control)
             .stdout(std::process::Stdio::from(
                 std::fs::File::create(probe_token(name)).expect("control token file"),
             ))
             .stderr(std::process::Stdio::piped());
         let mut child = spawn_row(&mut command);
-        // Drained while the child runs: a full pipe would block its write
-        // and the timeout would kill it with its line still in the pipe.
-        let stderr = child.stderr.take().expect("control stderr pipe");
-        let drain = std::thread::spawn(move || drain_stderr(stderr));
+        // A full pipe would block the child's write, so its stderr is read on
+        // this same runtime while `finish_probe` runs: a second runtime or a
+        // blocking read of a handle this one owns starves the reactor.
+        let mut stderr = child.stderr.take().expect("control stderr pipe");
+        let drain = tokio::spawn(async move {
+            let mut diagnostics = String::new();
+            match tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut diagnostics).await {
+                Ok(_) => diagnostics,
+                Err(error) => format!("stderr did not read: {error}"),
+            }
+        });
         let failure = finish_probe(name, row, &mut child).await;
-        // The child is reaped, so the draining thread sees its pipe end.
+        // The child is reaped, so its pipe end is here and the read ends.
         let diagnostics = drain
-            .join()
+            .await
             .unwrap_or_else(|_| "stderr drain panicked".to_owned());
         match failure {
             None => {
@@ -1321,25 +1328,21 @@ mod tests {
         }
     }
 
-    /// Reads a control child's pipe to its end while the child runs.
-    fn drain_stderr(mut stderr: tokio::process::ChildStderr) -> String {
-        let mut diagnostics = String::new();
-        let read = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("drain runtime")
-            .block_on(tokio::io::AsyncReadExt::read_to_string(
-                &mut stderr,
-                &mut diagnostics,
-            ));
-        match read {
-            Ok(_) => diagnostics,
-            Err(error) => format!("stderr did not read: {error}"),
+    /// Ends a control child that `sibling_control` named on its command: it
+    /// writes its stderr and exits [`CONTROL_EXIT`]. A child that names no
+    /// control runs on and prints its pass token.
+    fn planted_control() {
+        // Drains the pipe the harness reads, so the exit cause is the child's
+        // own and never the harness's timeout.
+        if let Ok(Some(bytes)) = std::env::var(CONTROL_VAR).map(|value| value.parse::<usize>().ok())
+        {
+            control_stderr(&control_text(bytes));
+            std::process::exit(CONTROL_EXIT);
         }
     }
 
-    /// Writes `text` to stderr in one call, retried when interrupted, so the
-    /// pipe takes one partial write and the call blocks for the rest.
+    /// Writes `text` to stderr, retried when interrupted, until every byte
+    /// has been accepted by the pipe.
     fn control_stderr(text: &str) {
         let mut rest = text.as_bytes();
         while !rest.is_empty() {
@@ -1355,32 +1358,29 @@ mod tests {
         }
     }
 
-    /// Writes the marker line and then `bytes` more bytes to a full pipe. Every
-    /// write waits for the harness to read, so a harness that drains only
-    /// after the wait leaves this child blocked and it is killed.
-    fn control_flood(bytes: usize) {
+    /// The stderr a [`CONTROL_VAR`] control writes: the marker line, then
+    /// `bytes` bytes, then a line end.
+    fn control_text(bytes: usize) -> String {
         let mut text = format!("{CONTROL_STDERR}\n");
         text.extend(std::iter::repeat_n('f', bytes));
         text.push('\n');
-        control_stderr(&text);
+        text
     }
 
-    /// Runs the helper row's control once with `flood` bytes on the child's
-    /// stderr, as the harness drives it.
-    fn control_failure(flood: &str) -> Result<(), String> {
+    /// Runs the helper row's control once, with `control` set on that child's
+    /// own command and this process's environment untouched.
+    fn control_failure(control: &str) -> Result<(), String> {
         let row = rows()
             .into_iter()
-            .find(|row| is_victim(row.name))
+            .find(|row| row.name == "pidfd_getfd sibling")
             .expect("a sibling row");
-        std::env::set_var(UNFILTERED_VAR, "1");
-        std::env::set_var(CONTROL_FLOOD_VAR, flood);
         let control = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("control runtime")
-            .block_on(sibling_control(&Victim::start(), &row));
-        std::env::remove_var(CONTROL_FLOOD_VAR);
-        std::env::remove_var(UNFILTERED_VAR);
+            .block_on(sibling_control(&Victim::start(), &row, control));
+        // A pipe this process still held at a later spawn would be
+        // close-on-exec there, so no descriptor outlives this run.
         control
     }
 
@@ -1423,28 +1423,38 @@ mod tests {
         assert_eq!(published_readiness("zero", "PID 0\n"), Some(1));
     }
 
-    /// An unfiltered control that exits `CONTROL_EXIT` after printing its line
-    /// fails with `finish_probe`'s reason and that whole line.
-    #[test]
-    fn a_control_that_exits_seven_reports_its_reason_and_stderr() {
-        let failure = control_failure("0").expect_err("an exit-7 control passed");
-        assert!(failure.contains("failed;"), "no reason: {failure}");
-        assert!(
-            failure.contains(&format!("{CONTROL_STDERR}\\n")),
-            "no stderr: {failure}"
+    /// Runs one planted control and asserts the whole failure: the harness's
+    /// text, the reason `finish_probe` returned (`row_result` keeps a bool, so
+    /// an exit names no number) and the whole stderr written.
+    #[track_caller]
+    fn refused_control(bytes: usize) -> String {
+        let failure = control_failure(&bytes.to_string()).expect_err("a control passed");
+        let expected = format!(
+            "row pidfd_getfd sibling sibling: unfiltered sibling control failed: \
+             row pidfd_getfd sibling failed; stderr {:?}",
+            control_text(bytes)
         );
+        assert_eq!(failure, expected);
+        failure
     }
 
-    /// A control that writes 100 KiB (more than a pipe holds) and exits
-    /// `CONTROL_EXIT` fails by its reason, never by the kill path.
+    /// An unfiltered control that exits `CONTROL_EXIT` after printing its line
+    /// fails with `finish_probe`'s whole reason and its whole stderr, so a
+    /// dropped `{reason}` from the message turns this red.
+    #[test]
+    fn a_control_that_exits_seven_reports_its_reason_and_stderr() {
+        refused_control(0);
+    }
+
+    /// A control that writes 100 KiB, more than the pipe holds, and exits
+    /// `CONTROL_EXIT` fails by that same exit reason with the whole flood, so
+    /// a harness that drains the pipe only after the wait, or that kills the
+    /// child at its timeout, turns this red.
     #[test]
     fn a_control_that_floods_stderr_still_reports_its_exit() {
-        let failure = control_failure("102400").expect_err("a flooding control passed");
-        assert!(failure.contains("failed;"), "the kill path won: {failure}");
-        assert!(
-            failure.len() > 102400,
-            "the drain stopped early: {}",
-            failure.len()
-        );
+        let failure = refused_control(102_400);
+        for kill in ["probe child did not finish", "expected SIGSYS"] {
+            assert!(!failure.contains(kill), "the kill path won: {failure:?}");
+        }
     }
 }
