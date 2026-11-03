@@ -1,0 +1,18 @@
+id: F-A5-rateorder
+file: src/lib.rs
+test: ops::model_revoked_journal_rate_is_unknown
+--- old
+        if grant.ended {
+            return Err(Refuse::UnknownHandle);
+        }
+        if grant.record.parent.is_some() {
+            return Err(Refuse::IssuingRate);
+        }
+--- new
+        if grant.record.parent.is_some() {
+            return Err(Refuse::IssuingRate);
+        }
+        if grant.ended {
+            return Err(Refuse::UnknownHandle);
+        }
+--- end
