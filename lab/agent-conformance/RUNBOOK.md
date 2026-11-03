@@ -247,8 +247,18 @@ The receipt contains native hashes, every observed probe's effect, component
 SHA-256 and the complete bundle's lab CID (as `lab/capsule-identity` prints it),
 the suite outcome, and the exact graded table plus its SHA-256. The sibling
 identity library owns the bundle walk, manifest validation and encoding. The
-staging path uses its checked entries for the component bytes. The lab CID
-covers `capsule.json` and the payload;
+staging path uses its checked entries for the component bytes.
+`staging_uses_manifest_entrypoint_and_refuses_escape` proves the stager writes
+the exact manifest and payload at the manifest's selected flat or nested path
+in the payload's hash-named directory, with the default entrypoint absent.
+It checks the component SHA-256, effect label and checked bundle lab CID.
+Six unsafe selections are refused with the exact entrypoint reason before
+bundle writes; an owned marker stays unchanged and the bundle stays absent.
+After each refusal, the fixture repairs only the manifest entrypoint and
+stages the same payload in the same Home, with zero directory removals.
+These synthetic fixtures start zero children and build zero capsules; the
+stager keeps exclusive directory creation and its existing repair policy.
+The lab CID covers `capsule.json` and the payload;
 Runtime CID launch remains BACKLOG item 13. Identity, admission and resource
 allowance remain separate decisions. The receipt's description gives the lab
 CID and any separate signed record zero admission or permission credit.

@@ -11549,3 +11549,48 @@ records. The task branch has no upstream; cached `spike/spike/agent-host`
 versus HEAD is 0 / 5 (base-only / HEAD-only commits). Network stays disabled;
 the supervisor owns current remote verification. The local ledger records
 the final inventory and proof-retention conditions. Final free space: 33.804 GiB.
+
+
+## 168 — Prove staging validates the manifest entrypoint
+
+Supplied HEAD: `139ffc00a8204599449f2181c93628f895ab020c`.
+Supplied tree: `b63621a426d7167419cabb14d5203840de78d206`.
+Supplied dirty paths: none. The supplied branch is
+`spark/cx-agent-conformance/168-staging-entrypoint-refusal-before-writes`;
+it has no upstream. Cached `spike/spike/agent-host` versus HEAD is 0 / 6
+(base-only / HEAD-only commits). Network access stays disabled; the supervisor
+owns current remote verification. The supplied checkout and unrelated work
+retain their owners.
+
+Plan: strengthen `staging_uses_manifest_entrypoint_and_refuses_escape` through
+the one `stage_probe`. Prove exact selected bytes and checked identity, six
+fixed-label early refusals, an unchanged owned marker and absent bundle before
+the result check, then same-Home repair of only the manifest entrypoint.
+Hand-run three compiling plants separately, restore exact source bytes and
+pass the same test between plants. Final edits stay in `tests/report.rs`,
+RUNBOOK's existing staging description and this LOG section. Runtime owns
+admission and grants; the identity library owns bundle identity. The real
+Agent Host journey keeps its UsersAI binding blocker. Stopped and blocked
+tasks, including 134 to 138 and 161, retain their states and gates.
+
+The ignored local `target/task-168/inventory.json` records this checkout,
+supplied lane hashes, owned artifacts and cleanup conditions. The repository
+skill search found no humanizer skill source; this handoff uses direct actor
+and ownership statements. Gates use the existing shared exclusive build
+lease, offline Cargo, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, a 600-second
+command bound, and a 12 GiB estimate plus 2 GiB free-space reserve.
+
+### Initial controls and assertion refinement
+
+The supplied test passed (exit 0, 1.671 s), then the strengthened baseline
+passed (exit 0, 1.619 s) and lane formatting passed (exit 0, 0.257 s).
+The first selected-path plant compiled and ran one test, but reached an
+unlabelled file-read unwrap for the absent selected path (exit 101, 1.541 s).
+That attempt supplies zero caught credit. The test now asserts the selected
+payload is a file before reading its bytes. Exact source bytes were restored
+by `finally`; the corrected test and all three isolated plants are rerun below.
+Its failed Home is retained privately under the task inventory's supervisor
+review, then removal condition. The staging fixture launched zero children.
+The sandbox loopback preflight returned `Operation not permitted` before any
+full-suite test. This is an infrastructure result; full gates need the task's
+authorized local process and loopback access with Cargo kept offline.
