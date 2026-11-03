@@ -1284,6 +1284,8 @@ mod tests {
     /// the helper, same command, no filter, which must get a real descriptor.
     async fn sibling_control(victim: &Victim, row: &Row, control: &str) -> Result<(), String> {
         let name = row.name;
+        // Its own token file: a parallel control never truncates or unlinks it.
+        let tag = format!("control-{}", next_tag());
         let mut command = Command::new(std::env::current_exe().expect("test executable path"));
         command
             .arg("--exact")
@@ -1295,7 +1297,7 @@ mod tests {
             .env(UNFILTERED_VAR, "1")
             // Planted on this one child's command only.
             .env(CONTROL_VAR, control)
-            .stdout(std::process::Stdio::from(token_file("control", name)))
+            .stdout(std::process::Stdio::from(token_file(&tag, name)))
             .stderr(std::process::Stdio::piped());
         let mut child = spawn_row(&mut command);
         // Read on the same runtime: a full pipe would block the child's write.
@@ -1307,11 +1309,14 @@ mod tests {
                 Err(error) => format!("stderr did not read: {error}"),
             }
         });
-        let failure = finish_probe("control", name, row, &mut child).await;
+        let failure = finish_probe(&tag, name, row, &mut child).await;
         // The child is reaped, so its pipe end is here and the read ends.
         let diagnostics = drain
             .await
             .unwrap_or_else(|_| "stderr drain panicked".to_owned());
+        // Only this control's token: one left here would read as a pass.
+        let token = probe_token(&tag, name);
+        assert!(!token.exists(), "control {tag} left its token {token:?}");
         match failure {
             None => {
                 // The readv row's control checks its own bytes.
@@ -1372,15 +1377,6 @@ mod tests {
             .build()
             .expect("control runtime")
             .block_on(sibling_control(&Victim::start(), &row, control));
-        // No control token survives: one left here would read as a pass.
-        let token = probe_token("control", TOKEN_ROW);
-        assert!(!token.exists(), "a refused control left a token {token:?}");
-        let kept = std::fs::read_dir(std::env::temp_dir())
-            .expect("temp dir")
-            .flatten()
-            .map(|entry| entry.path().to_string_lossy().into_owned())
-            .find(|path| path.contains(&format!("-{}-control-", std::process::id())));
-        assert_eq!(kept, None, "a control left its token");
         control
     }
 
@@ -1449,6 +1445,29 @@ mod tests {
     fn a_control_that_floods_stderr_still_reports_its_exit() {
         let failure = refused_control(102_400);
         assert!(!failure.contains("not finish"), "{failure:?}");
+    }
+
+    /// A refused control that ends first leaves a parallel passing control its
+    /// own token, so the pass still reads.
+    #[test]
+    fn a_refused_control_leaves_a_parallel_control_passing() {
+        let row = rows()
+            .into_iter()
+            .find(|row| row.name == "pidfd_getfd sibling")
+            .expect("a sibling row");
+        let victim = Victim::start();
+        let (refused, passed) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("control runtime")
+            .block_on(async {
+                tokio::join!(
+                    sibling_control(&victim, &row, "0"),
+                    sibling_control(&victim, &row, "")
+                )
+            });
+        assert!(refused.is_err(), "the planted control passed");
+        assert_eq!(passed, Ok(()));
     }
 
     /// One row under two tags reaches two files: no run shares a token.
