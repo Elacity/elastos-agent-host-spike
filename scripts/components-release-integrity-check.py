@@ -38,11 +38,11 @@ def requires_checksum(info):
     return any(non_empty(info.get(field)) for field in FETCH_FIELDS)
 
 
-def checksum_error(name, platform, info, release=False, source_home_anchor=False):
+def checksum_error(name, platform, info, release=False, source_home_anchor=False, format_reason=False):
     image_strategy = name == "browser-vm-image" and info.get("strategy") == "browser-vm-image"
     if release and info.get("strategy") not in (None, "prebuilt") and not image_strategy:
         return f"{name} {platform}: development or unsupported release strategy {info.get('strategy')!r}"
-    if not release and not requires_checksum(info):
+    if not release and not requires_checksum(info) and not format_reason:
         return None
     checksum = info.get("checksum")
     artifact = next(
@@ -112,7 +112,7 @@ def source_capsule_root(source_root, name):
 
 
 def audit_manifest(data, platforms, selected_components=None, source_home_capsules=None,
-                   source_home_anchor=False):
+                   source_home_anchor=False, record_checksums=False):
     external = data.get("external") or {}
     errors = []
     source_home_capsules = source_home_capsules or set()
@@ -128,7 +128,8 @@ def audit_manifest(data, platforms, selected_components=None, source_home_capsul
                 if info is None:
                     continue
                 label = platform if resolved_key == platform else f"{platform} via {resolved_key}"
-                error = checksum_error(name, label, info, source_home_anchor=source_home_anchor)
+                error = checksum_error(name, label, info, source_home_anchor=source_home_anchor,
+                                       format_reason=record_checksums)
                 if error:
                     errors.append(error)
         return errors
@@ -139,7 +140,8 @@ def audit_manifest(data, platforms, selected_components=None, source_home_capsul
         if name in source_home_capsules or not isinstance(component, dict):
             continue
         for platform, info in sorted((component.get("platforms") or {}).items()):
-            error = checksum_error(name, platform, info, source_home_anchor=source_home_anchor)
+            error = checksum_error(name, platform, info, source_home_anchor=source_home_anchor,
+                                   format_reason=record_checksums)
             if error:
                 errors.append(error)
     return errors
@@ -270,7 +272,7 @@ def audit_provider_capsule_metadata(
         if capsule_root is None:
             if source_root is not None and not source_home:
                 errors.append(f"{name}: provider capsule source manifest missing")
-            check_platform_rows(name, metadata, expected_install_path, source_home, errors)
+            check_platform_rows(name, metadata, expected_install_path, errors, source_home)
             continue
 
         try:
@@ -291,20 +293,27 @@ def audit_provider_capsule_metadata(
             icon_path = capsule_root / icon_dir / f"icon-{size}.png"
             if not icon_path.is_file():
                 errors.append(f"{name}: provider icon asset missing for size {size}")
-        check_platform_rows(name, metadata, expected_install_path, source_home, errors)
+        check_platform_rows(name, metadata, expected_install_path, errors, source_home)
     return errors
 
 
-def check_platform_rows(name, metadata, expected, source_home, errors):
+def check_platform_rows(name, metadata, expected, errors, source_home_anchor=False):
     for platform, info in sorted((metadata.get("platforms") or {}).items()):
         if not isinstance(info, dict):
             errors.append(f"{name}: capsule_metadata {platform} must be an object")
             continue
         if info.get("install_path") != expected:
             errors.append(f"{name}: capsule_metadata {platform} install_path mismatch")
-        # A source home has no release archive, so its rows carry no extract_path; copy rows are checked.
-        if not source_home and info.get("extract_path") != name:
+        # A row that names an extract_path must name its own capsule in every mode.
+        if "extract_path" in info and info.get("extract_path") != name:
             errors.append(f"{name}: capsule_metadata {platform} extract_path mismatch")
+        # A checksum names the installed capsule, not an archive; a release profile holds ordinary digests only.
+        if not source_home_anchor and non_empty(info.get("checksum")):
+            artifact = info.get("extract_path") or expected
+            error = checksum_error(name, platform, {**info, "release_path": artifact}, release=True,
+                                   format_reason=True)
+            if error:
+                errors.append(error)
 
 
 def file_sha256(path):
@@ -709,6 +718,10 @@ def run_self_test():
         release_errors = audit_provider_capsule_metadata(source_home_provider, ["linux-amd64"])
         if not any("unsupported checksum format" in e for e in release_errors):
             raise AssertionError("source-home digest accepted in release mode")
+        no_fetch = {"external": {"provider-demo": {"capsule_metadata": {"install_path": "capsules/provider-demo",
+            "platforms": {"linux-amd64": {"install_path": "capsules/provider-demo", "checksum": digest}}}}}}
+        if not any("unsupported checksum format" in e for e in audit_provider_capsule_metadata(no_fetch, ["linux-amd64"])):
+            raise AssertionError("release mode accepted a stamped row without fetch fields")
         with tempfile.TemporaryDirectory() as empty_root:
             release_missing = audit_provider_capsule_metadata(provider_good, ["linux-amd64"], source_root=empty_root)
         if "provider-demo: provider capsule source manifest missing" not in release_missing:

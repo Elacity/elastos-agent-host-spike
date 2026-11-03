@@ -441,9 +441,11 @@ def assert_source_home_provider_anchors(stamper):
             raise AssertionError("no-rights provider kept an anchor")
         if integrity.audit_provider_capsule_metadata(result, ["linux-amd64"], source_root=root, source_home=True):
             raise AssertionError("stamped anchors fail the integrity check")
-        if not any("extract_path mismatch" in e for e in integrity.audit_provider_capsule_metadata(
-                result, ["linux-amd64"], source_root=root)):
-            raise AssertionError("release mode accepted a source-home row without extract_path")
+        row["extract_path"] = "../outside"  # refused in both modes
+        for source_home in (True, False):
+            if not any("extract_path mismatch" in e for e in integrity.audit_provider_capsule_metadata(
+                    result, ["linux-amd64"], source_root=root, source_home=source_home)):
+                raise AssertionError(f"extract_path escape accepted: source-home={source_home}")
         row["install_path"] = "capsules/other"  # a source home still checks the row it anchors
         if not any("install_path mismatch" in e for e in integrity.audit_provider_capsule_metadata(
                 result, ["linux-amd64"], source_root=root, source_home=True)):
