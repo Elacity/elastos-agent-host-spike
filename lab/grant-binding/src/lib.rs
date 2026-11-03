@@ -527,14 +527,11 @@ impl Verifier {
     /// that did not end has no binding here, so `settle`, `release` and
     /// `timeout_hold` fall back to `resolve`.
     pub(crate) fn resolve_kept(&self, call: Call, handle: Handle) -> Result<GrantRecord, Refuse> {
-        let mut held = {
+        let held = {
             let ledger = self.ledger.lock().expect("ledger lock");
             ledger.ended.get(&handle).cloned()
         }
         .ok_or(Refuse::UnknownHandle)?;
-        if let Some(live) = self.registry.get(&call.instance) {
-            held.record.session = live.session.clone();
-        }
         self.check_call(call, &held.record)?;
         Ok(held.record)
     }

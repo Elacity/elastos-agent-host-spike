@@ -5748,7 +5748,7 @@ fn model_reservation_id_that_does_not_fit_is_refused() {
 }
 
 #[test]
-fn model_session_change_still_settles() {
+fn model_session_change_settle_is_refused() {
     let mut verifier = Verifier::new();
     let photo = verifier
         .register_instance("photo", "session-a")
@@ -5826,13 +5826,13 @@ fn model_session_change_still_settles() {
             session_hold,
             SettleOutcome::Known(4)
         ),
-        Ok(4),
-        "a hold opened before the session change still settles"
+        Err(SettleRefuse::Binding(Refuse::Session)),
+        "the new session cannot settle the old session's hold"
     );
     assert_eq!(
         verifier.settle(&call, &guest(roll), child_hold, SettleOutcome::Known(3)),
-        Ok(3),
-        "a journal hold opened before the session change still settles"
+        Err(SettleRefuse::Binding(Refuse::Session)),
+        "the new session cannot settle the old session's journal hold"
     );
     let standing_settle = verifier
         .settle(&call, &guest(album), standing_hold, SettleOutcome::Known(2))
@@ -5842,11 +5842,13 @@ fn model_session_change_still_settles() {
         standing_settle.to_string(),
         "session does not match the grant"
     );
-    assert_eq!(books(&verifier).held, 2, "the standing hold stays counted");
+    assert_eq!(books(&verifier).held, 9, "all holds stay counted");
+    assert_eq!(books(&verifier).open.get(&session_hold.id), Some(&4));
+    assert_eq!(books(&verifier).open.get(&child_hold.id), Some(&3));
     assert_eq!(
         books(&verifier).charged,
-        7,
-        "the two settled figures are charged"
+        0,
+        "the refused settles charge nothing"
     );
     let opened = verifier
         .reserve(&call, &guest(library), 1)
@@ -5864,17 +5866,19 @@ fn model_session_change_still_settles() {
         Ok(2),
         "the standing hold settles once its session is restored"
     );
-    assert_eq!(books(&verifier).held, 0, "every hold has closed");
+    assert_eq!(
+        books(&verifier).held,
+        7,
+        "the old session's holds stay open"
+    );
     verifier
         .use_grant(call, &guest(album))
         .expect("standing grant revives");
-    verifier
-        .reserve(&call, &guest(album), 9)
-        .expect("the ceiling room returned");
+    assert_eq!(books(&verifier).held, 7, "the held amount is unchanged");
 }
 
 #[test]
-fn model_session_change_still_releases() {
+fn model_session_change_release_is_refused() {
     let mut verifier = Verifier::new();
     let photo = verifier
         .register_instance("photo", "session-a")
@@ -5897,14 +5901,11 @@ fn model_session_change_still_releases() {
         .expect("session changes");
     assert_eq!(
         verifier.release(&call, &guest(library), reservation),
-        Ok(()),
-        "a hold opened before the session change still releases"
+        Err(ReleaseRefuse::Binding(Refuse::Session)),
+        "the new session cannot release the old session's hold"
     );
-    assert_eq!(
-        books(&verifier).held,
-        0,
-        "the released hold gives its amount back"
-    );
+    assert_eq!(books(&verifier).held, 4, "the held amount is unchanged");
+    assert_eq!(books(&verifier).open.get(&reservation.id), Some(&4));
     assert_eq!(books(&verifier).charged, 0, "release charges nothing");
     let ended = verifier
         .use_grant(call, &guest(library))
@@ -5916,7 +5917,7 @@ fn model_session_change_still_releases() {
 }
 
 #[test]
-fn model_session_change_still_times_out() {
+fn model_session_change_timeout_is_refused() {
     let mut verifier = Verifier::new();
     let photo = verifier
         .register_instance("photo", "session-a")
@@ -5940,19 +5941,25 @@ fn model_session_change_still_times_out() {
         .expect("session changes");
     assert_eq!(
         verifier.settle(&call, &guest(library), reservation, SettleOutcome::Unknown),
-        Err(SettleRefuse::UnknownOutcome)
+        Err(SettleRefuse::Binding(Refuse::Session))
     );
     assert_eq!(
         verifier.timeout_hold(&call, &guest(library), reservation, 10),
-        Ok(TimeoutRecord),
-        "a hold opened before the session change still times out"
+        Err(TimeoutRefuse::Binding(Refuse::Session)),
+        "the new session cannot time out the old session's hold"
     );
     assert_eq!(
         books(&verifier).timed_out.get(&reservation.id),
-        Some(&true),
-        "the kept uncertain hold records its timeout"
+        None,
+        "the refused timeout records nothing"
     );
-    assert_eq!(books(&verifier).held, 4, "the uncertain hold stays counted");
+    assert_eq!(books(&verifier).held, 4, "the held amount is unchanged");
+    assert_eq!(books(&verifier).open.get(&reservation.id), Some(&4));
+    assert_eq!(
+        books(&verifier).charged,
+        0,
+        "the refused calls charge nothing"
+    );
     let ended = verifier
         .use_grant(call, &guest(library))
         .expect_err("timeout does not revive the session grant");
