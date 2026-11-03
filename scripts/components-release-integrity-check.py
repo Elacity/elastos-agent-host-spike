@@ -58,6 +58,16 @@ def checksum_error(name, platform, info, release=False, source_home_anchor=False
     return None
 
 
+def recorded_checksum_error(name, platform, checksum, source_home):
+    # One rule for every recorded checksum, fetch fields or not (Codex C1). The mode comes only from
+    # --source-home-data-dir; a source-home: prefix outside that mode is refused, never a mode switch.
+    if checksum is None or CHECKSUM_RE.fullmatch(str(checksum)):
+        return None
+    if source_home and SOURCE_HOME_ANCHOR_RE.fullmatch(str(checksum)):
+        return None
+    return f"{name} {platform}: unsupported checksum format {checksum!r}"
+
+
 def resolve_platform_info(component, platform):
     platforms = component.get("platforms") or {}
     keys = (platform, *ALIASES.get(platform, ()), "*")
@@ -237,6 +247,10 @@ def audit_provider_capsule_metadata(
         metadata = component.get("capsule_metadata")
         if not isinstance(metadata, dict):
             continue
+        for platform, info in sorted((metadata.get("platforms") or {}).items()):
+            error = isinstance(info, dict) and recorded_checksum_error(name, platform, info.get("checksum"), source_home)
+            if error:
+                errors.append(error)
 
         errors.extend(
             audit_manifest(
@@ -726,6 +740,20 @@ def run_self_test():
             "platforms": {"linux-amd64": {"install_path": "capsules/provider-demo", "checksum": digest}}}}}}
         if not any("unsupported checksum format" in e for e in audit_provider_capsule_metadata(no_fetch, ["linux-amd64"])):
             raise AssertionError("release mode accepted a stamped row without fetch fields")
+        bad_anchor = json.loads(json.dumps(no_fetch))
+        bad_anchor["external"]["provider-demo"]["capsule_metadata"]["platforms"]["linux-amd64"]["checksum"] = (
+            "source-home:sha256:bad")
+        if not any("unsupported checksum format" in e
+                   for e in audit_provider_capsule_metadata(bad_anchor, ["linux-amd64"], source_home=True)):
+            raise AssertionError("C1 case 1: a malformed source-home digest passed in source-home mode")
+        content_anchor = {"external": {"content-demo": {"capsule_metadata": {
+            "role": "content", "type": "data", "install_path": "capsules/content-demo", "platforms": {"*": {
+                "install_path": "capsules/content-demo", "extract_path": "content-demo", "checksum": digest}}}}}}
+        if not any("unsupported checksum format" in e
+                   for e in audit_provider_capsule_metadata(content_anchor, ["linux-amd64"])):
+            raise AssertionError("C1 case 2: a source-home digest passed without --source-home-data-dir")
+        if audit_provider_capsule_metadata(content_anchor, ["linux-amd64"], source_home=True):
+            raise AssertionError("C1: a source-home digest refused in source-home mode")
         with tempfile.TemporaryDirectory() as empty_root:
             release_missing = audit_provider_capsule_metadata(provider_good, ["linux-amd64"], source_root=empty_root)
         if "provider-demo: provider capsule source manifest missing" not in release_missing:
