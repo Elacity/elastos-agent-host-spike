@@ -199,27 +199,10 @@ impl Verifier {
         if path == grant.owned_root {
             return Err(OperateRefuse::JournalRoot);
         }
-        if self.grants.values().any(|stored| {
-            stored.record.parent == Some(request.handle)
-                && !stored.ended
-                && stored.record.owned_root == path
-        }) {
-            return Err(OperateRefuse::JournalSame);
-        }
-        if self.grants.values().any(|stored| {
-            stored.record.parent == Some(request.handle)
-                && !stored.ended
-                && stored.record.owned_root != path
-                && (super::resource_name(&grant.identity, path, Some(&stored.record.owned_root))
-                    .is_ok()
-                    || super::resource_name(
-                        &grant.identity,
-                        &stored.record.owned_root,
-                        Some(path),
-                    )
-                    .is_ok())
-        }) {
-            return Err(OperateRefuse::JournalCover);
+        match self.live_journal_overlap(request.handle, &grant.identity, path) {
+            Some(super::Overlap::Equal) => return Err(OperateRefuse::JournalSame),
+            Some(_) => return Err(OperateRefuse::JournalCover),
+            None => {}
         }
         super::resource_name(&grant.identity, path, Some(&grant.owned_root))
             .map_err(OperateRefuse::Binding)?;
@@ -3030,4 +3013,46 @@ fn model_rate_does_not_spend_the_effect_count() {
     verifier
         .use_grant(call, &guest(roll))
         .expect("the journal stays");
+}
+
+#[cfg(test)]
+const LIVE_JOURNAL: &str = "UsersAI/agent-1/journal/a/b";
+
+#[cfg(test)]
+fn live_journal_at_a_b() -> (Verifier, Call, Handle) {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    let call = verifier.open_call(instance);
+    verifier
+        .create_child_journal(&call, &guest(parent), LIVE_JOURNAL)
+        .expect("the journal mints");
+    (verifier, call, parent)
+}
+
+#[test]
+fn model_one_overlap_rule_refuses_mint_on_a_journal() {
+    let (mut verifier, call, parent) = live_journal_at_a_b();
+    let mint = verifier.create_child_journal(&call, &guest(parent), LIVE_JOURNAL);
+    assert_eq!(mint, Err(OperateRefuse::JournalSame));
+}
+
+#[test]
+fn model_one_overlap_rule_refuses_effect_on_a_journal() {
+    let (mut verifier, call, parent) = live_journal_at_a_b();
+    let effect = verifier.operate(&call, &guest(parent), Operation::Append, LIVE_JOURNAL);
+    assert_eq!(effect, Err(OperateRefuse::JournalHeld));
+}
+
+#[test]
+fn model_one_overlap_rule_refuses_use_path_on_a_journal() {
+    let (verifier, call, parent) = live_journal_at_a_b();
+    let used = verifier.use_path(&call, &guest(parent), LIVE_JOURNAL);
+    assert_eq!(used, Err(Refuse::JournalHeld));
 }
