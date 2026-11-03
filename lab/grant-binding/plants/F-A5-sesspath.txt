@@ -1,0 +1,24 @@
+id: F-A5-sesspath
+file: src/lib.rs
+test: ops::model_public_path_leaves_the_standing_grant
+--- old
+        self.pending_session = false;
+        let record = self
+            .registry
+            .get(&instance)
+            .ok_or(Refuse::UnknownInstance)?;
+        if record.identity == "home" {
+            return Err(Refuse::HomeMint);
+        }
+        let owned_root = resource_name(&record.identity, resource, None)?;
+--- new
+        let record = self
+            .registry
+            .get(&instance)
+            .ok_or(Refuse::UnknownInstance)?;
+        if record.identity == "home" {
+            return Err(Refuse::HomeMint);
+        }
+        let owned_root = resource_name(&record.identity, resource, None)?;
+        self.pending_session = false;
+--- end
