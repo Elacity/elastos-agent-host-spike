@@ -4,9 +4,15 @@ test: ops::model_zero_window_starts_a_new_count
 test: ops::model_child_zero_window_starts_a_new_count
 --- old
         let elapsed = now.saturating_sub(grant.record.window_start);
+        if elapsed >= grant.record.window {
+            self.window_due = true;
+        }
 --- new
         if grant.record.window == 0 {
             return Ok(());
         }
         let elapsed = now.saturating_sub(grant.record.window_start);
+        if elapsed >= grant.record.window {
+            self.window_due = true;
+        }
 --- end

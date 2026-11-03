@@ -1,0 +1,10 @@
+id: F-A5-ratefit
+file: src/lib.rs
+test: ops::model_window_at_the_top_of_the_clock_holds_the_rate
+--- old
+        let elapsed = now.saturating_sub(grant.record.window_start);
+        if elapsed >= grant.record.window {
+--- new
+        let elapsed = now.saturating_sub(grant.record.window_start);
+        if elapsed > grant.record.window {
+--- end

@@ -1,0 +1,13 @@
+id: F-A5-ratecount
+file: src/lib.rs
+test: ops::model_later_writes_keep_the_effect_count
+--- old
+        grant.record.rate = Some(limit);
+        grant.record.window = window;
+--- new
+        grant.record.rate = Some(limit);
+        grant.record.window = window;
+        if !starting {
+            grant.record.effects = 0;
+        }
+--- end

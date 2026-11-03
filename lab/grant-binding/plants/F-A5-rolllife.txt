@@ -1,0 +1,13 @@
+id: F-A5-rolllife
+file: src/ops.rs
+test: ledger::model_rate_window_roll_keeps_allow_once
+test: ledger::model_rate_window_roll_keeps_the_expiry
+--- old
+                        rolling.record.window_start = now;
+                        rolling.record.window_effects = 0;
+--- new
+                        rolling.record.window_start = now;
+                        rolling.record.window_effects = 0;
+                        rolling.record.once = false;
+                        rolling.record.expiry = None;
+--- end

@@ -24,6 +24,9 @@ pub enum OperateRefuse {
     AppendNotGranted,
     ChildJournalNotGranted,
     JournalRoot,
+    JournalSame,
+    JournalCover,
+    JournalHeld,
 }
 
 impl std::fmt::Display for OperateRefuse {
@@ -42,6 +45,13 @@ impl std::fmt::Display for OperateRefuse {
             OperateRefuse::JournalRoot => {
                 formatter.write_str("child journal needs a path under the owned root")
             }
+            OperateRefuse::JournalSame => {
+                formatter.write_str("a live journal already has that path")
+            }
+            OperateRefuse::JournalCover => {
+                formatter.write_str("a live journal already covers that path")
+            }
+            OperateRefuse::JournalHeld => formatter.write_str("a live journal holds that path"),
         }
     }
 }
@@ -73,6 +83,19 @@ impl Verifier {
                             .map_err(OperateRefuse::Binding)?;
                     }
                 }
+                #[rustfmt::skip]
+                {
+                    if operation != Operation::ChildJournal {
+                        if self.live_journal_holds(
+                            request.handle,
+                            &grant.identity,
+                            path,
+                            &grant.owned_root,
+                        ) {
+                            return Err(OperateRefuse::JournalHeld);
+                        }
+                    }
+                };
                 let mut grant = grant;
                 let mut counted = request.handle;
                 while let Some(handle) = grant.parent {
@@ -88,17 +111,21 @@ impl Verifier {
                 if operation != Operation::ChildJournal {
                     self.open_rate_window(counted)
                         .map_err(OperateRefuse::Binding)?;
+                    let due = self.window_due;
                     let rate_handle = counted;
                     if let Some(rate) = self
                         .grants
                         .get(&rate_handle)
                         .and_then(|stored| stored.record.rate)
                     {
-                        let used = self
-                            .grants
-                            .get(&rate_handle)
-                            .map(|stored| stored.record.window_effects)
-                            .unwrap_or(0);
+                        let used = if due {
+                            0
+                        } else {
+                            self.grants
+                                .get(&rate_handle)
+                                .map(|stored| stored.record.window_effects)
+                                .unwrap_or(0)
+                        };
                         if used >= rate {
                             return Err(OperateRefuse::Binding(Refuse::Rate));
                         }
@@ -107,6 +134,16 @@ impl Verifier {
                         if grant.effects >= limit {
                             return Err(OperateRefuse::Binding(Refuse::EffectLimit));
                         }
+                    }
+                    if due {
+                        let now = self.verifier_now;
+                        let rolling = self
+                            .grants
+                            .get_mut(&counted)
+                            .ok_or(Refuse::UnknownHandle)
+                            .map_err(OperateRefuse::Binding)?;
+                        rolling.record.window_start = now;
+                        rolling.record.window_effects = 0;
                     }
                     let counting = grant.effect_limit.is_some()
                         || self
@@ -141,8 +178,11 @@ impl Verifier {
 
     /// Creates a child journal and returns its own handle. The grant must
     /// carry the child-journal right. A path equal to the owned root is
-    /// refused. A path under that root still mints. The new handle keeps
-    /// the parent's append and overwrite and does not keep child-journal.
+    /// refused. A path equal to a live journal minted from this grant is
+    /// refused. A path inside a live journal, or a path that contains one,
+    /// is refused. A path beside a live journal still mints. An ended
+    /// journal frees that path. The new handle keeps the parent's append
+    /// and overwrite and does not keep child-journal.
     #[rustfmt::skip]
     pub fn create_child_journal(
         &mut self,
@@ -173,6 +213,28 @@ impl Verifier {
         if path == grant.owned_root {
             return Err(OperateRefuse::JournalRoot);
         }
+        if self.grants.values().any(|stored| {
+            stored.record.parent == Some(request.handle)
+                && !stored.ended
+                && stored.record.owned_root == path
+        }) {
+            return Err(OperateRefuse::JournalSame);
+        }
+        if self.grants.values().any(|stored| {
+            stored.record.parent == Some(request.handle)
+                && !stored.ended
+                && stored.record.owned_root != path
+                && (super::resource_name(&grant.identity, path, Some(&stored.record.owned_root))
+                    .is_ok()
+                    || super::resource_name(
+                        &grant.identity,
+                        &stored.record.owned_root,
+                        Some(path),
+                    )
+                    .is_ok())
+        }) {
+            return Err(OperateRefuse::JournalCover);
+        }
         super::resource_name(&grant.identity, path, Some(&grant.owned_root))
             .map_err(OperateRefuse::Binding)?;
         self.bind_grant(
@@ -194,7 +256,9 @@ use crate::{guest, rights, InstanceId, Rights};
 /// Registers one instance with a grant that carries `rights`.
 #[cfg(test)]
 fn bound_with(verifier: &mut Verifier, rights: Rights) -> (InstanceId, Handle) {
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/journal", rights)
         .expect("bind");
@@ -423,8 +487,12 @@ fn model_forged_session_does_not_grant_append() {
 #[test]
 fn model_forged_instance_does_not_grant_append() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let handle = verifier
         .bind_grant(
@@ -458,8 +526,12 @@ fn model_forged_instance_does_not_grant_append() {
 #[test]
 fn model_operate_on_a_sibling_instance_is_refused() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(first, "UsersAI/agent-1/journal", rights())
         .expect("bind");
@@ -563,8 +635,12 @@ fn model_child_journal_does_not_permit_append_or_overwrite() {
 #[test]
 fn model_child_journal_on_a_sibling_instance_is_refused() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(
             first,
@@ -726,8 +802,12 @@ fn model_forged_overwrite_does_not_skip_the_right() {
 #[test]
 fn model_child_journal_create_on_a_sibling_instance_is_refused() {
     let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let first = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let handle = verifier
         .bind_grant(
             first,
@@ -790,9 +870,11 @@ fn model_child_journal_returns_its_own_handle() {
         .use_grant(call, &guest(parent))
         .expect("parent grant");
     assert_eq!(parent_decision.owned_root, "UsersAI/agent-1/journal");
-    verifier
+    let parent_path = verifier
         .use_path(&call, &guest(parent), "UsersAI/agent-1/journal/page.md")
-        .expect("the parent handle keeps the parent root");
+        .expect_err("the issuing grant does not use the journal path");
+    assert_eq!(parent_path, Refuse::JournalHeld);
+    assert_eq!(parent_path.to_string(), "a live journal holds that path");
 }
 
 #[test]
@@ -1058,7 +1140,9 @@ fn model_forged_instance_does_not_move_the_child_grant() {
             child_journal: true,
         },
     );
-    let sibling = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     assert_ne!(sibling, instance);
     let call = verifier.open_call(instance);
     let request = GuestRequest {
@@ -1236,7 +1320,9 @@ fn model_forged_overwrite_does_not_widen_the_child_root() {
 #[test]
 fn model_owned_root_needs_a_resource_segment() {
     let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
+    let instance = verifier
+        .register_instance("agent-1", "session-a")
+        .expect("instance");
     let refusal = verifier
         .bind_grant(instance, "UsersAI/agent-1", rights())
         .expect_err("agent principal is not a resource");
@@ -1257,7 +1343,9 @@ fn model_owned_root_needs_a_resource_segment() {
 #[test]
 fn model_allow_once_ends_after_one_effect() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_once(photo, "UsersAI/photo/library", rights())
         .expect("allow once");
@@ -1302,8 +1390,12 @@ fn model_allow_once_ends_after_one_effect() {
 #[test]
 fn model_session_grant_allows_a_second_effect() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
-    let home = verifier.register_instance("home", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let home = verifier
+        .register_instance("home", "session-a")
+        .expect("instance");
     let public = verifier
         .bind_once(photo, "Public/photo/desk", rights())
         .expect_err("public storage does not bind");
@@ -1362,7 +1454,9 @@ fn model_session_grant_allows_a_second_effect() {
 #[test]
 fn model_effect_limit_stops_the_next_effect() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(
             photo,
@@ -1430,7 +1524,9 @@ fn model_effect_limit_stops_the_next_effect() {
 #[test]
 fn model_unset_effect_limit_does_not_stop() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(
             photo,
@@ -1489,7 +1585,9 @@ fn model_unset_effect_limit_does_not_stop() {
 #[test]
 fn model_child_effect_spends_the_issuing_limit() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(
             photo,
@@ -1566,7 +1664,9 @@ fn model_child_effect_spends_the_issuing_limit() {
 #[test]
 fn model_unset_issuing_limit_allows_a_child_effect() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(
             photo,
@@ -1627,7 +1727,9 @@ fn model_overwrite_outside_the_owned_root_is_refused() {
 #[test]
 fn model_append_outside_the_owned_root_is_refused() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_once(
             photo,
@@ -1739,7 +1841,9 @@ fn model_child_journal_effect_stays_inside_its_root() {
 #[test]
 fn model_rate_stops_the_next_effect_in_the_window() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(
             photo,
@@ -1808,7 +1912,9 @@ fn model_rate_stops_the_next_effect_in_the_window() {
 #[test]
 fn model_new_window_allows_one_effect() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(
             photo,
@@ -1865,7 +1971,9 @@ fn model_new_window_allows_one_effect() {
 #[test]
 fn model_max_instant_still_stops_the_next_effect() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(
             photo,
@@ -1908,7 +2016,9 @@ fn model_max_instant_still_stops_the_next_effect() {
 #[test]
 fn model_revoked_journal_rate_is_unknown() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(
             photo,
@@ -1942,7 +2052,9 @@ fn model_revoked_journal_rate_is_unknown() {
 #[test]
 fn model_child_effect_spends_the_issuing_rate() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(
             photo,
@@ -2005,7 +2117,9 @@ fn model_child_effect_spends_the_issuing_rate() {
 #[test]
 fn model_unset_rate_does_not_stop() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(
             photo,
@@ -2064,7 +2178,9 @@ fn model_unset_rate_does_not_stop() {
 #[test]
 fn model_child_effect_follows_the_issuing_window() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(
             photo,
@@ -2130,7 +2246,9 @@ fn model_child_effect_follows_the_issuing_window() {
 #[test]
 fn model_child_effect_ends_the_allow_once_grant() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_once(photo, "UsersAI/photo/library", rights())
         .expect("allow once");
@@ -2196,7 +2314,9 @@ fn model_child_effect_ends_the_allow_once_grant() {
 #[test]
 fn model_standing_child_allows_another_effect() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(photo, "UsersAI/photo/library", rights())
         .expect("standing library");
@@ -2236,7 +2356,9 @@ fn model_standing_child_allows_another_effect() {
 #[test]
 fn model_zero_window_starts_a_new_count() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(photo, "UsersAI/photo/library", rights())
         .expect("library");
@@ -2266,7 +2388,9 @@ fn model_zero_window_starts_a_new_count() {
 #[test]
 fn model_child_zero_window_starts_a_new_count() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let library = verifier
         .bind_grant(photo, "UsersAI/photo/library", rights())
         .expect("issuing grant");
@@ -2304,7 +2428,9 @@ fn model_child_zero_window_starts_a_new_count() {
 #[test]
 fn model_zero_rate_on_a_zero_window_still_stops() {
     let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
     let frames = verifier
         .bind_grant(photo, "UsersAI/photo/frames", rights())
         .expect("frames");
@@ -2384,4 +2510,1413 @@ fn model_child_journal_on_the_owned_root_is_refused() {
         .use_grant(call, &guest(parent))
         .expect("the issuing grant stays");
     assert_eq!(parent_kept.owned_root, "UsersAI/agent-1/journal");
+}
+
+#[test]
+fn model_child_journal_on_a_live_sibling_path_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    assert_eq!(parent, Handle(1));
+    let call = verifier.open_call(instance);
+    let page = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/page.md")
+        .expect("the first journal mints");
+    assert_eq!(page, Handle(2));
+    let refusal = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/page.md")
+        .expect_err("a live sibling already has that path");
+    assert_eq!(refusal, OperateRefuse::JournalSame);
+    assert_eq!(refusal.to_string(), "a live journal already has that path");
+    let leaked = verifier
+        .use_grant(call, &guest(Handle(3)))
+        .expect_err("a refused mint stores no grant");
+    assert_eq!(leaked, Refuse::UnknownHandle);
+    assert_eq!(leaked.to_string(), "unknown handle");
+    let kept = verifier
+        .use_grant(call, &guest(page))
+        .expect("the first journal stays");
+    assert_eq!(kept.owned_root, "UsersAI/agent-1/journal/page.md");
+    let line = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/other.md")
+        .expect("a path beside a live journal still mints");
+    assert_eq!(line, Handle(3));
+    let other = verifier
+        .bind_grant(
+            instance,
+            "UsersAI/agent-1/journal",
+            Rights {
+                append: true,
+                overwrite: false,
+                child_journal: true,
+            },
+        )
+        .expect("another issuing grant");
+    assert_eq!(other, Handle(4));
+    let other_page = verifier
+        .create_child_journal(&call, &guest(other), "UsersAI/agent-1/journal/page.md")
+        .expect("another issuing grant mints that path");
+    assert_eq!(other_page, Handle(5));
+    verifier.revoke_grant(page).expect("end the first journal");
+    let ended = verifier
+        .use_grant(call, &guest(page))
+        .expect_err("the ended journal is gone");
+    assert_eq!(ended, Refuse::UnknownHandle);
+    let again = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/page.md")
+        .expect("an ended journal frees that path");
+    assert_eq!(again, Handle(6));
+    verifier
+        .use_grant(call, &guest(line))
+        .expect("the path beside the ended journal stays");
+    verifier
+        .use_grant(call, &guest(other_page))
+        .expect("the other issuing grant's journal stays");
+    verifier
+        .use_grant(call, &guest(parent))
+        .expect("the issuing grant stays");
+}
+
+#[test]
+fn model_child_journal_covered_by_a_live_sibling_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    assert_eq!(parent, Handle(1));
+    let call = verifier.open_call(instance);
+    let page = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/page.md")
+        .expect("the first journal mints");
+    assert_eq!(page, Handle(2));
+    let under = verifier
+        .create_child_journal(
+            &call,
+            &guest(parent),
+            "UsersAI/agent-1/journal/page.md/line",
+        )
+        .expect_err("a path inside a live journal is refused");
+    assert_eq!(under, OperateRefuse::JournalCover);
+    assert_eq!(under.to_string(), "a live journal already covers that path");
+    let leaked = verifier
+        .use_grant(call, &guest(Handle(3)))
+        .expect_err("a refused mint stores no grant");
+    assert_eq!(leaked, Refuse::UnknownHandle);
+    assert_eq!(leaked.to_string(), "unknown handle");
+    let stem = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/page")
+        .expect("a string prefix is not a cover");
+    assert_eq!(stem, Handle(3));
+    verifier.revoke_grant(page).expect("end the page journal");
+    let line = verifier
+        .create_child_journal(
+            &call,
+            &guest(parent),
+            "UsersAI/agent-1/journal/page.md/line",
+        )
+        .expect("an ended journal frees the inner path");
+    assert_eq!(line, Handle(4));
+    let wide = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/page.md")
+        .expect_err("a path that contains a live journal is refused");
+    assert_eq!(wide, OperateRefuse::JournalCover);
+    assert_eq!(wide.to_string(), "a live journal already covers that path");
+    let leaked_wide = verifier
+        .use_grant(call, &guest(Handle(5)))
+        .expect_err("a refused wide mint stores no grant");
+    assert_eq!(leaked_wide, Refuse::UnknownHandle);
+    verifier.revoke_grant(line).expect("end the inner journal");
+    let page_again = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/page.md")
+        .expect("an ended inner journal frees the wider path");
+    assert_eq!(page_again, Handle(5));
+    let beside = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/other.md")
+        .expect("a path beside a live journal still mints");
+    assert_eq!(beside, Handle(6));
+    let other = verifier
+        .bind_grant(
+            instance,
+            "UsersAI/agent-1/journal",
+            Rights {
+                append: true,
+                overwrite: false,
+                child_journal: true,
+            },
+        )
+        .expect("another issuing grant");
+    assert_eq!(other, Handle(7));
+    let other_line = verifier
+        .create_child_journal(&call, &guest(other), "UsersAI/agent-1/journal/page.md/line")
+        .expect("another issuing grant mints a path inside that journal");
+    assert_eq!(other_line, Handle(8));
+    verifier
+        .use_grant(call, &guest(page))
+        .expect_err("the ended page journal stays ended");
+    verifier
+        .use_grant(call, &guest(line))
+        .expect_err("the ended inner journal stays ended");
+    verifier
+        .use_grant(call, &guest(stem))
+        .expect("the string-prefix journal stays");
+    verifier
+        .use_grant(call, &guest(page_again))
+        .expect("the wider journal stays");
+    verifier
+        .use_grant(call, &guest(beside))
+        .expect("the beside journal stays");
+    verifier
+        .use_grant(call, &guest(other_line))
+        .expect("the other issuing grant's journal stays");
+    verifier
+        .use_grant(call, &guest(parent))
+        .expect("the issuing grant stays");
+}
+
+#[test]
+fn model_issuing_effect_inside_a_live_journal_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: true,
+            child_journal: true,
+        },
+    );
+    assert_eq!(parent, Handle(1));
+    verifier.set_effect_limit(parent, 5).expect("issuing limit");
+    let call = verifier.open_call(instance);
+    let page = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/page.md")
+        .expect("the journal mints");
+    assert_eq!(page, Handle(2));
+    let inside = verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal/page.md/line",
+        )
+        .expect_err("the issuing grant does not enter a live journal");
+    assert_eq!(inside, OperateRefuse::JournalHeld);
+    assert_eq!(inside.to_string(), "a live journal holds that path");
+    let on_journal = verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Overwrite,
+            "UsersAI/agent-1/journal/page.md",
+        )
+        .expect_err("the issuing grant does not effect the journal path");
+    assert_eq!(on_journal, OperateRefuse::JournalHeld);
+    assert_eq!(on_journal.to_string(), "a live journal holds that path");
+    let other = verifier
+        .bind_grant(
+            instance,
+            "UsersAI/agent-1/journal",
+            Rights {
+                append: true,
+                overwrite: false,
+                child_journal: false,
+            },
+        )
+        .expect("another issuing grant");
+    assert_eq!(other, Handle(3));
+    verifier
+        .operate(
+            &call,
+            &guest(other),
+            Operation::Append,
+            "UsersAI/agent-1/journal/page.md/line",
+        )
+        .expect("another issuing grant still effects that path");
+    verifier
+        .operate(
+            &call,
+            &guest(page),
+            Operation::Append,
+            "UsersAI/agent-1/journal/page.md/line",
+        )
+        .expect("the journal's own effect stays allowed");
+    verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
+        .expect("an effect on the issuing root stays allowed");
+    verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal/page",
+        )
+        .expect("a string prefix is not the journal path");
+    verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal/other.md",
+        )
+        .expect("a path beside a live journal stays allowed");
+    verifier.revoke_grant(page).expect("end the journal");
+    verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal/page.md/line",
+        )
+        .expect("an ended journal frees that path");
+    let limited = verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
+        .expect_err("the counted effects reach the limit");
+    assert_eq!(limited, OperateRefuse::Binding(Refuse::EffectLimit));
+    assert_eq!(limited.to_string(), "effect limit is reached");
+    let ended = verifier
+        .use_grant(call, &guest(page))
+        .expect_err("the ended journal stays ended");
+    assert_eq!(ended, Refuse::UnknownHandle);
+    assert_eq!(ended.to_string(), "unknown handle");
+    verifier
+        .use_grant(call, &guest(parent))
+        .expect("the issuing grant stays");
+    verifier
+        .use_grant(call, &guest(other))
+        .expect("the other issuing grant stays");
+    let once = verifier
+        .bind_once(
+            instance,
+            "UsersAI/agent-1/album",
+            Rights {
+                append: true,
+                overwrite: false,
+                child_journal: true,
+            },
+        )
+        .expect("allow once");
+    assert_eq!(once, Handle(4));
+    let shot = verifier
+        .create_child_journal(&call, &guest(once), "UsersAI/agent-1/album/shot")
+        .expect("the allow-once journal mints");
+    assert_eq!(shot, Handle(5));
+    let held_once = verifier
+        .operate(
+            &call,
+            &guest(once),
+            Operation::Append,
+            "UsersAI/agent-1/album/shot",
+        )
+        .expect_err("a refused path does not end the allow-once grant");
+    assert_eq!(held_once, OperateRefuse::JournalHeld);
+    verifier
+        .use_grant(call, &guest(once))
+        .expect("the allow-once grant stays");
+    verifier
+        .use_grant(call, &guest(shot))
+        .expect("the allow-once journal stays");
+    verifier
+        .operate(
+            &call,
+            &guest(once),
+            Operation::Append,
+            "UsersAI/agent-1/album",
+        )
+        .expect("the root effect ends the allow-once grant");
+    let once_ended = verifier
+        .use_grant(call, &guest(once))
+        .expect_err("the allow-once grant has ended");
+    assert_eq!(once_ended, Refuse::UnknownHandle);
+    let shot_ended = verifier
+        .use_grant(call, &guest(shot))
+        .expect_err("the allow-once journal ended with the grant");
+    assert_eq!(shot_ended, Refuse::UnknownHandle);
+}
+
+#[test]
+fn model_issuing_effect_over_a_live_journal_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: true,
+            child_journal: true,
+        },
+    );
+    assert_eq!(parent, Handle(1));
+    verifier.set_effect_limit(parent, 6).expect("issuing limit");
+    let call = verifier.open_call(instance);
+    let page = verifier
+        .create_child_journal(
+            &call,
+            &guest(parent),
+            "UsersAI/agent-1/journal/album/page.md",
+        )
+        .expect("the journal mints");
+    assert_eq!(page, Handle(2));
+    let over = verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal/album",
+        )
+        .expect_err("the issuing grant does not effect a path over a live journal");
+    assert_eq!(over, OperateRefuse::JournalHeld);
+    assert_eq!(over.to_string(), "a live journal holds that path");
+    let over_write = verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Overwrite,
+            "UsersAI/agent-1/journal/album",
+        )
+        .expect_err("the issuing grant does not overwrite a path over a live journal");
+    assert_eq!(over_write, OperateRefuse::JournalHeld);
+    assert_eq!(over_write.to_string(), "a live journal holds that path");
+    let other = verifier
+        .bind_grant(
+            instance,
+            "UsersAI/agent-1/journal",
+            Rights {
+                append: true,
+                overwrite: false,
+                child_journal: false,
+            },
+        )
+        .expect("another issuing grant");
+    assert_eq!(other, Handle(3));
+    verifier
+        .operate(
+            &call,
+            &guest(other),
+            Operation::Append,
+            "UsersAI/agent-1/journal/album",
+        )
+        .expect("another issuing grant still effects that path");
+    verifier
+        .operate(
+            &call,
+            &guest(page),
+            Operation::Append,
+            "UsersAI/agent-1/journal/album/page.md/line",
+        )
+        .expect("the journal's own effect stays allowed");
+    verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
+        .expect("an effect on the issuing root stays allowed");
+    verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal/album/page",
+        )
+        .expect("a string prefix of the journal path is not a cover");
+    verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal/albu",
+        )
+        .expect("a string prefix of the containing path is not a cover");
+    verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal/other.md",
+        )
+        .expect("a path beside a live journal stays allowed");
+    verifier.revoke_grant(page).expect("end the journal");
+    verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal/album",
+        )
+        .expect("an ended journal frees that path");
+    let limited = verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
+        .expect_err("the counted effects reach the limit");
+    assert_eq!(limited, OperateRefuse::Binding(Refuse::EffectLimit));
+    assert_eq!(limited.to_string(), "effect limit is reached");
+    let ended = verifier
+        .use_grant(call, &guest(page))
+        .expect_err("the ended journal stays ended");
+    assert_eq!(ended, Refuse::UnknownHandle);
+    assert_eq!(ended.to_string(), "unknown handle");
+    verifier
+        .use_grant(call, &guest(parent))
+        .expect("the issuing grant stays");
+    verifier
+        .use_grant(call, &guest(other))
+        .expect("the other issuing grant stays");
+    let once = verifier
+        .bind_once(
+            instance,
+            "UsersAI/agent-1/album",
+            Rights {
+                append: true,
+                overwrite: false,
+                child_journal: true,
+            },
+        )
+        .expect("allow once");
+    assert_eq!(once, Handle(4));
+    let shot = verifier
+        .create_child_journal(&call, &guest(once), "UsersAI/agent-1/album/roll/shot")
+        .expect("the allow-once journal mints");
+    assert_eq!(shot, Handle(5));
+    let held_once = verifier
+        .operate(
+            &call,
+            &guest(once),
+            Operation::Append,
+            "UsersAI/agent-1/album/roll",
+        )
+        .expect_err("a refused path does not end the allow-once grant");
+    assert_eq!(held_once, OperateRefuse::JournalHeld);
+    verifier
+        .use_grant(call, &guest(once))
+        .expect("the allow-once grant stays");
+    verifier
+        .use_grant(call, &guest(shot))
+        .expect("the allow-once journal stays");
+    verifier
+        .operate(
+            &call,
+            &guest(once),
+            Operation::Append,
+            "UsersAI/agent-1/album",
+        )
+        .expect("the root effect ends the allow-once grant");
+    let once_ended = verifier
+        .use_grant(call, &guest(once))
+        .expect_err("the allow-once grant has ended");
+    assert_eq!(once_ended, Refuse::UnknownHandle);
+    let shot_ended = verifier
+        .use_grant(call, &guest(shot))
+        .expect_err("the allow-once journal ended with the grant");
+    assert_eq!(shot_ended, Refuse::UnknownHandle);
+}
+
+#[test]
+fn model_rate_does_not_spend_the_effect_count() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    assert_eq!(parent, Handle(1));
+    verifier.set_rate(parent, 10, 100).expect("rate");
+    let call = verifier.open_call(instance);
+    for _ in 0..3 {
+        verifier
+            .operate(
+                &call,
+                &guest(parent),
+                Operation::Append,
+                "UsersAI/agent-1/journal",
+            )
+            .expect("a rate-only root effect does not spend the effect count");
+    }
+    let roll = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/roll")
+        .expect("the journal mints");
+    assert_eq!(roll, Handle(2));
+    verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/agent-1/journal/roll/line",
+        )
+        .expect("a rate-only child effect does not spend the effect count");
+    verifier.set_effect_limit(parent, 2).expect("limit");
+    verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/agent-1/journal/roll/line",
+        )
+        .expect("the limit starts empty");
+    verifier
+        .set_effect_limit(parent, 2)
+        .expect("a second limit does not start the count over");
+    verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
+        .expect("the second counted effect reaches the limit");
+    let limited = verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
+        .expect_err("the effect count is reached");
+    assert_eq!(limited, OperateRefuse::Binding(Refuse::EffectLimit));
+    assert_eq!(limited.to_string(), "effect limit is reached");
+    verifier
+        .use_grant(call, &guest(parent))
+        .expect("the issuing grant stays");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("the journal stays");
+}
+
+#[test]
+fn model_refused_effect_limit_does_not_roll_the_rate_window() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    assert_eq!(parent, Handle(1));
+    verifier.set_rate(parent, 1, 10).expect("rate");
+    verifier.set_effect_limit(parent, 1).expect("limit");
+    let call = verifier.open_call(instance);
+    let roll = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/roll")
+        .expect("the journal mints");
+    assert_eq!(roll, Handle(2));
+    verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
+        .expect("the one counted effect");
+    let inside = verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
+        .expect_err("inside the window the rate refuses");
+    assert_eq!(inside, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(inside.to_string(), "rate limit is reached");
+    verifier.set_verifier_now(10);
+    let limited = verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/agent-1/journal/roll/line",
+        )
+        .expect_err("the effect count refuses and does not start the window");
+    assert_eq!(limited, OperateRefuse::Binding(Refuse::EffectLimit));
+    assert_eq!(limited.to_string(), "effect limit is reached");
+    verifier
+        .set_effect_limit(parent, 4)
+        .expect("a higher limit does not start the rate window");
+    verifier.set_verifier_now(15);
+    verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/agent-1/journal/roll/line",
+        )
+        .expect("the allowed effect starts the window");
+    verifier.set_verifier_now(20);
+    let rated = verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
+        .expect_err("the refused effect did not start the window");
+    assert_eq!(rated, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(rated.to_string(), "rate limit is reached");
+    verifier
+        .use_grant(call, &guest(parent))
+        .expect("the issuing grant stays");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("the journal stays");
+}
+
+#[test]
+fn model_second_set_rate_keeps_the_window() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    assert_eq!(parent, Handle(1));
+    let album = verifier
+        .bind_grant(
+            instance,
+            "UsersAI/agent-1/album",
+            Rights {
+                append: true,
+                overwrite: false,
+                child_journal: false,
+            },
+        )
+        .expect("album");
+    assert_eq!(album, Handle(2));
+    verifier.set_verifier_now(3);
+    verifier
+        .set_rate(album, 1, 10)
+        .expect("the first rate starts the window at this instant");
+    let call = verifier.open_call(instance);
+    verifier
+        .operate(
+            &call,
+            &guest(album),
+            Operation::Append,
+            "UsersAI/agent-1/album",
+        )
+        .expect("one effect in the window that started at 3");
+    let inside = verifier
+        .operate(
+            &call,
+            &guest(album),
+            Operation::Append,
+            "UsersAI/agent-1/album",
+        )
+        .expect_err("the rate is spent");
+    assert_eq!(inside, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(inside.to_string(), "rate limit is reached");
+    verifier
+        .set_rate(album, 2, 11)
+        .expect("a second rate keeps the count and stores the new window");
+    verifier
+        .operate(
+            &call,
+            &guest(album),
+            Operation::Append,
+            "UsersAI/agent-1/album",
+        )
+        .expect("the raised rate allows one more effect");
+    let kept = verifier
+        .operate(
+            &call,
+            &guest(album),
+            Operation::Append,
+            "UsersAI/agent-1/album",
+        )
+        .expect_err("the kept count reaches the new rate");
+    assert_eq!(kept, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(kept.to_string(), "rate limit is reached");
+    verifier.set_verifier_now(12);
+    let still = verifier
+        .operate(
+            &call,
+            &guest(album),
+            Operation::Append,
+            "UsersAI/agent-1/album",
+        )
+        .expect_err("the window still started at 3");
+    assert_eq!(still, OperateRefuse::Binding(Refuse::Rate));
+    verifier.set_verifier_now(13);
+    let longer = verifier
+        .operate(
+            &call,
+            &guest(album),
+            Operation::Append,
+            "UsersAI/agent-1/album",
+        )
+        .expect_err("the second call stored a window of 11");
+    assert_eq!(longer, OperateRefuse::Binding(Refuse::Rate));
+    verifier.set_verifier_now(14);
+    verifier
+        .operate(
+            &call,
+            &guest(album),
+            Operation::Append,
+            "UsersAI/agent-1/album",
+        )
+        .expect("that longer window ends at 14");
+    verifier
+        .set_rate(parent, 1, 10)
+        .expect("the issuing rate starts at this instant");
+    let roll = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/roll")
+        .expect("the journal mints");
+    assert_eq!(roll, Handle(3));
+    verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/agent-1/journal/roll",
+        )
+        .expect("the child spends the issuing rate");
+    let parent_spent = verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
+        .expect_err("the issuing rate is spent");
+    assert_eq!(parent_spent, OperateRefuse::Binding(Refuse::Rate));
+    verifier.set_verifier_now(23);
+    verifier
+        .set_rate(parent, 1, 10)
+        .expect("a second issuing rate does not move the window");
+    let child_kept = verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/agent-1/journal/roll",
+        )
+        .expect_err("the child spend is still counted");
+    assert_eq!(child_kept, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(child_kept.to_string(), "rate limit is reached");
+    verifier.set_verifier_now(24);
+    verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/agent-1/journal/roll",
+        )
+        .expect("the window that started at 14 ends here");
+    verifier.set_verifier_now(25);
+    let next = verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
+        .expect_err("that effect started the next window");
+    assert_eq!(next, OperateRefuse::Binding(Refuse::Rate));
+    verifier
+        .use_grant(call, &guest(parent))
+        .expect("the issuing grant stays");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("the journal stays");
+    verifier
+        .use_grant(call, &guest(album))
+        .expect("the album grant stays");
+}
+
+#[test]
+fn model_expired_grant_stores_no_new_bound() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let library = verifier
+        .bind_until(photo, "UsersAI/photo/library", rights(), 10)
+        .expect("library");
+    assert_eq!(library, Handle(1));
+    let frames = verifier
+        .bind_until(photo, "UsersAI/photo/frames", rights(), 10)
+        .expect("frames");
+    assert_eq!(frames, Handle(2));
+    let album = verifier
+        .bind_grant(photo, "UsersAI/photo/album", rights())
+        .expect("album has no expiry");
+    assert_eq!(album, Handle(3));
+    verifier.set_verifier_now(4);
+    verifier
+        .set_rate(library, 1, 10)
+        .expect("the rate starts before the expiry");
+    verifier
+        .set_effect_limit(frames, 1)
+        .expect("the limit starts before the expiry");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("the journal mints before the expiry");
+    assert_eq!(roll, Handle(4));
+    verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect("one rated effect");
+    let rated = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("the rate is spent");
+    assert_eq!(rated, OperateRefuse::Binding(Refuse::Rate));
+    verifier
+        .operate(
+            &call,
+            &guest(frames),
+            Operation::Append,
+            "UsersAI/photo/frames",
+        )
+        .expect("one counted effect");
+    let limited = verifier
+        .operate(
+            &call,
+            &guest(frames),
+            Operation::Append,
+            "UsersAI/photo/frames",
+        )
+        .expect_err("the effect count is spent");
+    assert_eq!(limited, OperateRefuse::Binding(Refuse::EffectLimit));
+    verifier.set_verifier_now(u64::MAX);
+    verifier
+        .set_rate(album, 1, 10)
+        .expect("an unset expiry still stores a rate");
+    verifier
+        .set_effect_limit(album, 2)
+        .expect("an unset expiry still stores a limit");
+    verifier.set_verifier_now(10);
+    let late_rate = verifier
+        .set_rate(library, 5, 10)
+        .expect_err("an expired grant stores no new rate");
+    assert_eq!(late_rate, Refuse::Expired);
+    assert_eq!(late_rate.to_string(), "grant has expired");
+    let late_limit = verifier
+        .set_effect_limit(frames, 4)
+        .expect_err("an expired grant stores no new effect count limit");
+    assert_eq!(late_limit, Refuse::Expired);
+    assert_eq!(late_limit.to_string(), "grant has expired");
+    let child_rate = verifier
+        .set_rate(roll, 1, 10)
+        .expect_err("a child journal keeps no rate");
+    assert_eq!(child_rate, Refuse::IssuingRate);
+    let child_limit = verifier
+        .set_effect_limit(roll, 1)
+        .expect_err("a child journal keeps no effect count limit");
+    assert_eq!(child_limit, Refuse::IssuingLimit);
+    let due = verifier
+        .use_grant(call, &guest(library))
+        .expect_err("the library grant has expired");
+    assert_eq!(due, Refuse::Expired);
+    let child_due = verifier
+        .use_grant(call, &guest(roll))
+        .expect_err("the journal follows the issuing expiry");
+    assert_eq!(child_due, Refuse::Expired);
+    verifier
+        .use_grant(call, &guest(album))
+        .expect("the album grant has no expiry");
+    verifier.set_verifier_now(4);
+    let still_rated = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("the spent rate was not raised");
+    assert_eq!(still_rated, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(still_rated.to_string(), "rate limit is reached");
+    let still_limited = verifier
+        .operate(
+            &call,
+            &guest(frames),
+            Operation::Append,
+            "UsersAI/photo/frames",
+        )
+        .expect_err("the spent effect count limit was not raised");
+    assert_eq!(still_limited, OperateRefuse::Binding(Refuse::EffectLimit));
+    assert_eq!(still_limited.to_string(), "effect limit is reached");
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the library grant stays");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("the journal stays");
+    verifier
+        .use_grant(call, &guest(album))
+        .expect("the album grant stays");
+}
+
+#[test]
+fn model_window_at_the_top_of_the_clock_holds_the_rate() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let library = verifier
+        .bind_grant(
+            photo,
+            "UsersAI/photo/library",
+            Rights {
+                append: true,
+                overwrite: false,
+                child_journal: true,
+            },
+        )
+        .expect("library");
+    assert_eq!(library, Handle(1));
+    let frames = verifier
+        .bind_grant(photo, "UsersAI/photo/frames", rights())
+        .expect("frames");
+    assert_eq!(frames, Handle(2));
+    verifier.set_verifier_now(u64::MAX - 5);
+    verifier
+        .set_rate(library, 1, 10)
+        .expect("the window starts at the top of the clock");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("the journal mints");
+    assert_eq!(roll, Handle(3));
+    verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect("one effect inside the window at the top of the clock");
+    let held = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("the rate holds");
+    assert_eq!(held, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(held.to_string(), "rate limit is reached");
+    let child_held = verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect_err("the child spends the same rate");
+    assert_eq!(child_held, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(child_held.to_string(), "rate limit is reached");
+    verifier.set_verifier_now(u64::MAX - 10);
+    verifier
+        .set_rate(frames, 1, 10)
+        .expect("this window ends at the top of the clock");
+    verifier
+        .operate(
+            &call,
+            &guest(frames),
+            Operation::Append,
+            "UsersAI/photo/frames",
+        )
+        .expect("one effect inside the window");
+    let inside = verifier
+        .operate(
+            &call,
+            &guest(frames),
+            Operation::Append,
+            "UsersAI/photo/frames",
+        )
+        .expect_err("the rate holds inside the window");
+    assert_eq!(inside, OperateRefuse::Binding(Refuse::Rate));
+    verifier.set_verifier_now(u64::MAX);
+    verifier
+        .operate(
+            &call,
+            &guest(frames),
+            Operation::Append,
+            "UsersAI/photo/frames",
+        )
+        .expect("the window that ends at the top of the clock starts a new count");
+    let fitted = verifier
+        .operate(
+            &call,
+            &guest(frames),
+            Operation::Append,
+            "UsersAI/photo/frames",
+        )
+        .expect_err("the new window holds at the same instant");
+    assert_eq!(fitted, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(fitted.to_string(), "rate limit is reached");
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the library grant stays");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("the journal stays");
+    verifier
+        .use_grant(call, &guest(frames))
+        .expect("the frames grant stays");
+}
+
+#[test]
+fn model_clock_before_the_window_start_keeps_the_count() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("library");
+    let frames = verifier
+        .bind_grant(photo, "UsersAI/photo/frames", rights())
+        .expect("frames has no rate");
+    verifier.set_verifier_now(10);
+    verifier
+        .set_rate(library, 1, 10)
+        .expect("window starts at 10");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal does not spend the rate");
+    verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect("one effect inside the window");
+    let spent = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("the rate is spent");
+    assert_eq!(spent, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(spent.to_string(), "rate limit is reached");
+    let child_spent = verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect_err("the journal spends the same rate");
+    assert_eq!(child_spent, OperateRefuse::Binding(Refuse::Rate));
+    verifier.set_verifier_now(9);
+    let early = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("an instant before the start keeps the count");
+    assert_eq!(early, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(early.to_string(), "rate limit is reached");
+    let child_early = verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect_err("the journal keeps the same count");
+    assert_eq!(child_early, OperateRefuse::Binding(Refuse::Rate));
+    verifier
+        .operate(
+            &call,
+            &guest(frames),
+            Operation::Append,
+            "UsersAI/photo/frames",
+        )
+        .expect("a grant with no rate still appends");
+    verifier.set_verifier_now(0);
+    let earlier = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("an earlier instant keeps the count");
+    assert_eq!(earlier, OperateRefuse::Binding(Refuse::Rate));
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the grant stays in the store");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("the journal stays in the store");
+    verifier.set_verifier_now(20);
+    verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect("the window end starts a new count");
+    let again = verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect_err("the new window has its own rate");
+    assert_eq!(again, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(again.to_string(), "rate limit is reached");
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the grant stays after the new window");
+}
+
+#[test]
+fn model_later_limit_keeps_the_spent_rate() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("library");
+    let frames = verifier
+        .bind_grant(photo, "UsersAI/photo/frames", rights())
+        .expect("frames has no rate");
+    verifier
+        .set_rate(library, 1, 10)
+        .expect("one effect in the window");
+    verifier.set_effect_limit(library, 4).expect("four effects");
+    verifier
+        .set_effect_limit(frames, 4)
+        .expect("frames has a limit and no rate");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal does not spend the rate");
+    verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect("one effect inside the window");
+    let spent = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("the rate is spent");
+    assert_eq!(spent, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(spent.to_string(), "rate limit is reached");
+    verifier
+        .set_effect_limit(library, 6)
+        .expect("a later limit does not start the rate over");
+    verifier
+        .set_effect_limit(frames, 6)
+        .expect("a later limit on a grant with no rate");
+    let kept = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("the effect-limit write kept the spent rate");
+    assert_eq!(kept, OperateRefuse::Binding(Refuse::Rate));
+    assert_eq!(kept.to_string(), "rate limit is reached");
+    let child_kept = verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect_err("the journal keeps the same rate");
+    assert_eq!(child_kept, OperateRefuse::Binding(Refuse::Rate));
+    verifier
+        .operate(
+            &call,
+            &guest(frames),
+            Operation::Append,
+            "UsersAI/photo/frames",
+        )
+        .expect("a grant with no rate still appends");
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the grant stays in the store");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("the journal stays in the store");
+}
+
+#[test]
+fn model_later_writes_keep_the_effect_count() {
+    let mut verifier = Verifier::new();
+    let photo = verifier
+        .register_instance("photo", "session-a")
+        .expect("instance");
+    let library = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("library");
+    let frames = verifier
+        .bind_grant(photo, "UsersAI/photo/frames", rights())
+        .expect("frames has no effect count limit");
+    verifier.set_effect_limit(library, 2).expect("two effects");
+    verifier
+        .set_rate(library, 10, 10)
+        .expect("the first rate starts the window");
+    verifier
+        .set_rate(frames, 10, 10)
+        .expect("frames has a rate and no effect count limit");
+    let call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal does not spend the count");
+    verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect("one effect");
+    verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect("the second effect reaches the limit");
+    let spent = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("the effect count is spent");
+    assert_eq!(spent, OperateRefuse::Binding(Refuse::EffectLimit));
+    assert_eq!(spent.to_string(), "effect limit is reached");
+    let child_spent = verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect_err("the journal keeps the same count");
+    assert_eq!(child_spent, OperateRefuse::Binding(Refuse::EffectLimit));
+    verifier
+        .set_rate(library, 10, 10)
+        .expect("a later rate does not start the count over");
+    verifier
+        .set_rate(frames, 10, 10)
+        .expect("a later rate on a grant with no effect count limit");
+    let kept = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("the later rate kept the spent count");
+    assert_eq!(kept, OperateRefuse::Binding(Refuse::EffectLimit));
+    assert_eq!(kept.to_string(), "effect limit is reached");
+    let child_kept = verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect_err("the journal keeps the count after the later rate");
+    assert_eq!(child_kept, OperateRefuse::Binding(Refuse::EffectLimit));
+    verifier
+        .set_effect_limit(library, 3)
+        .expect("a later limit does not start the count over");
+    verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect("the journal spends the one effect the higher limit still allows");
+    let after = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library",
+        )
+        .expect_err("the later limit kept the spent count");
+    assert_eq!(after, OperateRefuse::Binding(Refuse::EffectLimit));
+    assert_eq!(after.to_string(), "effect limit is reached");
+    let child_after = verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Append,
+            "UsersAI/photo/library/roll",
+        )
+        .expect_err("the journal is spent at the higher limit");
+    assert_eq!(child_after, OperateRefuse::Binding(Refuse::EffectLimit));
+    verifier
+        .operate(
+            &call,
+            &guest(frames),
+            Operation::Append,
+            "UsersAI/photo/frames",
+        )
+        .expect("a grant with no effect count limit still appends");
+    verifier
+        .use_grant(call, &guest(library))
+        .expect("the grant stays in the store");
+    verifier
+        .use_grant(call, &guest(roll))
+        .expect("the journal stays in the store");
 }
