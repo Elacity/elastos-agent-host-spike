@@ -10928,3 +10928,115 @@ The final branch/worktree inventory keeps this checkout on the supplied HEAD and
 155: One checked helper now copies the Agent Host and relative Bus inputs, with exact-byte refusal tests, four caught plants, and a passing real copied-capsule build and staging proof.
 
 Candidate: the local five-path diff against the supplied HEAD. Exercised checks: build target, four caught compiling plants and their restored exact checks, opt-in real-capsule build/staging, full locked lane gate, formatting and basic repository checks pass. Review links: pending with the lane supervisor. Installed release evidence: skipped because this is a lab artifact-input prerequisite; Runtime owns installed acceptance and the existing principal-bound journey. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.
+
+## 161 — Scope the client-fixture receipt scan exception
+
+Supplied HEAD: `edbf64ea6d50a30f232ef7ed898843933687de90`.
+Supplied tree: `d391534de826f7cc10f8dd0a72d826439181766c`.
+Supplied branch: `spark/cx-agent-conformance/161-scope-client-receipt-scan-exception`.
+Initial dirty paths: none. The branch has no configured upstream; against the cached `spike/spike/agent-host` ref, HEAD is 16 commits ahead and 4 behind. Network access is outside this builder task, so these are local fetched-ref observations. Keep the supplied branch and worktree; the supervisor owns integration and other local refs/worktrees.
+
+Plan: pass the journey name into the existing `launch_gap_only` helper and require exact membership of the four client fixtures plus its existing sole-failure condition. Add inventory-path scope/receipt controls and in-memory credential checks through the existing controller. Update only the existing RUNBOOK receipt/credential paragraph and this LOG section. Run four separate compiling plants, restore each, then run the named tests, controller regressions, report target, formatting, diff check and full locked lane gate. Preserve report identity/effect rules, blocked journeys, falsifier registration and tasks 134–138's merge owners.
+
+Initial free space: 45,266,156 KiB. Reuse the existing lane target cache; an estimated 12 GiB of new outputs plus the required 2 GiB reserve fit. Cargo checks will use the shared heavy-build lease, offline Cargo, lane-local target directories, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0` and a 600-second command bound.
+
+### Hand-run plant: remove-name-restriction
+
+Exact old/new UTF-8 bytes in `tests/common/grants.rs`, shown with JSON string encoding:
+
+```json
+{
+  "old": "    [\n        \"grant_refused_from_another_session\",\n        \"grant_refused_from_a_new_session\",\n        \"grant_record_names_agent_identity\",\n        \"instance_writes_only_under_own_storage_root\",\n    ]\n    .contains(&name)\n        && matches!(failures, [reason] if reason == \"missing launched probe identity\")",
+  "new": "    matches!(failures, [reason] if reason == \"missing launched probe identity\")"
+}
+```
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::receipt_scan_exception_is_scoped_to_client_journeys -- --exact`. Planted exit 101, 1.807 seconds. CAUGHT: unrelated native-only inventory is refused. The named test compiled and ran one assertion-bearing test. Restored the complete source file byte for byte before the next command.
+Restored command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::receipt_scan_exception_is_scoped_to_client_journeys -- --exact`; exit 0, 2.224 seconds; 1 passed / 0 failed.
+
+### Hand-run plant: prefix-membership
+
+Exact old/new UTF-8 bytes in `tests/common/grants.rs`, shown with JSON string encoding:
+
+```json
+{
+  "old": "    .contains(&name)",
+  "new": "    .iter()\n    .any(|client| name.starts_with(client))"
+}
+```
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::receipt_scan_exception_is_scoped_to_client_journeys -- --exact`. Planted exit 101, 2.143 seconds. CAUGHT: near-name native-only inventory is refused. The named test compiled and ran one assertion-bearing test. Restored the complete source file byte for byte before the next command.
+Restored command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::receipt_scan_exception_is_scoped_to_client_journeys -- --exact`; exit 0, 2.133 seconds; 1 passed / 0 failed.
+
+### Hand-run plant: additional-identity-failures
+
+Exact old/new UTF-8 bytes in `tests/common/grants.rs`, shown with JSON string encoding:
+
+```json
+{
+  "old": "matches!(failures, [reason] if reason == \"missing launched probe identity\")",
+  "new": "failures.iter().any(|reason| reason == \"missing launched probe identity\")"
+}
+```
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::receipt_scan_exception_is_scoped_to_client_journeys -- --exact`. Planted exit 101, 1.528 seconds. CAUGHT: missing-native client inventory is refused. The named test compiled and ran one assertion-bearing test. Restored the complete source file byte for byte before the next command.
+Restored command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::receipt_scan_exception_is_scoped_to_client_journeys -- --exact`; exit 0, 2.23 seconds; 1 passed / 0 failed.
+
+### Hand-run plant: bypass-client-credential-scan
+
+Exact old/new UTF-8 bytes in `tests/common/grants.rs`, shown with JSON string encoding:
+
+```json
+{
+  "old": "        self.check_inventory(\n            &report_inventory(name, observations, &printed, passed)?,\n            &[Surface::Printed, Surface::Report, Surface::Receipt],\n        )",
+  "new": "        let inventory = report_inventory(name, observations, &printed, passed)?;\n        if launch_gap_only(name, &[\"missing launched probe identity\".into()]) {\n            return Ok(());\n        }\n        self.check_inventory(\n            &inventory,\n            &[Surface::Printed, Surface::Report, Surface::Receipt],\n        )"
+}
+```
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::client_receipt_exception_still_scans_credentials -- --exact`. Planted exit 101, 1.897 seconds. CAUGHT: printed credential is refused. The named test compiled and ran one assertion-bearing test. Restored the complete source file byte for byte before the next command.
+Restored command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::client_receipt_exception_still_scans_credentials -- --exact`; exit 0, 1.616 seconds; 1 passed / 0 failed.
+
+### Restored candidate checks
+
+Both exact baseline commands passed with one selected test each: the scope test exited 0 in 3.746 seconds (and again in 3.022 seconds after control ordering); the credential test exited 0 in 0.691 seconds. All four plants above compiled, selected one named test, failed its intended assertion, and passed after byte-for-byte source restoration. They create zero Homes, files, probe builds, Runtime/provider children or sockets. Synthetic canaries and rendered receipts stay in memory; every contaminated-input assertion has a fixed label. The existing falsifier list and runner retain their supplied bytes.
+
+The first controller regression, `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests`, exited 101 in 3.568 seconds: 30 passed and 11 failed. Nine failures came from sandbox loopback binds (`Operation not permitted`), and two came from unavailable child process-group inspection. These are infrastructure results, with zero refusal or falsifier credit. The same restored candidate is rerun with local loopback fixture access and process visibility under the shared lease. Two failed fixture roots remain under the existing retention rule pending inspection.
+
+The report target, `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report`, passed: exit 0, 2.534 seconds, 24 passed / 0 failed. Basic repository checks passed: `git diff --check`, `node scripts/check-product-data.mjs` (42 capsules, 2 profiles, 28 method contracts), `node --test scripts/check-product-data.test.mjs` (99 passed), `(cd elastos && cargo fmt --all -- --check)`, `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`, and lane formatting, all exit 0.
+
+The remaining commands use the restored candidate, offline Cargo, two test threads, incremental compilation disabled, lane-local target directories, the shared heavy-build lease and a 600-second command bound.
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests`; exit 0, 5.947 seconds. test result: ok. 41 passed; 0 failed; 0 ignored; 0 measured; 38 filtered out; finished in 5.80s
+
+Free bytes before the full locked gate: 46,343,393,280. The 12 GiB build estimate plus 2 GiB reserve fit.
+
+### Principles check
+
+1. Named by hash — No new code/content name replaces hash identity. The synthetic launched identity uses a component SHA-256 and `capsule_identity::encode_entries` for its lab CID (`tests/common/grants.rs:2931`).
+2. Ambient authority — No capsule or UI gains access. The change only narrows the client controller's scan eligibility (`tests/common/grants.rs:1618`).
+3. One path (P10) — No second decision, renderer or scanner. `report_inventory` still calls `render_run`, and `check_journey` still calls `check_inventory` (`tests/common/grants.rs:1475`, `:1315`).
+4. Trusted core — No core growth. The production change is confined to the lane's existing private helper and its caller (`tests/common/grants.rs:1485`, `:1618`).
+5. Fails closed (P11) — Yes. Every other incomplete report keeps the fixed complete-report refusal; exact membership and sole-failure matching deny by default (`tests/common/grants.rs:1486`, `:1625`).
+6. Self-contained capsule — Yes. Guest logic and granted Bus calls retain their supplied code; only the lab inventory and controller tests change (`tests/common/grants.rs:1463`, `:2974`).
+7. Tests and falsifiers — Yes. The two named tests pass; all four compiling plants above fail their named behavior assertions and pass after restoration (`tests/common/grants.rs:2854`, `:2974`).
+8. Separate decisions — Yes. Eligible receipts retain incomplete identity, empty launched probes, failed command status and A14 FAIL. A complete synthetic identity supplies version evidence only (`tests/common/grants.rs:2880`, `:2963`). Runtime retains admission and grants; resource allowance is outside this lab scan.
+
+161: Restricted the existing receipt-scan exception to four exact client-fixture names and its sole launch gap; added scope, repaired-identity and in-memory credential controls, with four caught hand-run plants.
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`; exit 0, 292.941 seconds. test result: ok. 97 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.15s test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 31.99s test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.66s test result: ok. 67 passed; 0 failed; 12 ignored; 0 measured; 0 filtered out; finished in 219.44s test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.81s test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.30s test result: ok. 12 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 16.52s test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Fixture cleanup: the two new tests and all four plants use in-memory inputs only and create zero fixture roots. Across the controller and full-gate runs, 2 new retained roots remain (644 logical file bytes). Each owned root passed a process-visible lsof check: exit 1, empty stdout/stderr, zero open handles. Keep these infrastructure-failure roots through review, then let the supervisor remove those exact paths. Their private paths, ownership, source identity and cleanup condition are in ignored `target/task-161-lifecycle.json`. Passing fixtures use their existing cleanup paths. Existing roots, the supplied worktree and build caches keep their supervisor owners.
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::receipt_scan_exception_is_scoped_to_client_journeys -- --exact`; exit 0, 1.577 seconds. test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 78 filtered out; finished in 1.41s
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::client_receipt_exception_still_scans_credentials -- --exact`; exit 0, 0.793 seconds. test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 78 filtered out; finished in 0.71s
+
+Command: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`; exit 0, 0.281 seconds.
+
+### Handoff and acceptance record
+
+The restored full locked gate passed: exit 0 in 292.941 seconds, 265 passed / 0 failed / 14 existing blocked rows ignored. The final exact scope and credential commands each passed one test, and the final lane format check passed. `git diff --check` passes after removing a trailing space from the recorded format result. The two retained infrastructure roots total 644 logical file bytes and have zero open handles; their review cleanup stays with the supervisor. The task leaves zero active fixture children. The shared heavy-build lease is released.
+
+Final branch/worktree inventory preserves the supplied branch, HEAD and HEAD tree. Only `tests/common/grants.rs`, the existing RUNBOOK paragraph and this `## 161` LOG section have tracked edits. The ignored local lifecycle inventory records this worktree and the two retained roots. The task branch has no configured upstream; cached lane-base divergence remains 16 commits ahead and 4 behind. Network refs and publication remain with the lane supervisor. Stopped and blocked tasks, including 134–138's merge gate, keep their owners.
+
+Candidate: local three-path diff against supplied HEAD `edbf64ea6d50a30f232ef7ed898843933687de90`; all candidate checks used that dirty worktree, with the supplied HEAD tree recorded above. Exercised checks: both exact tests, four caught compiling plants with restored passes, controller regression, report target, full locked lane gate, lane formatting, basic repository checks and diff checks pass; the initial sandbox controller result remains infrastructure evidence above. Review links: pending with the supervisor. Installed release evidence: skipped because the task changes lab scan eligibility only; Runtime owns capsule admission, grants and installed acceptance. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.

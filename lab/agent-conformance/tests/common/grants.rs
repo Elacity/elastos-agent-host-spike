@@ -1480,9 +1480,9 @@ fn report_inventory(
         GitIdentity::read(&repository()),
         Some(include_str!("../../GAPS.md")),
     );
-    // The suite grader still records a missing launch. A no-probe journey
-    // scans that receipt; every other refusal still blocks the scan.
-    if !report.failures.is_empty() && !launch_gap_only(&report.failures) {
+    // The suite grader still records a missing launch. Only the four client
+    // fixtures scan that incomplete receipt; every other refusal blocks it.
+    if !report.failures.is_empty() && !launch_gap_only(name, &report.failures) {
         return Err("credential check requires a complete report");
     }
     Ok(vec![
@@ -1614,9 +1614,16 @@ fn request_list(response: &Value) -> Result<&Vec<Value>> {
         .ok_or("pending list requires a request list")
 }
 
-/// The only receipt gap a no-probe journey may scan. Any other refusal blocks.
-fn launch_gap_only(failures: &[String]) -> bool {
-    matches!(failures, [reason] if reason == "missing launched probe identity")
+/// Only these client fixtures may scan a receipt with solely a missing launch.
+fn launch_gap_only(name: &str, failures: &[String]) -> bool {
+    [
+        "grant_refused_from_another_session",
+        "grant_refused_from_a_new_session",
+        "grant_record_names_agent_identity",
+        "instance_writes_only_under_own_storage_root",
+    ]
+    .contains(&name)
+        && matches!(failures, [reason] if reason == "missing launched probe identity")
 }
 
 fn require_empty_pending(response: &Value) -> Result<()> {
@@ -2771,13 +2778,20 @@ mod tests {
 
     #[test]
     fn no_probe_receipt_is_scanned_and_other_gaps_are_refused() {
-        assert!(launch_gap_only(&["missing launched probe identity".into()]));
-        assert!(!launch_gap_only(&[]));
-        assert!(!launch_gap_only(&[
-            "missing launched probe identity".into(),
-            "missing Runtime SHA-256".into(),
-        ]));
-        assert!(!launch_gap_only(&["missing Runtime SHA-256".into()]));
+        let name = "grant_refused_from_another_session";
+        assert!(launch_gap_only(
+            name,
+            &["missing launched probe identity".into()]
+        ));
+        assert!(!launch_gap_only(name, &[]));
+        assert!(!launch_gap_only(
+            name,
+            &[
+                "missing launched probe identity".into(),
+                "missing Runtime SHA-256".into(),
+            ]
+        ));
+        assert!(!launch_gap_only(name, &["missing Runtime SHA-256".into()]));
         let natives = [
             Observation::Native {
                 role: "elastos".into(),
@@ -2807,6 +2821,197 @@ mod tests {
             .err(),
             Some("credential check requires a complete report")
         );
+    }
+
+    fn client_receipt_fixtures() -> [(&'static str, &'static str, bool); 4] {
+        let session = "session grant: synthetic\nsession grant refusal: synthetic\n";
+        [
+            ("grant_refused_from_another_session", session, true),
+            ("grant_refused_from_a_new_session", session, true),
+            ("grant_record_names_agent_identity", session, false),
+            (
+                "instance_writes_only_under_own_storage_root",
+                "owned root: write first\nowned root: write second\nowned root: sibling request synthetic\n",
+                false,
+            ),
+        ]
+    }
+
+    fn receipt_natives() -> [Observation; 2] {
+        [
+            Observation::Native {
+                role: "elastos".into(),
+                sha256: "a".repeat(64),
+            },
+            Observation::Native {
+                role: "localhost-provider".into(),
+                sha256: "b".repeat(64),
+            },
+        ]
+    }
+
+    #[test]
+    fn receipt_scan_exception_is_scoped_to_client_journeys() {
+        let natives = receipt_natives();
+        let refusal = Some("credential check requires a complete report");
+        let unrelated = "synthetic_receipt_scan_control";
+        let printed = "session grant: synthetic\nsession grant refusal: synthetic\n";
+        for passed in [true, false] {
+            assert!(
+                report_inventory(unrelated, &natives, printed, passed).err() == refusal,
+                "unrelated native-only inventory is refused"
+            );
+        }
+        for (name, printed, passed) in client_receipt_fixtures().into_iter().chain([(
+            "grant_refused_from_another_session",
+            "session grant: synthetic\nsession grant refusal: synthetic\n",
+            false,
+        )]) {
+            let inventory = report_inventory(name, &natives, printed, passed)
+                .expect("eligible client fixture reaches scan inventory");
+            let receipt: Value = serde_json::from_slice(
+                &inventory
+                    .iter()
+                    .find(|(s, _)| *s == Surface::Receipt)
+                    .unwrap()
+                    .1,
+            )
+            .unwrap();
+            assert_eq!(receipt["identity_status"], "incomplete");
+            assert_eq!(
+                receipt["missing_or_invalid"],
+                json!(["missing launched probe identity"])
+            );
+            assert_eq!(receipt["probes"], json!([]));
+            assert_eq!(receipt["command_success"], false);
+            assert_eq!(receipt["cargo_success"], passed);
+            assert_eq!(
+                receipt["suite_outcome"],
+                if passed { "PASS" } else { "FAIL" }
+            );
+            assert!(inventory
+                .iter()
+                .filter(|(s, _)| *s == Surface::Report)
+                .any(|(_, bytes)| std::str::from_utf8(bytes)
+                    .unwrap()
+                    .contains("versions_receipt (A14) | FAIL")));
+            assert!(receipt["report"]["table"]
+                .as_str()
+                .unwrap()
+                .contains("versions_receipt (A14) | FAIL"));
+
+            for near_name in [
+                format!("prefix_{name}"),
+                format!("{name}_suffix"),
+                name.to_uppercase(),
+            ] {
+                assert!(
+                    report_inventory(&near_name, &natives, printed, passed).err() == refusal,
+                    "near-name native-only inventory is refused"
+                );
+            }
+            for missing in 0..natives.len() {
+                let incomplete = [natives[1 - missing].clone()];
+                assert!(
+                    report_inventory(name, &incomplete, printed, passed).err() == refusal,
+                    "missing-native client inventory is refused"
+                );
+            }
+        }
+
+        for name in [
+            "default_activation_refuses_without_selector",
+            "granted_read_succeeds",
+            "ungranted_sibling_read_is_refused",
+            "two_instances_overlap_with_separate_grants",
+            "host_key_read_is_refused",
+        ] {
+            assert!(
+                report_inventory(name, &natives, printed, true).err() == refusal,
+                "known probe journey requires its launched variants"
+            );
+        }
+        let probe = agent_conformance::identity::ProbeIdentity {
+            effect: "default".into(),
+            component_sha256: "c".repeat(64),
+            bundle_lab_cid: capsule_identity::encode_entries(&[capsule_identity::BundleEntry {
+                path: "synthetic.bin".into(),
+                content: b"synthetic receipt fixture".to_vec(),
+            }])
+            .unwrap()
+            .to_string(),
+        };
+        let mut observations = natives.to_vec();
+        observations.push(Observation::BuildOnly {
+            probe: probe.clone(),
+        });
+        assert!(
+            report_inventory(unrelated, &observations, printed, true).err() == refusal,
+            "build-only identity supplies zero launch credit"
+        );
+        observations.push(Observation::Launched { probe });
+        let inventory = report_inventory(unrelated, &observations, printed, true)
+            .expect("repaired unrelated journey reaches scan inventory");
+        let receipt: Value = serde_json::from_slice(
+            &inventory
+                .iter()
+                .find(|(s, _)| *s == Surface::Receipt)
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        assert_eq!(receipt["identity_status"], "complete");
+        assert_eq!(receipt["missing_or_invalid"], json!([]));
+        assert_eq!(receipt["probes"].as_array().unwrap().len(), 1);
+        assert_eq!(receipt["command_success"], true);
+        assert!(receipt["report"]["table"]
+            .as_str()
+            .unwrap()
+            .contains("versions_receipt (A14) | PASS"));
+    }
+
+    #[test]
+    fn client_receipt_exception_still_scans_credentials() {
+        for (name, printed, passed) in client_receipt_fixtures() {
+            let mut controller = idle_controller(0);
+            let mut natives = receipt_natives();
+            *controller.printed.borrow_mut() = printed.into();
+            assert!(
+                controller.check_journey(name, &natives, passed).is_ok(),
+                "clean client fixture reaches credential scan"
+            );
+
+            let canary = format!("synthetic-printed-{}", std::process::id());
+            controller.credentials.push(canary.clone());
+            controller.printed.borrow_mut().push_str(&canary);
+            assert!(
+                controller.check_journey(name, &natives, passed)
+                    == Err("fixture credential detected: printed journey"),
+                "printed credential is refused"
+            );
+            *controller.printed.borrow_mut() = printed.into();
+            assert!(
+                controller.check_journey(name, &natives, passed).is_ok(),
+                "repaired printed input passes credential scan"
+            );
+
+            let receipt_canary = agent_conformance::identity::sha256(b"synthetic native canary");
+            controller.credentials.push(receipt_canary.clone());
+            natives[0] = Observation::Native {
+                role: "elastos".into(),
+                sha256: receipt_canary,
+            };
+            assert!(
+                controller.check_journey(name, &natives, passed)
+                    == Err("fixture credential detected: version receipt"),
+                "receipt credential is refused"
+            );
+            natives = receipt_natives();
+            assert!(
+                controller.check_journey(name, &natives, passed).is_ok(),
+                "repaired native input passes credential scan"
+            );
+        }
     }
 
     #[test]

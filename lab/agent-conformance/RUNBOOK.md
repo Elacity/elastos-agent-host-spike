@@ -455,7 +455,14 @@ against every expected stdout/stderr pair, the report table, the serialized
 version receipt, committed lane blobs and candidate lane source files.
 `render_run` produces the same table and receipt bytes used by `write_run`,
 so credential acceptance can check both outputs in memory. Runtime owns the
-original coordinates file; it remains the controller's input. Harness copies
+original coordinates file; it remains the controller's input. Only the client
+fixtures `grant_refused_from_another_session`, `grant_refused_from_a_new_session`,
+`grant_record_names_agent_identity` and `instance_writes_only_under_own_storage_root`
+may scan an incomplete receipt whose sole failure is `missing launched probe identity`.
+That receipt stays incomplete, with A14 FAIL and a failed command status, while
+the controller scans its printed output, report and receipt for credentials.
+Every other incomplete report receives `credential check requires a complete report`.
+Complete reports reach the same scan for every journey. Harness copies
 stay in memory and reach the loopback HTTP calls directly. Process arguments,
 environment entries and output files carry paths or public evidence only.
 
