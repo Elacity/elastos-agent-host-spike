@@ -2,13 +2,14 @@ id: F-A5-rateend
 file: src/lib.rs
 test: ops::model_rate_stops_the_next_effect_in_the_window
 --- old
-            return Err(Refuse::IssuingRate);
-        }
         if grant.ended {
             return Err(Refuse::UnknownHandle);
         }
---- new
+        if grant.record.parent.is_some() {
             return Err(Refuse::IssuingRate);
         }
-        let _ = grant.ended;
+--- new
+        if grant.record.parent.is_some() {
+            return Err(Refuse::IssuingRate);
+        }
 --- end
