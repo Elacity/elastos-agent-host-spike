@@ -26,6 +26,7 @@ pub enum OperateRefuse {
     JournalRoot,
     JournalSame,
     JournalCover,
+    JournalHeld,
 }
 
 impl std::fmt::Display for OperateRefuse {
@@ -50,6 +51,7 @@ impl std::fmt::Display for OperateRefuse {
             OperateRefuse::JournalCover => {
                 formatter.write_str("a live journal already covers that path")
             }
+            OperateRefuse::JournalHeld => formatter.write_str("a live journal holds that path"),
         }
     }
 }
@@ -81,6 +83,23 @@ impl Verifier {
                             .map_err(OperateRefuse::Binding)?;
                     }
                 }
+                #[rustfmt::skip]
+                {
+                    if operation != Operation::ChildJournal {
+                        if self.grants.values().any(|stored| {
+                            stored.record.parent == Some(request.handle)
+                                && !stored.ended
+                                && super::resource_name(
+                                    &grant.identity,
+                                    path,
+                                    Some(&stored.record.owned_root),
+                                )
+                                .is_ok()
+                        }) {
+                            return Err(OperateRefuse::JournalHeld);
+                        }
+                    }
+                };
                 let mut grant = grant;
                 let mut counted = request.handle;
                 while let Some(handle) = grant.parent {
@@ -2589,4 +2608,173 @@ fn model_child_journal_covered_by_a_live_sibling_is_refused() {
     verifier
         .use_grant(call, &guest(parent))
         .expect("the issuing grant stays");
+}
+
+#[test]
+fn model_issuing_effect_inside_a_live_journal_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: true,
+            child_journal: true,
+        },
+    );
+    assert_eq!(parent, Handle(1));
+    verifier.set_effect_limit(parent, 5).expect("issuing limit");
+    let call = verifier.open_call(instance);
+    let page = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/page.md")
+        .expect("the journal mints");
+    assert_eq!(page, Handle(2));
+    let inside = verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal/page.md/line",
+        )
+        .expect_err("the issuing grant does not enter a live journal");
+    assert_eq!(inside, OperateRefuse::JournalHeld);
+    assert_eq!(inside.to_string(), "a live journal holds that path");
+    let on_journal = verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Overwrite,
+            "UsersAI/agent-1/journal/page.md",
+        )
+        .expect_err("the issuing grant does not effect the journal path");
+    assert_eq!(on_journal, OperateRefuse::JournalHeld);
+    assert_eq!(on_journal.to_string(), "a live journal holds that path");
+    let other = verifier
+        .bind_grant(
+            instance,
+            "UsersAI/agent-1/journal",
+            Rights {
+                append: true,
+                overwrite: false,
+                child_journal: false,
+            },
+        )
+        .expect("another issuing grant");
+    assert_eq!(other, Handle(3));
+    verifier
+        .operate(
+            &call,
+            &guest(other),
+            Operation::Append,
+            "UsersAI/agent-1/journal/page.md/line",
+        )
+        .expect("another issuing grant still effects that path");
+    verifier
+        .operate(
+            &call,
+            &guest(page),
+            Operation::Append,
+            "UsersAI/agent-1/journal/page.md/line",
+        )
+        .expect("the journal's own effect stays allowed");
+    verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
+        .expect("an effect on the issuing root stays allowed");
+    verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal/page",
+        )
+        .expect("a string prefix is not the journal path");
+    verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal/other.md",
+        )
+        .expect("a path beside a live journal stays allowed");
+    verifier.revoke_grant(page).expect("end the journal");
+    verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal/page.md/line",
+        )
+        .expect("an ended journal frees that path");
+    let limited = verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
+        .expect_err("the counted effects reach the limit");
+    assert_eq!(limited, OperateRefuse::Binding(Refuse::EffectLimit));
+    assert_eq!(limited.to_string(), "effect limit is reached");
+    let ended = verifier
+        .use_grant(call, &guest(page))
+        .expect_err("the ended journal stays ended");
+    assert_eq!(ended, Refuse::UnknownHandle);
+    assert_eq!(ended.to_string(), "unknown handle");
+    verifier
+        .use_grant(call, &guest(parent))
+        .expect("the issuing grant stays");
+    verifier
+        .use_grant(call, &guest(other))
+        .expect("the other issuing grant stays");
+    let once = verifier
+        .bind_once(
+            instance,
+            "UsersAI/agent-1/album",
+            Rights {
+                append: true,
+                overwrite: false,
+                child_journal: true,
+            },
+        )
+        .expect("allow once");
+    assert_eq!(once, Handle(4));
+    let shot = verifier
+        .create_child_journal(&call, &guest(once), "UsersAI/agent-1/album/shot")
+        .expect("the allow-once journal mints");
+    assert_eq!(shot, Handle(5));
+    let held_once = verifier
+        .operate(
+            &call,
+            &guest(once),
+            Operation::Append,
+            "UsersAI/agent-1/album/shot",
+        )
+        .expect_err("a refused path does not end the allow-once grant");
+    assert_eq!(held_once, OperateRefuse::JournalHeld);
+    verifier
+        .use_grant(call, &guest(once))
+        .expect("the allow-once grant stays");
+    verifier
+        .use_grant(call, &guest(shot))
+        .expect("the allow-once journal stays");
+    verifier
+        .operate(
+            &call,
+            &guest(once),
+            Operation::Append,
+            "UsersAI/agent-1/album",
+        )
+        .expect("the root effect ends the allow-once grant");
+    let once_ended = verifier
+        .use_grant(call, &guest(once))
+        .expect_err("the allow-once grant has ended");
+    assert_eq!(once_ended, Refuse::UnknownHandle);
+    let shot_ended = verifier
+        .use_grant(call, &guest(shot))
+        .expect_err("the allow-once journal ended with the grant");
+    assert_eq!(shot_ended, Refuse::UnknownHandle);
 }
