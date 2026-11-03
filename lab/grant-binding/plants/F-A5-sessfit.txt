@@ -1,0 +1,26 @@
+id: F-A5-sessfit
+file: src/lib.rs
+test: model_handle_clock_leaves_the_standing_grant
+--- old
+        self.pending_session = false;
+        let record = self
+            .registry
+            .get(&instance)
+            .ok_or(Refuse::UnknownInstance)?;
+        if record.identity == "home" {
+            return Err(Refuse::HomeMint);
+        }
+        let owned_root = resource_name(&record.identity, resource, None)?;
+        let next_handle = self.next_handle.checked_add(1).ok_or(Refuse::HandleSpace)?;
+--- new
+        let record = self
+            .registry
+            .get(&instance)
+            .ok_or(Refuse::UnknownInstance)?;
+        if record.identity == "home" {
+            return Err(Refuse::HomeMint);
+        }
+        let owned_root = resource_name(&record.identity, resource, None)?;
+        let next_handle = self.next_handle.checked_add(1).ok_or(Refuse::HandleSpace)?;
+        self.pending_session = false;
+--- end
