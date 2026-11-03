@@ -199,27 +199,10 @@ impl Verifier {
         if path == grant.owned_root {
             return Err(OperateRefuse::JournalRoot);
         }
-        if self.grants.values().any(|stored| {
-            stored.record.parent == Some(request.handle)
-                && !stored.ended
-                && stored.record.owned_root == path
-        }) {
-            return Err(OperateRefuse::JournalSame);
-        }
-        if self.grants.values().any(|stored| {
-            stored.record.parent == Some(request.handle)
-                && !stored.ended
-                && stored.record.owned_root != path
-                && (super::resource_name(&grant.identity, path, Some(&stored.record.owned_root))
-                    .is_ok()
-                    || super::resource_name(
-                        &grant.identity,
-                        &stored.record.owned_root,
-                        Some(path),
-                    )
-                    .is_ok())
-        }) {
-            return Err(OperateRefuse::JournalCover);
+        match self.live_journal_overlap(request.handle, &grant.identity, path) {
+            Some(super::Overlap::Equal) => return Err(OperateRefuse::JournalSame),
+            Some(_) => return Err(OperateRefuse::JournalCover),
+            None => {}
         }
         super::resource_name(&grant.identity, path, Some(&grant.owned_root))
             .map_err(OperateRefuse::Binding)?;
