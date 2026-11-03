@@ -515,6 +515,11 @@ def assert_source_home_provider_anchors(stamper):
         if not any("extract_path mismatch" in e for e in integrity.audit_provider_capsule_metadata(
                 anchor_row, ["linux-amd64"], source_root=root, source_home=False)):
             raise AssertionError("a release archive row with no extract_path passed")
+        anchor_row["external"]["rights-provider"]["capsule_metadata"]["platforms"]["linux-amd64"]["extract_path"] = None
+        for source_home in (True, False):  # an explicit null is not a missing key
+            if not any("extract_path mismatch" in e for e in integrity.audit_provider_capsule_metadata(
+                    anchor_row, ["linux-amd64"], source_root=root, source_home=source_home)):
+                raise AssertionError(f"explicit extract_path null accepted: source-home={source_home}")
         row["extract_path"] = "../outside"  # refused in both modes
         for source_home in (True, False):
             if not any("extract_path mismatch" in e for e in integrity.audit_provider_capsule_metadata(
@@ -554,6 +559,7 @@ def assert_source_home_provider_anchors(stamper):
         write_json(components, {"external": {**current["external"], "linked": external("linked")},
                                 "profiles": {"source-home": {"components": [*names, "linked"]}}})
         write_json(data / "capsules" / "linked" / "capsule.json", {"role": "provider"})  # a real dir would stamp
+        write_json(root / "capsules" / "linked" / "capsule.json", {"runtime_abi": "elastos.component/v1"})  # the source-capsule read
         (data / "capsules" / "linked").rename(scene / "linked-real")
         read_through.rename(data / "capsules" / "linked")  # capsules/linked -> capsules/rights-provider/linked -> outside
         if not (data / "capsules" / "linked").resolve().is_relative_to(outside.resolve()):
@@ -565,6 +571,16 @@ def assert_source_home_provider_anchors(stamper):
                 raise AssertionError(f"a linked installed capsule refused for the wrong reason: {error}")
         else:
             raise AssertionError("an installed capsule path that links outside $DATA_DIR/capsules was read")
+        (data / "capsules" / "linked").unlink()  # now only the capsule.json file links outside
+        (data / "capsules" / "linked").mkdir()
+        (data / "capsules" / "linked" / "capsule.json").symlink_to(outside / "capsule.json")
+        try:
+            unsafe_stamp([*names, "linked"])
+        except SystemExit as error:
+            if not str(error).startswith("refusing to anchor a linked capsule path"):
+                raise AssertionError(f"a linked capsule.json refused for the wrong reason: {error}")
+        else:
+            raise AssertionError("a capsule.json that links outside $DATA_DIR/capsules was read")
         if tree_hashes(outside) != outside_hashes:
             raise AssertionError("an unsafe profile name or link read a file outside $DATA_DIR/capsules")
 

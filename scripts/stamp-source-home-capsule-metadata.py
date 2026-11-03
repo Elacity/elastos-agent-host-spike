@@ -91,14 +91,13 @@ def validated_capsule_names(names, label):
 
 def installed_capsule_manifest(data_dir, name):
     """Resolve the installed manifest inside $DATA_DIR/capsules, refusing links that leave it."""
-    installed_root = data_dir / "capsules" / name
-    # A link anywhere at or below the capsules root would carry the read elsewhere.
+    # A link anywhere at or below the capsules root, capsule.json included, would carry the read elsewhere.
     path = data_dir
-    for segment in ("capsules", *name.split("/")):
+    for segment in ("capsules", *name.split("/"), "capsule.json"):
         path = path / segment
         if path.is_symlink():
             raise SystemExit(f"refusing to anchor a linked capsule path below $DATA_DIR/capsules: {path}")
-    return installed_root / "capsule.json"
+    return path
 
 
 def load_managed_capsules(path):
@@ -263,7 +262,7 @@ def stamp_component_capsules(components_path, data_dir, root, platform, capsules
     for name in capsules:
         source_manifest_path = root / "capsules" / name / "capsule.json"
         installed_root = data_dir / "capsules" / name
-        installed_manifest_path = installed_root / "capsule.json"
+        installed_manifest_path = installed_capsule_manifest(data_dir, name)
         if not source_manifest_path.is_file() or not installed_manifest_path.is_file():
             continue
         source_manifest = json.loads(source_manifest_path.read_text())

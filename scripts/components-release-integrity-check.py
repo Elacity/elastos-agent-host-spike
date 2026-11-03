@@ -309,7 +309,7 @@ def check_platform_rows(name, metadata, expected, errors, source_home_anchor=Fal
         # archive, so only its anchor row may omit it; a row that names one still names its own capsule.
         checksum = info.get("checksum")
         anchored = source_home_anchor and isinstance(checksum, str) and checksum.startswith(SOURCE_HOME_ANCHOR_PREFIX)
-        if ("extract_path" not in info and not anchored) or info.get("extract_path") not in (None, name):
+        if ("extract_path" not in info and not anchored) or ("extract_path" in info and info["extract_path"] != name):
             errors.append(f"{name}: capsule_metadata {platform} extract_path mismatch")
         # A checksum names the installed capsule, not an archive; a release profile holds ordinary digests only.
         if not source_home_anchor and non_empty(info.get("checksum")):
