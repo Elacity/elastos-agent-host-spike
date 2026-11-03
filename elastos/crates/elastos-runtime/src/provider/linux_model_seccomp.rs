@@ -803,9 +803,7 @@ mod tests {
         }
     }
 
-    /// A row's token file, opened before the fork. `tag` names the run, so a
-    /// concurrent run under the same pid and row gets its own file; a lost
-    /// token would read as a blocked syscall.
+    /// A row's token file, opened before the fork; `tag` keeps two runs apart.
     fn probe_token(tag: &str, name: &str) -> std::path::PathBuf {
         let safe: String = name
             .chars()
@@ -819,12 +817,10 @@ mod tests {
         std::fs::File::create(probe_token(tag, name)).expect("token")
     }
 
-    /// One tag per call: no two runs share a token file.
-    fn elapsed_nanos() -> u128 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos()
+    /// One tag per control: no two controls share a token file.
+    fn next_tag() -> u64 {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Where the helper publishes its readiness line, keyed by the harness pid
@@ -1087,14 +1083,15 @@ mod tests {
 
     /// The pass rule for a row that ends by exit: it exits zero and its token
     /// file holds the pass token. A child that exits zero without the token
-    /// exercised nothing.
+    /// exercised nothing. A refusal has already emptied the file at the fork,
+    /// so it reads no pass; the token is removed before every return.
     fn row_result(tag: &str, name: &str, success: bool) -> Result<(), String> {
-        if !success {
-            return Err(format!("row {name} failed"));
-        }
         let path = probe_token(tag, name);
         let stdout = std::fs::read_to_string(&path).unwrap_or_default();
         let _ = std::fs::remove_file(path);
+        if !success {
+            return Err(format!("row {name} failed"));
+        }
         if stdout.contains(PROBE_TOKEN) {
             Ok(())
         } else {
@@ -1151,7 +1148,7 @@ mod tests {
             .then(Victim::start);
         let total = all.len();
         let mut failures = Vec::new();
-        let tag = elapsed_nanos().to_string();
+        let tag = next_tag().to_string();
         // Victim rows also get one unfiltered sibling control each; their
         // failures are separate lines, never new rows in `rows()`.
         let mut defects = Vec::new();
@@ -1287,7 +1284,6 @@ mod tests {
     /// the helper, same command, no filter, which must get a real descriptor.
     async fn sibling_control(victim: &Victim, row: &Row, control: &str) -> Result<(), String> {
         let name = row.name;
-        let tag = format!("control-{}", elapsed_nanos());
         let mut command = Command::new(std::env::current_exe().expect("test executable path"));
         command
             .arg("--exact")
@@ -1299,7 +1295,7 @@ mod tests {
             .env(UNFILTERED_VAR, "1")
             // Planted on this one child's command only.
             .env(CONTROL_VAR, control)
-            .stdout(std::process::Stdio::from(token_file(&tag, name)))
+            .stdout(std::process::Stdio::from(token_file("control", name)))
             .stderr(std::process::Stdio::piped());
         let mut child = spawn_row(&mut command);
         // Read on the same runtime: a full pipe would block the child's write.
@@ -1311,7 +1307,7 @@ mod tests {
                 Err(error) => format!("stderr did not read: {error}"),
             }
         });
-        let failure = finish_probe(&tag, name, row, &mut child).await;
+        let failure = finish_probe("control", name, row, &mut child).await;
         // The child is reaped, so its pipe end is here and the read ends.
         let diagnostics = drain
             .await
@@ -1376,6 +1372,15 @@ mod tests {
             .build()
             .expect("control runtime")
             .block_on(sibling_control(&Victim::start(), &row, control));
+        // No control token survives: one left here would read as a pass.
+        let token = probe_token("control", TOKEN_ROW);
+        assert!(!token.exists(), "a refused control left a token {token:?}");
+        let kept = std::fs::read_dir(std::env::temp_dir())
+            .expect("temp dir")
+            .flatten()
+            .map(|entry| entry.path().to_string_lossy().into_owned())
+            .find(|path| path.contains(&format!("-{}-control-", std::process::id())));
+        assert_eq!(kept, None, "a control left its token");
         control
     }
 
@@ -1449,10 +1454,11 @@ mod tests {
     /// One row under two tags reaches two files: no run shares a token.
     #[test]
     fn one_row_under_two_tags_reaches_two_probe_files() {
-        let (one, two) = ("tag-one", "tag-two");
-        let path = probe_token(one, TOKEN_ROW);
-        let other = probe_token(two, TOKEN_ROW);
+        let (one, two) = (next_tag(), next_tag());
+        let path = probe_token(&one.to_string(), TOKEN_ROW);
+        let other = probe_token(&two.to_string(), TOKEN_ROW);
         assert!(!path.exists(), "a token exists before the spawn");
+        assert_ne!(one, two);
         assert_ne!(path, other);
         std::fs::write(&path, TOKEN_LINE).expect("token");
         assert!(!other.exists(), "fresh token exists");
