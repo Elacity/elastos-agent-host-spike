@@ -228,6 +228,13 @@ The existing report command writes `VERSIONS.json` into the fresh ignored
 that path for the tested candidate. The report reads the full repository commit
 and dirty state for this invocation; local edits set `dirty: true`.
 
+`versions_receipt_reads_git_dirty_state` uses one isolated Git repository in a
+fresh throwaway Home. It checks clean, edited, staged, committed, deleted,
+restored and untracked states through the existing reader and receipt writer.
+Receipts sit beside the repository so they leave its state unchanged. These
+checks prove A14 reporting; live capsule and Runtime acceptance stay with their
+current owners.
+
 The receipt contains native hashes, every observed probe's effect, component
 SHA-256 and the complete bundle's lab CID (as `lab/capsule-identity` prints it),
 the suite outcome, and the exact graded table plus its SHA-256. The sibling

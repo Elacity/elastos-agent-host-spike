@@ -10031,3 +10031,77 @@ The final branch/worktree inventory identifies this branch as unique task work i
 Candidate: local task diff against `b25662e1549d51ea1ecd181140821f17cc7f9e2d`. Author checks: format, full locked suite, exact named test, eight caught and restored plants, source preservation and basic repository checks pass. Independent reviews: pending with the supervisor. Installed acceptance: this is the lab stand-in list; a PASS gives the Runtime no A15 credit. Browser, installed-provider and public-live checks belong to the corresponding product changes and were skipped for this lab-only read. Remaining gate: supervisor checks and independent reviews. Next owner: lane supervisor.
 
 - 147: the shell lists every session's pending requests from the existing store, and the one expiry helper saturates at `u64::MAX`, with a full journey and eight caught hand-run plants.
+
+## 148
+
+Comparison base before editing: supplied checkout HEAD `518a8409129e3ada9047417af29198f505b18519`, tree `5f549534a5c5a47393aea6e4e649b5dad4f2b5de`. `git status --short --branch` showed `spark/cx-agent-conformance/148-receipt-proves-git-dirty-state` with zero dirty paths. This checkout is the comparison base; the test needs its current code and adds no history requirement. The parent checkout index, refs and configuration remain owned by the lane supervisor.
+
+Read `src/report.rs` (`GitIdentity::read`, `render_run`, `write_run`), the receipt tests and helpers, `ThrowawayHome::new`/`launch`/`finish`, the RUNBOOK receipt section, 018's handoff and the architecture's current implementation status. A fresh search found one Git reader and zero matching Git fixture helpers in this lane. The plan is one test with eight controlled Git states, each carried through the existing writer, followed by three separate compiling plants and the restored gates. Source changes stay in `tests/report.rs`, this LOG section and the existing RUNBOOK receipt section. The reader and schema keep their supplied bytes after plant restoration. The permitted repository has no humanizer skill; the handoff uses direct behavior and ownership statements.
+
+### Measured dirty-state proof
+
+The baseline exact test passed: exit 0, 1 passed, 0 failed, 2.61 seconds (test body 0.41 seconds). Every plant and restored run uses `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, with outputs in lane `target/host` and `target/host-build`, under the shared heavy-build lease. Exact command for every run below: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report versions_receipt_reads_git_dirty_state -- --exact`. Each plant is applied alone in `src/report.rs` and restored before its passing check and before the next plant. Old and new bytes use exact JSON string encoding. Every planted crate compiled and ran exactly one test: 0 passed, 1 failed at `tests/report.rs:517`, on `assert_eq!(identity.dirty, dirty)`. The always-clean and omitted-untracked plants returned `false` where the case expected `true`; always-dirty returned `true` where clean expected `false`. `falsifiers.json` keeps its supplied bytes.
+
+- F-a14-git-always-clean: CAUGHT. Old: `"dirty: !status.stdout.is_empty()"`. New: `"dirty: false"`. Command above, exit 101, 2.31 seconds. Failed assertion: `tracked-edit: Git dirty state`.
+  Restored command: exit 0, 1.39 seconds; 1 passed, 0 failed.
+- F-a14-git-always-dirty: CAUGHT. Old: `"dirty: !status.stdout.is_empty()"`. New: `"dirty: true"`. Command above, exit 101, 1.36 seconds. Failed assertion: `clean: Git dirty state`.
+  Restored command: exit 0, 1.56 seconds; 1 passed, 0 failed.
+- F-a14-git-omit-untracked: CAUGHT. Old: `"--untracked-files=all"`. New: `"--untracked-files=no"`. Command above, exit 101, 1.62 seconds. Failed assertion: `untracked-file: Git dirty state`.
+  Restored command: exit 0, 1.38 seconds; 1 passed, 0 failed.
+
+Restored gate: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`, exit 0, 0.39 seconds.
+
+Restored gate: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report`, exit 0, 1.19 seconds.
+
+Full locked lane gate: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`, exit 101, 3.71 seconds, under the shared lease and the same offline two-thread environment. Available bytes before the gate: 44970082304; estimated new gate outputs up to 8 GiB plus the required 2 GiB reserve fit.
+`test result: ok. 96 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s`
+`test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s`
+
+The sandboxed full gate stopped in the existing `earlier_run_check_refuses_live_owner`: `could not inspect child process group` at `src/bin/report.rs:80`. This is infrastructure evidence; that attempt gives zero full-suite credit. With Mac process visibility enabled, the isolated repeat `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --bin report earlier_run_check_refuses_live_owner -- --exact` exited 0 in 1.19 seconds. The cleanup implementation stays unchanged.
+
+### Scope and principles
+
+`tests/report.rs::versions_receipt_reads_git_dirty_state` creates sibling `repository/` and `receipts/` directories under one fresh Home. Fixture Git uses explicit `-C`, a ten-second bound and the existing cleared-environment launcher. Local Git configuration supplies the test identity and disables signing, hooks and external ignore files. Full commit IDs come from the two actual fixture commits. The clean, tracked-edit, staged-edit, second-commit, tracked-delete, tracked-restore, untracked-file and untracked-remove expectations come from the controlled actions. Each case checks both the reader and the serialized receipt, the complete identity status, the passing report and the A14 table row. Successful completion calls `home.finish()`; assertion failures follow the existing root-retention rule.
+
+| Principles question | Answer | Evidence |
+| --- | --- | --- |
+| 1. Anything new uses a name or URL where a hash belongs? | No | `tests/report.rs:508` and `:552` obtain full Git object IDs; `:516` and `:527` compare those IDs with the reader and receipt. |
+| 2. Capsule, Home or UI gains ambient authority? | No | `tests/report.rs:472` and `:481` use the existing isolated Home and launcher for local fixture Git; product authority code stays with its owners. |
+| 3. A second path or copy of an operation rule? | No | `tests/report.rs:514` and `:519` call the existing reader and writer; controlled actions supply expected booleans without another status parser. |
+| 4. Runtime core grows? | No | `tests/report.rs:471` adds a lab reporting test; the final source diff is limited to this test, the RUNBOOK receipt paragraph and this LOG section. |
+| 5. New refusals deny by default with a clear reason? | Yes | `tests/report.rs:486`, `:487`, `:515` and `:520` stop on setup or reporting failure with case context; existing identity refusal checks remain at `:676` onward. |
+| 6. Capsules stay self-contained and use granted Bus calls? | Yes | `tests/report.rs:510` uses local synthetic report inputs; this test adds zero capsule execution or Bus behavior. |
+| 7. Each new rule has a named test and caught falsifier? | Yes | `tests/report.rs:517`, exercised by all three plants above, fails on clean, tracked-edit or untracked-file as required. Every restored run passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | `RUNBOOK.md:231` scopes this to A14 reporting; `tests/report.rs:510` keeps native and probe identities synthetic, with live acceptance owned separately. |
+
+Basic repository checks also passed: `node scripts/check-product-data.mjs` (exit 0), `node --test scripts/check-product-data.test.mjs` (exit 0, 99 passed), `(cd elastos && cargo fmt --all -- --check)` (exit 0), and `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` (exit 0). These read-only gates leave the task's source scope unchanged.
+
+Full locked lane gate with Mac process visibility and local fixture sockets: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`, exit 0, 266.84 seconds. Same offline two-thread environment, shared heavy-build lease and 600-second bound. Free bytes before this run: 44958089216.
+`test result: ok. 96 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s`
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.88s`
+`test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 30.30s`
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s`
+`test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.66s`
+`test result: ok. 63 passed; 0 failed; 12 ignored; 0 measured; 0 filtered out; finished in 210.84s`
+`test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.71s`
+`test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.94s`
+`test result: ok. 10 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 14.34s`
+`test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s`
+`test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s`
+`test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s`
+`test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s`
+`test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s`
+`test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s`
+`test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s`
+
+### Cleanup and handoff
+
+The new test's baseline, all three restored exact runs, the complete report suite (24 passed) and the full locked lane gate passed. The full gate totals are 251 passed, 0 failed and 14 existing blocked/ignored tests. The sandbox infrastructure attempt remains recorded separately above. Installed capsule and Runtime acceptance stay with their existing owners; these author checks provide A14 reporting evidence. The supervisor owns the fresh independent review.
+
+Successful runs reached `home.finish()` and removed the fresh Git fixture, its receipts and captures. The three planted failures retained their fixture roots, and the sandbox infrastructure attempt retained one additional root, under the existing RUNBOOK review-and-remove rule. A process-visible `lsof -nP -Fpn +D <root>` check of each of those four roots returned exit 1 with empty stdout/stderr: zero open handles. Their exact local paths, sizes, task ownership and cleanup condition are in ignored `target/task-148-lifecycle.json`; retain them and the two small gate outputs through candidate review, then remove them. Shared lane build outputs remain supervisor-owned. The shared heavy-build lease is released.
+
+The final branch/worktree inventory keeps HEAD `518a8409129e3ada9047417af29198f505b18519` and tree `5f549534a5c5a47393aea6e4e649b5dad4f2b5de` fixed. The supplied task branch/worktree holds unique uncommitted task work for review; its staged-path list is empty. Its only dirty source paths are `lab/agent-conformance/tests/report.rs`, `lab/agent-conformance/RUNBOOK.md` and `lab/agent-conformance/LOG.md`. `src/report.rs`, the receipt schema, existing tests, manifests, locks, `falsifiers.json`, harness, census and stand-in retain their supplied bytes. The supplied branch upstream is unset. The shared cached lane ref advanced during the gate; at handoff `spike/spike/agent-host` is `3c5a1f2115a9b1900fdb5c97076d7b0d7aa2a8b6`, and this task branch is 6 commits ahead / 3 behind it. This offline task fetched and published nothing; the supplied task HEAD stays fixed. Other refs and worktrees keep their existing owners and roles.
+
+- 148: prove all eight real Git dirty-state transitions in the existing receipt path, with three caught compiling plants and a passing restored full lane gate.
+
+Final `git diff --check` passed (exit 0). The three source/document paths are the complete final diff.
