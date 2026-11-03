@@ -7176,6 +7176,22 @@ fn principal_kind_localhost_root(principal_id: &str, kind: PrincipalKind) -> Str
     }
 }
 
+/// The root a principal owns, chosen by the kind its stored record was minted
+/// with (A5-S3, rong-ruling-a5-s3-0025 C3). A legacy record with no kind field
+/// reads as Human; no data dir, a missing record, or a state that does not load
+/// refuses.
+pub(crate) fn principal_stored_localhost_root(
+    data_dir: Option<&Path>,
+    principal_id: &str,
+) -> Result<String, String> {
+    let data_dir = data_dir.ok_or("principal roots require a local runtime data directory")?;
+    let stored = stored_principal_record(data_dir, principal_id);
+    let record = stored.map_err(|err| err.to_string())?.ok_or_else(|| {
+        format!("principal '{principal_id}' has no stored record; its root cannot be chosen")
+    })?;
+    Ok(principal_kind_localhost_root(principal_id, record.kind))
+}
+
 pub fn now_ts() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
