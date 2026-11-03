@@ -195,8 +195,13 @@ def stamp_provider_spawn_anchors(manifest, data_dir, platform):
     for name, component in sorted(manifest.get("external", {}).items()):
         if name not in selected:
             continue
-        row_key, info = integrity.resolve_platform_info(component, platform)
-        if not isinstance(info, dict) or not (info.get("install_path") or component.get("install_path")):
+        # The binary row decides whether the provider resolves; a top-level install_path is its last step.
+        resolved, info = integrity.resolve_platform_info(component, platform)
+        if (not isinstance(info, dict) or not info.get("install_path")) and isinstance(
+                component.get("install_path"), str):
+            info = {"install_path": component["install_path"],
+                    "release_path": (info or {}).get("release_path")}
+        if not isinstance(info, dict) or not info.get("install_path"):
             print(f"stamp: skip {name}: no {platform} row or alias with install_path", file=sys.stderr)
             continue
         installed_manifest = data_dir / "capsules" / name / "capsule.json"
@@ -222,8 +227,15 @@ def stamp_provider_spawn_anchors(manifest, data_dir, platform):
         metadata = component["capsule_metadata"] = component.get("capsule_metadata") or {"platforms": {}}
         if metadata.setdefault("install_path", install_path) != install_path:
             raise SystemExit(f"{name} capsule_metadata install path conflicts with its source capsule")
-        row = metadata.setdefault("platforms", {}).setdefault(row_key, {"install_path": install_path,
-            "release_path": info.get("release_path") or f"{name}-{row_key}"})
+        # The checker reads capsule_metadata through the same resolver, so anchor the row it will read.
+        # A platform row names its own install path, so the top-level fallback selects no metadata row.
+        row_key, _ = integrity.resolve_platform_info(metadata, platform)
+        if row_key is None:
+            row_key = resolved or platform
+        rows = metadata.setdefault("platforms", {})
+        row = rows.setdefault(row_key, {})
+        row.setdefault("install_path", install_path)
+        row.setdefault("release_path", info.get("release_path") or f"{name}-{row_key}")
         row["checksum"] = SOURCE_HOME_ANCHOR_PREFIX + sha256_file(installed_manifest)
 
 
