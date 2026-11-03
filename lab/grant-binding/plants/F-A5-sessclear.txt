@@ -1,0 +1,8 @@
+id: F-A5-sessclear
+file: src/lib.rs
+test: model_session_grant_ends_when_the_session_changes
+--- old
+        self.pending_session = false;
+--- new
+        let _ = self.pending_session;
+--- end
