@@ -3479,7 +3479,7 @@ pub(super) async fn browser_app_page_status(
     if !is_safe_runtime_id(&page_id) {
         return (StatusCode::BAD_REQUEST, "invalid browser page id").into_response();
     }
-    let principal_id = context.principal_id;
+    let principal_id = context.principal_id().to_string();
     if !touch_browser_page(&state.data_dir, &page_id, &principal_id, &owner_launch_id).await {
         forget_browser_page_status(&browser_page_status_cache_key(
             &state.data_dir,
@@ -3744,7 +3744,7 @@ pub(super) async fn browser_app_page_heartbeat(
     if !is_safe_runtime_id(&page_id) {
         return (StatusCode::BAD_REQUEST, "invalid browser page id").into_response();
     }
-    let principal_id = context.principal_id;
+    let principal_id = context.principal_id().to_string();
     if !touch_browser_page(&state.data_dir, &page_id, &principal_id, &owner_launch_id).await {
         return (StatusCode::NOT_FOUND, "browser session is not active").into_response();
     }
@@ -3794,7 +3794,7 @@ pub(super) async fn browser_app_page_input(
     if !is_safe_runtime_id(&page_id) {
         return (StatusCode::BAD_REQUEST, "invalid browser page id").into_response();
     }
-    let principal_id = context.principal_id;
+    let principal_id = context.principal_id().to_string();
     if !touch_browser_page(&state.data_dir, &page_id, &principal_id, &owner_launch_id).await {
         return (StatusCode::NOT_FOUND, "browser session is not active").into_response();
     }
@@ -3912,7 +3912,7 @@ pub(super) async fn browser_app_page_close(
     if !is_safe_runtime_id(&page_id) {
         return (StatusCode::BAD_REQUEST, "invalid browser page id").into_response();
     }
-    let principal_id = context.principal_id;
+    let principal_id = context.principal_id().to_string();
     let (cleanup_id, requested_browser_instance) = match close_request {
         Some(Json(request)) => {
             if request.schema != "elastos.browser.close-request/v2"
@@ -4369,7 +4369,7 @@ pub(super) async fn browser_app_page_webrtc(
     if !is_safe_runtime_id(&page_id) {
         return (StatusCode::BAD_REQUEST, "invalid browser page id").into_response();
     }
-    let principal_id = context.principal_id;
+    let principal_id = context.principal_id().to_string();
     let signal_type = input.signal_type.clone();
     let channel = match input.channel.as_deref() {
         Some("audio") => "audio",
