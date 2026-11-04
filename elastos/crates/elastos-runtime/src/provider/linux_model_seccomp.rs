@@ -650,7 +650,9 @@ mod tests {
     fn process_vm_transfer(nr: libc::c_long, sent: &[u8]) -> libc::c_long {
         let pid = victim_pid();
         let mut local = [0u8; PATTERN_LEN];
-        local.copy_from_slice(sent);
+        if is_write(nr) {
+            local.copy_from_slice(sent);
+        }
         let mut remote = iovec(victim_address() as *mut u8, PATTERN_LEN);
         let mut here = iovec(local.as_mut_ptr(), PATTERN_LEN);
         let rc = sys(
@@ -1156,7 +1158,11 @@ mod tests {
     fn restores_pattern(victim: &Victim) {
         with_victim(victim, || {
             let rc = process_vm_pattern_body(0, 0, 0);
-            assert_eq!(rc, PATTERN_LEN as libc::c_long, "pattern restore rc {rc}");
+            let failed = errno();
+            assert_eq!(
+                rc, PATTERN_LEN as libc::c_long,
+                "pattern restore rc {rc}, errno {failed}"
+            );
         });
     }
 
@@ -1481,11 +1487,10 @@ mod tests {
                 // report must hold those bytes, not a fresh helper's.
                 if name == WRITEV_ROW {
                     check_write(&victim_report(victim), &write_bytes(), "wrote");
+                    restores_pattern(victim);
                 } else if name != READV_ROW {
                     pattern_control(victim);
                 }
-                // The probe's control wrote its bytes into the rows' helper.
-                restores_pattern(victim);
                 Ok(())
             }
             Some(reason) => Err(format!(
