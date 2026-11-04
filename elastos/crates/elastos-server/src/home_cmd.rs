@@ -3533,6 +3533,40 @@ mod tests {
         }
     }
 
+    /// The 1106 Q1 (a) rule: a gateway-owned Home CLI context names a principal
+    /// that must have a stored record. The fixture stores it through the
+    /// production store API in the data dir the guarded call reads, so
+    /// `ResolvedPrincipalRoot::resolve` reads a real record instead of refusing
+    /// "has no stored record". Every caller scopes HOME/XDG_DATA_HOME to its
+    /// temp dir first, so this writes nothing outside the temp tree.
+    fn store_home_cmd_test_principal(data_dir: &Path, principal_id: &str) {
+        fs::create_dir_all(data_dir).unwrap();
+        let now = elastos_server::auth::now_ts();
+        let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
+            elastos_runtime::auth::PasskeyWebAuthnBinding {
+                credential_id: format!("fixture-{principal_id}"),
+                public_key: "fixture-public-key".to_string(),
+                sign_count: 1,
+                user_verified: true,
+                origin: "http://localhost".to_string(),
+                rp_id: "localhost".to_string(),
+                created_at: now,
+                last_used_at: now,
+                revoked_at: None,
+            },
+        );
+        let stored = elastos_server::auth::upsert_principal_for_binding_as_role_named(
+            data_dir,
+            binding,
+            principal_id.to_string(),
+            elastos_server::auth::RuntimePrincipalRole::Guest,
+            None,
+            now,
+        )
+        .expect("fixture principal must be stored through the production store");
+        assert_eq!(stored.principal_id, principal_id);
+    }
+
     #[test]
     fn gateway_owned_home_cli_authority_helper_reads_gateway_env() {
         let _guard = HOME_CMD_ENV_LOCK.blocking_lock();
@@ -3540,6 +3574,7 @@ mod tests {
         let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
         let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
         let data_dir = default_data_dir();
+        store_home_cmd_test_principal(&data_dir, "principal-a");
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
         let _principal = ScopedEnvVar::set(
@@ -3623,22 +3658,54 @@ mod tests {
 
     #[tokio::test]
     async fn gateway_owned_home_summary_projection_fails_on_gateway_http_error() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
         let _guard = HOME_CMD_ENV_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
+        let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
+        // Stored in the data dir the call passes, so record and token agree.
+        store_home_cmd_test_principal(temp.path(), "person:test-home-cli");
+        let _coords = ScopedEnvVar::set(
+            "ELASTOS_RUNTIME_COORDS_FILE",
+            temp.path().join("missing-runtime-coords.json"),
+        );
+        // A plain thread answers, so the reply never waits on the test's own
+        // runtime. The accept deadline turns an early refusal into a red, not a hang.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
-        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 1024];
-            let _ = socket.read(&mut buf).await;
-            socket
-                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
-                .await
-                .unwrap();
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let (mut socket, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "gateway stub got no request within its accept deadline",
+                            ));
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(err) => return Err(err),
+                }
+            };
+            let mut request = [0u8; 1024];
+            let mut read = 0;
+            while !request[..read]
+                .windows(4)
+                .any(|window| window == b"\r\n\r\n")
+            {
+                let n = std::io::Read::read(&mut socket, &mut request[read..])?;
+                if n == 0 {
+                    break;
+                }
+                read += n;
+            }
+            std::io::Write::write_all(
+                &mut socket,
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n",
+            )
         });
 
         let _owned =
@@ -3664,12 +3731,17 @@ mod tests {
             format!("http://{addr}"),
         );
 
-        let err = gather_home_summary_projection(temp.path(), None)
+        let failure = gather_home_summary_projection(temp.path(), None)
             .await
-            .unwrap_err()
-            .to_string();
+            .unwrap_err();
+        let err = failure.to_string();
 
-        server.await.unwrap();
+        // Gathered before the join, so a refusal shows its own full reason chain.
+        let reached = server.join().expect("gateway stub thread panicked");
+        assert!(
+            reached.is_ok(),
+            "the guarded call must reach the gateway stub and get its 503: {failure:#}"
+        );
         assert!(err.contains("gateway-owned Home CLI summary unavailable"));
         assert!(err.contains("returned 503 Service Unavailable"));
     }
@@ -3698,6 +3770,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
+        // The env names the principal the store holds: a failure here leaves the
+        // test without a stored record, rather than with a poisoned env.
+        let data_dir = temp.path().join("data");
+        store_home_cmd_test_principal(&data_dir, "person:v07-admin");
         let _principal = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
             "person:v07-admin",
@@ -3714,8 +3790,6 @@ mod tests {
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_GRANT_ID_ENV,
             "grant-v07-admin",
         );
-        let data_dir = temp.path().join("data");
-        std::fs::create_dir_all(&data_dir).unwrap();
         write_home_cmd_test_capsule(&data_dir, "home-gui", "shell", Vec::new());
         write_home_cmd_test_capsule(&data_dir, "home-cli", "shell", Vec::new());
         write_home_cmd_active_shell_state(&data_dir, "person:v07-admin", "home-gui");
@@ -3798,6 +3872,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
+        // The env names the principal the store holds: a failure here leaves the
+        // test without a stored record, rather than with a poisoned env.
+        let data_dir = temp.path().join("data");
+        store_home_cmd_test_principal(&data_dir, "person:v07-admin");
         let _principal = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
             "person:v07-admin",
@@ -3814,8 +3892,6 @@ mod tests {
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_GRANT_ID_ENV,
             "grant-v07-admin",
         );
-        let data_dir = temp.path().join("data");
-        std::fs::create_dir_all(&data_dir).unwrap();
         let projection: HomeSummaryFactsProjection = serde_json::from_value(serde_json::json!({
             "authority": {
                 "signed_in": false,
@@ -3863,6 +3939,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
+        // The env names the principal the store holds: a failure here leaves the
+        // test without a stored record, rather than with a poisoned env.
+        let data_dir = temp.path().join("data");
+        store_home_cmd_test_principal(&data_dir, "person:v07-admin");
         let _principal = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
             "person:v07-admin",
@@ -3879,8 +3959,6 @@ mod tests {
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_GRANT_ID_ENV,
             "grant-v07-admin",
         );
-        let data_dir = temp.path().join("data");
-        std::fs::create_dir_all(&data_dir).unwrap();
         let projection: HomeSummaryFactsProjection = serde_json::from_value(serde_json::json!({
             "authority": {
                 "signed_in": true,
