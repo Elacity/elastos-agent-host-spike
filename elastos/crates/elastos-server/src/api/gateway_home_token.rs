@@ -16,6 +16,23 @@ pub(in crate::api) struct HomeLaunchTokenContext {
     pub grant_id: String,
 }
 
+#[cfg(test)]
+impl HomeLaunchTokenContext {
+    pub(in crate::api) fn for_test(
+        principal_id: impl Into<String>,
+        session_id: impl Into<String>,
+        proof_binding_id: Option<String>,
+        grant_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            principal_id: principal_id.into(),
+            session_id: session_id.into(),
+            proof_binding_id,
+            grant_id: grant_id.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(in crate::api) struct HomeLaunchContext {
