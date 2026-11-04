@@ -374,7 +374,6 @@ fn context_is_bounded(context: &HomeLaunchTokenContext) -> bool {
         && bounded_id(context.grant_id(), 160)
         && context
             .proof_binding_id()
-            .as_ref()
             .is_none_or(|id| bounded_id(id, 160))
 }
 
