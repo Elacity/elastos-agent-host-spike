@@ -778,7 +778,7 @@ async fn passkey_add_begin_inner(
             rp_id: &rp.id,
             principal_id: &principal.principal_id,
             proof_binding_id,
-            session_id: &launch.context.session_id,
+            session_id: launch.context.session_id(),
         },
         &ceremony_id,
     )?;
@@ -810,7 +810,7 @@ async fn passkey_add_complete_inner(
             rp_id: &rp.id,
             principal_id: &principal.principal_id,
             proof_binding_id: &principal.proof_binding_id,
-            session_id: &launch.context.session_id,
+            session_id: launch.context.session_id(),
         },
         &input.ceremony_id,
         &input.response,
@@ -956,7 +956,7 @@ pub async fn revoke_session(
         Ok(actor) => actor,
         Err(err) => return auth_error_response(err),
     };
-    if target.session_id != context.session_id && !crate::auth::is_admin(&actor) {
+    if target.session_id != context.session_id() && !crate::auth::is_admin(&actor) {
         return auth_error_response(anyhow::anyhow!(
             "admin authority required to revoke another auth session"
         ));
@@ -972,7 +972,7 @@ pub async fn revoke_session(
                 audit_event(AuditEventInput {
                     event_type: "auth.session.revoked",
                     principal_id: Some(actor.principal_id),
-                    proof_binding_id: context.proof_binding_id,
+                    proof_binding_id: context.proof_binding_id().map(ToString::to_string),
                     session_id: Some(session_id.clone()),
                     result: "ok",
                     reason: "session revoked",
@@ -1009,17 +1009,17 @@ fn sign_out_session_inner(
     let context = super::gateway::require_home_token_context(&state.data_dir, headers)?;
     let now = crate::auth::now_ts();
     let auth_data_dir = super::gateway::home_launch_auth_data_dir(&state.data_dir);
-    crate::auth::revoke_session_grant(&auth_data_dir, &context.session_id, now)?;
+    crate::auth::revoke_session_grant(&auth_data_dir, context.session_id(), now)?;
     if auth_data_dir != state.data_dir {
-        let _ = crate::auth::revoke_session_grant(&state.data_dir, &context.session_id, now);
+        let _ = crate::auth::revoke_session_grant(&state.data_dir, context.session_id(), now);
     }
     let _ = crate::auth::append_audit_event(
         &auth_data_dir,
         audit_event(AuditEventInput {
             event_type: "auth.session.signed_out",
-            principal_id: Some(context.principal_id),
-            proof_binding_id: context.proof_binding_id,
-            session_id: Some(context.session_id.clone()),
+            principal_id: Some(context.principal_id().to_string()),
+            proof_binding_id: context.proof_binding_id().map(ToString::to_string),
+            session_id: Some(context.session_id().to_string()),
             result: "ok",
             reason: "home browser session signed out",
             occurred_at: now,
@@ -1028,7 +1028,7 @@ fn sign_out_session_inner(
     );
     Ok(AuthRevokeResponse {
         status: "signed_out".to_string(),
-        session_id: context.session_id,
+        session_id: context.session_id().to_string(),
     })
 }
 
@@ -1037,7 +1037,7 @@ async fn passkey_list_inner(
     headers: &HeaderMap,
 ) -> anyhow::Result<PasskeyListResponse> {
     let context = require_auth_home_or_system_context(state, headers)?;
-    let current_proof_binding_id = context.proof_binding_id.as_deref();
+    let current_proof_binding_id = context.proof_binding_id();
     let actor = require_active_principal_for_context(state, &context)?;
     let actor_is_admin = crate::auth::is_admin(&actor);
 
@@ -1098,8 +1098,7 @@ async fn passkey_revoke_inner(
     let context = require_auth_home_or_system_context(state, headers)?;
     validate_passkey_proof_binding_id(&proof_binding_id)?;
     let actor_proof_binding_id = context
-        .proof_binding_id
-        .as_deref()
+        .proof_binding_id()
         .ok_or_else(|| anyhow::anyhow!("missing proof-bound auth session"))?;
     // The identity lock serializes every credential-store change with the one
     // auth write that checks and revokes.
@@ -1108,7 +1107,7 @@ async fn passkey_revoke_inner(
     let now = crate::auth::now_ts();
     crate::auth::revoke_passkey_for_actor(
         &state.data_dir,
-        &context.principal_id,
+        context.principal_id(),
         actor_proof_binding_id,
         &proof_binding_id,
         now,
@@ -1124,14 +1123,14 @@ async fn passkey_revoke_inner(
         manager.revoke_credential(&credential_id)?;
     }
     drop(manager);
-    let actor = context.principal_id.clone();
+    let actor = context.principal_id().to_string();
     crate::auth::append_audit_event(
         &state.data_dir,
         audit_event(AuditEventInput {
             event_type: "auth.passkey.revoked",
             principal_id: Some(actor),
             proof_binding_id: Some(proof_binding_id.clone()),
-            session_id: Some(context.session_id.clone()),
+            session_id: Some(context.session_id().to_string()),
             result: "ok",
             reason: "passkey credential revoked",
             occurred_at: now,
@@ -1139,8 +1138,7 @@ async fn passkey_revoke_inner(
         }),
     )?;
 
-    let clear_current_cookie =
-        context.proof_binding_id.as_deref() == Some(proof_binding_id.as_str());
+    let clear_current_cookie = context.proof_binding_id() == Some(proof_binding_id.as_str());
     Ok((
         PasskeyRevokeResponse {
             status: "revoked".to_string(),
@@ -1179,7 +1177,7 @@ async fn passkey_promote_admin_inner(
             event_type: "auth.passkey.promoted",
             principal_id: Some(actor.principal_id),
             proof_binding_id: Some(promoted.proof_binding_id.clone()),
-            session_id: Some(context.session_id.clone()),
+            session_id: Some(context.session_id().to_string()),
             result: "ok",
             reason: "guest passkey promoted to admin",
             occurred_at: now,
@@ -1226,7 +1224,7 @@ async fn passkey_demote_guest_inner(
             event_type: "auth.passkey.demoted",
             principal_id: Some(actor.principal_id),
             proof_binding_id: Some(demoted.proof_binding_id.clone()),
-            session_id: Some(context.session_id.clone()),
+            session_id: Some(context.session_id().to_string()),
             result: "ok",
             reason: "admin passkey demoted to guest",
             occurred_at: now,
@@ -1728,7 +1726,7 @@ fn full_recovery_bundle_establish_kit(
     run_full_recovery_scan_delay_test_hook(&state.data_dir);
     let kit = recovery_kit_get_or_create_for_principal(
         state,
-        &context.session_id,
+        context.session_id(),
         principal,
         input.label.as_deref(),
         RecoveryKitDelivery::RetainedUnseen,
@@ -1748,7 +1746,7 @@ fn full_recovery_bundle_establish_kit(
                 event_type: "auth.principal_root.plaintext_migrated",
                 principal_id: Some(principal.principal_id.clone()),
                 proof_binding_id: Some(principal.proof_binding_id.clone()),
-                session_id: Some(context.session_id.clone()),
+                session_id: Some(context.session_id().to_string()),
                 result: "ok",
                 reason: "declared plaintext objects migrated during recovery-kit activation",
                 occurred_at: now,
@@ -1777,7 +1775,7 @@ async fn full_recovery_bundle_export_inner(
         headers,
         &[HOME_CAPSULE_ID, super::gateway::SYSTEM_CAPSULE_ID],
     )?;
-    if launch.context.proof_binding_id.is_none() {
+    if launch.context.proof_binding_id().is_none() {
         anyhow::bail!("missing proof-bound auth session");
     }
     let wallet_authority = runtime_wallet_authority(&launch)?;
@@ -1859,9 +1857,9 @@ async fn full_recovery_bundle_export_inner(
         &state.data_dir,
         audit_event(AuditEventInput {
             event_type: "auth.full_recovery_bundle.exported",
-            principal_id: Some(context.principal_id.clone()),
-            proof_binding_id: context.proof_binding_id.clone(),
-            session_id: Some(context.session_id.clone()),
+            principal_id: Some(context.principal_id().to_string()),
+            proof_binding_id: context.proof_binding_id().map(ToString::to_string),
+            session_id: Some(context.session_id().to_string()),
             result: "ok",
             reason: "full recovery bundle downloaded after fresh passkey verification",
             occurred_at: now,
@@ -1885,7 +1883,7 @@ async fn full_recovery_bundle_import_inner(
         headers,
         &[HOME_CAPSULE_ID, super::gateway::SYSTEM_CAPSULE_ID],
     )?;
-    if launch.context.proof_binding_id.is_none() {
+    if launch.context.proof_binding_id().is_none() {
         anyhow::bail!("missing proof-bound auth session");
     }
     let context = launch.context.clone();
@@ -1946,13 +1944,10 @@ async fn full_recovery_bundle_import_inner(
         }
         validate_recovery_terminal_retry_event(
             &terminal_event,
-            &completed_audit_id(Some((
-                context.proof_binding_id.as_deref(),
-                &context.session_id,
-            ))),
+            &completed_audit_id(Some((context.proof_binding_id(), context.session_id()))),
             bundle_principal,
-            context.proof_binding_id.as_deref(),
-            &context.session_id,
+            context.proof_binding_id(),
+            context.session_id(),
             expected_wallet_count,
             &bundle_sha256,
         )?;
@@ -2080,7 +2075,7 @@ async fn full_recovery_bundle_import_inner(
             &state.data_dir,
             headers,
             &verified_actor,
-            context.proof_binding_id.as_deref(),
+            context.proof_binding_id(),
             &recovery_response,
         )
     } else {
@@ -2102,8 +2097,8 @@ async fn full_recovery_bundle_import_inner(
                 expected_wallet_count,
                 WALLET_RESTORE_REASON_AUTHORITY_INVALID,
             ),
-            context.proof_binding_id.clone(),
-            context.session_id.clone(),
+            context.proof_binding_id().map(ToString::to_string),
+            context.session_id().to_string(),
         ),
     };
     let (event_type, result) = if wallet_restore.status == WALLET_RESTORE_COMPLETE
@@ -3181,7 +3176,7 @@ async fn recovery_kit_import_inner(
             event_type: "auth.recovery_kit.imported",
             principal_id: Some(principal.principal_id.clone()),
             proof_binding_id: Some(principal.proof_binding_id.clone()),
-            session_id: Some(context.session_id.clone()),
+            session_id: Some(context.session_id().to_string()),
             result: "ok",
             reason: "principal recovery kit imported and verified",
             occurred_at: now,
@@ -3447,7 +3442,7 @@ fn fail_recovery_kit_request<T>(
             event_type,
             principal_id: Some(principal.principal_id.clone()),
             proof_binding_id: Some(principal.proof_binding_id.clone()),
-            session_id: Some(context.session_id.clone()),
+            session_id: Some(context.session_id().to_string()),
             result: "denied",
             reason: &reason,
             occurred_at: crate::auth::now_ts(),
@@ -3468,7 +3463,7 @@ fn require_active_principal_for_context(
     let principal =
         crate::auth::load_principal_for_proof_binding(&state.data_dir, proof_binding_id)?;
     crate::auth::ensure_proof_binding_not_revoked(&principal)?;
-    if principal.principal_id != context.principal_id {
+    if principal.principal_id != context.principal_id() {
         anyhow::bail!("auth session principal mismatch");
     }
     Ok(principal)
@@ -3497,13 +3492,13 @@ fn refresh_session_inner(
     let now = crate::auth::now_ts();
     let auth_data_dir = super::gateway::home_launch_auth_data_dir(&state.data_dir);
     let previous =
-        crate::auth::load_active_session_grant(&auth_data_dir, &context.session_id, now)?;
+        crate::auth::load_active_session_grant(&auth_data_dir, context.session_id(), now)?;
     let principal =
         crate::auth::load_principal_for_proof_binding(&auth_data_dir, &proof_binding_id)?;
     crate::auth::ensure_proof_binding_not_revoked(&principal)?;
-    if previous.principal_id != context.principal_id
+    if previous.principal_id != context.principal_id()
         || previous.proof_binding_id != proof_binding_id
-        || previous.grant_id != context.grant_id
+        || previous.grant_id != context.grant_id()
     {
         anyhow::bail!("home launch token authority context mismatch");
     }
@@ -3561,7 +3556,7 @@ fn require_auth_home_or_system_context(
         headers,
         &[HOME_CAPSULE_ID, super::gateway::SYSTEM_CAPSULE_ID],
     )?;
-    if context.proof_binding_id.is_none() {
+    if context.proof_binding_id().is_none() {
         anyhow::bail!("missing proof-bound auth session");
     }
     Ok(context)
@@ -3606,7 +3601,7 @@ pub(in crate::api) fn verified_wallet_link_context(
         grant_id: verified.grant_id().to_string(),
     };
     super::gateway::ensure_wallet_connector_configured(&state.data_dir, app)?;
-    if context.proof_binding_id.is_none() {
+    if context.proof_binding_id().is_none() {
         anyhow::bail!("missing proof-bound auth session");
     }
     Ok(WalletLinkContext {
@@ -4103,7 +4098,7 @@ pub(in crate::api) async fn evm_challenge_for_wallet_link(
     let uri = format!("{origin}{HOME_ROUTE}");
     let resources = vec![
         "elastos://wallet/account/link".to_string(),
-        format!("elastos://principal/{}", context.principal_id),
+        format!("elastos://principal/{}", context.principal_id()),
     ];
     let data = wallet_link_provider_data(
         state,
@@ -4125,8 +4120,8 @@ pub(in crate::api) async fn evm_challenge_for_wallet_link(
         &state.data_dir,
         audit_event(AuditEventInput {
             event_type: "auth.challenge.created",
-            principal_id: Some(context.principal_id),
-            session_id: Some(context.session_id),
+            principal_id: Some(context.principal_id().to_string()),
+            session_id: Some(context.session_id().to_string()),
             challenge_id: Some(challenge_id.clone()),
             result: "ok",
             reason: "EVM wallet-link challenge created",
@@ -4163,8 +4158,8 @@ pub(in crate::api) async fn evm_verify_for_wallet_link(
         authority,
     } = link;
     let session_proof_binding_id = context
-        .proof_binding_id
-        .clone()
+        .proof_binding_id()
+        .map(ToString::to_string)
         .ok_or_else(|| anyhow::anyhow!("missing proof-bound auth session"))?;
     let parsed =
         elastos_runtime::auth::parse_siwe_message(&input.message).map_err(anyhow::Error::msg)?;
@@ -4246,16 +4241,16 @@ pub(in crate::api) async fn evm_verify_for_wallet_link(
     if !parsed
         .resources
         .iter()
-        .any(|resource| resource == &format!("elastos://principal/{}", context.principal_id))
+        .any(|resource| resource == &format!("elastos://principal/{}", context.principal_id()))
     {
         anyhow::bail!("wallet proof is not bound to this runtime principal");
     }
 
     let session =
-        crate::auth::load_active_session_grant(&state.data_dir, &context.session_id, now)?;
-    if session.principal_id != context.principal_id
+        crate::auth::load_active_session_grant(&state.data_dir, context.session_id(), now)?;
+    if session.principal_id != context.principal_id()
         || session.proof_binding_id != session_proof_binding_id
-        || session.grant_id != context.grant_id
+        || session.grant_id != context.grant_id()
     {
         anyhow::bail!("home launch token authority context mismatch");
     }
@@ -4265,7 +4260,7 @@ pub(in crate::api) async fn evm_verify_for_wallet_link(
     let principal = crate::auth::upsert_principal_for_binding_as_role(
         &state.data_dir,
         binding,
-        context.principal_id.clone(),
+        context.principal_id().to_string(),
         session_principal.role,
         now,
     )?;
@@ -4287,9 +4282,9 @@ pub(in crate::api) async fn evm_verify_for_wallet_link(
         &state.data_dir,
         audit_event(AuditEventInput {
             event_type: "auth.wallet.linked",
-            principal_id: Some(context.principal_id.clone()),
+            principal_id: Some(context.principal_id().to_string()),
             proof_binding_id: Some(principal.proof_binding_id.clone()),
-            session_id: Some(context.session_id.clone()),
+            session_id: Some(context.session_id().to_string()),
             challenge_id: Some(challenge_id),
             result: "ok",
             reason: if proof_type == "siwe_erc1271" {
@@ -4347,7 +4342,7 @@ pub(in crate::api) async fn btc_challenge_for_wallet_link(
     let uri = format!("{scheme}://{domain}{HOME_ROUTE}");
     let resources = vec![
         "elastos://wallet/account/link".to_string(),
-        format!("elastos://principal/{}", context.principal_id),
+        format!("elastos://principal/{}", context.principal_id()),
     ];
     let data = wallet_link_provider_data(
         state,
@@ -4375,8 +4370,8 @@ pub(in crate::api) async fn btc_challenge_for_wallet_link(
         &state.data_dir,
         audit_event(AuditEventInput {
             event_type: "auth.challenge.created",
-            principal_id: Some(context.principal_id),
-            session_id: Some(context.session_id),
+            principal_id: Some(context.principal_id().to_string()),
+            session_id: Some(context.session_id().to_string()),
             challenge_id: Some(challenge_id.clone()),
             result: "ok",
             reason: "Bitcoin BIP-322 wallet-link challenge created",
