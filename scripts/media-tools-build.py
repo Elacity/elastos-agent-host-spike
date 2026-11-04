@@ -74,6 +74,9 @@ def fetch_source(archive, url, digest):
                 # A dropped connection ends the copy early without an error: retry the short body.
                 if expected is not None and partial.stat().st_size != int(expected):
                     raise OSError(f"short source download: {archive.name}")
+                # The pin is checked before promotion, so rejected bytes never reach the archive.
+                if sha(partial) != digest:
+                    raise ValueError(f"Source checksum mismatch: {archive.name}")
                 os.replace(partial, archive)
                 break
             except (urllib.error.URLError, TimeoutError, OSError):
@@ -81,6 +84,10 @@ def fetch_source(archive, url, digest):
                 if attempt > len(FETCH_BACKOFF):
                     raise
                 time.sleep(FETCH_BACKOFF[attempt - 1])
+            except BaseException:
+                # A dropped response or malformed header leaves no side file behind, and it is not retried.
+                partial.unlink(missing_ok=True)
+                raise
     if sha(archive) != digest:
         raise ValueError(f"Source checksum mismatch: {archive.name}")
 
