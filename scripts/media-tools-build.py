@@ -3,6 +3,7 @@
 import argparse
 import bz2
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -84,7 +85,7 @@ def fetch_source(archive, url, digest):
                 verify_digest(partial, digest, archive.name)  # before promotion
                 os.replace(partial, archive)
                 break
-            except (urllib.error.URLError, TimeoutError, OSError):
+            except (urllib.error.URLError, TimeoutError, OSError, http.client.IncompleteRead):
                 partial.unlink(missing_ok=True)
                 if attempt > len(FETCH_BACKOFF):
                     raise
@@ -116,7 +117,8 @@ def verify(output, expected):
     if actual != required | {"build-info.json"} or set(files) != required:
         raise ValueError("Cached media tools file inventory differs")
     for name, (_, digest) in SOURCES.items():
-        # A present archive, before use; it is removed so the next fetch takes the pinned bytes.
+        # A present archive, before use; a bad one is removed and this run refuses, so recovery needs the output
+        # directory removed: the next run then fetches the pinned bytes again.
         verify_digest(output / "sources" / name, digest, name, "Cached source differs from pinned upstream bytes")
     for name, key in (("media-tools-build.py", "recipe_sha256"), ("build-media-tools.sh", "wrapper_sha256")):
         if sha(output / "sources" / name) != expected[key]:
