@@ -7198,16 +7198,21 @@ pub(crate) fn principal_stored_localhost_root(
 pub(crate) struct ResolvedPrincipalRoot(String);
 
 impl ResolvedPrincipalRoot {
-    /// The one resolver. The device's own DID takes the device arm, matched
-    /// against the device identity, never an id prefix; any other principal
-    /// takes its stored record's root, and no record refuses.
-    pub(crate) fn resolve(data_dir: &Path, principal_id: &str) -> anyhow::Result<Self> {
+    /// The one resolver. The device's own DID (in `data_dir`) takes the device
+    /// arm, matched against the device identity, never an id prefix; any other
+    /// principal takes its record's root in the auth store (`auth_data_dir`, where
+    /// grants and principals live), and no record refuses.
+    pub(crate) fn resolve(
+        data_dir: &Path,
+        auth_data_dir: &Path,
+        principal_id: &str,
+    ) -> anyhow::Result<Self> {
         let device = crate::collaboration_profile_authority::load_existing_device_did(data_dir)?;
         if device.is_some_and(|did| PrincipalId::device_did(&did).as_str() == principal_id) {
             // Today's device root: the one Users rule, applied to `device:<did>`.
             return Ok(Self(principal_localhost_root(principal_id)));
         }
-        principal_stored_localhost_root(Some(data_dir), principal_id)
+        principal_stored_localhost_root(Some(auth_data_dir), principal_id)
             .map(Self)
             .map_err(|err| anyhow!(err))
     }
@@ -15983,7 +15988,8 @@ pub(crate) mod tests {
     fn resolved_root_refuses_a_principal_with_no_stored_record() {
         let data_dir = tempfile::tempdir().unwrap();
         elastos_identity::load_or_create_did(data_dir.path()).unwrap();
-        let resolved = ResolvedPrincipalRoot::resolve(data_dir.path(), "person:local:nobody");
+        let resolved =
+            ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), "person:local:nobody");
         assert!(resolved
             .unwrap_err()
             .to_string()
@@ -15995,7 +16001,8 @@ pub(crate) mod tests {
         let data_dir = tempfile::tempdir().unwrap();
         let (_key, did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
         let id = PrincipalId::device_did(&did);
-        let resolved = ResolvedPrincipalRoot::resolve(data_dir.path(), id.as_str()).unwrap();
+        let resolved =
+            ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), id.as_str()).unwrap();
         assert_eq!(resolved.0, principal_localhost_root(id.as_str()));
         assert!(!resolved.0.contains("UsersAI"));
     }
@@ -16005,7 +16012,8 @@ pub(crate) mod tests {
         let data_dir = tempfile::tempdir().unwrap();
         elastos_identity::load_or_create_did(data_dir.path()).unwrap();
         let foreign = PrincipalId::device_did("did:key:z6MkForeignDeviceNotThisOne");
-        let resolved = ResolvedPrincipalRoot::resolve(data_dir.path(), foreign.as_str());
+        let resolved =
+            ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), foreign.as_str());
         assert!(resolved
             .unwrap_err()
             .to_string()
