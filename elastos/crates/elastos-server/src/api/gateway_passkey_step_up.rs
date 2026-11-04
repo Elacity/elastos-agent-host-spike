@@ -626,10 +626,10 @@ pub(crate) fn issue_passkey_step_up_token_at_for_test(
             ceremony_id: format!("passkey:step-up:{}", gateway_home_token::uuid_like_token()),
             original_launch_id: launch.launch_id,
             launch_context: launch.launch_context,
-            principal_id: launch.context.principal_id().to_string(),
-            session_id: launch.context.session_id().to_string(),
+            principal_id: launch.context.principal_id,
+            session_id: launch.context.session_id,
             proof_binding_id: passkey_proof_binding_id(&passkey),
-            grant_id: launch.context.grant_id().to_string(),
+            grant_id: launch.context.grant_id,
             credential_id: passkey.credential_id,
             credential_public_key_sha256: hex::encode(Sha256::digest(
                 passkey.public_key.as_bytes(),
