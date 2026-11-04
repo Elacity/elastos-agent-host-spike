@@ -1477,9 +1477,10 @@ mod tests {
         assert!(!token.exists(), "control {tag} left its token {token:?}");
         match failure {
             None => {
-                // The writev row's control has a helper report what it wrote.
+                // The writev control child wrote into this same helper: its
+                // report must hold those bytes, not a fresh helper's.
                 if name == WRITEV_ROW {
-                    check_write_control(row);
+                    check_write(&victim_report(victim), &write_bytes(), "wrote");
                 } else if name != READV_ROW {
                     pattern_control(victim);
                 }
