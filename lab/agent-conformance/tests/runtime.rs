@@ -1,4 +1,7 @@
 mod common;
+#[path = "common/probe.rs"]
+#[allow(dead_code)]
+mod probe;
 
 use agent_conformance::build::lane;
 use agent_conformance::harness::ThrowawayHome;
@@ -697,49 +700,259 @@ fn cleanup_census_refuses_each_leftover() {
             &["-c", "cd \"$HOME/..\"; exec /bin/sleep 20"],
         )
         .unwrap();
-    let reason = cleanup(&home, port).unwrap_err();
+    let observation = cleanup(&home, port);
+    child.stop().unwrap();
+    drop(child);
+    let reason = observation.unwrap_err();
     assert!(reason.contains("process leftover"));
     assert!(reason.contains("processes:1"));
     assert!(reason.contains("\".\""), "root cwd must be visible");
-    child.stop().unwrap();
-    drop(child);
-
-    // Bind by a relative path: the macOS sockaddr_un path limit is smaller
-    // than this worktree's absolute throwaway-Home path.
-    let mut socket_child = home.start(
-        std::path::Path::new("/usr/bin/python3"),
-        &["-c", "import socket,time; s=socket.socket(socket.AF_UNIX); s.bind('cleanup.sock'); s.listen(1); open('socket-ready','w').close(); time.sleep(20)"],
-    ).unwrap();
-    let started = std::time::Instant::now();
-    while !home.home().join("socket-ready").exists() {
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "Unix socket control readiness exceeded 5 seconds"
-        );
-        assert!(
-            socket_child.is_alive().unwrap(),
-            "Unix socket control exited before binding"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let socket_result = cleanup(&home, port);
-    socket_child.stop().unwrap();
-    drop(socket_child);
-    fs::remove_file(home.home().join("cleanup.sock")).unwrap();
-    fs::remove_file(home.home().join("socket-ready")).unwrap();
-    let reason = socket_result.unwrap_err();
-    // This Mac's +D census sees the holder through cwd/captures, but does
-    // not select its relative-path Unix socket. Keep the scope explicit.
-    assert!(reason.contains("process leftover"), "{reason}");
-    assert!(
-        !reason.contains("cleanup.sock"),
-        "recheck the documented Unix socket visibility limit"
-    );
-    println!("cleanup socket control: bound Unix socket omitted by root selection; holder refused as process leftover; Unix socket absence unmeasured");
 
     let line = cleanup(&home, port).unwrap();
     assert!(line.contains("processes:0 paths:[] API sockets:0 temp:0 paths:[]"));
     assert!(line.contains("excludes only test PID"));
+    home.finish().unwrap();
+}
+
+// Setup is an unavailable control prerequisite. Every later refusal is a
+// failed check, including guard, capture, timeout and managed-stop errors.
+#[derive(Debug, PartialEq, Eq)]
+enum UnixSocketFailure {
+    Setup(String),
+    Check(String),
+}
+
+impl UnixSocketFailure {
+    fn check(reason: impl Into<String>) -> Self {
+        Self::Check(reason.into())
+    }
+}
+
+fn unix_socket_preflight(home: &ThrowawayHome, executable: &Path) -> Result<(), UnixSocketFailure> {
+    home.guard(home.home(), home.data())
+        .map_err(UnixSocketFailure::check)?;
+    let output = match home.launch(
+        executable,
+        &["-I", "-S", "-B", "-c", "import socket"],
+        Duration::from_secs(5),
+    ) {
+        Ok(output) => output,
+        Err("could not start child process") => {
+            return Err(UnixSocketFailure::Setup(
+                "Unix socket control setup: interpreter could not start".into(),
+            ));
+        }
+        Err(reason) => return Err(UnixSocketFailure::check(reason)),
+    };
+    if !output.status.success() {
+        return Err(UnixSocketFailure::Setup(format!(
+            "Unix socket control setup: socket import failed: {}",
+            output.status
+        )));
+    }
+    Ok(())
+}
+
+fn unix_socket_control(
+    home: &ThrowawayHome,
+    executable: &Path,
+    port: u16,
+) -> Result<(), UnixSocketFailure> {
+    use agent_conformance::census::cleanup;
+    use std::os::unix::fs::FileTypeExt;
+
+    unix_socket_preflight(home, executable)?;
+    // Bind by a relative path: macOS's sockaddr_un limit is smaller than
+    // this worktree's absolute throwaway-Home path.
+    let mut child = home.start(
+        executable,
+        &["-I", "-S", "-B", "-c", "import socket,time; s=socket.socket(socket.AF_UNIX); s.bind('cleanup.sock'); s.listen(1); open('socket-ready','w').close(); time.sleep(20)"],
+    ).map_err(UnixSocketFailure::check)?;
+    let pgid = child.pgid();
+    let observed = (|| -> Result<_, String> {
+        let started = std::time::Instant::now();
+        while !home
+            .home()
+            .join("socket-ready")
+            .try_exists()
+            .map_err(|error| error.to_string())?
+        {
+            if started.elapsed() >= Duration::from_secs(5) {
+                return Err("Unix socket control readiness exceeded 5 seconds".into());
+            }
+            if !child.is_alive()? {
+                return Err("Unix socket control exited before binding".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let metadata = fs::symlink_metadata(home.home().join("cleanup.sock"))
+            .map_err(|error| format!("Unix socket control socket metadata: {error}"))?;
+        if !metadata.file_type().is_socket() {
+            return Err("Unix socket control path is not a Unix socket".into());
+        }
+        Ok(cleanup(home, port))
+    })();
+    // Always stop and reap before checking the saved observation, even when
+    // readiness or the census failed. A failed stop keeps its Home and cause.
+    let stopped = child.stop();
+    drop(child);
+    if let Err(reason) = stopped {
+        return Err(UnixSocketFailure::check(match observed {
+            Err(observed) => format!("{observed}; stop failed: {reason}"),
+            Ok(_) => reason.into(),
+        }));
+    }
+    if home
+        .group_is_alive(pgid)
+        .map_err(UnixSocketFailure::check)?
+    {
+        return Err(UnixSocketFailure::check(
+            "Unix socket control group remains after stop",
+        ));
+    }
+    let socket_result = observed.map_err(UnixSocketFailure::check)?;
+    home.guard(home.home(), home.data())
+        .map_err(UnixSocketFailure::check)?;
+    for name in ["cleanup.sock", "socket-ready"] {
+        fs::remove_file(home.home().join(name))
+            .map_err(|error| UnixSocketFailure::check(format!("remove {name}: {error}")))?;
+    }
+    let reason = socket_result.err().ok_or_else(|| {
+        UnixSocketFailure::check("Unix socket control holder was accepted by the census")
+    })?;
+    // This Mac's +D census sees cwd/captures, but omits the bound socket.
+    if !reason.contains("process leftover") {
+        return Err(UnixSocketFailure::check(reason));
+    }
+    if reason.contains("cleanup.sock") {
+        return Err(UnixSocketFailure::check(
+            "recheck the documented Unix socket visibility limit",
+        ));
+    }
+    println!("cleanup socket control: bound Unix socket omitted by root selection; holder refused as process leftover; Unix socket absence unmeasured");
+    let line = cleanup(home, port).map_err(UnixSocketFailure::check)?;
+    if !line.contains("processes:0 paths:[] API sockets:0 temp:0 paths:[]")
+        || !line.contains("excludes only test PID")
+    {
+        return Err(UnixSocketFailure::check(line));
+    }
+    Ok(())
+}
+
+#[test]
+fn cleanup_unix_socket_control_reports_its_scope() {
+    let home = ThrowawayHome::new().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    match unix_socket_control(&home, Path::new("/usr/bin/python3"), port) {
+        Ok(()) => home.finish().unwrap(),
+        Err(UnixSocketFailure::Setup(reason)) => probe::skipped(&reason),
+        Err(UnixSocketFailure::Check(reason)) => panic!("{reason}"),
+    }
+}
+
+fn socket_executable(home: &ThrowawayHome, import_status: u8) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    home.guard(home.home(), home.data()).unwrap();
+    let path = home.home().join("socket-executable");
+    fs::write(&path, format!(
+        "#!/bin/sh\n[ \"$1\" = -I ] && [ \"$2\" = -S ] && [ \"$3\" = -B ] && [ \"$4\" = -c ] || exit 65\nif [ \"$5\" = 'import socket' ]; then exit {import_status}; fi\n: > worker-started\nexit 23\n"
+    )).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    path
+}
+
+fn assert_socket_worker_absent(home: &ThrowawayHome) {
+    for name in ["worker-started", "cleanup.sock", "socket-ready"] {
+        assert!(
+            !home.home().join(name).try_exists().unwrap(),
+            "unexpected {name}"
+        );
+    }
+    assert!(
+        agent_conformance::census::root_holders(home, &[home.root().to_owned()])
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn unix_socket_control_setup_refusals_are_named() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = ThrowawayHome::new().unwrap();
+    let missing = home.home().join("missing-interpreter");
+    let start_reason = "Unix socket control setup: interpreter could not start";
+    let missing_result = unix_socket_control(&home, &missing, 0);
+    assert_socket_worker_absent(&home);
+    assert_eq!(
+        missing_result,
+        Err(UnixSocketFailure::Setup(start_reason.into()))
+    );
+
+    let executable = socket_executable(&home, 0);
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o600)).unwrap();
+    let unstartable = unix_socket_control(&home, &executable, 0);
+    assert_socket_worker_absent(&home);
+    assert_eq!(
+        unstartable,
+        Err(UnixSocketFailure::Setup(start_reason.into()))
+    );
+
+    let executable = socket_executable(&home, 37);
+    let refused = unix_socket_control(&home, &executable, 0);
+    assert_socket_worker_absent(&home);
+    assert_eq!(
+        refused,
+        Err(UnixSocketFailure::Setup(
+            "Unix socket control setup: socket import failed: exit status: 37".into()
+        )),
+        "unsuccessful import must refuse setup with its actual status"
+    );
+    let executable = socket_executable(&home, 0);
+    let repaired = unix_socket_preflight(&home, &executable);
+    assert_socket_worker_absent(&home);
+    assert_eq!(repaired, Ok(()), "repaired setup uses the same preflight");
+    home.finish().unwrap();
+}
+
+#[test]
+fn unix_socket_control_failure_after_setup_is_fail() {
+    let home = ThrowawayHome::new().unwrap();
+    let executable = socket_executable(&home, 0);
+    let result = unix_socket_control(&home, &executable, 0);
+    // The helper has stopped and reaped the worker before returning a refusal.
+    let holders =
+        agent_conformance::census::root_holders(&home, &[home.root().to_owned()]).unwrap();
+    assert!(holders.is_empty(), "failed worker group must be cleaned up");
+    assert!(home.home().join("worker-started").is_file());
+    for name in ["cleanup.sock", "socket-ready"] {
+        assert!(!home.home().join(name).try_exists().unwrap());
+    }
+    assert_eq!(
+        result,
+        Err(UnixSocketFailure::Check(
+            "Unix socket control exited before binding".into()
+        )),
+        "post-setup exit must remain a check-stage failure"
+    );
+    home.finish().unwrap();
+
+    let home = ThrowawayHome::new().unwrap();
+    let saved = home.root().join("saved-home");
+    fs::rename(home.home(), &saved).unwrap();
+    std::os::unix::fs::symlink(&saved, home.home()).unwrap();
+    let result = unix_socket_control(&home, Path::new("/usr/bin/python3"), 0);
+    fs::remove_file(home.home()).unwrap();
+    fs::rename(saved, home.home()).unwrap();
+    assert_socket_worker_absent(&home);
+    assert_eq!(
+        result,
+        Err(UnixSocketFailure::Check(
+            "home must use directories without symlinks".into()
+        )),
+        "guard refusal must remain a check-stage failure"
+    );
     home.finish().unwrap();
 }
 

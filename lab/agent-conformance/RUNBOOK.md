@@ -572,6 +572,22 @@ the line names the retained `target/home-*`. Passing journeys remove their own
 Homes after capture, source and report checks. The census tool's scratch Home
 is removed after its captures join the existing credential-check inventory.
 
+`cleanup_census_refuses_each_leftover` independently checks the API listener,
+temp file, process holder and final clean root. The separate
+`cleanup_unix_socket_control_reports_its_scope` first runs a bounded socket
+import through the guarded Home launcher, using `/usr/bin/python3 -I -S -B`
+for both import and worker. An unavailable interpreter reports
+`Unix socket control setup: interpreter could not start`; an unsuccessful
+import reports `Unix socket control setup: socket import failed: <status>`.
+Each setup refusal emits one SKIPPED marker and a Cargo FAILED result. The row
+stays SKIPPED, suite outcome stays FAIL, and both Cargo and run.sh exit nonzero.
+Repair the named prerequisite and rerun the same command. Guard, capture,
+timeout, worker-start, early-exit, readiness, socket-type, census and stop
+errors remain FAIL. The worker must bind a real in-Home socket within five
+seconds; the test stops and reaps its group before checking the saved census.
+On this Mac the census refuses its holder as a process leftover and omits the
+socket. Unix socket absence remains unmeasured. The final clean census passes.
+
 The grant result is currently `BLOCKED(AC-021-GRANTS)`: the fixture shell sees
 its own grants. `run_leaves_no_live_grant` stays an ignored table row until
 Runtime supplies the global live-grant contract in GAPS.md. F-cleanup-grant

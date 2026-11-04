@@ -1111,83 +1111,203 @@ fn versions_receipt_uses_the_staged_bundle_identity() {
 
 #[test]
 fn run_table_grades_skipped_only_with_failed_test() {
-    let marker = "SKIPPED case: loopback bind refused\n";
-    for cargo_ok in [false, true] {
-        let (text, passed) = table(
-            "case: test\n",
-            &format!("{marker}test case ... FAILED\n"),
-            cargo_ok,
-            Some(""),
-        );
-        assert!(!passed);
-        assert!(text.contains("case | SKIPPED (loopback bind refused)\n"));
-    }
-    for result in ["ok", "ignored, blocked: RT3", "unknown", ""] {
-        let (text, passed) = table(
-            "case: test\n",
-            &format!("{marker}test case ... {result}\n"),
-            true,
-            Some(if result == "ignored, blocked: RT3" {
-                "| `case` | RT3 | Fixture change. |"
-            } else {
-                ""
-            }),
-        );
-        assert!(!passed);
-        assert!(text.contains("case | FAIL\n"));
-    }
-    for output in [
-        marker.to_owned(),
-        format!("{marker}{marker}test case ... FAILED\n"),
-        "SKIPPED case: \ntest case ... FAILED\n".into(),
-        "test case ... FAILED\nRuntime refusal\n".into(),
+    for (name, reason) in [
+        ("case", "loopback bind refused"),
+        (
+            "cleanup_unix_socket_control_reports_its_scope",
+            "Unix socket control setup: interpreter could not start",
+        ),
+        (
+            "cleanup_unix_socket_control_reports_its_scope",
+            "Unix socket control setup: socket import failed: exit status: 37",
+        ),
     ] {
-        let (text, passed) = table("case: test\n", &output, false, Some(""));
-        assert!(!passed);
-        assert!(text.contains("case | FAIL\n"));
+        let marker = format!("SKIPPED {name}: {reason}\n");
+        let listed = format!("{name}: test\n");
+        for cargo_ok in [false, true] {
+            let (text, passed) = table(
+                &listed,
+                &format!("{marker}test {name} ... FAILED\n"),
+                cargo_ok,
+                Some(""),
+            );
+            assert!(!passed);
+            assert!(text.contains(&format!("{name} | SKIPPED ({reason})\n")));
+        }
+        for result in ["ok", "ignored, blocked: RT3", "unknown", ""] {
+            let (text, passed) = table(
+                &listed,
+                &format!("{marker}test {name} ... {result}\n"),
+                true,
+                Some(&if result == "ignored, blocked: RT3" {
+                    format!("| `{name}` | RT3 | Fixture change. |")
+                } else {
+                    String::new()
+                }),
+            );
+            assert!(!passed);
+            assert!(text.contains(&format!("{name} | FAIL\n")));
+        }
+        for output in [
+            marker.clone(),
+            format!("{marker}{marker}test {name} ... FAILED\n"),
+            format!("SKIPPED {name}: \ntest {name} ... FAILED\n"),
+            format!("test {name} ... FAILED\nRuntime refusal\n"),
+        ] {
+            let (text, passed) = table(&listed, &output, false, Some(""));
+            assert!(!passed);
+            assert!(text.contains(&format!("{name} | FAIL\n")));
+        }
+        assert!(table(
+            "",
+            &format!("{marker}test {name} ... FAILED\n"),
+            false,
+            Some("")
+        )
+        .0
+        .contains(&format!("{name} | FAIL\n")));
     }
-    assert!(table(
-        "",
-        &format!("{marker}test case ... FAILED\n"),
-        false,
-        Some("")
-    )
-    .0
-    .contains("case | FAIL\n"));
 }
 
 #[test]
 fn skipped_report_keeps_a_nonzero_exit() {
+    // These observations prove report classification, with zero capsule credit.
     let home = ThrowawayHome::new().unwrap();
     let (observations, git) = synthetic(1, true);
-    let listed = format!("{LIVE}: test\n");
-    let output = format!(
-        "SKIPPED {LIVE}: loopback bind refused: PermissionDenied\n{}",
-        output(&observations).replace(" ... ok", " ... FAILED")
-    );
-    let memory = agent_conformance::report::render_run(&listed, &output, false, Ok(git), Some(""));
-    assert!(!memory.passed);
-    assert!(memory.table.contains(&format!(
-        "{LIVE} | SKIPPED (loopback bind refused: PermissionDenied)\n"
-    )));
-    let document: Value = serde_json::from_slice(&memory.receipt_bytes).unwrap();
-    assert_eq!(document["command_success"], false);
-    assert_eq!(document["report"]["table"], memory.table);
-    let list_path = home.root().join("list");
-    let results_path = home.root().join("results");
-    fs::write(&list_path, listed).unwrap();
-    fs::write(&results_path, output).unwrap();
-    let result = std::process::Command::new(env!("CARGO_BIN_EXE_report"))
-        .arg(list_path)
-        .arg(results_path)
-        .arg("101")
-        .arg(home.root().join("VERSIONS.json"))
-        .output()
-        .unwrap();
-    assert_eq!(result.status.code(), Some(1));
-    assert!(String::from_utf8(result.stdout)
-        .unwrap()
-        .starts_with(&memory.table));
+    let name = "cleanup_unix_socket_control_reports_its_scope";
+    for (index, (row, reason, grade, success)) in [
+        (
+            LIVE,
+            "loopback bind refused: PermissionDenied",
+            "SKIPPED",
+            false,
+        ),
+        (
+            name,
+            "Unix socket control setup: interpreter could not start",
+            "SKIPPED",
+            false,
+        ),
+        (
+            name,
+            "Unix socket control setup: socket import failed: exit status: 37",
+            "SKIPPED",
+            false,
+        ),
+        (
+            name,
+            "Unix socket control exited before binding",
+            "FAIL",
+            false,
+        ),
+        (name, "", "PASS", true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut listed = format!("{LIVE}: test\n");
+        let mut evidence = output(&observations);
+        if row == LIVE {
+            evidence = evidence.replace(" ... ok", " ... FAILED");
+        } else {
+            listed.push_str(&format!("{row}: test\n"));
+            evidence.push_str(&format!(
+                "test {row} ... {}\n",
+                if success { "ok" } else { "FAILED" }
+            ));
+        }
+        if grade == "SKIPPED" {
+            evidence.push_str(&format!("SKIPPED {row}: {reason}\n"));
+        } else if !success {
+            evidence.push_str(&format!("FAILURE {row}: {reason}\n"));
+        }
+        let expected_row = match grade {
+            "SKIPPED" => format!("{row} | SKIPPED ({reason})\n"),
+            "FAIL" => format!("{row} | FAIL | {reason}\n"),
+            _ => format!("{row} | PASS\n"),
+        };
+        let receipt_path = home.root().join(format!("writer-{index}.json"));
+        let written = write_run(
+            &listed,
+            &evidence,
+            success,
+            Ok(git.clone()),
+            &receipt_path,
+            Some(""),
+        );
+        assert!(written.receipt_written);
+        assert_eq!(written.passed, success);
+        assert!(written.table.contains(&expected_row), "{}", written.table);
+        let memory = read_receipt(&receipt_path);
+        assert_eq!(memory["repository"], serde_json::to_value(&git).unwrap());
+        let list_path = home.root().join(format!("list-{index}"));
+        let results_path = home.root().join(format!("results-{index}"));
+        let command_receipt = home.root().join(format!("command-{index}.json"));
+        fs::write(&list_path, listed).unwrap();
+        fs::write(&results_path, evidence).unwrap();
+        let result = home
+            .launch(
+                Path::new(env!("CARGO_BIN_EXE_report")),
+                &[
+                    list_path.to_str().unwrap(),
+                    results_path.to_str().unwrap(),
+                    if success { "0" } else { "101" },
+                    command_receipt.to_str().unwrap(),
+                ],
+                std::time::Duration::from_secs(10),
+            )
+            .unwrap();
+        assert_eq!(result.status.code(), Some(if success { 0 } else { 1 }));
+        let command = read_receipt(&command_receipt);
+        assert_eq!(
+            command["repository"],
+            serde_json::to_value(
+                GitIdentity::read(&agent_conformance::build::repository()).unwrap()
+            )
+            .unwrap()
+        );
+        let receipt_line = format!(
+            "versions receipt: {}\n",
+            command_receipt
+                .strip_prefix(agent_conformance::build::lane())
+                .unwrap()
+                .display()
+        );
+        assert_eq!(
+            result.stdout.strip_suffix(receipt_line.as_bytes()),
+            Some(written.table.as_bytes())
+        );
+        for document in [&memory, &command] {
+            assert_eq!(document["identity_status"], "complete");
+            assert_eq!(document["missing_or_invalid"], serde_json::json!([]));
+            assert_eq!(document["command_success"], success);
+            assert_eq!(
+                document["suite_outcome"],
+                if success { "PASS" } else { "FAIL" }
+            );
+            assert_eq!(document["report"]["table"], written.table);
+            assert_eq!(
+                document["report"]["sha256"],
+                sha256(written.table.as_bytes())
+            );
+            for observation in &observations {
+                match observation {
+                    Observation::Native { role, sha256 } => {
+                        let field = if role == "elastos" {
+                            "runtime_sha256"
+                        } else {
+                            "localhost_provider_sha256"
+                        };
+                        assert_eq!(document[field], *sha256);
+                    }
+                    Observation::Launched { probe } => {
+                        assert_eq!(document["probes"], serde_json::json!([probe]))
+                    }
+                    _ => panic!("unexpected synthetic observation"),
+                }
+            }
+        }
+    }
     home.finish().unwrap();
 }
 

@@ -12907,3 +12907,294 @@ Next owner: lane supervisor.
 
 174: Controller refusals retain ordered grader causes, scan detailed errors
 and prove refusal and recovery with three caught, restored plants.
+
+## 175 — Unix socket control setup and check failures
+
+Supplied HEAD: `59a7eebe901a4b29d485575152a883d7ebf623b6`; tree:
+`094d91d9af1eb360857e00ac87cca493076f32c5`. Initial dirty paths: none.
+The supplied task branch has no upstream; cached `spike/spike/agent-host`
+divergence is 0 base-only and 13 HEAD-only commits. Remote state stays
+unverified under the network restriction. Git state and unrelated work stay
+with their owners.
+
+Read task 175, BACKLOG item 14 supplied in the prompt, LOG 021/026, the
+Harness conformance design, cleanup/SKIPPED RUNBOOK paragraphs and GAPS
+cleanup scope. The repository has no humanizer skill source; this record
+uses direct actor and ownership statements.
+
+Plan: separate the Unix socket control while retaining the original independent
+API, file and process controls. Use one private executable input and bounded
+Home-launch import preflight. Only start unavailability and unsuccessful import
+are setup results; all check/guard/capture/timeout/stop causes retain FAIL.
+Exercise real harmless children for setup, repair and post-setup failure;
+extend the existing report controls. Run two compiling classification plants
+separately with exact restoration, demonstrate the missing-executable SKIPPED
+row with the actual test and run.sh, then run restored focused and full gates.
+Use offline Cargo, RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0, the shared
+exclusive heavy-build lease, a 600-second command bound and the 12 GiB
+estimate plus 2 GiB reserve. Final tracked edits stay in runtime/report tests,
+the existing cleanup documentation paragraphs and this LOG section.
+
+### Setup/check boundary and baseline
+
+`unix_socket_preflight` uses guard then `ThrowawayHome::launch` with
+`-I -S -B -c "import socket"` and a five-second bound. Only the existing
+start-unavailable cause and an unsuccessful actual import status become
+`UnixSocketFailure::Setup`. Guard, capture and time-bound causes remain
+`Check`. The worker uses the same executable and Python options through
+`ThrowawayHome::start`. Its bounded readiness walk checks the path with
+`FileTypeExt::is_socket`, saves the one census observation, then stops,
+reaps and checks the process group before examining that observation.
+The guarded Home owns both socket artifacts and all raw child captures.
+The real row alone maps Setup to the existing `probe::skipped`; Check panics
+with its cause. The real control uses the selected executable directly.
+
+`cleanup_census_refuses_each_leftover` retains API, temp-file, process and
+final-clean assertions, and stops the owned process before assertions.
+`unix_socket_control_setup_refusals_are_named` exercises a missing executable,
+a non-executable fixture, import exit 37 and repaired import exit 0 with actual
+bounded child runs. It checks absent worker/socket/ready artifacts and holders
+after each refusal. `unix_socket_control_failure_after_setup_is_fail` observes
+a fixture that succeeds at import and exits 23 before binding, checks group
+cleanup before its classification assertion, and restores an owned Home
+symlink before checking the guard's Check cause. Synthetic children supply
+setup/classification proof only. The bound-socket row supplies the real
+observation control and retains the Mac visibility limit.
+
+The existing report tests now cover the new row's start/import setup reasons,
+check-stage FAIL and healthy PASS beside native/default-launch observations.
+They retain malformed markers and test the existing writer and actual bounded
+report command: complete identities, receipt/table hash and byte equality,
+SKIPPED display with suite FAIL, false command success and exit 1; healthy PASS
+with exit 0. Existing blocker tests retain their policy. Report fixtures give
+zero capsule acceptance credit.
+
+The sandbox loopback preflight failed with errno 1 before any test ran; its
+parent released the lease. Host-access preflight passed. The first compile
+found a wrong common-module reference; runtime.rs now includes the existing
+common/probe.rs by path, as other targets do. That compile result gives zero
+test or falsifier credit. The corrected baseline used the shared exclusive
+read-only-descriptor flock lease (zero inherited child lease descriptors),
+offline Cargo, the existing host/host-build outputs and task-local TMPDIR.
+Each command checked the 14 GiB free-space gate and kept its 600-second bound.
+Initial host free space was 25.946 GiB. The lease wait was below 0.001 s.
+All corrected baseline commands below exited 0:
+
+| Check | Seconds | Result |
+| --- | ---: | --- |
+| `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` | 0.210 | PASS |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime unix_socket_control_setup_refusals_are_named -- --exact --show-output` | 3.331 | PASS |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime unix_socket_control_failure_after_setup_is_fail -- --exact --show-output` | 1.130 | PASS |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime cleanup_unix_socket_control_reports_its_scope -- --exact --show-output` | 0.873 | PASS |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime cleanup_census_refuses_each_leftover -- --exact --show-output` | 1.345 | PASS |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report run_table_grades_skipped_only_with_failed_test -- --exact --show-output` | 0.825 | PASS |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report skipped_report_keeps_a_nonzero_exit -- --exact --show-output` | 1.002 | PASS |
+
+### Two separate compiling plants — CAUGHT
+
+These exact UTF-8 old/new bytes were planted only in tests/runtime.rs.
+The first edit selects the single match after `fn unix_socket_preflight`;
+the second selects its single file match. Falsifier list and runner stay
+as supplied. The parent keeps healthy source bytes in memory and restores
+them in finally before the next plant, with a restored exact-test run.
+
+```json
+[
+  {
+    "name": "accept-failed-import",
+    "file": "tests/runtime.rs",
+    "old": "if !output.status.success() {",
+    "new": "if false && !output.status.success() {",
+    "scope": "the sole match after fn unix_socket_preflight",
+    "tests": [
+      "unix_socket_control_setup_refusals_are_named"
+    ]
+  },
+  {
+    "name": "worker-exit-as-setup",
+    "file": "tests/runtime.rs",
+    "old": "observed.map_err(UnixSocketFailure::check)?",
+    "new": "observed.map_err(UnixSocketFailure::Setup)?",
+    "tests": [
+      "unix_socket_control_failure_after_setup_is_fail"
+    ]
+  }
+]
+```
+
+Commands use `cargo test --locked --manifest-path
+lab/agent-conformance/Cargo.toml --test runtime <named-test> -- --exact
+--show-output`, the same offline environment, shared lease, free-space gate
+and bounds. Both named tests executed once and failed at their stated
+assertion; compilation, setup and timeout supplied zero caught credit.
+
+| Plant / restoration | Exit | Seconds | Observed result |
+| --- | ---: | ---: | --- |
+| `plant-accept-failed-import` | 101 | 1.850 | `unexpected worker-started` |
+| `restored-accept-failed-import` | 0 | 1.845 | PASS: 1 executed test |
+| `plant-worker-exit-as-setup` | 101 | 1.237 | `post-setup exit must remain a check-stage failure`: actual Setup, expected Check, both with early-exit cause |
+| `restored-worker-exit-as-setup` | 0 | 1.246 | PASS: 1 executed test |
+
+Each plant's worker returned through the shared managed stop and group-drain
+check before the assertion. The post-setup test also checked empty holders
+before its classification assertion. The expected plant failures keep two
+owned Homes for supervisor review; the restored tests finish and remove
+their Homes. Expected fixture refusals alone waive zero cleanup checks.
+Raw child streams stay in their existing Home captures. The ignored local
+`target/task-175-current/inventory.json` names the retained roots and their
+review-then-remove condition.
+
+### Missing-executable demonstration bytes
+
+Only the real test's single call site in tests/runtime.rs was temporarily
+changed with these exact UTF-8 bytes (the private helper stays unchanged):
+
+```json
+{
+  "old": "unix_socket_control(&home, Path::new(\"/usr/bin/python3\"), port)",
+  "new": "unix_socket_control(&home, &home.home().join(\"missing-interpreter\"), port)"
+}
+```
+
+The selected missing path is inside that control's guarded Home. The parent
+saves healthy bytes in memory and restores them in finally after the exact
+test and full run.sh demonstration, including when either command fails.
+
+### Principles check
+
+Answers follow the eight questions in task order. Local executable fixtures
+exercise the lab; capsule code/content identity keeps its existing hash owner.
+
+| # | Answer | Evidence |
+| --- | --- | --- |
+| 1 | No | tests/runtime.rs:731 selects a fixture executable; tests/report.rs:1173 uses existing synthetic hash/CID observations, with zero code-identity change. |
+| 2 | No | tests/runtime.rs:732 guards the Home; tests/runtime.rs:734 uses the existing launch that owns the cleared environment and captures. Capsule, Home and UI authority stay with Runtime. |
+| 3 | No | tests/runtime.rs:764 calls the single preflight; tests/runtime.rs:848 selects /usr/bin/python3 at the single real call site. The existing census remains the observer. |
+| 4 | No | tests/runtime.rs:756 contains only lab control flow; tracked edits stay in the five authorized lane files. |
+| 5 | Yes | tests/runtime.rs:743 names interpreter unavailability, tests/runtime.rs:750 names import status, and tests/runtime.rs:851 retains the Check refusal. |
+| 6 | Yes | tests/runtime.rs:756 changes host fixture control only. Capsule logic and granted Bus calls keep their supplied code. |
+| 7 | Yes | tests/runtime.rs:881 and tests/runtime.rs:920 caught their separate compiling plants; tests/report.rs:1113 and tests/report.rs:1173 prove existing grading with the new row. |
+| 8 | Yes | tests/report.rs:1173 verifies complete version identity separately from command success and suite outcome. Runtime keeps admission, permission and allowance decisions. |
+
+### Demonstration result and exact restoration
+
+The exact real test ran once with the in-Home nonexistent executable: exit
+101 in 1.770 s, one FAILED result and exactly one
+`SKIPPED cleanup_unix_socket_control_reports_its_scope: Unix socket control setup: interpreter could not start`
+marker. `lab/agent-conformance/run.sh` then exited 1 in 271.921 s. Its table
+keeps `cleanup_census_refuses_each_leftover | PASS` and the new socket row as
+`SKIPPED (Unix socket control setup: interpreter could not start)`. Its
+only FAIL row is Cargo's nonzero command result; 264 rows display PASS. The receipt has complete identity, `command_success: false` and
+`suite_outcome: FAIL`. Its entire stored table matches the printed table.
+The 14 existing blocker rows retain their gates.
+
+The local, uncommitted demonstration receipt is
+`target/run-table.hOXBpR/VERSIONS.json`, SHA-256
+`f8dd9a1ca2a1b9cf76628e2f6378d058689beabab97f05ea5a30dbc9a92eec79`.
+The parent restored exact source bytes before running the healthy real socket
+control: exit 0 in 2.114 s, one executed passing test. Its bound socket
+supplies the observation control; synthetic fixtures supply zero capsule
+acceptance credit. Restored source SHA-256 values are:
+
+- tests/runtime.rs: `2179bed9248067bd1082e3e41c4b53c7cdc999e56499d177ee69ff0c5832e3c7`
+- tests/report.rs: `e91fc63c486a5aaecf90a816ef91bf3383aee0bcdb77a3b7ec75eee0690f2a0b`
+
+Both demonstration setup refusals retain their owned Homes with empty child
+groups. Passing real controls stop and reap their workers, remove their
+socket/ready artifacts, pass the final census and finish their Homes. The
+ignored task inventory owns retention through supervisor review, followed by
+owner-approved removal. The two plant roots have the same review condition.
+The completed demonstration parent released its shared lease.
+
+### Restored gate and retained report failure
+
+Restored formatting, diff, runtime and report checks passed. The full locked
+lane gate passed in 263.551 s with every active test passing and the 14
+existing ignored blockers retained. The next normal run.sh invocation exited
+1 in 264.434 s. Both cleanup control rows and both synthetic classification
+tests passed. The existing `ungranted_network_is_refused` journey failed at
+tests/effects.rs:498: its point-in-time cleanup census saw one process holder
+of `stderr-307`, with empty API sockets, temp entries and pending requests.
+The test and census retain that failure. Source bytes stay unchanged.
+
+The failed receipt and Cargo results remain in the local, uncommitted
+`target/run-table.2HLsva/`; the affected Home is kept in the ignored task
+inventory for supervisor review. This capture-holder failure differs from
+the config.toml hard-stop condition. The supplied backlog describes one outer retry for transient capture holders.
+The existing `report --check-earlier-runs` passed with zero live holders in
+0.616 s before this unchanged full-command retry.
+There is zero census retry, assertion change or process-signalling workaround.
+A repeated failed result remains a blocker.
+
+### Final restored proof
+
+The cleared-owner check was followed by one unchanged run.sh retry: exit 0
+in 265.817 s. There was zero source change between the failed and passing
+report runs. The failed point-in-time observation and its receipt remain
+retained; the retry supplies the healthy full-command result. Both cleanup
+control rows and both classification tests display PASS. The successful table
+contains **265 PASS, 14 BLOCKED, 0 FAIL and 0 SKIPPED** rows. Aggregate suite
+outcome is BLOCKED for the existing product gates, with complete identity and
+`command_success: true`. The entire printed table matches the receipt.
+
+All restored checks used the same offline environment, shared exclusive lease,
+600-second per-command bound and per-command 14 GiB free-space gate:
+
+| Command | Exit | Seconds | Result |
+| --- | ---: | ---: | --- |
+| `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` | 0 | 0.383 | PASS |
+| `git diff --check` | 0 | 0.042 | PASS |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime` | 0 | 14.889 | 16 active tests passed; 2 existing blockers ignored |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report` | 0 | 1.044 | 25 tests passed |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` | 0 | 263.551 | all active tests passed; 14 existing blockers ignored |
+| `lab/agent-conformance/run.sh` | 1 | 264.434 | retained capture-holder failure; unchanged retry below |
+| `target/host/debug/report --check-earlier-runs` | 0 | 0.616 | zero live holders before unchanged retry |
+| `lab/agent-conformance/run.sh` (unchanged retry) | 0 | 265.817 | 265 PASS, 14 BLOCKED, 0 FAIL, 0 SKIPPED |
+
+The final local, uncommitted receipt is `target/run-table.AuOj0l/VERSIONS.json`,
+SHA-256 `d8bd947315856ec3db49a89ca3787084d068197a4861c38b4d30a70a59140dc5`. The earlier failed
+receipt `target/run-table.2HLsva/VERSIONS.json` has SHA-256
+`34266eb107f9b2a3449abbb19d71f95680b8f2c7adbaa026f19054723882c6f3`.
+The demonstration, failed restored run and healthy retry receipts have separate
+owned paths and retention decisions in the ignored task inventory.
+
+The source hash checks match both restored tests byte for byte. The census,
+shared harness, report implementation/schema, Cargo inputs, run.sh and
+falsifier list/runner retain supplied bytes. Five authorized tracked files
+are dirty. Supplied HEAD/tree stay unchanged; cached base divergence stays
+0 base-only / 13 HEAD-only, and the task branch has no upstream. Remote
+verification remains with the supervisor under the network restriction.
+
+All successful task controls finish their Homes after group drain. Five
+failed-run Homes are kept: two classification plants, two missing-executable
+demonstrations and the existing network journey's capture-holder observation.
+The supervisor owns their review, then their removal. Existing lane build
+outputs remain rebuildable active review artifacts under their prior owner.
+These fixtures and receipts supply lab setup/classification/observation proof
+only. Runtime keeps capsule cleanup and the existing product acceptance gates.
+
+### Acceptance record
+
+Candidate: supplied HEAD/tree above, with the five-file dirty candidate and
+restored test source hashes recorded here; this builder creates zero commits.
+Exercised checks: exact baseline/restored selections, both caught plants, the
+real missing-executable demonstration, runtime/report targets, locked lane
+gate and run.sh results above. Every requested lane check executed.
+Review links: independent development and adversarial review belong to the
+supervisor's next step; this local record supplies builder evidence.
+Installed release evidence: isolated fixture controls only; installed-product
+acceptance stays with its existing owners.
+Remaining gate: supervisor rerun, independent reviews and private-lab PR
+handling; preserve the earlier failed capture-holder result during review.
+Next owner: lane supervisor.
+
+175: Separated the Unix socket control, added guarded import preflight and named setup/check refusal and recovery tests, extended existing report proof, caught/restored both classification plants, demonstrated SKIPPED and passed the restored lane gate and run.sh with one retained unchanged-command retry.
+
+Final handoff checks also passed under the shared lease: earlier-Home holder
+check (0.675 s, zero live holders), lane formatting (0.264 s) and
+`git diff --check` (0.040 s). The parent released its lease. Read-only branch
+and worktree inventories confirm the supplied branch, HEAD/tree, five dirty
+paths and unchanged cached divergence. The local ignored inventory records
+the five retained Homes, three report directories, bounded proof scratch,
+existing build-output owners and explicit review/removal conditions. Final
+observed free space was 25.353 GiB, above the 14 GiB gate.

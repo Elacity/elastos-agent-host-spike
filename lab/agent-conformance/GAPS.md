@@ -768,10 +768,21 @@ snapshot. Every observed holder fails the check, even if it releases its
 handle after that snapshot. The tool runs through the existing spawn site in
 a separate scratch Home;
 after exit, its captures move into the journey's existing capture inventory.
-Task 026 plants a bound Unix socket in a bounded child through the one spawn
-site. On this Mac, `lsof +D` sees its cwd and capture handles but omits the
-socket. The child fails the process census and is stopped. Unix socket absence
-under the root remains unmeasured; `root checks PASS` covers the selected
+Task 026's bound-socket control now has its own row,
+`cleanup_unix_socket_control_reports_its_scope`; the original
+`cleanup_census_refuses_each_leftover` keeps independent API, temp, process
+and clean-root checks. The socket row preflights `/usr/bin/python3 -I -S -B`
+through the shared bounded Home launcher. Interpreter start unavailability
+and unsuccessful import emit distinct `Unix socket control setup: ` reasons;
+the import reason includes its exit status. These setup refusals display
+SKIPPED with suite outcome FAIL and a nonzero command status. Later worker,
+readiness, socket-type, census and cleanup errors retain FAIL. Synthetic
+setup and report fixtures supply zero capsule acceptance credit.
+The real worker binds an in-Home Unix socket within five seconds. The test
+saves the census, stops and reaps the owned worker, then checks that observation
+and removes its owned socket and ready marker. On this Mac, `lsof +D` sees
+its cwd and capture handles but omits the socket. Unix socket absence under
+the root remains unmeasured; `root checks PASS` covers the selected
 file/directory handles, API port and tmp entries only. A socket-absence claim
 needs a census selector with a passing bound-socket control.
 
