@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A failed fetch leaves no side file; a wrong digest leaves no archive, on fetch and in a cache."""
+"""A dropped body retries and a failed fetch leaves no side file; a wrong digest leaves no archive, on fetch and in a cache."""
 from http.client import IncompleteRead
 import hashlib, importlib.util, json, subprocess, tempfile, unittest
 from pathlib import Path
@@ -15,19 +15,26 @@ DIGEST = hashlib.sha256(BODY).hexdigest()
 
 
 class FakeNetwork:
-    """Fails `failures` calls (every call when negative); a success sends `body` then raises `error`."""
-    def __init__(self, failures=0, body=BODY, error=IncompleteRead(b"")):
-        self.failures, self.body, self.calls, self.error = failures, body, [], error
-        self.headers = {"Content-Length": str(len(BODY))}  # the count the server announced
+    """Fails `failures` calls (every call when negative); a success sends `body` in full, then raises `error`.
+    `body` is one bytes object for every call, or a list of per-call bodies."""
+    def __init__(self, failures=0, body=BODY, error=IncompleteRead(b""), drops=()):
+        self.failures, self.original, self.calls, self.error = failures, body, [], error
+        self.drops, self.body = set(drops), None  # per-call indexes that drop mid-read, and the current body
 
     def read(self, size=-1):
-        self.body, body = None, self.body
-        if body is not None: return body
-        raise self.error
+        body, self.body = self.body, None
+        if body: return body
+        if not isinstance(self.error, IncompleteRead) or len(self.calls) in self.drops:
+            raise self.error  # a malformed header, or a connection that drops instead of ending cleanly
+        return b""
 
     def __call__(self, url, timeout=None):
         self.calls.append(timeout)
         if self.failures < 0 or len(self.calls) <= self.failures: raise urllib.error.URLError("timed out")
+        # A list gives one body per call, in order; the last item repeats.
+        self.body = self.original[min(len(self.calls), len(self.original)) - 1] \
+            if isinstance(self.original, list) else self.original
+        self.headers = {"Content-Length": str(len(self.body))}  # the count the server announced
         return self
 
     __enter__, __exit__ = lambda self: self, lambda self, *exc: False
@@ -53,10 +60,17 @@ class FetchCleanupTest(unittest.TestCase):
         with patch.object(builder.urllib.request, "urlopen", network):
             builder.fetch_source(self.archive, URL, DIGEST)
 
-    def test_short_body_is_not_retried_and_leaves_no_side_file(self):
-        network = FakeNetwork(body=BODY[:1])  # 1 byte, then the connection drops
-        with self.assertRaises(IncompleteRead): self.run_fetch(network)
-        self.assertEqual(self.leftovers(network), (1, []))
+    def test_short_body_is_retried_and_leaves_no_side_file(self):
+        network = FakeNetwork(body=BODY[:1], drops=(1, 2, 3))  # every attempt drops mid-read
+        with self.assertRaises(IncompleteRead): self.run_fetch(network)  # the attempt bound stops it
+        self.assertEqual(self.leftovers(network), (3, []))
+        self.assertEqual(self.sleeps, [5, 15])
+
+    def test_a_body_dropped_mid_read_is_retried_and_promoted(self):
+        network = FakeNetwork(body=BODY, drops=(1,))  # attempt 1 drops mid-read, attempt 2 completes
+        self.run_fetch(network)
+        self.assertEqual((len(network.calls), self.archive.read_bytes(), self.sleeps), (2, BODY, [5]))
+        self.assertEqual(sorted(p.name for p in Path(self.home.name).iterdir()), [self.archive.name])
 
     def test_malformed_content_length_is_not_retried(self):
         network = FakeNetwork(error=ValueError("bad Content-Length"))  # rejected while reading it
