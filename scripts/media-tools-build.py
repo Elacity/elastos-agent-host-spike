@@ -12,10 +12,16 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.request
 
 X264_COMMIT = "b35605ace3ddf7c1a5d67a2eb553f034aef41d55"
 X264_TREE = "0700538866963f968154ea768289bf100350e84e"
+
+# One slow or refused response from ffmpeg.org must not fail the build.
+FETCH_TIMEOUT = 300
+FETCH_BACKOFF = (5, 15)
 
 SOURCES = {
     "ffmpeg-9.0.1.tar.xz": (
@@ -56,8 +62,25 @@ def fetch_source(archive, url, digest):
                                               f"--prefix=x264-{X264_COMMIT}/", X264_COMMIT])
             archive.write_bytes(bz2.compress(source))
     else:
-        with urllib.request.urlopen(url, timeout=60) as response, archive.open("wb") as dest:
-            shutil.copyfileobj(response, dest)
+        for attempt in range(1, len(FETCH_BACKOFF) + 2):
+            # A failed attempt leaves no archive behind: the body lands in a side file and
+            # replaces the archive only after the whole response was copied.
+            partial = archive.with_name(f".{archive.name}.download")
+            try:
+                with urllib.request.urlopen(url, timeout=FETCH_TIMEOUT) as response:
+                    expected = response.headers.get("Content-Length")
+                    with partial.open("wb") as dest:
+                        shutil.copyfileobj(response, dest)
+                # A dropped connection ends the copy early without an error: retry the short body.
+                if expected is not None and partial.stat().st_size != int(expected):
+                    raise OSError(f"short source download: {archive.name}")
+                os.replace(partial, archive)
+                break
+            except (urllib.error.URLError, TimeoutError, OSError):
+                partial.unlink(missing_ok=True)
+                if attempt > len(FETCH_BACKOFF):
+                    raise
+                time.sleep(FETCH_BACKOFF[attempt - 1])
     if sha(archive) != digest:
         raise ValueError(f"Source checksum mismatch: {archive.name}")
 
