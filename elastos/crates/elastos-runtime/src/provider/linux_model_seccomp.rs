@@ -158,18 +158,28 @@ mod tests {
     const PERMITTED: u8 = 1;
     const KILLED: u8 = 2;
 
+    thread_local! {
+        /// The bytes the last `process_vm` body moved out of its own buffer.
+        static BODY_BYTES: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
     /// The helper's published pattern size.
     const PATTERN_LEN: usize = 64;
 
     /// The row that reads the pattern.
     const READV_ROW: &str = "process_vm_readv sibling";
 
-    /// The row that writes the helper's own pattern back into its buffer.
+    /// The row that stores this process's own bytes into the helper's buffer.
     const WRITEV_ROW: &str = "process_vm_writev sibling";
 
     /// `true` for either `process_vm` row: each returns a byte count.
     fn is_process_vm(name: &str) -> bool {
         name == READV_ROW || name == WRITEV_ROW
+    }
+
+    /// `true` for a row that moves bytes into the helper.
+    fn is_write(nr: libc::c_long) -> bool {
+        nr == libc::SYS_process_vm_writev
     }
 
     /// A row body is a plain `fn` taking the row's three syscall arguments, so
@@ -561,15 +571,41 @@ mod tests {
         (1..=PATTERN_LEN as u8).collect()
     }
 
+    /// The write row's bytes: 201..=255 then 0..=8, unlike any read pattern.
+    fn write_bytes() -> Vec<u8> {
+        (201..=255).chain(0..=8).collect()
+    }
+
+    fn check_write(got: &[u8], expected: &[u8], wrong: &str) {
+        assert_eq!(
+            got.len(),
+            PATTERN_LEN,
+            "process_vm_writev control sent {} bytes, expected {PATTERN_LEN}",
+            got.len()
+        );
+        if let Some(index) = got
+            .iter()
+            .zip(expected)
+            .position(|(read, want)| read != want)
+        {
+            panic!(
+                "process_vm_writev control {wrong} at byte {}: expected {}, read {}",
+                index + 1,
+                expected[index],
+                got[index]
+            );
+        }
+    }
+
     /// Checks a whole read of the pattern.
     fn check_pattern(got: &[u8]) {
-        let expected = pattern_bytes();
         assert_eq!(
             got.len(),
             PATTERN_LEN,
             "process_vm_readv control moved {} bytes, expected {PATTERN_LEN}",
             got.len()
         );
+        let expected = pattern_bytes();
         if let Some(index) = got
             .iter()
             .zip(&expected)
@@ -589,20 +625,33 @@ mod tests {
         process_vm_body(libc::SYS_process_vm_readv)
     }
 
-    /// The helper's buffer, written with its own pattern so its content and
-    /// every other row's control stay as they are; only the filter refuses.
+    /// The helper's buffer, written here: only the filter can refuse it.
     fn process_vm_writev_body(_: libc::c_int, _: libc::c_int, _: libc::c_int) -> libc::c_long {
         process_vm_body(libc::SYS_process_vm_writev)
     }
 
-    /// One whole `PATTERN_LEN` transfer: a read fills this process's buffer,
-    /// a write sends the pattern it starts with. Either way it ends as the
-    /// pattern, which is checked.
+    fn process_vm_pattern_body(_: libc::c_int, _: libc::c_int, _: libc::c_int) -> libc::c_long {
+        process_vm_transfer(libc::SYS_process_vm_writev, &pattern_bytes())
+    }
+
+    /// One whole `PATTERN_LEN` transfer: a read fills this process's bytes, a
+    /// write sends them to the helper.
     fn process_vm_body(nr: libc::c_long) -> libc::c_long {
+        let sent = if is_write(nr) {
+            write_bytes()
+        } else {
+            pattern_bytes()
+        };
+        process_vm_transfer(nr, &sent)
+    }
+
+    /// One whole transfer of `sent` with the helper's buffer on the remote
+    /// side, and this process's buffer published for its control.
+    fn process_vm_transfer(nr: libc::c_long, sent: &[u8]) -> libc::c_long {
         let pid = victim_pid();
         let mut local = [0u8; PATTERN_LEN];
-        if nr == libc::SYS_process_vm_writev {
-            local.copy_from_slice(&pattern_bytes());
+        if is_write(nr) {
+            local.copy_from_slice(sent);
         }
         let mut remote = iovec(victim_address() as *mut u8, PATTERN_LEN);
         let mut here = iovec(local.as_mut_ptr(), PATTERN_LEN);
@@ -617,17 +666,27 @@ mod tests {
                 0,
             ],
         );
+        let moved = if rc == PATTERN_LEN as libc::c_long {
+            PATTERN_LEN
+        } else {
+            0
+        };
+        BODY_BYTES.with(|bytes| *bytes.borrow_mut() = local[..moved].to_vec());
         if rc >= 0 {
-            // A short copy is the control's own failure.
+            // A short transfer is the control's own failure.
             assert_eq!(
                 rc,
                 PATTERN_LEN as libc::c_long,
                 "process_vm control nr {nr} moved {rc} bytes, errno {}",
                 errno()
             );
-            check_pattern(&local);
         }
         rc
+    }
+
+    /// This process's bytes as the last body left them.
+    fn body_bytes() -> Vec<u8> {
+        BODY_BYTES.with(|bytes| bytes.borrow().clone())
     }
 
     /// Each denied family through `socket`, the Unix controls through both
@@ -697,9 +756,11 @@ mod tests {
             );
             // The probe runs under install_on_command, which sets no_new_privs
             // before attaching the filter.
+            let no_new_privs = unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) };
+            let failed = errno();
             assert_eq!(
-                unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) },
-                1
+                no_new_privs, 1,
+                "PR_GET_NO_NEW_PRIVS read {no_new_privs} (errno {failed}): no_new_privs was not set before the filter"
             );
         }
         let row = rows()
@@ -721,10 +782,16 @@ mod tests {
                 moved && rc >= row.outcome as libc::c_long,
                 "unfiltered sibling control for row {wanted}: rc {rc}, errno {failed}"
             );
-            // A real descriptor: closing it here also closes the one the row
-            // body kept. The readv row returns a byte count.
+            // A real descriptor; the `process_vm` rows return a byte count.
             if rc > 2 && !is_process_vm(wanted) {
                 close_all(&[rc as libc::c_int]);
+            }
+            // This buffer was filled before the call, so a no-op differs.
+            let buffer = body_bytes();
+            if wanted == READV_ROW {
+                check_pattern(&buffer);
+            } else if wanted == WRITEV_ROW {
+                check_write(&buffer, &write_bytes(), "sent");
             }
             // Set on a test's own control child only.
             planted_control();
@@ -1010,13 +1077,50 @@ mod tests {
     /// The `process_vm_readv` control: the body returns the whole pattern, so
     /// no descriptor is involved.
     fn process_vm_control(victim: &Victim, row: &Row) {
+        with_victim(victim, || {
+            let rc = (row.body)(0, 0, 0);
+            let failed = errno();
+            assert_eq!(
+                rc, PATTERN_LEN as libc::c_long,
+                "row {} is not valid unfiltered: rc {rc}, errno {failed}",
+                row.name
+            );
+            check_pattern(&body_bytes());
+        });
+    }
+
+    /// The `process_vm_writev` control: pattern, then the row's own bytes.
+    fn check_write_control(row: &Row) {
+        let victim = Victim::start();
+        pattern_control(&victim);
+        write_control_writes(&victim, row, &write_bytes());
+    }
+
+    /// The write body on `victim`, then its own published bytes.
+    fn write_control_writes(victim: &Victim, row: &Row, sent: &[u8]) {
+        with_victim(victim, || {
+            let rc = (row.body)(0, 0, 0);
+            let failed = errno();
+            assert_eq!(
+                rc, PATTERN_LEN as libc::c_long,
+                "row {} is not valid unfiltered: rc {rc}, errno {failed}",
+                row.name
+            );
+            // The helper's buffer is read back below, not only this side's.
+            check_write(&body_bytes(), sent, "sent");
+        });
+        let got = victim_report(victim);
+        check_write(&got, sent, "wrote");
+    }
+
+    /// Sets the helper variables around one call, then restores them.
+    fn with_victim<T>(victim: &Victim, call: impl FnOnce() -> T) -> T {
         let previous_pid = std::env::var(VICTIM_PID_VAR).ok();
         let previous_address = std::env::var(VICTIM_ADDRESS_VAR).ok();
         // Post what the harness posts; the body reads the environment.
         std::env::set_var(VICTIM_PID_VAR, victim.pid.to_string());
         std::env::set_var(VICTIM_ADDRESS_VAR, victim.address.to_string());
-        let rc = (row.body)(0, 0, 0);
-        let failed = errno();
+        let out = call();
         for (name, previous) in [
             (VICTIM_PID_VAR, previous_pid),
             (VICTIM_ADDRESS_VAR, previous_address),
@@ -1026,11 +1130,61 @@ mod tests {
                 None => std::env::remove_var(name),
             }
         }
-        assert_eq!(
-            rc, PATTERN_LEN as libc::c_long,
-            "row {} is not valid unfiltered: rc {rc}, errno {failed}",
-            row.name
-        );
+        out
+    }
+
+    /// The helper's published bytes, read until they are not the pattern, from
+    /// where a helper this process started publishes its buffer. Victim stays
+    /// as #1394 merged it (Rong 0935), so a killed run leaves this file.
+    fn victim_report(victim: &Victim) -> Vec<u8> {
+        let path =
+            victim_token(std::process::id() as libc::pid_t, victim.pid).with_extension("report");
+        let absent = |err: &std::io::Error| err.kind() == std::io::ErrorKind::NotFound;
+        match std::fs::remove_file(&path) {
+            Err(err) if !absent(&err) => {
+                panic!("cannot clear the old helper report {path:?}: {err}")
+            }
+            _ => {}
+        }
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(5) {
+            match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    let bytes: Vec<u8> = text
+                        .split_whitespace()
+                        .map(|byte| {
+                            byte.parse().unwrap_or_else(|err| {
+                                panic!("helper report {path:?} byte {byte:?}: {err}")
+                            })
+                        })
+                        .collect();
+                    if bytes.first() != pattern_bytes().first() {
+                        return bytes;
+                    }
+                }
+                // Only an absent report is retried; any other failure says why.
+                Err(err) if !absent(&err) => {
+                    panic!("cannot read the helper report {path:?}: {err}")
+                }
+                Err(_) => {}
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("helper published no written report in {path:?}");
+    }
+
+    /// Puts the pattern back after a write control.
+    fn restores_pattern(victim: &Victim) {
+        with_victim(victim, || {
+            let rc = process_vm_pattern_body(0, 0, 0);
+            let failed = errno();
+            assert_eq!(
+                rc, PATTERN_LEN as libc::c_long,
+                "pattern restore rc {rc}, errno {failed}"
+            );
+        });
+        // The helper holds the pattern again, or the next control reads stale bytes.
+        pattern_control(victim);
     }
 
     /// Reads the helper's bytes at the published address and checks them.
@@ -1092,6 +1246,14 @@ mod tests {
         std::fs::rename(&staging, &token).expect("helper publication rename");
         let start = std::time::Instant::now();
         while start.elapsed() < std::time::Duration::from_secs(120) {
+            let report = token.with_extension("report");
+            let staging = token.with_extension("report.tmp");
+            let bytes: Vec<String> = pattern.iter().map(|byte| byte.to_string()).collect();
+            std::fs::write(&staging, bytes.join(" ")).expect("helper report");
+            std::fs::rename(&staging, &report).expect("helper report rename");
+            // Rename leaves nothing, but a helper killed between the two
+            // steps would otherwise leave the staging file behind.
+            let _ = std::fs::remove_file(&staging);
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
@@ -1183,10 +1345,13 @@ mod tests {
             if is_victim(row.name) {
                 // The victim row runs once unfiltered here and once in its own
                 // filtered probe below: only the filter can refuse it.
-                victim_control(
-                    victim.as_ref().expect("a victim row starts the helper"),
-                    row,
-                );
+                let helper = victim.as_ref().expect("a victim row starts the helper");
+                if row.name == WRITEV_ROW {
+                    // This control stores other bytes: its own helper.
+                    check_write_control(row);
+                } else {
+                    victim_control(helper, row);
+                }
                 continue;
             }
             // A receive row's control queues one descriptor-bearing message on
@@ -1339,8 +1504,12 @@ mod tests {
         assert!(!token.exists(), "control {tag} left its token {token:?}");
         match failure {
             None => {
-                // The readv row's control checks its own bytes.
-                if name != READV_ROW {
+                // The writev control child wrote into this same helper: its
+                // report must hold those bytes, not a fresh helper's.
+                if name == WRITEV_ROW {
+                    check_write(&victim_report(victim), &write_bytes(), "wrote");
+                    restores_pattern(victim);
+                } else if name != READV_ROW {
                     pattern_control(victim);
                 }
                 Ok(())
