@@ -1890,12 +1890,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let context = HomeLaunchTokenContext {
-            principal_id: "fixture".to_string(),
-            session_id: "fixture".to_string(),
-            proof_binding_id: None,
-            grant_id: "fixture".to_string(),
-        };
+        let context = HomeLaunchTokenContext::for_test("fixture", "fixture", None, "fixture");
         let outcome = launch_runtime_backed_home_target(data_dir, "shell", &context)
             .await
             .unwrap();

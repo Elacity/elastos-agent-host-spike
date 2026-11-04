@@ -390,12 +390,7 @@ mod s3c_rows {
     fn stored_agent_launch_context(data_dir: &std::path::Path, id: &str) -> HomeLaunchTokenContext {
         crate::auth::store_test_human_principal(data_dir, id);
         crate::auth::tests::mint_agent_record(data_dir, id, None);
-        HomeLaunchTokenContext {
-            principal_id: id.to_string(),
-            session_id: "session:s3c".to_string(),
-            proof_binding_id: None,
-            grant_id: "grant:s3c".to_string(),
-        }
+        HomeLaunchTokenContext::for_test(id.to_string(), "session:s3c", None, "grant:s3c")
     }
 
     /// A5-S3c-0a, class G: a stored Agent's assistant workspace sits under
