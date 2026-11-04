@@ -10480,12 +10480,12 @@ mod tests {
             data_dir,
             super::super::gateway::SYSTEM_CAPSULE_ID,
             super::super::gateway::SYSTEM_CAPSULE_ID,
-            &super::super::gateway::HomeLaunchTokenContext {
-                principal_id: grant.principal_id.clone(),
-                session_id: grant.session_id.clone(),
-                proof_binding_id: Some(grant.proof_binding_id.clone()),
-                grant_id: grant.grant_id.clone(),
-            },
+            &super::super::gateway::HomeLaunchTokenContext::for_test(
+                grant.principal_id.clone(),
+                grant.session_id.clone(),
+                Some(grant.proof_binding_id.clone()),
+                grant.grant_id.clone(),
+            ),
         )
         .unwrap();
         let mut host_headers = home_token_headers(&home_token);

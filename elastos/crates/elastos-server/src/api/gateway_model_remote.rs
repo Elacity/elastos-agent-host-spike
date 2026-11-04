@@ -835,12 +835,7 @@ mod tests {
 
     #[test]
     fn typed_request_replaces_the_local_binding_with_the_remote_fields() {
-        let context = HomeLaunchTokenContext {
-            principal_id: "seed-principal".into(),
-            proof_binding_id: None,
-            session_id: "s".into(),
-            grant_id: "launch-grant".into(),
-        };
+        let context = HomeLaunchTokenContext::for_test("seed-principal", "s", None, "launch-grant");
         let normalized = json!({
             "op": "runs_create", "offer_id": "remote:g:qwen", "operation": "chat", "input": {"x": 1},
             "runtime_binding": { "principal_id": "seed-principal", "grant_id": "launch-grant", "request_id": "req-7" }
@@ -959,12 +954,7 @@ mod tests {
     async fn local_offers_and_unknown_runs_stay_local() {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(ProviderRegistry::new());
-        let context = HomeLaunchTokenContext {
-            principal_id: "p1".into(),
-            proof_binding_id: None,
-            session_id: "s".into(),
-            grant_id: "g".into(),
-        };
+        let context = HomeLaunchTokenContext::for_test("p1", "s", None, "g");
         let local_create = json!({ "op": "runs_create", "offer_id": "qwen", "operation": "chat", "input": {}, "runtime_binding": {} });
         assert!(route_run_operation(
             registry.clone(),
