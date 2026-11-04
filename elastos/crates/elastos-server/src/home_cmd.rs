@@ -3537,10 +3537,11 @@ mod tests {
     /// that must have a stored record. The fixture stores it through the
     /// production store API in the data dir the guarded call reads, so
     /// `ResolvedPrincipalRoot::resolve` reads a real record instead of refusing
-    /// "has no stored record". Every caller scopes HOME/XDG_DATA_HOME to its
-    /// temp dir first and derives `data_dir` from `default_data_dir()`, so the
-    /// stored record, the session lookup and `from_parts` share one dir and
-    /// this writes nothing outside the temp tree.
+    /// "has no stored record". The caller passes a `data_dir` inside its own
+    /// temp dir: either `default_data_dir()` after scoping HOME/XDG_DATA_HOME to
+    /// that temp dir, or `temp.path()` directly. The v07-admin callers assert
+    /// their derived dir is under the temp dir, so this writes nothing outside
+    /// the temp tree.
     fn store_home_cmd_test_principal(data_dir: &Path, principal_id: &str) {
         fs::create_dir_all(data_dir).unwrap();
         let now = elastos_server::auth::now_ts();
@@ -3777,6 +3778,11 @@ mod tests {
         // The env names the principal the store holds: a failure here leaves the
         // test without a stored record, rather than with a poisoned env.
         let data_dir = default_data_dir();
+        assert!(
+            data_dir.starts_with(temp.path()),
+            "fixture data_dir {} escapes the test temp dir",
+            data_dir.display()
+        );
         store_home_cmd_test_principal(&data_dir, "person:v07-admin");
         let _principal = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
@@ -3887,6 +3893,11 @@ mod tests {
         // The env names the principal the store holds: a failure here leaves the
         // test without a stored record, rather than with a poisoned env.
         let data_dir = default_data_dir();
+        assert!(
+            data_dir.starts_with(temp.path()),
+            "fixture data_dir {} escapes the test temp dir",
+            data_dir.display()
+        );
         store_home_cmd_test_principal(&data_dir, "person:v07-admin");
         let _principal = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
@@ -3956,6 +3967,11 @@ mod tests {
         // The env names the principal the store holds: a failure here leaves the
         // test without a stored record, rather than with a poisoned env.
         let data_dir = default_data_dir();
+        assert!(
+            data_dir.starts_with(temp.path()),
+            "fixture data_dir {} escapes the test temp dir",
+            data_dir.display()
+        );
         store_home_cmd_test_principal(&data_dir, "person:v07-admin");
         let _principal = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
