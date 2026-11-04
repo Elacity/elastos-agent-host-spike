@@ -1022,11 +1022,16 @@ def cli_native_executable(path, release_platform):
         raise ValueError("qualified Runtime requires a native Mach-O executable")
 
 
+def cli_missing_field(error):
+    """Name the exact selector or fixture field a bare KeyError could not find."""
+    return "required field " + (error.args[0] if error.args and isinstance(error.args[0], str) else "unnamed") + " missing"
+
+
 def cli_safe_error(error):
     if isinstance(error, (OSError, subprocess.SubprocessError)):
         return "fixture operation failed (" + type(error).__name__ + ")"
     if isinstance(error, KeyError):
-        return "required fixture field missing"
+        return cli_missing_field(error)
     if isinstance(error, TypeError):
         return "fixture field type invalid"
     return str(error)
@@ -1673,6 +1678,8 @@ CLI_PIN_FIELDS = {"version", "release_cid", "release_sha256", "head_cid", "signe
 
 
 def cli_release_pin_fields(pin, schema, extra, label):
+    if isinstance(pin, dict):
+        need(not (CLI_PIN_FIELDS | {"schema", *extra}) - set(pin), label + " pin lacks " + ", ".join(sorted((CLI_PIN_FIELDS | {"schema", *extra}) - set(pin))))
     need(isinstance(pin, dict) and set(pin) == CLI_PIN_FIELDS | {"schema", *extra} and pin["schema"] == schema
          and re.fullmatch(r"[0-9a-f]{64}", pin["release_sha256"]) and pin["signer_did"].startswith("did:key:z")
          and re.fullmatch(r"Qm[1-9A-HJ-NP-Za-km-z]{44}", pin["head_cid"]),
