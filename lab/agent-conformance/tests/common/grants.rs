@@ -1259,7 +1259,11 @@ impl Controller {
         )
     }
 
-    pub fn check_report(&self, name: &str, observations: &[Observation]) -> Result<()> {
+    pub fn check_report(
+        &self,
+        name: &str,
+        observations: &[Observation],
+    ) -> std::result::Result<(), String> {
         self.check_journey(name, observations, true)
     }
 
@@ -1268,7 +1272,7 @@ impl Controller {
         name: &str,
         observations: &[Observation],
         passed: bool,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), String> {
         // Use the exact lines printed by this controller, including decisions
         // made before a grant token arrived. Recheck with all credentials known.
         let printed = self.printed.borrow();
@@ -1286,7 +1290,7 @@ impl Controller {
                 "fixture read: instance-2",
             ] {
                 if !printed.lines().any(|line| line.starts_with(prefix)) {
-                    return Err("required instance journey evidence is missing");
+                    return Err("required instance journey evidence is missing".into());
                 }
             }
         }
@@ -1295,7 +1299,7 @@ impl Controller {
                 .lines()
                 .any(|line| line.starts_with("absent-policy settlement:"))
         {
-            return Err("required orphan settlement evidence is missing");
+            return Err("required orphan settlement evidence is missing".into());
         }
         if matches!(
             name,
@@ -1306,7 +1310,7 @@ impl Controller {
             .iter()
             .all(|prefix| printed.lines().any(|line| line.starts_with(prefix)))
         {
-            return Err("required session-grant evidence is missing");
+            return Err("required session-grant evidence is missing".into());
         }
         if name == "instance_writes_only_under_own_storage_root" {
             let writes = printed
@@ -1317,13 +1321,21 @@ impl Controller {
                 .lines()
                 .any(|line| line.starts_with("owned root: sibling request "));
             if writes != 2 || !sibling {
-                return Err("required owned-root evidence is missing");
+                return Err("required owned-root evidence is missing".into());
             }
         }
+        let inventory = match report_inventory(name, observations, &printed, passed) {
+            Ok(inventory) => inventory,
+            Err(reason) => {
+                self.check_bytes(reason.as_bytes(), Surface::Report)?;
+                return Err(reason);
+            }
+        };
         self.check_inventory(
-            &report_inventory(name, observations, &printed, passed)?,
+            &inventory,
             &[Surface::Printed, Surface::Report, Surface::Receipt],
         )
+        .map_err(str::to_owned)
     }
 
     fn check_inventory(
@@ -1473,7 +1485,7 @@ fn report_inventory(
     observations: &[Observation],
     printed: &str,
     passed: bool,
-) -> Result<Vec<(Surface, Vec<u8>)>> {
+) -> std::result::Result<Vec<(Surface, Vec<u8>)>, String> {
     let listed = format!("{name}: test\n");
     let result = if passed { "ok" } else { "FAILED" };
     let mut output = format!("{printed}test {name} ... {result}\n");
@@ -1491,13 +1503,43 @@ fn report_inventory(
     // The suite grader still records a missing launch. A no-probe journey
     // scans that receipt; every other refusal still blocks the scan.
     if !report.failures.is_empty() && !launch_gap_only(&report.failures) {
-        return Err("credential check requires a complete report");
+        return Err(format!(
+            "credential check requires a complete report: {}",
+            report.failures.join("; ")
+        ));
     }
     Ok(vec![
         (Surface::Printed, printed.as_bytes().to_vec()),
         (Surface::Report, report.table.into_bytes()),
         (Surface::Receipt, report.receipt_bytes),
     ])
+}
+
+fn memory_observations() -> [Observation; 3] {
+    [
+        Observation::Native {
+            role: "elastos".into(),
+            sha256: "1".repeat(64),
+        },
+        Observation::Native {
+            role: "localhost-provider".into(),
+            sha256: "2".repeat(64),
+        },
+        Observation::Launched {
+            probe: agent_conformance::identity::ProbeIdentity {
+                effect: "default".into(),
+                component_sha256: "3".repeat(64),
+                bundle_lab_cid: capsule_identity::encode_entries(&[
+                    capsule_identity::BundleEntry {
+                        path: "synthetic.bin".into(),
+                        content: "4".repeat(64).into_bytes(),
+                    },
+                ])
+                .unwrap()
+                .to_string(),
+            },
+        },
+    ]
 }
 
 /// Synthetic mutation control. Plant every canary only in an in-memory copy
@@ -1535,30 +1577,7 @@ pub fn assert_memory_surfaces() {
     );
     fs::write(&paths[0][1], b"").unwrap();
     let mut inventory = source_inventory().unwrap();
-    let observations = [
-        Observation::Native {
-            role: "elastos".into(),
-            sha256: "1".repeat(64),
-        },
-        Observation::Native {
-            role: "localhost-provider".into(),
-            sha256: "2".repeat(64),
-        },
-        Observation::Launched {
-            probe: agent_conformance::identity::ProbeIdentity {
-                effect: "default".into(),
-                component_sha256: "3".repeat(64),
-                bundle_lab_cid: capsule_identity::encode_entries(&[
-                    capsule_identity::BundleEntry {
-                        path: "synthetic.bin".into(),
-                        content: "4".repeat(64).into_bytes(),
-                    },
-                ])
-                .unwrap()
-                .to_string(),
-            },
-        },
-    ];
+    let observations = memory_observations();
     inventory.extend(
         report_inventory(
             "default_activation_refuses_without_selector",
@@ -2724,6 +2743,253 @@ mod tests {
         );
     }
 
+    fn memory_report(
+        name: &str,
+        observations: &[Observation],
+        printed: &str,
+        passed: bool,
+    ) -> agent_conformance::report::RunReport {
+        let result = if passed { "ok" } else { "FAILED" };
+        let mut output = format!("{printed}test {name} ... {result}\n");
+        for observation in observations {
+            output.push_str(&observation.line());
+            output.push('\n');
+        }
+        render_run(
+            &format!("{name}: test\n"),
+            &output,
+            passed,
+            GitIdentity::read(&repository()),
+            Some(include_str!("../../GAPS.md")),
+        )
+    }
+
+    #[test]
+    fn controller_reports_the_graders_stale_gap_reason() {
+        let controller = idle_controller(0);
+        let printed = "fixture read: synthetic report evidence\n";
+        controller.print_checked(printed.trim_end()).unwrap();
+        let observations = memory_observations();
+        let name = "ungranted_model_call_is_refused";
+        let cause = "GAPS.md: ungranted_model_call_is_refused: still lists it as blocked";
+        let expected = format!("credential check requires a complete report: {cause}");
+        let report = memory_report(name, &observations, printed, true);
+        assert_eq!(report.failures, [cause]);
+        assert!(report.table.contains(&format!("{name} | FAIL | {cause}\n")));
+        assert!(!report.passed);
+        let receipt: Value = serde_json::from_slice(&report.receipt_bytes).unwrap();
+        assert_eq!(receipt["command_success"], false);
+        for result in [
+            controller.check_report(name, &observations),
+            controller.check_journey(name, &observations, true),
+        ] {
+            assert!(result.is_err(), "stale gap requires a controller refusal");
+            assert_eq!(
+                result.err().as_deref(),
+                Some(expected.as_str()),
+                "stale gap refusal retains the grader reason"
+            );
+        }
+        let healthy = "default_activation_refuses_without_selector";
+        controller.check_report(healthy, &observations).unwrap();
+        controller
+            .check_journey(healthy, &observations, true)
+            .unwrap();
+
+        // A failed model fixture keeps its FAIL grade while scanning can finish.
+        // Synthetic observations supply zero model-call acceptance credit.
+        let failed = memory_report(name, &observations, printed, false);
+        assert!(failed.failures.is_empty());
+        assert!(failed.table.contains(&format!("{name} | FAIL\n")));
+        assert!(!failed.passed);
+        let receipt: Value = serde_json::from_slice(&failed.receipt_bytes).unwrap();
+        assert_eq!(receipt["command_success"], false);
+        controller
+            .check_journey(name, &observations, false)
+            .unwrap();
+    }
+
+    #[test]
+    fn controller_report_refusals_keep_safe_causes() {
+        let controller = idle_controller(0);
+        let name = "default_activation_refuses_without_selector";
+        let printed = "fixture read: synthetic report evidence\n";
+        controller.print_checked(printed.trim_end()).unwrap();
+        let healthy = memory_observations();
+        for (missing, causes) in [
+            (vec![0], vec!["missing Runtime SHA-256"]),
+            (vec![1], vec!["missing localhost-provider SHA-256"]),
+            (
+                vec![0, 1],
+                vec![
+                    "missing Runtime SHA-256",
+                    "missing localhost-provider SHA-256",
+                ],
+            ),
+        ] {
+            let observations: Vec<_> = healthy
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !missing.contains(index))
+                .map(|(_, observation)| observation.clone())
+                .collect();
+            let report = memory_report(name, &observations, printed, true);
+            assert_eq!(
+                report.failures, causes,
+                "grader keeps ordered native causes"
+            );
+            assert!(!report.passed);
+            let receipt: Value = serde_json::from_slice(&report.receipt_bytes).unwrap();
+            assert_eq!(receipt["command_success"], false);
+            let expected = format!(
+                "credential check requires a complete report: {}",
+                report.failures.join("; ")
+            );
+            for result in [
+                controller.check_report(name, &observations),
+                controller.check_journey(name, &observations, true),
+            ] {
+                assert!(
+                    result.is_err(),
+                    "missing identity requires a controller refusal"
+                );
+                let reason = result.unwrap_err();
+                assert_eq!(
+                    reason, expected,
+                    "report refusal retains ordered grader causes"
+                );
+                assert!(
+                    !reason.contains(printed.trim()),
+                    "refusal excludes raw printed text"
+                );
+                for observation in &observations {
+                    assert!(
+                        !reason.contains(&observation.line()),
+                        "refusal excludes observation JSON"
+                    );
+                }
+                assert!(
+                    !reason.contains(&report.table),
+                    "refusal excludes report table bytes"
+                );
+                assert!(
+                    !reason.contains(std::str::from_utf8(&report.receipt_bytes).unwrap()),
+                    "refusal excludes receipt bytes"
+                );
+            }
+            controller.check_report(name, &healthy).unwrap();
+            controller.check_journey(name, &healthy, true).unwrap();
+        }
+    }
+
+    #[test]
+    fn controller_redacts_report_refusal_credentials() {
+        let mut controller = idle_controller(0);
+        let name = "default_activation_refuses_without_selector";
+        controller
+            .print_checked("fixture read: synthetic report evidence")
+            .unwrap();
+        let printed = controller.printed.borrow().clone();
+        let counts = (
+            controller.decisions.matched,
+            controller.decisions.granted,
+            controller.decisions.denied,
+        );
+        let healthy = memory_observations();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let canary = format!("report-canary-{stamp}");
+        controller
+            .remember(&canary)
+            .expect("synthetic report credential registers");
+        let Observation::Launched { probe } = &healthy[2] else {
+            panic!("synthetic fixture has a launched observation");
+        };
+        let mut bad = probe.clone();
+        bad.effect = canary.clone();
+        bad.component_sha256 = "invalid".into();
+        let mut observations = healthy.to_vec();
+        observations.push(Observation::Launched { probe: bad });
+        let report = memory_report(name, &observations, &printed, true);
+        // Keep contaminated details out of assertion output, including under plants.
+        assert!(
+            report.failures == [format!("malformed component SHA-256: {canary}")],
+            "grader retains only the malformed component cause"
+        );
+        assert!(
+            !report.table.contains(&canary),
+            "canary stays outside the table"
+        );
+        for result in [
+            controller.check_report(name, &observations),
+            controller.check_journey(name, &observations, true),
+        ] {
+            assert!(
+                result.as_ref().err().map(String::as_str)
+                    == Some("fixture credential detected: report"),
+                "detailed refusal credential returns the fixed report reason"
+            );
+            assert!(
+                *controller.printed.borrow() == printed,
+                "refusal preserves printed evidence"
+            );
+            assert!(
+                (
+                    controller.decisions.matched,
+                    controller.decisions.granted,
+                    controller.decisions.denied
+                ) == counts,
+                "refusal preserves decision counters"
+            );
+        }
+        controller
+            .check_report(name, &healthy)
+            .expect("repaired report scans");
+        controller
+            .check_journey(name, &healthy, true)
+            .expect("repaired journey scans");
+        assert!(
+            *controller.printed.borrow() == printed,
+            "recovery preserves printed evidence"
+        );
+        assert!(
+            (
+                controller.decisions.matched,
+                controller.decisions.granted,
+                controller.decisions.denied
+            ) == counts,
+            "recovery preserves decision counters"
+        );
+
+        // Complete reports still scan printed and receipt surfaces through the
+        // shared inventory checker. Both controls keep contaminated bytes in memory.
+        controller.printed.borrow_mut().push_str(&canary);
+        let result = controller.check_report(name, &healthy);
+        assert!(
+            result.as_ref().err().map(String::as_str)
+                == Some("fixture credential detected: printed journey"),
+            "accepted report still scans printed evidence"
+        );
+        *controller.printed.borrow_mut() = printed.clone();
+        let mut receipt_observations = healthy.to_vec();
+        let mut receipt_probe = probe.clone();
+        receipt_probe.effect = canary;
+        receipt_observations.push(Observation::Launched {
+            probe: receipt_probe,
+        });
+        let result = controller.check_journey(name, &receipt_observations, true);
+        assert!(
+            result.as_ref().err().map(String::as_str)
+                == Some("fixture credential detected: version receipt"),
+            "accepted report still scans receipt evidence"
+        );
+        controller
+            .check_report(name, &healthy)
+            .expect("clean report recovers after scans");
+    }
+
     #[test]
     fn no_probe_receipt_is_scanned_and_other_gaps_are_refused() {
         assert!(launch_gap_only(&["missing launched probe identity".into()]));
@@ -2760,7 +3026,7 @@ mod tests {
                 true,
             )
             .err(),
-            Some("credential check requires a complete report")
+            Some("credential check requires a complete report: missing Runtime SHA-256; missing launched probe identity".into())
         );
     }
 
@@ -3356,7 +3622,7 @@ mod tests {
                 .join("\n");
             assert_eq!(
                 controller.check_journey("two_instances_overlap_with_separate_grants", &[], true),
-                Err("required instance journey evidence is missing")
+                Err("required instance journey evidence is missing".into())
             );
         }
         for (kill, name, prefix) in [
@@ -3386,7 +3652,7 @@ mod tests {
                     .join("\n");
                 assert_eq!(
                     controller.check_journey(name, &[], true),
-                    Err("required instance journey evidence is missing")
+                    Err("required instance journey evidence is missing".into())
                 );
             }
         }
@@ -3394,7 +3660,7 @@ mod tests {
         controller.printed.borrow_mut().clear();
         assert_eq!(
             controller.check_journey("no_policy_file_does_not_mean_allow", &[], true),
-            Err("required orphan settlement evidence is missing")
+            Err("required orphan settlement evidence is missing".into())
         );
     }
 
@@ -3551,7 +3817,7 @@ mod tests {
                 &natives,
                 false,
             ),
-            Err("required owned-root evidence is missing")
+            Err("required owned-root evidence is missing".into())
         );
         controller
             .print_checked(&format!(
@@ -3569,7 +3835,7 @@ mod tests {
                 &natives,
                 false,
             ),
-            Err("required owned-root evidence is missing")
+            Err("required owned-root evidence is missing".into())
         );
         controller
             .print_checked(&format!(

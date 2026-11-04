@@ -12675,3 +12675,235 @@ supervisor rerun and required independent reviews. Next owner: lane supervisor.
 172 round 3: Preserved the command-source tests and caught-plant proof, passed
 the exact cleanup rerun, all 25 report tests, the full locked lane gate and
 the fresh report/receipt gate with existing blockers intact.
+
+
+## 174 — Controller keeps safe report refusal causes
+
+Supplied HEAD: `026ecb4c61ba0649655c4916b606cb0d78337f32`.
+Supplied tree: `f0d18337d98141d8f78ac2e43e40a5e395087647`.
+Supplied dirty paths: none. The supplied branch is
+`spark/cx-agent-conformance/174-controller-keeps-safe-report-refusals`;
+it has no upstream. Cached `spike/spike/agent-host` divergence is 0 base-only
+and 12 HEAD-only commits. The network restriction leaves current remote
+verification with the supervisor. The supplied checkout and unrelated work
+keep their owners. The existing ignored task-174 proof inventory describes
+an earlier candidate; this run records its own source and results.
+
+Read task 174, the supplied BACKLOG item 14 follow-up, LOG sections 034 and
+036, RUNBOOK's BLOCKED and credential-evidence paragraphs, the architecture's
+Harness conformance section, and the existing controller, grader and identity
+checks. The repository skill search found no humanizer source. This record
+uses direct actor and ownership statements.
+
+Plan: retain `RunReport::failures` in the existing completeness refusal,
+allow owned errors only in `report_inventory`, `check_report` and
+`check_journey`, and check detailed errors through `check_bytes` as Report.
+Add memory-only stale-GAPS, missing-native, credential-refusal and recovery
+controls. Hand-run the three compiling plants separately, restore exact
+source bytes between them, then run controller, report, Agent Host compile,
+formatting, diff, full locked lane and run.sh gates. Use the existing shared
+heavy-build lease, offline Cargo, RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0,
+a 600-second bound per command, and the 12 GiB estimate plus 2 GiB reserve.
+The supplied launch-gap exception remains as found; task 161's restriction
+and task 173's completion policy are absent here and retain their own gates.
+Final tracked edits stay in tests/common/grants.rs, RUNBOOK's existing
+credential-evidence paragraph and this section.
+
+### Change and memory-only controls
+
+`report_inventory` keeps its one render call and existing launch-gap exception.
+Its refusal appends only the supplied `RunReport::failures`, joined by `; `.
+`check_journey` checks that error with `check_bytes(..., Surface::Report)`
+before return; `check_report` delegates to it. The remaining error APIs keep
+the static alias. Early printed-evidence and scan reasons retain their bytes.
+`memory_observations` shares assert_memory_surfaces' existing native/default
+fixture, including encode_entries' valid bundle CID, with the new tests.
+`memory_report` supplies synthetic inputs to the existing renderer for test
+comparisons; the grader owns every evidence decision.
+
+`controller_reports_the_graders_stale_gap_reason` checks both entrypoints'
+exact stale-row cause, the single render failure, FAIL row, false command
+success, healthy recovery and the failed-model fixture's unchanged FAIL
+grade while scanning completes. These fixtures give zero model-call credit.
+`controller_report_refusals_keep_safe_causes` removes Runtime, provider and
+both native observations, checks ordered reasons through both entrypoints,
+excludes raw printed/observation/table/receipt bytes and repairs each input
+through the same controller. `controller_redacts_report_refusal_credentials`
+registers a valid effect-label canary in memory, adds a malformed component
+hash beside the healthy launch, and requires the fixed Report refusal from
+both entrypoints. It preserves the printed buffer and decision counters,
+repairs that input, then proves complete-report printed and receipt scans.
+All canary comparisons use boolean assertions with fixed labels. These new
+tests start zero Runtime, provider or listener processes. The native-only
+exception control changes only its owned, detailed-error expectation.
+RUNBOOK's existing credential-evidence paragraph explains safe causes and
+the shared scan. GAPS, ignored product tests, report/schema, runner and
+falsifier registration retain their supplied bytes.
+
+### Baseline and three separate compiling plants
+
+All commands used offline Cargo, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`,
+existing target/host and target/host-build outputs, and current task-local
+TMPDIR. An exclusive shared `fcntl.flock` lease covered each sequential
+batch on a read-only descriptor; children inherited zero lease descriptors.
+The baseline acquired it with 26.530 GiB free; plants with 26.526 GiB. Every
+command checked the 12 GiB estimate plus 2 GiB reserve and had a 600-second
+bound with command-group settlement on interruption. The parent saved the
+healthy source in memory, required one exact old match and restored those
+bytes in finally before the next plant. Each named selection ran one test.
+
+Exact UTF-8 old/new strings for tests/common/grants.rs:
+
+```json
+[
+  {
+    "name": "former-generic-refusal",
+    "old": "        return Err(format!(\n            \"credential check requires a complete report: {}\",\n            report.failures.join(\"; \")\n        ));",
+    "new": "        return Err(\"credential check requires a complete report\".into());",
+    "tests": [
+      "controller_reports_the_graders_stale_gap_reason",
+      "controller_report_refusals_keep_safe_causes"
+    ]
+  },
+  {
+    "name": "bypass-report-gate",
+    "old": "    if !report.failures.is_empty() && !launch_gap_only(&report.failures) {",
+    "new": "    if false && !report.failures.is_empty() && !launch_gap_only(&report.failures) {",
+    "tests": [
+      "controller_reports_the_graders_stale_gap_reason",
+      "controller_report_refusals_keep_safe_causes"
+    ]
+  },
+  {
+    "name": "bypass-refusal-credential-check",
+    "old": "                self.check_bytes(reason.as_bytes(), Surface::Report)?;",
+    "new": "                // Plant: return the detailed refusal without its credential check.",
+    "tests": [
+      "controller_redacts_report_refusal_credentials"
+    ]
+  }
+]
+```
+
+Exact commands, exits and elapsed seconds:
+
+| Phase | Command | Exit | Seconds |
+| --- | --- | --- | --- |
+| baseline-controller_reports_the_graders_stale_gap_reason | `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_reports_the_graders_stale_gap_reason -- --exact` | 0 | 2.63 |
+| baseline-controller_report_refusals_keep_safe_causes | `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_report_refusals_keep_safe_causes -- --exact` | 0 | 0.552 |
+| baseline-controller_redacts_report_refusal_credentials | `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_redacts_report_refusal_credentials -- --exact` | 0 | 0.323 |
+| former-generic-refusal-controller_reports_the_graders_stale_gap_reason | `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_reports_the_graders_stale_gap_reason -- --exact` | 101 | 2.33 |
+| former-generic-refusal-controller_report_refusals_keep_safe_causes | `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_report_refusals_keep_safe_causes -- --exact` | 101 | 0.205 |
+| bypass-report-gate-controller_reports_the_graders_stale_gap_reason | `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_reports_the_graders_stale_gap_reason -- --exact` | 101 | 1.391 |
+| bypass-report-gate-controller_report_refusals_keep_safe_causes | `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_report_refusals_keep_safe_causes -- --exact` | 101 | 0.205 |
+| bypass-report-gate-grader-control | `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report gaps_listed_test_that_passes_fails -- --exact` | 0 | 0.755 |
+| bypass-refusal-credential-check-controller_redacts_report_refusal_credentials | `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_redacts_report_refusal_credentials -- --exact` | 101 | 1.338 |
+
+Both generic-error plants failed their exact reason assertions:
+`stale gap refusal retains the grader reason` and
+`report refusal retains ordered grader causes`. Both gate-bypass selections
+failed their refusal assertions: `stale gap requires a controller refusal`
+and `missing identity requires a controller refusal`. The unchanged
+`gaps_listed_test_that_passes_fails` report test passed under that bypass.
+The detailed-error scan bypass failed only at the safe label
+`detailed refusal credential returns the fixed report reason`. Each required
+plant test exited 101 with one failed test. Every plant compiled and ran its
+named assertion; setup and empty selections supply zero caught credit.
+Exact source restoration after each plant was checked; restored SHA-256 is
+`2b62441d91177bb327f7bf5df9c87311c7d4a830398189374d17c3ff41977089`.
+
+The sandbox loopback preflight returned Operation not permitted before
+controller regressions; this is infrastructure evidence. The host retry
+will use the same lease, free-space rule and command bounds.
+
+### Principles check
+
+Paths are relative to lab/agent-conformance/.
+
+| Question | Answer | Evidence |
+| --- | --- | --- |
+| 1. New name or URL in place of a code/content hash? | No | tests/common/grants.rs:1530 retains the complete synthetic bundle CID from encode_entries and a separate component SHA-256. |
+| 2. Capsule, Home or UI gains ambient authority? | No | tests/common/grants.rs:1327 changes only report refusal handling; the controller's existing inventory owns output checks. |
+| 3. Second path or copy of an operation rule? | No | tests/common/grants.rs:1508 uses the existing grader's failure list; line 1330 calls the existing credential checker. |
+| 4. Runtime core grows? | No | tests/common/grants.rs:1262 keeps error handling in the lab controller; the three-file diff stays under this lane. |
+| 5. New refusals fail closed with a clear cause? | Yes | tests/common/grants.rs:1330 checks refusal bytes before returning the grader reason, with the fixed Report detection reason. |
+| 6. Capsule logic stays inside and calls through granted Bus operations? | Yes | probe/src/lib.rs:145 retains providers::invoke with the grant ID after the capability request; this task preserves those bytes. |
+| 7. Tests and caught plants prove each new rule? | Yes | tests/common/grants.rs:2768, :2813 and :2886 are the three named controls; each required plant failure is recorded above. |
+| 8. Identity, admission and allowance remain separate? | Yes | tests/common/grants.rs:2895 snapshots decision counters; the report fixtures change zero admission, grant or budget decisions. Runtime keeps those owners. |
+
+### Restored gates
+
+Host loopback preflight passed. The host batch acquired the existing shared
+lease with 26.504 GiB free and used the same offline environment, output
+paths, per-command 14 GiB free-space gate and 600-second bounds. Each
+command below exited 0. No source correction or outer rerun was needed.
+
+| Check | Exact command | Exit | Seconds |
+| --- | --- | --- | --- |
+| restored-controller_reports_the_graders_stale_gap_reason | `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_reports_the_graders_stale_gap_reason -- --exact` | 0 | 2.489 |
+| restored-controller_report_refusals_keep_safe_causes | `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_report_refusals_keep_safe_causes -- --exact` | 0 | 0.538 |
+| restored-controller_redacts_report_refusal_credentials | `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_redacts_report_refusal_credentials -- --exact` | 0 | 0.316 |
+| controller-regressions | `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests` | 0 | 10.163 |
+| report-target | `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report` | 0 | 0.999 |
+| agent-host-compile | `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --features agent-host --test agent_host --no-run` | 0 | 1.3 |
+| lane-format | `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` | 0 | 0.243 |
+| diff-check | `git diff --check` | 0 | 0.025 |
+| full-locked-lane | `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` | 0 | 263.959 |
+
+The three named tests passed baseline and restored. Controller regressions
+passed 43 tests, including native-only scan policy, existing early evidence
+refusals and fixed credential reasons. The report target passed 25 tests.
+The opt-in Agent Host target compiled. The full locked lane gate passed
+261 tests with zero failures and 14 existing blocked ignores in 263.959 s.
+Its attach_secret_stays_in_memory journey reran the shared printed/receipt
+credential controls and actual captured-output coverage. This is author
+verification; independent reviews remain with the supervisor.
+
+The repository's basic checks also exited 0: git diff --check,
+node scripts/check-product-data.mjs, node --test scripts/check-product-data.test.mjs
+(99 passed), cargo fmt --all -- --check from elastos/, and
+cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check.
+Source-byte comparisons prove that src/report.rs, GAPS.md, Cargo.toml,
+Cargo.lock, run.sh and falsifiers.json match supplied HEAD. The existing
+check_inventory, check_bytes, Surface refusals and launch_gap_only function
+blocks also match supplied HEAD exactly.
+
+The final `lab/agent-conformance/run.sh` exited 0 in 265.462 s.
+Its table has **262 PASS, 14 BLOCKED, 0 FAIL, 0 SKIPPED** rows, including
+the three new controller tests and A14. No retry was needed. The receipt is
+local and uncommitted at `target/run-table.Xd8P3r/VERSIONS.json`, SHA-256
+`bde6425639a8f4af547eaab9a09d8932a4758d2752b88cb97ee6e2879c76e69e`. Its report-table SHA-256 matches the table bytes, identity
+is complete, missing_or_invalid is empty, both success flags are true, and
+suite_outcome remains BLOCKED. It names supplied HEAD with dirty: true and
+holds 16 launched and 15 build-only probe identities. The model row stays
+BLOCKED (RT3); the synthetic controls supply zero model-call product credit.
+
+The gate created one retained directory, the successful run-table receipt.
+`/usr/sbin/lsof -t +D <current run-table directory>` exited 1 with zero open
+file holders. The gate left zero new retained Home directories. The existing
+local task lifecycle inventory preserves prior candidates and records the
+current proof captures and receipt for supervisor review, then removal.
+The completed parent released its lease; immediate read-only acquisition
+confirmed availability. Final observed free space was 26.297 GiB.
+
+Final branch/worktree inventory: supplied HEAD and tree unchanged; the three
+permitted files are dirty. The active task branch has no upstream and owns
+this unique review candidate. Cached lab-base divergence remains 0 base-only
+and 12 HEAD-only commits; current remote verification stays with the
+supervisor under the network restriction. Other refs and worktrees retain
+their owners. The source SHA-256 still equals the restored candidate above.
+The builder made source edits and ran checks; Git history and refs retain
+their supplied state.
+
+Candidate: supplied HEAD/tree plus the three-file working diff above.
+Exercised checks: the baseline, plants, restored commands and basic gate
+listed here. Installed-product and Browser checks belong to their separate
+owners; this task changes lab report diagnostics.
+Review links: independent reviews pending with the supervisor.
+Installed release evidence: memory-only diagnostic proof and the existing
+isolated lane journeys; product acceptance retains its existing gates.
+Remaining gate: supervisor verification and independent reviews.
+Next owner: lane supervisor.
+
+174: Controller refusals retain ordered grader causes, scan detailed errors
+and prove refusal and recovery with three caught, restored plants.

@@ -422,8 +422,13 @@ journey checks its actual attach secret, shell token and returned grant tokens
 against every expected stdout/stderr pair, the report table, the serialized
 version receipt, committed lane blobs and candidate lane source files.
 `render_run` produces the same table and receipt bytes used by `write_run`,
-so credential acceptance can check both outputs in memory. Runtime owns the
-original coordinates file; it remains the controller's input. Harness copies
+so credential acceptance can check both outputs in memory. A controller report
+refusal keeps the grader's ordered causes after `credential check requires a
+complete report: `. The controller checks that detailed error with the same
+credential checker as a report surface before returning it. Detection returns
+only `fixture credential detected: report`; repaired evidence can use the same
+controller again. Accepted reports keep the printed, table and receipt scan.
+Runtime owns the original coordinates file; it remains the controller's input. Harness copies
 stay in memory and reach the loopback HTTP calls directly. Process arguments,
 environment entries and output files carry paths or public evidence only.
 
