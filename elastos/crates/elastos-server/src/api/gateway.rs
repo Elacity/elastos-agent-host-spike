@@ -401,8 +401,8 @@ fn home_launch_token_context_from_parts(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
+    let auth_data_dir = gateway_home_token::home_launch_auth_data_dir(data_dir);
     if let Some(proof_binding_id) = proof_binding_id.as_deref() {
-        let auth_data_dir = gateway_home_token::home_launch_auth_data_dir(data_dir);
         let grant = crate::auth::load_active_session_grant(&auth_data_dir, session_id, now_ts())?;
         if grant.principal_id != principal_id
             || grant.proof_binding_id != proof_binding_id
@@ -411,7 +411,7 @@ fn home_launch_token_context_from_parts(
             anyhow::bail!("home launch token authority context mismatch");
         }
     }
-    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, principal_id)?;
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, &auth_data_dir, principal_id)?;
     Ok(HomeLaunchTokenContext::resolved(
         root,
         principal_id.to_string(),
