@@ -3060,7 +3060,8 @@ class PreviousReleaseInstallTests(unittest.TestCase):
                                            "release_cid": observer.cli_v0_cid(raw), "release_sha256": hashlib.sha256(raw).hexdigest(),
                                            "head_cid": observer.cli_v0_cid(b"pinned head"), "signer_did": envelope["signer_did"]})
         data = '"$HOME"/' + shlex.quote(observer.CLI_DATA)
-        current.write_text("#!/bin/bash\nset -eu\ncase $1 in\nsetup) exit ;;\n"
+        current.write_text("#!/bin/bash\nset -eu\ncase $1 in\nsetup) echo \"$*\" > " + shlex.quote(str(root / "setup-argv"))
+                           + "; exit ;;\n"
                            "update) [ \"$2 $3 $4\" = '--rollback-to " + observer.cli_v0_cid(b"pinned head") + " --yes' ] ;;\n*) exit 1 ;;\nesac\n"
                            "cp -R " + shlex.quote(str(installed)) + "/. " + data + "/\n"
                            "cp " + shlex.quote(str(pinned)) + ' "$HOME/.local/bin/elastos.new"\n'
@@ -3098,6 +3099,18 @@ class PreviousReleaseInstallTests(unittest.TestCase):
             observer.cli_qualified_home(support, self.PLATFORM, name)
         self.assertEqual({name: (support / "bin" / name).read_bytes() for name in fixture["natives"]}, fixture["natives"])
         self.assertFalse((fixture["root"] / "home").exists())
+
+    def test_setup_selects_both_protected_providers_and_custody_like_upstream(self):
+        fixture = self.published("setup-argv")
+        self.install(fixture)
+        self.assertEqual((fixture["root"] / "setup-argv").read_text().split(), [
+            "setup", "--profile", "home", "--with", ",".join((*observer.CLI_PROTECTED_PROVIDERS, "custody-provider"))])
+
+    def test_rollback_refuses_a_listed_provider_with_no_installed_file(self):
+        fixture = self.published("p-absent")
+        (fixture["installed"] / "bin/protected-content-protect-provider").unlink()
+        with self.assertRaisesRegex(ValueError, "protected-content-protect-provider-.* is not installed"):
+            self.install(fixture)
 
     def test_rollback_refuses_installed_bytes_that_differ_from_the_pin_or_their_signed_hash(self):
         def tamper(relative):
