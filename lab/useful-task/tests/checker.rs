@@ -4,7 +4,8 @@ use serde_json::{json, Value};
 use useful_task::{judge, load_spec, sha256_hex, Schema, Verdict};
 
 const M1: &str = "A4: Each agent completes one useful task through real Runtime resources (model via a Runtime grant, DeepSeek on the Sparks); the permitted effect succeeds (granted_effect_succeeds).";
-const REASONS: [&str; 7] = [
+const REASONS: [&str; 8] = [
+    "task",
     "input",
     "recorded",
     "empty",
@@ -201,6 +202,72 @@ fn checker_accepts_recorded_answer_and_refuses_stubs() {
     assert_eq!(
         judge(&b_spec, &b_input, &b_recorded, &b_recorded),
         accepted(&b_recorded)
+    );
+
+    let mut other_m1 = parsed(&read("tasks/agent-a/accept.json"));
+    other_m1
+        .as_object_mut()
+        .unwrap()
+        .insert("m1".to_owned(), json!("other"));
+    let other_m1 = load_spec(&other_m1.to_string()).expect("the other-m1 spec parses");
+    assert_eq!(
+        judge(&other_m1, &a_input, &a_recorded, &a_recorded),
+        refused("task"),
+        "a spec with another m1 is not a named task"
+    );
+
+    let a_substitute_input = "The stall on Pine Street opens at 10:00.";
+    let a_substitute_recorded = r#"{"place":"Pine Street","goods":"pears","close":"14:00"}"#;
+    let mut a_substitute = parsed(&read("tasks/agent-a/accept.json"));
+    {
+        let object = a_substitute.as_object_mut().unwrap();
+        object.insert(
+            "input_sha256".to_owned(),
+            json!(sha256_hex(a_substitute_input)),
+        );
+        object.insert(
+            "recorded_sha256".to_owned(),
+            json!(sha256_hex(a_substitute_recorded)),
+        );
+    }
+    let a_substitute =
+        load_spec(&a_substitute.to_string()).expect("the agent-a substitute spec parses");
+    assert_eq!(
+        judge(
+            &a_substitute,
+            a_substitute_input,
+            a_substitute_recorded,
+            a_substitute_recorded
+        ),
+        refused("task"),
+        "a self-consistent agent-a substitute is not a named task"
+    );
+
+    let b_substitute_input = "2026-04-01 other stall";
+    let b_substitute_recorded = r#"{"items":[{"date":"2026-04-01","text":"other stall"}]}"#;
+    let mut b_substitute = parsed(&read("tasks/agent-b/accept.json"));
+    {
+        let object = b_substitute.as_object_mut().unwrap();
+        object.insert(
+            "input_sha256".to_owned(),
+            json!(sha256_hex(b_substitute_input)),
+        );
+        object.insert(
+            "recorded_sha256".to_owned(),
+            json!(sha256_hex(b_substitute_recorded)),
+        );
+    }
+    let b_substitute =
+        load_spec(&b_substitute.to_string()).expect("the agent-b substitute spec parses");
+    assert_eq!(
+        judge(
+            &b_substitute,
+            b_substitute_input,
+            b_substitute_recorded,
+            b_substitute_recorded
+        ),
+        refused("task"),
+        "a self-consistent agent-b substitute is not a named task"
     );
 
     let a_changed = a_input.replacen("Oak", "Ook", 1);
