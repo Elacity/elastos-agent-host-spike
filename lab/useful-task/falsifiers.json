@@ -1,20 +1,6 @@
 {
-  "about": "Useful-task falsifiers. Paths are relative to examples/agent-host. Replace the old text exactly once; the named test must run and fail, then pass after restoring the original bytes. The command is useful-task. F-UT1 plants the unconditional accept as the first statement of judge, the hand plant in LOG.md 001.",
+  "about": "Useful-task falsifiers. Paths are relative to examples/agent-host. The lane gate runs this file only. F-UT2 skips the named-task check. F-UT1 and F-UT3 stay in held-judge-plants.json until PROVIDER_TARGETS includes lab/useful-task/src/lib.rs.",
   "falsifiers": [
-    {
-      "id": "F-UT1",
-      "title": "accept every answer before the judge reads it",
-      "command": "useful-task",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "../../lab/useful-task/src/lib.rs",
-          "old": "    let trimmed = answer.trim();\n",
-          "new": "    return Verdict::Accept { answer_sha256: sha256_hex(answer.trim()) };\n    let trimmed = answer.trim();\n"
-        }
-      ],
-      "tests": ["checker_accepts_recorded_answer_and_refuses_stubs"]
-    },
     {
       "id": "F-UT2",
       "title": "skip the named-task check",
@@ -25,20 +11,6 @@
           "file": "../../lab/useful-task/src/lib.rs",
           "old": "            Reason::Task => !is_named_task(spec),\n",
           "new": "            Reason::Task => false,\n"
-        }
-      ],
-      "tests": ["checker_accepts_recorded_answer_and_refuses_stubs"]
-    },
-    {
-      "id": "F-UT3",
-      "title": "skip the duplicate-key check",
-      "command": "useful-task",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "../../lab/useful-task/src/lib.rs",
-          "old": "            Reason::Duplicate => matches!(parsed, AnswerParse::Duplicate),\n",
-          "new": "            Reason::Duplicate => false,\n"
         }
       ],
       "tests": ["checker_accepts_recorded_answer_and_refuses_stubs"]
