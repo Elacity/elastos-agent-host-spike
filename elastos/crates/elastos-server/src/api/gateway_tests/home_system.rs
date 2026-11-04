@@ -13025,6 +13025,49 @@ async fn gateway_context_resolves_a_person_stored_in_the_auth_store() {
     assert_eq!(context.unwrap().principal_id, "person:home-cli-test");
 }
 
+/// Proof-bound row (Rong 0344 L-1499-1): with a proof binding, the active
+/// session grant is loaded from the same trusted auth dir as the principal.
+/// A grant stored only in the runtime data dir does not count.
+#[tokio::test]
+async fn gateway_context_checks_a_proof_bound_grant_in_the_auth_store() {
+    let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
+    let (dir, auth) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let _auth = set_test_home_launch_auth_data_dir(auth.path());
+    store_home_cli_principal(auth.path());
+    let now = now_ts();
+    let grant = AuthSessionGrantV1 {
+        schema: AuthSessionGrantV1::SCHEMA.to_string(),
+        grant_id: "grant:home-cli-test".to_string(),
+        session_id: "auth:home-cli-test".to_string(),
+        principal_id: "person:home-cli-test".to_string(),
+        proof_binding_id: "proof:passkey:home-cli-test".to_string(),
+        issued_at: now,
+        expires_at: now + 300,
+        apps: vec![HOME_CAPSULE_ID.to_string()],
+    };
+    let context_from = || {
+        home_launch_token_context_from_parts(
+            dir.path(),
+            "person:home-cli-test",
+            "auth:home-cli-test",
+            Some("proof:passkey:home-cli-test"),
+            "grant:home-cli-test",
+        )
+    };
+    crate::auth::store_session_grant(dir.path(), grant.clone()).unwrap();
+    assert!(context_from()
+        .unwrap_err()
+        .to_string()
+        .contains("auth session not found"));
+    crate::auth::store_session_grant(auth.path(), grant).unwrap();
+    let context = context_from().unwrap();
+    assert_eq!(context.principal_id, "person:home-cli-test");
+    assert_eq!(
+        context.proof_binding_id.as_deref(),
+        Some("proof:passkey:home-cli-test")
+    );
+}
+
 /// Converse (Codex r1 #1462): a record only in the runtime data dir, not the
 /// selected auth store, refuses; the runtime dir is not a principal store.
 #[tokio::test]

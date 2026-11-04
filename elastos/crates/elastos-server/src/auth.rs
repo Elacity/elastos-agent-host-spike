@@ -16007,6 +16007,48 @@ pub(crate) mod tests {
         assert!(!resolved.0.contains("UsersAI"));
     }
 
+    /// P6 (Codex r1 #1462, Rong 1158 sec. 3): a stored Agent resolves to its
+    /// UsersAI root, never a person's Users root. The record is minted the way
+    /// `agent_principal_owns_the_usersai_root` mints one; no production API
+    /// mints an Agent kind yet.
+    #[test]
+    fn resolved_root_of_a_stored_agent_is_usersai_never_users() {
+        let (data_dir, auth_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let now = now_ts();
+        let binding =
+            ProofBinding::evm_account(20, "0x3333333333333333333333333333333333333333", now);
+        let record = upsert_principal_for_binding(auth_dir.path(), binding, now).unwrap();
+        let id = record.principal_id.clone();
+        mutate_auth_state(auth_dir.path(), |state| {
+            let stored = state
+                .principals
+                .iter_mut()
+                .find(|p| p.principal_id == id)
+                .unwrap();
+            stored.kind = PrincipalKind::Agent;
+            Ok(())
+        })
+        .unwrap();
+        let resolved =
+            ResolvedPrincipalRoot::resolve(data_dir.path(), auth_dir.path(), &id).unwrap();
+        assert_eq!(
+            resolved.0,
+            principal_kind_localhost_root(&id, PrincipalKind::Agent)
+        );
+        assert_ne!(resolved.0, principal_localhost_root(&id));
+    }
+
+    /// Resolution only reads the device identity; it never mints one (Codex
+    /// r1 #1462, Rong 1158 sec. 3).
+    #[test]
+    fn resolved_root_creates_no_device_identity() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let resolved =
+            ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), "person:local:nobody");
+        assert!(resolved.is_err());
+        assert!(!data_dir.path().join("identity").exists());
+    }
+
     #[test]
     fn resolved_root_refuses_a_foreign_device_id() {
         let data_dir = tempfile::tempdir().unwrap();
