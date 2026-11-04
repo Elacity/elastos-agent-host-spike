@@ -3538,7 +3538,9 @@ mod tests {
     /// production store API in the data dir the guarded call reads, so
     /// `ResolvedPrincipalRoot::resolve` reads a real record instead of refusing
     /// "has no stored record". Every caller scopes HOME/XDG_DATA_HOME to its
-    /// temp dir first, so this writes nothing outside the temp tree.
+    /// temp dir first and derives `data_dir` from `default_data_dir()`, so the
+    /// stored record, the session lookup and `from_parts` share one dir and
+    /// this writes nothing outside the temp tree.
     fn store_home_cmd_test_principal(data_dir: &Path, principal_id: &str) {
         fs::create_dir_all(data_dir).unwrap();
         let now = elastos_server::auth::now_ts();
@@ -3768,11 +3770,13 @@ mod tests {
     async fn gateway_owned_home_snapshot_uses_admitted_summary_shared_facts() {
         let _guard = HOME_CMD_ENV_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
+        let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
         // The env names the principal the store holds: a failure here leaves the
         // test without a stored record, rather than with a poisoned env.
-        let data_dir = temp.path().join("data");
+        let data_dir = default_data_dir();
         store_home_cmd_test_principal(&data_dir, "person:v07-admin");
         let _principal = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
@@ -3864,17 +3868,25 @@ mod tests {
         assert_eq!(snapshot.notifications.unread_count, 1);
         assert_eq!(snapshot.notifications.attention_count, 1);
         assert_eq!(snapshot.active_shell["active"], "home-cli");
+        // The lookup must read this temp dir's authority, not another Home's.
+        assert_eq!(snapshot.session.mode, "browser_pty");
+        assert_eq!(
+            snapshot.session.passkey_state,
+            "launch-token authorized browser Home session"
+        );
     }
 
     #[tokio::test]
     async fn gateway_owned_home_snapshot_rejects_unsigned_summary_authority() {
         let _guard = HOME_CMD_ENV_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
+        let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
         // The env names the principal the store holds: a failure here leaves the
         // test without a stored record, rather than with a poisoned env.
-        let data_dir = temp.path().join("data");
+        let data_dir = default_data_dir();
         store_home_cmd_test_principal(&data_dir, "person:v07-admin");
         let _principal = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
@@ -3937,11 +3949,13 @@ mod tests {
     async fn gateway_owned_home_snapshot_rejects_mismatched_summary_authority() {
         let _guard = HOME_CMD_ENV_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
+        let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
         // The env names the principal the store holds: a failure here leaves the
         // test without a stored record, rather than with a poisoned env.
-        let data_dir = temp.path().join("data");
+        let data_dir = default_data_dir();
         store_home_cmd_test_principal(&data_dir, "person:v07-admin");
         let _principal = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
