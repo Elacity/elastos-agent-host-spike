@@ -3539,9 +3539,9 @@ mod tests {
     /// `ResolvedPrincipalRoot::resolve` reads a real record instead of refusing
     /// "has no stored record". The caller passes a `data_dir` inside its own
     /// temp dir: either `default_data_dir()` after scoping HOME/XDG_DATA_HOME to
-    /// that temp dir, or `temp.path()` directly. The v07-admin callers assert
-    /// their derived dir is under the temp dir, so this writes nothing outside
-    /// the temp tree.
+    /// that temp dir, or `temp.path()` directly. Every caller that derives it
+    /// from `default_data_dir()` asserts it is under the temp dir before its
+    /// first write, so this writes nothing outside the temp tree.
     fn store_home_cmd_test_principal(data_dir: &Path, principal_id: &str) {
         fs::create_dir_all(data_dir).unwrap();
         let now = elastos_server::auth::now_ts();
