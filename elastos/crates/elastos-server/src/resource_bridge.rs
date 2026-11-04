@@ -478,9 +478,14 @@ fn protected_principal_root_resource_response(
     let rooted = principal_root_read_write_uri(operation, request)?;
 
     let Some(principal_id) = bridge_ctx.principal_id.as_deref() else {
+        let area = if rooted.starts_with("localhost://UsersAI/") {
+            "localhost://UsersAI"
+        } else {
+            "localhost://Users"
+        };
         return Some(resource_error_response(
             "principal_context_required",
-            "localhost://Users requires a principal-scoped launch context",
+            &format!("{area} requires a principal-scoped launch context"),
         ));
     };
     let data_dir = bridge_ctx.data_dir.as_deref();
@@ -1767,6 +1772,21 @@ mod tests {
         assert_eq!(refused["code"], "principal_context_required", "{refused}");
         let message = refused["message"].as_str().unwrap();
         assert!(message.starts_with("localhost://Users roots"), "{message}");
+    }
+
+    /// A5-S3c-0a (Q3): with no principal, the protected path names the
+    /// area it refuses.
+    #[test]
+    fn the_protected_path_names_the_area_it_refuses_without_a_principal() {
+        let ctx = bridge_context();
+        let need = " requires a principal-scoped launch context";
+        for area in ["localhost://Users", "localhost://UsersAI"] {
+            let path = format!("{area}/000000000000000000000000/a.md");
+            let request = serde_json::json!({"path": path, "content": "x"});
+            let r = protected_principal_root_resource_response(&ctx, "write", &request).unwrap();
+            assert_eq!(r["code"], "principal_context_required", "{r}");
+            assert_eq!(r["message"], format!("{area}{need}"), "{r}");
+        }
     }
 
     /// Codex FOLLOWUP (a) on #1442: UsersAI refusals with no principal.
