@@ -1,8 +1,8 @@
 {
-  "head_cid": "QmVAGsL25vrRftVC2UoBSfABmP9EZ21aD6Zz7rg7DdafB1",
-  "release_cid": "Qmd66XGaS59seEFo5Xa4yixdxHUEjU2hPR7H5ZdZia2nUi",
-  "release_sha256": "b53ec42d870e93bdb18c42a6fe7c2f73786fe77ca49bf159f3f646681157505a",
+  "head_cid": "QmYbAEVvKj9B6zi3Au3XfwssU2ukH3VsPz5BFMdmiK4A7j",
+  "release_cid": "QmfKYcyaECzckWSHHXbWTdQHc4FNRQXjz2vh3YQ4RCQon8",
+  "release_sha256": "92192ab5aab52766b4e23a7dfd5d746c4e8adc608fdbddbc29e900f4097c37c7",
   "schema": "elastos.update-hop.previous-release/v1",
   "signer_did": "did:key:z6MkgwHd2BCWe1jHMXPiR6H1q1RFPcv1YzhMbK5G1kBarbfe",
-  "version": "0.8.0-alpha.25"
+  "version": "2.0.0"
 }

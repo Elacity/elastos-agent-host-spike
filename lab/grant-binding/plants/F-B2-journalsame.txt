@@ -2,17 +2,7 @@ id: F-B2-journalsame
 file: src/ops.rs
 test: ops::model_child_journal_on_a_live_sibling_path_is_refused
 --- old
-        if self.grants.values().any(|stored| {
-            stored.record.parent == Some(request.handle)
-                && !stored.ended
-                && stored.record.owned_root == path
-        }) {
-            return Err(OperateRefuse::JournalSame);
-        }
+            Some(super::Overlap::Equal) => return Err(OperateRefuse::JournalSame),
 --- new
-        let _ = self.grants.values().any(|stored| {
-            stored.record.parent == Some(request.handle)
-                && !stored.ended
-                && stored.record.owned_root == path
-        });
+            Some(super::Overlap::Equal) => {}
 --- end
