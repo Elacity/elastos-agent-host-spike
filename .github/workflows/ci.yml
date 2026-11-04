@@ -489,6 +489,10 @@ jobs:
           cache-bin: false
           cache-directories: ${{ env.SCCACHE_DIR }}
           save-if: ${{ env.CI_SAVE_CACHE == 'true' }}
+      - name: free hosted runner disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -Pk .
       # The elastos workspace suite never builds or tests own-workspace
       # capsules; this mirrors `just test-capsules`.
       - name: lint and test own-workspace capsules
