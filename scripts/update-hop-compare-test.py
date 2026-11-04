@@ -2133,6 +2133,28 @@ class CliFixtureTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     observer.cli_admit_previous(generated, changed, {})
 
+    def test_run_names_a_missing_field_on_stderr_and_leaves_no_result(self):
+        # A truncated pin used to raise KeyError, so `run` exited 2 with "required fixture field
+        # missing" and no field name; check-result then failed on an absent result.json. This is
+        # the real cross-version `run` admission: everything else in the fixture and pin is valid.
+        generated, _ = self.assert_generated_signed_fixture()
+        pin_path, pin = self.root / "previous-pin.json", observer.cli_json(self.root / "previous-pin.json")
+        output = generated / "results"
+        observer.write(pin_path, {key: value for key, value in pin.items() if key != "head_cid"})
+        argv = ["observer", "run", str(generated / "fixture.json"), str(output)]
+        config = observer.cli_json(generated / "fixture.json")
+        config["immutable"]["sha256"] = observer.digest(generated / "manifest.json")
+        observer.write(generated / "fixture.json", config)
+        observer.os.environ["ELASTOS_CI_FIXTURE_MANIFEST_SHA256"] = config["immutable"]["sha256"]
+        with patch.object(observer, "CLI_PREVIOUS_PIN", pin_path), patch.object(observer.sys, "argv", argv), \
+             patch.object(observer.os, "umask"), patch.object(observer.signal, "signal"), \
+             patch.object(observer.sys, "platform", "darwin"), patch.object(observer.platform, "machine", return_value="arm64"), \
+             contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(observer.main(), 2)
+        self.assertEqual(json.loads(stderr.getvalue()), {"status": "unavailable", "reason": "previous release pin lacks head_cid"})
+        self.assertFalse(output.exists())
+        self.assertEqual(observer.read(pin_path), {key: value for key, value in pin.items() if key != "head_cid"})
+
     def test_next_release_advances_the_last_prerelease_field_or_the_patch(self):
         for version, expected in (("0.8.0-alpha.6", "0.8.0-alpha.7"), ("0.7.1", "0.7.2"), ("1.2.3-rc.9", "1.2.3-rc.10")):
             self.assertEqual(observer.cli_next_version(version), expected)
