@@ -1226,12 +1226,12 @@ mod tests {
         let data_dir = tempfile::tempdir().unwrap();
         elastos_identity::load_or_create_did(data_dir.path()).unwrap();
         let now = now_ts();
-        let context = HomeLaunchTokenContext {
-            principal_id: "person:local:alice".to_string(),
-            session_id: "auth:alice".to_string(),
-            proof_binding_id: Some("proof:passkey:alice".to_string()),
-            grant_id: "grant:alice".to_string(),
-        };
+        let context = HomeLaunchTokenContext::for_test(
+            "person:local:alice",
+            "auth:alice",
+            Some("proof:passkey:alice".to_string()),
+            "grant:alice",
+        );
         crate::auth::store_session_grant(
             data_dir.path(),
             elastos_runtime::auth::AuthSessionGrantV1 {
@@ -1444,12 +1444,12 @@ mod tests {
         let data_dir = tempfile::tempdir().unwrap();
         elastos_identity::load_or_create_did(data_dir.path()).unwrap();
         let now = now_ts();
-        let stored = HomeLaunchTokenContext {
-            principal_id: "person:local:alice".to_string(),
-            session_id: "auth:alice".to_string(),
-            proof_binding_id: Some("proof:passkey:alice".to_string()),
-            grant_id: "grant:alice".to_string(),
-        };
+        let stored = HomeLaunchTokenContext::for_test(
+            "person:local:alice",
+            "auth:alice",
+            Some("proof:passkey:alice".to_string()),
+            "grant:alice",
+        );
         crate::auth::store_session_grant(
             data_dir.path(),
             elastos_runtime::auth::AuthSessionGrantV1 {
@@ -1705,12 +1705,12 @@ mod tests {
         assert_ne!(parent_did, child_did);
 
         let now = now_ts();
-        let context = HomeLaunchTokenContext {
-            principal_id: "person:local:alice".to_string(),
-            session_id: "auth:alice".to_string(),
-            proof_binding_id: Some("proof:passkey:alice".to_string()),
-            grant_id: "grant:alice".to_string(),
-        };
+        let context = HomeLaunchTokenContext::for_test(
+            "person:local:alice",
+            "auth:alice",
+            Some("proof:passkey:alice".to_string()),
+            "grant:alice",
+        );
         crate::auth::store_session_grant(
             parent.path(),
             elastos_runtime::auth::AuthSessionGrantV1 {
