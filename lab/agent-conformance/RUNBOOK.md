@@ -23,9 +23,18 @@ An empty reason or part gives FAIL.
 A failure, missing result, repeated result, ignored test without a blocker ID,
 or Cargo error gives FAIL and a non-zero command exit status. BLOCKED rows
 remain open in [GAPS.md](GAPS.md).
-BLOCKED requires exactly one `GAPS.md` row with the test name, matching blocker IDs and a Runtime change.
-A missing or conflicting row, an unreadable `GAPS.md`, or a listed test that passes gives FAIL and a fixed reason.
-A backticked table line inside a fenced code block in `GAPS.md` still counts as a row, and a cell must not hold `\|`.
+The report command reads the lane-owned `lab/agent-conformance/GAPS.md`,
+independent of its working directory. BLOCKED requires exactly one row with
+the test name, matching blocker IDs and a Runtime change. A missing or
+conflicting row, an unreadable record, or a listed test that passes gives FAIL
+and a fixed reason. `report_command_uses_lane_gaps_from_another_directory`
+checks absent, conflicting and duplicate child-directory records against the
+lane's model blocker. `report_command_refuses_a_cwd_only_gap` checks a
+child-only row's refusal, then repairs only the report inputs in the same Home
+while preserving the decoy and failed receipt. These synthetic command checks
+verify table bytes, their SHA-256 and receipt identities; they supply zero live
+capsule acceptance credit. A backticked table line inside a fenced code block
+in `GAPS.md` still counts as a row, and a cell must not hold `\|`.
 
 - `home_is_throwaway`: checks the Mac data path, fresh root, path guard, symlink refusals and removal after success.
 - `launch_env_is_only_the_throwaway_home`: checks the four allowed environment entries, including `ELASTOS_CARRIER_MDNS=0`, null stdin, exit status and both output streams.

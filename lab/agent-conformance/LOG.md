@@ -12235,3 +12235,443 @@ Remaining gate: independent reviews and supervisor integration.
 Next owner: lane supervisor.
 
 - 170: Required an existing platform object in the one guarded component writer, proved exact early refusal, same-Home repair and metadata preservation, caught three separate compiling plants, and passed restored lane/report gates.
+
+
+## 172 — Report command uses the lane GAPS record
+
+Supplied HEAD: `d2c892e7dc653430edb28eb7ef04cc8e6a92438e`.
+Supplied tree: `eb9c5c001ac9f612e7f76c9222461840f8603de5`.
+Supplied dirty paths: none. The supplied task branch is
+`spark/cx-agent-conformance/172-report-command-keeps-lane-gaps-source`; it has
+no upstream. Cached `spike/spike/agent-host` versus HEAD is 0 / 10
+(base-only / HEAD-only commits). The supervisor owns remote refresh and Git
+mutations. The checkout and unrelated work stay as supplied.
+
+Plan: add two synthetic command tests in `tests/report.rs` using the existing
+observations, receipt reader and actual report binary. Run from owned child
+directories, check the lane model blocker against absent and competing GAPS
+files, refuse a child-only blocker, and repair only inventory/results in the
+same Home with a fresh receipt. Check exact table bytes, table SHA-256, native
+and probe identities, Git commit, decoy preservation and Home completion.
+Hand-run the one CWD-read plant against both new tests and the existing
+helper control, restore exact source bytes, then run the required gates under
+the shared build lease, offline settings and existing bounds. Final edits stay
+in this section, `tests/report.rs` and RUNBOOK's existing BLOCKED paragraph.
+
+The task read BACKLOG item 14 supplied in the prompt, 034's result and 034/036
+handoffs, the report implementation, the existing tests, RUNBOOK receipt and
+BLOCKED paragraphs, and architecture's Harness conformance section. The
+repository has no humanizer skill source; this handoff uses direct statements
+of behavior and ownership. The local machine-readable lifecycle inventory and
+supplied file hashes are ignored in `target/task-172-current/`. Existing ignored
+`target/task-172/` data belongs to the supplied checkout and stays intact.
+Stopped and blocked tasks, including 134 to 138 and 161, retain their supplied
+states and gates.
+
+### Command evidence and caught plant
+
+`assert_command_receipt` reads each actual command receipt and compares the
+printed table prefix byte for byte, checks its SHA-256 with the existing
+helper, and checks Cargo status, supplied native/probe identities and the
+real repository commit/dirty state. The two tests use `synthetic`, `output`,
+`read_receipt`, `ThrowawayHome` and `CARGO_BIN_EXE_report`. Only each child
+Command selects a working directory; parent environment and directory stay
+unchanged. Inventory, results, decoys and exclusive receipts use absolute
+paths inside that Home.
+
+`report_command_uses_lane_gaps_from_another_directory` runs three command
+cases: absent GAPS, a model row under TASK172, and duplicate model rows. Each
+reports the default PASS row, exact model `BLOCKED (RT3)` row and A14 PASS,
+complete identity, `cargo_success: true`, `command_success: true`,
+`suite_outcome: BLOCKED` and an empty `missing_or_invalid`. Each decoy keeps
+its exact bytes; the absent file stays absent.
+
+`report_command_refuses_a_cwd_only_gap` supplies this exact decoy (UTF-8,
+including its final newline):
+
+```text
+| `task_172_cwd_only` | TASK172 | Synthetic change. |
+```
+
+The child-only row is FAIL with exactly
+`GAPS.md: task_172_cwd_only: missing row for blocker IDs: TASK172`. A14 is
+FAIL; stderr and `missing_or_invalid` carry only that reason. Cargo remains
+successful, command success is false and suite outcome is FAIL. Exact reason
+equality excludes identity-format, missing-launch and Git failures. The
+second command repairs only inventory/results to use the existing model RT3
+row, keeps the same Home and decoy, and writes a fresh `repaired.json`. It
+gets the positive BLOCKED result above and preserves `failed.json` byte for
+byte. Both tests complete successful Homes with `finish`; an expected report
+refusal supplies test data and keeps that cleanup obligation. These fixtures
+supply zero live-capsule acceptance credit.
+
+The plant changes only the following expression in `src/bin/report.rs` once.
+Exact old bytes, with zero leading/trailing whitespace:
+
+```text
+fs::read_to_string(build::lane().join("GAPS.md")).ok()
+```
+
+Exact new bytes, with zero leading/trailing whitespace:
+
+```text
+fs::read_to_string("GAPS.md").ok()
+```
+
+Each command below ran baseline, planted and restored:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report report_command_uses_lane_gaps_from_another_directory -- --exact
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report report_command_refuses_a_cwd_only_gap -- --exact
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report blocked_row_needs_gaps_row -- --exact
+```
+
+All used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`,
+lane-local `target/host` and `target/host-build`, and task-local TMPDIR. The
+parent held the existing shared exclusive `fcntl.flock` build lease through
+sequential commands; children inherited zero lease descriptors. Each command
+had a 600-second bound and checked the 12 GiB estimate plus 2 GiB reserve.
+Initial focused free space was 26.949 GiB. A preliminary format check found
+two long assertions; both were wrapped before the passing baseline.
+
+| State | Named check | Exit | Seconds |
+| --- | --- | --- | --- |
+| baseline | `report_command_uses_lane_gaps_from_another_directory` | 0 | 2.283 |
+| baseline | `report_command_refuses_a_cwd_only_gap` | 0 | 0.475 |
+| baseline | `blocked_row_needs_gaps_row` | 0 | 0.141 |
+| planted | `report_command_uses_lane_gaps_from_another_directory` | 101 | 1.546 |
+| planted | `report_command_refuses_a_cwd_only_gap` | 101 | 0.384 |
+| planted | `blocked_row_needs_gaps_row` | 0 | 0.178 |
+| restored | `report_command_uses_lane_gaps_from_another_directory` | 0 | 0.738 |
+| restored | `report_command_refuses_a_cwd_only_gap` | 0 | 0.571 |
+| restored | `blocked_row_needs_gaps_row` | 0 | 0.080 |
+
+The planted candidate compiled; each command started and executed exactly one named test.
+The first failed at `tests/report.rs:650` with
+`absent: the command must use the known lane RT3 row`: actual exit was
+`Some(1)`, expected `Some(0)`. The second failed at `tests/report.rs:716` with
+`the command must refuse a blocker found only in the child directory`:
+actual exit was `Some(0)`, expected `Some(1)`. Each test result was
+`0 passed; 1 failed; 0 ignored`. The helper control passed under the same
+plant, showing that helper-only coverage leaves the command source unproven.
+Thus both named command tests caught the compiling plant; host and setup
+failures supply zero caught credit.
+
+The parent's `finally` restored exact source bytes before release of the
+lease. Restored report-command source SHA-256 is
+`5c26d0da0a89f463a986b884da7415b7b3143c421f99a4865755697108b415e7`.
+All three named tests passed restored. The two owned assertion-failure Homes
+stay for supervisor review, then removal:
+
+- `target/home-98091-1793754694364245000-0`: absent-record plant failure.
+- `target/home-98193-1793754694993982000-0`: child-only plant failure.
+
+The task inventory names both roots and their cleanup conditions. Their
+children completed before the failed assertions; both Homes contain only
+owned synthetic inputs/receipts. The falsifier list and runner keep their
+supplied bytes. The lane GAPS file was read-only throughout. Protected-file
+hashes are checked against the supplied snapshot before restored gates.
+
+The sandbox loopback preflight returned `PermissionError: Operation not
+permitted` before full-suite execution. This is infrastructure evidence only.
+The restored gate batch uses approved host loopback/process access under the
+same lease, offline environment, free-space rule and per-command bounds.
+
+### Principles check
+
+Paths below are relative to `lab/agent-conformance/`.
+
+| Question | Answer | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a code/content hash belongs? | No | `tests/report.rs:576` checks supplied SHA-256 and probe CID fields; names identify test metadata. |
+| 2. Capsule, Home or UI gains ambient authority? | No | `tests/report.rs:599` uses guarded synthetic Home inputs; production implementation bytes stay as supplied. |
+| 3. A second path or copy of one rule? | No | `tests/report.rs:638` invokes the existing report command; `src/bin/report.rs:39` keeps the lane lookup and existing grader. |
+| 4. Runtime core grows? | No | `tests/report.rs:598` adds command proof in the lab; all Runtime and provider code stays with its owners. |
+| 5. Refusals deny by default with a clear reason? | Yes | `tests/report.rs:719` checks the exact row refusal and `:733` checks the only recorded cause. |
+| 6. Capsule logic stays inside and calls through granted Bus operations? | Yes | `probe/src/lib.rs:138` retains the grant request; the probe keeps its supplied bytes. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/report.rs:598` and `:671` both fail the compiling CWD-read plant and pass after exact restoration. |
+| 8. Identity, admission and allowance stay separate? | Yes | `src/report.rs:538` retains the version-only receipt boundary; `tests/report.rs:733` isolates the blocker-source cause. |
+
+### Existing census failure and one unchanged retry
+
+The first restored `run.sh` exited 1 in 259.967 seconds. Both new command
+tests passed. The only journey failure was the existing
+`host_key_read_is_refused` at `tests/common/host_key.rs:92`, with
+`process leftover; processes:1 paths:["stdout-141"] API sockets:0 temp:0`.
+Its owned retained root is `target/home-31918-1793755126703429000-135`.
+The census and stop implementation keep their supplied bytes and assertions.
+The complete locked lane gate had already passed this same journey.
+
+The failed run's local, uncommitted receipt is
+`target/run-table.uNQ8PF/VERSIONS.json`, SHA-256
+`1f5482acf778aefe5b532f5e692666d73f8c975e1591dbf246157fea72897e7e`. It records `identity_status: complete`,
+`cargo_success: false`, `command_success: false` and
+`suite_outcome: FAIL`. Its Cargo captures, receipt and owned Home
+stay for supervisor review, then removal. This failure remains in the proof
+record. The task inventory records their lifecycle.
+
+Before one unchanged gate retry, `target/host/debug/report
+--check-earlier-runs` exited 0 in 0.477 seconds with host process access. Thus
+the reported holder had ended; no process cleanup or source correction was
+needed. The retry keeps the same lease, environment, free-space rule and
+600-second bound. Source tests, GAPS, runner and falsifier bytes remain as
+tested.
+
+### Restored gates and handoff
+
+The restored commands below all exited 0 under the shared lease, offline
+environment, 600-second command bounds and per-command 14 GiB free-space
+check. The first report-gate failure and its one unchanged retry are recorded
+above; the successful retry uses the same tested source.
+
+| Command | Seconds | Result |
+| --- | --- | --- |
+| `git diff --check` | 0.047 | Passed |
+| `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` | 0.430 | Passed |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report` | 1.706 | 25 passed |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` | 263.556 | 258 passed, 0 failed, 14 existing ignores |
+| `lab/agent-conformance/run.sh` | 260.931 | 259 PASS, 14 BLOCKED, 0 FAIL, 0 SKIPPED; one unchanged retry |
+| `node scripts/check-product-data.mjs` | 0.090 | Passed |
+| `node --test scripts/check-product-data.test.mjs` | 0.480 | 99 passed |
+| `(cd elastos && cargo fmt --all -- --check)` | 2.832 | Passed |
+| `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` | 0.141 | Passed |
+| `target/host/debug/report --check-earlier-runs` | 0.493 | Passed; zero earlier Home process owners |
+
+The successful receipt is local and uncommitted at
+`target/run-table.0r92nt/VERSIONS.json`, SHA-256
+`3cf194ebd93d3ffc72fd5ce7fb3228aeb31ce61efdeccf7558b66ea6ff173d03`. Its stored table SHA-256 is
+`4aab9a24b53a6358e69dd954ac6743629523f0c6c279437f38a0be394d2e1b4c`. Identity is complete, `missing_or_invalid` is
+empty, both success flags are true, and suite outcome is BLOCKED. Repository
+identity is the supplied HEAD with `dirty: true`, describing this task's
+uncommitted edits. The earlier failed gate receipt remains byte-identical.
+The Runtime model row remains `ungranted_model_call_is_refused | BLOCKED (RT3)`.
+The existing fourteen product blockers retain their scope and gates.
+
+After exact plant restoration, every supplied lane file outside the three
+authorized final paths matches its initial SHA-256. This includes all
+implementation files, GAPS, probe, Cargo files, runner and falsifier list.
+GAPS SHA-256 remains
+`012d45bf6e31268d63d018f4f54a2428d2ba0a74ca7e634c5ed07f350e1334f1`.
+The original LOG prefix is byte-identical. Final changes stay in
+`tests/report.rs`, RUNBOOK's existing BLOCKED paragraph and this section.
+The command, parser, grader, schema, controller and source/build/launch helpers
+keep their supplied bytes. All stopped/blocked task states remain supplied,
+including 134 to 138 and 161.
+
+Successful Homes from the two new tests complete through `finish`, including
+the expected-refusal/repaired case. The two planted assertion-failure Homes,
+the existing census-failure Home, the failed run's captures and receipt,
+the successful receipt and this task's small
+proof captures remain under the explicit supervisor-review-then-remove
+conditions in `target/task-172-current/inventory.json`. Supplied older proof
+directories and cache outputs remain with their existing owners. The final
+Home-owner check passed and the completed build parent released its lease.
+
+Candidate: supplied HEAD plus the three uncommitted task files; no merge SHA.
+Exercised checks: named baseline/plant/restored command proof, report target,
+locked lane suite, report gate and repository basic checks above. Sandbox
+loopback refusal was retried with host fixture access before full execution.
+Review links: independent reviews belong to the supervisor's next stage.
+Installed release evidence: synthetic report-source proof and the existing
+fixture gates; installed-product acceptance remains with its owners.
+Remaining gate: supervisor rerun and both independent reviews, including review
+of the retained first census failure. Next owner: lane supervisor.
+
+172: Added lane-owned GAPS command proof, child-only refusal and same-Home repair checks; both named tests caught the CWD-read plant, and restored gates passed with one unchanged retry of the existing host-key census failure.
+
+Final read-only branch/worktree inventory confirms the supplied HEAD and tree.
+The active branch has no upstream; cached lab base divergence remains 0 behind
+and 10 ahead. Network access was outside scope, so the supervisor owns remote
+refresh. Exactly the three authorized files are dirty. The machine-readable
+inventory names the current checkout's active task role and preserves all
+other branch/worktree state. Final free space is 26.060 GiB.
+
+### Round 2 — Preserve the census refusal and repeat the gates
+
+Round 2 keeps supplied HEAD `d2c892e7dc653430edb28eb7ef04cc8e6a92438e`
+and tree `eb9c5c001ac9f612e7f76c9222461840f8603de5`. Its supplied dirty
+paths are this LOG, `RUNBOOK.md` and `tests/report.rs`. The first round's
+command tests, exact plant/restoration proof and retained evidence stay intact.
+
+The supervisor's full locked gate exited 101: `ungranted_network_is_refused`
+failed at `tests/effects.rs:498` because the existing cleanup census found
+one process holding `home/Library/Application Support/elastos/host-process.lock`
+in `target/home-96267-1793755988859283000-302`. The census also reported
+zero API sockets and zero temporary entries. The fixture refusal remains a
+failed result; this task changes neither its assertion nor its cleanup rule.
+That owned Home stays for supervisor review, then removal. Its file contents
+are outside this report-source proof and remain unread.
+
+Plan: observe earlier Home owners through the existing report command, rerun
+the exact failed network journey with the required host fixture access, then
+repeat formatting, the report target, the complete locked lane gate and
+`run.sh` under the shared lease and bounds. Record each result here. A
+repeated fixture failure stays a blocker for its owner; report-source tests
+and synthetic receipts supply zero cleanup or installed-product credit.
+
+The round-2 batch acquired the shared exclusive `fcntl.flock` lease with
+26.607 GiB free, above the 12 GiB estimate plus 2 GiB reserve. Children
+inherited zero lease descriptors. Loopback preflight passed; Cargo used
+offline dependencies, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, the existing
+lane-local output directories and a 600-second bound per command.
+
+| Command | Exit | Seconds | Result |
+| --- | --- | --- | --- |
+| `target/host/debug/report --check-earlier-runs` before gates | 0 | 0.817 | Zero earlier Home owners |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects ungranted_network_is_refused -- --exact` | 0 | 14.412 | One test passed |
+| `git diff --check` | 0 | 0.215 | Passed |
+| `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` | 0 | 0.420 | Passed |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report` | 0 | 1.860 | All 25 tests passed, including both command tests and `blocked_row_needs_gaps_row` |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` | 101 | 327.895 | Existing runtime cleanup census failed; completed targets had 218 passed, one failed and 14 ignored |
+| `target/host/debug/report --check-earlier-runs` after failure | 0 | 0.496 | Zero earlier Home owners |
+| `node scripts/check-product-data.mjs` | 0 | 0.083 | Passed |
+| `node --test scripts/check-product-data.test.mjs` | 0 | 0.478 | 99 tests passed |
+| `(cd elastos && cargo fmt --all -- --check)` | 0 | 2.989 | Passed |
+| `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` | 0 | 0.142 | Passed |
+
+The full gate's effects target passed all 66 enabled tests in 235.72 seconds,
+including `ungranted_network_is_refused`. Its 12 ignored tests kept their
+blockers. The report target also passed all 25 tests within that gate.
+The later failure was `cleanup_census_refuses_each_leftover` at
+`tests/runtime.rs:740`: its clean-census unwrap received a refusal with
+`process leftover; processes:2`, zero API sockets and zero temporary entries.
+The two recorded paths were Python's `heapq.cpython-39.pyc` and
+`operator.cpython-39.pyc` under the fixture Home's `Library/Caches/com.apple.python/`.
+The exact refusal remains in the local, uncommitted capture
+`target/task-172-current/round2/locked-lane.txt`.
+
+The batch stopped at this failure and released its lease. `run.sh` was skipped
+in round 2 because the complete locked gate failed; the earlier round's
+successful report receipt remains historical evidence, rather than proof
+that this rerun passed. The test and census are outside task 172's final edit
+scope. This task adds zero retries, changes zero refusal assertions and keeps
+the failing result for its owner.
+
+The failed Home `target/home-78819-1793756429270563000-0` remains for supervisor
+review, then removal. The existing earlier-run check found zero active owners
+after the failure. Every other round-2 Home completed its existing lifecycle.
+The lifecycle inventory now covers this Home, the supervisor's retained
+network-failure Home and the small round-2 proof directory. Their contents
+remain private; this review used path metadata and preserved retained data
+under its existing access controls.
+
+All 53 protected lane files match the supplied SHA-256 snapshot, including
+implementation files, GAPS, Cargo files, probe, runner and falsifier list.
+Both earlier report receipts remain byte-identical. This round changes only
+this LOG section; it preserves the supplied report tests and RUNBOOK change.
+Both build parents released the shared lease. Final observed free space is
+26.562 GiB. The checkout, branch, commit history and cached divergence stay as
+supplied; remote refresh remains with the supervisor.
+
+Candidate: supplied HEAD and the three supplied uncommitted task files, with
+this round's LOG result appended. Exercised checks: the table above and the
+first round's exact caught-plant/restoration proof. Reviews: supervisor stage.
+Installed release evidence: synthetic report-source checks only; existing
+product acceptance blockers keep their gates. Remaining gate: resolve the
+existing runtime cleanup fixture failure, then pass the full locked gate and
+`run.sh` before acceptance. Next owner: lane supervisor and cleanup-fixture
+owner; repair of `tests/runtime.rs` or the census requires a separate scope.
+
+172 round 2: Preserved the report-source proof and the cleanup refusal, passed
+the exact network rerun and all 25 report tests, and recorded the full gate's
+separate Python-cache census blocker without changing its test or policy.
+
+### Round 3 — Recheck the unchanged cleanup fixture
+
+Supplied round-3 HEAD: `d2c892e7dc653430edb28eb7ef04cc8e6a92438e`.
+Supplied tree: `eb9c5c001ac9f612e7f76c9222461840f8603de5`.
+Supplied dirty paths: this LOG, `RUNBOOK.md` and `tests/report.rs`.
+The branch keeps its active task role and supplied checkout. Cached lab-base
+divergence remains 0 behind / 10 ahead; the branch has no upstream.
+
+The supervisor's full locked gate passed all 25 report tests, including both
+task-172 command tests. It then exited 101 in the existing
+`cleanup_census_refuses_each_leftover` test at `tests/runtime.rs:740`:
+`process leftover; processes:1 paths:["stdout-39"] API sockets:0 temp:0`.
+Its retained Home is `target/home-19027-1793756840808742000-0`. That refusal
+stays a failed result, and its fixture data stays unread for supervisor review.
+
+Plan: use the existing earlier-run check, rerun that exact runtime test with
+host fixture access, then run the three named report controls, formatting,
+the report target, the full locked lane gate and `run.sh` under the existing
+shared lease, offline settings, free-space rule and 600-second bounds.
+Preserve the supplied command tests, RUNBOOK change and earlier caught-plant
+evidence. The test and census keep their supplied bytes and assertions;
+this round adds its measured result only to this section and the existing
+ignored lifecycle inventory.
+
+The round-3 batch acquired the shared exclusive `fcntl.flock` lease with
+26.581 GiB free, above the 12 GiB build estimate plus 2 GiB reserve.
+Loopback setup passed. Cargo used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+CARGO_NET_OFFLINE=true`, the existing lane-local `target/host` and
+`target/host-build`, and round-local TMPDIR. Each command kept its 600-second
+bound; children inherited zero lease descriptors. Commands ran in sequence.
+
+| Command | Exit | Seconds | Result |
+| --- | --- | --- | --- |
+| `target/host/debug/report --check-earlier-runs` before gates | 0 | 0.607 | Zero earlier Home owners |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime cleanup_census_refuses_each_leftover -- --exact` | 0 | 1.831 | One test passed with its supplied assertions |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report report_command_uses_lane_gaps_from_another_directory -- --exact` | 0 | 0.842 | One test passed |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report report_command_refuses_a_cwd_only_gap -- --exact` | 0 | 0.472 | One test passed |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report blocked_row_needs_gaps_row -- --exact` | 0 | 0.077 | One test passed |
+| `git diff --check` | 0 | 0.023 | Passed |
+| `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` | 0 | 0.302 | Passed |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report` | 0 | 0.671 | All 25 tests passed |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` | 0 | 260.194 | 258 passed, zero failed, 14 existing ignores |
+| `lab/agent-conformance/run.sh` | 0 | 259.004 | 259 PASS, 14 BLOCKED, zero FAIL or SKIPPED |
+| `target/host/debug/report --check-earlier-runs` after gates | 0 | 0.487 | Zero earlier Home owners |
+| `node scripts/check-product-data.mjs` | 0 | 0.090 | Passed |
+| `node --test scripts/check-product-data.test.mjs` | 0 | 0.483 | 99 tests passed |
+| `(cd elastos && cargo fmt --all -- --check)` | 0 | 2.869 | Passed |
+| `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` | 0 | 0.150 | Passed |
+
+The cleanup fixture passed in its exact rerun, the full locked gate and the
+fresh report gate. The supervisor's earlier refusal remains recorded above.
+This round changes zero test assertions, adds zero retries to the harness,
+and preserves the census implementation. Its successful Homes completed
+their existing lifecycle; zero new Home directories remained after the gates.
+The supervisor's failed Home and earlier retained evidence keep their
+review-then-remove decisions in `target/task-172-current/inventory.json`.
+
+The fresh local, uncommitted receipt is
+`target/run-table.Vjxe4u/VERSIONS.json`, SHA-256
+`3cf194ebd93d3ffc72fd5ce7fb3228aeb31ce61efdeccf7558b66ea6ff173d03`.
+Its stored table SHA-256 is
+`4aab9a24b53a6358e69dd954ac6743629523f0c6c279437f38a0be394d2e1b4c`,
+which matches the stored table bytes. Identity is complete,
+`missing_or_invalid` is empty, both success flags are true, and suite outcome
+is BLOCKED. Repository identity names the supplied HEAD with `dirty: true`.
+The model row stays `ungranted_model_call_is_refused | BLOCKED (RT3)`.
+The receipt is byte-identical to the earlier successful receipt; the earlier
+failed receipt also retains its recorded SHA-256. Existing product acceptance
+blockers keep their supplied scope and gates. Synthetic command evidence
+supplies zero live-capsule acceptance credit.
+
+All 53 protected lane files still match the supplied SHA-256 snapshot,
+including every implementation file, GAPS, Cargo files, probe, runner and
+falsifier list. The first round's compiling CWD-read plant evidence remains
+valid for these unchanged tests and restored implementation bytes: both new
+named command tests failed their specified assertions, the helper control
+passed, and all three passed after exact restoration. Round 3 preserves that
+proof rather than adding a second plant or registration path. Only this LOG
+section changes in this round; the supplied tests and RUNBOOK edit remain.
+
+Final branch/worktree inventory confirms the supplied HEAD/tree, exactly the
+three authorized dirty files, and the active task checkout's preservation
+role. The branch has no upstream; cached lab-base divergence is still 0 behind
+and 10 ahead. Remote refresh stays with the supervisor under the network rule.
+The original committed LOG prefix is byte-identical. Final observed free
+space is 26.561 GiB. The build parent released its lease after the final
+zero-owner check. The ignored lifecycle inventory records the fresh receipt,
+round-3 captures and retained supervisor Home for review, then removal.
+
+Candidate: supplied HEAD plus the three uncommitted task files, with this
+round's LOG evidence appended. Exercised checks: all commands above and the
+unchanged earlier baseline/plant/restoration proof. Reviews: supervisor stage.
+Installed release evidence: synthetic command-source checks and existing
+fixture gates; product acceptance stays with its owners. Remaining gate:
+supervisor rerun and required independent reviews. Next owner: lane supervisor.
+
+172 round 3: Preserved the command-source tests and caught-plant proof, passed
+the exact cleanup rerun, all 25 report tests, the full locked lane gate and
+the fresh report/receipt gate with existing blockers intact.

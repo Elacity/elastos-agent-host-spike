@@ -549,6 +549,210 @@ fn read_receipt(path: &Path) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
 }
 
+fn assert_command_receipt(
+    result: &std::process::Output,
+    path: &Path,
+    observations: &[Observation],
+) -> Value {
+    let document = read_receipt(path);
+    let table = document["report"]["table"].as_str().unwrap();
+    let receipt_line = format!(
+        "versions receipt: {}\n",
+        path.strip_prefix(agent_conformance::build::lane())
+            .unwrap()
+            .display()
+    );
+    assert_eq!(
+        result.stdout.strip_suffix(receipt_line.as_bytes()),
+        Some(table.as_bytes()),
+        "printed table prefix matches the stored table byte for byte"
+    );
+    assert_eq!(document["report"]["sha256"], sha256(table.as_bytes()));
+    assert_eq!(document["cargo_success"], true);
+    assert_eq!(
+        document["repository"],
+        serde_json::to_value(GitIdentity::read(&agent_conformance::build::repository()).unwrap())
+            .unwrap()
+    );
+    for observation in observations {
+        match observation {
+            Observation::Native { role, sha256 } => {
+                let field = match role.as_str() {
+                    "elastos" => "runtime_sha256",
+                    "localhost-provider" => "localhost_provider_sha256",
+                    _ => panic!("unexpected synthetic native role"),
+                };
+                assert_eq!(document[field], *sha256);
+            }
+            Observation::Launched { probe } => {
+                assert_eq!(document["probes"], serde_json::json!([probe]));
+            }
+            _ => panic!("unexpected synthetic observation"),
+        }
+    }
+    assert_eq!(document["build_only_probes"], serde_json::json!([]));
+    document
+}
+
+#[test]
+fn report_command_uses_lane_gaps_from_another_directory() {
+    let home = ThrowawayHome::new().unwrap();
+    home.guard(home.home(), home.data()).unwrap();
+    let name = "ungranted_model_call_is_refused";
+    let (observations, _) = synthetic(172, true);
+    let list_path = home.root().join("list");
+    let results_path = home.root().join("results");
+    fs::write(&list_path, format!("{LIVE}: test\n{name}: test\n")).unwrap();
+    fs::write(
+        &results_path,
+        format!(
+            "{}test {name} ... ignored, blocked: RT3\n",
+            output(&observations)
+        ),
+    )
+    .unwrap();
+    for (case, decoy) in [
+        ("absent", None),
+        (
+            "different-blocker",
+            Some(format!("| `{name}` | TASK172 | Synthetic change. |\n")),
+        ),
+        (
+            "duplicate-rows",
+            Some(format!(
+                "| `{name}` | RT3 | Synthetic change. |\n| `{name}` | RT3 | Synthetic change. |\n"
+            )),
+        ),
+    ] {
+        let cwd = home.home().join(case);
+        fs::create_dir(&cwd).unwrap();
+        let gaps_path = cwd.join("GAPS.md");
+        if let Some(bytes) = &decoy {
+            fs::write(&gaps_path, bytes).unwrap();
+        }
+        let receipt_path = home.root().join(format!("{case}.json"));
+        assert!(
+            list_path.is_absolute() && results_path.is_absolute() && receipt_path.is_absolute()
+        );
+        let result = std::process::Command::new(env!("CARGO_BIN_EXE_report"))
+            .current_dir(&cwd)
+            .arg(&list_path)
+            .arg(&results_path)
+            .arg("0")
+            .arg(&receipt_path)
+            .output()
+            .unwrap();
+        let document = assert_command_receipt(&result, &receipt_path, &observations);
+        match decoy {
+            Some(bytes) => assert_eq!(fs::read(&gaps_path).unwrap(), bytes.as_bytes()),
+            None => assert!(!gaps_path.exists()),
+        }
+        assert_eq!(
+            result.status.code(),
+            Some(0),
+            "{case}: the command must use the known lane RT3 row"
+        );
+        assert!(result.stderr.is_empty());
+        assert_eq!(
+            document["report"]["table"],
+            format!(
+                "test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\n{LIVE} | PASS\n{name} | BLOCKED (RT3)\nversions_receipt (A14) | PASS\n"
+            )
+        );
+        assert_eq!(document["identity_status"], "complete");
+        assert_eq!(document["command_success"], true);
+        assert_eq!(document["suite_outcome"], "BLOCKED");
+        assert_eq!(document["missing_or_invalid"], serde_json::json!([]));
+    }
+    home.finish().unwrap();
+}
+
+#[test]
+fn report_command_refuses_a_cwd_only_gap() {
+    let home = ThrowawayHome::new().unwrap();
+    home.guard(home.home(), home.data()).unwrap();
+    let cwd = home.home().join("child-only");
+    fs::create_dir(&cwd).unwrap();
+    let gaps_path = cwd.join("GAPS.md");
+    let decoy = b"| `task_172_cwd_only` | TASK172 | Synthetic change. |\n";
+    fs::write(&gaps_path, decoy).unwrap();
+    let reason = "GAPS.md: task_172_cwd_only: missing row for blocker IDs: TASK172";
+    let (observations, _) = synthetic(172, true);
+    let list_path = home.root().join("list");
+    let results_path = home.root().join("results");
+    let failed_path = home.root().join("failed.json");
+    let mut failed_bytes = Vec::new();
+    for (name, blocker, receipt_path) in [
+        ("task_172_cwd_only", "TASK172", failed_path.clone()),
+        (
+            "ungranted_model_call_is_refused",
+            "RT3",
+            home.root().join("repaired.json"),
+        ),
+    ] {
+        fs::write(&list_path, format!("{LIVE}: test\n{name}: test\n")).unwrap();
+        fs::write(
+            &results_path,
+            format!(
+                "{}test {name} ... ignored, blocked: {blocker}\n",
+                output(&observations)
+            ),
+        )
+        .unwrap();
+        assert!(
+            list_path.is_absolute() && results_path.is_absolute() && receipt_path.is_absolute()
+        );
+        let result = std::process::Command::new(env!("CARGO_BIN_EXE_report"))
+            .current_dir(&cwd)
+            .arg(&list_path)
+            .arg(&results_path)
+            .arg("0")
+            .arg(&receipt_path)
+            .output()
+            .unwrap();
+        let document = assert_command_receipt(&result, &receipt_path, &observations);
+        assert_eq!(fs::read(&gaps_path).unwrap(), decoy);
+        if name == "task_172_cwd_only" {
+            assert_eq!(
+                result.status.code(),
+                Some(1),
+                "the command must refuse a blocker found only in the child directory"
+            );
+            assert_eq!(
+                document["report"]["table"],
+                format!(
+                    "test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\n{LIVE} | PASS\n{name} | FAIL | {reason}\nversions_receipt (A14) | FAIL\n"
+                )
+            );
+            assert_eq!(
+                result.stderr,
+                format!("versions receipt failure: {reason}\n").as_bytes()
+            );
+            // Exact equality excludes identity-format, missing-launch and Git
+            // failures: only the command's GAPS source causes this refusal.
+            assert_eq!(document["missing_or_invalid"], serde_json::json!([reason]));
+            assert_eq!(document["command_success"], false);
+            assert_eq!(document["suite_outcome"], "FAIL");
+            failed_bytes = fs::read(&failed_path).unwrap();
+        } else {
+            assert_eq!(result.status.code(), Some(0));
+            assert!(result.stderr.is_empty());
+            assert_eq!(
+                document["report"]["table"],
+                format!(
+                    "test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\n{LIVE} | PASS\n{name} | BLOCKED (RT3)\nversions_receipt (A14) | PASS\n"
+                )
+            );
+            assert_eq!(document["identity_status"], "complete");
+            assert_eq!(document["command_success"], true);
+            assert_eq!(document["suite_outcome"], "BLOCKED");
+            assert_eq!(document["missing_or_invalid"], serde_json::json!([]));
+            assert_eq!(fs::read(&failed_path).unwrap(), failed_bytes);
+        }
+    }
+    home.finish().unwrap();
+}
+
 #[test]
 fn versions_receipt_binds_current_run() {
     let home = ThrowawayHome::new().unwrap();
