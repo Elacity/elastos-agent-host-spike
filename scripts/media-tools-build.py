@@ -12,6 +12,8 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.request
 
 X264_COMMIT = "b35605ace3ddf7c1a5d67a2eb553f034aef41d55"
@@ -29,6 +31,11 @@ SOURCES = {
 }
 
 
+# One slow response from ffmpeg.org must not fail the build.
+FETCH_TIMEOUT = 300
+FETCH_BACKOFF = (5, 15)
+
+
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -42,6 +49,7 @@ def run(command, cwd, env, capture=False):
 
 
 def fetch_source(archive, url, digest):
+    source_cache = os.environ.get("ELASTOS_MEDIA_SOURCE_CACHE")
     if archive.name == f"x264-{X264_COMMIT}.tar.bz2":
         with tempfile.TemporaryDirectory(prefix=".x264-source-", dir=archive.parent) as temporary:
             git = ["git", "-C", temporary]
@@ -56,10 +64,30 @@ def fetch_source(archive, url, digest):
                                               f"--prefix=x264-{X264_COMMIT}/", X264_COMMIT])
             archive.write_bytes(bz2.compress(source))
     else:
-        with urllib.request.urlopen(url, timeout=60) as response, archive.open("wb") as dest:
-            shutil.copyfileobj(response, dest)
+        verified = False
+        if source_cache:
+            cached = Path(source_cache) / archive.name
+            if cached.exists() and sha(cached) != digest:  # a restored cache is untrusted
+                raise ValueError(f"Source cache checksum mismatch: {archive.name}")
+            verified = cached.is_file()
+            if verified:
+                print(f"+ reuse cached verified source {cached}", flush=True)
+                shutil.copyfile(cached, archive)
+        if not verified:
+            for attempt in range(1, len(FETCH_BACKOFF) + 2):
+                try:
+                    with urllib.request.urlopen(url, timeout=FETCH_TIMEOUT) as response, archive.open("wb") as dest:
+                        shutil.copyfileobj(response, dest)
+                    break
+                except (urllib.error.URLError, TimeoutError, OSError):
+                    if attempt > len(FETCH_BACKOFF):
+                        raise
+                    time.sleep(FETCH_BACKOFF[attempt - 1])
     if sha(archive) != digest:
         raise ValueError(f"Source checksum mismatch: {archive.name}")
+    if source_cache:
+        Path(source_cache).mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(archive, Path(source_cache) / archive.name)
 
 
 def verify(output, expected):

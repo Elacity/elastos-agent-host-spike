@@ -832,6 +832,15 @@ jobs:
           cache-targets: false
           cache-directories: ${{ env.SCCACHE_DIR }}
           save-if: ${{ env.CI_SAVE_CACHE == 'true' }}
+      # Reuse the pinned FFmpeg source archive; the builder re-checks its digest.
+      - name: bind media source cache
+        run: echo "ELASTOS_MEDIA_SOURCE_CACHE=$RUNNER_TEMP/media-source-cache" >> "$GITHUB_ENV"
+      - name: restore pinned media source
+        if: env.CI_USE_CACHE == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/media-source-cache
+          key: media-src-ffmpeg-9.0.1-cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635
       - name: free runner disk
         if: runner.os == 'Linux'
         run: |
@@ -956,6 +965,13 @@ jobs:
           set -euo pipefail
           mkdir -p "${RUNNER_TEMP}/source-home-logs"
           scripts/local-carrier-setup-smoke.sh 2>&1 | tee "${RUNNER_TEMP}/source-home-logs/local-carrier-setup-smoke.log"
+      # Save the archive the builder verified; a missing file skips the save.
+      - name: save pinned media source
+        if: env.CI_USE_CACHE == 'true' && env.CI_SAVE_CACHE == 'true' && hashFiles('**/media-tools-build.py') != '' && hashFiles(format('{0}/media-source-cache/ffmpeg-9.0.1.tar.xz', runner.temp)) != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/media-source-cache
+          key: media-src-ffmpeg-9.0.1-cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
