@@ -1305,6 +1305,7 @@ async fn home_summary_accepts_gateway_owned_home_cli_token_under_home_owned_gran
     let app = gateway_router(test_state(dir.path()));
     let now = now_ts();
     let _auth = set_test_home_launch_auth_data_dir(dir.path());
+    store_home_cli_principal(dir.path());
     let context = HomeLaunchTokenContext {
         principal_id: "person:home-cli-test".to_string(),
         session_id: "auth:home-cli-test".to_string(),
@@ -1361,6 +1362,7 @@ async fn direct_home_cli_token_rejects_home_owned_grant_authority() {
     let dir = tempfile::tempdir().unwrap();
     let now = now_ts();
     let _auth = set_test_home_launch_auth_data_dir(dir.path());
+    store_home_cli_principal(dir.path());
     let context = HomeLaunchTokenContext {
         principal_id: "person:home-cli-test".to_string(),
         session_id: "auth:home-cli-test".to_string(),
@@ -1398,6 +1400,7 @@ async fn gateway_owned_home_cli_issuer_projects_non_cli_capsules_under_home_auth
     let dir = tempfile::tempdir().unwrap();
     let now = now_ts();
     let _auth = set_test_home_launch_auth_data_dir(dir.path());
+    store_home_cli_principal(dir.path());
     let context = HomeLaunchTokenContext {
         principal_id: "person:home-cli-test".to_string(),
         session_id: "auth:home-cli-test".to_string(),
@@ -12976,4 +12979,30 @@ async fn home_external_link_names_the_launched_app_and_the_exact_address() {
     let (status, _) =
         home_external_link_raw(&app, "http://localhost:61180", &home_token, extra).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// The fixture's person, stored through the production principal store (Rong
+/// 1106 Q1 a), so the gateway resolver finds a record and never a bypass.
+fn store_home_cli_principal(dir: &std::path::Path) {
+    let binding = ProofBinding {
+        kind: elastos_runtime::auth::ProofBindingKind::DidKey,
+        subject: "did:key:z6MkhomeCliTestFixture".to_string(),
+        chain_id: None,
+        verified_at: now_ts(),
+        passkey: None,
+    };
+    let id = "person:home-cli-test".to_string();
+    crate::auth::upsert_principal_for_binding_as(dir, binding, id, now_ts()).unwrap();
+}
+
+#[tokio::test]
+async fn gateway_context_refuses_an_unstored_person() {
+    let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _auth = set_test_home_launch_auth_data_dir(dir.path());
+    let refused = home_launch_token_context_from_parts(dir.path(), "person:x", "auth:x", None, "g");
+    assert!(refused
+        .unwrap_err()
+        .to_string()
+        .contains("has no stored record"));
 }
