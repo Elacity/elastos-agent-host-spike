@@ -397,7 +397,7 @@ impl Runtime {
         let content_hash = hash_content(&content);
 
         // Verify signature
-        if !verifier.verify_capsule(manifest, &content_hash)? {
+        if verifier.verify_capsule(manifest, &content_hash)?.is_none() {
             return Err(ElastosError::InvalidManifest(
                 "Capsule signature verification failed".into(),
             ));

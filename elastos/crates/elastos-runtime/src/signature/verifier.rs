@@ -78,10 +78,15 @@ impl SignatureVerifier {
         self.trusted_keys.len()
     }
 
-    /// Verify a capsule's signature
+    /// Verify a capsule's signature and name the trusted key that verified it
     ///
-    /// The signature covers: SHA256(manifest_json_without_signature) || SHA256(content)
-    pub fn verify_capsule(&self, manifest: &CapsuleManifest, content_hash: &[u8]) -> Result<bool> {
+    /// The signature covers: SHA256(manifest_json_without_signature) || SHA256(content).
+    /// `Some(key)` is the matched trusted key; `None` means no trusted key matched.
+    pub fn verify_capsule(
+        &self,
+        manifest: &CapsuleManifest,
+        content_hash: &[u8],
+    ) -> Result<Option<VerifyingKey>> {
         let signature_b64 = manifest
             .signature
             .as_ref()
@@ -100,11 +105,11 @@ impl SignatureVerifier {
         // Try each trusted key
         for key in &self.trusted_keys {
             if key.verify_strict(&message, &signature).is_ok() {
-                return Ok(true);
+                return Ok(Some(*key));
             }
         }
 
-        Ok(false)
+        Ok(None)
     }
 
     /// Check if verification is enabled (has trusted keys)
@@ -229,7 +234,31 @@ mod tests {
         verifier.add_trusted_key(verifying_key).unwrap();
 
         let result = verifier.verify_capsule(&manifest, &content_hash).unwrap();
-        assert!(result);
+        assert_eq!(result, Some(verifying_key));
+    }
+
+    #[test]
+    fn verify_capsule_returns_the_matched_trusted_key() {
+        let first = SigningKey::from_bytes(&[5u8; 32]).verifying_key();
+        let second = SigningKey::from_bytes(&[6u8; 32]).verifying_key();
+        assert_ne!(first, second);
+        let mut manifest = create_test_manifest();
+        let content_hash = hash_content(b"test content");
+        sign_capsule(
+            &SigningKey::from_bytes(&[6u8; 32]),
+            &mut manifest,
+            &content_hash,
+        )
+        .unwrap();
+
+        let mut verifier = SignatureVerifier::new();
+        verifier.add_trusted_key(first).unwrap();
+        verifier.add_trusted_key(second).unwrap();
+
+        assert_eq!(
+            verifier.verify_capsule(&manifest, &content_hash).unwrap(),
+            Some(second)
+        );
     }
 
     #[test]
@@ -247,7 +276,7 @@ mod tests {
         verifier.add_trusted_key(wrong_verifying_key).unwrap();
 
         let result = verifier.verify_capsule(&manifest, &content_hash).unwrap();
-        assert!(!result);
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -267,7 +296,7 @@ mod tests {
         verifier.add_trusted_key(verifying_key).unwrap();
 
         let result = verifier.verify_capsule(&manifest, &tampered_hash).unwrap();
-        assert!(!result);
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -287,7 +316,7 @@ mod tests {
         verifier.add_trusted_key(verifying_key).unwrap();
 
         let result = verifier.verify_capsule(&manifest, &content_hash).unwrap();
-        assert!(!result);
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -312,7 +341,7 @@ mod tests {
 
         let verifier = SignatureVerifier::new();
         let result = verifier.verify_capsule(&manifest, &content_hash).unwrap();
-        assert!(!result); // No trusted keys, so verification fails
+        assert_eq!(result, None); // No trusted keys, so verification fails
     }
 
     #[test]
@@ -345,7 +374,7 @@ mod tests {
         let result = verifier
             .verify_capsule(&manifest, &hash_content(b"any entrypoint"))
             .unwrap();
-        assert!(!result);
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -369,6 +398,9 @@ mod tests {
         verifier
             .add_trusted_key_hex(&hex::encode(signing_key.verifying_key().as_bytes()))
             .unwrap();
-        assert!(verifier.verify_capsule(&manifest, &content_hash).unwrap());
+        assert!(verifier
+            .verify_capsule(&manifest, &content_hash)
+            .unwrap()
+            .is_some());
     }
 }
