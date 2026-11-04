@@ -109,6 +109,14 @@ pub struct Decision {
     pub rights: Rights,
 }
 
+/// How a path sits against one live journal root: around it, under it, or on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Overlap {
+    Contains,
+    Inside,
+    Equal,
+}
+
 /// A refusal with one clear reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refuse {
@@ -513,6 +521,28 @@ impl Verifier {
         resolved
     }
 
+    /// The one overlap rule: the closest overlap of `path` with a live journal
+    /// minted from `issuing`. Mint, effect and path use all call this.
+    #[rustfmt::skip]
+    fn live_journal_overlap(&self, issuing: Handle, identity: &str, path: &str) -> Option<Overlap> {
+        self.grants
+            .values()
+            .filter(|stored| stored.record.parent == Some(issuing) && !stored.ended)
+            .filter_map(|stored| {
+                let root = stored.record.owned_root.as_str();
+                if root == path {
+                    Some(Overlap::Equal)
+                } else if resource_name(identity, path, Some(root)).is_ok() {
+                    Some(Overlap::Inside)
+                } else if resource_name(identity, root, Some(path)).is_ok() {
+                    Some(Overlap::Contains)
+                } else {
+                    None
+                }
+            })
+            .max()
+    }
+
     #[rustfmt::skip]
     fn live_journal_holds(
         &self,
@@ -521,15 +551,10 @@ impl Verifier {
         path: &str,
         owned_root: &str,
     ) -> bool {
-        self.grants.values().any(|stored| {
-            stored.record.parent == Some(issuing)
-                && !stored.ended
-                && (resource_name(identity, path, Some(&stored.record.owned_root)).is_ok()
-                    || (path != owned_root
-                        && resource_name(identity, &stored.record.owned_root, Some(path))
-                            .is_ok())
-                )
-        })
+        match self.live_journal_overlap(issuing, identity, path) {
+            Some(Overlap::Contains) => path != owned_root,
+            found => found.is_some(),
+        }
     }
 
     /// Uses a grant for one path. The path must be the stored owned root or a
