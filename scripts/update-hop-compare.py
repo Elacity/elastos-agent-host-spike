@@ -1990,9 +1990,10 @@ def cli_install_previous_release(home_path, output, pin_path=None):
     (home_path / "install.sh").write_bytes(installer)
     receipt = {"schema": "elastos.update-hop.previous-release-fetch/v1", "pin": pin,
                "published_installer_sha256": hashlib.sha256(installer).hexdigest()}
-    # Custody is listed outside the Home profile (#238); the fixture pins its bytes too.
+    # The fixture also pins optional providers that the Home profile leaves out.
     for argv, timeout in ((["/bin/bash", "install.sh", "--install-only"], 900),
-                          ([str(runtime), "setup", "--profile", "home", "--with", "custody-provider"], 1800),
+                          ([str(runtime), "setup", "--profile", "home", "--with",
+                            ",".join((*CLI_PROTECTED_PROVIDERS, "custody-provider"))], 1800),
                           ([str(runtime), "update", "--rollback-to", pin["head_cid"], "--yes"], 1800)):
         proc = subprocess.Popen(argv, env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home_path),
                                            "ELASTOS_COLLABORATION_STARTUP_MODE": "isolated"}, cwd=home_path,
@@ -2010,6 +2011,7 @@ def cli_install_previous_release(home_path, output, pin_path=None):
         need(code == 0, "previous release Home step failed: " + " ".join(argv[1:3]))
 
     def take(path, name, sha256):
+        need(path.is_file(), name + " is not installed")
         info = path.lstat()
         need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and digest(path) == sha256, name + " differs from its signed hash")
         target = cli_path(output, name)
