@@ -275,12 +275,12 @@ async fn system_offers_a_canary_home_its_signers_stable_release_and_binds_that_c
     let dir = tempfile::tempdir().unwrap();
     let _state = test_state(dir.path());
     let owner = passkey_authority_with_name(dir.path(), Some("owner"));
-    let context = HomeLaunchTokenContext {
-        principal_id: owner.principal_id,
-        session_id: owner.session_id,
-        proof_binding_id: Some(owner.proof_binding_id),
-        grant_id: owner.grant_id,
-    };
+    let context = HomeLaunchTokenContext::for_test(
+        owner.principal_id,
+        owner.session_id,
+        Some(owner.proof_binding_id),
+        owner.grant_id,
+    );
     configure_update_summary(dir.path());
     let mut sources = crate::sources::load_trusted_sources(dir.path()).unwrap();
     sources.sources[0].channel = "canary".into();
@@ -347,12 +347,12 @@ async fn system_update_summary_refuses_invalid_installed_version_with_local_repa
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(dir.path());
     let owner = passkey_authority_with_name(dir.path(), Some("owner"));
-    let context = HomeLaunchTokenContext {
-        principal_id: owner.principal_id,
-        session_id: owner.session_id,
-        proof_binding_id: Some(owner.proof_binding_id),
-        grant_id: owner.grant_id,
-    };
+    let context = HomeLaunchTokenContext::for_test(
+        owner.principal_id,
+        owner.session_id,
+        Some(owner.proof_binding_id),
+        owner.grant_id,
+    );
     configure_update_summary(dir.path());
     let mut sources = crate::sources::load_trusted_sources(dir.path()).unwrap();
     sources.sources[0].installed_version = "broken".into();
@@ -397,12 +397,12 @@ async fn system_update_summary_stays_fast_while_check_is_pending_and_keeps_queue
     let dir = tempfile::tempdir().unwrap();
     let _state = test_state(dir.path());
     let owner = passkey_authority_with_name(dir.path(), Some("owner"));
-    let context = HomeLaunchTokenContext {
-        principal_id: owner.principal_id,
-        session_id: owner.session_id,
-        proof_binding_id: Some(owner.proof_binding_id),
-        grant_id: owner.grant_id,
-    };
+    let context = HomeLaunchTokenContext::for_test(
+        owner.principal_id,
+        owner.session_id,
+        Some(owner.proof_binding_id),
+        owner.grant_id,
+    );
     let cache = tokio::sync::Mutex::new(UpdateCheckCache::default());
     assert!(
         system_runtime_update_summary_with_cache(dir.path(), &context, &cache, |_, _, _| {
@@ -468,12 +468,12 @@ async fn system_update_summary_stays_fast_while_check_is_pending_and_keeps_queue
         Some("member"),
         crate::auth::RuntimePrincipalRole::Guest,
     );
-    let member_context = HomeLaunchTokenContext {
-        principal_id: member.principal_id,
-        session_id: member.session_id,
-        proof_binding_id: Some(member.proof_binding_id),
-        grant_id: member.grant_id,
-    };
+    let member_context = HomeLaunchTokenContext::for_test(
+        member.principal_id,
+        member.session_id,
+        Some(member.proof_binding_id),
+        member.grant_id,
+    );
     let member_summary =
         system_runtime_update_summary_with_cache(dir.path(), &member_context, &cache, |_, _, _| {
             unexpected_check()
@@ -496,12 +496,12 @@ async fn system_update_summary_never_reoffers_a_refused_release_but_offers_a_new
     let dir = tempfile::tempdir().unwrap();
     let _state = test_state(dir.path());
     let owner = passkey_authority_with_name(dir.path(), Some("owner"));
-    let context = HomeLaunchTokenContext {
-        principal_id: owner.principal_id,
-        session_id: owner.session_id,
-        proof_binding_id: Some(owner.proof_binding_id),
-        grant_id: owner.grant_id,
-    };
+    let context = HomeLaunchTokenContext::for_test(
+        owner.principal_id,
+        owner.session_id,
+        Some(owner.proof_binding_id),
+        owner.grant_id,
+    );
     configure_update_summary(dir.path());
     let status_path = dir.path().join("update-controller/status.json");
     let mut status: crate::update_controller::UpdateStatus =
@@ -578,12 +578,12 @@ async fn system_update_guest_summary_skips_discovery_and_keeps_owner_check_unsta
         Some("member"),
         crate::auth::RuntimePrincipalRole::Guest,
     );
-    let context = HomeLaunchTokenContext {
-        principal_id: member.principal_id.clone(),
-        session_id: member.session_id.clone(),
-        proof_binding_id: Some(member.proof_binding_id.clone()),
-        grant_id: member.grant_id.clone(),
-    };
+    let context = HomeLaunchTokenContext::for_test(
+        member.principal_id.clone(),
+        member.session_id.clone(),
+        Some(member.proof_binding_id.clone()),
+        member.grant_id.clone(),
+    );
     configure_update_summary(dir.path());
     let cache = tokio::sync::Mutex::new(UpdateCheckCache::default());
     assert!(
@@ -600,12 +600,12 @@ async fn system_update_guest_summary_skips_discovery_and_keeps_owner_check_unsta
     assert_update_stays_unqueued(dir.path());
 
     let owner = passkey_authority_with_name(dir.path(), Some("owner"));
-    let owner_context = HomeLaunchTokenContext {
-        principal_id: owner.principal_id,
-        session_id: owner.session_id,
-        proof_binding_id: Some(owner.proof_binding_id),
-        grant_id: owner.grant_id,
-    };
+    let owner_context = HomeLaunchTokenContext::for_test(
+        owner.principal_id,
+        owner.session_id,
+        Some(owner.proof_binding_id),
+        owner.grant_id,
+    );
     let (started, observed) = tokio::sync::oneshot::channel();
     let owner_summary = system_runtime_update_summary_with_cache(
         dir.path(),

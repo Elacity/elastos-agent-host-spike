@@ -84,12 +84,12 @@ impl ContactRequestHome {
         .unwrap();
 
         let (remote_profile_did, remote_advertisement) = remote_advertisement("Remote", now);
-        let chat_context = HomeLaunchTokenContext {
-            principal_id: authority.principal_id.clone(),
-            session_id: authority.session_id.clone(),
-            proof_binding_id: Some(authority.proof_binding_id.clone()),
-            grant_id: authority.grant_id.clone(),
-        };
+        let chat_context = HomeLaunchTokenContext::for_test(
+            authority.principal_id.clone(),
+            authority.session_id.clone(),
+            Some(authority.proof_binding_id.clone()),
+            authority.grant_id.clone(),
+        );
         let chat_token = issue_home_projection_launch_token_with_context(
             dir.path(),
             CHAT_ROOM_CAPSULE_ID,
