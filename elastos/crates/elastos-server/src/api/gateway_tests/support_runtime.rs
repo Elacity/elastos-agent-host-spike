@@ -610,12 +610,12 @@ fn launch_token_for_authority_context(
     issue_home_launch_token_with_context(
         data_dir,
         app,
-        &HomeLaunchTokenContext {
-            principal_id: authority.principal_id.clone(),
-            session_id: authority.session_id.clone(),
-            proof_binding_id: Some(authority.proof_binding_id.clone()),
-            grant_id: authority.grant_id.clone(),
-        },
+        &HomeLaunchTokenContext::for_test(
+            authority.principal_id.clone(),
+            authority.session_id.clone(),
+            Some(authority.proof_binding_id.clone()),
+            authority.grant_id.clone(),
+        ),
     )
     .unwrap()
 }
@@ -629,12 +629,12 @@ fn projection_launch_token_for_authority_context(
         data_dir,
         app,
         app,
-        &HomeLaunchTokenContext {
-            principal_id: authority.principal_id.clone(),
-            session_id: authority.session_id.clone(),
-            proof_binding_id: Some(authority.proof_binding_id.clone()),
-            grant_id: authority.grant_id.clone(),
-        },
+        &HomeLaunchTokenContext::for_test(
+            authority.principal_id.clone(),
+            authority.session_id.clone(),
+            Some(authority.proof_binding_id.clone()),
+            authority.grant_id.clone(),
+        ),
     )
     .unwrap()
 }
