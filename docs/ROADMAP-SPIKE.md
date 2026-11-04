@@ -1,6 +1,6 @@
 # ElastOS agent-host spike: roadmap to v3
 
-Last updated: Wed 4 Nov 2026, about 11:30 Bangkok time (UTC+7). Base: `spike/agent-host` at `d1246b3c` (merge of #1447).
+Last updated 4 Nov 2026, about 11:10 Bangkok time (UTC+7). Base: `spike/agent-host` at `d1246b3c` (merge of #1447).
 
 This page is for an agent or engineer arriving cold. It says where the work stands, what is done, what is moving and what is left, all the way to "v3". Every claim carries its source. Where a source does not give a stage or date, the item says **unscheduled**. Nothing here is a release date.
 
