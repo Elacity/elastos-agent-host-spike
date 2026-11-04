@@ -1398,6 +1398,26 @@ async fn test_gateway_provider_proxy_rejects_predeclared_runtime_metadata() {
     }
 }
 
+/// A5-S3c-0b, N2: a client-sent `principal_id` on the object scheme is
+/// replaced by the launch-token principal (gateway_provider_proxy.rs:1842).
+#[tokio::test]
+async fn test_object_provider_replaces_a_client_sent_principal_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    let token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &authority);
+    let own = crate::auth::principal_localhost_root(&authority.principal_id);
+    let spoofed = json!({"principal_id": "person:local:someone-else"});
+    let (status, roots) = post_library(app, &token, "roots", spoofed).await;
+    assert_eq!(status, StatusCode::OK, "{roots}");
+    let home = roots["data"]["roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "home");
+    assert_eq!(home.unwrap()["uri"], own, "{roots}");
+}
+
 #[tokio::test]
 async fn test_library_provider_object_lifecycle() {
     let dir = tempfile::tempdir().unwrap();

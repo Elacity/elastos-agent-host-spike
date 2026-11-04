@@ -679,6 +679,26 @@ mod tests {
     use super::*;
     use elastos_runtime::primitives::audit::AuditEvent;
 
+    /// A5-S3c-0b, presence: a stored Agent's presence grant file names its
+    /// own UsersAI root. Expected-fail: the id rule. Flipped by A5-S3c-3a.
+    #[test]
+    #[ignore = "expected-fail until A5-S3c-3a"]
+    fn a_stored_agents_presence_grant_file_is_under_its_usersai_root() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let id = "person:local:s3c-agent-presence";
+        crate::auth::store_test_human_principal(data_dir.path(), id);
+        crate::auth::tests::mint_agent_record(data_dir.path(), id, None);
+        let root = crate::auth::principal_stored_localhost_root(Some(data_dir.path()), id).unwrap();
+        assert!(root.starts_with("localhost://UsersAI/"), "{root}");
+        let file = load_file(data_dir.path(), id).unwrap();
+        assert_eq!(file.localhost_root, root);
+        assert!(
+            object_uri(id).starts_with(&format!("{root}/")),
+            "{}",
+            object_uri(id)
+        );
+    }
+
     const ME: &str = "did:key:zMe";
 
     fn home() -> (tempfile::TempDir, String) {
