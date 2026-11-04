@@ -7885,6 +7885,40 @@ fn anyhow_error_detail(error: &anyhow::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A5-S3c-0b, class I: the object provider request no longer carries a
+    /// client-named principal; the Runtime supplies the resolved root.
+    /// Expected-fail: it deserializes an id. Flipped by A5-S3c-4.
+    #[test]
+    #[ignore = "expected-fail until A5-S3c-4"]
+    fn an_object_provider_request_naming_a_principal_is_refused() {
+        let named = serde_json::json!({"op": "roots", "principal_id": "person:local:x"});
+        let parsed = serde_json::from_value::<super::ObjectProviderRequest>(named);
+        assert!(parsed.is_err(), "{parsed:?}");
+    }
+
+    /// A5-S3c-0a, library: a stored Agent's Library roots sit under its own
+    /// UsersAI root. Expected-fail: library_roots still applies the id rule.
+    /// Flipped by A5-S3c-2b.
+    #[test]
+    #[ignore = "expected-fail until A5-S3c-2b"]
+    fn a_stored_agents_library_roots_are_under_its_usersai_root() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let id = "person:local:s3c-agent-library";
+        crate::auth::store_test_human_principal(data_dir.path(), id);
+        crate::auth::tests::mint_agent_record(data_dir.path(), id, None);
+        let root = crate::auth::principal_stored_localhost_root(Some(data_dir.path()), id).unwrap();
+        assert!(root.starts_with("localhost://UsersAI/"), "{root}");
+        let principal_id = id.to_string();
+        let request = super::ObjectProviderRequest::Roots { principal_id };
+        let roots = super::handle_library_request(data_dir.path(), request).unwrap();
+        let roots = roots["roots"].as_array().unwrap();
+        assert!(roots.len() > 1, "{roots:?}");
+        for entry in roots.iter().filter(|r| r["kind"] != "webspace-root") {
+            let uri = entry["uri"].as_str().unwrap();
+            assert!(uri == root || uri.starts_with(&format!("{root}/")), "{uri}");
+        }
+    }
+
     #[test]
     fn provider_error_from_keeps_the_stable_message_and_exposes_the_cause_chain() {
         let error = anyhow::anyhow!("(400, \"upstream_rpc_error: reverted\")")

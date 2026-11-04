@@ -37,6 +37,18 @@ enum UnsignedCapsules {
     Refused,
 }
 
+/// The signer that admitted a capsule: the trusted key that verified it, the
+/// installed signed release, or dev_mode's unsigned admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Signer {
+    /// A trusted capsule-signing key, named by its `did:key`.
+    Key { did: String },
+    /// Admitted as a capsule of the installed signed release.
+    InstalledRelease,
+    /// Admitted unsigned because `dev_mode = true`.
+    UnsignedDev,
+}
+
 /// The main ElastOS runtime
 pub struct Runtime {
     // Keep the storage provider alive for runtime/lifecycle ownership even
@@ -279,7 +291,7 @@ impl Runtime {
         self.check_provider_dependencies(&manifest).await?;
 
         // Verify signature if verifier is configured
-        self.verify_capsule_signature(&manifest, path).await?;
+        let _signer = self.verify_capsule_signature(&manifest, path).await?;
         crate::component::validate_component_capsule(path, &manifest).await?;
 
         // Find a compute provider that supports this capsule type
@@ -352,7 +364,7 @@ impl Runtime {
         &self,
         manifest: &CapsuleManifest,
         path: &Path,
-    ) -> Result<()> {
+    ) -> Result<Signer> {
         if manifest.signature.is_none() {
             return match &*self.unsigned_capsules.read().await {
                 UnsignedCapsules::Allowed => {
@@ -360,7 +372,16 @@ impl Runtime {
                         "Unsigned capsule '{}' allowed because dev_mode=true",
                         manifest.name
                     );
-                    Ok(())
+                    Ok(Signer::UnsignedDev)
+                }
+                // An agent is named by the key that signed it. The installed
+                // release has no signer DID yet (rong-ruling-a5-measure-1945 Q3,
+                // gated), so an agent declared there is refused, failing closed.
+                UnsignedCapsules::InstalledRelease(_) if manifest.agent.is_some() => {
+                    Err(ElastosError::InvalidManifest(format!(
+                        "Capsule '{}' declares an agent but no trusted key signed it",
+                        manifest.name
+                    )))
                 }
                 UnsignedCapsules::InstalledRelease(data_dir) => {
                     crate::setup::verify_installed_release_capsule(data_dir, &manifest.name, path)
@@ -370,6 +391,7 @@ impl Runtime {
                                 manifest.name
                             ))
                         })
+                        .map(|()| Signer::InstalledRelease)
                 }
                 UnsignedCapsules::Refused => Err(ElastosError::InvalidManifest(format!(
                     "Capsule '{}' is unsigned; only a source or development Home with dev_mode = true runs unsigned capsules",
@@ -396,15 +418,17 @@ impl Runtime {
         })?;
         let content_hash = hash_content(&content);
 
-        // Verify signature
-        if verifier.verify_capsule(manifest, &content_hash)?.is_none() {
+        // Verify signature; the matched trusted key names the signer.
+        let Some(key) = verifier.verify_capsule(manifest, &content_hash)? else {
             return Err(ElastosError::InvalidManifest(
                 "Capsule signature verification failed".into(),
             ));
-        }
+        };
+        let did = crate::crypto::encode_did_key(&key)
+            .map_err(|e| ElastosError::InvalidManifest(e.to_string()))?;
 
-        tracing::info!("Capsule signature verified successfully");
-        Ok(())
+        tracing::info!("Capsule signature verified successfully by {}", did);
+        Ok(Signer::Key { did })
     }
 
     /// Stop a running capsule
@@ -680,6 +704,7 @@ mod tests {
             viewer: None,
             window_policy: None,
             model_content: None,
+            agent: None,
             signature: None,
         }
     }
@@ -762,10 +787,14 @@ mod tests {
             .configure_capsule_admission(&home.data, &[], true)
             .await
             .unwrap();
-        runtime
-            .verify_capsule_signature(&manifest, &release_dir)
-            .await
-            .unwrap();
+        // The installed signed release is named as such, not as a key or dev.
+        assert_eq!(
+            runtime
+                .verify_capsule_signature(&manifest, &release_dir)
+                .await
+                .unwrap(),
+            Signer::InstalledRelease
+        );
         let error = runtime
             .verify_capsule_signature(&manifest, &local_dir)
             .await
@@ -776,6 +805,20 @@ mod tests {
                 .contains("not from the installed signed release"),
             "{error}"
         );
+        // A5-S2b: an agent declared on the installed release is refused.
+        let mut declared = manifest.clone();
+        declared.agent = Some(elastos_common::AgentDeclaration {
+            kind: elastos_common::AgentKind::Agent,
+        });
+        let error = runtime
+            .verify_capsule_signature(&declared, &release_dir)
+            .await
+            .unwrap_err();
+        let expected = format!(
+            "Capsule '{}' declares an agent but no trusted key signed it",
+            declared.name
+        );
+        assert!(error.to_string().contains(&expected), "{error}");
 
         let signed_by = |key: u8| {
             let mut signed = manifest.clone();
@@ -804,6 +847,57 @@ mod tests {
             .verify_capsule_signature(&manifest, &release_dir)
             .await
             .is_err());
+    }
+
+    /// A signed capsule names its signer by the matched key's DID; dev_mode's
+    /// unsigned admission is named as such.
+    #[tokio::test]
+    async fn verify_capsule_signature_names_the_matched_signer() {
+        let (runtime, temp_dir) = test_runtime().await;
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[71; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp_dir.path(),
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let dir = temp_dir.path().join("signed-capsule");
+        std::fs::create_dir_all(&dir).unwrap();
+        let entrypoint = b"entrypoint bytes";
+        std::fs::write(dir.join("main.wasm"), entrypoint).unwrap();
+        let mut manifest = unsigned_manifest();
+        manifest.entrypoint = "main.wasm".to_string();
+        manifest.agent = Some(elastos_common::AgentDeclaration {
+            kind: elastos_common::AgentKind::Agent,
+        });
+        elastos_runtime::signature::sign_capsule(&key, &mut manifest, &hash_content(entrypoint))
+            .unwrap();
+
+        let expected_did = elastos_identity::encode_did_key(&key.verifying_key()).unwrap();
+        let signer = runtime
+            .verify_capsule_signature(&manifest, &dir)
+            .await
+            .unwrap();
+        assert_eq!(signer, Signer::Key { did: expected_did });
+
+        // The unsigned capsule is named unsigned by dev_mode's admission, and
+        // dev_mode admits a declared agent unsigned.
+        runtime
+            .configure_capsule_admission(temp_dir.path(), &[], true)
+            .await
+            .unwrap();
+        manifest.signature = None;
+        for capsule in [unsigned_manifest(), manifest] {
+            assert_eq!(
+                runtime
+                    .verify_capsule_signature(&capsule, &dir)
+                    .await
+                    .unwrap(),
+                Signer::UnsignedDev
+            );
+        }
     }
 
     /// A Home with no signed release, dev_mode off and one trusted key refuses

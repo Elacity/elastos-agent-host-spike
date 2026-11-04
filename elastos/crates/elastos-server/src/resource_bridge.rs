@@ -183,6 +183,7 @@ struct ResourceInvokeDispatch {
 fn resource_invoke_dispatch(
     request: &serde_json::Value,
     principal_id: Option<&str>,
+    data_dir: Option<&Path>,
 ) -> Result<ResourceInvokeDispatch, String> {
     let uri = request["uri"]
         .as_str()
@@ -193,7 +194,7 @@ fn resource_invoke_dispatch(
     if is_system_only_backend_resource(uri) {
         return Err("system backends are not app capabilities; use elastos://content".to_string());
     }
-    let uri = scope_current_user_alias(uri, principal_id)?;
+    let uri = scope_current_user_alias(uri, principal_id, data_dir)?;
 
     let operation = request["operation"]
         .as_str()
@@ -226,7 +227,7 @@ fn resource_invoke_dispatch(
             object.remove("token");
         }
         let path = match body.get("path").and_then(|value| value.as_str()) {
-            Some(path) => scope_current_user_alias(path, principal_id)?,
+            Some(path) => scope_current_user_alias(path, principal_id, data_dir)?,
             None => uri.to_string(),
         };
         body["path"] = serde_json::Value::String(path);
@@ -260,11 +261,12 @@ fn manifest_allows_resource(
     manifest_capabilities: &[String],
     resource: &str,
     principal_id: Option<&str>,
+    data_dir: Option<&Path>,
 ) -> bool {
     let requested = ResourceId::new(resource);
     manifest_capabilities.iter().any(|capability| {
         let pattern = if is_unscoped_current_user_alias(capability) {
-            match scope_current_user_alias(capability, principal_id) {
+            match scope_current_user_alias(capability, principal_id, data_dir) {
                 Ok(scoped) => scoped,
                 Err(_) => return false,
             }
@@ -341,7 +343,11 @@ async fn authorize_and_dispatch_resource_invoke(
     bridge_ctx: &BridgeContext,
 ) -> serde_json::Value {
     let token_b64 = request["token"].as_str().unwrap_or("");
-    let dispatch = match resource_invoke_dispatch(request, bridge_ctx.principal_id.as_deref()) {
+    let dispatch = match resource_invoke_dispatch(
+        request,
+        bridge_ctx.principal_id.as_deref(),
+        bridge_ctx.data_dir.as_deref(),
+    ) {
         Ok(dispatch) => dispatch,
         Err(message) => {
             return resource_error_response("invalid_resource_invoke", &message);
@@ -357,6 +363,7 @@ async fn authorize_and_dispatch_resource_invoke(
         &bridge_ctx.manifest_capabilities,
         &dispatch.resource,
         bridge_ctx.principal_id.as_deref(),
+        bridge_ctx.data_dir.as_deref(),
     ) {
         return finish_component_invoke(
             bridge_ctx,
@@ -471,12 +478,22 @@ fn protected_principal_root_resource_response(
     let rooted = principal_root_read_write_uri(operation, request)?;
 
     let Some(principal_id) = bridge_ctx.principal_id.as_deref() else {
+        let area = if rooted.starts_with("localhost://UsersAI/") {
+            "localhost://UsersAI"
+        } else {
+            "localhost://Users"
+        };
         return Some(resource_error_response(
             "principal_context_required",
-            "localhost://Users requires a principal-scoped launch context",
+            &format!("{area} requires a principal-scoped launch context"),
         ));
     };
-    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    let data_dir = bridge_ctx.data_dir.as_deref();
+    let localhost_root = match crate::auth::principal_stored_localhost_root(data_dir, principal_id)
+    {
+        Ok(root) => root,
+        Err(err) => return Some(resource_error_response("principal_context_required", &err)),
+    };
     if rooted != localhost_root && !rooted.starts_with(&format!("{localhost_root}/")) {
         return Some(resource_error_response(
             "principal_context_required",
@@ -715,7 +732,12 @@ fn principal_root_read_write_uri(operation: &str, request: &serde_json::Value) -
         .and_then(|value| value.as_str())
         .unwrap_or_default();
     let rooted = rooted_localhost_uri(object_uri)?;
-    rooted.starts_with("localhost://Users/").then_some(rooted)
+    // A5-S3b: both principal-root areas take the protected path.
+    let areas = ["localhost://Users/", "localhost://UsersAI/"];
+    areas
+        .iter()
+        .any(|area| rooted.starts_with(area))
+        .then_some(rooted)
 }
 
 fn request_content_bytes(request: &serde_json::Value) -> Result<Vec<u8>, String> {
@@ -809,48 +831,47 @@ fn serialize_bridge_response(response: serde_json::Value) -> Vec<u8> {
 fn scope_current_user_alias(
     uri_or_resource: &str,
     principal_id: Option<&str>,
+    data_dir: Option<&Path>,
 ) -> Result<String, String> {
     let Some(rooted) = rooted_localhost_uri(uri_or_resource) else {
         return Ok(uri_or_resource.to_string());
     };
 
-    if is_unscoped_current_user_alias(&rooted) {
-        let Some(principal_id) = principal_id else {
-            return Err(
-                "localhost://Users/self requires a principal-scoped launch context".to_string(),
-            );
-        };
-        let principal_root = crate::auth::principal_localhost_root(principal_id);
-        if rooted == "localhost://Users/self" {
-            return Ok(principal_root);
-        }
-        let rest = rooted
-            .strip_prefix("localhost://Users/self/")
-            .ok_or_else(|| format!("Invalid current-user alias: {uri_or_resource}"))?;
-        return Ok(format!("{principal_root}/{rest}"));
+    // A5-S3a-2: the stored record's kind picks the one root area a principal may use.
+    let Some(area) = ["Users", "UsersAI"]
+        .into_iter()
+        .find(|area| rooted.starts_with(&format!("localhost://{area}/")))
+    else {
+        return Ok(rooted);
+    };
+    let alias = format!("localhost://{area}/self");
+    let is_alias = rooted == alias || rooted.starts_with(&format!("{alias}/"));
+    let Some(principal_id) = principal_id else {
+        let what = format!("localhost://{area}{}", if is_alias { "/self" } else { "" });
+        return Err(format!("{what} requires a principal-scoped launch context"));
+    };
+    let principal_root = crate::auth::principal_stored_localhost_root(data_dir, principal_id)?;
+    if !principal_root.starts_with(&format!("localhost://{area}/")) {
+        return Err(format!("{area} is not this principal's root area"));
     }
-
-    if rooted.starts_with("localhost://Users/") {
-        let Some(principal_id) = principal_id else {
-            return Err("localhost://Users requires a principal-scoped launch context".to_string());
-        };
-        let principal_root = crate::auth::principal_localhost_root(principal_id);
-        if rooted == principal_root || rooted.starts_with(&format!("{principal_root}/")) {
-            return Ok(rooted);
-        }
-        return Err(
-            "localhost://Users roots must use Users/self or the active principal root".to_string(),
-        );
+    if is_alias {
+        return Ok(format!("{principal_root}{}", &rooted[alias.len()..]));
     }
-
-    Ok(rooted)
+    if rooted == principal_root || rooted.starts_with(&format!("{principal_root}/")) {
+        return Ok(rooted);
+    }
+    Err(format!(
+        "localhost://{area} roots must use {area}/self or the active principal root"
+    ))
 }
 
 fn is_unscoped_current_user_alias(uri_or_resource: &str) -> bool {
     let Some(rooted) = rooted_localhost_uri(uri_or_resource) else {
         return false;
     };
-    rooted == "localhost://Users/self" || rooted.starts_with("localhost://Users/self/")
+    ["localhost://Users/self", "localhost://UsersAI/self"]
+        .iter()
+        .any(|alias| rooted == *alias || rooted.starts_with(&format!("{alias}/")))
 }
 
 fn provider_scheme_for_resource_uri(uri: &str) -> Result<String, String> {
@@ -927,8 +948,10 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                         },
                     }));
                 }
+                let data_dir = ctx.data_dir.as_deref();
                 let scoped_resource =
-                    match scope_current_user_alias(resource, ctx.principal_id.as_deref()) {
+                    match scope_current_user_alias(resource, ctx.principal_id.as_deref(), data_dir)
+                    {
                         Ok(resource) => resource,
                         Err(message) => {
                             return Ok(serde_json::json!({
@@ -975,6 +998,7 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                     &ctx.manifest_capabilities,
                     resource,
                     ctx.principal_id.as_deref(),
+                    ctx.data_dir.as_deref(),
                 ) {
                     return Ok(serde_json::json!({
                         "id": id,
@@ -1194,7 +1218,7 @@ pub async fn handle_remote_request_with_audit_dir(
 
     let response = match request_type {
         "resource_invoke" => {
-            let dispatch = match resource_invoke_dispatch(request, principal_id) {
+            let dispatch = match resource_invoke_dispatch(request, principal_id, audit_data_dir) {
                 Ok(dispatch) => dispatch,
                 Err(message) => {
                     return Ok(serde_json::json!({
@@ -1244,6 +1268,7 @@ pub async fn handle_remote_request_with_audit_dir(
                 manifest_capabilities,
                 &dispatch.resource,
                 principal_id,
+                audit_data_dir,
             ) {
                 Some(manifest_denied_response(&dispatch.resource))
             } else if cap_token.is_empty() {
@@ -1347,7 +1372,8 @@ pub async fn handle_remote_request_with_audit_dir(
             let action_str = request["action"].as_str().unwrap_or("execute");
             let reason = request["reason"].as_str().unwrap_or("");
 
-            let scoped_resource = match scope_current_user_alias(resource, principal_id) {
+            let data_dir = audit_data_dir;
+            let scoped_resource = match scope_current_user_alias(resource, principal_id, data_dir) {
                 Ok(resource) => resource,
                 Err(message) => {
                     return Ok(serde_json::json!({
@@ -1382,7 +1408,7 @@ pub async fn handle_remote_request_with_audit_dir(
                     return Ok(bridge_error_envelope(id, "generic_wallet_denied", &message));
                 }
             }
-            if !manifest_allows_resource(manifest_capabilities, resource, principal_id) {
+            if !manifest_allows_resource(manifest_capabilities, resource, principal_id, data_dir) {
                 return Ok(serde_json::json!({
                     "id": id,
                     "response": manifest_denied_response(resource),
@@ -1657,6 +1683,7 @@ mod tests {
     #[test]
     fn manifest_bound_users_self_matches_active_principal_root_only_with_context() {
         let principal_id = "person:local:abc123";
+        let temp = stored_human_dir(principal_id);
         let resource = format!(
             "{}/.AppData/LocalHost/Chat/state.json",
             crate::auth::principal_localhost_root(principal_id)
@@ -1666,9 +1693,168 @@ mod tests {
         assert!(manifest_allows_resource(
             &bounds,
             &resource,
-            Some(principal_id)
+            Some(principal_id),
+            Some(temp.path())
         ));
-        assert!(!manifest_allows_resource(&bounds, &resource, None));
+        assert!(!manifest_allows_resource(&bounds, &resource, None, None));
+    }
+
+    /// A temp data dir holding a stored Human record for `principal_id`.
+    fn stored_human_dir(principal_id: &str) -> tempfile::TempDir {
+        let temp = tempfile::tempdir().unwrap();
+        crate::auth::store_test_human_principal(temp.path(), principal_id);
+        temp
+    }
+
+    #[test]
+    fn a_principal_root_comes_only_from_its_stored_record() {
+        let id = "person:local:stored-root";
+        let temp = stored_human_dir(id);
+        let state = crate::auth::load_auth_state(temp.path()).unwrap();
+        assert_eq!(state.principals.len(), 1);
+        let record = &state.principals[0];
+        assert_eq!(record.principal_id, id);
+        assert_eq!(record.kind, crate::auth::PrincipalKind::Human);
+        let root = crate::auth::principal_localhost_root(id);
+        assert_eq!(record.localhost_root, root);
+        let request = serde_json::json!({"type": "resource_invoke", "uri": "localhost://Users/self/a.md", "operation": "read", "body": {}});
+        let resolve = |dir: &Path| resource_invoke_dispatch(&request, Some(id), Some(dir));
+        let resolved = resolve(temp.path()).unwrap().resource;
+        assert_eq!(resolved, format!("{root}/a.md"));
+        let missing = resolve(tempfile::tempdir().unwrap().path()).err().unwrap();
+        assert!(missing.contains("has no stored record"), "{missing}");
+        std::fs::write(crate::auth::auth_state_path(temp.path()).unwrap(), b"{").unwrap();
+        let unparsed = resolve(temp.path()).err().unwrap();
+        assert!(unparsed.contains("failed to parse"), "{unparsed}");
+    }
+
+    /// A5-S3a-2: a stored Agent owns UsersAI/self only; a Human owns no UsersAI root.
+    #[test]
+    fn a_stored_agent_is_scoped_to_its_own_usersai_root() {
+        let id = "agent:local:scoped";
+        let temp = stored_human_dir(id);
+        let root = crate::auth::tests::mint_agent_record(temp.path(), id, None).localhost_root;
+        let (want, dir) = (format!("{root}/a.md"), Some(temp.path()));
+        assert!(root.starts_with("localhost://UsersAI/"), "{root}");
+        let scope = |uri: &str| scope_current_user_alias(uri, Some(id), dir);
+        let not_area = |area: &str| format!("{area} is not this principal's root area");
+        assert_eq!(scope("localhost://UsersAI/self/a.md").unwrap(), want);
+        assert_eq!(scope(&want).unwrap(), want);
+        let human_root = format!("{}/a.md", crate::auth::principal_localhost_root(id));
+        for uri in ["localhost://Users/self/a.md", &human_root] {
+            assert_eq!(scope(uri).unwrap_err(), not_area("Users"));
+        }
+        let foreign = scope("localhost://UsersAI/000000000000000000000000/a.md").unwrap_err();
+        assert!(foreign.contains("roots must use UsersAI/self"), "{foreign}");
+        let allows =
+            |bound: &str, r: &str| manifest_allows_resource(&[bound.into()], r, Some(id), dir);
+        assert!(allows("localhost://UsersAI/self/*", &want));
+        assert!(!allows("localhost://Users/self/*", &human_root));
+        let (h, human) = ("person:local:h", stored_human_dir("person:local:h"));
+        let refused =
+            scope_current_user_alias("localhost://UsersAI/self", Some(h), Some(human.path()));
+        assert_eq!(refused.unwrap_err(), not_area("UsersAI"));
+    }
+
+    /// F-S3-protected: the protected write path takes the stored Agent root,
+    /// so the same id's Users root is refused with a data dir present.
+    #[test]
+    fn the_protected_path_refuses_a_stored_agent_the_users_root_of_its_id() {
+        let id = "agent:local:protected";
+        let temp = stored_human_dir(id);
+        crate::auth::tests::mint_agent_record(temp.path(), id, None);
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some(id.to_string());
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        let path = format!("{}/a.md", crate::auth::principal_localhost_root(id));
+        let request = serde_json::json!({"path": path, "content": "x"});
+        let refused = protected_principal_root_resource_response(&ctx, "write", &request).unwrap();
+        assert_eq!(refused["code"], "principal_context_required", "{refused}");
+        let message = refused["message"].as_str().unwrap();
+        assert!(message.starts_with("localhost://Users roots"), "{message}");
+    }
+
+    /// A5-S3c-0a (Q3): with no principal, the protected path names the
+    /// area it refuses.
+    #[test]
+    fn the_protected_path_names_the_area_it_refuses_without_a_principal() {
+        let ctx = bridge_context();
+        let need = " requires a principal-scoped launch context";
+        for area in ["localhost://Users", "localhost://UsersAI"] {
+            let path = format!("{area}/000000000000000000000000/a.md");
+            let request = serde_json::json!({"path": path, "content": "x"});
+            let r = protected_principal_root_resource_response(&ctx, "write", &request).unwrap();
+            assert_eq!(r["code"], "principal_context_required", "{r}");
+            assert_eq!(r["message"], format!("{area}{need}"), "{r}");
+        }
+    }
+
+    /// Codex FOLLOWUP (a) on #1442: UsersAI refusals with no principal.
+    #[test]
+    fn usersai_without_a_principal_is_refused_with_its_area_named() {
+        let refuse = |uri: &str| scope_current_user_alias(uri, None, None).unwrap_err();
+        let need = " requires a principal-scoped launch context";
+        let alias = refuse("localhost://UsersAI/self/a.md");
+        assert_eq!(alias, format!("localhost://UsersAI/self{need}"));
+        let explicit = refuse("localhost://UsersAI/000000000000000000000000/a.md");
+        assert_eq!(explicit, format!("localhost://UsersAI{need}"));
+    }
+
+    /// Codex FOLLOWUP (b) on #1442: the protected path refuses a missing
+    /// record and an auth state that does not load.
+    #[test]
+    fn the_protected_path_refuses_a_missing_record_and_a_malformed_state() {
+        let id = "person:local:protected-lookup";
+        let temp = stored_human_dir("person:local:someone-else");
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some(id.to_string());
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        let path = format!("{}/a.md", crate::auth::principal_localhost_root(id));
+        let request = serde_json::json!({"path": path, "content": "x"});
+        let refused = |ctx: &BridgeContext| {
+            let r = protected_principal_root_resource_response(ctx, "write", &request).unwrap();
+            assert_eq!(r["code"], "principal_context_required", "{r}");
+            r["message"].as_str().unwrap().to_string()
+        };
+        assert!(refused(&ctx).contains("has no stored record"));
+        std::fs::write(crate::auth::auth_state_path(temp.path()).unwrap(), b"{").unwrap();
+        assert!(refused(&ctx).contains("failed to parse"));
+    }
+
+    /// F-S3b-area: UsersAI paths take the protected path. A stored Agent is
+    /// refused a foreign UsersAI root there, and the remote bridge refuses
+    /// UsersAI root storage instead of dispatching it.
+    #[tokio::test]
+    async fn usersai_root_storage_takes_the_protected_path() {
+        let id = "agent:local:protected-ai";
+        let temp = stored_human_dir(id);
+        let root = crate::auth::tests::mint_agent_record(temp.path(), id, None).localhost_root;
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some(id.to_string());
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        let foreign = "localhost://UsersAI/000000000000000000000000/a.md";
+        let request = serde_json::json!({"path": foreign, "content": "x"});
+        let refused = protected_principal_root_resource_response(&ctx, "write", &request).unwrap();
+        assert_eq!(refused["code"], "principal_context_required", "{refused}");
+        let line = r#"{"id":31,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/a.md","operation":"read","token":"tok","body":{}}}"#;
+        let bounds = [format!("{root}/a.md")];
+        let remote = handle_remote_request_with_audit_dir(
+            line,
+            "http://127.0.0.1:12345",
+            "client-token",
+            "test-capsule",
+            &bounds,
+            Some(id),
+            Some(temp.path()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            remote["response"]["code"], "principal_context_required",
+            "{remote}"
+        );
+        let message = remote["response"]["message"].as_str().unwrap();
+        assert!(message.contains("protected storage bridge"), "{message}");
     }
 
     fn bridge_token(ctx: &BridgeContext, resource: &str, action: Action) -> String {
@@ -1725,6 +1911,7 @@ mod tests {
                 "body": {}
             }),
             None,
+            None,
         )
         .expect("localhost resource invoke should dispatch");
 
@@ -1753,6 +1940,7 @@ mod tests {
                 "body": {}
             }),
             None,
+            None,
         );
         assert!(
             result.is_err(),
@@ -1769,6 +1957,7 @@ mod tests {
     #[test]
     fn resource_invoke_dispatch_scopes_current_user_alias_with_principal() {
         let principal_id = "person:local:test-principal";
+        let temp = stored_human_dir(principal_id);
         let expected_root = crate::auth::principal_localhost_root(principal_id);
         let dispatch = resource_invoke_dispatch(
             &serde_json::json!({
@@ -1778,6 +1967,7 @@ mod tests {
                 "body": {}
             }),
             Some(principal_id),
+            Some(temp.path()),
         )
         .expect("principal-scoped current-user alias should dispatch");
 
@@ -1795,6 +1985,7 @@ mod tests {
     #[test]
     fn resource_invoke_dispatch_allows_active_explicit_principal_root() {
         let principal_id = "person:local:test-principal";
+        let temp = stored_human_dir(principal_id);
         let principal_root = crate::auth::principal_localhost_root(principal_id);
         let path = format!("{principal_root}/Documents/a.md");
         let dispatch = resource_invoke_dispatch(
@@ -1805,6 +1996,7 @@ mod tests {
                 "body": {}
             }),
             Some(principal_id),
+            Some(temp.path()),
         )
         .expect("active explicit principal root should dispatch");
 
@@ -1814,6 +2006,7 @@ mod tests {
     #[test]
     fn resource_invoke_dispatch_rejects_foreign_principal_root() {
         let active_principal_id = "person:local:active";
+        let temp = stored_human_dir(active_principal_id);
         let foreign_root = crate::auth::principal_localhost_root("person:local:foreign");
         let result = resource_invoke_dispatch(
             &serde_json::json!({
@@ -1823,6 +2016,7 @@ mod tests {
                 "body": {}
             }),
             Some(active_principal_id),
+            Some(temp.path()),
         );
 
         assert_eq!(
@@ -1840,6 +2034,7 @@ mod tests {
                 "operation": "block_number",
                 "body": {}
             }),
+            None,
             None,
         )
         .expect("chain resource invoke should dispatch");
@@ -1883,6 +2078,7 @@ mod tests {
                         "body": body
                     }),
                     None,
+                    None,
                 );
                 assert_eq!(
                     result.err().as_deref(),
@@ -1897,6 +2093,7 @@ mod tests {
                     "operation": operation,
                     "body": null
                 }),
+                None,
                 None,
             )
             .unwrap_or_else(|err| panic!("{uri} with null body should dispatch: {err}"));
@@ -1925,6 +2122,7 @@ mod tests {
                     }
                 }),
                 None,
+                None,
             )
             .err()
             .expect("generic Wallet operations must fail closed");
@@ -1946,6 +2144,7 @@ mod tests {
                     "request": {"op": "wallet_contract"}
                 }
             }),
+            None,
             None,
         )
         .expect("read-only Wallet status should remain available");
@@ -2128,17 +2327,19 @@ mod tests {
     #[tokio::test]
     async fn handle_remote_request_rejects_users_root_storage_without_protected_bridge() {
         let principal_id = "person:local:active";
+        let temp = stored_human_dir(principal_id);
         let object_uri = format!(
             "{}/Documents/a.md",
             crate::auth::principal_localhost_root(principal_id)
         );
-        let response = handle_remote_request(
+        let response = handle_remote_request_with_audit_dir(
             r#"{"id":13,"request":{"type":"resource_invoke","uri":"localhost://Users/self/Documents/a.md","operation":"read","token":"tok","body":{}}}"#,
             "http://127.0.0.1:12345",
             "client-token",
             "test-capsule",
             &[object_uri],
             Some(principal_id),
+            Some(temp.path()),
         )
         .await
         .expect("attached bridge should reject before provider dispatch");
@@ -2296,6 +2497,8 @@ mod tests {
     async fn handle_request_denies_foreign_user_root_before_pending() {
         let mut ctx = bridge_context();
         ctx.principal_id = Some("person:local:active".to_string());
+        let temp = stored_human_dir("person:local:active");
+        ctx.data_dir = Some(temp.path().to_path_buf());
         let pending_store = ctx.pending_store.clone();
         let foreign_root = crate::auth::principal_localhost_root("person:local:foreign");
         let response = handle_request(
@@ -2329,6 +2532,7 @@ mod tests {
         let mut ctx = bridge_context();
         ctx.principal_id = Some(principal_id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
+        crate::auth::store_test_human_principal(temp.path(), principal_id);
 
         let object_uri = format!(
             "{}/.AppData/LocalHost/Chat/state.json",
@@ -2398,6 +2602,7 @@ mod tests {
         let mut ctx = bridge_context();
         ctx.principal_id = Some(principal_id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
+        crate::auth::store_test_human_principal(temp.path(), principal_id);
         ctx.manifest_capabilities = vec![format!(
             "{}/.AppData/Agents/demo-agent/*",
             protection.localhost_root
@@ -2679,6 +2884,7 @@ mod tests {
         let mut ctx = bridge_context();
         ctx.principal_id = Some(principal_id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
+        crate::auth::store_test_human_principal(temp.path(), principal_id);
         ctx.manifest_capabilities = vec![format!("{root}/*")];
         let provider = Arc::new(CapturingProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
@@ -2785,6 +2991,7 @@ mod tests {
         let mut ctx = bridge_context();
         ctx.principal_id = Some(principal_id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
+        crate::auth::store_test_human_principal(temp.path(), principal_id);
         ctx.manifest_capabilities = vec![format!("{root}/*")];
         let provider = Arc::new(CapturingProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
@@ -2819,6 +3026,7 @@ mod tests {
         let mut ctx = bridge_context();
         ctx.principal_id = Some(principal_id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
+        crate::auth::store_test_human_principal(temp.path(), principal_id);
         ctx.manifest_capabilities = vec![format!("{root}/*")];
         let provider = Arc::new(CapturingProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
@@ -3092,6 +3300,7 @@ mod tests {
     #[tokio::test]
     async fn the_attached_bridge_applies_the_agents_rule_before_http() {
         let manifest = ["localhost://Users/self/*".to_string()];
+        let temp = stored_human_dir("person:local:journal-owner");
         let journal = "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal";
         let folder = "localhost://Users/self/.AppData/Agents/agent-host";
         for (id, operation, uri, refused) in [
@@ -3130,13 +3339,14 @@ mod tests {
                 }
             })
             .to_string();
-            let response = handle_remote_request(
+            let response = handle_remote_request_with_audit_dir(
                 &line,
                 "http://127.0.0.1:12345",
                 "client-token",
                 "test-capsule",
                 &manifest,
                 Some("person:local:journal-owner"),
+                Some(temp.path()),
             )
             .await
             .unwrap_or_else(|err| panic!("{operation} {uri} reached HTTP: {err}"));
@@ -3181,7 +3391,7 @@ mod tests {
     /// request that got past a refusal would fail to connect.
     #[tokio::test]
     async fn attached_bridge_refusals_are_audited() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = stored_human_dir("person:local:journal-owner");
         let manifest = ["localhost://Users/self/*".to_string()];
         let journal = "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal";
         for (id, operation, uri, token, refused) in [
@@ -3374,13 +3584,14 @@ mod tests {
                 local["response"]["code"], "operation_not_allowed",
                 "{action} {resource}"
             );
-            let remote = handle_remote_request(
+            let remote = handle_remote_request_with_audit_dir(
                 &line,
                 "http://127.0.0.1:12345",
                 "client-token",
                 "test-capsule",
                 &["localhost://Users/self/*".to_string()],
                 Some("person:local:journal-owner"),
+                Some(_temp.path()),
             )
             .await
             .unwrap_or_else(|err| panic!("{action} {resource} reached HTTP: {err}"));
@@ -3819,6 +4030,7 @@ mod tests {
                 }
             }),
             None,
+            None,
         )
         .unwrap();
         let token = bridge_token(&ctx, &preview.resource, Action::Read);
@@ -4133,7 +4345,7 @@ mod tests {
 
         assert_eq!(response["id"], 23);
         assert_eq!(response["response"]["type"], "error");
-        assert_eq!(response["response"]["code"], "principal_context_required");
+        assert_eq!(response["response"]["code"], "invalid_resource_invoke");
         assert!(response["response"]["message"]
             .as_str()
             .unwrap()

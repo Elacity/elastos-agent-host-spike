@@ -7624,6 +7624,46 @@ mod tests {
         assert_eq!(event.result, "ok");
     }
 
+    /// A5-S3c-0b, N3 (Rong 0825 option a): a kit for a principal stored as an
+    /// Agent is refused for both root shapes, with no ok import audit and no
+    /// principal or session created. Today's refusers: the recovery request
+    /// principal binding mismatch (Users root kept) and the `localhost_root`
+    /// principal-owned check (UsersAI root). S3c-4 tightens this row to the
+    /// explicit kind refusal message.
+    #[tokio::test]
+    async fn recovery_kit_import_refuses_a_principal_stored_as_an_agent() {
+        for keep_users_root in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let state = test_gateway_state(temp.path());
+            let (cred, o) = (test_credential(), "https://elastos.elacitylabs.com");
+            let role = crate::auth::RuntimePrincipalRole::Admin;
+            seed_test_passkey_principal(&state, &cred, o, role);
+            store_test_credential(temp.path(), cred.clone());
+            let grant = issue_passkey_session_grant(&state, "id", &cred, o, true, "t").unwrap();
+            let id = grant.principal_id.clone();
+            let own = crate::auth::principal_stored_localhost_root(Some(temp.path()), &id).unwrap();
+            let kept = keep_users_root.then_some(own.as_str());
+            let root = crate::auth::tests::mint_agent_record(temp.path(), &id, kept).localhost_root;
+            let kit = create_recovery_kit_for_principal(&id, &root, None, 1_800_000_000).unwrap();
+            let before = crate::auth::load_auth_state(temp.path()).unwrap();
+            let request = RecoveryKitMaterialImport {
+                principal_id: id,
+                localhost_root: root,
+                reassign_to_current_principal: false,
+                kit,
+                did_recovery_proof: None,
+            };
+            let headers = home_token_headers(&grant.home_token);
+            let result = recovery_kit_import_inner(&state, &headers, request).await;
+            assert!(result.is_err(), "keep_users_root={keep_users_root}");
+            let after = crate::auth::load_auth_state(temp.path()).unwrap();
+            let added = &after.audit[before.audit.len()..];
+            assert!(added.iter().all(|e| e.result != "ok"), "{keep_users_root}");
+            let counts = |s: &crate::auth::AuthState| (s.principals.len(), s.sessions.len());
+            assert_eq!(counts(&after), counts(&before), "{keep_users_root}");
+        }
+    }
+
     #[tokio::test]
     async fn recovery_kit_import_rejects_wrong_key_binding_without_mutation() {
         let temp = tempfile::tempdir().unwrap();

@@ -411,12 +411,14 @@ fn home_launch_token_context_from_parts(
             anyhow::bail!("home launch token authority context mismatch");
         }
     }
-    Ok(HomeLaunchTokenContext {
-        principal_id: principal_id.to_string(),
-        session_id: session_id.to_string(),
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, principal_id)?;
+    Ok(HomeLaunchTokenContext::resolved(
+        root,
+        principal_id.to_string(),
+        session_id.to_string(),
         proof_binding_id,
-        grant_id: grant_id.to_string(),
-    })
+        grant_id.to_string(),
+    ))
 }
 const BROWSER_CAPSULE_ID: &str = "browser";
 const SERVICES_CAPSULE_ID: &str = "services";

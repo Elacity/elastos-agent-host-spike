@@ -379,3 +379,37 @@ pub(super) fn validate_legacy_workspace_bytes(bytes: &[u8]) -> anyhow::Result<se
     validate_workspace(&workspace)?;
     Ok(serde_json::from_slice(bytes)?)
 }
+
+#[cfg(test)]
+mod s3c_rows {
+    use super::*;
+
+    /// The launch context a stored Agent's Home launch carries. Today it is
+    /// the bare literal; S3c-1a builds it through the one resolving
+    /// constructor (P1), and only this helper changes.
+    fn stored_agent_launch_context(data_dir: &std::path::Path, id: &str) -> HomeLaunchTokenContext {
+        crate::auth::store_test_human_principal(data_dir, id);
+        crate::auth::tests::mint_agent_record(data_dir, id, None);
+        HomeLaunchTokenContext {
+            principal_id: id.to_string(),
+            session_id: "session:s3c".to_string(),
+            proof_binding_id: None,
+            grant_id: "grant:s3c".to_string(),
+        }
+    }
+
+    /// A5-S3c-0a, class G: a stored Agent's assistant workspace sits under
+    /// its own UsersAI root. Expected-fail: the launch context still gives
+    /// the id rule's Users root. Flipped by A5-S3c-1b.
+    #[test]
+    #[ignore = "expected-fail until A5-S3c-1b"]
+    fn a_stored_agents_assistant_workspace_is_under_its_usersai_root() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let id = "person:local:s3c-agent-g";
+        let context = stored_agent_launch_context(data_dir.path(), id);
+        let root = crate::auth::principal_stored_localhost_root(Some(data_dir.path()), id).unwrap();
+        assert!(root.starts_with("localhost://UsersAI/"), "{root}");
+        let uri = assistant_workspace_uri(&context);
+        assert!(uri.starts_with(&format!("{root}/")), "{uri}");
+    }
+}

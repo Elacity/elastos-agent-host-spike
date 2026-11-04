@@ -16,6 +16,25 @@ pub(in crate::api) struct HomeLaunchTokenContext {
     pub grant_id: String,
 }
 
+impl HomeLaunchTokenContext {
+    /// The one production constructor (C6 P1): the root is resolved and refuses
+    /// before a context exists. S3c-1a-iii stores it in the context.
+    pub(in crate::api) fn resolved(
+        _root: crate::auth::ResolvedPrincipalRoot,
+        principal_id: String,
+        session_id: String,
+        proof_binding_id: Option<String>,
+        grant_id: String,
+    ) -> Self {
+        Self {
+            principal_id,
+            session_id,
+            proof_binding_id,
+            grant_id,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(in crate::api) struct HomeLaunchContext {

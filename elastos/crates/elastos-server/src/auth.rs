@@ -19,7 +19,7 @@ use anyhow::{anyhow, Context};
 use base64::Engine as _;
 use elastos_common::localhost::rooted_localhost_fs_path;
 use elastos_runtime::auth::{
-    validate_principal_root_protection, AuthChallengeV1, AuthSessionGrantV1,
+    validate_principal_root_protection, AuthChallengeV1, AuthSessionGrantV1, PrincipalId,
     PrincipalRootProtectionV1, PrincipalRootProtectorKind, PrincipalRootRecoveryArchiveV1,
     ProofBinding, RecoveryKitV1, RuntimeAuditEventV1, DEFAULT_PRINCIPAL_ROOT_CIPHER,
 };
@@ -7176,6 +7176,43 @@ fn principal_kind_localhost_root(principal_id: &str, kind: PrincipalKind) -> Str
     }
 }
 
+/// The root a principal owns, chosen by the kind its stored record was minted
+/// with (A5-S3, rong-ruling-a5-s3-0025 C3). A legacy record with no kind field
+/// reads as Human; no data dir, a missing record, or a state that does not load
+/// refuses.
+pub(crate) fn principal_stored_localhost_root(
+    data_dir: Option<&Path>,
+    principal_id: &str,
+) -> Result<String, String> {
+    let data_dir = data_dir.ok_or("principal roots require a local runtime data directory")?;
+    let stored = stored_principal_record(data_dir, principal_id);
+    let record = stored.map_err(|err| err.to_string())?.ok_or_else(|| {
+        format!("principal '{principal_id}' has no stored record; its root cannot be chosen")
+    })?;
+    Ok(principal_kind_localhost_root(principal_id, record.kind))
+}
+
+/// A principal's root, resolved once where the principal is bound (C6 P1,
+/// rong-ruling-1455b-s3c1a-1430-1000). Only this module constructs one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedPrincipalRoot(String);
+
+impl ResolvedPrincipalRoot {
+    /// The one resolver. The device's own DID takes the device arm, matched
+    /// against the device identity, never an id prefix; any other principal
+    /// takes its stored record's root, and no record refuses.
+    pub(crate) fn resolve(data_dir: &Path, principal_id: &str) -> anyhow::Result<Self> {
+        let device = crate::collaboration_profile_authority::load_existing_device_did(data_dir)?;
+        if device.is_some_and(|did| PrincipalId::device_did(&did).as_str() == principal_id) {
+            // Today's device root: the one Users rule, applied to `device:<did>`.
+            return Ok(Self(principal_localhost_root(principal_id)));
+        }
+        principal_stored_localhost_root(Some(data_dir), principal_id)
+            .map(Self)
+            .map_err(|err| anyhow!(err))
+    }
+}
+
 pub fn now_ts() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -10584,6 +10621,31 @@ pub(crate) fn store_test_principal_root_protection(
     store_test_principal_root_protection_for(data_dir, principal_id, &localhost_root)
 }
 
+/// Stores a Human record under a fixed test principal id, so a test that
+/// names its own id has the stored record a kind check reads. Test-only.
+#[cfg(test)]
+pub(crate) fn store_test_human_principal(data_dir: &Path, principal_id: &str) -> PrincipalRecord {
+    let now = now_ts();
+    let record = PrincipalRecord {
+        principal_id: principal_id.to_string(),
+        proof_binding_id: format!("test-binding:{principal_id}"),
+        proof_binding: ProofBinding::evm_account(20, &format!("0x{}", "0".repeat(40)), now),
+        display_name: String::new(),
+        initial_profile_display_name: None,
+        role: RuntimePrincipalRole::Guest,
+        localhost_root: principal_localhost_root(principal_id),
+        kind: PrincipalKind::Human,
+        created_at: now,
+        updated_at: now,
+    };
+    mutate_auth_state(data_dir, |state| {
+        state.principals.push(record.clone());
+        Ok(())
+    })
+    .unwrap();
+    record
+}
+
 /// The test protection written under a caller-named root, so a test can put
 /// an object under a root the human default does not name.
 #[cfg(test)]
@@ -10687,7 +10749,7 @@ mod object_class_tests;
 mod scan_tests;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -15451,7 +15513,7 @@ mod tests {
 
     /// Makes the existing record for `principal_id` an Agent record that keeps
     /// `root` as its stored root.
-    fn mint_agent_record(
+    pub(crate) fn mint_agent_record(
         data_dir: &Path,
         principal_id: &str,
         root: Option<&str>,
@@ -15915,5 +15977,38 @@ mod tests {
             None,
             "the protection covers UsersAI/, so the read answers after the guard"
         );
+    }
+
+    #[test]
+    fn resolved_root_refuses_a_principal_with_no_stored_record() {
+        let data_dir = tempfile::tempdir().unwrap();
+        elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let resolved = ResolvedPrincipalRoot::resolve(data_dir.path(), "person:local:nobody");
+        assert!(resolved
+            .unwrap_err()
+            .to_string()
+            .contains("has no stored record"));
+    }
+
+    #[test]
+    fn resolved_device_root_is_todays_users_root_never_usersai() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_key, did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let id = PrincipalId::device_did(&did);
+        let resolved = ResolvedPrincipalRoot::resolve(data_dir.path(), id.as_str()).unwrap();
+        assert_eq!(resolved.0, principal_localhost_root(id.as_str()));
+        assert!(!resolved.0.contains("UsersAI"));
+    }
+
+    #[test]
+    fn resolved_root_refuses_a_foreign_device_id() {
+        let data_dir = tempfile::tempdir().unwrap();
+        elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let foreign = PrincipalId::device_did("did:key:z6MkForeignDeviceNotThisOne");
+        let resolved = ResolvedPrincipalRoot::resolve(data_dir.path(), foreign.as_str());
+        assert!(resolved
+            .unwrap_err()
+            .to_string()
+            .contains("has no stored record"));
     }
 }
