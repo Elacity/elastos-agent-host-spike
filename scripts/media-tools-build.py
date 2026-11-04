@@ -38,12 +38,10 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def verify_digest(path, digest, name, cached=False):
-    """The only pinned sha256 comparison; a mismatch raises, removing `path` unless cached."""
+def verify_digest(path, digest, name, lead="Source checksum mismatch"):
+    """The only pinned sha256 comparison; a mismatch removes `path` and raises `lead`."""
     if sha(path) != digest:
-        if not cached:
-            path.unlink(missing_ok=True)
-        lead = "Cached source differs from pinned upstream bytes" if cached else "Source checksum mismatch"
+        path.unlink(missing_ok=True)
         raise ValueError(f"{lead}: {name}")
 
 
@@ -71,8 +69,7 @@ def fetch_source(archive, url, digest):
             archive.write_bytes(bz2.compress(source))
             verify_digest(archive, digest, archive.name)  # x264 archive, before use
     else:
-        if archive.exists():
-            verify_digest(archive, digest, archive.name)  # present archive, before use
+        # A present archive is never trusted or reused: the download replaces it and the digest guards the side file.
         for attempt in range(1, len(FETCH_BACKOFF) + 2):
             # The body lands in a side file that replaces the archive only after a whole copy.
             partial = archive.with_name(f".{archive.name}.download")
@@ -119,7 +116,8 @@ def verify(output, expected):
     if actual != required | {"build-info.json"} or set(files) != required:
         raise ValueError("Cached media tools file inventory differs")
     for name, (_, digest) in SOURCES.items():
-        verify_digest(output / "sources" / name, digest, name, cached=True)
+        # A present archive, before use; it is removed so the next fetch takes the pinned bytes.
+        verify_digest(output / "sources" / name, digest, name, "Cached source differs from pinned upstream bytes")
     for name, key in (("media-tools-build.py", "recipe_sha256"), ("build-media-tools.sh", "wrapper_sha256")):
         if sha(output / "sources" / name) != expected[key]:
             raise ValueError(f"Cached build recipe differs: {name}")
