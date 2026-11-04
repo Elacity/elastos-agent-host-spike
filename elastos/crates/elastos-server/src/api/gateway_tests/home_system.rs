@@ -13006,3 +13006,42 @@ async fn gateway_context_refuses_an_unstored_person() {
         .to_string()
         .contains("has no stored record"));
 }
+
+/// Gateway wiring: a person stored only in the auth store (not the runtime
+/// data dir) resolves, so the gateway reads principals from `auth_data_dir`.
+#[tokio::test]
+async fn gateway_context_resolves_a_person_stored_in_the_auth_store() {
+    let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
+    let (dir, auth) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let _auth = set_test_home_launch_auth_data_dir(auth.path());
+    store_home_cli_principal(auth.path());
+    let context = home_launch_token_context_from_parts(
+        dir.path(),
+        "person:home-cli-test",
+        "auth:home-cli-test",
+        None,
+        "grant:home-cli-test",
+    );
+    assert_eq!(context.unwrap().principal_id, "person:home-cli-test");
+}
+
+/// Converse (Codex r1 #1462): a record only in the runtime data dir, not the
+/// selected auth store, refuses; the runtime dir is not a principal store.
+#[tokio::test]
+async fn gateway_context_refuses_a_person_stored_only_in_the_runtime_dir() {
+    let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
+    let (dir, auth) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let _auth = set_test_home_launch_auth_data_dir(auth.path());
+    store_home_cli_principal(dir.path());
+    let refused = home_launch_token_context_from_parts(
+        dir.path(),
+        "person:home-cli-test",
+        "auth:home-cli-test",
+        None,
+        "grant:home-cli-test",
+    );
+    assert!(refused
+        .unwrap_err()
+        .to_string()
+        .contains("has no stored record"));
+}
