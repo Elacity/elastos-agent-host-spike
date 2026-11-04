@@ -3336,6 +3336,18 @@ mod tests {
 
     static HOME_CMD_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    /// The wait for the env lock is bounded. A gateway-owned refusal panics while
+    /// this guard is held, and the panic unwinds through the test's own runtime
+    /// drop, which aborts the process and leaves the lock held forever. A bounded
+    /// wait turns that into a loud red with the refusal text, not a silent hang.
+    async fn acquire_home_cmd_env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        tokio::time::timeout(std::time::Duration::from_secs(20), HOME_CMD_ENV_LOCK.lock())
+            .await
+            .expect(
+                "home_cmd env lock not released within 20 s: an earlier test panicked on a refusal",
+            )
+    }
+
     #[test]
     fn home_cli_renderer_resolves_only_the_installed_capsule() {
         let temp = tempfile::tempdir().unwrap();
@@ -3567,9 +3579,9 @@ mod tests {
         assert_eq!(stored.principal_id, principal_id);
     }
 
-    #[test]
-    fn gateway_owned_home_cli_authority_helper_reads_gateway_env() {
-        let _guard = HOME_CMD_ENV_LOCK.blocking_lock();
+    #[tokio::test]
+    async fn gateway_owned_home_cli_authority_helper_reads_gateway_env() {
+        let _guard = acquire_home_cmd_env_lock().await;
         let temp = tempfile::tempdir().unwrap();
         let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
         let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
@@ -3615,7 +3627,7 @@ mod tests {
 
     #[tokio::test]
     async fn gateway_owned_home_summary_projection_requires_gateway_api_url() {
-        let _guard = HOME_CMD_ENV_LOCK.lock().await;
+        let _guard = acquire_home_cmd_env_lock().await;
         let temp = tempfile::tempdir().unwrap();
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
@@ -3635,7 +3647,7 @@ mod tests {
 
     #[tokio::test]
     async fn gateway_owned_home_snapshot_propagates_summary_failure() {
-        let _guard = HOME_CMD_ENV_LOCK.lock().await;
+        let _guard = acquire_home_cmd_env_lock().await;
         let temp = tempfile::tempdir().unwrap();
         let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
         let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
@@ -3658,7 +3670,7 @@ mod tests {
 
     #[tokio::test]
     async fn gateway_owned_home_summary_projection_fails_on_gateway_http_error() {
-        let _guard = HOME_CMD_ENV_LOCK.lock().await;
+        let _guard = acquire_home_cmd_env_lock().await;
         let temp = tempfile::tempdir().unwrap();
         let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
         let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
@@ -3748,7 +3760,7 @@ mod tests {
 
     #[tokio::test]
     async fn native_home_summary_projection_is_optional_without_gateway() {
-        let _guard = HOME_CMD_ENV_LOCK.lock().await;
+        let _guard = acquire_home_cmd_env_lock().await;
         let temp = tempfile::tempdir().unwrap();
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "0");
@@ -3766,7 +3778,7 @@ mod tests {
 
     #[tokio::test]
     async fn gateway_owned_home_snapshot_uses_admitted_summary_shared_facts() {
-        let _guard = HOME_CMD_ENV_LOCK.lock().await;
+        let _guard = acquire_home_cmd_env_lock().await;
         let temp = tempfile::tempdir().unwrap();
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
@@ -3868,7 +3880,7 @@ mod tests {
 
     #[tokio::test]
     async fn gateway_owned_home_snapshot_rejects_unsigned_summary_authority() {
-        let _guard = HOME_CMD_ENV_LOCK.lock().await;
+        let _guard = acquire_home_cmd_env_lock().await;
         let temp = tempfile::tempdir().unwrap();
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
@@ -3935,7 +3947,7 @@ mod tests {
 
     #[tokio::test]
     async fn gateway_owned_home_snapshot_rejects_mismatched_summary_authority() {
-        let _guard = HOME_CMD_ENV_LOCK.lock().await;
+        let _guard = acquire_home_cmd_env_lock().await;
         let temp = tempfile::tempdir().unwrap();
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
@@ -4134,7 +4146,7 @@ mod tests {
 
     #[tokio::test]
     async fn home_snapshot_uses_native_shell_catalog_and_interface_facts() {
-        let _guard = HOME_CMD_ENV_LOCK.lock().await;
+        let _guard = acquire_home_cmd_env_lock().await;
         let temp = tempfile::tempdir().unwrap();
         let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
         let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
