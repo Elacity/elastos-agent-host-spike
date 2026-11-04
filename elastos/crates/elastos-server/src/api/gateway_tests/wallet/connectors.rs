@@ -53,12 +53,12 @@ async fn test_wallet_connector_route_rejects_unknown_connector_capsule() {
 async fn test_home_wallet_connector_bridge_rejects_invalid_authority_before_wallet_provider() {
     let dir = tempfile::tempdir().unwrap();
     let authority = passkey_authority(dir.path());
-    let context = HomeLaunchTokenContext {
-        principal_id: authority.principal_id.clone(),
-        session_id: authority.session_id.clone(),
-        proof_binding_id: Some(authority.proof_binding_id.clone()),
-        grant_id: authority.grant_id.clone(),
-    };
+    let context = HomeLaunchTokenContext::for_test(
+        authority.principal_id.clone(),
+        authority.session_id.clone(),
+        Some(authority.proof_binding_id.clone()),
+        authority.grant_id.clone(),
+    );
     let valid_connector_token = projection_launch_token_for_authority_context(
         dir.path(),
         WALLET_METAMASK_CAPSULE_ID,

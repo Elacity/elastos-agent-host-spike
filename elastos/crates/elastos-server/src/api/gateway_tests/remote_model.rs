@@ -1331,12 +1331,7 @@ mod consumer_path {
     }
 
     fn seed_context() -> HomeLaunchTokenContext {
-        HomeLaunchTokenContext {
-            principal_id: SEED_PRINCIPAL.to_string(),
-            session_id: "auth:seed".to_string(),
-            proof_binding_id: None,
-            grant_id: "grant:seed-launch".to_string(),
-        }
+        HomeLaunchTokenContext::for_test(SEED_PRINCIPAL, "auth:seed", None, "grant:seed-launch")
     }
 
     impl TwoRuntimes {
@@ -1588,12 +1583,12 @@ mod denial_authority {
 
     impl TwoRuntimes {
         fn owner_context(&self) -> HomeLaunchTokenContext {
-            HomeLaunchTokenContext {
-                principal_id: self.authority.principal_id.clone(),
-                session_id: self.authority.session_id.clone(),
-                proof_binding_id: Some(self.authority.proof_binding_id.clone()),
-                grant_id: self.authority.grant_id.clone(),
-            }
+            HomeLaunchTokenContext::for_test(
+                self.authority.principal_id.clone(),
+                self.authority.session_id.clone(),
+                Some(self.authority.proof_binding_id.clone()),
+                self.authority.grant_id.clone(),
+            )
         }
 
         async fn deny_as(&self, context: &HomeLaunchTokenContext) -> anyhow::Result<String> {
@@ -1657,12 +1652,12 @@ mod denial_authority {
         let open = fx.create_run("seed-req-open", "qwen-local").await;
         assert_eq!(open["ok"], true, "{open}");
         let ops_before = fx.provider_ops().await;
-        let intruder = HomeLaunchTokenContext {
-            principal_id: "person:local:intruder".to_string(),
-            session_id: "auth:intruder".to_string(),
-            proof_binding_id: Some("proof:passkey:intruder".to_string()),
-            grant_id: "grant:intruder".to_string(),
-        };
+        let intruder = HomeLaunchTokenContext::for_test(
+            "person:local:intruder",
+            "auth:intruder",
+            Some("proof:passkey:intruder".to_string()),
+            "grant:intruder",
+        );
         let result = fx.deny_as(&intruder).await;
         assert!(result.is_err(), "{result:?}");
         assert_eq!(fx.provider_ops().await, ops_before, "no cancel may follow");
@@ -2094,12 +2089,12 @@ async fn assistant_and_home_agent_keeps_separate_runs_for_the_same_request_id() 
     let result = crate::api::gateway::gateway_model_service::deny_grant_and_settle(
         Some(fx.registry.clone()),
         fx.owner.path(),
-        &HomeLaunchTokenContext {
-            principal_id: fx.authority.principal_id.clone(),
-            session_id: fx.authority.session_id.clone(),
-            proof_binding_id: Some(fx.authority.proof_binding_id.clone()),
-            grant_id: fx.authority.grant_id.clone(),
-        },
+        &HomeLaunchTokenContext::for_test(
+            fx.authority.principal_id.clone(),
+            fx.authority.session_id.clone(),
+            Some(fx.authority.proof_binding_id.clone()),
+            fx.authority.grant_id.clone(),
+        ),
         None,
         REQUEST_ID,
     )
