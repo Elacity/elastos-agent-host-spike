@@ -219,6 +219,8 @@ try {
       assert.deepEqual(await frame.locator(".modal-body .modal-section-title:visible").allInnerTexts(), ["About", "Status", "Available actions", "Technical details"]);
       assert.equal(await frame.locator(".modal-description").innerText(), "Language model for Assistant.");
       assert.equal(await frame.locator(".modal-footer .trust-chip").innerText(), "Catalog signature verified");
+      // The controller renders Status and footer actions after its Runtime read; counts below read after that render.
+      await frame.locator("[data-model-management] li", { hasText: "Download size: 1.02 KB" }).waitFor();
       assert.equal(await frame.locator("[data-model-management] .model-hint").count(), 0, "compact detail carries no cache or memory hints");
       assert.equal(await frame.locator('[data-model-control="refresh"]').count(), 0, "Refresh shows only after a failed read");
       assert.equal(await frame.locator('.modal-footer-actions [data-model-control="use"]').count(), 1, "Get sits next to Close");
@@ -627,6 +629,8 @@ try {
     }
     await frame.getByRole("button", { name: "Models", exact: true }).click();
     if (app === "marketplace") await frame.locator(`[data-action="model-detail"][data-app="model:${selectedCid}"]`).click();
+    // Wait for the new CID render before opening the details it creates collapsed.
+    if (app === "system") await frame.locator(".model-identity").filter({ hasText: selectedCid }).waitFor({ state: "attached" });
     if (app === "system") await frame.getByText("Content details", { exact: true }).click();
     if (app === "marketplace") await frame.getByText("Technical details", { exact: true }).click();
     await frame.locator(app === "marketplace" ? ".technical-details li" : ".model-identity").filter({ hasText: selectedCid }).waitFor();
