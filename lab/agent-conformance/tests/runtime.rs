@@ -135,6 +135,11 @@ fn run_without_operator_is_refused_with_reason() {
     // Identification only: compare the returned digest against the actual bytes
     // with the existing test dependency, and check repeated access shares it.
     assert!(runtime.binary.is_absolute());
+    assert_eq!(
+        runtime.binary,
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("target/runtime/debug/elastos"),
+        "cached Runtime must use the unchanged lane output path"
+    );
     assert!(std::ptr::eq(runtime, runtime_under_test().unwrap()));
     assert_eq!(
         runtime.sha256,
@@ -268,6 +273,11 @@ fn serve_refuses_provider_whose_bytes_differ_from_its_hash() {
     let home = ThrowawayHome::new().unwrap();
     let installed = common::write_operator_home(&home).expect("install the operator fixture");
     assert!(provider.binary.is_absolute());
+    assert_eq!(
+        provider.binary,
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("target/runtime/debug/localhost-provider"),
+        "cached provider must use the unchanged lane output path"
+    );
     assert!(std::ptr::eq(
         provider,
         localhost_provider_under_test().unwrap()

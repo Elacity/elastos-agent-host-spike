@@ -1,3 +1,4 @@
+use agent_conformance::build::target;
 use agent_conformance::harness::{data_dir, Launch, RunningChild, RunningInstances, ThrowawayHome};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -5,10 +6,33 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn home_is_throwaway() {
+    let lane = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let expected_target = lane.join("target");
+    assert_eq!(
+        target(),
+        expected_target,
+        "shared lane output root must be the compile-time lane plus target"
+    );
     let owned = ThrowawayHome::new().expect("harness must start with the committed fixture");
     let root = owned.root().to_path_buf();
-    let lane = Path::new(env!("CARGO_MANIFEST_DIR"));
-    assert_eq!(root.parent(), Some(lane.join("target").as_path()));
+    assert_eq!(root.parent(), Some(expected_target.as_path()));
+    for refused in [
+        root.join("nested-root"),
+        lane.join(format!(
+            "task-169-outside-{}",
+            root.file_name().unwrap().to_str().unwrap()
+        )),
+    ] {
+        assert!(!refused.try_exists().unwrap());
+        assert_eq!(
+            ThrowawayHome::create_at(&refused).unwrap_err(),
+            "throwaway root must be directly inside the lane target"
+        );
+        assert!(
+            !refused.try_exists().unwrap(),
+            "refused Home root must stay absent"
+        );
+    }
     assert!(owned.home().starts_with(&root));
     assert!(owned.data().starts_with(&root));
     assert!(owned.temp().starts_with(&root));
@@ -76,6 +100,7 @@ fn home_is_throwaway() {
     }
     let second = ThrowawayHome::new().unwrap();
     assert_ne!(second.root(), owned.root());
+    assert_eq!(second.root().parent(), Some(expected_target.as_path()));
     second.finish().unwrap();
     owned.finish().unwrap();
     assert!(!root.exists(), "passed test root must be removed");

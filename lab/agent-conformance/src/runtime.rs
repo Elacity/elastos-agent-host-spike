@@ -1,6 +1,6 @@
 //! Identify the checkout's native binaries. `harness` owns every Runtime launch.
 
-use crate::build::{lane, offline_build};
+use crate::build::{offline_build, target};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -33,7 +33,7 @@ pub fn localhost_provider_under_test() -> Result<&'static BinaryUnderTest, &'sta
 }
 
 fn build_native(package: &str, name: &str) -> Result<BinaryUnderTest, String> {
-    let target = lane().join("target/runtime");
+    let target = target().join("runtime");
     let started = Instant::now();
     let output = offline_build("cargo", &target)
         .map_err(|error| format!("prepare {name} build: {error}"))?

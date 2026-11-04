@@ -11807,3 +11807,200 @@ Next owner: lane supervisor.
 Final handoff `git diff --check` passed. The final preservation checks confirm
 exact supplied stager bytes, the eight protected file hashes, earlier LOG
 sections, HEAD, tree and index; the local inventory records the sole LOG edit.
+
+
+## 169 — One lane output root for Homes and builds
+
+Supplied HEAD: `418b2d998e68d6816752ff595fa052a7cd6b105e`.
+Supplied tree: `787807a47359af5652a5543deaf4babbb63cc782`.
+Supplied dirty paths: none. The supplied task branch is
+`spark/cx-agent-conformance/169-one-lane-output-root-for-homes-and-builds`;
+it has no upstream. Cached `spike/spike/agent-host` versus HEAD is 0 / 8
+(base-only / HEAD-only commits). Network access stays disabled; the supervisor
+owns current remote verification. Supplied history and other work retain
+their owners.
+
+Plan: put the default root in `build::target`, migrate the existing Home, copy
+boundary, native, probe, Agent Host, feature-check and content-CID callers,
+and preserve their child names. Extend the existing real Home and native
+journeys with independent exact-path assertions. Run the Home baseline,
+plant only the helper return, restore exact bytes and repeat the same test.
+Then run the focused, opt-in compile, full locked lane and report gates under
+the shared heavy-build lease, offline settings, 600-second command bounds
+and a 12 GiB estimate plus 2 GiB reserve. Runtime owns storage and grants.
+Stopped and blocked tasks, including 134 to 138 and 161, keep their gates.
+The repository skill search found no humanizer skill source; this record uses
+direct actor and ownership statements.
+
+### Caller migration and restored root proof
+
+`src/build.rs::target` returns `lane().join("target")`. The harness imports
+that helper for `ThrowawayHome::{new,create_at}`; its private calculation is
+removed. `copy_agent_host` uses it for the existing destination boundary.
+`runtime::build_native` joins `runtime`, `build_probe` joins
+`probe-build-<effect>`, `build_agent_host` joins `real-agent-host-build`, both
+artifact feature checks join `probe-feature-check`, and the content-CID
+content and manifest scratch callers join their existing child names. The
+artifact child-fixture root check also uses the shared owner. This checkout
+still has the content-CID manifest scratch helper; this task preserves it.
+`offline_build` matches its supplied function bytes exactly, including its
+explicit target argument and all environment settings. The supplied native
+type has no `verified_path`; its existing launch and writer paths stay intact.
+
+`home_is_throwaway` now compares the helper with the compile-time lane plus
+the literal `target`, then exercises two distinct real Homes with that parent.
+Its nested candidate and unique sibling outside target stay inside the lane;
+`create_at` returns `throwaway root must be directly inside the lane target`
+and leaves both requested paths absent. Existing guard, symlink, collision,
+platform and retention assertions remain. Both successful Homes use `finish`.
+The two existing native refusal journeys now check the actual cached paths
+against compile-time `target/runtime/debug/elastos` and
+`target/runtime/debug/localhost-provider`, alongside their existing hashes,
+checksum reason and cleanup assertions. Artifact layout and receipt identity
+keep their current form.
+
+Every Cargo command used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`,
+`CARGO_NET_OFFLINE=true`, the existing lane `target/host` and
+`target/host-build`, and task-local TMPDIR under `target/task-169/tmp`. The
+parent held the existing shared exclusive `fcntl.flock` build lease on a
+read-only descriptor; children inherited zero lease descriptors. Each command
+had a 600-second bound and checked the 12 GiB estimate plus 2 GiB reserve.
+Initial free space was 30.537 GiB. Sandbox loopback preflight returned
+`Operation not permitted` before any native journey; it supplies only an
+infrastructure result. The authorized host retry passed loopback preflight
+and used the same offline build settings and lease.
+
+The supplied `home_is_throwaway` passed (exit 0, 2.184 s). The first format
+check found one wrapping change in the new test; the corrected format check
+passed. The strengthened baseline, compiling plant and restored control all
+used this exact command:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness home_is_throwaway -- --exact
+```
+
+Hand-run falsifier **F-169-shifted-root** changed only one helper return line
+in `src/build.rs::target`. Exact old bytes, with four leading spaces:
+
+```rust
+    lane().join("target")
+```
+
+Exact new bytes, with four leading spaces:
+
+```rust
+    lane().join("target/task-169-shifted")
+```
+
+| Run | Exit | Seconds | Observation |
+| --- | --- | --- | --- |
+| Strengthened baseline | 0 | 1.997 | 1 passed, 0 failed |
+| Compiling plant | 101 | 1.206 | 0 passed, 1 failed at `tests/harness.rs:11` |
+| Exact-byte restored control | 0 | 0.946 | 1 passed, 0 failed |
+
+The planted failure was `assertion left == right failed: shared lane output
+root must be the compile-time lane plus target`. The actual suffix was
+`target/task-169-shifted`; the independent expected suffix was `target`.
+Cargo compiled and ran the named test. A `finally` block restored the complete
+original `src/build.rs` byte string, then an exact byte comparison passed.
+The assertion precedes Home creation: the plant created zero Homes and zero
+shifted-root directories. Baseline and restored Homes finished and were
+removed; nested and outside candidates remained absent. A before/after target
+entry comparison found zero new roots. `falsifiers.json` and the shared runner
+retain their supplied bytes. Local captures are uncommitted in
+`target/task-169`, owned by this task for supervisor review, then removal.
+
+Restored focused gates passed: `cargo fmt --manifest-path
+lab/agent-conformance/Cargo.toml -- --check` (exit 0, 0.201 s),
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml
+--test harness --test build --test runtime` (exit 0, 18.388 s: build 1 PASS,
+harness 9 PASS, runtime 11 PASS and 2 existing BLOCKED ignores), and
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml
+--features agent-host --test agent_host --no-run` (exit 0, 1.807 s). The
+Agent Host compile keeps the existing UsersAI binding acceptance gate.
+
+### Principles check
+
+Paths below are relative to this lane.
+
+| Question | Answer | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a code/content hash belongs? | No | `src/runtime.rs:65` still hashes built bytes; `src/build.rs:13` only locates lane outputs. |
+| 2. New capsule, Home or UI ambient authority? | No | `src/harness.rs:228` keeps the cleared launch environment and its fixed entries; the helper selects an output location. |
+| 3. Second operation path or rule copy? | No | `src/build.rs:13` owns the root; `src/harness.rs:104` and `src/runtime.rs:36` call it. |
+| 4. Does the trusted core grow? | No | `src/build.rs:13` is lane code; the tracked diff stays in the eleven named lane files. |
+| 5. Clear default-deny refusals? | Yes | `src/harness.rs:105` keeps the existing direct-child refusal, exercised before writes at `tests/harness.rs:26`. |
+| 6. Capsule logic stays self-contained and traps down? | Yes | The unchanged `probe/src/lib.rs:53` generates typed Bus bindings; capability and provider calls remain at lines 138 and 146. |
+| 7. Named test and caught falsifier for the shared-root rule? | Yes | `tests/harness.rs:11` fails the compiling shifted-root plant and passes after exact restoration, as recorded above. |
+| 8. Identity, admission and allowance remain separate? | Yes | `tests/runtime.rs:144` checks byte identity, then line 149 runs the existing operator refusal; the path helper supplies neither permission nor budget. |
+
+### Final restored gates and lifecycle
+
+The restored gates used the same offline environment, exclusive lease,
+free-space rule and 600-second command bounds. All commands below exited 0:
+
+| Command | Seconds | Result |
+| --- | --- | --- |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` | 305.559 | 254 passed, 0 failed, 14 existing ignored blockers |
+| `lab/agent-conformance/run.sh` | 319.832 | Report table: 256 PASS, 0 FAIL, 14 BLOCKED, 0 SKIPPED |
+| `git diff --check` | 0.041 | Passed |
+| `node scripts/check-product-data.mjs` | 0.090 | Passed |
+| `node --test scripts/check-product-data.test.mjs` | 1.227 | Passed |
+| `cargo fmt --manifest-path elastos/Cargo.toml --all -- --check` | 3.193 | Passed |
+| `(cd elastos && cargo fmt --all -- --check)` | 3.183 | Passed from the Runtime workspace |
+| `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` | 0.135 | Passed |
+
+The report receipt is local and uncommitted at
+`target/run-table.eBAN9J/VERSIONS.json`, SHA-256
+`2b31f30bec1c25cc23ed8cd45e856f295a16eb54a5b7a2d6e8efc3000b1a5fa5`.
+It reports complete identity, an empty missing-or-invalid list,
+`cargo_success: true`, `command_success: true`, and `suite_outcome: BLOCKED`.
+Its repository commit is the supplied HEAD with `dirty: true`; the candidate
+is the supplied commit plus this task's working changes. The receipt has
+16 launched and 15 build-only probe identities. Runtime SHA-256 is
+`dcf8cda84f2eaf1e0ded5267959e26d0c600fb7ea6b908ba9a93a355cdfdc9ff`;
+localhost-provider SHA-256 is
+`2ff07b37721c97631e2f84a31c7408c8edb45f80c8fddde7f7cef1e367d09ab4`.
+The existing fourteen blocked journeys retain their acceptance gates; these
+lab path checks supply only the contained-fixture prerequisite.
+
+The final branch/worktree inventory confirms the supplied HEAD, tree and
+index. Only the eleven authorized lane files differ. The task branch has
+no upstream; cached `spike/spike/agent-host` versus HEAD stays 0 / 8
+(base-only / HEAD-only). The supervisor owns current remote verification.
+`offline_build`, registration, Cargo files, probe source, runner, GAPS and
+every earlier LOG section retain their supplied bytes. This task creates
+zero branches, worktrees, installed runtimes or rollback sets.
+
+The owned-root decisions are:
+
+| Root or candidate | Observation and terminal decision |
+| --- | --- |
+| Strengthened baseline and restored Home roots | Both Homes in each run finished through the existing API and were removed. |
+| Nested and sibling refusal candidates | Both stayed absent; zero directories need removal. |
+| `target/task-169-shifted` | Plant stopped at the independent root assertion; this path stayed absent. |
+| Homes from focused, full and report gates | Final direct-child comparison found zero new Home roots. |
+| `target/task-169` | Task-owned local captures and lifecycle inventory; remove after supervisor review. |
+| `target/run-table.eBAN9J` | Task-owned local receipt; remove after supervisor review. The runner removed its transient captures after success. |
+| Existing lane host, native, selector and content outputs | Keep for the active supervisor gate and review; the supervisor owns their completion cleanup. These are rebuildable outputs. |
+
+Narrow host `lsof` checks found zero open-file holders for the task proof
+directory, the receipt directory and both native executables. The local
+ignored `target/task-169/inventory.json` records the task branch and checkout,
+protected hashes, dirty paths, owned roots, holder checks and cleanup
+conditions. Final inventory free space was 30.564 GiB, above the 14 GiB gate.
+Each completed build parent released its shared lease.
+
+Candidate: supplied HEAD/tree plus the eleven named lane-file edits.
+Exercised checks: supplied and strengthened Home controls, compiling caught
+root plant and exact restored control, lane formatting, focused harness/build/
+runtime targets, feature-gated Agent Host compile, full locked lane gate,
+report/receipt gate and repository basic checks. The fourteen ignored tests
+keep their named blockers; human and installed-product acceptance stays with
+its owners.
+Reviews: author checks above; independent reviews remain with the supervisor.
+Installed release evidence: isolated lab Home and native refusal paths only.
+Remaining gate: independent reviews and supervisor integration.
+Next owner: lane supervisor.
+
+- 169: Shared the lane output root through `build::target`, migrated every listed default caller, expanded real Home and cached-native path checks, caught and restored the shifted-root plant, and passed all restored lane and report gates.

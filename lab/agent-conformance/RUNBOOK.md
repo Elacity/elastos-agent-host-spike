@@ -47,7 +47,13 @@ A backticked table line inside a fenced code block in `GAPS.md` still counts as 
 - `tests::probe_refuses_without_a_launch_argument_channel`: checks the probe's explicit unavailable result.
 - `cargo` (failure only): Cargo could not supply a complete test inventory or finish the suite.
 
-The harness owns each fresh root under this lane's ignored `target/`. It checks
+`build::target()` owns the default root for lane outputs: the compile-time lane
+directory plus `target/`. The harness creates fresh Homes as direct children
+there. Native outputs keep `target/runtime`, probe selectors keep
+`target/probe-build-<effect>`, and the Agent Host and feature-check outputs keep
+`target/real-agent-host-build` and `target/probe-feature-check`. Content-CID
+scratch directories keep their existing names under the same root. Explicit
+per-Home build targets stay caller inputs to `offline_build`. The harness checks
 HOME and the derived data path before reading those paths or starting a child.
 The launch primitive clears the parent environment and sets HOME, TMPDIR,
 the fixed system PATH and `ELASTOS_CARRIER_MDNS=0`. The environment test checks that complete allowlist.

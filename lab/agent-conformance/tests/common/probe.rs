@@ -1,6 +1,6 @@
 //! One component build path. Callers serialize builds: the script writes one entrypoint.
 
-use agent_conformance::build::{lane, offline_build, repository};
+use agent_conformance::build::{lane, offline_build, repository, target};
 use std::fs;
 use std::process::Output;
 
@@ -70,7 +70,7 @@ pub fn build_probe(effect: Effect, round: usize) -> Vec<u8> {
     let root = repository();
     // Reuse dependencies and the componentizer for each selector. Remove only
     // the probe package before EVERY call, including both reproducibility rounds.
-    let target = lane.join(format!("target/probe-build-{}", effect.name()));
+    let target = target().join(format!("probe-build-{}", effect.name()));
     let cleaned = offline_build("cargo", &target)
         .unwrap_or_else(|error| skipped(&format!("prepare probe clean: {error}")))
         .args(["clean", "--manifest-path"])

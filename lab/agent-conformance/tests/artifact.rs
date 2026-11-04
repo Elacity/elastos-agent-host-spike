@@ -1,7 +1,7 @@
 #[path = "common/probe.rs"]
 mod probe;
 
-use agent_conformance::build::{lane, offline_build, repository};
+use agent_conformance::build::{lane, offline_build, repository, target};
 use agent_conformance::harness::ThrowawayHome;
 use agent_conformance::identity::{stage_probe, Observation, MANIFEST};
 use agent_conformance::report::{render_run, table, GitIdentity};
@@ -26,7 +26,7 @@ const BUILD_CONTINUED: &str = "probe build fixture continued";
 fn probe_build_result_fixture() {
     let directory = std::env::current_dir().unwrap();
     if directory.file_name().and_then(|name| name.to_str()) != Some("home")
-        || directory.parent().and_then(Path::parent) != Some(lane().join("target").as_path())
+        || directory.parent().and_then(Path::parent) != Some(target().as_path())
         || !directory.join("probe-build-fixture").is_file()
     {
         return;
@@ -439,7 +439,7 @@ fn probe_effects_are_exclusive() {
     for (index, first) in features.iter().enumerate() {
         for second in &features[index + 1..] {
             let pair = format!("{first},{second}");
-            let output = offline_build("cargo", &lane().join("target/probe-feature-check"))
+            let output = offline_build("cargo", &target().join("probe-feature-check"))
                 .unwrap()
                 .args([
                     "check",
@@ -470,7 +470,7 @@ fn instance_subselectors_require_one_granted_read() {
         ("--cfg feature=\"instance-2\"", "instance requires granted-read"),
         ("--cfg feature=\"granted-read\" --cfg feature=\"instance-1\" --cfg feature=\"instance-2\"", "select exactly one instance"),
     ] {
-        let output = offline_build("cargo", &lane().join("target/probe-feature-check"))
+        let output = offline_build("cargo", &target().join("probe-feature-check"))
             .unwrap()
             .args(["check", "--locked", "--offline", "--manifest-path", "lab/agent-conformance/probe/Cargo.toml"])
             .env("RUSTFLAGS", flags)
