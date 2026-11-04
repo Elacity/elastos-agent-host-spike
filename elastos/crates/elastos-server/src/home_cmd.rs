@@ -3577,6 +3577,11 @@ mod tests {
         let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
         let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
         let data_dir = default_data_dir();
+        assert!(
+            data_dir.starts_with(temp.path()),
+            "fixture data_dir {} escapes the test temp dir",
+            data_dir.display()
+        );
         store_home_cmd_test_principal(&data_dir, "principal-a");
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
@@ -4179,6 +4184,11 @@ mod tests {
             "",
         );
         let data_dir = default_data_dir();
+        assert!(
+            data_dir.starts_with(temp.path()),
+            "fixture data_dir {} escapes the test temp dir",
+            data_dir.display()
+        );
         write_home_cmd_test_capsule(&data_dir, "home-gui", "shell", Vec::new());
         write_home_cmd_test_capsule(
             &data_dir,
