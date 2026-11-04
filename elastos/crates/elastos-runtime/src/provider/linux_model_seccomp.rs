@@ -756,9 +756,11 @@ mod tests {
             );
             // The probe runs under install_on_command, which sets no_new_privs
             // before attaching the filter.
+            let no_new_privs = unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) };
+            let failed = errno();
             assert_eq!(
-                unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) },
-                1
+                no_new_privs, 1,
+                "PR_GET_NO_NEW_PRIVS read {no_new_privs} (errno {failed}): no_new_privs was not set before the filter"
             );
         }
         let row = rows()
@@ -1137,17 +1139,34 @@ mod tests {
     fn victim_report(victim: &Victim) -> Vec<u8> {
         let path =
             victim_token(std::process::id() as libc::pid_t, victim.pid).with_extension("report");
-        let _ = std::fs::remove_file(&path);
+        let absent = |err: &std::io::Error| err.kind() == std::io::ErrorKind::NotFound;
+        match std::fs::remove_file(&path) {
+            Err(err) if !absent(&err) => {
+                panic!("cannot clear the old helper report {path:?}: {err}")
+            }
+            _ => {}
+        }
         let start = std::time::Instant::now();
         while start.elapsed() < std::time::Duration::from_secs(5) {
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                let bytes: Vec<u8> = text
-                    .split_whitespace()
-                    .map(|byte| byte.parse().expect("helper report byte"))
-                    .collect();
-                if bytes.first() != pattern_bytes().first() {
-                    return bytes;
+            match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    let bytes: Vec<u8> = text
+                        .split_whitespace()
+                        .map(|byte| {
+                            byte.parse().unwrap_or_else(|err| {
+                                panic!("helper report {path:?} byte {byte:?}: {err}")
+                            })
+                        })
+                        .collect();
+                    if bytes.first() != pattern_bytes().first() {
+                        return bytes;
+                    }
                 }
+                // Only an absent report is retried; any other failure says why.
+                Err(err) if !absent(&err) => {
+                    panic!("cannot read the helper report {path:?}: {err}")
+                }
+                Err(_) => {}
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
@@ -1164,6 +1183,8 @@ mod tests {
                 "pattern restore rc {rc}, errno {failed}"
             );
         });
+        // The helper holds the pattern again, or the next control reads stale bytes.
+        pattern_control(victim);
     }
 
     /// Reads the helper's bytes at the published address and checks them.
