@@ -98,6 +98,241 @@ fn checksum_refusal_requires_one_component_path_and_manifest() {
     }
 }
 
+fn assert_component_outputs_absent(home: &ThrowawayHome, component: &str) {
+    for path in [
+        home.data().join("bin"),
+        home.data().join("bin").join(component),
+        home.data().join("components.json"),
+    ] {
+        assert!(
+            !path.try_exists().unwrap(),
+            "metadata refusal must leave output absent: {}",
+            path.display()
+        );
+    }
+}
+
+fn assert_component_install(
+    home: &ThrowawayHome,
+    component: &str,
+    platform: &str,
+    bytes: &[u8],
+    source: &serde_json::Value,
+) -> serde_json::Value {
+    let installed = home.data().join("bin").join(component);
+    assert_eq!(fs::read(&installed).unwrap(), bytes);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&installed).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "fixture bytes must be executable"
+        );
+    }
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(home.data().join("components.json")).unwrap()).unwrap();
+    let mut expected = source.clone();
+    let info = &mut expected["platforms"][platform];
+    info["checksum"] = serde_json::json!(format!("sha256:{:x}", Sha256::digest(bytes)));
+    info["size"] = serde_json::json!(bytes.len());
+    info["install_path"] = serde_json::json!(format!("bin/{component}"));
+    assert_eq!(
+        manifest,
+        serde_json::json!({"external": {component: expected}, "profiles": {}}),
+        "recorded metadata and minimal manifest must survive installed-byte stamping"
+    );
+    manifest
+}
+
+#[test]
+fn component_home_requires_recorded_platform() {
+    use serde_json::json;
+    const BYTES: &[u8] = b"harmless recorded-platform fixture\n";
+    let checksum = format!("{:x}", Sha256::digest(BYTES));
+
+    // The Home guard owns precedence, including over source loading.
+    let home = ThrowawayHome::new().unwrap();
+    let loaded = std::cell::Cell::new(false);
+    fs::remove_dir(home.data()).unwrap();
+    std::os::unix::fs::symlink(home.temp(), home.data()).unwrap();
+    let reason = common::write_component_home_with_source(
+        &home,
+        "ipfs-provider",
+        &home.data().join("bin/ipfs-provider"),
+        BYTES,
+        &checksum,
+        || {
+            loaded.set(true);
+            Ok((json!({"platforms": {"darwin-arm64": {}}}), "darwin-amd64"))
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        reason.to_string(),
+        "data directory must use directories without symlinks"
+    );
+    assert!(!loaded.get(), "guard refusal must precede source loading");
+    assert_component_outputs_absent(&home, "ipfs-provider");
+    fs::remove_file(home.data()).unwrap();
+    fs::create_dir(home.data()).unwrap();
+    common::write_component_home_with_source(
+        &home,
+        "ipfs-provider",
+        &home.data().join("bin/ipfs-provider"),
+        BYTES,
+        &checksum,
+        || {
+            loaded.set(true);
+            Ok((json!({"platforms": {"darwin-amd64": {}}}), "darwin-amd64"))
+        },
+    )
+    .unwrap();
+    assert!(loaded.get(), "repaired Home must load its source");
+    assert_component_install(
+        &home,
+        "ipfs-provider",
+        "darwin-amd64",
+        BYTES,
+        &json!({"platforms": {"darwin-amd64": {}}}),
+    );
+    home.finish().unwrap();
+
+    for component in ["localhost-provider", "ipfs-provider"] {
+        for (platform, row) in [
+            ("darwin-amd64", None),
+            ("fixture-absent", None),
+            ("darwin-amd64", Some(json!(null))),
+            ("darwin-amd64", Some(json!("fixture row"))),
+            ("darwin-amd64", Some(json!([]))),
+        ] {
+            let home = ThrowawayHome::new().unwrap();
+            let installed = home.data().join("bin").join(component);
+            let mut source = json!({
+                "fixture_component": "unchanged",
+                "platforms": {"darwin-arm64": {"fixture_arm": true}}
+            });
+            let expected_reason = if let Some(row) = row {
+                source["platforms"][platform] = row;
+                format!("repository {component} {platform} platform must be an object")
+            } else {
+                format!("{component} has no {platform} platform entry in components.json")
+            };
+            let original = source.clone();
+            let result = common::write_component_home_with_source(
+                &home,
+                component,
+                &installed,
+                BYTES,
+                &checksum,
+                || Ok((source.clone(), platform)),
+            );
+            assert_eq!(
+                result.err().map(|error| error.to_string()),
+                Some(expected_reason),
+                "selected metadata must return its exact refusal"
+            );
+            assert_eq!(source, original, "refusal must preserve source metadata");
+            assert_component_outputs_absent(&home, component);
+
+            // Repair only the selected input; absent outputs need zero cleanup.
+            source["platforms"][platform] = json!({"fixture_repaired": true});
+            let repaired = source.clone();
+            common::write_component_home_with_source(
+                &home,
+                component,
+                &installed,
+                BYTES,
+                &checksum,
+                || Ok((source.clone(), platform)),
+            )
+            .unwrap();
+            assert_eq!(
+                source, repaired,
+                "installation must preserve source metadata"
+            );
+            assert_component_install(&home, component, platform, BYTES, &source);
+            home.finish().unwrap();
+        }
+    }
+}
+
+#[test]
+fn component_home_preserves_recorded_platform_metadata() {
+    use serde_json::json;
+    const BYTES: &[u8] = b"harmless metadata-preservation fixture\n";
+    let checksum = format!("{:x}", Sha256::digest(BYTES));
+    for component in ["localhost-provider", "ipfs-provider"] {
+        let home = ThrowawayHome::new().unwrap();
+        let source = json!({
+            "fixture_component": {"keep": "component sentinel"},
+            "platforms": {
+                "darwin-arm64": {
+                    "fixture_platform": {"keep": "selected sentinel"},
+                    "release_path": "fixture release",
+                    "checksum": "old fixture checksum", "size": 999,
+                    "install_path": "old fixture path"
+                },
+                "fixture-other": {"keep": ["other platform sentinel"]}
+            }
+        });
+        let original = source.clone();
+        common::write_component_home_with_source(
+            &home,
+            component,
+            &home.data().join("bin").join(component),
+            BYTES,
+            &checksum,
+            || Ok((source.clone(), "darwin-arm64")),
+        )
+        .unwrap();
+        assert_eq!(
+            source, original,
+            "installation must preserve source metadata"
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(home.data().join("components.json")).unwrap())
+                .unwrap();
+        let entry = &manifest["external"][component];
+        assert_eq!(entry["fixture_component"], source["fixture_component"]);
+        assert_eq!(
+            entry["platforms"]["darwin-arm64"]["fixture_platform"],
+            source["platforms"]["darwin-arm64"]["fixture_platform"],
+            "selected platform sentinel must survive stamping"
+        );
+        assert_eq!(
+            entry["platforms"]["fixture-other"],
+            source["platforms"]["fixture-other"]
+        );
+        assert_component_install(&home, component, "darwin-arm64", BYTES, &source);
+        home.finish().unwrap();
+    }
+
+    // Harmless bytes exercise repository loading without building or executing a provider.
+    let home = ThrowawayHome::new().unwrap();
+    let source: serde_json::Value = serde_json::from_slice(
+        &fs::read(agent_conformance::build::repository().join("components.json")).unwrap(),
+    )
+    .unwrap();
+    let component = "ipfs-provider";
+    common::write_component_home(
+        &home,
+        component,
+        &home.data().join("bin").join(component),
+        BYTES,
+        &checksum,
+    )
+    .unwrap();
+    assert_component_install(
+        &home,
+        component,
+        common::operator_platform().unwrap(),
+        BYTES,
+        &source["external"][component],
+    );
+    home.finish().unwrap();
+}
+
 fn run_probe(home: &ThrowawayHome) -> String {
     let runtime = runtime_under_test().expect("build the checkout Runtime offline");
     // Locate the same probe from the launch cwd without putting a private

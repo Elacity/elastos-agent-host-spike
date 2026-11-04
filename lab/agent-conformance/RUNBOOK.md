@@ -79,10 +79,17 @@ and stamping helper, which also prepares the CID refusal fixture. The helper
 checks the Home guard and installs executable bytes. For the operator fixture,
 it writes a manifest containing only the repository's `external.localhost-provider`
 entry and an empty `profiles` map; the CID fixture selects `external.ipfs-provider`.
-It stamps the current Mac platform with the
-copy's checksum, size and install path. The repository entry owns all other fields.
-The writer supports `darwin-arm64` and `darwin-amd64` and refuses other platforms
-with a reason. Exclusive creation keeps existing paths and symlinks intact.
+Host detection selects the platform key; the repository supplies its existing
+platform record. Before creating output, the writer requires that record to be
+an object. A missing record returns `<component> has no <platform> platform entry
+in components.json`; a malformed row returns `repository <component> <platform>
+platform must be an object`. It stamps the copy's checksum, size and install
+path, and preserves all other entry and platform fields. Exclusive creation
+keeps existing paths and symlinks intact. `component_home_requires_recorded_platform`
+proves early refusal and same-Home repair with synthetic platform inputs;
+`component_home_preserves_recorded_platform_metadata` also exercises the repository
+wrapper with harmless bytes. Cross-host fixture inputs prove preparation rules;
+native target acceptance requires that target's evidence.
 
 The checksum test passes both `--addr 127.0.0.1:<free port>` and an in-root
 `--storage-path`. Provider verification stops startup before Carrier and HTTP

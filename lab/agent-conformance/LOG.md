@@ -12004,3 +12004,234 @@ Remaining gate: independent reviews and supervisor integration.
 Next owner: lane supervisor.
 
 - 169: Shared the lane output root through `build::target`, migrated every listed default caller, expanded real Home and cached-native path checks, caught and restored the shifted-root plant, and passed all restored lane and report gates.
+
+
+## 170 — Require a recorded provider platform
+
+Supplied HEAD: `ac1015811214499350b65931e3d52f960b2c4cf0`.
+Supplied tree: `abac1b8f34550581694d2ffd839d1b7c94b6d82d`.
+Supplied dirty paths: none. The active task branch is
+`spark/cx-agent-conformance/170-require-recorded-provider-platform`, with zero
+upstream. Cached `spike/spike/agent-host` versus HEAD is 0 / 9
+(base-only / HEAD-only commits). The supervisor owns remote refresh and all
+Git mutations. Existing ignored task-170 evidence belongs to its earlier run;
+this run uses `target/task-170-current` for bounded local captures and inventory.
+
+Plan: move the shared writer body into one implementation with a source-entry
+and selected-platform input seam. Keep the guard before loading inputs, select
+an existing object before output creation, and preserve entry metadata while
+stamping the three installed-byte fields. Exercise absent and malformed rows,
+guard precedence, same-Home repair and repository-wrapper metadata through two
+named runtime-target tests. Run all three compiling plants separately with
+exact restoration and healthy controls, then formatting, runtime, locked lane
+and report gates under the existing shared lease and bounds. The supplied
+writer has neither 150's `verified_path` nor 151/157's path-error seams; its
+existing guards, exclusive writes, config handling, checksum assertions and
+169's shared output root retain their owners. Stopped/blocked tasks keep their
+states. The repository skill search found zero humanizer skill sources; this
+record uses direct actor and ownership statements.
+
+### Writer and fixture proof
+
+`write_component_home` supplies the detected host key and cloned repository
+entry to `write_component_home_with_source`. The implementation guards the
+Home before invoking that input closure, requires the existing platform map
+and selected object, then runs the original exclusive writes and stamp. The
+repository's actual localhost-provider and ipfs-provider entries each list
+`darwin-arm64`, `linux-amd64` and `linux-arm64`; this run read those records
+as inputs. Host detection remains in `operator_platform`. Runtime owns provider
+verification, permission and allowance.
+
+`component_home_requires_recorded_platform` checks both components with absent
+`darwin-amd64` and `fixture-absent` keys and present null, string and array rows.
+Each case checks the exact reason, unchanged source metadata and absent `bin`,
+installed file and manifest. It repairs only the selected row and installs in
+the same Home with zero partial-output removal. Exact bytes, mode 0755, hash,
+size, install path and complete preserved metadata are checked. An owned data
+symlink returns the original guard reason before the counted input closure
+runs; removing that symlink and restoring the directory lets the same writer
+install. Every successful repaired Home ends through `finish`.
+
+`component_home_preserves_recorded_platform_metadata` checks component, selected
+row and other-platform sentinels for both components, plus the complete minimal
+manifest. Harmless bytes through the public ipfs-provider wrapper prove real
+repository loading and preservation of every field other than the three stamps.
+These two tests build and execute zero native Runtime/provider processes.
+Cross-host keys prove fixture preparation; native target acceptance remains
+with each target's evidence.
+
+### Three separate compiling plants
+
+All focused commands used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`,
+`CARGO_NET_OFFLINE=true`, `CARGO_TARGET_DIR=$PWD/lab/agent-conformance/target/host`,
+`CARGO_BUILD_BUILD_DIR=$PWD/lab/agent-conformance/target/host-build`, and
+`TMPDIR=$PWD/lab/agent-conformance/target/task-170-current/tmp`. The parent held
+the existing shared exclusive `fcntl.flock` lease on a read-only descriptor.
+Children inherited zero lease descriptors. Each command had a 600-second
+bound and checked the 12 GiB estimate plus 2 GiB reserve. The first focused
+command had 28.861 GiB free after completion.
+
+The exact commands were:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_requires_recorded_platform -- --exact
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_preserves_recorded_platform_metadata -- --exact
+```
+
+For each plant, the parent saved the healthy writer bytes in memory, required
+one exact `old` match, wrote `healthy.replace(old, new, 1)`, ran its named test,
+and restored the saved bytes in `finally` before the next command. The JSON
+strings below give the exact UTF-8 old/new bytes, including spaces and newlines.
+The list and its runner retain their supplied bytes.
+
+```json
+[
+  {
+    "name": "missing-row-insertion",
+    "file": "lab/agent-conformance/tests/common/mod.rs",
+    "old": "    let info = platforms.get_mut(platform).ok_or_else(|| {\n        format!(\"{component} has no {platform} platform entry in components.json\")\n    })?;\n",
+    "new": "    let info = platforms.entry(platform).or_insert_with(|| json!({}));\n",
+    "test": "component_home_requires_recorded_platform",
+    "assertion": "selected metadata must return its exact refusal"
+  },
+  {
+    "name": "late-platform-selection",
+    "file": "lab/agent-conformance/tests/common/mod.rs",
+    "old": "    let info = platforms.get_mut(platform).ok_or_else(|| {\n        format!(\"{component} has no {platform} platform entry in components.json\")\n    })?;\n    if !info.is_object() {\n        return Err(format!(\"repository {component} {platform} platform must be an object\").into());\n    }\n\n    fs::create_dir(home.data().join(\"bin\"))?;\n",
+    "new": "    fs::create_dir(home.data().join(\"bin\"))?;\n    let info = platforms.get_mut(platform).ok_or_else(|| {\n        format!(\"{component} has no {platform} platform entry in components.json\")\n    })?;\n    if !info.is_object() {\n        return Err(format!(\"repository {component} {platform} platform must be an object\").into());\n    }\n",
+    "test": "component_home_requires_recorded_platform",
+    "assertion": "metadata refusal must leave output absent"
+  },
+  {
+    "name": "replace-selected-row",
+    "file": "lab/agent-conformance/tests/common/mod.rs",
+    "old": "    info[\"checksum\"] = json!(format!(\"sha256:{checksum}\"));\n",
+    "new": "    *info = json!({});\n    info[\"checksum\"] = json!(format!(\"sha256:{checksum}\"));\n",
+    "test": "component_home_preserves_recorded_platform_metadata",
+    "assertion": "selected platform sentinel must survive stamping"
+  }
+]
+```
+
+| Command run | Exit | Seconds | Named-test result |
+| --- | --- | --- | --- |
+| `baseline-requires` | 0 | 2.306 | 1 passed, 0 failed |
+| `baseline-preserves` | 0 | 0.136 | 1 passed, 0 failed |
+| `plant-missing-row-insertion` | 101 | 0.761 | 1 failed, 0 passed: CAUGHT |
+| `restored-missing-row-insertion` | 0 | 0.531 | 1 passed, 0 failed |
+| `plant-late-platform-selection` | 101 | 0.710 | 1 failed, 0 passed: CAUGHT |
+| `restored-late-platform-selection` | 0 | 0.549 | 1 passed, 0 failed |
+| `plant-replace-selected-row` | 101 | 0.714 | 1 failed, 0 passed: CAUGHT |
+| `restored-replace-selected-row` | 0 | 0.501 | 1 passed, 0 failed |
+
+The insertion plant failed `selected metadata must return its exact refusal`:
+actual `None`, expected `Some("localhost-provider has no darwin-amd64 platform
+entry in components.json")`. Late validation retained the exact metadata reason
+but failed `metadata refusal must leave output absent` at `bin`. Replacing the
+selected row failed `selected platform sentinel must survive stamping`: actual
+`Null`, expected `Object {"keep": String("selected sentinel")}`. Each plant
+compiled and executed its sole named test. Setup, cleanup, compile failures
+and zero-test runs receive zero caught credit. Each corresponding restored
+control passed. The restored writer SHA-256 is
+`3b24c19a0d29bd6ded78fe5e362eebda1fb38877e4de043e2553728a2b37d658`.
+
+Each planted failure retained one root through the existing Drop rule:
+
+- `target/home-34046-1793751948665711000-1`: `plant-missing-row-insertion`; keep for supervisor review, then remove. Only fixed fixture data was installed; these tests started zero child processes.
+- `target/home-34077-1793751949913227000-1`: `plant-late-platform-selection`; keep for supervisor review, then remove. Only fixed fixture data was installed; these tests started zero child processes.
+- `target/home-34097-1793751951163898000-0`: `plant-replace-selected-row`; keep for supervisor review, then remove. Only fixed fixture data was installed; these tests started zero child processes.
+
+Healthy focused runs retained zero new Home roots. The task-local lifecycle
+inventory records these roots and their cleanup condition; earlier task
+evidence keeps its original ownership.
+
+### Principles check
+
+| Question | Yes/No | Evidence (lane-relative) |
+| --- | --- | --- |
+| 1. New code/content name or URL where a hash belongs? | No | `tests/common/mod.rs:89` stamps the supplied byte digest as SHA-256; component names select repository metadata. |
+| 2. New ambient capsule or UI authority? | No | `tests/common/mod.rs:69` uses the existing guarded throwaway Home; the change stays in test preparation. |
+| 3. Second operation path or rule copy? | No | `tests/common/mod.rs:52` routes the public wrapper into the single guarded installer at line 61; both actual callers retain that wrapper. |
+| 4. Runtime core grows? | No | `tests/common/mod.rs:61` contains the correction within the lane test helper; all four changed files belong to this lane. |
+| 5. New refusals fail closed with a clear reason? | Yes | `tests/common/mod.rs:74` refuses absent rows, and line 77 refuses malformed rows before the first destination write at line 81. |
+| 6. Capsule logic stays self-contained and calls through granted Bus operations? | Yes | `tests/runtime.rs:149` exercises fixture installation with harmless fixed bytes; capsule and Bus code retain their supplied bytes. |
+| 7. Named tests and caught falsifiers prove each new rule? | Yes | `tests/runtime.rs:149` catches insertion and late selection; `tests/runtime.rs:261` catches selected-row replacement on its sentinel assertion. |
+| 8. Identity, admission and allowance stay separate? | Yes | `tests/common/mod.rs:89` records byte identity only; the native checksum journey at `tests/runtime.rs:504` continues to require Runtime's own verification, with grants and budgets under Runtime ownership. |
+
+### Restored gates and lifecycle
+
+The sandbox loopback preflight returned `Operation not permitted` before any
+native launch. The authorized host run passed that preflight and held the same
+exclusive shared lease throughout the sequential restored gates. It used the
+offline environment above, a 600-second limit per command, process-group
+settlement on interruption, zero inherited lease descriptors, and the 14 GiB
+free-space gate before each command. Every command below exited 0.
+
+| Command | Seconds | Result |
+| --- | --- | --- |
+| `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` | 0.411 | Passed |
+| `git diff --check` | 0.025 | Passed |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime` | 15.485 | 13 passed, 0 failed, 2 existing ignored blockers |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` | 266.681 | 256 passed, 0 failed, 14 existing ignored blockers |
+| `lab/agent-conformance/run.sh` | 267.632 | 249 PASS, 0 FAIL, 14 BLOCKED, 0 SKIPPED |
+| `node scripts/check-product-data.mjs` | 0.087 | Passed |
+| `node --test scripts/check-product-data.test.mjs` | 0.547 | Passed |
+| `(cd elastos && cargo fmt --all -- --check)` | 2.941 | Passed |
+| `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` | 0.137 | Passed |
+
+Both native checksum journeys passed in the runtime target and the report:
+`serve_refuses_provider_whose_bytes_differ_from_its_hash` and
+`run_by_cid_refuses_content_provider_whose_bytes_differ_from_its_hash`. The
+ready-operator and loopback-only socket controls passed as well. This is native
+fixture evidence on darwin-arm64; other native targets retain their acceptance
+requirements. Each new platform test also appears as PASS in the actual report.
+The full Cargo count includes repeated helper tests across targets; the report
+uses its existing named inventory. These are the actual counts from each run.
+
+The local, uncommitted report receipt is
+`target/run-table.RmNDB7/VERSIONS.json`, SHA-256
+`956a6700a8bf95041563e439f3c03d28ba8e203bad7be8ef70dbd92602568ada`.
+It records `identity_status: complete`, an empty `missing_or_invalid` list,
+`cargo_success: true`, `command_success: true`, and `suite_outcome: BLOCKED`.
+Its repository commit is the supplied HEAD with `dirty: true`; the candidate
+is that commit plus the four working-file edits. There are 16 launched and
+15 build-only probe identities. The fourteen existing ignored journeys retain
+their named blockers and receive zero passing credit.
+
+Focused healthy controls, the runtime target, full locked suite and report
+retained zero new Home roots. The three compiling plants retained exactly the
+three named fixture roots above. Narrow `lsof` checks found zero open-file
+holders for those roots, current task proof directory, report directory and
+both cached native executables. The 495-byte regular `xcrun_db` tool cache and
+its empty task TMPDIR were removed after the holder check.
+
+The task proof directory and report receipt stay for supervisor review, then
+are removed. The three fixed-fixture plant roots follow the same condition.
+Existing host, native and probe outputs stay for the supervisor's active rerun
+and review gate; they are rebuildable caches, with cleanup owned by that gate.
+Earlier evidence retains its supplied ownership. This task created zero
+branches, worktrees, installed runtimes or rollback sets. The task build parent
+released its lease on completion. Final inventory free space was 28.784 GiB.
+
+The local ignored `target/task-170-current/lifecycle.json` records exact paths,
+source identities, branch/worktree inventory, holder checks, retained roots and
+cleanup conditions. The twelve protected supplied files, including the list,
+runner, Cargo files, GAPS, probe, core harness/build helpers, stand-in, repository
+component records and source-Home script, match HEAD byte for byte. Final dirty
+paths are exactly the four allowed files. The active branch has zero upstream;
+cached base-only / HEAD-only divergence remains 0 / 9. Network access stayed
+disabled; the supervisor owns current remote verification and publication.
+
+Candidate: supplied HEAD/tree plus `tests/common/mod.rs`, `tests/runtime.rs`,
+RUNBOOK's existing fixture paragraph and this LOG section.
+Exercised checks: both exact new tests at baseline/restoration, all three
+compiling caught plants, runtime target, full locked lane, run.sh, formatting,
+product-data checks and final `git diff --check`; existing blocked journeys
+retain their GAPS reasons.
+Reviews: author verification above; independent reviews remain with the supervisor.
+Installed release evidence: isolated fixture preparation and the two local
+native refusal journeys; product acceptance stays with its owners.
+Remaining gate: independent reviews and supervisor integration.
+Next owner: lane supervisor.
+
+- 170: Required an existing platform object in the one guarded component writer, proved exact early refusal, same-Home repair and metadata preservation, caught three separate compiling plants, and passed restored lane/report gates.
