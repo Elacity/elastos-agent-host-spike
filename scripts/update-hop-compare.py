@@ -157,6 +157,7 @@ import shutil
 import signal
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
@@ -165,6 +166,7 @@ import threading
 import time
 import urllib.request
 import urllib.parse
+import zlib
 
 
 def digest(path):
@@ -1830,7 +1832,9 @@ def cli_previous_members(archive, prefix, destination):
 
 def cli_capsule_archive(folder, name):
     """A capsule archive as releases build it (publish-release.sh create_capsule_tar), from
-    the files setup extracted, without setup's cache receipts."""
+    the files setup extracted, without setup's cache receipts. Returns each encoding a
+    release may have used: the stored-deflate gzip of 2.0.0-rc.2 and later, then the host
+    deflate of earlier releases; the caller keeps the one the signed descriptor names."""
     def normalize(info):
         if Path(info.name).name in CLI_HOME_CACHE:
             return None
@@ -1839,14 +1843,29 @@ def cli_capsule_archive(folder, name):
         info.pax_headers = {}
         info.mode = 0o777 if info.issym() else (0o755 if info.isdir() or info.mode & 0o111 else 0o644)
         return info
-    output = io.BytesIO()
-    with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=0) as compressed:
-        with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as package:
-            package.add(folder, arcname=name, filter=normalize)
-    return output.getvalue()
+    tar = io.BytesIO()
+    with tarfile.open(fileobj=tar, mode="w", format=tarfile.PAX_FORMAT) as package:
+        package.add(folder, arcname=name, filter=normalize)
+    data = tar.getvalue()
+    stored = io.BytesIO()
+    stored.write(b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff")
+    chunks = [data[i:i + 65535] for i in range(0, len(data), 65535)] or [b""]
+    for index, chunk in enumerate(chunks):
+        stored.write(bytes([1 if index == len(chunks) - 1 else 0]) + struct.pack("<HH", len(chunk), len(chunk) ^ 0xFFFF) + chunk)
+    stored.write(struct.pack("<II", zlib.crc32(data) & 0xFFFFFFFF, len(data) & 0xFFFFFFFF))
+    deflated = io.BytesIO()
+    with gzip.GzipFile(filename="", mode="wb", fileobj=deflated, mtime=0) as compressed:
+        compressed.write(data)
+    return [stored.getvalue(), deflated.getvalue()]
 
 
-def cli_previous_layout(output, release, component_platform, artifact, executable, receipt):
+# The signed release head and release name a source commit but no repository, so the
+# verified release signer names it: a maintainer publishes its releases from one repository.
+CLI_PREVIOUS_SOURCE_REPOSITORIES = {
+    "did:key:z6MkgwHd2BCWe1jHMXPiR6H1q1RFPcv1YzhMbK5G1kBarbfe": "https://github.com/elastos/elastos-runtime.git"}
+
+
+def cli_previous_layout(output, release, component_platform, artifact, executable, receipt, signer_did):
     """Complete a previous release output that holds its admitted release.json, elastos and
     components.json: add the installer of its signed source, and lay its Home support out like
     a source Home so a fixture can publish it. artifact(selected) returns the path of a signed
@@ -1856,8 +1875,13 @@ def cli_previous_layout(output, release, component_platform, artifact, executabl
     # A release signs its source; its installer is that source's install.sh.
     source, repository = release["source"], Path(__file__).resolve().parents[1]
     if subprocess.run(["git", "cat-file", "-e", source["commit"] + "^{commit}"], cwd=repository, capture_output=True).returncode:
-        subprocess.run(["git", "fetch", "--quiet", "--no-tags", "--depth=1", "origin", source["commit"]],
+        need(signer_did in CLI_PREVIOUS_SOURCE_REPOSITORIES, "previous release signer has no source repository")
+        remote = CLI_PREVIOUS_SOURCE_REPOSITORIES[signer_did]
+        print("previous release source: " + signer_did + " -> " + remote + " @ " + source["commit"], file=sys.stderr, flush=True)
+        subprocess.run(["git", "fetch", "--quiet", "--no-tags", "--depth=1", remote, source["commit"]],
                        cwd=repository, check=True, timeout=300)
+        need(subprocess.check_output(["git", "rev-parse", "FETCH_HEAD"], cwd=repository, text=True).strip() == source["commit"],
+             "previous release source fetch differs from its signed commit")
     need(subprocess.check_output(["git", "rev-parse", source["commit"] + "^{tree}"], cwd=repository, text=True).strip() == source["tree"],
          "previous release source tree differs")
     installer = subprocess.check_output(["git", "show", source["commit"] + ":scripts/install.sh"], cwd=repository)
@@ -1945,7 +1969,8 @@ def cli_fetch_previous_release(cache, output, pin_path=None):
     artifacts = release["platforms"][release_platform]
     for key, name in (("binary", "elastos"), ("components", "components.json")):
         fetch(artifacts[key]["cid"], artifacts[key]["sha256"], artifacts[key]["size"], name)
-    return cli_previous_layout(output, release, cli_component_platform(release_platform), artifact, executable, receipt)
+    return cli_previous_layout(output, release, cli_component_platform(release_platform), artifact, executable, receipt,
+                               pin["signer_did"])
 
 
 def cli_install_previous_release(home_path, output, pin_path=None):
@@ -1965,9 +1990,10 @@ def cli_install_previous_release(home_path, output, pin_path=None):
     (home_path / "install.sh").write_bytes(installer)
     receipt = {"schema": "elastos.update-hop.previous-release-fetch/v1", "pin": pin,
                "published_installer_sha256": hashlib.sha256(installer).hexdigest()}
-    # Custody is listed outside the Home profile (#238); the fixture pins its bytes too.
+    # The fixture also pins optional providers that the Home profile leaves out.
     for argv, timeout in ((["/bin/bash", "install.sh", "--install-only"], 900),
-                          ([str(runtime), "setup", "--profile", "home", "--with", "custody-provider"], 1800),
+                          ([str(runtime), "setup", "--profile", "home", "--with",
+                            ",".join((*CLI_PROTECTED_PROVIDERS, "custody-provider"))], 1800),
                           ([str(runtime), "update", "--rollback-to", pin["head_cid"], "--yes"], 1800)):
         proc = subprocess.Popen(argv, env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home_path),
                                            "ELASTOS_COLLABORATION_STARTUP_MODE": "isolated"}, cwd=home_path,
@@ -1985,6 +2011,7 @@ def cli_install_previous_release(home_path, output, pin_path=None):
         need(code == 0, "previous release Home step failed: " + " ".join(argv[1:3]))
 
     def take(path, name, sha256):
+        need(path.is_file(), name + " is not installed")
         info = path.lstat()
         need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and digest(path) == sha256, name + " differs from its signed hash")
         target = cli_path(output, name)
@@ -1997,9 +2024,9 @@ def cli_install_previous_release(home_path, output, pin_path=None):
         installed, name = cli_path(data, selected["install_path"]), "artifacts/" + selected["release_path"]
         if not selected.get("extract_path"):
             return take(installed, name, selected["checksum"].removeprefix("sha256:"))
-        raw = cli_capsule_archive(installed, selected["extract_path"])
-        need(len(raw) == selected["size"] and "sha256:" + hashlib.sha256(raw).hexdigest() == selected["checksum"],
-             name + " differs from its signed hash")
+        raw = next((candidate for candidate in cli_capsule_archive(installed, selected["extract_path"])
+                    if len(candidate) == selected["size"] and "sha256:" + hashlib.sha256(candidate).hexdigest() == selected["checksum"]), None)
+        need(raw is not None, name + " differs from its signed hash")
         target = cli_path(output, name)
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         target.write_bytes(raw)
@@ -2023,7 +2050,7 @@ def cli_install_previous_release(home_path, output, pin_path=None):
     artifacts = release["platforms"][release_platform]
     take(runtime, "elastos", artifacts["binary"]["sha256"])
     take(data / "components.json", "components.json", artifacts["components"]["sha256"])
-    receipt = cli_previous_layout(output, release, component_platform, artifact, executable, receipt)
+    receipt = cli_previous_layout(output, release, component_platform, artifact, executable, receipt, pin["signer_did"])
     shutil.rmtree(home_path)
     return receipt
 

@@ -1,0 +1,13 @@
+id: F-P10-one
+file: src/lib.rs
+test: ops::model_one_overlap_rule_refuses_mint_rows
+test: ops::model_one_overlap_rule_refuses_effect_rows
+test: ops::model_one_overlap_rule_refuses_use_path_rows
+--- old
+            .max()
+    }
+--- new
+            .max()
+            .and(None)
+    }
+--- end
