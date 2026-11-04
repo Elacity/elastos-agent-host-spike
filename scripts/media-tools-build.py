@@ -12,10 +12,15 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.request
 
 X264_COMMIT = "b35605ace3ddf7c1a5d67a2eb553f034aef41d55"
 X264_TREE = "0700538866963f968154ea768289bf100350e84e"
+
+# A slow or refused ffmpeg.org response retries instead of failing the build.
+FETCH_TIMEOUT, FETCH_BACKOFF = 300, (5, 15)
 
 SOURCES = {
     "ffmpeg-9.0.1.tar.xz": (
@@ -31,6 +36,13 @@ SOURCES = {
 
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def verify_digest(path, digest, name, lead="Source checksum mismatch"):
+    """The only pinned sha256 comparison; a mismatch removes `path` and raises `lead`."""
+    if sha(path) != digest:
+        path.unlink(missing_ok=True)
+        raise ValueError(f"{lead}: {name}")
 
 
 def run(command, cwd, env, capture=False):
@@ -55,11 +67,32 @@ def fetch_source(archive, url, digest):
             source = subprocess.check_output([*git, "-c", "tar.umask=0002", "archive", "--format=tar",
                                               f"--prefix=x264-{X264_COMMIT}/", X264_COMMIT])
             archive.write_bytes(bz2.compress(source))
+            verify_digest(archive, digest, archive.name)  # x264 archive, before use
     else:
-        with urllib.request.urlopen(url, timeout=60) as response, archive.open("wb") as dest:
-            shutil.copyfileobj(response, dest)
-    if sha(archive) != digest:
-        raise ValueError(f"Source checksum mismatch: {archive.name}")
+        # A present archive is never trusted or reused: the download replaces it and the digest guards the side file.
+        for attempt in range(1, len(FETCH_BACKOFF) + 2):
+            # The body lands in a side file that replaces the archive only after a whole copy.
+            partial = archive.with_name(f".{archive.name}.download")
+            try:
+                with urllib.request.urlopen(url, timeout=FETCH_TIMEOUT) as response:
+                    expected = response.headers.get("Content-Length")
+                    with partial.open("wb") as dest:
+                        shutil.copyfileobj(response, dest)
+                # A dropped connection ends the copy early without an error: retry the short body.
+                if expected is not None and partial.stat().st_size != int(expected):
+                    raise OSError(f"short source download: {archive.name}")
+                verify_digest(partial, digest, archive.name)  # before promotion
+                os.replace(partial, archive)
+                break
+            except (urllib.error.URLError, TimeoutError, OSError):
+                partial.unlink(missing_ok=True)
+                if attempt > len(FETCH_BACKOFF):
+                    raise
+                time.sleep(FETCH_BACKOFF[attempt - 1])
+            except BaseException:
+                # A dropped response or malformed header leaves no side file behind, and it is not retried.
+                partial.unlink(missing_ok=True)
+                raise
 
 
 def verify(output, expected):
@@ -83,8 +116,8 @@ def verify(output, expected):
     if actual != required | {"build-info.json"} or set(files) != required:
         raise ValueError("Cached media tools file inventory differs")
     for name, (_, digest) in SOURCES.items():
-        if sha(output / "sources" / name) != digest:
-            raise ValueError(f"Cached source differs from pinned upstream bytes: {name}")
+        # A present archive, before use; it is removed so the next fetch takes the pinned bytes.
+        verify_digest(output / "sources" / name, digest, name, "Cached source differs from pinned upstream bytes")
     for name, key in (("media-tools-build.py", "recipe_sha256"), ("build-media-tools.sh", "wrapper_sha256")):
         if sha(output / "sources" / name) != expected[key]:
             raise ValueError(f"Cached build recipe differs: {name}")
