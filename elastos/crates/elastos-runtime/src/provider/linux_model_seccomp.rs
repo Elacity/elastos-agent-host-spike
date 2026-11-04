@@ -164,6 +164,14 @@ mod tests {
     /// The row that reads the pattern.
     const READV_ROW: &str = "process_vm_readv sibling";
 
+    /// The row that writes the helper's own pattern back into its buffer.
+    const WRITEV_ROW: &str = "process_vm_writev sibling";
+
+    /// `true` for either `process_vm` row: each returns a byte count.
+    fn is_process_vm(name: &str) -> bool {
+        name == READV_ROW || name == WRITEV_ROW
+    }
+
     /// A row body is a plain `fn` taking the row's three syscall arguments, so
     /// the table stays a table and no row captures state.
     type Body = fn(libc::c_int, libc::c_int, libc::c_int) -> libc::c_long;
@@ -581,10 +589,21 @@ mod tests {
         process_vm_body(libc::SYS_process_vm_readv)
     }
 
-    /// One whole `PATTERN_LEN` read from the helper into this process.
+    /// The helper's buffer, written with its own pattern so its content and
+    /// every other row's control stay as they are; only the filter refuses.
+    fn process_vm_writev_body(_: libc::c_int, _: libc::c_int, _: libc::c_int) -> libc::c_long {
+        process_vm_body(libc::SYS_process_vm_writev)
+    }
+
+    /// One whole `PATTERN_LEN` transfer: a read fills this process's buffer,
+    /// a write sends the pattern it starts with. Either way it ends as the
+    /// pattern, which is checked.
     fn process_vm_body(nr: libc::c_long) -> libc::c_long {
         let pid = victim_pid();
         let mut local = [0u8; PATTERN_LEN];
+        if nr == libc::SYS_process_vm_writev {
+            local.copy_from_slice(&pattern_bytes());
+        }
         let mut remote = iovec(victim_address() as *mut u8, PATTERN_LEN);
         let mut here = iovec(local.as_mut_ptr(), PATTERN_LEN);
         let rc = sys(
@@ -640,6 +659,7 @@ mod tests {
             row("io_uring_setup", io_uring_body, 0, 0, 0, EPERM),
             row("pidfd_getfd sibling", pidfd_getfd_body, 0, 0, 0, EPERM),
             row(READV_ROW, process_vm_readv_body, 0, 0, 0, EPERM),
+            row(WRITEV_ROW, process_vm_writev_body, 0, 0, 0, EPERM),
             row("getpid", getpid_body, 0, 0, 0, PERMITTED),
             row("nr==0x40000000", x32_body, 0, 0, 0, KILLED),
         ]
@@ -692,7 +712,7 @@ mod tests {
             // the position (Yama, for example) fails loudly, never skips; the
             // errno is read before any other call.
             let failed = errno();
-            let moved = if wanted == READV_ROW {
+            let moved = if is_process_vm(wanted) {
                 rc == PATTERN_LEN as libc::c_long
             } else {
                 rc >= 0
@@ -703,7 +723,7 @@ mod tests {
             );
             // A real descriptor: closing it here also closes the one the row
             // body kept. The readv row returns a byte count.
-            if rc > 2 && wanted != READV_ROW {
+            if rc > 2 && !is_process_vm(wanted) {
                 close_all(&[rc as libc::c_int]);
             }
             // Set on a test's own control child only.
@@ -964,7 +984,7 @@ mod tests {
     /// helper, made by this unfiltered process, must succeed, so only the
     /// filter can refuse the probe's call.
     fn victim_control(victim: &Victim, row: &Row) {
-        if row.name == READV_ROW {
+        if is_process_vm(row.name) {
             process_vm_control(victim, row);
             return;
         }
