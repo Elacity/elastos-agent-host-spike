@@ -19,7 +19,7 @@ use anyhow::{anyhow, Context};
 use base64::Engine as _;
 use elastos_common::localhost::rooted_localhost_fs_path;
 use elastos_runtime::auth::{
-    validate_principal_root_protection, AuthChallengeV1, AuthSessionGrantV1,
+    validate_principal_root_protection, AuthChallengeV1, AuthSessionGrantV1, PrincipalId,
     PrincipalRootProtectionV1, PrincipalRootProtectorKind, PrincipalRootRecoveryArchiveV1,
     ProofBinding, RecoveryKitV1, RuntimeAuditEventV1, DEFAULT_PRINCIPAL_ROOT_CIPHER,
 };
@@ -7190,6 +7190,34 @@ pub(crate) fn principal_stored_localhost_root(
         format!("principal '{principal_id}' has no stored record; its root cannot be chosen")
     })?;
     Ok(principal_kind_localhost_root(principal_id, record.kind))
+}
+
+/// A principal's root, resolved once where the principal is bound (C6 P1,
+/// rong-ruling-1455b-s3c1a-1430-1000). Only this module constructs one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedPrincipalRoot(String);
+
+impl ResolvedPrincipalRoot {
+    /// The one resolver. The device's own DID takes the device arm, matched
+    /// against the device identity, never an id prefix; any other principal
+    /// takes its stored record's root, and no record refuses.
+    pub(crate) fn resolve(data_dir: &Path, principal_id: &str) -> anyhow::Result<Self> {
+        let device = crate::collaboration_profile_authority::load_existing_device_did(data_dir)?;
+        if let Some(did) =
+            device.filter(|did| PrincipalId::device_did(did).as_str() == principal_id)
+        {
+            return Ok(Self(device_localhost_root(&did)));
+        }
+        principal_stored_localhost_root(Some(data_dir), principal_id)
+            .map(Self)
+            .map_err(|err| anyhow!(err))
+    }
+}
+
+/// Today's device root, byte for byte: the Users root of `device:<did>`.
+fn device_localhost_root(did: &str) -> String {
+    let digest = Sha256::digest(PrincipalId::device_did(did).as_str().as_bytes());
+    format!("localhost://Users/{}", hex::encode(&digest[..12]))
 }
 
 pub fn now_ts() -> u64 {
@@ -15956,5 +15984,26 @@ pub(crate) mod tests {
             None,
             "the protection covers UsersAI/, so the read answers after the guard"
         );
+    }
+
+    #[test]
+    fn resolved_root_refuses_a_principal_with_no_stored_record() {
+        let data_dir = tempfile::tempdir().unwrap();
+        elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let resolved = ResolvedPrincipalRoot::resolve(data_dir.path(), "person:local:nobody");
+        assert!(resolved
+            .unwrap_err()
+            .to_string()
+            .contains("has no stored record"));
+    }
+
+    #[test]
+    fn resolved_device_root_is_todays_users_root_never_usersai() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_key, did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let id = PrincipalId::device_did(&did);
+        let resolved = ResolvedPrincipalRoot::resolve(data_dir.path(), id.as_str()).unwrap();
+        assert_eq!(resolved.0, principal_localhost_root(id.as_str()));
+        assert!(!resolved.0.contains("UsersAI"));
     }
 }
