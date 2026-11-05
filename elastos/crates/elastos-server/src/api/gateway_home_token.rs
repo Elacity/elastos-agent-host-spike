@@ -1486,7 +1486,9 @@ mod tests {
         .unwrap();
         let substituted = HomeLaunchTokenContext {
             principal_id: "person:local:bob".to_string(),
-            ..stored.clone()
+            session_id: stored.session_id().to_string(),
+            proof_binding_id: stored.proof_binding_id().map(ToString::to_string),
+            grant_id: stored.grant_id().to_string(),
         };
         let token =
             issue_home_launch_token_with_context(data_dir.path(), SYSTEM_CAPSULE_ID, &substituted)
@@ -1502,16 +1504,22 @@ mod tests {
 
         for substituted in [
             HomeLaunchTokenContext {
+                principal_id: stored.principal_id().to_string(),
                 session_id: "auth:other".to_string(),
-                ..stored.clone()
+                proof_binding_id: stored.proof_binding_id().map(ToString::to_string),
+                grant_id: stored.grant_id().to_string(),
             },
             HomeLaunchTokenContext {
+                principal_id: stored.principal_id().to_string(),
+                session_id: stored.session_id().to_string(),
                 proof_binding_id: Some("proof:passkey:other".to_string()),
-                ..stored.clone()
+                grant_id: stored.grant_id().to_string(),
             },
             HomeLaunchTokenContext {
+                principal_id: stored.principal_id().to_string(),
+                session_id: stored.session_id().to_string(),
+                proof_binding_id: stored.proof_binding_id().map(ToString::to_string),
                 grant_id: "grant:other".to_string(),
-                ..stored.clone()
             },
         ] {
             let token = issue_home_launch_token_with_context(
@@ -1543,8 +1551,10 @@ mod tests {
         .contains("authority context mismatch"));
 
         let proofless = HomeLaunchTokenContext {
+            principal_id: stored.principal_id().to_string(),
+            session_id: stored.session_id().to_string(),
             proof_binding_id: None,
-            ..stored.clone()
+            grant_id: stored.grant_id().to_string(),
         };
         let token =
             issue_home_launch_token_with_context(data_dir.path(), SYSTEM_CAPSULE_ID, &proofless)
