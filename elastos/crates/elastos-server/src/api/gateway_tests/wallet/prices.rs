@@ -208,3 +208,65 @@ async fn test_wallet_prices_raise_inbox_request_only_when_wallet_asks_and_not_af
         assert_eq!(price_requests(), expected_requests, "{uri}");
     }
 }
+
+#[tokio::test]
+async fn inbox_wallet_price_approve_keys_policy_and_audit_to_the_acting_principal_and_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut authority = passkey_authority_with_name(dir.path(), Some("Alice"));
+    // The acting session lives on the fixture grant itself, whose grant id the
+    // launch-token verifier matches; only the Inbox app is added.
+    let acting_session = format!("auth:{}", uuid_like_token());
+    crate::auth::store_session_grant(
+        dir.path(),
+        AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: authority.grant_id.clone(),
+            session_id: acting_session.clone(),
+            principal_id: authority.principal_id.clone(),
+            proof_binding_id: authority.proof_binding_id.clone(),
+            issued_at: crate::auth::now_ts(),
+            expires_at: crate::auth::now_ts() + 12 * 60 * 60,
+            apps: vec![INBOX_CAPSULE_ID.to_string()],
+        },
+    )
+    .unwrap();
+    authority.session_id = acting_session;
+    let token = launch_token_for_authority_context(dir.path(), INBOX_CAPSULE_ID, &authority);
+    let state = wallet_test_state(dir.path()).await;
+    assert_ne!(authority.principal_id, authority.session_id);
+
+    let request = test_browser_request("localhost:61180", "null")
+        .method("POST")
+        .uri("/api/apps/inbox/actions")
+        .header("x-elastos-home-token", &token)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({ "action_id": "wallet-price-http-approve:coingecko" }).to_string(),
+        ))
+        .unwrap();
+    let (parts, body) = request.into_parts();
+    let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+    let response = inbox_action(State(state), parts.headers, body).await;
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+    let principal_id = authority.principal_id.clone();
+    let session_id = authority.session_id.clone();
+    let policy = load_wallet_price_policy(dir.path()).unwrap();
+    assert!(policy.external_http_approved);
+    assert_eq!(policy.approved_by_principal_id, principal_id);
+
+    let auth_state = crate::auth::load_auth_state(dir.path()).unwrap();
+    let event = auth_state
+        .audit
+        .iter()
+        .find(|event| {
+            event.event_type == "wallet.price_source.policy" && event.result == "approved"
+        })
+        .expect("wallet price policy audit event");
+    assert_eq!(event.principal_id.as_deref(), Some(principal_id.as_str()));
+    assert_eq!(event.session_id.as_deref(), Some(session_id.as_str()));
+}
