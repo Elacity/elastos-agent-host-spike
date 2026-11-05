@@ -113,7 +113,7 @@ pub(super) async fn append_inbox_requests(
         }
     }
     if let Ok(inspect_requests) =
-        pending_inspect_action_requests(&state.data_dir, &context.principal_id)
+        pending_inspect_action_requests(&state.data_dir, context.principal_id())
     {
         append_inspect_action_notifications(notifications, inspect_requests);
     }
@@ -496,8 +496,8 @@ async fn dispatch_inbox_action(
             WalletApprovalAuditInput {
                 capsule_id: INBOX_CAPSULE_ID,
                 event_type: "wallet.approval.rejected",
-                principal_id: &context.principal_id,
-                session_id: &context.session_id,
+                principal_id: context.principal_id(),
+                session_id: context.session_id(),
                 request_id,
                 result: "rejected",
                 reason: "Wallet approval rejected through Runtime authority",
@@ -552,12 +552,12 @@ async fn dispatch_inbox_action(
     if action_id == WALLET_PRICE_HTTP_APPROVE_ACTION_ID {
         ensure_admin_context(data_dir, context)?;
         let approved_at = now_ts();
-        store_wallet_price_http_policy(data_dir, &context.principal_id, approved_at)?;
+        store_wallet_price_http_policy(data_dir, context.principal_id(), approved_at)?;
         let _ = crate::notifications::mark_acted_for_action(data_dir, None, action_id);
         append_wallet_price_policy_audit(
             data_dir,
-            &context.principal_id,
-            &context.session_id,
+            context.principal_id(),
+            context.session_id(),
             "approved",
             "Approved Wallet market-price HTTP source through Inbox",
         )?;
@@ -570,8 +570,8 @@ async fn dispatch_inbox_action(
         );
         append_wallet_price_policy_audit(
             data_dir,
-            &context.principal_id,
-            &context.session_id,
+            context.principal_id(),
+            context.session_id(),
             "rejected",
             "Rejected Wallet market-price HTTP source through Inbox",
         )?;
@@ -583,8 +583,7 @@ async fn dispatch_inbox_action(
     {
         ensure_admin_context(data_dir, context)?;
         let proof = context
-            .proof_binding_id
-            .as_deref()
+            .proof_binding_id()
             .ok_or_else(|| anyhow::anyhow!("admin passkey required"))?;
         let _decision = crate::api::model_provider_egress_decision::transition_gate(data_dir)
             .lock_owned()
@@ -607,8 +606,7 @@ async fn dispatch_inbox_action(
     {
         ensure_admin_context(data_dir, context)?;
         let proof = context
-            .proof_binding_id
-            .as_deref()
+            .proof_binding_id()
             .ok_or_else(|| anyhow::anyhow!("admin passkey required"))?;
         let _decision = crate::api::model_provider_egress_decision::transition_gate(data_dir)
             .lock_owned()
@@ -625,8 +623,7 @@ async fn dispatch_inbox_action(
     {
         ensure_admin_context(data_dir, context)?;
         let proof = context
-            .proof_binding_id
-            .as_deref()
+            .proof_binding_id()
             .ok_or_else(|| anyhow::anyhow!("admin passkey required"))?;
         let _decision = crate::api::model_provider_egress_decision::transition_gate(data_dir)
             .lock_owned()
