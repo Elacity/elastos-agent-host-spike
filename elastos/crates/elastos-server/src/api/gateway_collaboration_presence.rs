@@ -201,8 +201,7 @@ pub(super) fn authenticated_presence_presentation_for_context(
     context: &HomeLaunchTokenContext,
 ) -> Result<AuthenticatedPresencePresentation, HomePresenceAuthenticationError> {
     let proof_binding_id = context
-        .proof_binding_id
-        .as_deref()
+        .proof_binding_id()
         .ok_or(HomePresenceAuthenticationError::Denied)?;
     let auth_state = crate::auth::load_auth_state(&state.data_dir)
         .map_err(|_| HomePresenceAuthenticationError::Internal)?;
@@ -213,13 +212,13 @@ pub(super) fn authenticated_presence_presentation_for_context(
         .ok_or(HomePresenceAuthenticationError::Denied)?;
     crate::auth::ensure_proof_binding_not_revoked(&principal)
         .map_err(|_| HomePresenceAuthenticationError::Denied)?;
-    if principal.principal_id != context.principal_id {
+    if principal.principal_id != context.principal_id() {
         return Err(HomePresenceAuthenticationError::Denied);
     }
-    let localhost_root = crate::auth::principal_localhost_root(&context.principal_id);
+    let localhost_root = crate::auth::principal_localhost_root(context.principal_id());
     let profile = crate::collaboration_profile_authority::load_profile_authority(
         &state.data_dir,
-        &context.principal_id,
+        context.principal_id(),
         &localhost_root,
     )
     .map_err(|_| HomePresenceAuthenticationError::Internal)?;
@@ -302,7 +301,7 @@ pub(super) fn community_presence_state(
     context: &HomeLaunchTokenContext,
 ) -> Option<&'static str> {
     let (_, _, scope) = presence_subject(state, context).ok()??;
-    crate::collaboration_presence_grant::state(&state.data_dir, &context.principal_id, &scope)
+    crate::collaboration_presence_grant::state(&state.data_dir, context.principal_id(), &scope)
         .ok()?
 }
 
@@ -321,7 +320,7 @@ pub(super) fn request_community_presence(
     }
     crate::collaboration_presence_grant::request(
         &state.data_dir,
-        &context.principal_id,
+        context.principal_id(),
         &scope,
         asked_by_person,
         now_ts(),
@@ -394,7 +393,7 @@ async fn set_community_presence(
     crate::collaboration_presence_grant::set_presence_grant(
         authority,
         &state.data_dir,
-        &context.principal_id,
+        context.principal_id(),
         &profile_did,
         &scope,
         decision,
@@ -403,7 +402,7 @@ async fn set_community_presence(
     .await?;
     // Each answer retires the previous projection and queued announcements.
     // The selected publisher prepares fresh presence under the current grant.
-    port.retire_own_presence(&context.principal_id, &profile_did)?;
+    port.retire_own_presence(context.principal_id(), &profile_did)?;
     Ok(())
 }
 
@@ -436,7 +435,7 @@ pub(super) async fn answer_community_presence_request(
             .ok_or_else(|| anyhow::anyhow!("Community is not configured on this Home."))?;
         let open = crate::collaboration_presence_grant::open_request_at(
             &state.data_dir,
-            &context.principal_id,
+            context.principal_id(),
             &scope,
         )?;
         if open.map(|at| at.to_string()).as_deref() != Some(request) {
@@ -477,7 +476,7 @@ pub(super) fn community_presence_request_notification(
     let (_, _, scope) = presence_subject(state, context).ok()??;
     let issued_at = crate::collaboration_presence_grant::open_request_at(
         &state.data_dir,
-        &context.principal_id,
+        context.principal_id(),
         &scope,
     )
     .ok()??;
