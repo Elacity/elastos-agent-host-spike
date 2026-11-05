@@ -7228,7 +7228,9 @@ impl ResolvedPrincipalRoot {
     /// `remote:` plus 32 hex digits, and no localhost root.
     pub(crate) fn remote(remote_principal_id: &str) -> anyhow::Result<Self> {
         let shaped = match remote_principal_id.strip_prefix("remote:") {
-            Some(hex) => hex.len() == 32 && hex.bytes().all(|b| b.is_ascii_hexdigit()),
+            Some(hex) => {
+                hex.len() == 32 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            }
             None => false,
         };
         if !shaped {

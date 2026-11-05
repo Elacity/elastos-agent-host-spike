@@ -1324,10 +1324,12 @@ pub(crate) async fn invoke(
                 data_dir,
                 &grant.provider_principal_id,
             );
-            let Ok(context) = remote_context(
-                &remote_principal_id(&source_did, requester_principal_id),
-                &grant.grant_id,
-            ) else {
+            let remote_principal = remote_principal_id(&source_did, requester_principal_id);
+            let Ok(context) =
+                remote_context(&remote_principal, &grant.grant_id).inspect_err(|err| {
+                    tracing::warn!("no model context for {remote_principal}: {err}")
+                })
+            else {
                 return denied("provider_failure", "model context is unavailable");
             };
             (
@@ -1365,7 +1367,11 @@ pub(crate) async fn invoke(
             {
                 return denied("denied", "model run is not owned by this grant");
             }
-            let Ok(context) = remote_context(&record.remote_principal_id, grant_id) else {
+            let Ok(context) =
+                remote_context(&record.remote_principal_id, grant_id).inspect_err(|err| {
+                    tracing::warn!("no model context for {}: {err}", record.remote_principal_id)
+                })
+            else {
                 return denied("provider_failure", "model context is unavailable");
             };
             (
@@ -1755,8 +1761,15 @@ pub(crate) async fn cancel_grant_runs(
         if record.terminal_at.is_some() {
             continue;
         }
-        let Ok(context) = remote_context(&record.remote_principal_id, grant_id) else {
-            continue;
+        let context = match remote_context(&record.remote_principal_id, grant_id) {
+            Ok(context) => context,
+            Err(err) => {
+                tracing::warn!(
+                    "revoke cancel for {run_id} skipped: no model context for {}: {err}",
+                    record.remote_principal_id
+                );
+                continue;
+            }
         };
         let request = json!({
             "run_id": run_id,
@@ -1829,6 +1842,24 @@ mod tests {
         let local = ResolvedPrincipalRoot::resolve(dir, dir, &record.principal_id).unwrap();
         let uri = format!("{}/Documents/a.txt", record.localhost_root);
         local.owns_object_uri(&uri).unwrap();
+    }
+
+    #[test]
+    fn p2a_iii_remote_context_refuses_malformed_remote_ids() {
+        let mints = remote_principal_id("did:key:z6Mksource", "principal-a");
+        assert!(remote_context(&mints, "grant-a").is_ok());
+        let hex = mints.strip_prefix("remote:").unwrap();
+        let upper = hex.to_uppercase();
+        for id in [
+            hex.to_string(),
+            format!("remote:{}", &hex[..31]),
+            format!("remote:{hex}0"),
+            format!("remote:{}z", &hex[..31]),
+            format!("remote:{upper}"),
+        ] {
+            let err = remote_context(&id, "grant-a").unwrap_err();
+            assert!(format!("{err}").contains("remote principal id"), "{id}");
+        }
     }
 
     #[test]
