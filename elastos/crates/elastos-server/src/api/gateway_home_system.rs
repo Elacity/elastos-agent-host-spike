@@ -3002,9 +3002,16 @@ pub(in crate::api::gateway) fn local_model_offer_is_shared(
     data_dir: &std::path::Path,
     principal_id: &str,
 ) -> bool {
-    let Ok(root) = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)
-    else {
-        return false;
+    let root = match crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id) {
+        Ok(root) => root,
+        Err(err) => {
+            tracing::warn!(
+                principal_id = %principal_id,
+                error = %err,
+                "local_model_offer_is_shared: principal root unresolved; offer not shared"
+            );
+            return false;
+        }
     };
     let context = HomeLaunchTokenContext::resolved(
         root,
