@@ -91,7 +91,7 @@ pub(super) async fn home_cli_terminal_access(
             request.headers(),
             &[HOME_CLI_CAPSULE_ID],
         ) {
-            if !acts_for_host(&data_dir, context.proof_binding_id.as_deref()) {
+            if !acts_for_host(&data_dir, context.proof_binding_id()) {
                 return home_terminal_guest_refusal();
             }
         }
@@ -460,7 +460,7 @@ pub(super) async fn home_cli_terminal_start(
         Ok(context) => context,
         Err(err) => return home_error_response(err),
     };
-    if !acts_for_host(&state.data_dir, context.proof_binding_id.as_deref()) {
+    if !acts_for_host(&state.data_dir, context.proof_binding_id()) {
         return home_terminal_guest_refusal();
     }
     let size = match terminal_start_size(start.map(|Json(start)| start)) {
@@ -828,7 +828,7 @@ async fn start_home_terminal_session(
     if !home_terminal_policy_allows(data_dir) {
         return Err(HomeTerminalStartError::PolicyRefused);
     }
-    if !acts_for_host(data_dir, context.proof_binding_id.as_deref()) {
+    if !acts_for_host(data_dir, context.proof_binding_id()) {
         return Err(HomeTerminalStartError::GuestRefused);
     }
     let child = command
@@ -840,10 +840,10 @@ async fn start_home_terminal_session(
         session_id: format!("term-{}", random_hex_token()),
         stream_ticket: format!("ticket-{}", random_hex_token()),
         input_ticket: format!("input-{}", random_hex_token()),
-        principal_id: context.principal_id,
-        auth_session_id: context.session_id,
-        proof_binding_id: context.proof_binding_id,
-        grant_id: context.grant_id,
+        principal_id: context.principal_id().to_string(),
+        auth_session_id: context.session_id().to_string(),
+        proof_binding_id: context.proof_binding_id().map(ToString::to_string),
+        grant_id: context.grant_id().to_string(),
         child_pid,
         created_at_ms: now_unix_ms(),
         input: Mutex::new(Some(pty.input)),
@@ -1399,7 +1399,7 @@ fn home_terminal_start_plan(
 
     let principal_count = active
         .iter()
-        .filter(|session| session.principal_id == context.principal_id)
+        .filter(|session| session.principal_id == context.principal_id())
         .count();
     if principal_count >= limits.per_principal {
         return Err(HomeTerminalCapacityError {
@@ -1413,8 +1413,8 @@ fn home_terminal_start_plan(
     let auth_session_count = active
         .iter()
         .filter(|session| {
-            session.principal_id == context.principal_id
-                && session.auth_session_id == context.session_id
+            session.principal_id == context.principal_id()
+                && session.auth_session_id == context.session_id()
         })
         .count();
     if auth_session_count >= limits.per_auth_session {
@@ -1442,9 +1442,9 @@ fn home_terminal_session_matches_context(
     session: &HomeTerminalSessionLifecycle,
     context: &HomeLaunchTokenContext,
 ) -> bool {
-    session.principal_id == context.principal_id
-        && session.auth_session_id == context.session_id
-        && session.grant_id == context.grant_id
+    session.principal_id == context.principal_id()
+        && session.auth_session_id == context.session_id()
+        && session.grant_id == context.grant_id()
 }
 
 fn home_terminal_session_lifecycle(session: &HomeTerminalSession) -> HomeTerminalSessionLifecycle {
@@ -1769,15 +1769,18 @@ fn home_terminal_authority_env(context: &HomeLaunchTokenContext) -> Vec<(&'stati
     let mut env = vec![
         (
             HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
-            context.principal_id.clone(),
+            context.principal_id().to_string(),
         ),
         (
             HOME_CLI_AUTH_CONTEXT_SESSION_ID_ENV,
-            context.session_id.clone(),
+            context.session_id().to_string(),
         ),
-        (HOME_CLI_AUTH_CONTEXT_GRANT_ID_ENV, context.grant_id.clone()),
+        (
+            HOME_CLI_AUTH_CONTEXT_GRANT_ID_ENV,
+            context.grant_id().to_string(),
+        ),
     ];
-    if let Some(proof_binding_id) = context.proof_binding_id.clone() {
+    if let Some(proof_binding_id) = context.proof_binding_id().map(ToString::to_string) {
         env.push((HOME_CLI_AUTH_CONTEXT_PROOF_BINDING_ID_ENV, proof_binding_id));
     }
     env

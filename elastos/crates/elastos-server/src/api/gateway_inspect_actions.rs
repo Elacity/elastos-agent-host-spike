@@ -198,8 +198,8 @@ pub(super) async fn approve_inspect_action_request(
             ProviderEffectAuditInput {
                 capsule_id: INBOX_CAPSULE_ID,
                 event_type: "inspect.action.stale",
-                principal_id: &context.principal_id,
-                session_id: &context.session_id,
+                principal_id: context.principal_id(),
+                session_id: context.session_id(),
                 request_id,
                 result: "stale",
                 reason: "Inspector action authority changed before Inbox approval",
@@ -250,8 +250,8 @@ pub(super) async fn approve_inspect_action_request(
                 ProviderEffectAuditInput {
                     capsule_id: INBOX_CAPSULE_ID,
                     event_type: "inspect.action.failed",
-                    principal_id: &context.principal_id,
-                    session_id: &context.session_id,
+                    principal_id: context.principal_id(),
+                    session_id: context.session_id(),
                     request_id,
                     result: "failed",
                     reason: "Inspector action result did not match its exact request binding",
@@ -268,8 +268,8 @@ pub(super) async fn approve_inspect_action_request(
             ProviderEffectAuditInput {
                 capsule_id: INBOX_CAPSULE_ID,
                 event_type: "inspect.action.completed",
-                principal_id: &context.principal_id,
-                session_id: &context.session_id,
+                principal_id: context.principal_id(),
+                session_id: context.session_id(),
                 request_id,
                 result: "completed",
                 reason: "Approved Inspector action through Inbox",
@@ -292,8 +292,8 @@ pub(super) async fn approve_inspect_action_request(
         ProviderEffectAuditInput {
             capsule_id: INBOX_CAPSULE_ID,
             event_type: "inspect.action.failed",
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id,
             result: "failed",
             reason: "Approved Inspector action dispatch failed through Inbox",
@@ -317,8 +317,8 @@ pub(super) fn deny_inspect_action_request(
         ProviderEffectAuditInput {
             capsule_id: INBOX_CAPSULE_ID,
             event_type: "inspect.action.denied",
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id,
             result: "denied",
             reason: "Denied Inspector action through Inbox",
@@ -380,7 +380,7 @@ fn claim_bound_pending_inspect_action(
     let mut record = claim_pending_inspect_action_record(
         &state.data_dir,
         request_id,
-        &context.principal_id,
+        context.principal_id(),
         claim_status,
         now_ts(),
     )?;
@@ -421,8 +421,8 @@ fn claim_bound_pending_inspect_action(
         ProviderEffectAuditInput {
             capsule_id: INBOX_CAPSULE_ID,
             event_type: "inspect.action.stale",
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id,
             result: "stale",
             reason: "Inspector action request binding changed before Inbox approval or denial",
@@ -566,7 +566,7 @@ async fn create_inspect_action_request(
     let request_id = inspect_action_request_id(id, operation, now, &nonce);
     let request_binding = inspect_action_request_binding(
         &request_id,
-        &context.principal_id,
+        context.principal_id(),
         id,
         operation,
         &plan["data"],
@@ -575,8 +575,8 @@ async fn create_inspect_action_request(
     let record = InspectActionRequestRecord {
         schema: INSPECT_ACTION_SCHEMA.to_string(),
         request_id,
-        principal_id: context.principal_id.clone(),
-        session_id: context.session_id.clone(),
+        principal_id: context.principal_id().to_string(),
+        session_id: context.session_id().to_string(),
         id: id.to_string(),
         operation: operation.to_string(),
         request: provider_request,
@@ -594,8 +594,8 @@ async fn create_inspect_action_request(
         ProviderEffectAuditInput {
             capsule_id: SYSTEM_CAPSULE_ID,
             event_type: "inspect.action.requested",
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id: &record.request_id,
             result: "pending",
             reason: "System requested Inspector action approval",
