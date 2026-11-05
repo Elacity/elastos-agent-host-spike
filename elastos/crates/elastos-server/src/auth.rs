@@ -7228,7 +7228,6 @@ impl ResolvedPrincipalRoot {
     /// `from_verified_context` test constructors). Production's only
     /// constructor is `resolve`.
     #[cfg(test)]
-    #[allow(dead_code)] // A5-P2a-ii-0b is its first caller.
     pub(crate) fn for_test_principal(principal_id: &str) -> Self {
         Self(RootArm::Local(format!("test-root/{principal_id}")))
     }

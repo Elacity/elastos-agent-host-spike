@@ -443,7 +443,7 @@ fn require_home_wallet_connector_authority(
     {
         anyhow::bail!("Home wallet-connector launch context mismatch");
     }
-    let wallet = runtime_wallet_authority(&connector_launch)?;
+    let wallet = runtime_wallet_authority(&state.data_dir, &connector_launch)?;
     let home_context = home.verified_context();
     let connector_context = wallet.verified_context();
     if home_context.principal_id() != connector_context.principal_id()
