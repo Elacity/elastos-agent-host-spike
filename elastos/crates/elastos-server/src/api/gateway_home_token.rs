@@ -17,6 +17,24 @@ pub(in crate::api) struct HomeLaunchTokenContext {
 }
 
 impl HomeLaunchTokenContext {
+    pub(in crate::api) fn principal_id(&self) -> &str {
+        &self.principal_id
+    }
+
+    pub(in crate::api) fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub(in crate::api) fn proof_binding_id(&self) -> Option<&str> {
+        self.proof_binding_id.as_deref()
+    }
+
+    pub(in crate::api) fn grant_id(&self) -> &str {
+        &self.grant_id
+    }
+}
+
+impl HomeLaunchTokenContext {
     /// The one production constructor (C6 P1): the root is resolved and refuses
     /// before a context exists. S3c-1a-iii stores it in the context.
     pub(in crate::api) fn resolved(
@@ -304,9 +322,9 @@ fn issue_home_launch_token_at(
     issued_at: u64,
 ) -> anyhow::Result<String> {
     launch_context.validate()?;
-    if context.principal_id.trim().is_empty()
-        || context.session_id.trim().is_empty()
-        || context.grant_id.trim().is_empty()
+    if context.principal_id().trim().is_empty()
+        || context.session_id().trim().is_empty()
+        || context.grant_id().trim().is_empty()
     {
         anyhow::bail!("home launch token is missing authority context");
     }
@@ -318,10 +336,10 @@ fn issue_home_launch_token_at(
             launch_context: launch_context.clone(),
             iat: issued_at,
             exp: issued_at.saturating_add(HOME_LAUNCH_TOKEN_TTL_SECS),
-            principal_id: context.principal_id.clone(),
-            session_id: context.session_id.clone(),
-            proof_binding_id: context.proof_binding_id.clone(),
-            grant_id: context.grant_id.clone(),
+            principal_id: context.principal_id().to_string(),
+            session_id: context.session_id().to_string(),
+            proof_binding_id: context.proof_binding_id().map(ToString::to_string),
+            grant_id: context.grant_id().to_string(),
             non_delegatable: true,
         },
         signature: String::new(),
@@ -543,10 +561,10 @@ pub(in crate::api) fn runtime_wallet_authority(
     required: &RequiredHomeLaunchToken,
 ) -> anyhow::Result<RuntimeWalletAuthority> {
     let context = VerifiedWalletInvocationContext::new(
-        required.context.principal_id.clone(),
-        required.context.session_id.clone(),
-        required.context.proof_binding_id.clone(),
-        required.context.grant_id.clone(),
+        required.context.principal_id().to_string(),
+        required.context.session_id().to_string(),
+        required.context.proof_binding_id().map(ToString::to_string),
+        required.context.grant_id().to_string(),
         required.launch_context.executable_actor.clone(),
         required.launch_id.clone(),
     )
