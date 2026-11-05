@@ -925,6 +925,32 @@ async fn run_lifecycle_stays_with_the_creating_principal_through_denial_and_revo
 }
 
 #[tokio::test]
+async fn p2a_iii_stored_run_with_malformed_remote_id_is_denied_before_dispatch() {
+    let fx = TwoRuntimes::start().await;
+    let created = fx.create_run("seed-req-1", "qwen-local").await;
+    assert_eq!(created["ok"], true, "{created}");
+    let run_id = run_id_for(&fx.remote_principal(), "seed-req-1");
+    let path = fx.owner.path().join("services-model-runs.json");
+    let mut index: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let stored = index["runs"][&run_id]["remote_principal_id"]
+        .as_str()
+        .unwrap();
+    let upper = format!(
+        "remote:{}",
+        stored.trim_start_matches("remote:").to_uppercase()
+    );
+    index["runs"][&run_id]["remote_principal_id"] = json!(upper);
+    std::fs::write(&path, serde_json::to_vec(&index).unwrap()).unwrap();
+    let ops_before = fx.provider_ops().await;
+    let refused = fx.run_operation("runs_get", &run_id, SEED_PRINCIPAL).await;
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert_eq!(refused["code"], "provider_failure");
+    assert_eq!(refused["error"], "model context is unavailable");
+    assert_eq!(fx.provider_ops().await, ops_before);
+    fx.shutdown().await;
+}
+
+#[tokio::test]
 async fn revoke_before_dispatch_sends_no_create() {
     let fx = TwoRuntimes::start().await;
     let barrier = install_create_race_barrier(fx.owner.path(), CreateRacePoint::BeforeDispatch);
