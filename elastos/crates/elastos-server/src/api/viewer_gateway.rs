@@ -502,7 +502,7 @@ async fn viewer_object_provider_request(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("object provider unavailable"))?;
     request["op"] = Value::String(op.to_string());
-    request["principal_id"] = Value::String(context.principal_id.clone());
+    request["principal_id"] = Value::String(context.principal_id().to_string());
     let request_id = format!("viewer-library:{op}:{}", crate::auth::now_ts());
     append_viewer_library_audit(
         &state.data_dir,
@@ -667,9 +667,9 @@ fn append_viewer_library_audit(
             schema: RuntimeAuditEventV1::SCHEMA.to_string(),
             event_id: format!("audit:{event_type}:{request_id}:{now}"),
             event_type: event_type.to_string(),
-            principal_id: Some(context.principal_id.clone()),
-            proof_binding_id: context.proof_binding_id.clone(),
-            session_id: Some(context.session_id.clone()),
+            principal_id: Some(context.principal_id().to_string()),
+            proof_binding_id: context.proof_binding_id().map(ToString::to_string),
+            session_id: Some(context.session_id().to_string()),
             challenge_id: Some(request_id.to_string()),
             capsule_id: Some(viewer.to_string()),
             result: result.to_string(),
@@ -765,7 +765,7 @@ fn viewer_storage_target(
     {
         anyhow::bail!("viewer storage does not support .AppData/Agents/ (agent journals)");
     }
-    let principal_id = context.principal_id;
+    let principal_id = context.principal_id().to_string();
     let localhost_root = crate::auth::principal_localhost_root(&principal_id);
     Ok(ViewerStorageTarget {
         path: dir.join(file_name),
@@ -799,7 +799,7 @@ fn viewer_storage_root_uri(
         &storage, context,
     ))
     .ok_or_else(|| anyhow::anyhow!("invalid viewer storage root"))?;
-    let localhost_root = crate::auth::principal_localhost_root(&context.principal_id);
+    let localhost_root = crate::auth::principal_localhost_root(context.principal_id());
     if root_uri != localhost_root
         && !root_uri
             .strip_prefix(&localhost_root)
@@ -843,7 +843,7 @@ pub(super) fn principal_root_protected_object_inventory(
 }
 
 fn principal_scoped_storage_uri(storage: &str, context: &HomeLaunchTokenContext) -> String {
-    let principal_root = crate::auth::principal_localhost_root(&context.principal_id);
+    let principal_root = crate::auth::principal_localhost_root(context.principal_id());
     principal_scoped_storage_uri_for_root(storage, &principal_root)
 }
 

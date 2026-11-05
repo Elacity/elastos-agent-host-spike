@@ -277,7 +277,7 @@ pub(super) async fn capsule_interface_invoke(
     }
     let request_binding = crate::esp_binding::esp_request_binding(
         request_id,
-        &context.principal_id,
+        context.principal_id(),
         &resolved.capsule,
         Some(&resolved.interface_id),
         &resolved.method.id,
@@ -291,8 +291,8 @@ pub(super) async fn capsule_interface_invoke(
         ProviderEffectAuditInput {
             capsule_id: &resolved.capsule,
             event_type: "capsule.affordance.requested",
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id,
             result: "requested",
             reason: &format!(
@@ -334,8 +334,8 @@ pub(super) async fn capsule_interface_invoke(
                 ProviderEffectAuditInput {
                     capsule_id: &resolved.capsule,
                     event_type: "capsule.affordance.failed",
-                    principal_id: &context.principal_id,
-                    session_id: &context.session_id,
+                    principal_id: context.principal_id(),
+                    session_id: context.session_id(),
                     request_id,
                     result: "failed",
                     reason: message,
@@ -362,8 +362,8 @@ pub(super) async fn capsule_interface_invoke(
                 ProviderEffectAuditInput {
                     capsule_id: &resolved.capsule,
                     event_type: "capsule.affordance.failed",
-                    principal_id: &context.principal_id,
-                    session_id: &context.session_id,
+                    principal_id: context.principal_id(),
+                    session_id: context.session_id(),
                     request_id,
                     result: "failed",
                     reason: &message,
@@ -406,8 +406,8 @@ pub(super) async fn capsule_interface_invoke(
         ProviderEffectAuditInput {
             capsule_id: &resolved.capsule,
             event_type: "capsule.affordance.completed",
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id,
             result: "completed",
             reason: &format!("Runtime completed {}", resolved.method.id),
