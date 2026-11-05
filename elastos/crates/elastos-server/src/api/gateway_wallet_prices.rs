@@ -302,8 +302,8 @@ pub(in crate::api::gateway) fn upsert_wallet_price_http_request(
     )?;
     append_wallet_price_policy_audit(
         data_dir,
-        &context.principal_id,
-        &context.session_id,
+        context.principal_id(),
+        context.session_id(),
         "requested",
         "Wallet price HTTP access requested",
     )
@@ -313,7 +313,7 @@ pub(in crate::api::gateway) fn ensure_admin_context(
     data_dir: &FsPath,
     context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<()> {
-    let Some(proof_binding_id) = context.proof_binding_id.as_deref() else {
+    let Some(proof_binding_id) = context.proof_binding_id() else {
         anyhow::bail!("admin passkey required");
     };
     let principal = crate::auth::load_principal_for_proof_binding(data_dir, proof_binding_id)?;
@@ -363,8 +363,8 @@ pub(in crate::api::gateway) fn append_wallet_price_fetch_audit(
         WalletApprovalAuditInput {
             capsule_id: WALLET_CAPSULE_ID,
             event_type,
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id,
             result,
             reason,

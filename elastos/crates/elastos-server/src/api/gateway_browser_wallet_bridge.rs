@@ -217,8 +217,8 @@ pub(in crate::api::gateway) async fn browser_wallet_bridge_payload(
     );
     serde_json::json!({
         "schema": "elastos.browser.wallet-bridge/v1",
-        "principal_id": context.principal_id,
-        "session_id": context.session_id,
+        "principal_id": context.principal_id(),
+        "session_id": context.session_id(),
         "launch_id": authority.verified_context().launch_id(),
         "default_chain_namespace": default_chain_namespace,
         "default_account_id": default_account_id,

@@ -246,7 +246,7 @@ fn supervisor_launch_principal_from_input(
         &[input.name.as_str()],
     )
     .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
-    Ok(Some(context.principal_id))
+    Ok(Some(context.principal_id().to_string()))
 }
 
 /// POST /api/supervisor/stop-capsule — stop a running capsule VM.

@@ -239,7 +239,7 @@ fn require_system_admin(
     headers: &HeaderMap,
 ) -> anyhow::Result<HomeLaunchTokenContext> {
     let context = require_home_launch_token_context(data_dir, headers, SYSTEM_CAPSULE_ID)?;
-    let Some(proof_binding_id) = context.proof_binding_id.as_deref() else {
+    let Some(proof_binding_id) = context.proof_binding_id() else {
         return Err(anyhow::anyhow!("admin passkey required"));
     };
     let principal = crate::auth::load_principal_for_proof_binding(data_dir, proof_binding_id)?;
@@ -812,8 +812,8 @@ pub(super) async fn system_ai_provider_validate(
     headers: HeaderMap,
     Json(req): Json<AiProviderValidateRequest>,
 ) -> Response {
-    let admin = match require_system_admin(&state.data_dir, &headers) {
-        Ok(admin) => admin,
+    let admin_proof_binding_id = match require_system_admin(&state.data_dir, &headers) {
+        Ok(admin) => admin.proof_binding_id().map(str::to_string),
         Err(err) => return system_error_response(err),
     };
     if !cfg!(test) && !cfg!(target_os = "macos") {
@@ -856,7 +856,7 @@ pub(super) async fn system_ai_provider_validate(
         &state.data_dir,
         provider,
         &api_key,
-        admin.proof_binding_id.as_deref().unwrap_or_default(),
+        admin_proof_binding_id.as_deref().unwrap_or_default(),
         &connection_id,
     )
     .await
@@ -875,8 +875,8 @@ pub(super) async fn system_ai_provider_save(
     headers: HeaderMap,
     Json(req): Json<AiProviderSaveRequest>,
 ) -> Response {
-    let admin = match require_system_admin(&state.data_dir, &headers) {
-        Ok(admin) => admin,
+    let admin_proof_binding_id = match require_system_admin(&state.data_dir, &headers) {
+        Ok(admin) => admin.proof_binding_id().map(str::to_string),
         Err(err) => return system_error_response(err),
     };
     if !cfg!(test) && !cfg!(target_os = "macos") {
@@ -923,7 +923,7 @@ pub(super) async fn system_ai_provider_save(
         &state.data_dir,
         provider,
         &api_key,
-        admin.proof_binding_id.as_deref().unwrap_or_default(),
+        admin_proof_binding_id.as_deref().unwrap_or_default(),
         &connection_id,
     )
     .await

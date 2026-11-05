@@ -182,8 +182,8 @@ pub(in crate::api::gateway) async fn create_managed_wallet_accounts(
         WalletApprovalAuditInput {
             capsule_id,
             event_type: "wallet.managed.created",
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id: "wallet-managed",
             result: "ok",
             reason: if capsule_id == SYSTEM_CAPSULE_ID {
@@ -254,8 +254,8 @@ pub(in crate::api::gateway) async fn update_default_wallet_account(
                 WalletApprovalAuditInput {
                     capsule_id,
                     event_type: "wallet.default.updated",
-                    principal_id: &context.principal_id,
-                    session_id: &context.session_id,
+                    principal_id: context.principal_id(),
+                    session_id: context.session_id(),
                     request_id: "wallet-default",
                     result: "ok",
                     reason: if capsule_id == SYSTEM_CAPSULE_ID {

@@ -169,7 +169,7 @@ fn principal_from_launch_request(
                 &[capsule_name.as_str()],
             )
             .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
-            Ok(Some(context.principal_id))
+            Ok(Some(context.principal_id().to_string()))
         }
     }
 }

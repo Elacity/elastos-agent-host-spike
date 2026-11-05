@@ -1458,14 +1458,14 @@ pub(crate) async fn invoke(
         .unwrap_or_default()
         .to_string();
     let reservation_key =
-        run_reservation_key(grant_id, &context.principal_id, capsule_id, &request_id);
+        run_reservation_key(grant_id, context.principal_id(), capsule_id, &request_id);
     let held_slot = if operation == "runs_create" {
         match reserve_run_slot(
             data_dir,
             now,
             &reservation_key,
             grant_id,
-            &context.principal_id,
+            context.principal_id(),
             capsule_id,
             &request_id,
         ) {
@@ -1577,7 +1577,7 @@ pub(crate) async fn invoke(
         grant_id: grant_id.to_string(),
         source_endpoint_did: source_did.clone(),
         requester_principal_id: requester_principal_id.to_string(),
-        remote_principal_id: context.principal_id.clone(),
+        remote_principal_id: context.principal_id().to_string(),
         capsule_id: capsule_id.to_string(),
         offer_id: normalized["offer_id"]
             .as_str()

@@ -134,7 +134,7 @@ pub(super) fn principal_root_protected_object_inventory(
 fn assistant_workspace_uri(context: &HomeLaunchTokenContext) -> String {
     format!(
         "{}/{ASSISTANT_WORKSPACE_RELATIVE_ROOT}/{ASSISTANT_WORKSPACE_FILE}",
-        crate::auth::principal_localhost_root(&context.principal_id)
+        crate::auth::principal_localhost_root(context.principal_id())
     )
 }
 
@@ -169,7 +169,7 @@ fn load_assistant_workspace(
         }
         Err(err) => return Err(err.into()),
     }
-    let principal_id = &context.principal_id;
+    let principal_id = context.principal_id();
     let localhost_root = crate::auth::principal_localhost_root(principal_id);
     let bytes = crate::auth::read_principal_root_object(
         data_dir,
@@ -213,7 +213,7 @@ fn save_assistant_workspace(
     let bytes = serde_json::to_vec_pretty(&next)?;
     validate_workspace_bytes(&bytes)?;
     let path = assistant_workspace_path(data_dir, context)?;
-    let principal_id = &context.principal_id;
+    let principal_id = context.principal_id();
     let localhost_root = crate::auth::principal_localhost_root(principal_id);
     crate::auth::write_protected_principal_root_object(
         data_dir,
