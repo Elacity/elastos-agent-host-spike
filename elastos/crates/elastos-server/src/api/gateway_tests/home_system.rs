@@ -10850,6 +10850,51 @@ async fn p2a_i_a_wiring_loop_resolve_reads_the_listing_store() {
     .unwrap();
     assert_eq!(grant.provider_principal_id, bob.authority.principal_id);
 }
+
+/// The one reachable refusal (Rong 1106 sec. 3): a provider principal with no
+/// stored record is refused by the root resolver even though its Services
+/// selection state shares the local model offer. The control principal proves
+/// the same share state answers true once a record exists.
+#[test]
+fn p2a_i_b_local_model_offer_unshared_for_provider_without_stored_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider_id = "passkey:p2a-i-b-provider-without-record";
+    let record_owner = passkey_authority_with_name(dir.path(), Some("carol"));
+    for principal_id in [provider_id, record_owner.principal_id.as_str()] {
+        let localhost_root = crate::auth::principal_localhost_root(principal_id);
+        let object_uri = format!("{localhost_root}/.AppData/ElastOS/Home/services-state.json");
+        let path = rooted_localhost_fs_path(dir.path(), &object_uri).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let state = json!({
+            "schema": "elastos.services.state/v1",
+            "principal_id": principal_id,
+            "localhost_root": localhost_root,
+            "updated_at": 0,
+            "local_offer_ids": [MODEL_LOCAL_OFFER],
+        });
+        crate::auth::write_principal_root_object(
+            dir.path(),
+            principal_id,
+            &localhost_root,
+            &object_uri,
+            &path,
+            &serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["local_offer_ids"], json!([MODEL_LOCAL_OFFER]));
+    }
+    assert!(!crate::api::gateway::local_model_offer_is_shared(
+        dir.path(),
+        provider_id
+    ));
+    assert!(crate::api::gateway::local_model_offer_is_shared(
+        dir.path(),
+        &record_owner.principal_id
+    ));
+}
+
 // Regression for a configured Gateway whose Carrier is already in process.
 fn configured_services_runtime_remove_attached_runtime(
     data_dir: &std::path::Path,

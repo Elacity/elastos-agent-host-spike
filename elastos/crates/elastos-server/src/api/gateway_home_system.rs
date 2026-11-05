@@ -3001,12 +3001,24 @@ pub(in crate::api::gateway) fn local_model_offer_is_shared(
     data_dir: &std::path::Path,
     principal_id: &str,
 ) -> bool {
-    let context = HomeLaunchTokenContext {
-        principal_id: principal_id.to_string(),
-        session_id: String::new(),
-        proof_binding_id: None,
-        grant_id: String::new(),
+    let root = match crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id) {
+        Ok(root) => root,
+        Err(err) => {
+            tracing::warn!(
+                principal_id = %principal_id,
+                error = %err,
+                "local_model_offer_is_shared: principal root unresolved; offer not shared"
+            );
+            return false;
+        }
     };
+    let context = HomeLaunchTokenContext::resolved(
+        root,
+        principal_id.to_string(),
+        String::new(),
+        None,
+        String::new(),
+    );
     home_services_local_model_shared(data_dir, &context).unwrap_or(false)
 }
 
@@ -4576,11 +4588,16 @@ pub(crate) fn sync_runtime_services_mailboxes(
         return Ok(());
     }
     let principal = &principals[round % principals.len()];
-    let context = HomeLaunchTokenContext {
-        principal_id: principal.principal_id.clone(),
-        proof_binding_id: Some(principal.proof_binding_id.clone()),
-        session_id: String::new(),
-        grant_id: String::new(),
+    let context = match stored_passkey_principal_context(data_dir, principal) {
+        Ok(context) => context,
+        Err(err) => {
+            tracing::warn!(
+                principal_id = %principal.principal_id,
+                error = %err,
+                "Services mailbox sync skipped: principal root unresolved"
+            );
+            return Ok(());
+        }
     };
     if load_configured_contact_authority_for_context(data_dir, &context, Some(discovery_service))?
         .is_none()
