@@ -7224,6 +7224,15 @@ impl ResolvedPrincipalRoot {
             .map_err(|err| anyhow!(err))
     }
 
+    /// Test-only root for a fixture principal (A5-P2a-ii-0b's two
+    /// `from_verified_context` test constructors). Production's only
+    /// constructor is `resolve`.
+    #[cfg(test)]
+    #[allow(dead_code)] // A5-P2a-ii-0b is its first caller.
+    pub(crate) fn for_test_principal(principal_id: &str) -> Self {
+        Self(RootArm::Local(format!("test-root/{principal_id}")))
+    }
+
     /// The remote principal's root (D2, rong-ruling-1514-1515-p2a-1059 3.3):
     /// `remote:` plus 32 hex digits, and no localhost root.
     pub(crate) fn remote(remote_principal_id: &str) -> anyhow::Result<Self> {
