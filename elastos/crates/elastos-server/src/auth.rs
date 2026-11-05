@@ -16041,6 +16041,11 @@ pub(crate) mod tests {
         let usersai = principal_kind_localhost_root(id.as_str(), PrincipalKind::Agent);
         let usersai_uri = format!("{usersai}/Documents/a.txt");
         assert!(resolved.owns_object_uri(&usersai_uri).is_err());
+        // A sibling principal under the same Users parent stays outside this root.
+        let sibling = principal_localhost_root("person:local:sibling-principal");
+        assert_ne!(sibling, principal_localhost_root(id.as_str()));
+        let sibling_uri = format!("{sibling}/Documents/a.txt");
+        assert!(resolved.owns_object_uri(&sibling_uri).is_err());
     }
 
     /// P6 (Codex r1 #1462, Rong 1158 sec. 3): a stored Agent resolves to its
@@ -16072,6 +16077,12 @@ pub(crate) mod tests {
         assert!(resolved.owns_object_uri(&agent_uri).is_ok());
         let users_uri = format!("{}/Documents/a.txt", principal_localhost_root(&id));
         assert!(resolved.owns_object_uri(&users_uri).is_err());
+        // A sibling agent under the same UsersAI parent stays outside this root.
+        let sibling =
+            principal_kind_localhost_root("person:local:sibling-agent", PrincipalKind::Agent);
+        assert_ne!(sibling, agent);
+        let sibling_uri = format!("{sibling}/Documents/a.txt");
+        assert!(resolved.owns_object_uri(&sibling_uri).is_err());
     }
 
     /// Resolution only reads the device identity; it never mints one (Codex
