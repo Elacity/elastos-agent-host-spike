@@ -2967,6 +2967,38 @@
       "tests": [
         "hosted_access_states_fail_the_run_on_the_socket"
       ]
+    },
+    {
+      "id": "MP74",
+      "title": "the entry cap is dropped, so a journal of 256 crash files is not policy_limit",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/journal.rs",
+          "old": "            if usage.entries >= MAX_NEW_JOURNAL_ENTRIES\n                || usage\n                    .charged_bytes\n                    .checked_add(charge)\n                    .is_none_or(|total| total > MAX_JOURNAL_GROWTH_BYTES)\n            {\n                // This check precedes the durable Prepared record and dispatch.\n                return Err(journal_budget_fault());\n            }",
+          "new": "            if usage\n                    .charged_bytes\n                    .checked_add(charge)\n                    .is_none_or(|total| total > MAX_JOURNAL_GROWTH_BYTES)\n            {\n                // This check precedes the durable Prepared record and dispatch.\n                return Err(journal_budget_fault());\n            }"
+        }
+      ],
+      "tests": [
+        "hosted_full_journal_refuses_before_any_send"
+      ]
+    },
+    {
+      "id": "MP75",
+      "title": "the charged-growth cap is dropped, so the 64-run arm admits the next run",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/journal.rs",
+          "old": "            if usage.entries >= MAX_NEW_JOURNAL_ENTRIES\n                || usage\n                    .charged_bytes\n                    .checked_add(charge)\n                    .is_none_or(|total| total > MAX_JOURNAL_GROWTH_BYTES)\n            {\n                // This check precedes the durable Prepared record and dispatch.\n                return Err(journal_budget_fault());\n            }",
+          "new": "            if usage.entries >= MAX_NEW_JOURNAL_ENTRIES\n            {\n                // This check precedes the durable Prepared record and dispatch.\n                return Err(journal_budget_fault());\n            }"
+        }
+      ],
+      "tests": [
+        "state::tests::journal_admission_refuses_before_prepared_and_backend_effects"
+      ]
     }
   ]
 }
