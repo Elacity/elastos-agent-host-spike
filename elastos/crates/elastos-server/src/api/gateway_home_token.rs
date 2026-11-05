@@ -1046,6 +1046,20 @@ pub(crate) fn set_test_home_launch_auth_data_dir(
 mod tests {
     use super::*;
 
+    #[test]
+    fn for_test_maps_each_argument_to_its_own_getter() {
+        let context = HomeLaunchTokenContext::for_test(
+            "principal:t",
+            "session:t",
+            Some("proof:t".to_string()),
+            "grant:t",
+        );
+        assert_eq!(context.principal_id(), "principal:t");
+        assert_eq!(context.session_id(), "session:t");
+        assert_eq!(context.proof_binding_id(), Some("proof:t"));
+        assert_eq!(context.grant_id(), "grant:t");
+    }
+
     fn capsule_headers(token: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert("x-elastos-home-token", token.parse().unwrap());
