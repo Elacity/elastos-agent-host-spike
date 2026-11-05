@@ -610,8 +610,8 @@ async fn create_browser_wallet_transaction_request(
                 "method": method,
                 "page_url": page_url,
                 "origin": input.origin,
-                "principal_id": context.principal_id.clone(),
-                "session_id": context.session_id.clone(),
+                "principal_id": context.principal_id().to_string(),
+                "session_id": context.session_id().to_string(),
             }),
         },
     )
@@ -834,8 +834,8 @@ async fn create_browser_wallet_signature_request(
         "chain_namespace": chain_namespace,
         "page_url": page_url,
         "origin": origin,
-        "principal_id": context.principal_id,
-        "session_id": context.session_id,
+        "principal_id": context.principal_id(),
+        "session_id": context.session_id(),
         "requires_wallet_approval": true
     });
     if let Some(message) = message {

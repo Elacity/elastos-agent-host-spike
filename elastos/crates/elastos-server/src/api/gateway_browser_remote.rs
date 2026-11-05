@@ -1595,7 +1595,7 @@ pub(super) async fn select(
     guarantee: BrowserGuaranteeLevel,
 ) -> Result<Option<(Value, String, String)>> {
     if !requested.is_some_and(|id| id.starts_with("remote-engine-")) {
-        require_profile_placement(&gateway.data_dir, &context.principal_id, None)?;
+        require_profile_placement(&gateway.data_dir, context.principal_id(), None)?;
         return Ok(None);
     }
     let registry = gateway
@@ -1614,7 +1614,7 @@ pub(super) async fn select(
         selected_inventory(registry, grants, requested.unwrap(), deadline).await?;
     require_profile_placement(
         &gateway.data_dir,
-        &context.principal_id,
+        context.principal_id(),
         grant["peer_did"].as_str(),
     )?;
     inventory.select(Some(&adapter_id), mode, guarantee)?;
@@ -1639,7 +1639,7 @@ pub(super) async fn select(
     // An existing local profile requires an approved transfer. Selecting
     // execution cannot silently fork its cookies onto another Runtime.
     let (local_profile, _) =
-        browser_profile_launch_descriptor(&gateway.data_dir, &context.principal_id)?;
+        browser_profile_launch_descriptor(&gateway.data_dir, context.principal_id())?;
     ensure!(
         !local_profile.exists(),
         "This Browser profile requires an approved transfer before remote placement"

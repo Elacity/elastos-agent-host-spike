@@ -401,7 +401,7 @@ fn principal_display_name_for_context(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
 ) -> Option<String> {
-    let proof_binding_id = context.proof_binding_id.as_deref()?;
+    let proof_binding_id = context.proof_binding_id()?;
     crate::auth::load_principal_for_proof_binding(data_dir, proof_binding_id)
         .ok()
         .and_then(|principal| {

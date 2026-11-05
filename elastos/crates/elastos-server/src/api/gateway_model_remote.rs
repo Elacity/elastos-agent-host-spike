@@ -320,7 +320,7 @@ fn typed_request(
             "remote_model".to_string(),
             json!({
                 "grant_id": grant_id,
-                "principal_id": context.principal_id,
+                "principal_id": context.principal_id(),
                 "capsule_id": capsule_id,
             }),
         );
@@ -633,13 +633,13 @@ pub(crate) async fn route_run_operation(
                 .unwrap_or_default()
                 .to_string();
             let key =
-                route_reservation_key(&context.principal_id, grant_id, capsule_id, &request_id);
+                route_reservation_key(context.principal_id(), grant_id, capsule_id, &request_id);
             let held_slot = matches!(
                 reserve_route_slot(
                     data_dir,
                     now,
                     &key,
-                    &context.principal_id,
+                    context.principal_id(),
                     grant_id,
                     capsule_id,
                     &request_id,
@@ -671,7 +671,7 @@ pub(crate) async fn route_run_operation(
             };
             if let Some(run_id) = reply.run_id {
                 let route = RemoteRunRoute {
-                    principal_id: context.principal_id.clone(),
+                    principal_id: context.principal_id().to_string(),
                     grant_id: grant.grant_id.clone(),
                     peer_did: grant.peer_did.clone(),
                     connect_ticket: grant.connect_ticket.clone(),
@@ -712,7 +712,7 @@ pub(crate) async fn route_run_operation(
         }
         "runs_get" | "runs_events" | "runs_cancel" => {
             let run_id = normalized["run_id"].as_str().unwrap_or_default();
-            let Some(route) = remote_run_route(data_dir, &context.principal_id, run_id)
+            let Some(route) = remote_run_route(data_dir, context.principal_id(), run_id)
                 .map_err(|err| RemoteRouteError::Invalid(err.to_string()))?
             else {
                 return Ok(None);

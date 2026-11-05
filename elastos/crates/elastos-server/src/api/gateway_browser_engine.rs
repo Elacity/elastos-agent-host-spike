@@ -1039,7 +1039,7 @@ pub(in crate::api::gateway) async fn browser_remote_engine_summary(
         return serde_json::json!({"state":"unavailable","offers":[]});
     };
     let fingerprint = remote_engine_grant_fingerprint(&grants);
-    let cache_key = remote_engine_cache_key(&state.data_dir, &context.principal_id);
+    let cache_key = remote_engine_cache_key(&state.data_dir, context.principal_id());
     if let Some(cached) = cached_remote_engine_summary(&cache_key, &fingerprint) {
         return cached;
     }

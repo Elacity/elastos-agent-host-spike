@@ -184,7 +184,7 @@ fn resource(page: &str, id: &str) -> ResourceId {
 async fn owner_live(state: &GatewayState, owner: &BrowserInspectionOwner, token: &str) -> bool {
     require_carried_home_launch_token(&state.data_dir, token, &[BROWSER_CAPSULE_ID]).is_ok_and(
         |grant| {
-            grant.context.principal_id == owner.principal_id()
+            grant.context.principal_id() == owner.principal_id()
                 && grant.launch_id == owner.launch_id()
         },
     ) && browser_inspection_owner_current(&state.data_dir, owner).await
