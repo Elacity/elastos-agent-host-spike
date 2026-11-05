@@ -223,6 +223,9 @@ async fn passkey_step_up_begin_inner(
         anyhow::bail!("passkey step-up relying party mismatch");
     }
 
+    let grant_id = launch.context.grant_id().to_string();
+    let session_id = launch.context.session_id().to_string();
+    let principal_id = launch.context.principal_id().to_string();
     let now = now_ts();
     let ceremony_id = format!("passkey:step-up:{}", gateway_home_token::uuid_like_token());
     let pending = PendingPasskeyStepUp {
@@ -230,10 +233,10 @@ async fn passkey_step_up_begin_inner(
         ceremony_id: ceremony_id.clone(),
         original_launch_id: launch.launch_id,
         launch_context: launch.launch_context,
-        principal_id: launch.context.principal_id,
-        session_id: launch.context.session_id,
+        principal_id,
+        session_id,
         proof_binding_id: passkey_proof_binding_id(&passkey),
-        grant_id: launch.context.grant_id,
+        grant_id,
         credential_id: passkey.credential_id.clone(),
         credential_public_key_sha256: hex::encode(Sha256::digest(passkey.public_key.as_bytes())),
         rp_id: rp.id.clone(),
@@ -653,14 +656,14 @@ pub(in crate::api) fn require_hosted_step_up_launch(
     {
         anyhow::bail!("passkey step-up requires an original Home-hosted app launch");
     }
-    let Some(proof_binding_id) = launch.context.proof_binding_id.as_deref() else {
+    let Some(proof_binding_id) = launch.context.proof_binding_id() else {
         anyhow::bail!("passkey step-up requires a proof-bound original launch");
     };
     if !proof_binding_id.starts_with("proof:passkey:")
-        || host_context.principal_id != launch.context.principal_id
-        || host_context.session_id != launch.context.session_id
-        || host_context.proof_binding_id.as_deref() != Some(proof_binding_id)
-        || host_context.grant_id != launch.context.grant_id
+        || host_context.principal_id() != launch.context.principal_id()
+        || host_context.session_id() != launch.context.session_id()
+        || host_context.proof_binding_id() != Some(proof_binding_id)
+        || host_context.grant_id() != launch.context.grant_id()
     {
         anyhow::bail!("passkey step-up original launch authority mismatch");
     }
@@ -671,10 +674,10 @@ fn passkey_for_launch(
     data_dir: &Path,
     launch: &RequiredHomeLaunchToken,
 ) -> anyhow::Result<PasskeyWebAuthnBinding> {
-    let proof_binding_id =
-        launch.context.proof_binding_id.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("passkey step-up requires a proof-bound original launch")
-        })?;
+    let proof_binding_id = launch
+        .context
+        .proof_binding_id()
+        .ok_or_else(|| anyhow::anyhow!("passkey step-up requires a proof-bound original launch"))?;
     if !proof_binding_id.starts_with("proof:passkey:") {
         anyhow::bail!("passkey step-up requires the original registered passkey");
     }
@@ -682,7 +685,7 @@ fn passkey_for_launch(
     let principal =
         crate::auth::load_principal_for_proof_binding(&auth_data_dir, proof_binding_id)?;
     crate::auth::ensure_proof_binding_not_revoked(&principal)?;
-    if principal.principal_id != launch.context.principal_id {
+    if principal.principal_id != launch.context.principal_id() {
         anyhow::bail!("passkey step-up principal binding mismatch");
     }
     principal
@@ -790,15 +793,14 @@ fn require_step_up_binding(
 ) -> anyhow::Result<()> {
     let proof_binding_id = launch
         .context
-        .proof_binding_id
-        .as_deref()
+        .proof_binding_id()
         .ok_or_else(|| anyhow::anyhow!("original launch is not passkey proof-bound"))?;
     if payload.original_launch_id != launch.launch_id
         || payload.launch_context != launch.launch_context
-        || payload.principal_id != launch.context.principal_id
-        || payload.session_id != launch.context.session_id
+        || payload.principal_id != launch.context.principal_id()
+        || payload.session_id != launch.context.session_id()
         || payload.proof_binding_id != proof_binding_id
-        || payload.grant_id != launch.context.grant_id
+        || payload.grant_id != launch.context.grant_id()
     {
         anyhow::bail!("passkey step-up original launch binding mismatch");
     }
@@ -893,10 +895,10 @@ fn claim_pending(
     ensure_private_record_root(root)?;
     let pending: PendingPasskeyStepUp = read_strict_json(&path, "passkey step-up state")?;
     pending.validate(now, true)?;
-    if pending.principal_id != host_context.principal_id
-        || pending.session_id != host_context.session_id
-        || host_context.proof_binding_id.as_deref() != Some(pending.proof_binding_id.as_str())
-        || pending.grant_id != host_context.grant_id
+    if pending.principal_id != host_context.principal_id()
+        || pending.session_id != host_context.session_id()
+        || host_context.proof_binding_id() != Some(pending.proof_binding_id.as_str())
+        || pending.grant_id != host_context.grant_id()
         || pending.rp_id != rp_id
         || pending.rp_origin.trim_end_matches('/') != rp_origin.trim_end_matches('/')
     {
