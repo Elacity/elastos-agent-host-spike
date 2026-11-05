@@ -764,13 +764,14 @@ fn provider_status_error(result: &Value) -> Option<String> {
     })
 }
 
-fn remote_context(record_principal: &str, grant_id: &str) -> HomeLaunchTokenContext {
-    HomeLaunchTokenContext {
-        principal_id: record_principal.to_string(),
-        proof_binding_id: None,
-        session_id: grant_id.to_string(),
-        grant_id: grant_id.to_string(),
-    }
+fn remote_context(principal: &str, grant_id: &str) -> anyhow::Result<HomeLaunchTokenContext> {
+    Ok(HomeLaunchTokenContext::resolved(
+        crate::auth::ResolvedPrincipalRoot::remote(principal)?,
+        principal.to_string(),
+        grant_id.to_string(),
+        None,
+        grant_id.to_string(),
+    ))
 }
 
 /// Local engine offers are shareable. A hosted offer is shareable only after
@@ -1323,11 +1324,14 @@ pub(crate) async fn invoke(
                 data_dir,
                 &grant.provider_principal_id,
             );
+            let Ok(context) = remote_context(
+                &remote_principal_id(&source_did, requester_principal_id),
+                &grant.grant_id,
+            ) else {
+                return denied("provider_failure", "model context is unavailable");
+            };
             (
-                remote_context(
-                    &remote_principal_id(&source_did, requester_principal_id),
-                    &grant.grant_id,
-                ),
+                context,
                 None,
                 include_local,
                 grant.approved_offer_ids,
@@ -1361,8 +1365,11 @@ pub(crate) async fn invoke(
             {
                 return denied("denied", "model run is not owned by this grant");
             }
+            let Ok(context) = remote_context(&record.remote_principal_id, grant_id) else {
+                return denied("provider_failure", "model context is unavailable");
+            };
             (
-                remote_context(&record.remote_principal_id, grant_id),
+                context,
                 Some((run_id, record)),
                 true,
                 BTreeSet::new(),
@@ -1748,7 +1755,9 @@ pub(crate) async fn cancel_grant_runs(
         if record.terminal_at.is_some() {
             continue;
         }
-        let context = remote_context(&record.remote_principal_id, grant_id);
+        let Ok(context) = remote_context(&record.remote_principal_id, grant_id) else {
+            continue;
+        };
         let request = json!({
             "run_id": run_id,
             "request_id": format!("revoke:{}", record.request_id),
@@ -1799,6 +1808,27 @@ mod tests {
         assert_ne!(a1, other_runtime);
         assert!(a1.starts_with("remote:"));
         assert_eq!(a1.len(), "remote:".len() + 32);
+    }
+
+    #[test]
+    fn p2a_iii_remote_context_root_refuses_localhost_users_write() {
+        use crate::auth::*;
+        use elastos_runtime::auth::ProofBinding;
+        let remote_id = remote_principal_id("did:key:z6Mksource", "principal-a");
+        assert!(remote_context(&remote_id, "grant-a").is_ok());
+        let root = ResolvedPrincipalRoot::remote(&remote_id).unwrap();
+        let users_uri = format!("{}/Documents/a.txt", principal_localhost_root(&remote_id));
+        let refusal = root.owns_object_uri(&users_uri).unwrap_err();
+        assert!(format!("{refusal}").contains("owns no such localhost object"));
+        let data_dir = tempfile::tempdir().unwrap();
+        let now = now_ts();
+        let binding =
+            ProofBinding::evm_account(20, "0x3333333333333333333333333333333333333333", now);
+        let record = upsert_principal_for_binding(data_dir.path(), binding, now).unwrap();
+        let dir = data_dir.path();
+        let local = ResolvedPrincipalRoot::resolve(dir, dir, &record.principal_id).unwrap();
+        let uri = format!("{}/Documents/a.txt", record.localhost_root);
+        local.owns_object_uri(&uri).unwrap();
     }
 
     #[test]

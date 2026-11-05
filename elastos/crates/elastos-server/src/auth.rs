@@ -7194,8 +7194,15 @@ pub(crate) fn principal_stored_localhost_root(
 
 /// A principal's root, resolved once where the principal is bound (C6 P1,
 /// rong-ruling-1455b-s3c1a-1430-1000). Only this module constructs one.
+/// A remote principal's root owns no localhost path.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedPrincipalRoot(String);
+pub(crate) struct ResolvedPrincipalRoot(RootArm);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RootArm {
+    Local(String),
+    Remote,
+}
 
 impl ResolvedPrincipalRoot {
     /// The one resolver. The device's own DID (in `data_dir`) takes the device
@@ -7210,11 +7217,33 @@ impl ResolvedPrincipalRoot {
         let device = crate::collaboration_profile_authority::load_existing_device_did(data_dir)?;
         if device.is_some_and(|did| PrincipalId::device_did(&did).as_str() == principal_id) {
             // Today's device root: the one Users rule, applied to `device:<did>`.
-            return Ok(Self(principal_localhost_root(principal_id)));
+            return Ok(Self(RootArm::Local(principal_localhost_root(principal_id))));
         }
         principal_stored_localhost_root(Some(auth_data_dir), principal_id)
-            .map(Self)
+            .map(|root| Self(RootArm::Local(root)))
             .map_err(|err| anyhow!(err))
+    }
+
+    /// The remote principal's root (D2, rong-ruling-1514-1515-p2a-1059 3.3):
+    /// `remote:` plus 32 hex digits, and no localhost root.
+    pub(crate) fn remote(remote_principal_id: &str) -> anyhow::Result<Self> {
+        let shaped = match remote_principal_id.strip_prefix("remote:") {
+            Some(hex) => hex.len() == 32 && hex.bytes().all(|b| b.is_ascii_hexdigit()),
+            None => false,
+        };
+        if !shaped {
+            anyhow::bail!("resolved remote root needs a remote principal id");
+        }
+        Ok(Self(RootArm::Remote))
+    }
+
+    /// Whether this root may own `object_uri`; a remote root owns nothing.
+    #[cfg(test)]
+    pub(crate) fn owns_object_uri(&self, object_uri: &str) -> anyhow::Result<()> {
+        match &self.0 {
+            RootArm::Local(root) if object_uri_is_under_root(root, object_uri) => Ok(()),
+            _ => anyhow::bail!("this principal root owns no such localhost object"),
+        }
     }
 }
 
@@ -7268,14 +7297,16 @@ fn validate_principal_root_object_binding_for_kind(
     if localhost_root != own_root {
         anyhow::bail!("principal localhost root must be the record's own root for its kind");
     }
-    let under_root = object_uri == localhost_root
-        || object_uri
-            .strip_prefix(localhost_root)
-            .is_some_and(|rest| rest.starts_with('/'));
-    if !under_root {
+    if !object_uri_is_under_root(localhost_root, object_uri) {
         anyhow::bail!("principal-root object URI is outside the principal root");
     }
     Ok(())
+}
+
+fn object_uri_is_under_root(localhost_root: &str, object_uri: &str) -> bool {
+    object_uri
+        .strip_prefix(localhost_root)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 /// The stored record for `principal_id`, or None when none is stored.
@@ -16003,8 +16034,11 @@ pub(crate) mod tests {
         let id = PrincipalId::device_did(&did);
         let resolved =
             ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), id.as_str()).unwrap();
-        assert_eq!(resolved.0, principal_localhost_root(id.as_str()));
-        assert!(!resolved.0.contains("UsersAI"));
+        let users_uri = format!("{}/Documents/a.txt", principal_localhost_root(id.as_str()));
+        assert!(resolved.owns_object_uri(&users_uri).is_ok());
+        let usersai = principal_kind_localhost_root(id.as_str(), PrincipalKind::Agent);
+        let usersai_uri = format!("{usersai}/Documents/a.txt");
+        assert!(resolved.owns_object_uri(&usersai_uri).is_err());
     }
 
     /// P6 (Codex r1 #1462, Rong 1158 sec. 3): a stored Agent resolves to its
@@ -16031,11 +16065,11 @@ pub(crate) mod tests {
         .unwrap();
         let resolved =
             ResolvedPrincipalRoot::resolve(data_dir.path(), auth_dir.path(), &id).unwrap();
-        assert_eq!(
-            resolved.0,
-            principal_kind_localhost_root(&id, PrincipalKind::Agent)
-        );
-        assert_ne!(resolved.0, principal_localhost_root(&id));
+        let agent = principal_kind_localhost_root(&id, PrincipalKind::Agent);
+        let agent_uri = format!("{agent}/Documents/a.txt");
+        assert!(resolved.owns_object_uri(&agent_uri).is_ok());
+        let users_uri = format!("{}/Documents/a.txt", principal_localhost_root(&id));
+        assert!(resolved.owns_object_uri(&users_uri).is_err());
     }
 
     /// Resolution only reads the device identity; it never mints one (Codex
