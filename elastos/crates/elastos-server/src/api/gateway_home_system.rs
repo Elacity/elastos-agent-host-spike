@@ -1949,12 +1949,12 @@ mod discovery_summary_tests {
 
         assert_eq!(fixture.store.snapshot().unwrap().contacts().len(), 1);
         let response_read = fixture.store.read_only_snapshot().unwrap();
-        let context = HomeLaunchTokenContext {
-            principal_id: fixture.store.principal_id().to_string(),
-            session_id: "session".to_string(),
-            proof_binding_id: Some("proof".to_string()),
-            grant_id: "grant".to_string(),
-        };
+        let context = HomeLaunchTokenContext::for_test(
+            fixture.store.principal_id().to_string(),
+            "session".to_string(),
+            Some("proof".to_string()),
+            "grant".to_string(),
+        );
         let authority = ConfiguredContactAuthority {
             profile: fixture.local_profile.clone(),
             store: fixture.store.clone(),
@@ -2096,12 +2096,12 @@ mod discovery_summary_tests {
             &mut notifications,
         )
         .is_err());
-        let context = HomeLaunchTokenContext {
-            principal_id: "person:local:foreign-home-reader".to_string(),
-            session_id: "session".to_string(),
-            proof_binding_id: Some("proof".to_string()),
-            grant_id: "grant".to_string(),
-        };
+        let context = HomeLaunchTokenContext::for_test(
+            "person:local:foreign-home-reader".to_string(),
+            "session".to_string(),
+            Some("proof".to_string()),
+            "grant".to_string(),
+        );
         assert!(home_services_peer_contacts_state_from_snapshot(&context, Some(&read)).is_err());
     }
 
@@ -2114,12 +2114,12 @@ mod discovery_summary_tests {
         let principal_id = "person:local:legacy-people-ignore".to_string();
         let protection =
             crate::auth::store_test_principal_root_protection(&data_root, &principal_id);
-        let context = HomeLaunchTokenContext {
-            principal_id: principal_id.clone(),
-            session_id: "session".to_string(),
-            proof_binding_id: Some("proof".to_string()),
-            grant_id: "grant".to_string(),
-        };
+        let context = HomeLaunchTokenContext::for_test(
+            principal_id.clone(),
+            "session".to_string(),
+            Some("proof".to_string()),
+            "grant".to_string(),
+        );
         let legacy_path = home_services_peer_contacts_path(&data_root, &context).unwrap();
         let legacy_state = HomeServicesPeerContactsState {
             schema: HOME_SERVICES_PEER_CONTACTS_SCHEMA.to_string(),
