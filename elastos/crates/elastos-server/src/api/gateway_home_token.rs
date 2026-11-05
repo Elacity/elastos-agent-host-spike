@@ -133,6 +133,8 @@ pub(in crate::api) struct RequiredHomeLaunchToken {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeWalletAuthority {
     context: VerifiedWalletInvocationContext,
+    #[allow(dead_code)] // P2a-ii reads it through `home_launch_context`.
+    root: crate::auth::ResolvedPrincipalRoot,
 }
 
 impl RuntimeWalletAuthority {
@@ -151,7 +153,8 @@ impl RuntimeWalletAuthority {
 
     #[cfg(test)]
     pub(super) fn from_verified_context(context: VerifiedWalletInvocationContext) -> Self {
-        Self { context }
+        let root = crate::auth::ResolvedPrincipalRoot::for_test_principal(context.principal_id());
+        Self { context, root }
     }
 
     /// The authority a persisted transaction effect was created under, rebuilt
@@ -162,9 +165,11 @@ impl RuntimeWalletAuthority {
     /// validated Chain outcome under that new binding. Completing the effect's
     /// own projection under its original binding is the only legitimate use.
     pub(in crate::api) fn from_persisted_transaction_authority(
+        data_dir: &std::path::Path,
         context: VerifiedWalletInvocationContext,
-    ) -> Self {
-        Self { context }
+    ) -> anyhow::Result<Self> {
+        let root = wallet_principal_root(data_dir, context.principal_id())?;
+        Ok(Self { context, root })
     }
 }
 
@@ -525,7 +530,7 @@ pub(in crate::api) fn require_runtime_wallet_authority(
     allowed_apps: &[&str],
 ) -> anyhow::Result<RuntimeWalletAuthority> {
     let required = require_home_launch_token_for_any_from(data_dir, headers, allowed_apps, None)?;
-    runtime_wallet_authority(&required)
+    runtime_wallet_authority(data_dir, &required)
 }
 
 pub(in crate::api) fn require_internal_shell_runtime_wallet_authority(
@@ -540,7 +545,7 @@ pub(in crate::api) fn require_internal_shell_runtime_wallet_authority(
         None,
         HomeLaunchOriginPolicy::InternalShell,
     )?;
-    runtime_wallet_authority(&required)
+    runtime_wallet_authority(data_dir, &required)
 }
 
 pub(in crate::api) fn require_home_runtime_wallet_authority(
@@ -554,10 +559,24 @@ pub(in crate::api) fn require_home_runtime_wallet_authority(
         Some(&home_session_cookie_name(headers)?),
         HomeLaunchOriginPolicy::Browser,
     )?;
-    runtime_wallet_authority(&required)
+    runtime_wallet_authority(data_dir, &required)
+}
+
+/// The auth store the launch token's grant was validated against.
+fn wallet_principal_root(
+    data_dir: &std::path::Path,
+    principal_id: &str,
+) -> anyhow::Result<crate::auth::ResolvedPrincipalRoot> {
+    crate::auth::ResolvedPrincipalRoot::resolve(
+        data_dir,
+        &home_launch_auth_data_dir(data_dir),
+        principal_id,
+    )
+    .map_err(|err| anyhow::anyhow!("Wallet authority principal root unresolved: {err:#}"))
 }
 
 pub(in crate::api) fn runtime_wallet_authority(
+    data_dir: &std::path::Path,
     required: &RequiredHomeLaunchToken,
 ) -> anyhow::Result<RuntimeWalletAuthority> {
     let context = VerifiedWalletInvocationContext::new(
@@ -569,7 +588,8 @@ pub(in crate::api) fn runtime_wallet_authority(
         required.launch_id.clone(),
     )
     .map_err(|err| anyhow::anyhow!("invalid verified Wallet authority: {err}"))?;
-    Ok(RuntimeWalletAuthority { context })
+    let root = wallet_principal_root(data_dir, required.context.principal_id())?;
+    Ok(RuntimeWalletAuthority { context, root })
 }
 
 pub(in crate::api) fn require_home_launch_token_binding(
@@ -1821,5 +1841,41 @@ mod tests {
             &[HOME_CLI_SHELL_ID],
         )
         .is_err());
+    }
+
+    #[test]
+    fn p2a_ii_0_wallet_authority_for_principal_without_stored_record_fails_to_build() {
+        use elastos_runtime::auth::{AuthSessionGrantV1, ProofBinding};
+
+        let data_dir = tempfile::tempdir().unwrap();
+        let now = now_ts();
+        let grant_for = |principal_id: String| AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: format!("grant:{}", uuid_like_token()),
+            session_id: format!("auth:{}", uuid_like_token()),
+            principal_id,
+            proof_binding_id: "proof:p2a-ii-0".to_string(),
+            issued_at: now,
+            expires_at: now + 600,
+            apps: vec!["wallet".to_string()],
+        };
+        let build = |grant: &AuthSessionGrantV1| {
+            crate::auth::store_session_grant(data_dir.path(), grant.clone()).unwrap();
+            let token =
+                issue_home_launch_token_for_auth_grant(data_dir.path(), "wallet", grant).unwrap();
+            let headers = capsule_headers(&token);
+            require_runtime_wallet_authority(data_dir.path(), &headers, &["wallet"])
+        };
+        let err = build(&grant_for("person:local:no-stored-record".to_string())).unwrap_err();
+        assert!(err.to_string().contains("principal root unresolved"));
+
+        let stored = crate::auth::upsert_principal_for_binding(
+            data_dir.path(),
+            ProofBinding::evm_account(20, "0x4444444444444444444444444444444444444444", now),
+            now,
+        )
+        .unwrap();
+        let control = build(&grant_for(stored.principal_id.clone())).unwrap();
+        assert!(control.home_launch_context().principal_id == stored.principal_id);
     }
 }

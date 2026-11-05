@@ -2026,7 +2026,7 @@ pub(super) async fn gateway_provider_proxy(
     {
         let wallet_authority =
             if (op == "publish" && request.get("protection").is_some()) || op == "buy" {
-                match runtime_wallet_authority(&required) {
+                match runtime_wallet_authority(&state.data_dir, &required) {
                     Ok(authority) => Some(authority),
                     Err(err) => return gateway_provider_error_response(&scheme, err),
                 }

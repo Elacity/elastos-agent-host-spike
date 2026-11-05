@@ -7216,6 +7216,12 @@ impl ResolvedPrincipalRoot {
             .map(Self)
             .map_err(|err| anyhow!(err))
     }
+
+    /// Test-only root (A5-P2a-ii-0); production's only constructor is `resolve`.
+    #[cfg(test)]
+    pub(crate) fn for_test_principal(principal_id: &str) -> Self {
+        Self(format!("test-root/{principal_id}"))
+    }
 }
 
 pub fn now_ts() -> u64 {

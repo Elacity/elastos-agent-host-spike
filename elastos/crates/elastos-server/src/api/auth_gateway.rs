@@ -1778,7 +1778,7 @@ async fn full_recovery_bundle_export_inner(
     if launch.context.proof_binding_id().is_none() {
         anyhow::bail!("missing proof-bound auth session");
     }
-    let wallet_authority = runtime_wallet_authority(&launch)?;
+    let wallet_authority = runtime_wallet_authority(&state.data_dir, &launch)?;
     let context = launch.context.clone();
     let principal = require_active_passkey_principal_for_context(state, &context)?;
     if input.principal_id != principal.principal_id
@@ -1888,7 +1888,7 @@ async fn full_recovery_bundle_import_inner(
     }
     let context = launch.context.clone();
     let verified_actor = launch.launch_context.executable_actor.clone();
-    let pre_recovery_wallet_authority = runtime_wallet_authority(&launch)?;
+    let pre_recovery_wallet_authority = runtime_wallet_authority(&state.data_dir, &launch)?;
     let bundle = full_recovery_bundle_from_import_request(&input)?;
     validate_full_recovery_bundle(&bundle)?;
     let recovery_set = managed_recovery_set_from_full_bundle(&bundle)?;

@@ -1271,9 +1271,21 @@ async fn finish_transaction_completion(
                 effect.authority.actor.clone(),
                 effect.authority.launch_id.clone(),
             ) {
-                Ok(context) => {
-                    RuntimeWalletAuthority::from_persisted_transaction_authority(context)
-                }
+                Ok(context) => match RuntimeWalletAuthority::from_persisted_transaction_authority(
+                    &state.data_dir,
+                    context,
+                ) {
+                    Ok(authority) => authority,
+                    Err(err) => {
+                        errors.push(format!(
+                            "Wallet outcome projection pending: persisted effect authority root unresolved: {err:#}"
+                        ));
+                        store.effects[effect_index].state =
+                            TransactionEffectState::CompletionPending;
+                        store.effects[effect_index].completion_error = Some(errors.join("; "));
+                        return;
+                    }
+                },
                 Err(err) => {
                     errors.push(format!(
                         "Wallet outcome projection pending: persisted effect authority is invalid: {err:?}"
