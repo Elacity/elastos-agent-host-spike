@@ -2836,12 +2836,7 @@ mod tests {
         session_id: &str,
         grant_id: &str,
     ) -> HomeLaunchTokenContext {
-        HomeLaunchTokenContext {
-            principal_id: principal_id.to_string(),
-            session_id: session_id.to_string(),
-            proof_binding_id: None,
-            grant_id: grant_id.to_string(),
-        }
+        HomeLaunchTokenContext::for_test(principal_id, session_id, None, grant_id)
     }
 
     fn test_terminal_lifecycle(

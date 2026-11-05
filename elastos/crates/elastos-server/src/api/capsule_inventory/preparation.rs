@@ -4579,12 +4579,12 @@ mod tests {
     }
 
     fn context() -> HomeLaunchTokenContext {
-        HomeLaunchTokenContext {
-            principal_id: "person:reservation-fixture".into(),
-            session_id: "session-1".into(),
-            proof_binding_id: Some("proof-1".into()),
-            grant_id: "grant-1".into(),
-        }
+        HomeLaunchTokenContext::for_test(
+            "person:reservation-fixture",
+            "session-1",
+            Some("proof-1".into()),
+            "grant-1",
+        )
     }
 
     fn fixture() -> (tempfile::TempDir, String) {
@@ -14128,10 +14128,12 @@ server.serve_forever()
             .is_err());
         }
         for identity in [String::new(), "x".repeat(161), "principal\nother".into()] {
-            let context = HomeLaunchTokenContext {
-                principal_id: identity,
-                ..context.clone()
-            };
+            let context = HomeLaunchTokenContext::for_test(
+                identity,
+                context.session_id(),
+                context.proof_binding_id().map(|value| value.to_string()),
+                context.grant_id(),
+            );
             assert!(reserve(root.path(), &caller(&context, &method("use")), "req", &cid).is_err());
         }
         for operation in ["status", "cancel", "install"] {
@@ -14163,11 +14165,12 @@ server.serve_forever()
         let use_method = method("use");
         let caller = caller(&initial, &use_method);
         let record = reserve(root.path(), &caller, "request-1", &cid).unwrap();
-        let newer = HomeLaunchTokenContext {
-            session_id: "session-2".into(),
-            grant_id: "grant-2".into(),
-            ..initial.clone()
-        };
+        let newer = HomeLaunchTokenContext::for_test(
+            initial.principal_id(),
+            "session-2",
+            initial.proof_binding_id().map(|value| value.to_string()),
+            "grant-2",
+        );
         assert_eq!(
             reserve(
                 root.path(),
@@ -14206,10 +14209,12 @@ server.serve_forever()
             record
         );
         let bytes = std::fs::read(root.path().join("model-preparation/state.json")).unwrap();
-        let foreign = HomeLaunchTokenContext {
-            principal_id: "person:other".into(),
-            ..newer.clone()
-        };
+        let foreign = HomeLaunchTokenContext::for_test(
+            "person:other",
+            newer.session_id(),
+            newer.proof_binding_id().map(|value| value.to_string()),
+            newer.grant_id(),
+        );
         assert!(status(
             root.path(),
             &PreparationCaller {
@@ -15425,12 +15430,12 @@ server.serve_forever()
             .unwrap()
             .unwrap();
         let entry = &entries[0];
-        let context = HomeLaunchTokenContext {
-            principal_id: "person:preparation-fixture".into(),
-            session_id: "preparation-session".into(),
-            proof_binding_id: Some("preparation-proof".into()),
-            grant_id: "preparation-grant".into(),
-        };
+        let context = HomeLaunchTokenContext::for_test(
+            "person:preparation-fixture",
+            "preparation-session",
+            Some("preparation-proof".into()),
+            "preparation-grant",
+        );
         let capsule = "marketplace";
         let request_id = fixture_request_id(root.path(), "prepare-fixture-1", now().unwrap());
         let request_id = request_id.as_str();
