@@ -10808,6 +10808,48 @@ async fn test_services_remote_engine_signed_approval_retains_scoped_execution_gr
     local.shutdown().await.unwrap();
     remote.shutdown().await.unwrap();
 }
+
+/// wiring row: pins which store resolve reads; not a fail-closed proof
+/// (Rong 1106 sec. 3).
+#[tokio::test]
+async fn p2a_i_a_wiring_loop_resolve_reads_the_listing_store() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
+    let (trusted_key, _) = generate_keypair();
+    let network = configured_discovery_network_profile_for_test(&trusted_key, "services-contacts");
+    let alice = services_contact_fixture(left.path(), "Alice", bus.clone(), network.clone()).await;
+    let bob = services_contact_fixture(right.path(), "Bob", bus.clone(), network.clone()).await;
+    accept_services_contact_pair(&alice, &bob);
+    let action =
+        services_contact_pending_engine_request(left.path(), right.path(), &alice, &bob).await;
+    let request_id = action.strip_prefix("service-approve-request:").unwrap();
+    let request = json!({"op":"status","principal_id":alice.authority.principal_id,
+        "grant_id":crate::carrier::engine_grant_id(request_id)});
+    let token = app_token_for_authority(right.path(), INBOX_CAPSULE_ID, &bob.authority);
+    let (status, body) = services_contact_post(
+        &bob.app,
+        &token,
+        "/api/apps/inbox/actions",
+        json!({"action_id":action}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // The listing store (`right`) still authorizes while the launch-auth
+    // override points at an empty directory.
+    let empty = tempfile::tempdir().unwrap();
+    let _override = crate::api::gateway::set_test_home_launch_auth_data_dir(empty.path());
+    let source = alice.peer_id.parse::<iroh::PublicKey>().unwrap();
+    let grant = crate::api::gateway::authorize_home_service_engine(
+        right.path(),
+        &network,
+        &source,
+        &request,
+        now_ts(),
+    )
+    .unwrap();
+    assert_eq!(grant.provider_principal_id, bob.authority.principal_id);
+}
 // Regression for a configured Gateway whose Carrier is already in process.
 fn configured_services_runtime_remove_attached_runtime(
     data_dir: &std::path::Path,

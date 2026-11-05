@@ -35,8 +35,11 @@ impl HomeLaunchTokenContext {
 }
 
 impl HomeLaunchTokenContext {
-    /// The one production constructor (C6 P1): the root is resolved and refuses
-    /// before a context exists. S3c-1a-iii stores it in the context.
+    /// `resolved()` is the constructor production code is moving to. The root
+    /// is resolved and refuses before a context exists, but it is not stored
+    /// yet: the `_root` argument is dropped. S3c-1a-iii stores it; until then
+    /// the production literals remain (this file :144, :243, :287, :796) and at
+    /// the not-yet-converted sites.
     pub(in crate::api) fn resolved(
         _root: crate::auth::ResolvedPrincipalRoot,
         principal_id: String,

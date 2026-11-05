@@ -3953,6 +3953,43 @@ fn passkey_principals_once(
     once
 }
 
+/// Resolves the principal's root in the store that listed it: these callers
+/// read `active_passkey_principals(data_dir)`, so both resolver arguments are
+/// `data_dir`. These are Runtime-side authorize checks, not launch tokens, so
+/// the session and grant ids stay empty.
+fn stored_passkey_principal_context(
+    data_dir: &std::path::Path,
+    principal: &crate::auth::PrincipalRecord,
+) -> anyhow::Result<HomeLaunchTokenContext> {
+    let root =
+        crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, &principal.principal_id)?;
+    Ok(HomeLaunchTokenContext::resolved(
+        root,
+        principal.principal_id.clone(),
+        String::new(),
+        Some(principal.proof_binding_id.clone()),
+        String::new(),
+    ))
+}
+
+/// Authorize loops skip a principal whose root won't resolve; log why, no secrets.
+fn ctx_or_warn(
+    data_dir: &std::path::Path,
+    principal: &crate::auth::PrincipalRecord,
+    fn_name: &'static str,
+) -> Option<HomeLaunchTokenContext> {
+    stored_passkey_principal_context(data_dir, principal)
+        .inspect_err(|err| {
+            tracing::warn!(
+                principal_id = %principal.principal_id,
+                error = %err,
+                fn_name,
+                "principal root unresolved; skipped"
+            )
+        })
+        .ok()
+}
+
 pub(crate) fn authorize_home_service_exit(
     data_dir: &std::path::Path,
     network: &crate::collaboration_network::VerifiedCollaborationNetworkProfile,
@@ -3969,11 +4006,8 @@ pub(crate) fn authorize_home_service_exit(
         .ok_or_else(|| anyhow::anyhow!("Exit signing identity unavailable"))?;
     let mut authorized = None;
     for (principal, _) in passkey_principals_once(principals) {
-        let context = HomeLaunchTokenContext {
-            principal_id: principal.principal_id,
-            proof_binding_id: Some(principal.proof_binding_id),
-            session_id: String::new(),
-            grant_id: String::new(),
+        let Some(context) = ctx_or_warn(data_dir, &principal, "authorize_home_service_exit") else {
+            continue;
         };
         let state = home_services_requests_state(data_dir, &context)?;
         for record in state.requests.values().filter(|record| {
@@ -4052,11 +4086,12 @@ pub(crate) fn authorize_home_engine_preparation_cancellation(
     );
     let mut matched = false;
     for (principal, _) in passkey_principals_once(principals) {
-        let context = HomeLaunchTokenContext {
-            principal_id: principal.principal_id,
-            proof_binding_id: Some(principal.proof_binding_id),
-            session_id: String::new(),
-            grant_id: String::new(),
+        let Some(context) = ctx_or_warn(
+            data_dir,
+            &principal,
+            "authorize_home_engine_preparation_cancellation",
+        ) else {
+            continue;
         };
         let state = home_services_requests_state(data_dir, &context)?;
         for record in state
@@ -4102,11 +4137,9 @@ pub(crate) fn authorize_home_service_engine(
         .ok_or_else(|| anyhow::anyhow!("Engine signing identity unavailable"))?;
     let mut authorized = None;
     for (principal, _) in passkey_principals_once(principals) {
-        let context = HomeLaunchTokenContext {
-            principal_id: principal.principal_id,
-            proof_binding_id: Some(principal.proof_binding_id),
-            session_id: String::new(),
-            grant_id: String::new(),
+        let Some(context) = ctx_or_warn(data_dir, &principal, "authorize_home_service_engine")
+        else {
+            continue;
         };
         let state = home_services_requests_state(data_dir, &context)?;
         for record in state.requests.values().filter(|record| {
@@ -4413,11 +4446,9 @@ pub(crate) fn authorize_home_service_model(
         .ok_or_else(|| anyhow::anyhow!("model signing identity unavailable"))?;
     let mut authorized = None;
     for (principal, provider_is_admin) in passkey_principals_once(principals) {
-        let context = HomeLaunchTokenContext {
-            principal_id: principal.principal_id,
-            proof_binding_id: Some(principal.proof_binding_id),
-            session_id: String::new(),
-            grant_id: String::new(),
+        let Some(context) = ctx_or_warn(data_dir, &principal, "authorize_home_service_model")
+        else {
+            continue;
         };
         let state = home_services_requests_state(data_dir, &context)?;
         for record in state
