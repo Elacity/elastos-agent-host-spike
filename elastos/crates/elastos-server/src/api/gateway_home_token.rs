@@ -1282,12 +1282,12 @@ mod tests {
         let data_dir = tempfile::tempdir().unwrap();
         elastos_identity::load_or_create_did(data_dir.path()).unwrap();
         let now = now_ts();
-        let context = HomeLaunchTokenContext {
-            principal_id: "person:local:alice".to_string(),
-            session_id: "auth:alice".to_string(),
-            proof_binding_id: Some("proof:passkey:alice".to_string()),
-            grant_id: "grant:alice".to_string(),
-        };
+        let context = HomeLaunchTokenContext::for_test(
+            "person:local:alice",
+            "auth:alice",
+            Some("proof:passkey:alice".to_string()),
+            "grant:alice",
+        );
         crate::auth::store_session_grant(
             data_dir.path(),
             elastos_runtime::auth::AuthSessionGrantV1 {
@@ -1335,12 +1335,12 @@ mod tests {
         .to_string()
         .contains("not authorized"));
 
-        let system_context = HomeLaunchTokenContext {
-            session_id: "auth:system".to_string(),
-            proof_binding_id: Some("proof:passkey:system".to_string()),
-            grant_id: "grant:system".to_string(),
-            ..context
-        };
+        let system_context = HomeLaunchTokenContext::for_test(
+            context.principal_id().to_string(),
+            "auth:system",
+            Some("proof:passkey:system".to_string()),
+            "grant:system",
+        );
         crate::auth::store_session_grant(
             data_dir.path(),
             elastos_runtime::auth::AuthSessionGrantV1 {
@@ -1500,12 +1500,12 @@ mod tests {
         let data_dir = tempfile::tempdir().unwrap();
         elastos_identity::load_or_create_did(data_dir.path()).unwrap();
         let now = now_ts();
-        let stored = HomeLaunchTokenContext {
-            principal_id: "person:local:alice".to_string(),
-            session_id: "auth:alice".to_string(),
-            proof_binding_id: Some("proof:passkey:alice".to_string()),
-            grant_id: "grant:alice".to_string(),
-        };
+        let stored = HomeLaunchTokenContext::for_test(
+            "person:local:alice",
+            "auth:alice",
+            Some("proof:passkey:alice".to_string()),
+            "grant:alice",
+        );
         crate::auth::store_session_grant(
             data_dir.path(),
             elastos_runtime::auth::AuthSessionGrantV1 {
@@ -1520,12 +1520,12 @@ mod tests {
             },
         )
         .unwrap();
-        let substituted = HomeLaunchTokenContext {
-            principal_id: "person:local:bob".to_string(),
-            session_id: stored.session_id().to_string(),
-            proof_binding_id: stored.proof_binding_id().map(ToString::to_string),
-            grant_id: stored.grant_id().to_string(),
-        };
+        let substituted = HomeLaunchTokenContext::for_test(
+            "person:local:bob",
+            stored.session_id().to_string(),
+            stored.proof_binding_id().map(ToString::to_string),
+            stored.grant_id().to_string(),
+        );
         let token =
             issue_home_launch_token_with_context(data_dir.path(), SYSTEM_CAPSULE_ID, &substituted)
                 .unwrap();
@@ -1539,24 +1539,24 @@ mod tests {
         .contains("authority context mismatch"));
 
         for substituted in [
-            HomeLaunchTokenContext {
-                principal_id: stored.principal_id().to_string(),
-                session_id: "auth:other".to_string(),
-                proof_binding_id: stored.proof_binding_id().map(ToString::to_string),
-                grant_id: stored.grant_id().to_string(),
-            },
-            HomeLaunchTokenContext {
-                principal_id: stored.principal_id().to_string(),
-                session_id: stored.session_id().to_string(),
-                proof_binding_id: Some("proof:passkey:other".to_string()),
-                grant_id: stored.grant_id().to_string(),
-            },
-            HomeLaunchTokenContext {
-                principal_id: stored.principal_id().to_string(),
-                session_id: stored.session_id().to_string(),
-                proof_binding_id: stored.proof_binding_id().map(ToString::to_string),
-                grant_id: "grant:other".to_string(),
-            },
+            HomeLaunchTokenContext::for_test(
+                stored.principal_id().to_string(),
+                "auth:other",
+                stored.proof_binding_id().map(ToString::to_string),
+                stored.grant_id().to_string(),
+            ),
+            HomeLaunchTokenContext::for_test(
+                stored.principal_id().to_string(),
+                stored.session_id().to_string(),
+                Some("proof:passkey:other".to_string()),
+                stored.grant_id().to_string(),
+            ),
+            HomeLaunchTokenContext::for_test(
+                stored.principal_id().to_string(),
+                stored.session_id().to_string(),
+                stored.proof_binding_id().map(ToString::to_string),
+                "grant:other",
+            ),
         ] {
             let token = issue_home_launch_token_with_context(
                 data_dir.path(),
@@ -1586,12 +1586,12 @@ mod tests {
         .to_string()
         .contains("authority context mismatch"));
 
-        let proofless = HomeLaunchTokenContext {
-            principal_id: stored.principal_id().to_string(),
-            session_id: stored.session_id().to_string(),
-            proof_binding_id: None,
-            grant_id: stored.grant_id().to_string(),
-        };
+        let proofless = HomeLaunchTokenContext::for_test(
+            stored.principal_id().to_string(),
+            stored.session_id().to_string(),
+            None,
+            stored.grant_id().to_string(),
+        );
         let token =
             issue_home_launch_token_with_context(data_dir.path(), SYSTEM_CAPSULE_ID, &proofless)
                 .unwrap();
@@ -1771,12 +1771,12 @@ mod tests {
         assert_ne!(parent_did, child_did);
 
         let now = now_ts();
-        let context = HomeLaunchTokenContext {
-            principal_id: "person:local:alice".to_string(),
-            session_id: "auth:alice".to_string(),
-            proof_binding_id: Some("proof:passkey:alice".to_string()),
-            grant_id: "grant:alice".to_string(),
-        };
+        let context = HomeLaunchTokenContext::for_test(
+            "person:local:alice",
+            "auth:alice",
+            Some("proof:passkey:alice".to_string()),
+            "grant:alice",
+        );
         crate::auth::store_session_grant(
             parent.path(),
             elastos_runtime::auth::AuthSessionGrantV1 {
