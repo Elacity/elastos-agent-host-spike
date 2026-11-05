@@ -1229,6 +1229,7 @@ async fn p1j_t1_request(app: Router, method: &str, uri: &str, token: &str, body:
 }
 fn p1j_t1_token(dir: &std::path::Path, app: &str) -> (String, (String, String)) {
     let ids = passkey_authority(dir);
+    assert_ne!(ids.principal_id, ids.session_id);
     let now = crate::auth::now_ts();
     let mut grant = crate::auth::load_active_session_grant(dir, &ids.session_id, now).unwrap();
     grant.apps = vec![app.to_string()];
