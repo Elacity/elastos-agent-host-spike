@@ -11059,12 +11059,12 @@ async fn test_library_provider_runtime_custody_viewer_ops_require_player_launch_
         dir.path(),
         LIBRARY_CAPSULE_ID,
         ELACITY_PLAYER_CAPSULE_ID_FOR_TEST,
-        &HomeLaunchTokenContext {
-            principal_id: authority.principal_id.clone(),
-            session_id: authority.session_id.clone(),
-            proof_binding_id: Some(authority.proof_binding_id.clone()),
-            grant_id: authority.grant_id.clone(),
-        },
+        &HomeLaunchTokenContext::for_test(
+            authority.principal_id.clone(),
+            authority.session_id.clone(),
+            Some(authority.proof_binding_id.clone()),
+            authority.grant_id.clone(),
+        ),
     )
     .unwrap();
     let wrong_resource = app
