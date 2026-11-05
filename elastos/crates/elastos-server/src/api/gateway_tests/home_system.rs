@@ -1306,12 +1306,12 @@ async fn home_summary_accepts_gateway_owned_home_cli_token_under_home_owned_gran
     let now = now_ts();
     let _auth = set_test_home_launch_auth_data_dir(dir.path());
     store_home_cli_principal(dir.path());
-    let context = HomeLaunchTokenContext {
-        principal_id: "person:home-cli-test".to_string(),
-        session_id: "auth:home-cli-test".to_string(),
-        proof_binding_id: Some("proof:passkey:home-cli-test".to_string()),
-        grant_id: "grant:home-cli-test".to_string(),
-    };
+    let context = HomeLaunchTokenContext::for_test(
+        "person:home-cli-test",
+        "auth:home-cli-test",
+        Some("proof:passkey:home-cli-test".to_string()),
+        "grant:home-cli-test",
+    );
     crate::auth::store_session_grant(
         dir.path(),
         AuthSessionGrantV1 {
@@ -1363,12 +1363,12 @@ async fn direct_home_cli_token_rejects_home_owned_grant_authority() {
     let now = now_ts();
     let _auth = set_test_home_launch_auth_data_dir(dir.path());
     store_home_cli_principal(dir.path());
-    let context = HomeLaunchTokenContext {
-        principal_id: "person:home-cli-test".to_string(),
-        session_id: "auth:home-cli-test".to_string(),
-        proof_binding_id: Some("proof:passkey:home-cli-test".to_string()),
-        grant_id: "grant:home-cli-test".to_string(),
-    };
+    let context = HomeLaunchTokenContext::for_test(
+        "person:home-cli-test",
+        "auth:home-cli-test",
+        Some("proof:passkey:home-cli-test".to_string()),
+        "grant:home-cli-test",
+    );
     crate::auth::store_session_grant(
         dir.path(),
         AuthSessionGrantV1 {
@@ -1401,12 +1401,12 @@ async fn gateway_owned_home_cli_issuer_projects_non_cli_capsules_under_home_auth
     let now = now_ts();
     let _auth = set_test_home_launch_auth_data_dir(dir.path());
     store_home_cli_principal(dir.path());
-    let context = HomeLaunchTokenContext {
-        principal_id: "person:home-cli-test".to_string(),
-        session_id: "auth:home-cli-test".to_string(),
-        proof_binding_id: Some("proof:passkey:home-cli-test".to_string()),
-        grant_id: "grant:home-cli-test".to_string(),
-    };
+    let context = HomeLaunchTokenContext::for_test(
+        "person:home-cli-test",
+        "auth:home-cli-test",
+        Some("proof:passkey:home-cli-test".to_string()),
+        "grant:home-cli-test",
+    );
     crate::auth::store_session_grant(
         dir.path(),
         AuthSessionGrantV1 {
