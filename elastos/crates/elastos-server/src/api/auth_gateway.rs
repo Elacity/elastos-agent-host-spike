@@ -2060,8 +2060,8 @@ async fn full_recovery_bundle_import_inner(
     )
     .await?;
     let restored_proof_binding_id = context
-        .proof_binding_id
-        .clone()
+        .proof_binding_id()
+        .map(ToString::to_string)
         .ok_or_else(|| anyhow::anyhow!("missing proof-bound auth session"))?;
     let people_identity_restore = restore_people_identity_from_full_bundle(
         &state.data_dir,
@@ -3457,8 +3457,7 @@ fn require_active_principal_for_context(
     context: &super::gateway::HomeLaunchTokenContext,
 ) -> anyhow::Result<crate::auth::PrincipalRecord> {
     let proof_binding_id = context
-        .proof_binding_id
-        .as_deref()
+        .proof_binding_id()
         .ok_or_else(|| anyhow::anyhow!("missing proof-bound auth session"))?;
     let principal =
         crate::auth::load_principal_for_proof_binding(&state.data_dir, proof_binding_id)?;
@@ -3486,8 +3485,8 @@ fn refresh_session_inner(
 ) -> anyhow::Result<AuthSessionRefreshResponse> {
     let context = super::gateway::require_home_token_context(&state.data_dir, headers)?;
     let proof_binding_id = context
-        .proof_binding_id
-        .clone()
+        .proof_binding_id()
+        .map(ToString::to_string)
         .ok_or_else(|| anyhow::anyhow!("missing proof-bound auth session"))?;
     let now = crate::auth::now_ts();
     let auth_data_dir = super::gateway::home_launch_auth_data_dir(&state.data_dir);
@@ -4411,8 +4410,8 @@ pub(in crate::api) async fn btc_verify_for_wallet_link(
         authority,
     } = link;
     let session_proof_binding_id = context
-        .proof_binding_id
-        .clone()
+        .proof_binding_id()
+        .map(ToString::to_string)
         .ok_or_else(|| anyhow::anyhow!("missing proof-bound auth session"))?;
     let challenge_id = bitcoin_challenge_id_from_message(&input.message)?;
     let now = crate::auth::now_ts();
@@ -4456,16 +4455,16 @@ pub(in crate::api) async fn btc_verify_for_wallet_link(
     }
     if !bitcoin_message_has_resource(
         &input.message,
-        &format!("elastos://principal/{}", context.principal_id),
+        &format!("elastos://principal/{}", context.principal_id()),
     ) {
         anyhow::bail!("Bitcoin wallet proof is not bound to this runtime principal");
     }
 
     let session =
-        crate::auth::load_active_session_grant(&state.data_dir, &context.session_id, now)?;
-    if session.principal_id != context.principal_id
+        crate::auth::load_active_session_grant(&state.data_dir, context.session_id(), now)?;
+    if session.principal_id != context.principal_id()
         || session.proof_binding_id != session_proof_binding_id
-        || session.grant_id != context.grant_id
+        || session.grant_id != context.grant_id()
     {
         anyhow::bail!("home launch token authority context mismatch");
     }
@@ -4475,7 +4474,7 @@ pub(in crate::api) async fn btc_verify_for_wallet_link(
     let principal = crate::auth::upsert_principal_for_binding_as_role(
         &state.data_dir,
         binding,
-        context.principal_id.clone(),
+        context.principal_id().to_string(),
         session_principal.role,
         now,
     )?;
@@ -4497,9 +4496,9 @@ pub(in crate::api) async fn btc_verify_for_wallet_link(
         &state.data_dir,
         audit_event(AuditEventInput {
             event_type: "auth.wallet.linked",
-            principal_id: Some(context.principal_id.clone()),
+            principal_id: Some(context.principal_id().to_string()),
             proof_binding_id: Some(principal.proof_binding_id.clone()),
-            session_id: Some(context.session_id.clone()),
+            session_id: Some(context.session_id().to_string()),
             challenge_id: Some(challenge_id),
             result: "ok",
             reason: "Bitcoin wallet proof verified and wallet linked",
