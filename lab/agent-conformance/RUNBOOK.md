@@ -36,7 +36,7 @@ A backticked table line inside a fenced code block in `GAPS.md` still counts as 
 - `run_by_cid_refuses_content_provider_whose_bytes_differ_from_its_hash`: stamps a different byte string's SHA-256 on the installed marker script; requires the complete checksum refusal on one stderr line, an absent marker, and zero materialized capsule entries.
 - `capsule_named_by_hash`: BLOCKED (AC-025-CID). Still required, in order: a measured Kubo v0.40.1 match for the staged probe bundle's lab CID; the offline content fixture (installed, checksum-verified `ipfs-provider`, a local-only Kubo policy and a socket census); `--cid` reaching the directory launch's activation. The verdict is in [GAPS.md](GAPS.md#launch-by-bundle-cid-025).
 - `launch_refuses_bytes_unlike_signed_record`: BLOCKED (AC-040-RECORD-LAUNCH). `elastos run` does not compare the launched bytes with the signed record. The record-to-launch repair is in [GAPS.md](GAPS.md#record-to-launch-040). An unsigned refusal happens before that comparison and is not this row.
-- `serve_refuses_provider_whose_bytes_differ_from_its_hash`: installs the provider and its hash, appends one byte to the copy, and requires a nonzero `serve` exit with `localhost-provider` and `failed checksum verification` on stderr. It also checks that storage exists inside the root and the readiness file is absent.
+- `serve_refuses_provider_whose_bytes_differ_from_its_hash`: installs the provider and its hash, appends one byte to the copy, and requires a nonzero `serve` exit with the complete checksum refusal described below. It also checks that storage exists inside the root and the readiness file is absent.
 - `run_table_requires_cargo_results`: checks PASS, BLOCKED and FAIL grading against Cargo-format result fixtures.
 - `run_table_grades_blocker_lists_by_one_rule`: checks whole multi-word blocker reasons, trimmed semicolon lists and FAIL for empty reasons or parts. F-report-blocker-list keeps only the first whitespace word; the named test must fail planted and pass restored.
 - `foreign_and_wrong_version_imports_are_refused`: rejects imports outside the probe's Bus subset.
@@ -83,8 +83,15 @@ The checksum test passes both `--addr 127.0.0.1:<free port>` and an in-root
 bind (`server_infra.rs:768-776,1547`; `serve_cmd.rs:295,462`). F-ac1i changes the
 writer's destination to `bin/localhost-provider-copy` while the manifest keeps
 the required path. Runtime then reports the provider as missing, so the test
-fails on its reason check. Both cases stop before network startup. Task 013
-adds the matching-byte ready operator and closes AC-010-OFFLINE below.
+fails on its reason check. Both cases stop before network startup. Both native
+checksum journeys share one private line check over raw stderr and original
+paths: `installed component '<component>' at <installed path> failed checksum
+verification against <manifest path>` must be contiguous on one line. Each
+journey also requires a nonzero exit. Synthetic decoys test this lab assertion
+and supply zero Runtime acceptance. After the changed-byte refusal,
+`fixture_operator_starts_ready_and_stops_cleanly` uses matching bytes in a fresh
+Home as the recovery control; it proves readiness and clean group shutdown.
+Task 013 closes AC-010-OFFLINE below.
 
 F-ac1f changes the single data-dir rule to the Linux form. The decoy must remain
 and `runtime_data_dir_is_under_throwaway_home` must fail. F-ac1g changes only the
@@ -228,6 +235,14 @@ The existing report command writes `VERSIONS.json` into the fresh ignored
 that path for the tested candidate. The report reads the full repository commit
 and dirty state for this invocation; local edits set `dirty: true`.
 
+The shared native hash helper emits identity after a successful hash. A failed
+tool exit or malformed digest returns `binary SHA-256 failed` with the actual
+exit status and labelled stdout and stderr. Both byte streams use lossy UTF-8
+and escaped string formatting: empty streams appear as `""`, and a newline
+appears as `\n` within the diagnostic line. File-open and command-start failures
+keep their separate causes. The builder repairs the input or tool setup named
+by the cause and reruns the same command before citing native identity.
+
 The receipt contains native hashes, every observed probe's effect, component
 SHA-256 and the complete bundle's lab CID (as `lab/capsule-identity` prints it),
 the suite outcome, and the exact graded table plus its SHA-256. The sibling
@@ -321,10 +336,14 @@ a later matching request.
   Cargo `FAILED` result produce `SKIPPED (<reason>)` and a failing command status.
 
 SKIPPED means an external setup failure prevented the probe from running, such
-as a refused loopback bind or failed probe build. The test prints
-`SKIPPED <test>: <reason>` and fails. Runtime refusals and failed assertions keep
-their FAIL grade. A SKIPPED marker paired with `ok`, an absent result, a repeated
-marker or an unlisted test also grades FAIL. `run.sh` prints the marker and the
+as a refused loopback bind or a probe build script that could not start. Build
+preparation and cleaning keep their setup treatment. The test prints
+`SKIPPED <test>: <reason>` and fails. A script that starts and exits unsuccessfully
+prints `FAILURE <test>: probe build failed: <status>` and grades FAIL. The build
+helper uses the process result and keeps tool output out of that diagnostic. The
+caller repairs the build inputs or setup named by the result and reruns the same
+command. Runtime refusals and failed assertions keep their FAIL grade. A SKIPPED
+marker paired with `ok`, an absent result, a repeated marker or an unlisted test also grades FAIL. `run.sh` prints the marker and the
 SKIPPED table row and exits non-zero. BLOCKED continues to mean a named open
 Runtime contract gap.
 
@@ -439,6 +458,12 @@ fake marker. The probe uses the one Bus read path, selected at build time by
 checks its exact reason, marker-free captures and unchanged fake bytes.
 `host_key::fixture_path_uses_the_guarded_home_rule` checks the fixed resource's
 relative depth against the harness's Mac data-dir rule.
+`grants::tests::committed_fixture_has_no_host_file_grant` directly checks every
+committed grant entry against that resource, regardless of its other fields.
+The guest retains provider response bytes. Exact status `ok` succeeds; every
+other status gives the fixed lifecycle reason `host key provider read failed`.
+`tests::host_key_provider_result_uses_a_fixed_reason` checks opaque response
+bodies natively; Runtime acceptance comes from the existing live journey.
 
 `run.sh` prints `host key read:` along with the checked controller, census,
 refusal and identity lines, followed by the Cargo-derived test row. Read each
@@ -457,12 +482,18 @@ cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effe
 cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects attach_secret_stays_in_memory -- --exact --nocapture
 ```
 
-Both must fail on the changed refusal after credential coverage finishes.
+Each demo observes one grant, then requires `guest_provider_refusal:true` and
+`provider_body_absent:true`. The latter checks both captures for the former
+provider text. Both tests then fail at `expected exact manifest-bound lifecycle
+refusal`, after credential coverage finishes. The baseline keeps zero decisions
+and the original manifest refusal. Both the manifest bound and provider refuse
+the parent segments in the resource text, so this journey stops before the fake
+file. Its scope remains one route to one fake file.
 Restore both files, run the same tests, and require PASS. F-ac8-fixture changes
 the relative depth and must fail `host_key::fixture_path_uses_the_guarded_home_rule`.
 F-ac8-receipt removes the required launched identity and must fail
-`host_key_receipt_requires_this_launched_bundle`. These keep `command: lab`;
-the shared runner's lab arm remains with the provider lane.
+`host_key_receipt_requires_this_launched_bundle`. The existing falsifier list
+and shared runner keep their current registration.
 
 The existing synthetic-canary test and F-grant-capture also cover the new
 printed-journey surface. The controller keeps the exact lines it prints in
