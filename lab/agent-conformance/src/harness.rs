@@ -1,5 +1,6 @@
 //! The lane's one owner of throwaway Homes and bounded Runtime launches.
 
+use crate::build::target;
 use std::cell::{Cell, RefCell};
 use std::fs::{self, File, Metadata};
 use std::io::{Read, Seek, SeekFrom};
@@ -29,10 +30,6 @@ pub fn data_dir(home: &Path) -> Result<PathBuf> {
         let _ = home;
         Err("throwaway Homes require macOS or Linux")
     }
-}
-
-fn target() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("target")
 }
 
 fn inside(path: &Path, root: &Path) -> bool {

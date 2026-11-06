@@ -49,16 +49,33 @@ pub fn write_component_home(
     bytes: &[u8],
     checksum: &str,
 ) -> Result<(), Box<dyn Error>> {
+    write_component_home_with_source(home, component, installed, bytes, checksum, || {
+        let platform = operator_platform()?;
+        let source: Value =
+            serde_json::from_slice(&fs::read(repository().join("components.json"))?)?;
+        Ok((source["external"][component].clone(), platform))
+    })
+}
+
+/// The same guarded installer accepts synthetic source metadata in fixture tests.
+pub fn write_component_home_with_source(
+    home: &ThrowawayHome,
+    component: &str,
+    installed: &Path,
+    bytes: &[u8],
+    checksum: &str,
+    load_source: impl FnOnce() -> Result<(Value, &'static str), Box<dyn Error>>,
+) -> Result<(), Box<dyn Error>> {
     home.guard(home.home(), home.data())?;
-    let platform = operator_platform()?;
-    let source: Value = serde_json::from_slice(&fs::read(repository().join("components.json"))?)?;
-    let mut entry = source["external"][component].clone();
+    let (mut entry, platform) = load_source()?;
     let platforms = entry["platforms"]
         .as_object_mut()
         .ok_or_else(|| format!("repository {component} entry requires platforms"))?;
-    let info = platforms.entry(platform).or_insert_with(|| json!({}));
+    let info = platforms.get_mut(platform).ok_or_else(|| {
+        format!("{component} has no {platform} platform entry in components.json")
+    })?;
     if !info.is_object() {
-        return Err(format!("repository {component} platform must be an object").into());
+        return Err(format!("repository {component} {platform} platform must be an object").into());
     }
 
     fs::create_dir(home.data().join("bin"))?;

@@ -1,7 +1,8 @@
 //! One component build path. Callers serialize builds: the script writes one entrypoint.
 
-use agent_conformance::build::{lane, offline_build, repository};
+use agent_conformance::build::{lane, offline_build, repository, target};
 use std::fs;
+use std::process::Output;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Effect {
@@ -69,7 +70,7 @@ pub fn build_probe(effect: Effect, round: usize) -> Vec<u8> {
     let root = repository();
     // Reuse dependencies and the componentizer for each selector. Remove only
     // the probe package before EVERY call, including both reproducibility rounds.
-    let target = lane.join(format!("target/probe-build-{}", effect.name()));
+    let target = target().join(format!("probe-build-{}", effect.name()));
     let cleaned = offline_build("cargo", &target)
         .unwrap_or_else(|error| skipped(&format!("prepare probe clean: {error}")))
         .args(["clean", "--manifest-path"])
@@ -113,14 +114,8 @@ pub fn build_probe(effect: Effect, round: usize) -> Vec<u8> {
             .to_string(),
         )
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .output()
-        .unwrap_or_else(|error| skipped(&format!("start probe build: {error}")));
-    if !output.status.success() {
-        skipped(&format!(
-            "probe build failed before launch: {}",
-            output.status
-        ));
-    }
+        .output();
+    let output = probe_build_output(output);
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("Compiling agent-conformance-probe v"),
         "probe round {round} must compile the package independently"
@@ -129,6 +124,21 @@ pub fn build_probe(effect: Effect, round: usize) -> Vec<u8> {
         .expect("the build script must produce the component");
     fs::remove_file(lane.join("probe/agent-conformance-probe.component.wasm")).unwrap();
     artifact
+}
+
+/// The started script owns its exit result; only a start error is setup.
+pub(crate) fn probe_build_output<E: std::fmt::Display>(result: Result<Output, E>) -> Output {
+    let failed = |status: &dyn std::fmt::Display| -> ! {
+        let thread = std::thread::current();
+        let name = thread.name().expect("libtest names each test thread");
+        println!("FAILURE {name}: probe build failed: {status}");
+        panic!("probe build failed");
+    };
+    let output = result.unwrap_or_else(|error| skipped(&format!("start probe build: {error}")));
+    if !output.status.success() {
+        failed(&output.status);
+    }
+    output
 }
 
 /// Only pre-probe setup calls this. Runtime refusals and assertions stay FAIL.
