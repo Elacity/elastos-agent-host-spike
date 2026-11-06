@@ -2317,45 +2317,313 @@ mod tests {
         .into_bytes()
     }
 
-    fn serve_frames(frames: Vec<Vec<u8>>) -> (u16, std::thread::JoinHandle<()>) {
+    struct ObservedRequest {
+        line: String,
+        body: Value,
+    }
+
+    // Keep only the request line and decoded body; headers stay in this read.
+    fn read_scripted_request(stream: &mut TcpStream, deadline: Instant) -> Result<ObservedRequest> {
+        const REQUEST_CAP: usize = 8192;
+        let mut bytes = Vec::new();
+        let mut framing = None;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|time| !time.is_zero())
+                .ok_or("scripted fixture request exceeded its deadline")?;
+            stream
+                .set_read_timeout(Some(remaining))
+                .map_err(|_| "could not bound scripted fixture read")?;
+            let mut chunk = [0; 1024];
+            let size = stream
+                .read(&mut chunk)
+                .map_err(|_| "scripted fixture request read failed")?;
+            if size == 0 {
+                return Err("scripted fixture request is incomplete");
+            }
+            if size > REQUEST_CAP - bytes.len() {
+                return Err("scripted fixture request exceeded size bound");
+            }
+            bytes.extend_from_slice(&chunk[..size]);
+            if framing.is_none() {
+                if let Some(split) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let head = std::str::from_utf8(&bytes[..split])
+                        .map_err(|_| "invalid scripted fixture request headers")?;
+                    let mut length = None;
+                    for line in head.split("\r\n").skip(1) {
+                        let (name, value) = line
+                            .split_once(':')
+                            .ok_or("invalid scripted fixture request header")?;
+                        if name.eq_ignore_ascii_case("content-length") {
+                            if length.is_some() {
+                                return Err("repeated scripted fixture request length");
+                            }
+                            length = Some(
+                                value
+                                    .trim()
+                                    .parse::<usize>()
+                                    .map_err(|_| "invalid scripted fixture request length")?,
+                            );
+                        }
+                    }
+                    let length = length.ok_or("scripted fixture request length is missing")?;
+                    let body_start = split + 4;
+                    if length > REQUEST_CAP - body_start {
+                        return Err("scripted fixture request exceeded size bound");
+                    }
+                    framing = Some((split, body_start + length));
+                }
+            }
+            if let Some((split, end)) = framing {
+                if bytes.len() > end {
+                    return Err("scripted fixture request length mismatch");
+                }
+                if bytes.len() == end {
+                    let line = std::str::from_utf8(&bytes[..split])
+                        .map_err(|_| "invalid scripted fixture request headers")?
+                        .split("\r\n")
+                        .next()
+                        .ok_or("scripted fixture request line is missing")?
+                        .to_owned();
+                    let body = &bytes[split + 4..end];
+                    let body = if body.is_empty() {
+                        Value::Null
+                    } else {
+                        serde_json::from_slice(body)
+                            .map_err(|_| "invalid scripted fixture request JSON")?
+                    };
+                    return Ok(ObservedRequest { line, body });
+                }
+            }
+        }
+    }
+
+    fn serve_frames(
+        frames: Vec<Vec<u8>>,
+    ) -> (u16, std::thread::JoinHandle<Result<Vec<ObservedRequest>>>) {
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         listener.set_nonblocking(true).unwrap();
         let handle = std::thread::spawn(move || {
-            let started = Instant::now();
-            let mut index = 0;
-            let mut last = Instant::now();
-            while index < frames.len() && started.elapsed() < Duration::from_secs(3) {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut requests = Vec::new();
+            while requests.len() < frames.len() && Instant::now() < deadline {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        stream.set_nonblocking(false).unwrap();
                         stream
-                            .set_read_timeout(Some(Duration::from_secs(1)))
-                            .unwrap();
-                        let mut buf = [0u8; 8192];
-                        let _ = stream.read(&mut buf);
-                        let _ = stream.write_all(&frames[index]);
-                        let _ = stream.shutdown(std::net::Shutdown::Write);
-                        index += 1;
-                        last = Instant::now();
+                            .set_nonblocking(false)
+                            .map_err(|_| "could not set scripted fixture stream mode")?;
+                        let request = read_scripted_request(
+                            &mut stream,
+                            deadline.min(Instant::now() + Duration::from_secs(1)),
+                        )?;
+                        stream
+                            .set_write_timeout(Some(Duration::from_secs(1)))
+                            .map_err(|_| "could not bound scripted fixture write")?;
+                        stream
+                            .write_all(&frames[requests.len()])
+                            .map_err(|_| "scripted fixture response write failed")?;
+                        stream
+                            .shutdown(std::net::Shutdown::Both)
+                            .map_err(|_| "scripted fixture stream close failed")?;
+                        requests.push(request);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        if index > 0 && last.elapsed() > Duration::from_millis(200) {
-                            break;
-                        }
                         std::thread::sleep(Duration::from_millis(5));
                     }
-                    Err(_) => break,
+                    Err(_) => return Err("scripted fixture accept failed"),
                 }
             }
+            Ok(requests)
         });
         (port, handle)
     }
 
     fn with_frames(frames: Vec<Vec<u8>>, check: impl FnOnce(u16)) {
         let (port, handle) = serve_frames(frames);
-        check(port);
-        handle.join().expect("scripted fixture response");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check(port)));
+        let observed = handle.join().expect("scripted fixture thread joined");
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+        // Existing refusal rows may deliberately stop before later replies.
+        assert!(
+            observed.is_ok(),
+            "scripted fixture request capture completed"
+        );
+    }
+
+    fn assert_grant_body(request: &ObservedRequest, id: &str, duration: &str, case: &str) {
+        assert!(
+            request.line == "POST /api/capability/grant HTTP/1.1",
+            "{case}: grant request route"
+        );
+        assert!(
+            request.body
+                == json!({
+                    "request_id": id,
+                    "duration": duration,
+                    "rationale": "isolated conformance fixture"
+                }),
+            "{case}: sent grant body has exact request id, fixture duration and rationale"
+        );
+    }
+
+    #[test]
+    fn controller_sends_each_fixture_duration() {
+        for (case, duration_a, duration_b) in [
+            ("once then session", "once", "session"),
+            ("session then once", "session", "once"),
+        ] {
+            let fixture = Fixture::parse(
+                &json!({
+                    "deny_reason": "fixture denial",
+                    "grants": [
+                        {"resource": "localhost://Public/test/one", "action": "read",
+                         "reason": "test read", "duration": duration_a},
+                        {"resource": "localhost://Public/test/two", "action": "write",
+                         "reason": "test write", "duration": duration_b}
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let pending = json!({"requests": [
+                {"request_id": "duration-b", "session_id": "session-b",
+                 "resource": "localhost://Public/test/two", "action": "write", "reason": "test write"},
+                {"request_id": "duration-a", "session_id": "session-a",
+                 "resource": "localhost://Public/test/one", "action": "read", "reason": "test read"}
+            ]});
+            let mut running = RunningInstances::start(&[], None).unwrap();
+            let (port, server) = serve_frames(vec![
+                framed("200 OK", &pending.to_string()),
+                framed("200 OK", r#"{"success":true,"token":"synthetic-grant-b"}"#),
+                framed("200 OK", r#"{"success":true,"token":"synthetic-grant-a"}"#),
+            ]);
+            let mut controller = idle_controller(port);
+            controller.fixture = fixture;
+            let result = controller.poll(&mut running);
+            let observed = server.join().expect("duration fixture thread joined");
+            let observed = observed.unwrap_or_else(|reason| panic!("{case}: {reason}"));
+            assert!(
+                observed.len() == 3,
+                "{case}: scripted fixture request missing"
+            );
+            assert!(result.is_ok(), "{case}: poll succeeds");
+            assert!(
+                observed[0].line == "GET /api/capability/pending HTTP/1.1"
+                    && observed[0].body.is_null(),
+                "{case}: one pending GET"
+            );
+            // Expected durations are keyed by request id, independent of the
+            // controller's selected index and the reversed pending order.
+            for (id, duration) in [("duration-a", duration_a), ("duration-b", duration_b)] {
+                let request = observed[1..]
+                    .iter()
+                    .find(|request| request.body["request_id"] == id);
+                assert!(request.is_some(), "{case}: expected grant request id");
+                assert_grant_body(request.unwrap(), id, duration, case);
+            }
+            assert!(
+                controller.decisions.matched == 2,
+                "{case}: two matched decisions"
+            );
+            assert!(
+                controller.decisions.granted == 2,
+                "{case}: two granted decisions"
+            );
+            assert!(controller.decisions.denied == 0, "{case}: zero denials");
+            assert!(
+                controller.used == BTreeSet::from([0, 1]),
+                "{case}: exactly two used entries"
+            );
+        }
+    }
+
+    #[test]
+    fn controller_keeps_fixture_duration_after_refused_grant() {
+        for duration in ["once", "session"] {
+            let fixture = Fixture::parse(
+                &json!({
+                    "deny_reason": "fixture denial",
+                    "grants": [{"resource": "localhost://Public/test/one", "action": "read",
+                                "reason": "test read", "duration": duration}]
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let pending = json!({"requests": [{
+                "request_id": "duration-retry", "session_id": "session-retry",
+                "resource": "localhost://Public/test/one", "action": "read", "reason": "test read"
+            }]});
+            let mut running = RunningInstances::start(&[], None).unwrap();
+            let (port, server) = serve_frames(vec![
+                framed("200 OK", &pending.to_string()),
+                framed("200 OK", r#"{"success":false}"#),
+                framed("200 OK", &pending.to_string()),
+                framed(
+                    "200 OK",
+                    r#"{"success":true,"token":"synthetic-retry-grant"}"#,
+                ),
+            ]);
+            let mut controller = idle_controller(port);
+            controller.fixture = fixture;
+            let first_result = controller.poll(&mut running);
+            let first_counts = (
+                controller.decisions.matched,
+                controller.decisions.granted,
+                controller.decisions.denied,
+            );
+            let first_used = controller.used.clone();
+            let second_result = controller.poll(&mut running);
+            let observed = server.join().expect("retry fixture thread joined");
+            assert!(
+                first_used.is_empty(),
+                "{duration}: first refused poll leaves used-entry set empty"
+            );
+            assert!(
+                first_result == Err("fixture approval route refused the decision"),
+                "{duration}: first poll has exact approval refusal"
+            );
+            assert!(
+                first_counts == (1, 0, 0),
+                "{duration}: first poll counts only the match attempt"
+            );
+            assert!(
+                observed.is_ok(),
+                "{duration}: complete retry request capture"
+            );
+            let observed = observed.unwrap_or_else(|reason| panic!("{reason}"));
+            assert!(
+                observed.len() == 4,
+                "{duration}: scripted fixture request missing"
+            );
+            assert!(second_result.is_ok(), "{duration}: retry succeeds");
+            for index in [0, 2] {
+                assert!(
+                    observed[index].line == "GET /api/capability/pending HTTP/1.1"
+                        && observed[index].body.is_null(),
+                    "{duration}: retry pending GET"
+                );
+            }
+            for index in [1, 3] {
+                assert_grant_body(&observed[index], "duration-retry", duration, duration);
+            }
+            assert!(
+                controller.decisions.matched == 2,
+                "{duration}: two match attempts"
+            );
+            assert!(
+                controller.decisions.granted == 1,
+                "{duration}: retry grants exactly once"
+            );
+            assert!(controller.decisions.denied == 0, "{duration}: zero denials");
+            assert!(
+                controller.used == BTreeSet::from([0]),
+                "{duration}: retry consumes only entry zero"
+            );
+        }
     }
 
     fn idle_controller(port: u16) -> Controller {

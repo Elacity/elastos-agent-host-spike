@@ -106,7 +106,9 @@ fn real_agent_host_gets_no_ungranted_authority() {
         .expect("empty pending list before this run");
     let launches = [Launch {
         home: &home,
-        program: &runtime.binary,
+        program: runtime
+            .verified_path()
+            .expect("verify the recorded Runtime bytes"),
         args: vec!["run", capsule.path.to_str().unwrap()],
     }];
     let running = RunningInstances::start(&launches, Some(&home)).expect("launch the real capsule");

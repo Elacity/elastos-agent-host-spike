@@ -26,7 +26,9 @@ fn run_probe(home: &ThrowawayHome) -> String {
         .collect();
     let output = home
         .launch(
-            &runtime.binary,
+            runtime
+                .verified_path()
+                .expect("verify the recorded Runtime bytes"),
             &["run", probe.to_str().unwrap()],
             Duration::from_secs(10),
         )
@@ -48,11 +50,14 @@ fn run_without_operator_is_refused_with_reason() {
     let runtime = runtime_under_test().expect("build the checkout Runtime offline");
     // Identification only: compare the returned digest against the actual bytes
     // with the existing test dependency, and check repeated access shares it.
-    assert!(runtime.binary.is_absolute());
+    assert!(runtime.verified_path().unwrap().is_absolute());
     assert!(std::ptr::eq(runtime, runtime_under_test().unwrap()));
     assert_eq!(
         runtime.sha256,
-        format!("{:x}", Sha256::digest(fs::read(&runtime.binary).unwrap()))
+        format!(
+            "{:x}",
+            Sha256::digest(fs::read(runtime.verified_path().unwrap()).unwrap())
+        )
     );
     let home = ThrowawayHome::new().unwrap();
     let stderr = run_probe(&home);
@@ -72,7 +77,9 @@ fn run_by_synthetic_cid(home: &ThrowawayHome) -> String {
     .to_string();
     let output = home
         .launch(
-            &runtime.binary,
+            runtime
+                .verified_path()
+                .expect("verify the recorded Runtime bytes"),
             &["run", "--cid", &cid],
             Duration::from_secs(10),
         )
@@ -90,6 +97,153 @@ fn assert_no_materialized_capsule(home: &ThrowawayHome) {
             .starts_with("elastos-capsule-")),
         "refused CID launch must leave no materialized capsule in TMPDIR"
     );
+}
+
+#[test]
+fn component_home_writer_checks_guard_before_writing() {
+    let home = ThrowawayHome::new().unwrap();
+    let bytes = b"component Home writer fixture\n";
+    let checksum = format!("{:x}", Sha256::digest(bytes));
+    let installed = home.data().join("bin/ipfs-provider");
+    let moved_home = home.root().join("moved-home");
+    let moved_data = moved_home.join(home.data().strip_prefix(home.home()).unwrap());
+    fs::rename(home.home(), &moved_home).unwrap();
+    std::os::unix::fs::symlink(&moved_home, home.home()).unwrap();
+
+    let result = common::write_component_home(&home, "ipfs-provider", &installed, bytes, &checksum)
+        .map_err(|error| error.to_string());
+    let observations = [
+        moved_data.join("bin"),
+        moved_data.join("bin/ipfs-provider"),
+        moved_data.join("components.json"),
+    ]
+    .map(fs::symlink_metadata);
+    // Repair before assertions, including when a plant wrote through the link.
+    fs::remove_file(home.home()).expect("remove the owned Home symlink");
+    fs::rename(&moved_home, home.home()).expect("restore the owned Home directory");
+    eprintln!("component writer fixture: owned Home repaired");
+
+    assert_eq!(
+        result,
+        Err("home must use directories without symlinks".into()),
+        "writer must return the existing Home-symlink refusal"
+    );
+    for (name, observed) in ["bin", "installed file", "components.json"]
+        .into_iter()
+        .zip(observations)
+    {
+        assert!(
+            observed.is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            "writer must guard before creating {name}"
+        );
+    }
+
+    common::write_component_home(&home, "ipfs-provider", &installed, bytes, &checksum)
+        .expect("writer must accept the repaired Home");
+    assert_eq!(fs::read(&installed).unwrap(), bytes);
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        fs::metadata(&installed).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(home.data().join("components.json")).unwrap()).unwrap();
+    assert_eq!(manifest.as_object().unwrap().len(), 2);
+    assert_eq!(manifest["external"].as_object().unwrap().len(), 1);
+    assert_eq!(manifest["profiles"], serde_json::json!({}));
+    let info =
+        &manifest["external"]["ipfs-provider"]["platforms"][common::operator_platform().unwrap()];
+    assert_eq!(info["checksum"], format!("sha256:{checksum}"));
+    assert_eq!(info["size"], bytes.len());
+    assert_eq!(info["install_path"], "bin/ipfs-provider");
+    home.finish().unwrap();
+}
+
+#[test]
+fn component_home_writer_names_refused_destinations() {
+    let bytes = b"component destination fixture\n";
+    let checksum = format!("{:x}", Sha256::digest(bytes));
+    let marker = b"keep the existing destination\n";
+    for case in ["bin", "installed", "manifest", "manifest-symlink"] {
+        let home = ThrowawayHome::new().unwrap();
+        let bin = home.data().join("bin");
+        let manifest = home.data().join("components.json");
+        let installed = if case == "installed" {
+            // Keep bin absent so its creation cannot mask this file refusal.
+            home.root().join("installed-ipfs-provider")
+        } else {
+            bin.join("ipfs-provider")
+        };
+        let (refused, preserved, operation) = match case {
+            "bin" => {
+                fs::create_dir(&bin).unwrap();
+                (
+                    bin.clone(),
+                    bin.join("marker"),
+                    "create component directory",
+                )
+            }
+            "installed" => (
+                installed.clone(),
+                installed.clone(),
+                "create component file",
+            ),
+            "manifest" => (
+                manifest.clone(),
+                manifest.clone(),
+                "create component manifest",
+            ),
+            "manifest-symlink" => {
+                let target = home.root().join("manifest-marker");
+                std::os::unix::fs::symlink(&target, &manifest).unwrap();
+                (manifest.clone(), target, "create component manifest")
+            }
+            _ => unreachable!(),
+        };
+        fs::write(&preserved, marker).unwrap();
+        if case == "installed" {
+            assert!(!bin.try_exists().unwrap(), "fixture bin must start absent");
+        }
+
+        let result =
+            common::write_component_home(&home, "ipfs-provider", &installed, bytes, &checksum)
+                .map_err(|error| error.to_string());
+        let saved_bytes = fs::read(&preserved);
+        let saved_metadata = fs::symlink_metadata(&refused);
+        let saved_link = (case == "manifest-symlink").then(|| fs::read_link(&refused));
+        // Preserve observations before finish removes this case's owned root.
+        let error = result.expect_err(&format!(
+            "{case}: writer must refuse the existing destination"
+        ));
+        assert!(
+            error.contains(refused.to_str().unwrap()),
+            "{case}: refusal must name the exact destination {}; error: {error}",
+            refused.display()
+        );
+        assert!(
+            error.starts_with(&format!("{operation} ")),
+            "{case}: refusal must name the operation; error: {error}"
+        );
+        let cause = std::io::Error::from_raw_os_error(17).to_string();
+        assert!(
+            error.ends_with(&format!(": {cause}")),
+            "{case}: refusal must retain the underlying I/O cause; error: {error}"
+        );
+        assert_eq!(saved_bytes.unwrap(), marker, "{case}: keep marker bytes");
+        let metadata = saved_metadata.unwrap();
+        if let Some(link) = saved_link {
+            assert!(
+                metadata.file_type().is_symlink(),
+                "keep the manifest symlink"
+            );
+            assert_eq!(link.unwrap(), preserved, "keep the manifest symlink target");
+        } else if case == "bin" {
+            assert!(metadata.is_dir(), "keep the existing bin directory");
+        } else {
+            assert!(metadata.is_file(), "{case}: keep the existing file");
+        }
+        home.finish().unwrap();
+    }
 }
 
 #[test]
@@ -180,7 +334,7 @@ fn serve_refuses_provider_whose_bytes_differ_from_its_hash() {
     let home = ThrowawayHome::new().unwrap();
     let installed = common::write_operator_home(&home).expect("install the operator fixture");
     let provider = localhost_provider_under_test().unwrap();
-    assert!(provider.binary.is_absolute());
+    assert!(provider.verified_path().unwrap().is_absolute());
     assert!(std::ptr::eq(
         provider,
         localhost_provider_under_test().unwrap()
@@ -220,7 +374,9 @@ fn serve_refuses_provider_whose_bytes_differ_from_its_hash() {
     let storage = home.root().join("storage");
     let output = home
         .launch(
-            &runtime.binary,
+            runtime
+                .verified_path()
+                .expect("verify the recorded Runtime bytes"),
             &[
                 "serve",
                 "--addr",
