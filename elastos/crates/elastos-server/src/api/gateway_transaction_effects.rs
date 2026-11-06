@@ -1270,13 +1270,18 @@ async fn finish_transaction_completion(
                 effect.authority.grant_id.clone(),
                 effect.authority.actor.clone(),
                 effect.authority.launch_id.clone(),
-            ) {
-                Ok(context) => {
-                    RuntimeWalletAuthority::from_persisted_transaction_authority(context)
-                }
+            )
+            .map_err(anyhow::Error::from)
+            .and_then(|context| {
+                RuntimeWalletAuthority::from_persisted_transaction_authority(
+                    &state.data_dir,
+                    context,
+                )
+            }) {
+                Ok(authority) => authority,
                 Err(err) => {
                     errors.push(format!(
-                        "Wallet outcome projection pending: persisted effect authority is invalid: {err:?}"
+                        "Wallet outcome projection pending: persisted effect authority is unusable: {err:#}"
                     ));
                     store.effects[effect_index].state = TransactionEffectState::CompletionPending;
                     store.effects[effect_index].completion_error = Some(errors.join("; "));
@@ -4330,6 +4335,22 @@ mod approved_request_resume_tests {
         store.effects.push(effect);
         save_transaction_effect_store(&state, &store).unwrap();
 
+        // The fixture principal is stored where the Home launch resolver reads
+        // (A5-P2a-ii-0b builds this authority's root from it).
+        crate::auth::upsert_principal_for_binding_as(
+            &state.data_dir,
+            elastos_runtime::auth::ProofBinding {
+                kind: elastos_runtime::auth::ProofBindingKind::DidKey,
+                subject: "did:key:z6MkresumeTestFixture".to_string(),
+                chain_id: None,
+                verified_at: crate::auth::now_ts(),
+                passkey: None,
+            },
+            "principal:test".to_string(),
+            crate::auth::now_ts(),
+        )
+        .unwrap();
+
         let completion = complete_runtime_transaction_effect(
             &state,
             &resumed_authority,
@@ -4360,6 +4381,14 @@ mod approved_request_resume_tests {
         assert_eq!(persisted_effect.authority.session_id, "session:original");
         assert_eq!(persisted_effect.authority.launch_id, "launch:original");
         assert!(persisted_effect.receipt.is_some());
+
+        // The seeded record is the one `resolve` reads for this fixture root.
+        assert!(crate::auth::ResolvedPrincipalRoot::resolve(
+            &state.data_dir,
+            &crate::api::gateway::gateway_home_token::home_launch_auth_data_dir(&state.data_dir),
+            "principal:test",
+        )
+        .is_ok());
     }
 
     #[tokio::test]

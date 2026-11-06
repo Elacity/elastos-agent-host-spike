@@ -297,7 +297,7 @@ pub(super) async fn inbox_action(
             Ok(launch) => launch,
             Err(err) => return inbox_error_response(err),
         };
-    let authority = match runtime_wallet_authority(&launch) {
+    let authority = match runtime_wallet_authority(&state.data_dir, &launch) {
         Ok(authority) => authority,
         Err(err) => return inbox_error_response(err),
     };
