@@ -384,18 +384,13 @@ pub(super) fn validate_legacy_workspace_bytes(bytes: &[u8]) -> anyhow::Result<se
 mod s3c_rows {
     use super::*;
 
-    /// The launch context a stored Agent's Home launch carries. Today it is
-    /// the bare literal; S3c-1a builds it through the one resolving
-    /// constructor (P1), and only this helper changes.
+    /// The launch context a stored Agent's Home launch carries, built through
+    /// the test constructor. S3c-1a adds the root there, and only this helper
+    /// changes.
     fn stored_agent_launch_context(data_dir: &std::path::Path, id: &str) -> HomeLaunchTokenContext {
         crate::auth::store_test_human_principal(data_dir, id);
         crate::auth::tests::mint_agent_record(data_dir, id, None);
-        HomeLaunchTokenContext {
-            principal_id: id.to_string(),
-            session_id: "session:s3c".to_string(),
-            proof_binding_id: None,
-            grant_id: "grant:s3c".to_string(),
-        }
+        HomeLaunchTokenContext::for_test(id, "session:s3c", None, "grant:s3c")
     }
 
     /// A5-S3c-0a, class G: a stored Agent's assistant workspace sits under
