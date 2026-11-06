@@ -66,6 +66,10 @@ A request may carry `plan`, the `sha256` that `plan_approval::preview` returned;
 
 `StandIn::bridge_envelope` is the one hostcall. A capability line calls `post_capability_request` for the capsule id. An invoke line calls `use_grant` with `None` for the run id, `None` for the plan hash, and the `amount` from `body`. It never passes `EFFECT_BUDGET_CAP`. `use_grant` calls the four-argument `authorise`. The envelope's `run_id` is not read. The principal argument does not choose the caller. Two once grants invoked with amount `1` are spent, and each hold is settled. A later amount of `4096` still succeeds. An amount of `0` is refused. An amount of `4097` is refused and is not clamped. A bound grant stays live. The hostcall does not call `settle` or `release`. `use_grant` does. A settled spend is not released. `post_hosted_effect` stays the route that presents a run id. The hostcall does not call `post_capability_validate`. Two-capsule-run passes the line, the capsule id, and the principal, and this lane does not run the component bytes. A PASS gives the Runtime no A3 credit.
 
+Six session asks of 1 on one session grant are admitted. An ask of 4091 is `reservation exceeds the ceiling` and holds nothing, so the remaining 4090 is still admitted. A failed settle releases only that hold. A session grant's earlier hold stays counted. The bridge does not keep a second cap compare. `use_grant` returns a release error instead of discarding it. A PASS gives the Runtime no A6 credit.
+
+`post_capability_request` denies a system-backend resource and a generic wallet resource after the live-instance check and before `declared_ask`. Its Ok body contains only `status` `denied` and the handler's `reason`. The exact `elastos://wallet/meta/status` resource with `read` and a declared `elastos://content/...` ask still store through the signed-ask check. A stopped instance stays `instance is not live`. A PASS gives the Runtime no A6 credit for this denial.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.
