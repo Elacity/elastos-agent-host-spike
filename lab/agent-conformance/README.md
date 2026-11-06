@@ -33,9 +33,16 @@ elastos/Cargo.toml -p elastos-server --bin elastos`. It caches a build failure
 as well as a success. The build uses the developer's toolchain environment,
 sets `CARGO_PROFILE_DEV_DEBUG=0` and `CARGO_INCREMENTAL=0`, and clears inherited
 Rust flags. Its one target is `target/runtime`, with intermediates in `build/`
-and temporary files in `tmp/` below that target. It returns the absolute binary
-path and a SHA-256 computed from its bytes by macOS `shasum`. This identifies
-the Runtime tested on this machine; it is separate from capsule bundle identity.
+and temporary files in `tmp/` below that target. It records a SHA-256 computed
+from the native bytes by macOS `shasum`. `BinaryUnderTest::verified_path`
+re-hashes those bytes immediately before each path-based Runtime launch and
+provider fixture copy. It returns the borrowed absolute path only when the
+digest matches; changed bytes return `native binary SHA-256 differs from
+recorded build`, and hash failures retain their cause. The cache and recorded
+digest stay fixed. `runtime::tests::native_identity_refuses_changed_or_missing_bytes`
+proves original, changed, restored and missing bytes through the existing three
+launch APIs. This identifies the native artifact tested on this machine;
+capsule bundle identity and installed-product acceptance keep their own journeys.
 
 `probe_imports_only_the_bus` validates the built component and checks its outer
 imports against the five-interface Bus v1 subset. `probe_hash_is_stable` makes two

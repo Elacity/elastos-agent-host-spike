@@ -9693,3 +9693,1507 @@ A passing row gives the real Runtime no A3 credit. Two-capsule-run owns the real
 
 - 139: `bridge_envelope` records the capsule's capability line and spends the invoke amount through `use_grant`; a `once` hold is settled and a `session` hold stays open.
 
+## 141
+
+Comparison base, recorded before the first edit: `fc9f75ef44f30143631a2556979a67acb580b181`. `fc9f75ef` is an ancestor. `fff8f1761eb851f642f8e9b680ea1c6747974060` and `80a2405624121eef3404fe3b3814a558be4b7cb5` are not. `git status --short -- elastos capsules scripts examples` was empty before the edit and after `cargo fetch --locked --manifest-path elastos/Cargo.toml`, which completed with no output. wasmtime in `elastos/Cargo.lock` is `36.0.20`.
+
+Allow once: "Allow once authorizes one exact operation." Allow for this session: "Allow for this session authorizes a bounded operation set until the session ends or the grant is revoked." This task is the spend half of Allow for this session. It adds no mandate service and it does not revoke.
+
+The four refusal strings: `budget ask exceeds the admission cap: asked {asked}, cap {cap}`; `reservation exceeds the ceiling`; `measured figure exceeds the reservation`; `uncertain hold is not released`.
+
+`bridge_envelope` no longer compares `amount > 4_096` and does not name `EFFECT_BUDGET_CAP`. `admit_effect` remains the one cap check. `use_grant` reads one `#[cfg(test)]` flag after `admit_effect` reserves, then clears it. `arm_settle_fault(false)` treats that settle as `AboveReservation` and does not call the ledger. `arm_settle_fault(true)` settles `Unknown`, so the hold is uncertain. Both arms use the one release match: `Ok(())` returns the settle error, and `Err(release)` returns `Err((403, release.to_string()))`. `NotOutstanding` still skips release. A clear flag keeps a session hold and still settles a `once` grant with `SettleOutcome::Known`. The hostcall still calls `use_grant` with the body amount, `None`, and `None`.
+
+### Plants
+
+Each plant was restored before the next. Restored, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` has no plant: the working file has no `let _ = self.ledger.release` and no `amount > 4_096`. The planted crate compiled. The named test failed on the assertion below.
+
+- F-release-skip. Old: `match self.ledger.release(&call, &request, reservation) { Ok(()) => return Err((403, refusal.to_string())), Err(release) => return Err((403, release.to_string())), }`. New: `return Err((403, refusal.to_string()));`. The drain test passed. `standin-runtime/mod.rs:10723` `the once ask of the full amount answers with type and data`, left `{"code", "message", "type"}`. The once invoke of 4096 stayed `(Live, false)` and the message was `reservation exceeds the ceiling`. The session invoke of 3996 was refused with that same message and stayed `(Live, false)`. The surfaces row also went red, at `:10786`, with `unknown outcome keeps the hold`, because that row reads the release result.
+- F-release-discard. Old: the same match. New: `let _ = self.ledger.release(&call, &request, reservation); return Err((403, refusal.to_string()));`. The drain test and `standin_failed_settle_releases_only_that_hold` passed. `standin-runtime/mod.rs:10786` `the uncertain settle`, left `unknown outcome keeps the hold` against `uncertain hold is not released`.
+- Bridge compare, restored, not left in. Old: the invoke goes straight to `use_grant`. New: `if amount > 4_096` returns `admit_text` of `OverBudget` before `use_grant`. `standin-runtime/mod.rs:10665` `the sibling ask above the cap`, left `budget ask exceeds the admission cap: asked 4097, cap 4096`. With that sibling assertion removed, the owner ask of 4097 still passed. Restored, the compare is absent and the sibling assertion is back.
+
+### Docs
+
+`standin-runtime/README.md` adds one paragraph immediately before `## Callers`. Six session asks of 1 are admitted, 4091 is `reservation exceeds the ceiling`, a failed settle releases only that hold, an earlier session hold stays counted, the bridge keeps no second cap compare, and `use_grant` returns a release error. A PASS gives the Runtime no A6 credit. The bridge paragraph stays. `RUNBOOK.md` adds one paragraph after the last stand-in paragraph naming `standin_session_drain_refuses_past_the_remainder`, `standin_failed_settle_releases_only_that_hold` and `standin_failed_settle_surfaces_release_error`. Every other paragraph keeps its bytes.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged. `git diff` for `elastos`, `capsules`, `scripts`, `examples`, `tests/standin_grants.rs`, `tests/standin_contract.rs`, `tests/effects.rs`, `GAPS.md` and `falsifiers.json` printed nothing. The changed files are `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.34 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 266.33 seconds, inside the 600-second bound. Targets: lib 93 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; content_cid 2 passed; effects 63 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 14 passed; standin_grants 11 passed; standin_plan 8 passed; standin_residents 2 passed; probe 3 passed; doc-tests 0. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+
+### Proof
+
+After the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.29 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_session_drain_refuses_past_the_remainder -- --exact` exit 0, 1 passed, real 0.20 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_failed_settle_releases_only_that_hold -- --exact` exit 0, 1 passed, real 0.08 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_bridge_envelope_records_the_capsule_request -- --exact` exit 0, 1 passed, real 0.08 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_calls_use_grant -- --exact` exit 0, 1 passed, real 0.08 seconds. `git diff -- elastos` is empty. `fc9f75ef` is an ancestor.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | The invoke still passes the body amount at `standin-runtime/mod.rs:1497`. The new rows name a request id and an amount, not code or content. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `authorise` still runs before any hold at `:1323`. `arm_settle_fault` at `:1300` is `#[cfg(test)]` and grants nothing. |
+| 3. A second path or a second copy of one rule? | No | The bridge compare is gone. `admit_effect` at `:1955` is the one cap check. The one release match is at `:1366`. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`. `git diff -- elastos` is empty. |
+| 5. Refusals deny by default with a clear reason? | Yes | An ask past the remainder is `reservation exceeds the ceiling`. An ask of 4097 is the admission-cap text from `:1955`. A refused release returns that refusal at `:1368`, and the grant stays `Live`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The one hostcall stays `bridge_envelope` at `:1421`. It calls `use_grant` and adds no world import. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `:10619`, `:10701` and `:10776`. F-release-skip fails `:10723`. F-release-discard fails `:10786`. Restored, those tests pass, and the drain row stayed green while the skip plant was in. |
+| 8. Identity, admission and allowance stay separate? | Yes | A sibling ask of 4097 is `wrong capsule` from `authorise` at `:1323` before `admit_effect` at `:1332`. The cap check at `:1955` is admission. `reserve` is the session allowance. A failed settle returns that hold and does not spend the grant. |
+
+A passing row gives the real Runtime no A6 credit.
+
+- 141: a session grant spends each body amount against the one ceiling, and a failed settle releases only that hold.
+
+
+## 145
+
+Comparison base: `8da39dce977a12e97d8d32a0ecc3a881766ef865`, recorded before the first edit. HEAD remains that commit; its tree is `2243bccd1ad639e0a60b6b60ce330d071eac0c83`. The task branch owns this local change. The initial worktree is clean. `git merge-base --is-ancestor fc9f75ef44f30143631a2556979a67acb580b181 HEAD` returned 0. The same command for `fff8f1761eb851f642f8e9b680ea1c6747974060` and `80a2405624121eef3404fe3b3814a558be4b7cb5` returned 1 each.
+
+The required `env -u CARGO_NET_OFFLINE RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo fetch --locked --manifest-path elastos/Cargo.toml` ran once, exit 0, real 0.49 seconds. `elastos/Cargo.lock:6516` pins wasmtime `36.0.20`. The protected-path status check was empty before and after fetch. The probe and `offline_build` retain offline mode.
+
+Request flow step 7: “Runtime verifies the exact resource, action, operation, principal, session, capsule, grant, expiry, and revocation state.” Step 8: “If additional consent is required, Runtime records a pending request and Home or Inbox presents it. The UI does not mint the grant itself.” (`docs/AGENT_ARCHITECTURE.md:232-235`.) This task implements only the stand-in denial before that pending record.
+
+Read-only route evidence: `request_capability` in `elastos/crates/elastos-server/src/api/handlers/capability.rs:97-115` returns `status` `denied`, the reason, and absent request id and token before insertion. System reason: `system backends are not app capabilities; use elastos://content`. `is_system_only_backend_resource` in `elastos/crates/elastos-common/src/localhost.rs:36-53` compares the first segment before `/`, `?` or `#` as given against `elacity`, `elacity-sdk`, `gateway`, `ipfs`, `ipfs-cluster`, `ipfs-provider` and `kubo`. Wallet reason: `generic Wallet access is limited to read-only elastos://wallet/meta/status; use the private Runtime Wallet Bus for authority-bound operations`. `ensure_generic_wallet_capability` in `elastos/crates/elastos-server/src/provider_resource.rs:584-594` allows the exact `WALLET_STATUS_RESOURCE` (`elastos://wallet/meta/status`, line 12) with `read`.
+
+Plan: add one private `prestore_denial` after the live-instance refusal and before the existing `declared_ask`. Keep the existing signed-ask and store bodies. Exercise starting, running and stopped clients in one named journey, run each of the nine plants separately and restore each, then run the lane gates. Update the two existing documentation files and keep Runtime A6 credit separate.
+
+The first targeted build stopped at E0282 on the new empty-vector assertion (2.14 seconds). Both new empty expectations now state `Vec::<Value>::new()`; the full equality assertions remain. This was a source correction before the plant runs.
+
+### Change and named test
+
+`standin-runtime/mod.rs` adds the private `prestore_denial` and calls it once between the live-instance check and `declared_ask`. Each reason has one literal. The helper compares the first segment as given, checks system resources first, and permits only the exact read-only wallet status request. Every protected method body matches the comparison base. The only other added function is `standin_system_and_wallet_requests_never_become_pending` in `mod tests`. It signs exactly the six declared pairs, exercises starting, running and stopped clients, compares the complete denial and pending bodies, checks the request counter, and checks the ordered shell records and empty live-grant set. It builds neither an operator nor a probe.
+
+`standin-runtime/README.md` adds one paragraph immediately before `## Callers`. `RUNBOOK.md` adds one paragraph after the last stand-in paragraph. Removing each new paragraph reproduces its base file byte for byte, preserving the grant paragraph, plan approval and `declared_ask` sentence.
+
+### Hand-run falsifiers
+
+Each plant ran alone with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`, under the shared heavy-build lease. Command for every plant and restore: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_system_and_wallet_requests_never_become_pending -- --exact`. Each planted crate compiled and reported 0 passed / 1 failed on this named assertion; each restored run reported 1 passed / 0 failed. The corrected baseline passed in 2.00 seconds. No `falsifiers.json` id was added. Old and new bytes below are exact JSON string encodings, including whitespace and newline bytes.
+
+
+#### F-prestore-stub
+
+Old bytes: `"        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"`
+
+New bytes: `""`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9361:13`: assertion `left == right` failed: the stand-in did the work: starting elastos://ipfs/x is denied before the signed-ask check. Plant exit 101, 1.71 seconds; restored exit 0, 1.28 seconds.
+
+
+#### F-prestore-keep
+
+Old bytes: `"        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"`
+
+New bytes: `"        if let Some(reason) = prestore_denial(resource, &action) {\n            let request_id = format!(\"denied-{}\", self.requests.len());\n            self.seed_request(&request_id, session_id, resource, &action, reason)?;\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9376:9`: assertion `left == right` failed: the stand-in did the work: starting denials store nothing. Plant exit 101, 1.77 seconds; restored exit 0, 1.22 seconds.
+
+An initial keep plant used old bytes `"        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"` and new bytes `"        if let Some(reason) = prestore_denial(resource, &action) {\n            let request_id = format!(\"request-{}\", self.next_request);\n            self.seed_request(&request_id, session_id, resource, &action, reason)?;\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"`. It also compiled and failed (1.56 seconds) at `src/../standin-runtime/mod.rs:9366:13`, `starting elastos://wallet/open is denied before the signed-ask check`, because the second insertion reused the id. Restored, it passed in 1.49 seconds. The refined plant above uses distinct stored ids to reach the empty-store assertion directly.
+
+
+#### F-prestore-ask-first
+
+Old bytes: `"        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n        self.declared_ask(session_id, resource, &action)?;\n"`
+
+New bytes: `"        self.declared_ask(session_id, resource, &action)?;\n        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9364:13`: assertion `left == right` failed: the stand-in did the work: starting elastos://ipfs/x is denied before the signed-ask check. Plant exit 101, 1.62 seconds; restored exit 0, 1.2 seconds.
+
+
+#### F-prestore-wallet-read
+
+Old bytes: `"\"wallet\" if resource != \"elastos://wallet/meta/status\" || action != \"read\" => {"`
+
+New bytes: `"\"wallet\" => {"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9432:13`: assertion `left == right` failed: the stand-in did the work: declared elastos://wallet/meta/status Read still stores as request-3. Plant exit 101, 1.46 seconds; restored exit 0, 1.5 seconds.
+
+
+#### F-prestore-prefix
+
+Old bytes: `"let segment = rest.split(['/', '?', '#']).next()?;"`
+
+New bytes: `"let segment = rest.split(['/', '?', '#']).next()?;\n    let segment = if segment.starts_with(\"ipfs\") { \"ipfs\" } else { segment };"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9433:13`: assertion `left == right` failed: the stand-in did the work: declared elastos://ipfs-extra/x read still stores as request-4. Plant exit 101, 1.49 seconds; restored exit 0, 1.31 seconds.
+
+
+#### F-prestore-wallet-bypass
+
+Old bytes: `"Some(GENERIC_WALLET_REASON)"`
+
+New bytes: `"None"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9364:13`: assertion `left == right` failed: the stand-in did the work: starting elastos://wallet/open is denied before the signed-ask check. Plant exit 101, 1.46 seconds; restored exit 0, 2.0 seconds.
+
+
+#### F-prestore-running-only
+
+Old bytes: `"        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"`
+
+New bytes: `"        if matches!(phase, ResidentStatus::Running) {\n            if let Some(reason) = prestore_denial(resource, &action) {\n                return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n            }\n        }\n"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9366:13`: assertion `left == right` failed: the stand-in did the work: starting elastos://ipfs/x is denied before the signed-ask check. Plant exit 101, 1.52 seconds; restored exit 0, 1.81 seconds.
+
+
+#### F-prestore-before-live
+
+Old bytes: `"        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {\n            return Err(not_live(phase));\n        }\n        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"`
+
+New bytes: `"        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {\n            return Err(not_live(phase));\n        }\n"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9500:9`: assertion `left == right` failed: the stand-in did the work: the live-instance refusal precedes a system denial. Plant exit 101, 1.45 seconds; restored exit 0, 1.22 seconds.
+
+
+#### F-prestore-raw-action
+
+Old bytes: `"prestore_denial(resource, &action)"`
+
+New bytes: `"prestore_denial(resource, given_action)"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9432:13`: assertion `left == right` failed: the stand-in did the work: declared elastos://wallet/meta/status Read still stores as request-3. Plant exit 101, 2.11 seconds; restored exit 0, 1.35 seconds.
+
+
+All plants are restored. The candidate `standin-runtime/mod.rs` SHA-256 is `284142bf3296a412586ebba1f50b376da9119b1f3d3f9094ab18297448a74973`, matching the bytes before the first plant. The production diff contains only the gate, constants and helper.
+
+### Principles check
+
+| Question | Yes/No | Evidence (standin-runtime/mod.rs unless specified) |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `:9335-9352` changes the fixture asks before signed admission through `admit_shared`; resource strings describe operations and preserve the existing bundle identity. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `:958-960` returns the denial before any store; `:9522` checks the empty live-grant set. |
+| 3. A second path or copy of one rule? | No | `:958` is the single call to `prestore_denial`; `:2940-2950` is the single new predicate, and `declared_ask` keeps its body and place on the success path. Each reason has one literal at `:2936-2938`. |
+| 4. Runtime core grows? | No | `:2940` is lab-only. `git diff -- elastos capsules scripts examples` is empty. |
+| 5. New refusals fail closed with a clear reason? | Yes | `:958-960` returns only denied status and the reason defined at `:2936-2938`, ahead of id creation and storage. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `:918-974` retains the existing request route. The capsule, Bus and bridge stay unchanged; `:9334` exercises this stand-in alone. |
+| 7. Named tests and caught falsifiers prove each rule? | Yes | `:9334` is `standin_system_and_wallet_requests_never_become_pending`; all nine plants above compile and fail that test, and every restored run passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | `:9335-9352` admits the signed bundle; the accepted asks at `:9380-9384` and `:9427-9438` create pending records, and `:9522` checks that the route creates no live grant. Budget methods keep their bodies. |
+
+The branch/worktree inventory still identifies task 145 at the comparison base and its original tree. This branch has no upstream. Against the existing fetched `spike/spike/agent-host` ref (`3a3e5381f96fcbd33f7383d066d693bf4222c922`), `git rev-list --left-right --count refs/remotes/spike/spike/agent-host...HEAD` is `1471 1` (remote-only, local-only). These counts describe the available shallow history; no network refresh or branch change was made. The task branch holds unique local work for supervisor review. Other worktrees remain outside this task.
+
+### Gates and final proof
+
+All Cargo checks used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`, and the shared heavy-build lease. Gate commands ran in sequence.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.20 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 285.44 seconds, within 600 seconds. The suite reported 248 passed, 0 failed and 14 ignored. Its existing blocked rows stay ignored. The first full run passed, so the permitted outer rerun was unused.
+- After every plant was restored, `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.27 seconds.
+- Final `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_system_and_wallet_requests_never_become_pending -- --exact`: exit 0, 1 passed, real 0.21 seconds.
+- Basic repository gate: `git diff --check`, `node scripts/check-product-data.mjs`, `node --test scripts/check-product-data.test.mjs` (99 passed), `(cd elastos && cargo fmt --all -- --check)`, and `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` all passed. The first Node invocation used the workspace directory; the root-directory invocations above passed.
+
+`git diff -- elastos capsules scripts examples` is empty. The protected lane files, manifests and locks have empty diffs. The protected method bodies match the comparison base. Only `prestore_denial` is new above `mod tests`; only the named journey is added under it. HEAD remains the comparison base. The required ancestor check returns 0, and both excluded ancestors return 1. The source SHA-256 still matches the pre-plant candidate. The branch has no upstream and the fetched integration divergence remains `1471 1`; those are existing shallow refs, not a current-base compatibility claim.
+
+The local lifecycle inventory retains this branch as task 145 work for review, records existing lane build outputs for the supervisor's active gates, and marks task-owned proof scratch removed after its results were transferred here. Other branches, worktrees, test roots and existing caches were preserved. Installed Runtime acceptance stays with the Runtime owner; a passing stand-in denial gives the Runtime no A6 credit. Next owner: lane supervisor for its gates and independent reviews.
+
+- 145: the stand-in denies system-backend and generic-wallet requests before signed-ask checks and storage, with one journey and nine caught plants.
+
+## 146
+
+Comparison base, recorded before the first edit: `54dd4222c01d139555de5e3989393fb3eab25061` (tree `65e3f43a1a99d041b662a600b3bb8f35b4580038`). HEAD stays at this commit. The initial tree is clean. The required `fc9f75ef44f30143631a2556979a67acb580b181` ancestor check returns 0; the excluded `fff8f1761eb851f642f8e9b680ea1c6747974060` and `80a2405624121eef3404fe3b3814a558be4b7cb5` checks each return 1. The bridge exists, calls `use_grant(caller, token, None, None, amount)`, and has neither a frame check nor an `amount > 4_096` compare. This base already contains the session-drain and system/wallet-denial work; their bodies stay as found.
+
+The required `env -u CARGO_NET_OFFLINE cargo fetch --locked --manifest-path elastos/Cargo.toml` ran once and returned 0 with empty output. `elastos/Cargo.lock` pins `wasmtime` version `36.0.20`. The protected paths remain clean. Probe `build_probe` and `offline_build` keep offline resolution.
+
+Read-only contract, `docs/AGENT_ARCHITECTURE.md`, Request flow step 7: “Runtime verifies the exact resource, action, operation, principal, session, capsule, grant, expiry, and revocation state.” This task places a frame check before that work in the stand-in; it grants nothing.
+
+Read-only match, `elastos/crates/elastos-server/src/resource_bridge.rs`: `MAX_RESOURCE_FRAME_BYTES` is `1_048_576`. The request comparison is `line.len() > MAX_RESOURCE_FRAME_BYTES` before parsing. Its envelope uses id 0, code `request_too_large`, and message `resource frame exceeds maximum size`. The response comparison is `bytes.len() > MAX_RESOURCE_FRAME_BYTES`, with code `response_too_large`, message `resource response exceeds maximum size`, and the original id. Both use `>`, so exactly 1048576 bytes stays. The Runtime appends its newline after the comparison; this hostcall returns its JSON string without a newline.
+
+Implementation follows the spec correction: LONG/LONGER use `localhost://` plus 1048453/1048454 ASCII bytes. One private shared response limiter serves the existing success and error closures. Its success-envelope checks exercise the same serialization seam and pin the closure wiring, since the existing hostcall success bodies are small. Request parsing, grant use, and all protected method bodies retain their existing behavior. The new journey will check raw bytes, exact boundaries, full replacement objects, multiline framing, unchanged state, and multibyte replies, with compiling plants for each rule and each response bypass.
+
+The repository contains no humanizer skill. This handoff uses direct behavior and ownership statements. The initial disk check reports 59655696 KiB available; existing lane outputs use 11311612 KiB. Reusing those outputs with up to 10 GiB growth plus the required 2 GiB reserve fits the volume. The task branch has unique work for review and has no upstream; divergence from the existing fetched `spike/spike/agent-host` ref is 0 remote-only and 3 local-only commits. These are existing refs, without a network refresh.
+
+### Frame journey and hand-run plants
+
+`standin_hostcall_frame_fails_closed` in `standin-runtime/mod.rs` uses `Shared`, `launch_two_running`, `seed_grant`, `grant_record`, `request_entries`, and `assert_capsule`, without an operator or probe build. It checks 1048577 ASCII request bytes, exactly 1048576 invalid bytes, 524289 U+00E1 characters (1048578 bytes), leading spaces, the 1048576-byte denied reply, and the 1048577-byte denied reply. LONG and LONGER include the valid `localhost://` scheme and retain request lengths 1048556 and 1048557. An oversized multibyte denied reply proves response byte counting through the hostcall. The shared limiter also exercises oversized ASCII and multibyte success envelopes and an exact-size success envelope; a wiring assertion pins both existing closures to this limiter. Both replacement objects are compared in full and checked for a trailing newline. Both instances remain running, both request lists remain empty, and `req-once` remains `(Life::Live, false)`. The 3.09-second baseline passed.
+
+Every plant and every restore used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`, and the shared heavy-build lease. The exact command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_frame_fails_closed -- --exact`. Each plant compiled and failed that one named test on its assertion; each restore passed that test. No id was added to `falsifiers.json`. Exact old and new bytes below use JSON string encoding so newline and whitespace bytes are explicit.
+
+- F-frame-skip-request: CAUGHT. Old: `"        if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {\n            return Ok(denied(\n                0,\n                \"request_too_large\",\n                \"resource frame exceeds maximum size\",\n            ));\n        }\n"`. New: `""`. Assertion at `standin-runtime/mod.rs:10799:18`: the stand-in did the work: an oversized frame returns Ok before parsing: "Invalid JSON: expected value at line 1 column 1". Plant exit 101, 2.39 seconds; restored exit 0, 1.33 seconds.
+- F-frame-chars: CAUGHT. Old: `"if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {"`. New: `"if line.chars().count() > Self::RESOURCE_FRAME_BYTE_LIMIT {"`. Assertion at `standin-runtime/mod.rs:10806:18`: the stand-in did the work: an oversized frame returns Ok before parsing: "Invalid JSON: expected value at line 1 column 1". Plant exit 101, 1.35 seconds; restored exit 0, 1.31 seconds.
+- F-frame-trim: CAUGHT. Old: `"if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {"`. New: `"if line.trim().len() > Self::RESOURCE_FRAME_BYTE_LIMIT {"`. Assertion at `standin-runtime/mod.rs:10807:13`: the stand-in did the work: padded declared request stores no request. Plant exit 101, 1.47 seconds; restored exit 0, 1.33 seconds.
+- F-frame-inclusive: CAUGHT. Old: `"if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {"`. New: `"if line.len() >= Self::RESOURCE_FRAME_BYTE_LIMIT {"`. Assertion at `standin-runtime/mod.rs:10830:14`: the stand-in did the work: exactly 1048576 bytes still reaches parsing: "{\"id\":0,\"response\":{\"code\":\"request_too_large\",\"message\":\"resource frame exceeds maximum size\",\"type\":\"error\"}}". Plant exit 101, 1.39 seconds; restored exit 0, 1.37 seconds.
+- F-frame-keep-exact: CAUGHT. Old: `"        if text.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {"`. New: `"        if text.len() >= Self::RESOURCE_FRAME_BYTE_LIMIT {"`. Assertion at `standin-runtime/mod.rs:10848:9`: assertion `left == right` failed: the stand-in did the work: exactly 1048576 reply bytes stays unchanged. Plant exit 101, 1.42 seconds; restored exit 0, 1.53 seconds.
+- F-frame-skip-response: CAUGHT. Old: `"        if text.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {"`. New: `"        if false && text.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {"`. Assertion at `standin-runtime/mod.rs:10905:13`: the stand-in did the work: the ASCII oversized denied reply is replaced. Plant exit 101, 1.45 seconds; restored exit 0, 1.3 seconds.
+- F-frame-success-only: CAUGHT. Old: `"            .expect(\"the bridge error envelope is one JSON object\");\n            Self::limit_bridge_response(id, text)"`. New: `"            .expect(\"the bridge error envelope is one JSON object\");\n            text"`. Assertion at `standin-runtime/mod.rs:10905:13`: the stand-in did the work: the ASCII oversized denied reply is replaced. Plant exit 101, 1.75 seconds; restored exit 0, 1.47 seconds.
+- F-frame-skip-success: CAUGHT. Old: `"            .expect(\"the bridge ok envelope is one JSON object\");\n            Self::limit_bridge_response(id, text)"`. New: `"            .expect(\"the bridge ok envelope is one JSON object\");\n            text"`. Assertion at `standin-runtime/mod.rs:10955:13`: the stand-in did the work: the success closure uses the shared reply limiter. Plant exit 101, 1.59 seconds; restored exit 0, 1.33 seconds.
+- F-frame-response-chars: CAUGHT. Old: `"        if text.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {"`. New: `"        if text.chars().count() > Self::RESOURCE_FRAME_BYTE_LIMIT {"`. Assertion at `standin-runtime/mod.rs:10905:13`: the stand-in did the work: the multibyte oversized denied reply is replaced. Plant exit 101, 1.5 seconds; restored exit 0, 1.34 seconds.
+- F-frame-request-type: CAUGHT. Old: `"                \"id\": id,\n                \"response\": {\n                    \"type\": \"error\",\n                    \"code\": code,"`. New: `"                \"id\": id,\n                \"response\": {\n                    \"type\": if code == \"request_too_large\" { \"ok\" } else { \"error\" },\n                    \"code\": code,"`. Assertion at `standin-runtime/mod.rs:10822:13`: assertion `left == right` failed: the stand-in did the work: oversized ASCII returns the complete request limit envelope. Plant exit 101, 1.4 seconds; restored exit 0, 1.4 seconds.
+- F-frame-request-extra: CAUGHT. Old: `"                \"id\": id,\n                \"response\": {\n                    \"type\": \"error\",\n                    \"code\": code,"`. New: `"                \"id\": id,\n                \"extra\": null,\n                \"response\": {\n                    \"type\": \"error\",\n                    \"code\": code,"`. Assertion at `standin-runtime/mod.rs:10823:13`: assertion `left == right` failed: the stand-in did the work: oversized ASCII returns the complete request limit envelope. Plant exit 101, 1.39 seconds; restored exit 0, 1.36 seconds.
+- F-frame-request-newline: CAUGHT. Old: `"        if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {\n            return Ok(denied(\n                0,\n                \"request_too_large\",\n                \"resource frame exceeds maximum size\",\n            ));\n        }\n"`. New: `"        if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {\n            return Ok(format!(\"{}\\n\", denied(\n                0,\n                \"request_too_large\",\n                \"resource frame exceeds maximum size\",\n            )));\n        }\n"`. Assertion at `standin-runtime/mod.rs:10816:13`: the stand-in did the work: oversized ASCII returns no trailing newline. Plant exit 101, 1.44 seconds; restored exit 0, 1.31 seconds.
+- F-frame-response-type: CAUGHT. Old: `"            serde_json::to_string(&json!({\n                \"id\": id,\n                \"response\": {\n                    \"type\": \"error\",\n                    \"code\": \"response_too_large\",\n                    \"message\": \"resource response exceeds maximum size\",\n                }\n            }))\n            .expect(\"the bridge response limit envelope is one JSON object\")"`. New: `"            serde_json::to_string(&json!({\n                \"id\": id,\n                \"response\": {\n                    \"type\": \"ok\",\n                    \"code\": \"response_too_large\",\n                    \"message\": \"resource response exceeds maximum size\",\n                }\n            }))\n            .expect(\"the bridge response limit envelope is one JSON object\")"`. Assertion at `standin-runtime/mod.rs:10910:13`: assertion `left == right` failed: the stand-in did the work: the ASCII denied reply keeps the full replacement envelope. Plant exit 101, 1.45 seconds; restored exit 0, 1.34 seconds.
+- F-frame-response-extra: CAUGHT. Old: `"            serde_json::to_string(&json!({\n                \"id\": id,\n                \"response\": {\n                    \"type\": \"error\",\n                    \"code\": \"response_too_large\",\n                    \"message\": \"resource response exceeds maximum size\",\n                }\n            }))\n            .expect(\"the bridge response limit envelope is one JSON object\")"`. New: `"            serde_json::to_string(&json!({\n                \"id\": id,\n                \"extra\": null,\n                \"response\": {\n                    \"type\": \"error\",\n                    \"code\": \"response_too_large\",\n                    \"message\": \"resource response exceeds maximum size\",\n                }\n            }))\n            .expect(\"the bridge response limit envelope is one JSON object\")"`. Assertion at `standin-runtime/mod.rs:10911:13`: assertion `left == right` failed: the stand-in did the work: the ASCII denied reply keeps the full replacement envelope. Plant exit 101, 1.48 seconds; restored exit 0, 1.33 seconds.
+- F-frame-response-newline: CAUGHT. Old: `"            serde_json::to_string(&json!({\n                \"id\": id,\n                \"response\": {\n                    \"type\": \"error\",\n                    \"code\": \"response_too_large\",\n                    \"message\": \"resource response exceeds maximum size\",\n                }\n            }))\n            .expect(\"the bridge response limit envelope is one JSON object\")"`. New: `"            serde_json::to_string(&json!({\n                \"id\": id,\n                \"response\": {\n                    \"type\": \"error\",\n                    \"code\": \"response_too_large\",\n                    \"message\": \"resource response exceeds maximum size\",\n                }\n            }))\n            .expect(\"the bridge response limit envelope is one JSON object\") + \"\\n\""`. Assertion at `standin-runtime/mod.rs:10901:13`: the stand-in did the work: the ASCII response replacement has no trailing newline. Plant exit 101, 1.47 seconds; restored exit 0, 1.46 seconds.
+- F-frame-request-id: CAUGHT. Old: `"        if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {\n            return Ok(denied(\n                0,\n                \"request_too_large\",\n                \"resource frame exceeds maximum size\",\n            ));\n        }\n"`. New: `"        if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {\n            return Ok(denied(\n                9,\n                \"request_too_large\",\n                \"resource frame exceeds maximum size\",\n            ));\n        }\n"`. Assertion at `standin-runtime/mod.rs:10822:13`: assertion `left == right` failed: the stand-in did the work: oversized ASCII returns the complete request limit envelope. Plant exit 101, 1.38 seconds; restored exit 0, 1.33 seconds.
+- F-frame-response-id: CAUGHT. Old: `"            serde_json::to_string(&json!({\n                \"id\": id,\n                \"response\": {\n                    \"type\": \"error\",\n                    \"code\": \"response_too_large\",\n                    \"message\": \"resource response exceeds maximum size\",\n                }\n            }))\n            .expect(\"the bridge response limit envelope is one JSON object\")"`. New: `"            serde_json::to_string(&json!({\n                \"id\": 0,\n                \"response\": {\n                    \"type\": \"error\",\n                    \"code\": \"response_too_large\",\n                    \"message\": \"resource response exceeds maximum size\",\n                }\n            }))\n            .expect(\"the bridge response limit envelope is one JSON object\")"`. Assertion at `standin-runtime/mod.rs:10910:13`: assertion `left == right` failed: the stand-in did the work: the ASCII denied reply keeps the full replacement envelope. Plant exit 101, 1.53 seconds; restored exit 0, 1.36 seconds.
+
+All plants were restored. Candidate source SHA-256: `8694c58f8ac6b52d898c5fa83f62ce875f886b466a77eaacc23a25b766ea8b3d`. The protected method bodies match the comparison base byte for byte. The invoke still calls `use_grant(caller, token, None, None, amount)`. The base has no `amount > 4_096` compare and the candidate keeps it absent. Every protected path has an empty diff. The README has one extended hostcall paragraph, and all other paragraphs keep their bytes. The RUNBOOK gains only the requested paragraph after the last stand-in paragraph.
+
+### Principles check
+
+| Question | Answer | Evidence |
+| --- | --- | --- |
+| 1. Anything new names code or content by URL where a hash belongs? | No | `standin-runtime/mod.rs:10758` uses the existing signed `Shared` bundle. LONG/LONGER are request-size fixtures, while the existing launch identity stays unchanged. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `standin-runtime/mod.rs:1462` refuses the frame before parse, request storage or grant use; `:1536` preserves the existing grant call. |
+| 3. A second path or second copy of one rule? | No | `standin-runtime/mod.rs:1419` is the one response limiter used by both closures at `:1459` and `:1490`; `:1462` is the one request check on the existing hostcall. |
+| 4. Runtime core grows? | No | The implementation at `standin-runtime/mod.rs:1419` belongs to the lab. `git diff -- elastos capsules scripts examples` is empty. |
+| 5. Every new refusal denies by default with a clear reason? | Yes | `standin-runtime/mod.rs:1462` returns `request_too_large`; `:1420` returns `response_too_large`, each with the Runtime bridge's exact error message. |
+| 6. Capsule logic stays inside and calls down through granted Bus calls? | Yes | `standin-runtime/mod.rs:1536` retains the grant-use call. The capsule and Bus code keep their existing bytes; this task adds only lab frame handling and its proof. |
+| 7. Each new rule has a named test and a caught falsifier? | Yes | `standin-runtime/mod.rs:10758` is the named journey; all 17 plants above compile and fail that test, with a passing run after each restore. |
+| 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:1462` supplies only a frame limit. `:1536` still presents the caller and body amount to the existing grant and allowance path; the frame grants nothing. |
+
+### Gates and final proof
+
+The gate environment was `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, with outputs in lane `target/host` and `target/host-build`. The shared heavy-build lease held each build in sequence. The full suite had the process visibility and loopback access its existing fixtures require. Each command stayed within 600 seconds.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.2 seconds; format check passed.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 345.38 seconds; 249 passed, 0 failed, 14 ignored; existing blocked rows stay ignored. The first run passed, so the outer rerun was unused.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_frame_fails_closed -- --exact`: exit 0, real 0.33 seconds; 1 named test passed, 0 failed.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_calls_use_grant -- --exact`: exit 0, real 0.08 seconds; 1 named test passed, 0 failed.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_bridge_envelope_records_the_capsule_request -- --exact`: exit 0, real 0.08 seconds; 1 named test passed, 0 failed.
+
+Basic repository gate: `git diff --check` passed; `node scripts/check-product-data.mjs` passed (42 capsules, 2 profiles, 28 method contracts); `node --test scripts/check-product-data.test.mjs` passed all 99 tests; `(cd elastos && cargo fmt --all -- --check)` passed in 2.88 seconds; `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` passed in 0.11 seconds. These read-only checks left protected paths clean.
+
+HEAD is still the comparison base. The required ancestor check returns 0 and both excluded ancestor checks return 1. `git diff -- elastos capsules scripts examples` and all protected lane-file diffs are empty. The protected method bodies match the comparison base. The restored source SHA-256 remains `8694c58f8ac6b52d898c5fa83f62ce875f886b466a77eaacc23a25b766ea8b3d`. Only the four authorized task files changed. The task branch has no upstream; the existing fetched integration ref has 0 remote-only and 3 local-only commits against HEAD. No Git state was changed and no network refresh or publication was performed.
+
+The local untracked lifecycle inventory keeps the task branch and its working tree for supervisor review. Existing lane build outputs remain for the supervisor's active gate rerun, with cleanup due when that gate closes. Task-owned plant and gate scratch files were removed after their exact edits and results moved into this record; the lifecycle inventory remains. Other worktrees and earlier retained test roots stay under the lane supervisor's ownership.
+
+Candidate: local task diff against the comparison base. Author checks: all gates above pass. Independent review: pending with the lane supervisor. Installed acceptance: this is the stand-in frame only; a PASS gives the Runtime no A15 credit. Browser, installed-provider and public-live checks are outside this lab-only change. Remaining gate: supervisor reruns and independent reviews. Next owner: lane supervisor.
+
+- 146: the one stand-in hostcall counts raw frame bytes before parse and uses one shared reply limiter, with the boundary journey and 17 caught hand-run plants.
+
+## 147
+
+Comparison base: `b25662e1549d51ea1ecd181140821f17cc7f9e2d`, from `git rev-parse HEAD` before the first edit. The worktree was clean. The required `fc9f75ef44f30143631a2556979a67acb580b181` ancestor check returned 0; the excluded `fff8f1761eb851f642f8e9b680ea1c6747974060` and `80a2405624121eef3404fe3b3814a558be4b7cb5` checks each returned 1. Every required method is present; `get_capability_pending` and `pending_expires_at` are absent on this base. This task keeps HEAD fixed and implements the list from this checkout.
+
+The one required fetch, `env -u CARGO_NET_OFFLINE RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo fetch --locked --manifest-path elastos/Cargo.toml`, passed (exit 0, 0.45 seconds). `elastos/Cargo.lock` names `wasmtime` version `36.0.20`. `git status --short -- elastos capsules scripts examples` was empty before and after the fetch. `build_probe` and `offline_build` keep their offline settings.
+
+Read-only contract evidence: `docs/AGENT_ARCHITECTURE.md`, Request flow step 8, says: "If additional consent is required, Runtime records a pending request and Home or Inbox presents it." It then says: "The UI does not mint the grant itself." Step 9 assigns dispatch of an approved operation and its audit record to Runtime and the owning provider. This list supplies the presentation step only.
+
+Read-only route evidence: `elastos/crates/elastos-server/src/api/handlers/capability.rs::list_pending` returns the sole body key `requests`. `PendingRequestOutput` names exactly `request_id`, `session_id`, `resource`, `action`, `reason`, `requested_at` and `expires_at`. The handler uses `pending.into_iter().map(|r| PendingRequestOutput { ... }).collect()` without a sort. The lab list uses the task's required session/request ordering and keeps the Runtime handler unchanged.
+
+The existing timeout is `REQUEST_TIMEOUT_SECS = 300` in `standin-runtime/mod.rs`; Runtime names the same timeout `DEFAULT_REQUEST_TIMEOUT_SECS = 300` in `elastos/crates/elastos-runtime/src/capability/pending.rs`. `set_instant` calls `expire_due`, whose age is `instant.saturating_sub(request.requested_at)`. The new expiry helper will reuse the existing stand-in constant.
+
+### Journey and hand-run falsifiers
+
+The baseline named test passed: exit 0, 1 passed, 0 failed, 7.97 seconds. It starts neither an operator nor a probe build. Each plant below runs alone, compiles, fails the named test on its assertion, and is restored before a passing run and before the next plant. Every run uses `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`, under the shared heavy-build lease. Exact command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_shell_lists_every_pending_request -- --exact`. Exact old and new bytes below use JSON string encoding to show whitespace and newline bytes. These are hand-run plants; `falsifiers.json` keeps its existing bytes.
+
+- F-pending-stub: CAUGHT. Old: `"    pub fn get_capability_pending(&self, caller: Caller<'_>) -> Result<Value, (u16, String)> {\n"`. New: `"    pub fn get_capability_pending(&self, caller: Caller<'_>) -> Result<Value, (u16, String)> {\n        return Ok(json!({ \"requests\": [] }));\n"`. Assertion: thread 'standin_runtime::tests::standin_shell_lists_every_pending_request' (337409142) panicked at src/../standin-runtime/mod.rs:8012:9: assertion `left == right` failed: the stand-in did the work: component-1 is refused before reading the list. Plant exit 101, 1.88 seconds; restored exit 0, 1.5 seconds.
+- F-pending-granted: CAUGHT. Old: `"            .filter(|request| request.status == RequestStatus::Pending)"`. New: `"            .filter(|request| matches!(request.status, RequestStatus::Pending | RequestStatus::Granted))"`. Assertion: thread 'standin_runtime::tests::standin_shell_lists_every_pending_request' (337410991) panicked at src/../standin-runtime/mod.rs:8135:9: assertion `left == right` failed: the stand-in did the work: a granted record leaves the pending list. Plant exit 101, 1.58 seconds; restored exit 0, 1.59 seconds.
+- F-pending-denied: CAUGHT. Old: `"            .filter(|request| request.status == RequestStatus::Pending)"`. New: `"            .filter(|request| matches!(request.status, RequestStatus::Pending | RequestStatus::Denied))"`. Assertion: thread 'standin_runtime::tests::standin_shell_lists_every_pending_request' (337413352) panicked at src/../standin-runtime/mod.rs:8112:9: assertion `left == right` failed: the stand-in did the work: a denied record leaves the pending list. Plant exit 101, 1.49 seconds; restored exit 0, 1.21 seconds.
+- F-pending-store-order: CAUGHT. Old: `"        listed.sort_by(|left, right| {\n            left.session_id\n                .cmp(&right.session_id)\n                .then_with(|| left.request_id.cmp(&right.request_id))\n        });\n"`. New: `""`. Assertion: thread 'standin_runtime::tests::standin_shell_lists_every_pending_request' (337415615) panicked at src/../standin-runtime/mod.rs:8039:9: assertion `left == right` failed: the stand-in did the work: pending requests sort by session then request id. Plant exit 101, 2.43 seconds; restored exit 0, 1.24 seconds.
+- F-pending-session-only: CAUGHT. Old: `"        listed.sort_by(|left, right| {\n            left.session_id\n                .cmp(&right.session_id)\n                .then_with(|| left.request_id.cmp(&right.request_id))\n        });\n"`. New: `"        listed.sort_by(|left, right| left.session_id.cmp(&right.session_id));\n"`. Assertion: thread 'standin_runtime::tests::standin_shell_lists_every_pending_request' (337416858) panicked at src/../standin-runtime/mod.rs:8040:9: assertion `left == right` failed: the stand-in did the work: pending requests sort by session then request id. Plant exit 101, 1.77 seconds; restored exit 0, 1.28 seconds.
+- F-pending-clock: CAUGHT. Old: `"                    \"expires_at\": pending_expires_at(request.requested_at),"`. New: `"                    \"expires_at\": request.requested_at,"`. Assertion: thread 'standin_runtime::tests::standin_shell_lists_every_pending_request' (337418542) panicked at src/../standin-runtime/mod.rs:8083:13: assertion `left == right` failed: the stand-in did the work: each pending entry carries its own request fields and expiry. Plant exit 101, 1.82 seconds; restored exit 0, 1.52 seconds.
+- F-pending-wrap: CAUGHT. Old: `"    requested_at.saturating_add(REQUEST_TIMEOUT_SECS)"`. New: `"    requested_at.wrapping_add(REQUEST_TIMEOUT_SECS)"`. Assertion: thread 'standin_runtime::tests::standin_shell_lists_every_pending_request' (337420092) panicked at src/../standin-runtime/mod.rs:8186:9: assertion `left == right` failed: the stand-in saturates the pending expiry at u64::MAX. Plant exit 101, 1.53 seconds; restored exit 0, 1.45 seconds.
+- F-pending-copy: CAUGHT. Old: `"            .map(|request| {\n                json!({\n                    \"request_id\": request.request_id,\n                    \"session_id\": request.session_id,\n                    \"resource\": request.resource,\n                    \"action\": request.action,\n                    \"reason\": request.reason,\n                    \"requested_at\": request.requested_at,\n                    \"expires_at\": pending_expires_at(request.requested_at),\n                })\n            })"`. New: `"            .map(|request| request_entry(request))"`. Assertion: thread 'standin_runtime::tests::standin_shell_lists_every_pending_request' (337421808) panicked at src/../standin-runtime/mod.rs:8068:13: assertion `left == right` failed: the stand-in did the work: a pending entry has exactly the seven presentation keys. Plant exit 101, 1.51 seconds; restored exit 0, 1.29 seconds.
+
+`cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, 0.22 seconds. Format check passed.
+
+### Implementation and source checks
+
+`StandIn::get_capability_pending` is the sole new public method. It calls `require_shell` before reading the existing request store, filters `Pending`, sorts once by `session_id` then `request_id`, and emits the seven presentation fields. The only new private production function, `pending_expires_at`, contains exactly `requested_at.saturating_add(REQUEST_TIMEOUT_SECS)`. The list takes `&self` and calls no writer. The named journey checks the two running instances, both client refusals, empty and populated shell reads, exact fields and ordering, shell denial, shell grant, expiry at 300, a later request's own timestamp, and saturation at `u64::MAX`. Each shell read compares the session records, live grants and instance list before and after.
+
+All eight plants are restored. Removing only the new method, expiry helper and named test from the candidate produces the comparison base's complete stand-in source byte for byte. This proves that the existing method bodies, stores, caps, grant path, hostcall, census and timeout keep their bytes. The helper text contains one `saturating_add` and none of the forbidden alternate additions or branches. The pending method has one sort, with the shell check before the store read, and calls none of the excluded readers or writers. All protected path diffs are empty, including the lane manifests, locks, falsifier list and tests owned by other tasks.
+
+`standin-runtime/README.md` adds one paragraph immediately before `## Callers`; its grant paragraph, plan-approval section and all other bytes match the base. `RUNBOOK.md` adds one paragraph after the last stand-in paragraph and preserves every other byte, including the existing 145 and 146 paragraphs. A passing stand-in list supplies presentation evidence only; Runtime A15 acceptance stays with its owner.
+
+### Principles check
+
+| Question | Answer | Evidence |
+| --- | --- | --- |
+| 1. Does anything new use a name or URL where a code/content hash belongs? | No | `standin-runtime/mod.rs:908` reads existing request resources for presentation. The signed bundle and CID launch path keep their bytes; `:7948` reuses the existing two-instance launch. |
+| 2. Does the capsule, Home or UI gain ungranted access or authority? | No | `standin-runtime/mod.rs:909` applies the shell privilege check before the store read. The list returns presentation fields only at `:924`. |
+| 3. Is there a second path or copy of one operation's rule? | No | `standin-runtime/mod.rs:910` reads the existing request store, `:915` sorts once, and `:2146` uses the existing timeout constant in one expiry function. |
+| 4. Does the Runtime core grow? | No | The new method at `standin-runtime/mod.rs:908` belongs to the lab. `git diff -- elastos capsules scripts examples` is empty. |
+| 5. Does every new refusal deny by default with a clear reason? | Yes | `standin-runtime/mod.rs:909` reuses `require_shell` at `:2372`, which returns status 403 and `This endpoint requires shell privileges`; the journey checks both clients at `:8011` and `:8095`. |
+| 6. Does capsule logic stay inside and call down only through granted Bus calls? | Yes | `standin-runtime/mod.rs:908` adds a shell read only. Capsule, provider and Bus code keep their bytes, and grant use stays on the existing path. |
+| 7. Do a named test and caught falsifiers prove each new rule? | Yes | `standin-runtime/mod.rs:7948` is the journey; the eight exact plants above each compile, fail that test on an assertion, and pass after restoration. The saturation assertion is at `:8194`. |
+| 8. Do identity, admission and allowance remain separate decisions? | Yes | `standin-runtime/mod.rs:908` presents stored requests and grants nothing. The grant method at `:1121` and existing admission and ledger methods keep their bytes. |
+
+Basic repository checks passed: `git diff --check`; `node scripts/check-product-data.mjs` (42 capsules, 2 profiles, 28 method contracts); `node --test scripts/check-product-data.test.mjs` (99 passed); `(cd elastos && cargo fmt --all -- --check)`; and `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`.
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101, 332.26 seconds. test result: ok. 96 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.83s test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.76s test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.72s test result: FAILED. 62 passed; 1 failed; 12 ignored; 0 measured; 0 filtered out; finished in 290.38s
+
+### Allowed outer rerun
+
+The first full gate failed only `grant_refused_from_a_new_session` at `tests/effects.rs:902:14`. Its cleanup census reported a process leftover with three holders and paths ending only in `ca.key`, `device.key` and `tls.key`; API sockets, temp paths and pending records were empty. The existing journey and the new list test passed their assertions. Acceptance item 6 permits one full-command rerun for this exact failure and path set. The source and census remain unchanged. The failed fixture Home stays retained under its existing owner; its data was left unread.
+
+Permitted rerun of `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, 264.01 seconds. test result: ok. 96 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 31.54s test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.70s test result: ok. 63 passed; 0 failed; 12 ignored; 0 measured; 0 filtered out; finished in 208.29s test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.79s test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.42s test result: ok. 10 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 14.21s test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Final restored proof: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, 0.25 seconds; passed.
+
+Final restored proof: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_shell_lists_every_pending_request -- --exact`: exit 0, 0.16 seconds; passed.
+
+### Final result and handoff
+
+The full locked suite passed on the single permitted outer rerun: **250 passed, 0 failed, 14 ignored**, in **264.01 seconds**. The first run took **332.26 seconds** and failed only the exact allowed process-leftover case recorded above. Both runs stayed inside 600 seconds. Existing blocked rows retain their ignores. Final restored formatting and the exact pending-list test both pass; the basic repository gate also passes.
+
+HEAD remains the recorded comparison base. The required ancestor check returns 0 and both excluded checks return 1. The final diff contains only `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this log. Every protected path has an empty diff. Removing the three new source blocks still reproduces the base byte for byte, so all existing methods, fields and stores keep their bytes. The restored source SHA-256 is `3aba972e5cf17139370a87e8ec452fbc50a253acdf99f49d339fa60bfe82885b`. Every plant is restored.
+
+The final branch/worktree inventory identifies this branch as unique task work in a dirty worktree, preserved for review. The branch has no upstream. Against the existing fetched integration ref, HEAD has 4 remote-only and 4 local-only commits; this is a fetched-ref comparison, with network refresh outside this task. This task changed no Git refs, index contents or HEAD. The fetched integration ref advanced during the gates; the final 4/4 comparison above records that divergence for the supervisor. The private lifecycle inventory records the current branch, tree and dirty state, the active supervisor gate outputs and the retained first-run fixture. Earlier retained fixtures and other worktrees remain under their existing owners; their data was left unread. The supervisor owns fixture retention and build-output cleanup after its active gates and reviews finish.
+
+Candidate: local task diff against `b25662e1549d51ea1ecd181140821f17cc7f9e2d`. Author checks: format, full locked suite, exact named test, eight caught and restored plants, source preservation and basic repository checks pass. Independent reviews: pending with the supervisor. Installed acceptance: this is the lab stand-in list; a PASS gives the Runtime no A15 credit. Browser, installed-provider and public-live checks belong to the corresponding product changes and were skipped for this lab-only read. Remaining gate: supervisor checks and independent reviews. Next owner: lane supervisor.
+
+- 147: the shell lists every session's pending requests from the existing store, and the one expiry helper saturates at `u64::MAX`, with a full journey and eight caught hand-run plants.
+
+## 148
+
+Comparison base before editing: supplied checkout HEAD `518a8409129e3ada9047417af29198f505b18519`, tree `5f549534a5c5a47393aea6e4e649b5dad4f2b5de`. `git status --short --branch` showed `spark/cx-agent-conformance/148-receipt-proves-git-dirty-state` with zero dirty paths. This checkout is the comparison base; the test needs its current code and adds no history requirement. The parent checkout index, refs and configuration remain owned by the lane supervisor.
+
+Read `src/report.rs` (`GitIdentity::read`, `render_run`, `write_run`), the receipt tests and helpers, `ThrowawayHome::new`/`launch`/`finish`, the RUNBOOK receipt section, 018's handoff and the architecture's current implementation status. A fresh search found one Git reader and zero matching Git fixture helpers in this lane. The plan is one test with eight controlled Git states, each carried through the existing writer, followed by three separate compiling plants and the restored gates. Source changes stay in `tests/report.rs`, this LOG section and the existing RUNBOOK receipt section. The reader and schema keep their supplied bytes after plant restoration. The permitted repository has no humanizer skill; the handoff uses direct behavior and ownership statements.
+
+### Measured dirty-state proof
+
+The baseline exact test passed: exit 0, 1 passed, 0 failed, 2.61 seconds (test body 0.41 seconds). Every plant and restored run uses `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, with outputs in lane `target/host` and `target/host-build`, under the shared heavy-build lease. Exact command for every run below: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report versions_receipt_reads_git_dirty_state -- --exact`. Each plant is applied alone in `src/report.rs` and restored before its passing check and before the next plant. Old and new bytes use exact JSON string encoding. Every planted crate compiled and ran exactly one test: 0 passed, 1 failed at `tests/report.rs:517`, on `assert_eq!(identity.dirty, dirty)`. The always-clean and omitted-untracked plants returned `false` where the case expected `true`; always-dirty returned `true` where clean expected `false`. `falsifiers.json` keeps its supplied bytes.
+
+- F-a14-git-always-clean: CAUGHT. Old: `"dirty: !status.stdout.is_empty()"`. New: `"dirty: false"`. Command above, exit 101, 2.31 seconds. Failed assertion: `tracked-edit: Git dirty state`.
+  Restored command: exit 0, 1.39 seconds; 1 passed, 0 failed.
+- F-a14-git-always-dirty: CAUGHT. Old: `"dirty: !status.stdout.is_empty()"`. New: `"dirty: true"`. Command above, exit 101, 1.36 seconds. Failed assertion: `clean: Git dirty state`.
+  Restored command: exit 0, 1.56 seconds; 1 passed, 0 failed.
+- F-a14-git-omit-untracked: CAUGHT. Old: `"--untracked-files=all"`. New: `"--untracked-files=no"`. Command above, exit 101, 1.62 seconds. Failed assertion: `untracked-file: Git dirty state`.
+  Restored command: exit 0, 1.38 seconds; 1 passed, 0 failed.
+
+Restored gate: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`, exit 0, 0.39 seconds.
+
+Restored gate: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report`, exit 0, 1.19 seconds.
+
+Full locked lane gate: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`, exit 101, 3.71 seconds, under the shared lease and the same offline two-thread environment. Available bytes before the gate: 44970082304; estimated new gate outputs up to 8 GiB plus the required 2 GiB reserve fit.
+`test result: ok. 96 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s`
+`test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s`
+
+The sandboxed full gate stopped in the existing `earlier_run_check_refuses_live_owner`: `could not inspect child process group` at `src/bin/report.rs:80`. This is infrastructure evidence; that attempt gives zero full-suite credit. With Mac process visibility enabled, the isolated repeat `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --bin report earlier_run_check_refuses_live_owner -- --exact` exited 0 in 1.19 seconds. The cleanup implementation stays unchanged.
+
+### Scope and principles
+
+`tests/report.rs::versions_receipt_reads_git_dirty_state` creates sibling `repository/` and `receipts/` directories under one fresh Home. Fixture Git uses explicit `-C`, a ten-second bound and the existing cleared-environment launcher. Local Git configuration supplies the test identity and disables signing, hooks and external ignore files. Full commit IDs come from the two actual fixture commits. The clean, tracked-edit, staged-edit, second-commit, tracked-delete, tracked-restore, untracked-file and untracked-remove expectations come from the controlled actions. Each case checks both the reader and the serialized receipt, the complete identity status, the passing report and the A14 table row. Successful completion calls `home.finish()`; assertion failures follow the existing root-retention rule.
+
+| Principles question | Answer | Evidence |
+| --- | --- | --- |
+| 1. Anything new uses a name or URL where a hash belongs? | No | `tests/report.rs:508` and `:552` obtain full Git object IDs; `:516` and `:527` compare those IDs with the reader and receipt. |
+| 2. Capsule, Home or UI gains ambient authority? | No | `tests/report.rs:472` and `:481` use the existing isolated Home and launcher for local fixture Git; product authority code stays with its owners. |
+| 3. A second path or copy of an operation rule? | No | `tests/report.rs:514` and `:519` call the existing reader and writer; controlled actions supply expected booleans without another status parser. |
+| 4. Runtime core grows? | No | `tests/report.rs:471` adds a lab reporting test; the final source diff is limited to this test, the RUNBOOK receipt paragraph and this LOG section. |
+| 5. New refusals deny by default with a clear reason? | Yes | `tests/report.rs:486`, `:487`, `:515` and `:520` stop on setup or reporting failure with case context; existing identity refusal checks remain at `:676` onward. |
+| 6. Capsules stay self-contained and use granted Bus calls? | Yes | `tests/report.rs:510` uses local synthetic report inputs; this test adds zero capsule execution or Bus behavior. |
+| 7. Each new rule has a named test and caught falsifier? | Yes | `tests/report.rs:517`, exercised by all three plants above, fails on clean, tracked-edit or untracked-file as required. Every restored run passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | `RUNBOOK.md:231` scopes this to A14 reporting; `tests/report.rs:510` keeps native and probe identities synthetic, with live acceptance owned separately. |
+
+Basic repository checks also passed: `node scripts/check-product-data.mjs` (exit 0), `node --test scripts/check-product-data.test.mjs` (exit 0, 99 passed), `(cd elastos && cargo fmt --all -- --check)` (exit 0), and `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` (exit 0). These read-only gates leave the task's source scope unchanged.
+
+Full locked lane gate with Mac process visibility and local fixture sockets: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`, exit 0, 266.84 seconds. Same offline two-thread environment, shared heavy-build lease and 600-second bound. Free bytes before this run: 44958089216.
+`test result: ok. 96 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s`
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.88s`
+`test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 30.30s`
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s`
+`test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.66s`
+`test result: ok. 63 passed; 0 failed; 12 ignored; 0 measured; 0 filtered out; finished in 210.84s`
+`test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.71s`
+`test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.94s`
+`test result: ok. 10 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 14.34s`
+`test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s`
+`test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s`
+`test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s`
+`test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s`
+`test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s`
+`test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s`
+`test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s`
+
+### Cleanup and handoff
+
+The new test's baseline, all three restored exact runs, the complete report suite (24 passed) and the full locked lane gate passed. The full gate totals are 251 passed, 0 failed and 14 existing blocked/ignored tests. The sandbox infrastructure attempt remains recorded separately above. Installed capsule and Runtime acceptance stay with their existing owners; these author checks provide A14 reporting evidence. The supervisor owns the fresh independent review.
+
+Successful runs reached `home.finish()` and removed the fresh Git fixture, its receipts and captures. The three planted failures retained their fixture roots, and the sandbox infrastructure attempt retained one additional root, under the existing RUNBOOK review-and-remove rule. A process-visible `lsof -nP -Fpn +D <root>` check of each of those four roots returned exit 1 with empty stdout/stderr: zero open handles. Their exact local paths, sizes, task ownership and cleanup condition are in ignored `target/task-148-lifecycle.json`; retain them and the two small gate outputs through candidate review, then remove them. Shared lane build outputs remain supervisor-owned. The shared heavy-build lease is released.
+
+The final branch/worktree inventory keeps HEAD `518a8409129e3ada9047417af29198f505b18519` and tree `5f549534a5c5a47393aea6e4e649b5dad4f2b5de` fixed. The supplied task branch/worktree holds unique uncommitted task work for review; its staged-path list is empty. Its only dirty source paths are `lab/agent-conformance/tests/report.rs`, `lab/agent-conformance/RUNBOOK.md` and `lab/agent-conformance/LOG.md`. `src/report.rs`, the receipt schema, existing tests, manifests, locks, `falsifiers.json`, harness, census and stand-in retain their supplied bytes. The supplied branch upstream is unset. The shared cached lane ref advanced during the gate; at handoff `spike/spike/agent-host` is `3c5a1f2115a9b1900fdb5c97076d7b0d7aa2a8b6`, and this task branch is 6 commits ahead / 3 behind it. This offline task fetched and published nothing; the supplied task HEAD stays fixed. Other refs and worktrees keep their existing owners and roles.
+
+- 148: prove all eight real Git dirty-state transitions in the existing receipt path, with three caught compiling plants and a passing restored full lane gate.
+
+Final `git diff --check` passed (exit 0). The three source/document paths are the complete final diff.
+
+## 149
+
+Before editing: supplied HEAD `67c58415575fee35e51945c8db110568e1ede56c`, tree `a3114e569d77187554810ffdc9cedcd391df4b02`. `git status --short --branch` showed `spark/cx-agent-conformance/149-managed-stop-escalation-and-group-drain` with zero dirty paths, including zero unrelated dirty paths. This task uses that checkout and preserves its refs, index and history.
+
+Read the architecture's Harness conformance section, the managed-child implementation and tests, 013's handoff and F-managed-stop result, the three existing falsifier records and the RUNBOOK managed-child section. A lane search found the existing `child_group` launcher and the owned-group cleanup pattern in `parallel_collection_refuses_live_descendants`. Plan: extend that fixture for two ready signal modes, record stop observations before emergency cleanup and assertions, run four separate compiling plants with exact restoration, then run the restored harness and full lane gates. Final edits belong to the existing test file, managed-child RUNBOOK section and this LOG section. The repository has no humanizer skill; this handoff uses direct behavior and ownership statements.
+
+Initial lease checks found the shared heavy-build lease busy and started zero builds. The existing target cache is reused; the initial space check showed 32,430,924 KiB available, which fits an estimated 8 GiB of new build outputs plus the required 2 GiB reserve. Every Cargo test below uses `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane-local `target/host` and `target/host-build`, the shared exclusive lease and a 600-second command bound. Exact-test observations use `RUST_TEST_NOCAPTURE=1`; full-suite captures keep the normal test capture policy.
+
+Basic checks passed: `git diff --check` (exit 0), `node scripts/check-product-data.mjs` (exit 0), `node --test scripts/check-product-data.test.mjs` (exit 0, 99 passed), `(cd elastos && cargo fmt --all -- --check)` (exit 0), `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` (exit 0), and `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` (exit 0). Product source remains with its existing owners; these checks are read-only.
+
+Baseline exact command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness managed_stop_escalates_and_keeps_root -- --exact`, exit 0, 12.46 seconds.
+`stop observed: result=Err("managed child or its group exceeded the 10 second stop bound") elapsed=10.051759417s leader_alive=Ok(false) group_alive=Ok(false)`
+`fixture cleanup: pgid=73681 leader reaped and group empty`
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 10.16s`
+
+Baseline exact command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness managed_stop_waits_for_descendants -- --exact`, exit 0, 10.70 seconds.
+`stop observed: result=Err("managed child or its group exceeded the 10 second stop bound") elapsed=10.075322708s leader_alive=Ok(false) group_alive=Ok(false)`
+`fixture cleanup: pgid=74188 leader reaped and group empty`
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 10.46s`
+
+### F-stop-skip-kill — CAUGHT
+
+Only `RunningChild::stop` in `src/harness.rs` was planted. Exact old bytes (JSON): `"            self.kill_group()?;\n"`. Exact new bytes (JSON): `""`.
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness managed_stop_escalates_and_keeps_root -- --exact`, exit 101, 12.42 seconds. Expected failed assertion: `stop must reap the leader before emergency cleanup`.
+`stop observed: result=Err("managed child or its group exceeded the 10 second stop bound") elapsed=10.004110875s leader_alive=Ok(true) group_alive=Ok(true)`
+`fixture cleanup: pgid=77319 leader reaped and group empty`
+``assertion `left == right` failed: stop must reap the leader before emergency cleanup``
+`  left: Ok(true)`
+` right: Ok(false)`
+`test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 10.16s`
+
+The original source bytes were restored immediately after this command.
+
+Restored same command: exit 0, 11.18 seconds. `git diff --exit-code -- lab/agent-conformance/src/harness.rs` passed with empty output.
+`stop observed: result=Err("managed child or its group exceeded the 10 second stop bound") elapsed=10.047528583s leader_alive=Ok(false) group_alive=Ok(false)`
+`fixture cleanup: pgid=77966 leader reaped and group empty`
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 10.14s`
+
+### F-stop-forget-root — CAUGHT
+
+Only `RunningChild::stop` in `src/harness.rs` was planted. Exact old bytes (JSON): `"            self.home.keep.set(true);\n"`. Exact new bytes (JSON): `""`.
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness managed_stop_escalates_and_keeps_root -- --exact`, exit 101, 12.32 seconds. Expected failed assertion: `failed stop must retain its Home`.
+`stop observed: result=Err("managed child or its group exceeded the 10 second stop bound") elapsed=10.068735792s leader_alive=Ok(false) group_alive=Ok(false)`
+`fixture cleanup: pgid=78638 leader reaped and group empty`
+``assertion `left == right` failed: failed stop must retain its Home``
+`  left: Ok(())`
+` right: Err("keep the root after an unstopped child or failed stop")`
+`test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 10.16s`
+
+The original source bytes were restored immediately after this command.
+
+Restored same command: exit 0, 11.85 seconds. `git diff --exit-code -- lab/agent-conformance/src/harness.rs` passed with empty output.
+`stop observed: result=Err("managed child or its group exceeded the 10 second stop bound") elapsed=10.049789917s leader_alive=Ok(false) group_alive=Ok(false)`
+`fixture cleanup: pgid=79256 leader reaped and group empty`
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 10.14s`
+
+### F-stop-leader-only — CAUGHT
+
+Only `RunningChild::stop_within_bound` in `src/harness.rs` was planted. Exact old bytes (JSON): `"            if !self.is_alive()? && !self.home.group_is_alive(self.pgid())? {\n"`. Exact new bytes (JSON): `"            if !self.is_alive()? {\n"`.
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness managed_stop_waits_for_descendants -- --exact`, exit 101, 2.43 seconds. Expected failed assertion: `stop must refuse the undrained group at its bound`.
+`stop observed: result=Ok(()) elapsed=12.86475ms leader_alive=Ok(false) group_alive=Ok(true)`
+`fixture cleanup: pgid=80465 leader reaped and group empty`
+``assertion `left == right` failed: stop must refuse the undrained group at its bound``
+`  left: Ok(())`
+` right: Err("managed child or its group exceeded the 10 second stop bound")`
+`test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.14s`
+
+The original source bytes were restored immediately after this command.
+
+Restored same command: exit 0, 11.28 seconds. `git diff --exit-code -- lab/agent-conformance/src/harness.rs` passed with empty output.
+`stop observed: result=Err("managed child or its group exceeded the 10 second stop bound") elapsed=10.074912208s leader_alive=Ok(false) group_alive=Ok(false)`
+`fixture cleanup: pgid=80540 leader reaped and group empty`
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 10.20s`
+
+### F-stop-short-bound — CAUGHT
+
+Only `RunningChild::stop_within_bound` in `src/harness.rs` was planted. Exact old bytes (JSON): `"        while started.elapsed() < Duration::from_secs(10) {\n"`. Exact new bytes (JSON): `"        while started.elapsed() < Duration::from_secs(0) {\n"`.
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness managed_stop_escalates_and_keeps_root -- --exact`, exit 101, 2.96 seconds. Expected failed assertion: `stop must wait at least ten seconds`.
+`stop observed: result=Err("managed child or its group exceeded the 10 second stop bound") elapsed=49.790792ms leader_alive=Ok(false) group_alive=Ok(false)`
+`fixture cleanup: pgid=81187 leader reaped and group empty`
+`test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.14s`
+
+The original source bytes were restored immediately after this command.
+
+Restored same command: exit 0, 11.17 seconds. `git diff --exit-code -- lab/agent-conformance/src/harness.rs` passed with empty output.
+`stop observed: result=Err("managed child or its group exceeded the 10 second stop bound") elapsed=10.072876917s leader_alive=Ok(false) group_alive=Ok(false)`
+`fixture cleanup: pgid=81328 leader reaped and group empty`
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 10.16s`
+
+Restored gate `restored-format`: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`, exit 0, 0.38 seconds; available bytes 33161523200.
+
+Restored gate `restored-harness`: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness`, exit 0, 12.07 seconds; available bytes 33161482240.
+`test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.87s`
+
+
+### Scope and principles
+
+`child_group` keeps the existing graceful shell and both callers, and adds the two signal modes through the same `home.start` call. Each new descendant sleeps for 120 seconds. Signal handlers precede the readiness markers; the two-second poll accepts the recorded leader and descendant only when both belong to the managed group. An incomplete marker is retried within that same bound. `managed_stop_times_out` shares the observations and assertions between the two named tests. It records all four stop observations before emergency cleanup, and the cleanup checks drain before any behavior assertion. Setup failures use `fixture setup failed`; cleanup failures use `fixture cleanup failed` and give zero caught credit.
+
+All four planted crates compiled and each command ran exactly its one named test. The short-bound assertion failed with `stop must wait at least ten seconds: 49.790792ms`. The skip-kill and leader-only runs recorded a live group before emergency cleanup, and then proved that group empty before failing their saved behavior assertion. The forget-root plant drained its group but returned `Ok(())` from `home.finish()`, which caught loss of retention. Every restored exact run returned the timeout reason in 10.047–10.075 seconds, with the leader reaped and group empty before test cleanup. Passing runs proved the retained-root refusal and root existence, then removed that root. This is harness-only physical-cleanup evidence for M1 A12; the architecture's cancellation, grant-settlement and installed Runtime journeys keep their current owners.
+
+| Principles question | Answer | Evidence |
+| --- | --- | --- |
+| 1. Anything new uses a name or URL where a hash belongs? | No | `tests/harness.rs:160` starts the prescribed inert shell fixture; capsule and content identity paths keep their supplied bytes. |
+| 2. Capsule, Home or UI gains ambient authority? | No | `tests/harness.rs:242` owns a fresh throwaway Home; `:160` and `:257` use its existing guarded launch APIs. |
+| 3. A second path or copy of an operation rule? | No | `tests/harness.rs:147` extends the one fixture launcher; `:317` and `:322` share the same stop-assertion helper. |
+| 4. Runtime core grows? | No | `RUNBOOK.md:138` scopes the new evidence to the lab harness; the final source change is in `tests/harness.rs`. |
+| 5. New refusals deny by default with a clear reason? | Yes | `tests/harness.rs:205` names a setup refusal; `:281` and `:305` require the exact timeout and retention reasons. |
+| 6. Capsules stay self-contained and use granted Bus calls? | Yes | `tests/harness.rs:153` and `:156` add only inert shell/sleep fixtures; capsule logic and Bus contracts keep their supplied bytes. |
+| 7. Each new rule has a named test and caught falsifier? | Yes | `tests/harness.rs:316` and `:321` catch all four compiling plants above at the stop-result, elapsed-time, leader-state or retention assertions. |
+| 8. Identity, admission and allowance stay separate? | Yes | `RUNBOOK.md:138` limits this to physical cleanup, and `:144` keeps admission separate from a resource grant. |
+
+Restored gate `full-locked`: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`, exit 0, 284.34 seconds; available bytes 33158115328.
+`test result: ok. 96 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s`
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.96s`
+`test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.02s`
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s`
+`test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.51s`
+`test result: ok. 63 passed; 0 failed; 12 ignored; 0 measured; 0 filtered out; finished in 214.11s`
+`test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.83s`
+`test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.97s`
+`test result: ok. 10 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 14.54s`
+`test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s`
+`test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s`
+`test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s`
+`test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s`
+`test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s`
+`test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s`
+`test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s`
+
+
+### Cleanup and handoff
+
+The restored harness suite passed all 11 tests, including the existing graceful-stop and dropped-handle rows. The full locked lane gate passed 253 tests, with zero failures and 14 existing ignored rows, in 284.34 seconds. All ten exact baseline, planted and restored fixture runs recorded their owned groups empty after cleanup. All four plants failed at the specified behavior assertions; setup and cleanup completed in each run. The implementation and existing falsifier records keep their supplied bytes after restoration; their named tests continue to pass.
+
+Passing new-test roots were removed after retention and empty-group assertions passed. Three planted failures keep their roots for review. The forget-root plant removed its root through the deliberately broken `finish()` path, and the retention assertion caught that removal. The full lane gate left zero new retained roots. The private, ignored `target/task-149-lifecycle.json` records the three retained paths, sizes, group-cleanup observations, branch/worktree identity and gate-output ownership. The supervisor keeps these roots and small outputs through candidate review, then removes those exact paths. Existing lane build caches stay under the supervisor's cache lifecycle. The shared heavy-build lease is released. Earlier Homes and their processes remain with their owners; this task's emergency signals target only each newly started fixture group.
+
+Final inventory: HEAD `67c58415575fee35e51945c8db110568e1ede56c` and committed tree `a3114e569d77187554810ffdc9cedcd391df4b02` are unchanged. The supplied task branch and worktree hold unique uncommitted work for review. The index path list is empty. The final dirty source paths are exactly `lab/agent-conformance/tests/harness.rs`, `lab/agent-conformance/RUNBOOK.md` and `lab/agent-conformance/LOG.md`; unrelated dirty paths remain empty. `git diff --exit-code -- lab/agent-conformance/src/harness.rs` passed with empty output. The branch upstream is unset. At the final local observation, cached `spike/spike/agent-host` is `321cc698a21543c7cfe2895fecf9c2ef99e2b33c`: this task HEAD is 8 commits ahead and 9 behind that ref. This comparison uses the shared cached ref; remote operations stay with the supervisor. Existing refs and other worktrees keep their owners and state.
+
+Candidate: local task diff against the supplied HEAD above. Exercised checks: both exact tests, all four caught plants and restored exact tests, the restored harness suite, full locked lane gate, format and basic repository checks pass. Independent reviews: pending with the lane supervisor. Installed release evidence: skipped because this change proves the lab harness only; capsule cancellation, grant settlement, Browser and installed Runtime acceptance keep their current product owners. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.
+
+- 149: extend `child_group` with ready SIGTERM-resistant fixtures and prove managed-stop escalation, descendant drain, stop bounds and retained Homes with two named tests and four caught hand-run plants.
+
+Final `git diff --check` and lane `cargo fmt -- --check` passed (exit 0). The three permitted paths are the complete final source/document diff.
+
+
+## 150
+
+Before editing: supplied HEAD `6963609128611b59b008bd806ef7b0a3fa9a3d84`, tree `bda701a44e07b94f7fc0c704614da9b1260f9b4a`. The supplied branch is `spark/cx-agent-conformance/150-native-launch-rechecks-recorded-hash`. `git status --short --branch` showed zero dirty paths, including zero unrelated dirty paths. This HEAD is the comparison base; this task preserves refs, index and history.
+
+Read the task, architecture Current implementation status, 009/011/014 handoffs, native builders, identity observation and report receipt contracts, launch ownership and shell fixtures. A repository-wide Rust caller search found cached native paths only inside this lane. Plan: make the raw path private, add one per-use check through the existing hash helper, migrate all seven caller files, and exercise original/changed/restored/missing shell bytes through bounded, managed and parallel harness APIs. Then run the compiling skip-compare plant, restore the comparison, run all required gates, and record same-run receipt and cleanup. Final edits stay in the authorized runtime, caller, README, RUNBOOK and task LOG sections. The repository has no humanizer skill; this handoff uses direct behavior and ownership statements.
+
+Initial free space: 31,964,152 KiB. Reuse the lane target cache; an estimated 12 GiB of generated files plus the required 2 GiB reserve fit. Builds will use the existing shared heavy-build lease, offline Cargo, lane-local targets, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, and a 600-second command bound.
+
+
+Migrated call sites: `tests/runtime.rs::{run_probe,run_by_synthetic_cid,serve_refuses_provider_whose_bytes_differ_from_its_hash}` check immediately before bounded launch; `tests/common/operator.rs::Operator::start` checks before managed start. `tests/effects.rs::{assert_refusal_as,exercise_read}`, `tests/common/parallel.rs::exercise`, `tests/common/host_key.rs::exercise` and `tests/agent_host.rs::real_agent_host_gets_no_ungranted_authority` check each Runtime `Launch` entry during construction. Existing path inspections in `tests/runtime.rs` and the provider read in `tests/common/mod.rs::write_operator_home` use the same method. Errors preserve their cause through the existing Result or assertion path. The installed copy keeps its existing checksum verification. A new search found raw path access only in the private identity implementation.
+
+The first exact-test command compiled, then exited 101 in 3.95 seconds because sandbox process-group inspection was unavailable (`Managed original: launch`, `could not inspect child process group`). This is infrastructure evidence, with zero identity/falsifier credit. With Mac process visibility, the same command passed: exit 0, one named test passed, 1.40 seconds. `git diff --check` and the lane format check passed. The fixture uses fixed known shell bytes and an independent `sha2` digest, emits zero native identity observations, builds neither Runtime nor probe, and starts zero operator or network services.
+
+F-native-identity-skip-compare changes only the inequality refusal condition, preserving the hash read and every fixture. Exact edit bytes as JSON strings:
+
+- Old: `"if sha256_file(&self.binary)? != self.sha256 {"`
+- New: `"if sha256_file(&self.binary)? != self.sha256 && false {"`
+
+
+Exact command for the baseline, plant and restored proof: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib runtime::tests::native_identity_refuses_changed_or_missing_bytes -- --exact`. F-native-identity-skip-compare: exit 101 in 2.62 seconds; compilation succeeded and exactly one named test failed at `src/runtime.rs:248`, `Bounded changed: refused bytes reached the marker`. The changed script actually ran after a successful original-byte launch. This is a behavior failure, with zero compilation, setup or cleanup failure. The original comparison was restored in `finally`; the identical command then exited 0 in 2.17 seconds, one named test passed. `falsifiers.json` keeps its supplied bytes.
+
+The fixture checks each of the original, changed, restored and missing states with one fixed identity per launch form. Parallel attempts construct two checked entries per batch. Managed attempts wait up to two seconds for a complete readiness marker, then stop and drain the owned group before behavior assertions. The parallel collector drains its groups; the bounded script has no descendants. Successful fixtures call `home.finish()` only after every state passes. Ordinary failures retain the fixture root through the existing rule. Synthetic digests stay out of live observations.
+
+
+Restored candidate checks use offline Cargo, two test threads, incremental compilation disabled, lane `target/host` and `target/host-build`, the existing exclusive heavy-build lease, Mac process visibility and isolated loopback fixtures. Available bytes before the sequence: 32,532,586,496, above the 12 GiB output estimate plus 2 GiB reserve. Each command has a 600-second bound.
+
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime`: exit 0, 19.12 seconds; 10 passed, 0 failed, 2 blocked rows ignored.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --features agent-host --test agent_host --no-run`: exit 0, 1.35 seconds; feature-gated callers compile.
+- Basic repository gate: `git diff --check`, `node scripts/check-product-data.mjs`, `node --test scripts/check-product-data.test.mjs` (99 passed), `cargo fmt --all --manifest-path elastos/Cargo.toml -- --check`, `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`, and `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` all exited 0.
+
+Principles check (evidence paths below are relative to `lab/agent-conformance/`):
+
+| Question | Answer | Evidence |
+| --- | --- | --- |
+| 1. New code/content identity by name or URL instead of hash? | No | `src/runtime.rs:19` compares actual native SHA-256 with the recorded build identity; the private path is a locator. |
+| 2. Capsule, Home or UI gains ambient authority? | No | `tests/common/operator.rs:30` checks identity before the existing launch owner; the harness and grants retain their supplied code. |
+| 3. Second path or copy of a rule? | No | `src/runtime.rs:18` is the single per-use method; `tests/common/mod.rs:29` shares it for provider staging and the existing hash helper keeps its bytes. |
+| 4. Runtime core grows? | No | `src/runtime.rs:18` is lab-only; every edited file is inside this lane and the Runtime core keeps its supplied bytes. |
+| 5. New refusal denies with a clear reason? | Yes | `src/runtime.rs:19` propagates hash errors and `:20` returns the exact mismatch reason before returning a path. |
+| 6. Capsule keeps its logic and granted Bus calls? | Yes | `RUNBOOK.md:281` preserves the identity/admission/allowance boundary; probe and capsule code keep their supplied bytes. |
+| 7. Named test and caught falsifier prove the rule? | Yes | `src/runtime.rs:188` proves all four byte states through all three launch forms; F-native-identity-skip-compare compiled and failed `:248` on changed-script behavior. |
+| 8. Identity, admission and allowance stay separate? | Yes | `RUNBOOK.md:261` keeps installed acceptance with its journey; `src/runtime.rs:18` checks native identity only, while `RUNBOOK.md:281` states the separate decisions. |
+
+
+First full locked gate: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`, exit 101, 267.61 seconds. The 97 library tests, including the new identity proof, passed. The effects target had 62 passed, 1 failed and 12 ignored: existing `grants::tests::attach_refusal_names_the_scope` failed at `tests/common/grants.rs:2430`, `client missing token`, because it received `fixture client attach failed` instead of `fixture client attach returned no token`. This is the scripted loopback response test in an unchanged file; its assertion stays intact. Cargo stopped before later targets and the runner was held.
+
+The unchanged targeted recheck, `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::attach_refusal_names_the_scope -- --exact`, passed: exit 0, 0.37 seconds, 1 passed / 0 failed. One full-gate retry follows with the same candidate, environment, lease and 600-second bound. Available bytes before that sequence: 32,054,910,976. The first failure remains recorded; its transport timing is outside this task's source scope.
+
+
+The one unchanged full-gate retry passed: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`, exit 0, 287.00 seconds. Actual target summaries total 254 passed, 0 failed and 14 ignored. The effects target passed all 63 active tests, including the earlier attach-response failure; the library passed 97 tests, including the new identity proof; the Runtime target passed 10 active tests with its 2 blocked rows ignored. Existing blocked labels and assertions stay intact. The required `lab/agent-conformance/run.sh` follows under the same lease to produce its own same-run A14 receipt.
+
+
+`lab/agent-conformance/run.sh` passed: exit 0, 284.87 seconds. Its own same-run table reports `versions_receipt (A14) | PASS`. Local, uncommitted receipt: `target/run-table.6fv9nG/VERSIONS.json`, SHA-256 `37a74cc703aa8c74aec3d198c22641f02ea532637a16db7fc71d41964be30cc8`. It records source HEAD `6963609128611b59b008bd806ef7b0a3fa9a3d84`, `dirty: true`, `identity_status: complete`, `command_success: true` and the preserved `suite_outcome: BLOCKED`. Native fields: Runtime `f747a43701d19479948e8e770fa0931d8b89430d8e5a9f78b3fffdba25befb38`; localhost-provider `2ff07b37721c97631e2f84a31c7408c8edb45f80c8fddde7f7cef1e367d09ab4`. These are the runner's observed native identities; the shell fixtures emit none. Receipt fields and blocked acceptance rows keep their existing meaning. The Runtime workspace format check also passed from `elastos/` with `cargo fmt --all -- --check` (exit 0).
+
+Passing identity-fixture Homes reached `home.finish()` after all owned groups drained. The caught-plant root and the sandbox infrastructure root remain for review under the existing retention rule; they total 617 logical file bytes. For each, `lsof -nP -Fpn +D <root>` returned exit 1 with empty stdout/stderr, proving zero open handles. Their exact private paths, sizes, task ownership and cleanup conditions are in ignored `target/task-150-lifecycle.json`. The ledger also covers the small gate outputs, measured-result JSON, same-run receipt, supplied worktree and supervisor-owned caches. Keep proof through candidate review, then remove the exact proof paths and empty receipt directory. The shared build lease is released. This task leaves zero active fixture children; other test roots keep their existing owners.
+
+Final branch/worktree inventory: supplied HEAD and tree remain `6963609128611b59b008bd806ef7b0a3fa9a3d84` / `bda701a44e07b94f7fc0c704614da9b1260f9b4a`. The supplied task branch/worktree holds unique uncommitted task work for review. Its eleven dirty paths are exactly `src/runtime.rs`, the seven migrated caller files, README, RUNBOOK and LOG, all inside this lane; the index has zero staged paths. The supplied upstream is unset. Against the observed cached `spike/spike/agent-host` at `321cc698a21543c7cfe2895fecf9c2ef99e2b33c`, this task is 10 commits ahead / 0 behind. This offline task fetched and published nothing and moved zero refs. The complete branch/worktree inventory ran; other refs and worktrees retain their existing owners and roles. The supplied LOG prefix and all excluded launcher, identity, receipt, census, blocked-row, runner, falsifier, manifest and lock files retain their exact bytes.
+
+Candidate: the local task diff against the supplied comparison base above. Exercised checks: exact identity test, caught compiling plant, restored exact test, Runtime regression, feature-gated compile, full locked gate, runner with same-run A14 receipt, format and basic repository checks pass; the first full-gate attach-response failure remains recorded above. Independent reviews: pending with the lane supervisor. Installed release evidence: skipped because this task proves the lab native artifact; its installed journey keeps installed-product acceptance. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.
+
+- 150: make cached native paths private, re-hash each Runtime launch and provider fixture read, and prove changed/restored/missing bytes with a caught compiling plant through the existing harness.
+
+## 151
+
+Before editing: supplied HEAD `52cab432f2e8a27a554fa31509aac8f658353a08`, tree `ae52230d2608f278eab0515edc8bafddfe036534`. The supplied branch is `spark/cx-agent-conformance/151-guard-component-home-writes`. `git status --short --branch` showed zero dirty paths, including zero unrelated dirty paths. This HEAD is the comparison base. The task preserves refs, history and index.
+
+Read the task, the 012/014/025 handoffs and writer parity, architecture Harness conformance, the shared writer, Home guard and finish APIs, existing Runtime callers and Home symlink tests. A lane search found one shared component writer and the existing Home guard. Plan: preserve that guard as the first operation, add operation/path/cause context to the writer's existing file operations, add the two fixed-byte tests, run four separate compiling plants with restoration, then run restored exact, Runtime and full locked gates. Final edits stay in the writer function, the two new Runtime tests, the existing RUNBOOK fixture description and this LOG section. The repository has no humanizer skill source; this record uses direct behavior and ownership statements.
+
+Initial free space: 30,151,684 KiB. Reuse the lane's existing target cache; an estimated 12 GiB of new outputs plus the required 2 GiB reserve fit. Cargo checks use the existing shared heavy-build lease, offline dependencies, lane-local targets, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0` and a 600-second command bound.
+
+Both exact baseline tests passed before planting: the guard test exited 0 in 2.17 seconds and the destination test exited 0 in 0.09 seconds. Initial format inspection identified layout changes; the two edited Rust files were formatted, then the lane format and `git diff --check` passed. Every Cargo run below uses offline dependencies, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, lane `target/host` and `target/host-build`, the exclusive shared heavy-build lease and a 600-second command bound.
+
+F-component-writer-skip-guard — CAUGHT. Exact edit bytes as JSON strings, scoped to `tests/common/mod.rs::write_component_home`:
+
+- Old: `"    home.guard(home.home(), home.data())?;\n"`
+- New: `""`
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_writer_checks_guard_before_writing -- --exact`. Exit 101 in 1.42 seconds. Failed behavior assertion: `writer must return the existing Home-symlink refusal`. Compilation and fixture setup succeeded; the named behavior assertion supplies caught credit. The candidate writer was restored byte for byte in `finally` before the next plant. The owned Home directory was repaired before the guard assertions; retained fixture Homes are directories and their moved-Home paths are absent.
+
+F-component-writer-late-guard — CAUGHT. Exact edit bytes as JSON strings, scoped to `tests/common/mod.rs::write_component_home`:
+
+- Old: `"    home.guard(home.home(), home.data())?;\n"`
+- New: `""`
+- Old: `"    fs::create_dir(&bin)\n        .map_err(|error| format!(\"create component directory {}: {error}\", bin.display()))?;\n"`
+- New: `"    fs::create_dir(&bin)\n        .map_err(|error| format!(\"create component directory {}: {error}\", bin.display()))?;\n    home.guard(home.home(), home.data())?;\n"`
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_writer_checks_guard_before_writing -- --exact`. Exit 101 in 0.69 seconds. Failed behavior assertion: `writer must guard before creating bin`. Compilation and fixture setup succeeded; the named behavior assertion supplies caught credit. The candidate writer was restored byte for byte in `finally` before the next plant. The owned Home directory was repaired before the guard assertions; retained fixture Homes are directories and their moved-Home paths are absent.
+
+F-component-writer-overwrite — CAUGHT. Exact edit bytes as JSON strings, scoped to `tests/common/mod.rs::write_component_home`:
+
+- Old: `"File::create_new(installed)"`
+- New: `"File::create(installed)"`
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_writer_names_refused_destinations -- --exact`. Exit 101 in 0.69 seconds. Failed behavior assertion: `installed: writer must refuse the existing destination`. Compilation and fixture setup succeeded; the named behavior assertion supplies caught credit. The candidate writer was restored byte for byte in `finally` before the next plant. The owned Home directory was repaired before the guard assertions; retained fixture Homes are directories and their moved-Home paths are absent.
+
+F-component-writer-bare-error — CAUGHT. Exact edit bytes as JSON strings, scoped to `tests/common/mod.rs::write_component_home`:
+
+- Old: `"    let mut copy = File::create_new(installed)\n        .map_err(|error| format!(\"create component file {}: {error}\", installed.display()))?;\n"`
+- New: `"    let mut copy = File::create_new(installed)?;\n"`
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_writer_names_refused_destinations -- --exact`. Exit 101 in 0.69 seconds. Failed behavior assertion: `installed: refusal must name the exact destination`. Compilation and fixture setup succeeded; the named behavior assertion supplies caught credit. The candidate writer was restored byte for byte in `finally` before the next plant. The owned Home directory was repaired before the guard assertions; retained fixture Homes are directories and their moved-Home paths are absent.
+
+Restored exact tests passed: guard exit 0 in 1.37 seconds; destinations exit 0 in 0.09 seconds. Both passing runs removed every owned root. The first Runtime regression exited 101 in 8.37 seconds: 7 passed, 5 infrastructure failures, 2 existing blocked rows ignored. Local binds returned `Operation not permitted`, and process-group inspection returned `could not inspect child process group`; the full gate was held. These sandbox failures supply zero behavior/falsifier credit. Retry the unchanged candidate with Mac loopback and process visibility. Basic gates passed: product-data check, its 99 Node tests, Runtime workspace format from `elastos/`, chain-provider format, lane format and `git diff --check`.
+
+The two restored exact commands are the same named commands recorded above. The host Runtime regression passed: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime`, exit 0 in 19.22 seconds, 12 passed / 0 failed / 2 existing blocked rows ignored. It left zero new retained roots. The full locked gate follows on the same restored candidate, with the same environment and exclusive lease.
+
+`write_component_home` remains the single writer. Its guard stays first at `tests/common/mod.rs:52`, and its source read and JSON decode each run once. Exclusive creation, mode 0755, the current Mac platform rule, source entry metadata and checksum/size/install-path stamps keep their supplied behavior. Error strings add the operation and path and retain the underlying cause text. The two new tests use fixed harmless bytes and the repository's existing `ipfs-provider` entry; they start zero providers or Runtime processes. The guard test records the moved directory before repair, restores it before assertions even under both guard plants, then checks bytes, permissions and the minimal manifest on the repaired Home. Each collision captures error, marker bytes and destination metadata before `finish`; the installed-file case selects the owned root directly while `data/bin` starts absent. Later refusals keep earlier new fixture outputs under the existing policy.
+
+Principles check (evidence paths relative to `lab/agent-conformance/`):
+
+| Question | Answer | Evidence |
+| --- | --- | --- |
+| 1. New code/content name or URL where a hash belongs? | No | `tests/common/mod.rs:83` preserves the supplied SHA-256 stamp; `tests/runtime.rs:106` supplies a digest of fixed fixture bytes. |
+| 2. Capsule, Home or UI gains ambient authority? | No | `tests/common/mod.rs:52` keeps the existing Home guard first; `tests/runtime.rs:108` keeps the symlink target inside the owned root. |
+| 3. Second operation path or copy of a rule? | No | `tests/common/mod.rs:45` remains the shared writer; `tests/runtime.rs:113` tests that writer directly through the existing Home APIs. |
+| 4. Runtime core grows? | No | `tests/common/mod.rs:55` adds lab error context only; the four edited files all belong to this lane. |
+| 5. Refusals fail closed with a clear reason? | Yes | `tests/common/mod.rs:69` and `:71` keep exclusive creation and add operation/path/cause context; `tests/runtime.rs:126` checks the unchanged guard reason. |
+| 6. Capsule logic stays self-contained and uses granted Bus calls? | Yes | `tests/runtime.rs:105` and `:164` supply inert bytes without a launch; capsule logic and Bus contracts retain their supplied bytes. |
+| 7. Named tests and caught falsifiers prove each rule? | Yes | `tests/runtime.rs:103` catches skip/late guard; `:163` catches overwrite/bare-error. All four plants compiled and failed their named behavior assertion. |
+| 8. Identity, admission and allowance stay separate? | Yes | `tests/common/mod.rs:83` stamps fixture identity only; `RUNBOOK.md:93` keeps Runtime storage and installed acceptance with their owners. |
+
+Restored full locked gate: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`, exit 0 in 405.26 seconds. Actual target summaries total 256 passed, 0 failed and 14 existing ignored rows. The full run includes both new tests, the existing provider-refusal callers and all other active lane tests. It left zero new retained roots. All four plants compiled, failed the specified named behavior assertion and were restored before regression checks. `falsifiers.json` and the shared runner retain their supplied bytes.
+
+Owned-root cleanup: passing exact, Runtime and full-gate runs removed their roots through the existing `finish` paths. Four fixed-byte plant roots (2,402 logical bytes total) and six sandbox-infrastructure roots remain under the existing failure-retention rule for candidate review. Both guard plants repaired their owned Home before assertions. Final `lsof -nP -Fpn +D <owned-root>` checks for all ten retained roots exited 1 with empty stdout/stderr; process inspection found zero executables active from this lane target. The ignored `target/task-151-lifecycle.json` records each exact private path, size, owner, source identity, protection source and cleanup condition. The lane supervisor keeps those finite fixtures and small gate outputs through review, then removes the exact owned paths. Supplied build caches keep their supervisor lifecycle. The shared heavy-build lease is released. This task creates no rollback set.
+
+Final branch/worktree inventory: HEAD `52cab432f2e8a27a554fa31509aac8f658353a08`, tree `ae52230d2608f278eab0515edc8bafddfe036534`; the supplied task branch/worktree holds unique uncommitted task work for review. Its four dirty paths are exactly `tests/common/mod.rs`, `tests/runtime.rs`, `RUNBOOK.md` and `LOG.md`, all inside this lane; the index is empty. The branch upstream is unset. Against cached `spike/spike/agent-host` at `321cc698a21543c7cfe2895fecf9c2ef99e2b33c`, it is 11 commits ahead / 0 behind. This offline task fetched and published nothing and moved zero refs. The complete inventory observed 1598 branches and 157 worktrees; other refs and worktrees keep their existing owners. Scope checks confirm the operator wrapper, existing tests, harness, native hashing, acceptance labels, Cargo manifests and locks, falsifier list, shared runner and supplied LOG prefix retain their supplied bytes.
+
+Candidate: local task diff against the supplied comparison HEAD above. Exercised checks: both exact tests, four caught compiling plants, restored exact tests, Runtime regression, full locked lane gate, format and basic repository checks pass; the initial sandbox infrastructure result remains recorded. Review links: pending with the lane supervisor. Installed release evidence: skipped because this task proves the lab writer; Runtime storage and installed-product acceptance keep their existing owners. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.
+
+- 151: keep the shared component writer guard first, add operation/path/cause errors, and prove owned-Home repair plus exclusive destination refusals with two tests and four caught hand-run plants.
+
+Round 2 starts from the same supplied HEAD `52cab432f2e8a27a554fa31509aac8f658353a08` and tree `ae52230d2608f278eab0515edc8bafddfe036534`. The supplied dirty paths are this task's `tests/common/mod.rs`, `tests/runtime.rs`, `RUNBOOK.md` and `LOG.md`; unrelated dirty paths are absent. The supervisor full gate exited 101 at `runtime::tests::native_identity_refuses_changed_or_missing_bytes`: `Parallel original: launch` returned `instances exceeded their shared time bound; harness cleanup is not a Runtime stop`. Its 96 other library tests passed. This replaces the prior full-pass claim for that supervisor invocation. The failed native identity test and harness belong to their existing owners and keep their supplied bytes, assertions and two-second bound.
+
+Round 2 plan: retry the exact existing native identity test, both writer tests, four separate compiling plants with byte-for-byte restoration, both restored writer tests, Runtime regression and full locked gate. Keep one shared heavy-build lease and offline dependencies, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, lane-local host/build outputs and a 600-second bound per command. Host process visibility and local loopback are needed by the existing harness tests. Free space before retry is 29,007,940 KiB, above the existing 12 GiB output estimate plus 2 GiB reserve. This round adds evidence in this section and changes source only if the writer checks expose a defect within task scope.
+
+Round 2 results on the restored candidate:
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib runtime::tests::native_identity_refuses_changed_or_missing_bytes -- --exact` passed unchanged: exit 0 in 1.13 seconds, one named test passed. The same test also passed in the full gate; its two-second launch bound and the shared collector retain their supplied implementation. The supervisor timeout remains a recorded failed invocation.
+
+The guard and destination baseline commands both passed (exit 0, 0.14 and 0.09 seconds). Each compiling plant reused the exact old/new JSON bytes recorded above in this section. Each run used its full named command below, and a `finally` block restored the supplied candidate writer byte for byte before the next run. Compilation and setup succeeded; the required behavior assertion supplies caught credit.
+
+- F-component-writer-skip-guard: **CAUGHT**, exit 101 in 0.90 seconds. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_writer_checks_guard_before_writing -- --exact`. Failed assertion: `writer must return the existing Home-symlink refusal`.
+
+- F-component-writer-late-guard: **CAUGHT**, exit 101 in 0.77 seconds. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_writer_checks_guard_before_writing -- --exact`. Failed assertion: `writer must guard before creating bin`.
+
+- F-component-writer-overwrite: **CAUGHT**, exit 101 in 0.73 seconds. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_writer_names_refused_destinations -- --exact`. Failed assertion: `installed: writer must refuse the existing destination`.
+
+- F-component-writer-bare-error: **CAUGHT**, exit 101 in 0.75 seconds. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_writer_names_refused_destinations -- --exact`. Failed assertion: `installed: refusal must name the exact destination`.
+
+
+Both guard plants repaired their owned Home before assertions. The candidate writer SHA-256 matches the supplied round-1 candidate after all four restorations.
+
+Restored guard test: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_writer_checks_guard_before_writing -- --exact`, exit 0 in 0.73 seconds. One passed, zero failed. Each passing invocation left zero new retained roots.
+
+Restored destination test: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime component_home_writer_names_refused_destinations -- --exact`, exit 0 in 0.15 seconds. One passed, zero failed. Each passing invocation left zero new retained roots.
+
+Runtime regression: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime`, exit 0 in 16.01 seconds. 12 passed, zero failed, two existing ignored rows. Each passing invocation left zero new retained roots.
+
+Full locked lane gate: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`, exit 0 in 279.49 seconds. 256 passed, zero failed, 14 existing ignored rows. Each passing invocation left zero new retained roots.
+
+Basic checks passed with exit 0: `git diff --check`; `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`; `node scripts/check-product-data.mjs`; `node --test scripts/check-product-data.test.mjs` (99 passed); `cargo fmt --all -- --check` from `elastos/`; and `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`. Cargo tests used the offline environment and lane-local outputs recorded at round start. The shared heavy-build lease covered each test command and is released.
+
+Round 2 lifecycle: both restored named tests, Runtime regression and full gate removed their owned roots through `finish`. Four new fixed-byte plant roots remain through candidate review. The existing ledger now also accounts for the supervisor's retained native-identity fixture. All 15 recorded retained roots passed `lsof -nP -Fpn +D <owned-root>` with exit 1 and empty stdout/stderr; their total logical file size is 4,278,432 bytes. Host process inspection found zero executables active from this lane target. Exact private paths, ownership, source identity, sizes and cleanup conditions remain in ignored `target/task-151-lifecycle.json`; review completion triggers removal of these exact finite fixtures and gate outputs. The generated round-2 command results are in ignored `target/task-151/round-2/results.json`. Supplied caches keep their supervisor lifecycle.
+
+Final round-2 inventory: supplied HEAD, tree, branch and index remain unchanged. The task has the same four dirty paths and zero unrelated source changes. The task branch is 11 commits ahead and zero behind cached `spike/spike/agent-host`; its upstream remains unset. This offline run fetched and published nothing. The inventory observed 1599 branches and 157 worktrees; their existing owners retain all other refs and worktrees. Scope comparison proves `write_operator_home`, pre-existing Runtime tests, native hashing, harness, census, report, stand-in implementation, acceptance labels, manifests, locks, falsifier list and runner retain their supplied bytes. This round changes only the task's LOG evidence.
+
+Author checks now pass on the restored candidate. The eight principles answers above still apply. Runtime storage and installed-product acceptance keep their existing owners. Supervisor rerun and independent reviews remain with the lane supervisor.
+
+- 151 round 2: reproduce the native identity test unchanged, recatch all four writer plants, and pass both restored tests, Runtime regression and the full locked gate; record finite-fixture cleanup and source scope.
+
+## 152 — Prove fixture durations in sent grant requests (2026-11-03)
+
+Supplied comparison base: HEAD `1c0a289bfaa7b78fe139ad09471b4b5729afa0f3`, tree `da7484dbfb657f2d66f9841091495a7fc8ff4cde`, branch `spark/cx-agent-conformance/152-fixture-grant-duration-reaches-runtime`. Initial tracked and untracked dirty paths: empty. Keep this checkout and its history. This branch has no upstream; against the fetched `spike/spike/agent-host` ref, local HEAD is 12 commits ahead and 0 behind. Network access stays disabled, so this is fetched-ref evidence. The supervisor owns branch publication and other worktrees.
+
+Plan: extend only the existing scripted listener in the grants test module to retain the request line and decoded JSON body in memory after a bounded complete read. Keep `with_frames` on that listener. Exercise real `Controller::poll` with an empty `RunningInstances` batch, reversed fixture order, exchanged durations and a refused-then-successful retry. Join each new test server before checking results. Run five separate compiling plants, restore exact production bytes after each, then run the restored exact tests, controller regression, second-inclusion compile and full locked lane gate. Final source edits stay in the test module, this section and the existing RUNBOOK controller description/inventory.
+
+Read the current Fixture, Controller, HTTP implementation, scripted-response helpers, empty-batch harness, task-019/020 records and architecture Request flow / Delegation and mandates. Runtime owns each grant and its duration enforcement. These rows prove only the fixture approval request for A6; existing live and stand-in acceptance keeps its scope. The repository has no humanizer skill; this record uses direct behavior and ownership statements.
+
+Initial free space: 28,840,588 KiB. Reuse lane target caches; an estimated 12 GiB of new outputs plus the required 2 GiB reserve fit. Cargo checks use the shared exclusive heavy-build lease, offline dependencies, lane-local `target/host` and `target/host-build`, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, and a 600-second bound per command.
+
+### Exact tests and five compiling plants
+
+The first sandbox attempt could not open the shared lease, before any test ran; it earns zero proof. With lease access and local fixture sockets, baseline exact duration and refusal commands passed: exit 0, one test each, 2.55 seconds and 1.82 seconds. Every Cargo run uses the offline, two-thread environment and lane-local outputs above. The following plants run separately under the shared lease; a finally block restores the entire candidate source after each edit, before its restored check and before the next plant. Exact old/new bytes use JSON string encoding. `falsifiers.json` and its runner retain their supplied bytes.
+
+Plant `once`: old `"                        \"duration\": self.fixture.entries[index][\"duration\"],\n"`; new `"                        \"duration\": \"once\",\n"`. Full command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_sends_each_fixture_duration -- --exact`. Planted exit 101, 2.02 seconds; CAUGHT, failed behavior assertion `sent grant body has exact request id, fixture duration and rationale`. Restored command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_sends_each_fixture_duration -- --exact`; exit 0, 0.99 seconds, 1 passed / 0 failed.
+
+Plant `session`: old `"                        \"duration\": self.fixture.entries[index][\"duration\"],\n"`; new `"                        \"duration\": \"session\",\n"`. Full command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_sends_each_fixture_duration -- --exact`. Planted exit 101, 1.16 seconds; CAUGHT, failed behavior assertion `sent grant body has exact request id, fixture duration and rationale`. Restored command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_sends_each_fixture_duration -- --exact`; exit 0, 0.95 seconds, 1 passed / 0 failed.
+
+Plant `omitted`: old `"                        \"duration\": self.fixture.entries[index][\"duration\"],\n"`; new `""`. Full command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_sends_each_fixture_duration -- --exact`. Planted exit 101, 1.17 seconds; CAUGHT, failed behavior assertion `sent grant body has exact request id, fixture duration and rationale`. Restored command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_sends_each_fixture_duration -- --exact`; exit 0, 0.99 seconds, 1 passed / 0 failed.
+
+Plant `entry-zero`: old `"                        \"duration\": self.fixture.entries[index][\"duration\"],\n"`; new `"                        \"duration\": self.fixture.entries[0][\"duration\"],\n"`. Full command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_sends_each_fixture_duration -- --exact`. Planted exit 101, 1.21 seconds; CAUGHT, failed behavior assertion `sent grant body has exact request id, fixture duration and rationale`. Restored command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_sends_each_fixture_duration -- --exact`; exit 0, 0.98 seconds, 1 passed / 0 failed.
+
+Plant `early-used`: old `"                require_success(&response)?;\n                self.credentials.push(field(&response, \"token\")?.to_owned());\n                self.used.insert(index);\n"`; new `"                self.used.insert(index);\n                require_success(&response)?;\n                self.credentials.push(field(&response, \"token\")?.to_owned());\n"`. Full command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_keeps_fixture_duration_after_refused_grant -- --exact`. Planted exit 101, 1.19 seconds; CAUGHT, failed behavior assertion `first refused poll leaves used-entry set empty`. Restored command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::controller_keeps_fixture_duration_after_refused_grant -- --exact`; exit 0, 1.03 seconds, 1 passed / 0 failed.
+
+All five planted crates compiled and each named test failed on its required behavior assertion (0 passed / 1 failed). Every restored exact test passed. The production Fixture, Controller and HTTP prefix is byte-identical to supplied HEAD; SHA-256 `2358593b18dbc7a4301193edf4c70c9f6e4f0e452a1ffae194789e94436c9442`. The complete candidate file is restored byte for byte after every plant. New tests join the listener thread after completing their poll calls and before any result assertion; stream shutdown/drop and listener drop complete on that thread, including planted failures. These fixture-only rows start zero native processes.
+
+Restored `controller-regression`: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects grants::tests::`, exit 0, 5.6 seconds. test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 38 filtered out; finished in 5.44s
+
+Restored `agent-host-compile`: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --features agent-host --test agent_host --no-run`, exit 0, 1.69 seconds. Feature-gated second inclusion compiled.
+
+Basic checks passed: `git diff --check`; `node scripts/check-product-data.mjs`; `node --test scripts/check-product-data.test.mjs` (99 passed / 0 failed); `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` from the repository root; `cargo fmt --all -- --check` from `elastos/`; and `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`. One earlier lane-format invocation used the `elastos/` working directory and failed to find its relative manifest before formatting; the corrected root command passed. These checks edit zero product files.
+
+### Principles check
+
+| Question | Answer | Evidence |
+| --- | --- | --- |
+| 1. Any new name or URL where code/content needs a hash? | No | `tests/common/grants.rs:2486` uses synthetic permission resources; the change adds only fixture request evidence. |
+| 2. Any new capsule or UI ambient authority? | No | `tests/common/grants.rs:2498` uses the existing empty launch batch; the scripted fixture supplies zero capsule access. |
+| 3. A second path or copy of an operation rule? | No | `tests/common/grants.rs:2444` keeps `with_frames` on `serve_frames`, while `:2506` calls the real controller. |
+| 4. Does the trusted Runtime core grow? | No | `tests/common/grants.rs:2320` places capture in the existing test module; `RUNBOOK.md:359` keeps grant enforcement with Runtime. |
+| 5. Do new refusals fail closed with clear reasons? | Yes | `tests/common/grants.rs:2343` rejects incomplete input and `:2346` checks the fixed byte cap before buffer growth. |
+| 6. Does capsule logic and granted Bus ownership stay intact? | Yes | `tests/common/grants.rs:2498` services the real controller with an empty native batch; production and capsule bytes retain their supplied state. |
+| 7. Named tests and caught falsifiers for each new rule? | Yes | `tests/common/grants.rs:2474` and `:2545` are the two named proofs; all five separate plants above fail their behavior assertions. |
+| 8. Are identity, admission and resource allowance separate? | Yes | `RUNBOOK.md:358` limits these rows to fixture-only A6 requests and assigns grant-duration enforcement to Runtime. |
+
+Restored `full-locked`: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`, exit 0, 279.6 seconds. test result: ok. 97 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.15s; test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.92s; test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 28.80s; test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s; test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.53s; test result: ok. 65 passed; 0 failed; 12 ignored; 0 measured; 0 filtered out; finished in 211.17s; test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.85s; test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.92s; test result: ok. 12 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 15.76s; test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s; test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s; test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s; test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s; test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s; test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s; test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+### Final verification and handoff
+
+The restored full locked gate passed in 279.6 seconds: 258 passed, 0 failed and 14 existing ignored rows. All commands used the offline two-thread environment, lane-local targets, the shared exclusive heavy-build lease and a 600-second bound; 29558870016 free bytes were available before the restored gate sequence. The controller regression passed 39 tests, and the feature-gated second inclusion compiled. The existing live proof, receipt fields, ignored rows and acceptance labels retain their supplied scope. Runtime grant-duration enforcement and installed acceptance stay with Runtime's owner.
+
+The complete gate left zero new retained fixture directories, and final host process inspection found zero executables active from this lane target. Each new scripted test joins its server after its poll calls; that thread closes or drops every stream and drops the listener before any result assertion, on restored and planted runs. The five planted failures created zero native processes or Home roots. This run's 19 small `.out`/JSON evidence files stay through candidate review, then the supervisor removes their exact paths and this run's inventory. The 18 pre-existing `task-152-*.txt` files retain their supervisor owner and retention decision; this run preserved them. Private paths, sizes, source identity, ownership and cleanup conditions are in ignored `target/task-152-lifecycle.json`. Supplied caches and earlier fixtures keep their existing supervisor lifecycle. The shared build lease is released.
+
+Final inventory: HEAD `1c0a289bfaa7b78fe139ad09471b4b5729afa0f3`, tree `da7484dbfb657f2d66f9841091495a7fc8ff4cde` and branch `spark/cx-agent-conformance/152-fixture-grant-duration-reaches-runtime` match the supplied checkout; the index remains unchanged. Dirty paths are exactly the three task files. The branch has 12 commits ahead and 0 behind cached `spike/spike/agent-host`; upstream remains unset. This offline task fetched and published nothing. The branch/worktree inventory observed 1599 refs and 157 worktrees; their other owners retain them. Production Fixture, Controller and HTTP bytes match supplied HEAD (SHA-256 `2358593b18dbc7a4301193edf4c70c9f6e4f0e452a1ffae194789e94436c9442`). Every final code edit is inside the grants test module. The other final edits are this task section and the existing controller paragraph/inventory in RUNBOOK.
+
+Candidate: local task diff against the supplied comparison base. Exercised checks: both exact tests, five caught compiling plants and their restored exact tests, the controller regression, feature-gated compile, full locked gate, format and basic repository checks pass. Review links: pending with the lane supervisor. Installed release evidence: skipped because these tests prove fixture approval requests only; Runtime owns installed grant enforcement. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.
+
+- 152: capture complete bounded grant requests in the existing scripted listener, prove each matched fixture duration and refusal retry, and catch all five separate plants with production bytes restored.
+
+
+## 153 — One fixture source for each probe read target (2026-11-03)
+
+Supplied HEAD: `bd5eac0d3da2d118c00a7f57292621d272e8279c`.
+Supplied tree: `ab103af4fb89c4652cbd4bf0853a7c12265b5595`.
+Supplied branch: `spark/cx-agent-conformance/153-one-source-for-probe-read-targets`.
+Initial `git status --short --branch` showed that branch and zero dirty paths.
+The cached `spike/spike/agent-host` comparison is 13 commits ahead, zero behind.
+This task preserves the supplied checkout and history; the supervisor owns integration.
+
+Plan: add the human-read subselector and one fixture-only selection function shared by component and host tests; remove read-target environment selection from both probe and build helper. Add native poisoned-override and raw-selector checks in the existing artifact target. Move only F-ac2-human's anchor, then run its existing runner, a separate compiling override plant, restored checks, artifact and live rows, full locked gate and run.sh. Keep principal-binding blockers, receipt fields and cleanup owners as supplied.
+
+Initial volume free space: 28,706,532 KiB. The existing target cache is reused; the 12 GiB build estimate plus 2 GiB reserve fit. Builds use the existing shared exclusive heavy-build lease, offline Cargo, lane-local targets, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0` and a 600-second bound per Cargo gate command.
+
+153: Added fixture-only read selection, the human-read subselector, native selector and poisoned-override checks, and the moved F-ac2-human request anchor.
+
+### Native baselines and compiling plants
+
+Both new exact artifact baselines passed: `override-baseline` exit 0 in 2.988 seconds (1 passed, 0 failed); `selector-baseline` exit 0 in 0.165 seconds (1 passed, 0 failed).
+All commands below use the gate environment and shared lease described above. Each plant matched once and was restored byte for byte in a `finally` block before the next command. No falsifier ID or runner was added.
+
+Hand-run plant `legacy-override`, in `probe/src/lib.rs`. Exact old/new UTF-8 bytes use JSON string encoding:
+
+```json
+{
+  "old": "fn read_target() -> &'static str {\n",
+  "new": "fn read_target() -> &'static str {\n    if let Some(resource) = option_env!(\"AC_PROBE_READ_RESOURCE\") {\n        return resource;\n    }\n"
+}
+```
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact probe_read_targets_ignore_legacy_override -- --exact`. Planted exit 101 in 1.203 seconds; restored exit 0 in 0.674 seconds. Each planted outer test ran and failed; each restored run reported 1 passed, 0 failed.
+The child compiled and ran `tests::read_target_is_the_selected_fixture`, then failed `assert_eq!(super::read_target(), expected.trim())`: left `localhost://Public/agent-conformance-ignored-override`, right `localhost://Public/agent-conformance-ungranted/outside-fixture.txt`. The outer failure was `read selected-target test failed`. This is selected-target assertion evidence, rather than a build or empty-selection result. The restored outer test ran and passed both native feature builds.
+
+Hand-run plant `missing-read-guard`, in `probe/src/lib.rs`. Exact old/new UTF-8 bytes use JSON string encoding:
+
+```json
+{
+  "old": "#[cfg(all(feature = \"human-read\", not(feature = \"read\")))]\ncompile_error!(\"human-read requires read\");\n",
+  "new": ""
+}
+```
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact human_read_subselector_requires_read -- --exact`. Planted exit 101 in 0.162 seconds; restored exit 0 in 0.132 seconds. Each planted outer test ran and failed; each restored run reported 1 passed, 0 failed.
+The raw subselector check compiled after removal of the guard; `human_read_subselector_requires_read` then failed `human-read without read must be refused`. The restored guard rejected the raw cfg with `human-read requires read`.
+
+### Artifact and live setup checks
+
+The complete artifact target passed: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact`, exit 0 in 37.678 seconds; 9 passed, 0 failed. This includes unchanged exclusive-effect and instance-subselector checks, both component reproducibility rounds and Bus-only import validation.
+
+The first live human-read command returned exit 101 in 3.434 seconds: `SKIPPED agent_cannot_read_human_space_without_grant: operator prerequisite: Operation not permitted (os error 1)`. Operator setup stopped before the live refusal assertion. This supplies zero Runtime or falsifier credit. The retry uses local process visibility and loopback access for the same isolated fixture.
+
+The basic repository checks passed: `node scripts/check-product-data.mjs` (42 capsules, 2 profiles, 28 method contracts), `node --test scripts/check-product-data.test.mjs` (99 passed), `(cd elastos && cargo fmt --all -- --check)` and `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`, all exit 0. Lane formatting and `git diff --check` also passed after formatting the new assertion.
+
+### Live refusal and existing falsifier runner
+
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects agent_cannot_read_human_space_without_grant -- --exact --show-output`: exit 0, 11.187 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects ungranted_effect_is_refused -- --exact --show-output`: exit 0, 9.763 seconds.
+- `python3 -I examples/agent-host/falsify.py --from lab/agent-conformance/falsifiers.json --list`: exit 0, 0.182 seconds.
+- `python3 -I examples/agent-host/falsify.py --from lab/agent-conformance/falsifiers.json F-ac2-human`: exit 0, 26.653 seconds.
+
+Both live rows ran one test and passed with `exit:Some(1) reason_present:true`. The list command loaded the existing list and retained F-ac2-human as `agent-conformance caught`. The runner reported:
+
+```text
+baseline: 1 named tests pass without an edit, 0 do not
+F-ac2-human CAUGHT                            11s  make the human-space refusal activation succeed
+summary: 1 CAUGHT of 1
+```
+
+Only F-ac2-human's edit anchor moved; its ID, command and named live test are unchanged. Exact edit bytes in `probe/src/lib.rs` (JSON string encoding):
+
+```json
+{
+  "file": "../../lab/agent-conformance/probe/src/lib.rs",
+  "old": "    #[cfg(feature = \"read\")]\n    let (resource, action) = (read_target(), \"read\");",
+  "new": "    if cfg!(feature = \"human-read\") {\n        return Ok(());\n    }\n    #[cfg(feature = \"read\")]\n    let (resource, action) = (read_target(), \"read\");"
+}
+```
+
+The compiling plant returns success before the existing Bus capability request only when the human-read subselector is selected. The runner checks its passing unmutated baseline and reports CAUGHT. A separate hand-run of the same edit records the live assertion, followed by the exact restored human row.
+
+### Restored candidate checks
+
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects agent_cannot_read_human_space_without_grant -- --exact --show-output` (`human-assertion-plant`): exit 101, 10.645 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects agent_cannot_read_human_space_without_grant -- --exact --show-output` (`human-restored`): exit 0, 9.778 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact probe_read_targets_ignore_legacy_override -- --exact` (`override-final`): exit 0, 1.286 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact human_read_subselector_requires_read -- --exact` (`selector-final`): exit 0, 0.158 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` (`full-locked`): exit 0, 274.139 seconds.
+
+The repeated human plant compiled and ran exactly its named live test, then failed at `tests/effects.rs:113` on `expected nonzero exit and lifecycle refusal Internal("localhost://Users/self requires a principal-scoped launch context")`. Its observation was `probe refusal effect:human-read exit:Some(0) reason_present:false`. Restoring the source bytes changed that observation to `exit:Some(1) reason_present:true` and the exact row passed. The existing runner and this hand-run use the same F-ac2-human edit. The restored source SHA-256 is `54b97b1f2ad92c866f890e53a1b5060b4f1cd6d8c198d5cba0c3bf895ea3d15c`.
+
+Both required exact artifact commands passed after restoration. The full locked gate passed on its first host-capable run: 260 passed, 0 failed, 14 existing ignored rows across 16 target summaries, exit 0 in 274.139 seconds. Existing blockers and ignored rows keep their states. The native selector children start neither Runtime nor providers; live tests retain their one isolated operator and launch path. Dependencies, pins and Cargo locks retain their supplied bytes.
+
+### Principles check
+
+| Question | Yes/No | Evidence (lane-relative) |
+| --- | --- | --- |
+| 1. New name or URL where a code/content hash belongs? | No | `src/identity.rs:79` still derives the bundle CID from checked bytes; `tests/artifact.rs:133` retains distinct, reproducible component hashes. |
+| 2. Capsule, Home or UI gains ambient authority? | No | `probe/src/lib.rs:243` selects compiled fixture bytes; `probe/src/lib.rs:261` still requests a Runtime grant through the Bus. |
+| 3. Second operation path or copy of a rule? | No | `probe/src/lib.rs:255` calls the one `read_target` function; `tests/common/probe.rs:99` supplies feature flags with zero read-resource environment input. |
+| 4. Does the trusted Runtime core grow? | No | `probe/src/lib.rs:243` keeps selection in the lane capsule; the final diff is limited to the seven task-approved lane files. |
+| 5. Do new refusals fail closed with a clear reason? | Yes | `probe/src/lib.rs:20` refuses the raw human-read selector with `human-read requires read`; `tests/artifact.rs:274` proves the refusal. |
+| 6. Does capsule logic stay inside with granted Bus calls? | Yes | `probe/src/lib.rs:243` embeds the target; `probe/src/lib.rs:261` remains the one read capability request. |
+| 7. Do named tests and caught plants prove each new rule? | Yes | `tests/artifact.rs:229` catches the environment plant, `tests/artifact.rs:274` catches the removed guard, and `tests/effects.rs:755` catches the moved F-ac2-human Bus bypass. |
+| 8. Are identity, admission and allowance separate? | Yes | `src/identity.rs:52` keeps the CID as identity evidence; `probe/src/lib.rs:261` separately requests resource authority; this change adds zero admission or budget decisions. |
+
+### Final report and lifecycle
+
+`lab/agent-conformance/run.sh` passed, exit 0 in 276.272 seconds. It reported the expected human and ordinary read refusals and zero FAIL or SKIPPED rows. The 14 existing BLOCKED rows keep their blocker IDs. The generated receipt is local and uncommitted: `target/run-table.qI9a1D/VERSIONS.json`, SHA-256 `ec5f4a5651941823e194228db5073630b4da10143aacef9e5d5ceb9af4e782ba`. Receipt fields and the report path retain their existing owners and format.
+
+The final branch/worktree inventory preserves supplied HEAD `bd5eac0d3da2d118c00a7f57292621d272e8279c` and tree `ab103af4fb89c4652cbd4bf0853a7c12265b5595`. The current task branch remains the unique review/merge work line. Its seven intended dirty files are the complete diff; dependencies, locks, fixture bytes and out-of-lane source are unchanged. The cached remote `spike/spike/agent-host` is `321cc698a21543c7cfe2895fecf9c2ef99e2b33c`; this checkout is 13 ahead and zero behind. Network access stayed disabled. The supervisor owns current-base integration and independent reviews; this record contains author checks. Git history, index, branches and remotes were preserved.
+
+Final host process inspection found zero executables active from this lane target. Three finite roots remain from the isolated setup failure and the two caught human plants, with 4,370,947 logical file bytes total. `lsof -nP -Fpn +D <owned-root>` returned exit 1 and empty stdout/stderr for each. The private ignored inventory `target/task-153-lifecycle.json` records exact paths, source identity, dirty state, ownership, sizes, protection and cleanup conditions for this checkout, task outputs, retained roots, supplied build caches and the new receipt. The lane supervisor removes the exact task-owned proof paths and roots after review; supplied caches keep their existing supervisor lifecycle. The shared build lease is released. This task creates zero installed artifacts or rollback sets.
+
+## 154 — Build output settings override the parent (2026-11-03)
+
+Supplied comparison HEAD: `252c99428e9c21b43f04e562e4cc4152f348f223`.
+Supplied tree: `8ff7afce2709e81a88041a569675c10a03fed63f`.
+Supplied branch: `spark/cx-agent-conformance/154-build-output-settings-override-the-parent`.
+Initial `git status --short --branch` showed zero dirty paths. The index and supplied history stay with the supervisor. The branch has 14 commits ahead and zero behind cached `spike/spike/agent-host`, with upstream unset; remote freshness is unverified under the offline task rule.
+
+Plan: extend the existing build integration target with one bounded re-entry of its own named test. The worker runs the real `offline_build` shell command, observes the five settings and repository directory, and writes fixed markers through the actual output settings after an owned-path preflight. Run each of the five compiling plants separately, restore the complete helper bytes after each, then run exact, build, harness and full locked gates. Final tracked edits belong to this section, `tests/build.rs` and the existing RUNBOOK build paragraph. Runtime owns capsule storage and product acceptance.
+
+Initial free space: 29,718,652 KiB. The existing lane target cache is reused; the 12 GiB output estimate plus 2 GiB reserve fit. Cargo gates use the shared exclusive heavy-build lease, offline dependencies, lane-local host/build outputs, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0` and a 600-second command bound. Existing `target/task-154-*` proof files are supplied supervisor state; this run preserves them and uses separate `task-154-current-*` evidence names.
+
+154: Added a bounded synthetic-parent build-settings witness, exact output and decoy checks, and five hand-run removal plants for the existing build helper.
+
+Two initial lease checks found the shared lease busy and started zero builds. Light checks passed: `git diff --check`; `node scripts/check-product-data.mjs` (42 capsules, 2 profiles, 28 method contracts); `node --test scripts/check-product-data.test.mjs` (99 passed); `cargo fmt --all -- --check` from `elastos/`; and `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`. An initial `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml --test build` exited 2 because Cargo fmt has no test-selector argument; `rustfmt --edition 2021 lab/agent-conformance/tests/build.rs` formatted only the edited test, then the required `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` passed.
+
+### Exact baseline and five compiling plants
+
+A third lease check acquired the lease. The exact baseline passed: exit 0 in 1.497 seconds, one named test passed. Every Cargo command below uses `CARGO_NET_OFFLINE=true RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, lane-local `target/host`, `target/host-build` and `target/task-154-current-tmp`, the shared exclusive lease, and a 600-second command bound.
+
+All five plants and all five restored checks ran this exact command:
+
+```sh
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build offline_build_overrides_inherited_output_settings -- --exact
+```
+
+Each plant removed only one `.env` call from `src/build.rs`, after checking one exact byte match. Old and new bytes below use JSON string encoding. A `finally` block restored the complete original file before the restored check and the next plant. Each compiling plant reached the worker, ran exactly its one named test, and failed on the specified observed-value assertion; empty selection, compile, start, setup and timeout failures earned zero credit.
+
+**F-build-override-CARGO_BUILD_BUILD_DIR**
+
+```json
+{
+  "old": "\n        .env(\"CARGO_BUILD_BUILD_DIR\", target.join(\"build\"))",
+  "new": ""
+}
+```
+
+Planted: exit `101` in 2.183 seconds; the worker and outer result failed with `CARGO_BUILD_BUILD_DIR observed-value assertion`. Restored exact check: exit `0` in 1.016 seconds, one named test passed.
+
+The retained synthetic decoy contains `output.marker` with the exact bytes `owned build output`, showing the output destination after the override was removed.
+
+**F-build-override-CARGO_TARGET_DIR**
+
+```json
+{
+  "old": "\n        .env(\"CARGO_TARGET_DIR\", target)",
+  "new": ""
+}
+```
+
+Planted: exit `101` in 1.198 seconds; the worker and outer result failed with `CARGO_TARGET_DIR observed-value assertion`. Restored exact check: exit `0` in 1.007 seconds, one named test passed.
+
+The retained synthetic decoy contains `output.marker` with the exact bytes `owned build output`, showing the output destination after the override was removed.
+
+**F-build-override-TMPDIR**
+
+```json
+{
+  "old": "\n        .env(\"TMPDIR\", target.join(\"tmp\"))",
+  "new": ""
+}
+```
+
+Planted: exit `101` in 1.257 seconds; the worker and outer result failed with `TMPDIR observed-value assertion`. Restored exact check: exit `0` in 1.047 seconds, one named test passed.
+
+The retained synthetic decoy contains `output.marker` with the exact bytes `owned build output`, showing the output destination after the override was removed.
+
+**F-build-override-CARGO_NET_OFFLINE**
+
+```json
+{
+  "old": "\n        .env(\"CARGO_NET_OFFLINE\", \"true\")",
+  "new": ""
+}
+```
+
+Planted: exit `101` in 1.238 seconds; the worker and outer result failed with `CARGO_NET_OFFLINE observed-value assertion`. Restored exact check: exit `0` in 0.953 seconds, one named test passed.
+
+**F-build-override-CARGO_INCREMENTAL**
+
+```json
+{
+  "old": "\n        .env(\"CARGO_INCREMENTAL\", \"0\")",
+  "new": ""
+}
+```
+
+Planted: exit `101` in 1.268 seconds; the worker and outer result failed with `CARGO_INCREMENTAL observed-value assertion`. Restored exact check: exit `0` in 0.95 seconds, one named test passed.
+
+All five complete-file restorations have SHA-256 `58e8f2bae9827f0a9a35a12bda880c37fe5f8bdccfeb454a4abb292a942820fd`. The source helper matches the supplied comparison base; `falsifiers.json` and its runner keep their supplied bytes. The five failed roots remain under the existing failure-retention rule for review.
+
+### Restored regression and host prerequisites
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build` passed: exit 0 in 0.286 seconds, 2 passed and zero retained roots. The first harness-target run exited 101 in 6.710 seconds because the sandbox blocked process-group inspection (`could not inspect child process group`); 3 tests passed and 8 failed. That is infrastructure evidence, with zero harness behavior credit. The full gate stayed unstarted in that attempt. The 13 retained infrastructure roots each passed host `lsof -nP -Fpn +D <owned-root>` inspection with exit 1 and empty stdout/stderr.
+
+With host process visibility and local fixture sockets, the same restored `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness` passed: exit 0 in 12.109 seconds, 11 passed, zero failed and zero new retained roots. The shared exclusive lease covered every Cargo command. Free space before the host full gate was 30,782,918,656 bytes, above the 12 GiB estimate plus 2 GiB reserve.
+
+### Principles check
+
+1. Named by hash — No new name or URL replaces a code/content hash. `/bin/sh` and `current_exe` are test process locators; this task claims fixture behavior only (`tests/build.rs:24`, `tests/build.rs:102`).
+2. Ambient authority — No capsule, Home or UI gains access. The existing cleared Home launcher owns the synthetic worker environment (`tests/build.rs:123`).
+3. One path — No second build setup or launch path. The worker runs `offline_build`, and its parent calls `ThrowawayHome::launch` (`tests/build.rs:24`, `tests/build.rs:124`).
+4. Trusted core — No Runtime source grows. This test and its lab-only scope stay in the lane (`RUNBOOK.md:77`).
+5. Fails closed — Yes. A differing setting has a fixed refusal label, and success requires one named worker result before fixture removal (`tests/build.rs:61`, `tests/build.rs:140`, `tests/build.rs:159`).
+6. Self-contained — Yes. Capsule logic and granted Bus calls keep their owners; the new executable work is a fixed lab shell witness (`tests/build.rs:31`, `RUNBOOK.md:78`).
+7. Tests prove it — Yes. The named integration test covers all five settings, and all five separate removal plants above fail their own observed-value assertion (`tests/build.rs:54`, `tests/build.rs:86`).
+8. Separate decisions — Yes. These checks prove build-fixture containment. Runtime keeps admission, resource grants and allowance separate from artifact identity (`RUNBOOK.md:77`).
+
+### Full gate and final handoff
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` passed: exit 0 in 293.411 seconds, 261 passed, zero failed and 14 existing ignored rows. The offline two-thread environment, disabled incremental compilation, lane-local outputs, shared exclusive lease and 600-second command bound remained in effect. Existing receipt fields, acceptance labels and blocked rows keep their supplied meanings.
+
+Final source restoration: `src/build.rs` matches supplied HEAD byte for byte, SHA-256 `58e8f2bae9827f0a9a35a12bda880c37fe5f8bdccfeb454a4abb292a942820fd`. The final diff is limited to `tests/build.rs`, the existing RUNBOOK build description and this task LOG section. The harness, native/probe builders, manifests, locks, falsifier list and runner keep their supplied bytes.
+
+Passing new-test roots reached `home.finish()` after all assertions; the build, host harness and full gate left zero new retained roots. Five caught-plant roots and 13 sandbox-infrastructure roots remain for review, with 32286 logical bytes total. Final host `lsof -nP -Fpn +D <owned-root>` checks of all 18 roots returned exit 1 with empty stdout/stderr. Host process inspection found zero executables active from this lane target. The ignored `target/task-154-current-lifecycle.json` records exact private paths, observations, sizes, ownership, protection sources and cleanup conditions. The supervisor keeps these finite roots and current-run proof files through review, then removes their exact paths. Task scratch remains in that review cleanup set. Supplied proof files and build caches retain their supervisor owner. The shared build lease is released; this task creates zero installed artifacts or rollback sets.
+
+Final branch/worktree inventory: HEAD `252c99428e9c21b43f04e562e4cc4152f348f223`, tree `8ff7afce2709e81a88041a569675c10a03fed63f` and the supplied branch are unchanged. Exactly the three intended files are dirty, with an unchanged index. The inventory observed 1601 local branches and 157 worktrees; their other owners keep their existing lifecycle decisions. The current branch is the active task work line for review/merge. It remains 14 commits ahead and 0 behind cached `spike/spike/agent-host`, with upstream unset. Remote freshness remains unverified under the offline rule. Git history, refs and remote state were preserved.
+
+Candidate: local three-path diff against the supplied comparison HEAD. Exercised checks: exact baseline, five caught compiling plants, five restored exact checks, build target, host harness target, full locked lane gate, format and basic repository checks pass. The sandbox process-inspection failure remains an infrastructure result. Review links: pending with the lane supervisor. Installed release evidence: skipped because this is lab build-containment proof; Runtime owns capsule storage and installed-product acceptance. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.
+
+Final scratch check: the retained Cargo scratch contains one regular file, 495 logical bytes, with zero open handles. Its exact path and review-then-remove decision are in the ignored lifecycle inventory. Final `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` and `git diff --check` pass. The complete earlier LOG prefix and existing build-test bodies are byte-identical to the supplied HEAD.
+
+### Round 2 — Supervisor census retry
+
+The supervisor's full gate reached and passed both build tests, including `offline_build_overrides_inherited_output_settings`. It then failed only `standin_a12_census_catches_planted_leftovers` on a retained `stdout-204` process handle. This is the existing census case for which the lane permits one outer rerun. The census, its assertions and the task 154 implementation retain their supplied bytes.
+
+Round 2 starts at supplied HEAD `252c99428e9c21b43f04e562e4cc4152f348f223`, tree `8ff7afce2709e81a88041a569675c10a03fed63f`. Its three supplied dirty paths are `lab/agent-conformance/tests/build.rs`, `lab/agent-conformance/RUNBOOK.md` and this LOG. The branch has no upstream; the previous inventory records 14 ahead and 0 behind the cached private integration ref. Network access stays disabled, so remote freshness remains unverified.
+
+Plan: repeat the exact build test and the five separate removal plants, restore the helper bytes after each, then run the restored build and harness targets and the full locked lane gate. Use offline dependencies, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, the existing shared exclusive heavy-build lease and a 600-second bound per command. Free space is 29,973,056 KiB; the existing 12 GiB output estimate plus 2 GiB reserve fit. Reuse the lane caches and keep finite failed-fixture evidence under the existing retention rule. This round changes the task LOG only if these checks confirm the current implementation.
+
+Six lease checks found another active gate and started zero builds. The next attempt acquired the same persistent exclusive lease and kept it through every Cargo test below. All commands used `CARGO_NET_OFFLINE=true RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, lane `target/host`, `target/host-build` and `target/task-154-round2-tmp`. The exact command and five old/new byte edits are the same as recorded above in this task section. Each plant removed its single named `.env` call, reached the named test and failed its observed-value assertion. The complete helper bytes were restored in `finally` before each restored check and the next plant.
+
+| Removal plant | Exit | Failed behavior assertion | Seconds | Restored exact check |
+| --- | --- | --- | --- | --- |
+| `CARGO_BUILD_BUILD_DIR` | 101 | `CARGO_BUILD_BUILD_DIR observed-value assertion` | 1.678 | exit 0; 1 passed; 1.181 s |
+| `CARGO_TARGET_DIR` | 101 | `CARGO_TARGET_DIR observed-value assertion` | 1.211 | exit 0; 1 passed; 0.977 s |
+| `TMPDIR` | 101 | `TMPDIR observed-value assertion` | 1.207 | exit 0; 1 passed; 1.071 s |
+| `CARGO_NET_OFFLINE` | 101 | `CARGO_NET_OFFLINE observed-value assertion` | 1.216 | exit 0; 1 passed; 1.151 s |
+| `CARGO_INCREMENTAL` | 101 | `CARGO_INCREMENTAL observed-value assertion` | 1.164 | exit 0; 1 passed; 0.936 s |
+
+The baseline exact command passed one named test in 0.174 seconds. Each of the three output-path plants left `output.marker` with the exact fixed bytes `owned build output` in its corresponding synthetic decoy. All five plants earn caught credit from their named behavior assertions, rather than from compilation, setup, selection or timeout errors.
+
+Restored commands and actual results:
+
+| Command | Result |
+| --- | --- |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build` | exit 0; 2 passed; 0.086 s |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness` | exit 0; 11 passed; 12.516 s |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` | exit 0; 261 passed; 14 existing ignored rows; 296.567 s |
+
+The full gate includes `standin_a12_census_catches_planted_leftovers ... ok`, so the one permitted outer rerun passes the supervisor's failed case. The earlier failure remains recorded above. The existing census, tests, receipt fields, ignored rows and acceptance labels keep their supplied bytes and meanings.
+
+The lane format check, Runtime workspace format check, chain-provider format check, `node scripts/check-product-data.mjs` (42 capsules, 2 profiles, 28 method contracts) and `node --test scripts/check-product-data.test.mjs` (99 passed) all exited 0. Repeating `git diff --check` and the final Git ref inventory is skipped under the round-2 instruction to use no Git commands; the earlier pass and identity inventory remain above. A direct whitespace and final-newline check covers the three candidate files after this LOG addition.
+
+Final source restoration: `src/build.rs` has SHA-256 `58e8f2bae9827f0a9a35a12bda880c37fe5f8bdccfeb454a4abb292a942820fd`, identical to the supplied helper. Hash comparisons also confirm that this round preserved the supplied build test, RUNBOOK, harness, falsifier list, Cargo manifest and lockfile. This round's tracked addition is confined to this task's LOG section; the candidate retains its three intended paths.
+
+The five new retained synthetic plant roots contain 3,312 logical file bytes in total. Each final `lsof -nP -Fpn +D <owned-root>` check exited 1 with empty stdout and stderr; the lane target has zero active executables. Successful baseline, restored and regression fixtures reached their existing cleanup paths, leaving exactly those five new failed-plant roots. The ignored `target/task-154-round2-lifecycle.json` records their exact private paths, sizes, observations, source identities, source hashes, owner and review-then-remove condition. It also records the 16 finite round-2 evidence/scratch entries. The supervisor removes these exact owned paths after candidate review; supplied caches and earlier roots keep their existing lifecycle. The shared lease is released. Git state and installed artifacts were preserved.
+
+154 round 2: Repeated all five caught plants and restored gates; the supervisor's census case passed in the complete locked gate without a source change.
+
+Candidate: the supplied three-path task diff plus this LOG retry record. Exercised checks: exact baseline, five caught plants, five restored exact checks, build target, harness target, full locked lane gate, format and basic repository checks pass; the Git-only repeats are skipped for the reason above. Review links: pending with the lane supervisor. Installed release evidence: skipped because these are lab build-containment checks; Runtime owns capsule storage and installed acceptance. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.
+
+### Round 3 — Supervisor sibling-read census retry
+
+The supervisor passed both build tests, then failed `ungranted_sibling_read_is_refused` when the existing cleanup census saw one open `stdout-297` handle. The task 154 worker had passed before that failure. The census and its assertions keep their existing owners and bytes.
+
+This round receives HEAD `252c99428e9c21b43f04e562e4cc4152f348f223`, tree `8ff7afce2709e81a88041a569675c10a03fed63f` and three dirty paths: `lab/agent-conformance/tests/build.rs`, `lab/agent-conformance/RUNBOOK.md` and this LOG. At round start, read-only `git status` and `git rev-parse` calls confirmed those identities despite the round's no-Git-command constraint. Further checks use file hashes and leave Git commands to the supervisor. The branch, history and supplied edits are preserved. Cached divergence remains 14 ahead and zero behind the private integration ref, with upstream unset; remote freshness remains unverified under the offline rule.
+
+Plan: rerun the exact build test, each of the five separate compiling plants and restored checks, then the restored build and harness targets, the failed sibling-read test and the full locked gate. Preserve the build helper byte for byte after each plant. This round changes only this LOG if the candidate passes. Commands use offline dependencies, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, lane-local output paths, the shared exclusive heavy-build lease and a 600-second command bound. Free space is 28,102,533,120 bytes; the 12 GiB estimate plus 2 GiB reserve fit. The existing failure-retention rule owns failed roots; passing fixtures use their existing cleanup paths.
+
+The shared exclusive lease covered every Cargo command. Its descriptor stayed with the gate process; child commands received zero lease descriptors. The gate used these child-command settings from the supplied repository root:
+
+```sh
+CARGO_NET_OFFLINE=true RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
+CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host"
+CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build"
+TMPDIR="$PWD/lab/agent-conformance/target/task-154-round3-tmp"
+```
+
+The exact baseline passed one named test in 1.999 seconds. Each plant used the exact old/new bytes and command recorded in this task's five compiling-plant entries above. Each removed only its own `.env` call from `src/build.rs`; complete-file restoration ran in `finally` before the restored check and the next plant.
+
+| Removal plant | Exit | Failed behavior assertion | Seconds | Restored exact check |
+| --- | --- | --- | --- | --- |
+| `CARGO_BUILD_BUILD_DIR` | 101 | `CARGO_BUILD_BUILD_DIR observed-value assertion` | 1.707 | exit 0; 1 passed; 1.816 s |
+| `CARGO_TARGET_DIR` | 101 | `CARGO_TARGET_DIR observed-value assertion` | 1.625 | exit 0; 1 passed; 1.362 s |
+| `TMPDIR` | 101 | `TMPDIR observed-value assertion` | 1.628 | exit 0; 1 passed; 1.502 s |
+| `CARGO_NET_OFFLINE` | 101 | `CARGO_NET_OFFLINE observed-value assertion` | 1.579 | exit 0; 1 passed; 1.437 s |
+| `CARGO_INCREMENTAL` | 101 | `CARGO_INCREMENTAL observed-value assertion` | 1.789 | exit 0; 1 passed; 1.398 s |
+
+For every plant, both the outer result and the captured synthetic worker result selected exactly `offline_build_overrides_inherited_output_settings` and reported one failed test with that setting's assertion. These are five caught behavior plants. Each output-path plant also left `output.marker` with the exact bytes `owned build output` in its corresponding decoy. Compilation, setup, empty-selection and timeout failures supplied zero caught credit. The existing falsifier list and runner retain their supplied bytes.
+
+Restored commands and actual results:
+
+| Command | Result |
+| --- | --- |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build` | exit 0; 2 passed; 0.106 s |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness` | exit 0; 11 passed; 12.550 s |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects ungranted_sibling_read_is_refused -- --exact` | exit 0; 1 passed; 14.248 s |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` | exit 0; 261 passed; 14 existing ignored rows; 307.867 s |
+
+The supervisor's failed sibling-read case passed both its exact rerun and the complete locked gate. This records a passing rerun; the earlier census failure remains above. The census, its assertions, receipt fields, ignored rows and acceptance labels retain their supplied behavior.
+
+`cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` passed before the baseline and after all regression checks. `node scripts/check-product-data.mjs`, `node --test scripts/check-product-data.test.mjs`, `(cd elastos && cargo fmt --all -- --check)` and `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` each exited 0. Repeating `git diff --check` and the branch/worktree inventory is left to the supervisor under the round's no-Git-command constraint; direct trailing-whitespace and final-newline checks cover the three candidate files.
+
+Final source restoration: `src/build.rs` has SHA-256 `58e8f2bae9827f0a9a35a12bda880c37fe5f8bdccfeb454a4abb292a942820fd`, matching the supplied helper. Hash comparisons also confirm this round preserved `tests/build.rs`, RUNBOOK, harness, native/probe builders, artifact/effects tests, falsifier list, Cargo manifest and lockfile. The eight principles answers above retain their file/line evidence. This round's tracked change is confined to this task's LOG section.
+
+Passing fixtures used their existing cleanup paths. Exactly five new failed synthetic plant roots remain for review, with 3,312 logical file bytes total. Each final `lsof -nP -Fpn +D <owned-root>` check exited 1 with empty stdout/stderr. The lane target has zero active executables. The round's empty Cargo scratch directory is removed after the final metadata check. The ignored `target/task-154-round3-lifecycle.json` records exact owned paths, sizes, source hashes, observed state and cleanup decisions. The supervisor removes that inventory and the five named roots after candidate review. Earlier roots, caches and supplied evidence retain their existing owners. The shared lease is released; installed artifacts and Git state are preserved.
+
+154 round 3: Repeated the five caught plants and all restored gates; the supervisor's sibling-read census case passed alone and in the full locked suite, with the implementation unchanged.
+
+Candidate: the supplied three-path task diff plus this LOG retry record. Exercised checks: exact baseline, five caught plants, five restored exact checks, build target, harness target, exact sibling-read retry, full locked lane gate, formatting and basic repository checks pass. Review links: pending with the lane supervisor. Installed release evidence: skipped because this is lab build-containment proof; Runtime owns capsule storage and installed acceptance. Remaining gate: supervisor rerun, Git-only checks and independent reviews. Next owner: lane supervisor.
+
+
+## 155 — one helper owns the Agent Host build inputs
+
+Supplied HEAD: `5542660c806a618b5cfe98c97d4da0e355e43012`. Supplied tree: `f4cc3329789b221042cbfe67489c83dbb0800e89`. Supplied dirty paths: none (clean checkout). The active task branch keeps its supplied history and checkout. Its fetched private lane base is 15 commits behind this HEAD (15 local-only, zero base-only); this offline task leaves remote refresh with the supervisor.
+
+Plan: extend the existing copy helper to check both repository input branches before it creates a fresh build root, return the copied capsule path, and migrate its callers. Extend the existing exact-tree test, add relative-contract and invalid-Bus-input checks, then build and stage the real copy through the existing offline path. Run the four separate compiling plants, restore each before the next, and run the restored build target and full locked lane gate. Final source edits stay in the five task paths.
+
+Initial free space: 59740651520 bytes. Reuse existing lane caches; a 12 GiB output estimate plus the required 2 GiB reserve fit. Cargo tests use the shared exclusive heavy-build lease, offline inputs, lane-local outputs, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`, and a 600-second bound per command. Existing ignored proofs and prior lifecycle inventories retain their supervisor owner.
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build`: exit 0 in 2.143 seconds. test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+### Four separate compiling plants
+
+All commands use the offline two-thread environment, disabled incremental compilation, lane-local host/build/temp outputs, and the shared exclusive heavy-build lease. Exact old/new bytes below use JSON string encoding. Each plant is restored in `finally` before its passing check and the next plant. Existing falsifier lists and runners keep their bytes.
+
+Plant `omit-wit` in `src/build.rs`:
+
+```json
+{
+  "old": "        (\"elastos/wit/elastos-bus-v1.wit\", InputKind::File),\n",
+  "new": ""
+}
+```
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build agent_host_copy_keeps_the_relative_bus_contract -- --exact`: exit 101 in 1.692 seconds. test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+Failed assertion: `relative Bus contract must be copied`. The named test ran and compiled. This plant is CAUGHT.
+Restored the complete candidate helper bytes (SHA-256 `a58a33dc78f570025f4b748978b901f2af5994cd76c1094c16387c75257af78e`).
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build agent_host_copy_keeps_the_relative_bus_contract -- --exact`: exit 0 in 1.146 seconds. test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+
+Plant `wrong-wit` in `src/build.rs`:
+
+```json
+{
+  "old": "fs::copy(&path, &target)",
+  "new": "fs::copy(if path.ends_with(\"elastos/wit/elastos-bus-v1.wit\") { source.join(\"examples/agent-host/Cargo.toml\") } else { path.clone() }, &target)"
+}
+```
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build agent_host_copy_keeps_the_relative_bus_contract -- --exact`: exit 101 in 1.378 seconds. test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+Failed assertion: `relative Bus contract must keep complete bytes`. The named test ran and compiled. This plant is CAUGHT.
+Restored the complete candidate helper bytes (SHA-256 `a58a33dc78f570025f4b748978b901f2af5994cd76c1094c16387c75257af78e`).
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build agent_host_copy_keeps_the_relative_bus_contract -- --exact`: exit 0 in 1.099 seconds. test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+
+Plant `allow-readme` in `src/build.rs`:
+
+```json
+{
+  "old": "        (\"examples/agent-host/Cargo.toml\", InputKind::File),\n",
+  "new": "        (\"examples/agent-host/Cargo.toml\", InputKind::File),\n        (\"examples/agent-host/README.md\", InputKind::File),\n"
+}
+```
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build agent_host_copy_takes_only_listed_files -- --exact`: exit 101 in 1.514 seconds. test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+Failed assertion: `only listed inputs may be copied`. The named test ran and compiled. This plant is CAUGHT.
+Restored the complete candidate helper bytes (SHA-256 `a58a33dc78f570025f4b748978b901f2af5994cd76c1094c16387c75257af78e`).
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build agent_host_copy_takes_only_listed_files -- --exact`: exit 0 in 1.137 seconds. test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+
+Plant `follow-leaf` in `src/build.rs`:
+
+```json
+{
+  "old": "fs::symlink_metadata(path)",
+  "new": "fs::metadata(path)"
+}
+```
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build agent_host_copy_refuses_bad_bus_inputs -- --exact`: exit 101 in 1.313 seconds. test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+Failed assertion: `leaf-symlink: bad Bus input must be refused`. The named test ran and compiled. This plant is CAUGHT.
+Restored the complete candidate helper bytes (SHA-256 `a58a33dc78f570025f4b748978b901f2af5994cd76c1094c16387c75257af78e`).
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build agent_host_copy_refuses_bad_bus_inputs -- --exact`: exit 0 in 1.062 seconds. test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test build`: exit 0 in 0.140 seconds. test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --features agent-host --test agent_host agent_host_copy_builds_with_relative_bus_contract -- --exact --show-output`: exit 0 in 23.171 seconds. test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out; finished in 21.26s
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101 in 3.422 seconds. test result: FAILED. 96 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s
+
+The first full gate ran inside the builder sandbox and stopped in the existing `runtime::tests::native_identity_refuses_changed_or_missing_bytes`: `Managed original: launch` returned `could not inspect child process group`. Its 96 earlier unit passes supply partial proof only; later targets did not run. This is an infrastructure result, with zero falsifier credit. The same full gate is retried with host process visibility and local fixture sockets, under the same lease and offline settings.
+
+### Implementation and principles
+
+`src/build.rs::copy_agent_host` now accepts the source repository root and a fresh build-tree root, checks both input branches with `checked_directories` and `copy_inputs`, and returns `examples/agent-host` under that tree. Its literal allowlist owns the four capsule inputs and the Bus WIT file. `copy_inputs` keeps leaf metadata checks and enforces file/tree expectations before destination creation. `tests/agent_host.rs::build_agent_host` uses that returned path and keeps its existing offline command, error classification and artifact reads.
+
+`tests/build.rs::agent_host_copy_takes_only_listed_files` compares all copied file paths and exact bytes, including nested source and binary Bus bytes, while preserving the source, collision, capsule-symlink and escape checks. The new `agent_host_copy_keeps_the_relative_bus_contract` resolves two different complete contracts from two returned capsule paths after both copies exist. The new `agent_host_copy_refuses_bad_bus_inputs` checks the missing file, leaf symlink, directory symlink and directory leaf, with named operation/path/cause, absent destinations, unchanged owned decoys and successful repaired copies. The opt-in `agent_host_copy_builds_with_relative_bus_contract` compiles the real copy, validates its component and stages its exact manifest and payload in the same Home before cleanup. Runtime owns the separate principal-bound journey and acceptance gate.
+
+| Principles question | Yes/No | Evidence (lane-relative) |
+| --- | --- | --- |
+| 1. New code/content name or URL where a hash belongs? | No | `tests/agent_host.rs:65` uses the existing hash-bound `stage_probe`; `:75` checks the staged payload digest. |
+| 2. New capsule, Home or UI ambient authority? | No | `tests/agent_host.rs:26` runs only the existing offline build; `:65` stages in the owned Home. |
+| 3. Second path or copy of an operation rule? | No | `src/build.rs:37` owns the one literal input list, consumed by `tests/agent_host.rs:24`. |
+| 4. Does the trusted Runtime core grow? | No | `src/build.rs:18` implements this lab-only change; the five changed paths remain inside this lane. |
+| 5. Do new refusals deny by default with a clear reason? | Yes | `src/build.rs:90` checks leaf metadata and `:95` enforces types before destination creation at `:48`; `tests/build.rs:351` checks named refusals. |
+| 6. Does capsule logic stay inside with granted Bus calls? | Yes | `tests/agent_host.rs:24` builds the unchanged capsule source with its relative typed Bus input, and `tests/build.rs:242` proves source preservation. |
+| 7. Named tests and caught falsifiers prove the new rules? | Yes | `tests/build.rs:278`, `:208` and `:316` catch all four separately compiled plants recorded above; each restored named test passes. |
+| 8. Do identity, admission and allowance stay separate? | Yes | `tests/agent_host.rs:65` constructs bundle identity; the blocked journey still has its existing ignore at `:109`, with Runtime owning admission, principal binding and grants. |
+
+Basic author checks passed with exit 0: `git diff --check`; `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`; `node scripts/check-product-data.mjs` (42 capsules, two profiles, 28 method contracts); `node --test scripts/check-product-data.test.mjs` (99 passed); `(cd elastos && cargo fmt --all -- --check)`; and `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`.
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0 in 299.572 seconds. test result: ok. 97 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s; test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s; test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 39.92s; test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s; test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.58s; test result: ok. 65 passed; 0 failed; 12 ignored; 0 measured; 0 filtered out; finished in 220.30s; test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.89s; test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s; test result: ok. 12 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 16.79s; test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s; test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s; test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s; test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s; test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s; test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s; test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+### Restored gates and lifecycle
+
+The host-access full locked gate passed with exit 0 in 299.572 seconds: 263 passed, zero failed and 14 existing ignored rows. The same offline two-thread settings, lane-local outputs, disabled incremental compilation, 600-second bound and shared exclusive heavy-build lease applied. The real Agent Host build took 21.110 seconds inside its passing 23.171-second command. It compiled the unchanged capsule from copied inputs, validated the component, staged exact manifest/payload bytes and completed `home.finish()`. The sandbox process-inspection result above stays an infrastructure result.
+
+The four plants restored the complete helper to SHA-256 `a58a33dc78f570025f4b748978b901f2af5994cd76c1094c16387c75257af78e` before the final gates. Byte comparisons against the supplied HEAD also confirm the offline-build function, controller, probe selectors, manifests, locks, falsifier list, runner and blocked rows retain their supplied bytes. The candidate changes exactly the five task paths.
+
+Passing fixtures removed their own roots. After the restored gates passed, host `lsof -nP -Fpn +D <owned-root>` checks returned exit 1 with empty stdout/stderr for each of the five retained synthetic/sandbox roots and the new real-agent-host build directory; those six directories were then removed. The first cleanup stopped at a nonempty scratch check after those removals, before it saved the size measurements. A metadata check identified one 495-byte tool cache in the owned scratch. A separate empty holder check then passed, and that cache, its scratch directory and the transient gate script were removed. The inventory records the missing pre-removal size measurements explicitly. Host process inspection found zero executables active from this lane target, and the final scan found zero new retained roots.
+
+The ignored `target/task-155-current-lifecycle.json` records exact private paths, source identities, ownership, holder checks and removal decisions. The finite proof outputs and that inventory stay for supervisor review, then the supervisor removes their exact paths. Earlier roots, inventories and supplied caches retain their existing supervisor owner. The shared lease is released. This task creates zero installed artifacts, rollback sets, branches or worktrees.
+
+The final branch/worktree inventory keeps this checkout on the supplied HEAD and tree, with only the five task paths dirty. The task branch has no upstream. Compared with fetched `spike/spike/agent-host` at `321cc698a21543c7cfe2895fecf9c2ef99e2b33c`, HEAD has 15 local-only commits and 0 base-only commits. Network access is outside this builder task, so the supervisor owns a fresh remote comparison and publication.
+
+155: One checked helper now copies the Agent Host and relative Bus inputs, with exact-byte refusal tests, four caught plants, and a passing real copied-capsule build and staging proof.
+
+Candidate: the local five-path diff against the supplied HEAD. Exercised checks: build target, four caught compiling plants and their restored exact checks, opt-in real-capsule build/staging, full locked lane gate, formatting and basic repository checks pass. Review links: pending with the lane supervisor. Installed release evidence: skipped because this is a lab artifact-input prerequisite; Runtime owns installed acceptance and the existing principal-bound journey. Remaining gate: supervisor rerun and independent reviews. Next owner: lane supervisor.
+
+
+## 156 — A14 suite outcome from graded rows
+
+Supplied checkout before edits: HEAD `edbf64ea6d50a30f232ef7ed898843933687de90`,
+tree `d391534de826f7cc10f8dd0a72d826439181766c`, branch
+`spark/cx-agent-conformance/156-suite-outcome-from-graded-rows`.
+`git status --porcelain=v1 --untracked-files=all` and `git diff --name-only`
+were empty. The branch has zero upstream; the fetched `spike/spike/agent-host`
+comparison is 16 local-only commits and 0 base-only commits. Remote freshness
+stays with the supervisor because this task permits offline work only.
+
+Read task 156, supplied BACKLOG item 14, LOG sections 018, 022 and 034,
+the RUNBOOK table/receipt/SKIPPED descriptions, the architecture's Harness
+conformance section, and the existing parser, grader, report CLI and tests.
+The permitted repository has zero humanizer skill files; this handoff uses
+direct statements of behavior and ownership.
+
+Plan: extend the private table result with its row-derived outcome, preserve
+the public table API and existing grade checks, add receipt and CLI regression
+cases, then run four separate compiling plants and restore each exact edit.
+Final source changes stay in `src/report.rs`, `tests/report.rs`, the existing
+RUNBOOK receipt paragraph and this LOG section. The supplied ignored target
+artifacts, including an older task-156 inventory, keep their existing owners.
+This task preserves the supplied HEAD, tree, index and unrelated paths.
+
+### Commands and hand-run plants
+
+The shared exclusive `fcntl.flock` lease was held through each sequential Cargo
+command. The parent opened the existing common-Git lock read-only and kept
+its descriptor private. Offline Cargo, `RUST_TEST_THREADS=2`,
+`CARGO_INCREMENTAL=0`, lane `target/host` and `target/host-build` outputs, and
+a 600-second bound applied. Each command checks a 12 GiB build estimate plus
+2 GiB reserve; the initial available space was 59005337600 bytes.
+
+Baseline `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report versions_receipt_outcome_uses_graded_rows -- --exact`: exit 0 in 1.606 seconds; the exact named test ran and passed.
+
+Baseline `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report report_cli_preserves_outcome_and_failure_reason -- --exact`: exit 0 in 0.387 seconds; the exact named test ran and passed.
+
+Plant `blocked-only-pass` in `src/report.rs`:
+
+```json
+{
+  "old": "        } else if blocked {\n            \"BLOCKED\"\n",
+  "new": "        } else if blocked {\n            \"PASS\"\n"
+}
+```
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report versions_receipt_outcome_uses_graded_rows -- --exact`: exit 101 in 1.467 seconds.
+The named test compiled and ran; failed assertion: `valid BLOCKED: suite outcome`.
+Result: CAUGHT. Exact candidate bytes were restored in
+a `finally` block (SHA-256 `f33783d02904c55ce898e45cd7238e0968534c0bd804861f15296b47e22636f6`) before the next command.
+
+Restored `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report versions_receipt_outcome_uses_graded_rows -- --exact`: exit 0 in 1.101 seconds; 1 passed, 0 failed.
+
+Plant `blocked-overrides-failure` in `src/report.rs`:
+
+```json
+{
+  "old": "        let outcome = if !passed {\n            \"FAIL\"\n        } else if blocked {\n            \"BLOCKED\"\n",
+  "new": "        let outcome = if blocked {\n            \"BLOCKED\"\n        } else if !passed {\n            \"FAIL\"\n"
+}
+```
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report versions_receipt_outcome_uses_graded_rows -- --exact`: exit 101 in 1.304 seconds.
+The named test compiled and ran; failed assertion: `failed row before blocked row: suite outcome`.
+Result: CAUGHT. Exact candidate bytes were restored in
+a `finally` block (SHA-256 `f33783d02904c55ce898e45cd7238e0968534c0bd804861f15296b47e22636f6`) before the next command.
+
+Restored `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report versions_receipt_outcome_uses_graded_rows -- --exact`: exit 0 in 1.052 seconds; 1 passed, 0 failed.
+
+Plant `bypass-gap-check` in `src/report.rs`:
+
+```json
+{
+  "old": "            check_blocked_gap(name, reason, gaps)?;\n",
+  "new": "            // Plant: accept blocker without GAPS validation.\n"
+}
+```
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report versions_receipt_outcome_uses_graded_rows -- --exact`: exit 101 in 1.238 seconds.
+The named test compiled and ran; failed assertion: `RT3 | SKIPPED: invalid blocker must fail`.
+Result: CAUGHT. Exact candidate bytes were restored in
+a `finally` block (SHA-256 `f33783d02904c55ce898e45cd7238e0968534c0bd804861f15296b47e22636f6`) before the next command.
+
+Restored `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report versions_receipt_outcome_uses_graded_rows -- --exact`: exit 0 in 1.047 seconds; 1 passed, 0 failed.
+
+Plant `drop-failure-reason` in `src/report.rs`:
+
+```json
+{
+  "old": "            if result == \"FAIL\" {\n                if let Some(reasons) = self.reasons.get(name) {\n                    text.push_str(&format!(\" | {}\", reasons.join(\"; \")));\n                }\n            }\n",
+  "new": ""
+}
+```
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report report_cli_preserves_outcome_and_failure_reason -- --exact`: exit 101 in 1.782 seconds.
+The named test compiled and ran; failed assertion: `failed: displayed grade and full failure reason`.
+Result: CAUGHT. Exact candidate bytes were restored in
+a `finally` block (SHA-256 `f33783d02904c55ce898e45cd7238e0968534c0bd804861f15296b47e22636f6`) before the next command.
+
+Restored `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report report_cli_preserves_outcome_and_failure_reason -- --exact`: exit 0 in 1.317 seconds; 1 passed, 0 failed.
+
+### Restored candidate gates
+
+The sandbox preflight refused a loopback bind before a test ran. This is an
+infrastructure result with zero caught credit. The full gates use host fixture
+permission, the same shared exclusive lease, offline two-thread settings,
+lane-local outputs and 600-second limits. Existing isolated Git fixtures in
+the full report tests own their own Git operations; this checkout stays fixed.
+
+`git diff --check`: exit 2 in 0.046 seconds; free space before command 59003768832 bytes.
+
+`git diff --check`: exit 0 in 0.043 seconds; free space before command 59003748352 bytes.
+
+`cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0 in 0.375 seconds; free space before command 59003736064 bytes.
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report`: exit 0 in 1.123 seconds; free space before command 59003715584 bytes.
+
+```text
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.92s
+```
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0 in 293.976 seconds; free space before command 59003719680 bytes.
+
+```text
+test result: ok. 97 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.09s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.92s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 29.68s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.69s
+test result: ok. 65 passed; 0 failed; 12 ignored; 0 measured; 0 filtered out; finished in 222.41s
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.85s
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.22s
+test result: ok. 12 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 17.02s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+`lab/agent-conformance/run.sh`: exit 1 in 326.755 seconds; free space before command 58996150272 bytes.
+
+```text
+versions receipt: target/run-table.rDeM5m/VERSIONS.json
+retained Cargo output: target/run-table.rDeM5m
+```
+
+The first diff check found a trailing blank line in this new LOG section
+(exit 2); the line was removed before the passing diff check above.
+The product-data command returned `{"ok":true,"capsules":42,"profiles":2,"method_contracts":28}`;
+`node --test scripts/check-product-data.test.mjs` passed all 99 tests (exit 0).
+
+The first `run.sh` attempt failed only `attach_secret_stays_in_memory` and
+`killed_worker_settlement_recorded_without_retry` at their physical cleanup
+census: respectively `stderr-32`/`stdout-32` and `stderr-135` capture holders.
+The full locked gate had passed these same journeys. The failed receipt and
+four failed Homes remain under the existing retention rule. Host `lsof -nP
+-Fpn +D <owned-root>` returned exit 1 with empty stdout/stderr for all five
+retained paths after the command ended. The tests settled their child groups;
+this task applied zero process or census changes. One outer retry below uses
+the exact restored source and original command; this lab census result gives
+zero falsifier credit. The machine-readable inventory records each exact root
+and its review/removal condition.
+
+`lab/agent-conformance/run.sh` (run-sh-retry): exit 0 in 286.22 seconds; free space before command 58979233792 bytes.
+
+```text
+versions receipt: target/run-table.rtoll1/VERSIONS.json
+```
+
+`(cd elastos && cargo fmt --all -- --check)` (workspace-format): exit 0 in 3.163 seconds; free space before command 57221226496 bytes.
+
+`cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` (chain-provider-format): exit 0 in 0.129 seconds; free space before command 57204375552 bytes.
+
+### Implementation, receipt and cleanup
+
+`Evidence::table` now returns its row-derived suite outcome with the existing
+text and success flag. `render_run` uses that value directly. The public
+`table` wrapper keeps its `(String, bool)` API. The parser, `grade`,
+`check_blocked_gap`, receipt schema, identity requirements and write gate keep
+their existing rules. Status words in failure reasons remain display data;
+genuine SKIPPED rows continue to yield FAIL. The RUNBOOK receipt paragraph
+states that policy.
+
+`versions_receipt_outcome_uses_graded_rows` covers PASS, valid BLOCKED,
+a multi-word SKIPPED blocker, mixed failures/blocks in both name orders,
+Cargo failure, genuine SKIPPED, the three literal-pipe blocker refusals and
+identity failure beside passing rows. The cases state their expected outcomes
+directly and check table grades, identity status, command result and hash.
+`report_cli_preserves_outcome_and_failure_reason` runs the existing report
+executable for passing, real RT3-blocked and failed synthetic rows, checking
+actual exit codes, receipt outcomes, exact printed/stored table equality,
+hashes and the full pipe-to-slash failure reason. Both use the existing
+synthetic helpers; these two tests start neither Runtime nor providers.
+
+All four plants compiled and failed their exact named test. The first returned
+PASS instead of BLOCKED; the second returned BLOCKED instead of FAIL; the third
+accepted an invalid literal-pipe blocker; the fourth omitted the full rendered
+failure reason. Each restored named test passed before the next plant.
+The final report source SHA-256 is `f33783d02904c55ce898e45cd7238e0968534c0bd804861f15296b47e22636f6`.
+The falsifier list, shared runner, report CLI, run.sh, GAPS, Cargo files,
+probe, build/launch helpers, controller, census and stand-in retain their
+supplied source bytes. The task edits exactly its four permitted paths.
+
+The full locked lane command passed 265 tests, with 14 existing ignored rows.
+The report target passed 26 tests. The unchanged `run.sh` retry returned exit 0
+in 286.220 seconds after the separate retained capture-census failure above.
+The first failed receipt has complete identity coverage, outcome FAIL and
+command success false. The successful receipt is local, uncommitted evidence:
+`target/run-table.rtoll1/VERSIONS.json`,
+SHA-256 `d44589e0161ac6319b3a32aa88fee9f70ecaf759313605b2084546446fee57e8`.
+Its suite outcome is BLOCKED, identity status is complete, command success is
+true, Cargo success is true, and missing/invalid evidence is empty. Its commit
+matches the supplied HEAD and its dirty flag is true. The printed table equals
+the stored table byte for byte; table SHA-256 is
+`18d7345f9a93bdce9a6d255bc8d4259ded97d846b108681c550e3a150ff8f2d2`.
+
+Passing fixture Homes removed themselves with `finish`. Four plant Homes and
+four capture-census failure Homes remain for review, together with the first
+failed run's output and the successful receipt. Final host `lsof` checks for
+all ten retained Home/run directories returned exit 1 with empty stdout/stderr.
+The successful run directory contains only VERSIONS.json. The private ignored
+`target/task-156-current-lifecycle.json` records exact paths, ownership, sizes,
+source identities, empty holder checks and finite removal conditions. The
+finite command outputs in `target/task-156-current-proof` stay through candidate
+review, then the supervisor removes that exact directory. Supplied caches and
+earlier evidence keep their existing owners and retention decisions. The shared
+lease is released; this task creates zero branches, worktrees, installations or
+rollback sets. Retained-output paths in this LOG are lane-relative.
+
+### Principles check
+
+Answers follow the task's question wording; file references are lane-relative.
+
+| # | Answer | Evidence |
+| --- | --- | --- |
+| 1. New name/URL where a code/content hash belongs? | No | `src/report.rs:552` binds the table to SHA-256; synthetic labels describe report cases. |
+| 2. Capsule or UI gains ambient authority? | No | `tests/report.rs:831` uses a throwaway host-side CLI fixture; Runtime grants and Home ownership stay with their existing paths. |
+| 3. Second path or grading rule? | No | `src/report.rs:212` uses the existing row result; `src/report.rs:520` consumes that same pass's outcome. |
+| 4. Runtime core grows? | No | `src/report.rs:512` keeps the change in the lab report; the four-path diff contains the complete implementation. |
+| 5. Refusals fail closed with clear reasons? | Yes | `src/report.rs:34` retains exact GAPS validation; `tests/report.rs:789` checks invalid blocker refusal. |
+| 6. Capsule logic stays self-contained with granted Bus calls? | Yes | `tests/artifact.rs:87` retains the Bus import proof and passed in the full lane gate. |
+| 7. Named tests and caught falsifiers prove the rules? | Yes | `tests/report.rs:671` and `tests/report.rs:830` passed restored; all four exact compiling plants above failed their named assertions. |
+| 8. Identity, admission and allowance stay separate? | Yes | `src/report.rs:539` keeps Runtime admission/grant ownership; `src/report.rs:548` and `src/report.rs:549` keep suite and identity command gates separate. |
+
+156: The existing table pass now supplies the receipt outcome from graded rows;
+two regression tests and four caught, restored plants prove outcome and reason
+fidelity through the public report path.
+
+Candidate: the local four-path diff at the supplied HEAD/tree, with the restored
+report-source digest above. Exercised checks: both exact named tests, four
+plants and their restored tests, report target, full locked lane gate,
+run.sh retry, lane/workspace/chain-provider formatting, diff check and 99
+product-data tests pass. Review links: pending with the lane supervisor.
+Installed release evidence: outside this synthetic reporting task; the existing
+installed-product acceptance and blocked journeys stay with their owners.
+Remaining gate: supervisor rerun and independent reviews. Next owner: lane
+supervisor.
+
+The final branch/worktree inventory preserves the supplied HEAD and tree and
+has exactly the four task paths dirty. The task branch has no upstream.
+The cached `spike/spike/agent-host` ref moved during the gates; at the final
+observation it is `eb2129162bec0881ad0b6e1e5672dc44b17b8cff`, with 16 local-only commits
+and 2 base-only commits. This task made zero network requests. The supplied checkout's Git state is
+unchanged. The supervisor owns fresh remote comparison and base compatibility.
