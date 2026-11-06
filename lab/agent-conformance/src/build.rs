@@ -13,29 +13,37 @@ pub fn repository() -> PathBuf {
     lane().parent().unwrap().parent().unwrap().to_path_buf()
 }
 
-/// Copy only the capsule's build inputs. Both locations stay in this checkout;
-/// existing destinations and symlinks are refused before any source bytes move.
-pub fn copy_agent_host(source: &Path, destination: &Path) -> Result<(), String> {
+/// Copy the capsule and its relative Bus contract into a fresh build tree.
+/// Both locations stay in this checkout; all inputs are checked before creation.
+pub fn copy_agent_host(source: &Path, destination: &Path) -> Result<PathBuf, String> {
     checked_directories(source, &repository())?;
-    checked_directories(
-        destination
-            .parent()
-            .ok_or("copy destination needs a parent")?,
-        &lane().join("target"),
-    )?;
     if destination.file_name().is_none()
         || destination
             .components()
             .any(|c| !matches!(c, Component::RootDir | Component::Normal(_)))
     {
         return Err(format!(
-            "copy destination refused: {}",
+            "copy destination {}: requires a normal path with a file name",
             destination.display()
         ));
     }
+    checked_directories(
+        destination
+            .parent()
+            .ok_or_else(|| format!("copy destination {}: needs a parent", destination.display()))?,
+        &lane().join("target"),
+    )?;
     let mut files = Vec::new();
-    for name in ["Cargo.toml", "Cargo.lock", "capsule.json", "src"] {
-        copy_inputs(&source.join(name), &mut files)?;
+    for (name, kind) in [
+        ("examples/agent-host/Cargo.toml", InputKind::File),
+        ("examples/agent-host/Cargo.lock", InputKind::File),
+        ("examples/agent-host/capsule.json", InputKind::File),
+        ("examples/agent-host/src", InputKind::Tree),
+        ("elastos/wit/elastos-bus-v1.wit", InputKind::File),
+    ] {
+        let path = source.join(name);
+        checked_directories(path.parent().unwrap(), source)?;
+        copy_inputs(&path, kind, &mut files)?;
     }
     fs::create_dir(destination)
         .map_err(|error| format!("copy destination {}: {error}", destination.display()))?;
@@ -45,7 +53,7 @@ pub fn copy_agent_host(source: &Path, destination: &Path) -> Result<(), String> 
             .and_then(|()| fs::copy(&path, &target).map(|_| ()))
             .map_err(|error| format!("copy input {}: {error}", path.display()))?;
     }
-    Ok(())
+    Ok(destination.join("examples/agent-host"))
 }
 
 fn checked_directories(path: &Path, root: &Path) -> Result<(), String> {
@@ -72,11 +80,29 @@ fn checked_directories(path: &Path, root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn copy_inputs(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+enum InputKind {
+    File,
+    Tree,
+    Any,
+}
+
+fn copy_inputs(path: &Path, kind: InputKind, files: &mut Vec<PathBuf>) -> Result<(), String> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("copy input {}: {error}", path.display()))?;
     if metadata.file_type().is_symlink() {
         return Err(format!("copy refuses symlink: {}", path.display()));
+    }
+    match kind {
+        InputKind::File if !metadata.is_file() => {
+            return Err(format!("copy requires a regular input: {}", path.display()));
+        }
+        InputKind::Tree if !metadata.is_dir() => {
+            return Err(format!(
+                "copy requires an input directory: {}",
+                path.display()
+            ));
+        }
+        _ => {}
     }
     if metadata.is_dir() {
         for entry in fs::read_dir(path)
@@ -84,7 +110,7 @@ fn copy_inputs(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
         {
             let entry =
                 entry.map_err(|error| format!("copy directory {}: {error}", path.display()))?;
-            copy_inputs(&entry.path(), files)?;
+            copy_inputs(&entry.path(), InputKind::Any, files)?;
         }
     } else if metadata.is_file() {
         files.push(path.to_path_buf());

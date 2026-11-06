@@ -68,7 +68,9 @@ fn exercise(runaway: bool, require_reason: bool) -> Vec<Completion> {
         .zip(&capsules)
         .map(|(home, capsule)| Launch {
             home,
-            program: &runtime.binary,
+            program: runtime
+                .verified_path()
+                .expect("verify the recorded Runtime bytes"),
             args: vec!["run", capsule.path.to_str().unwrap()],
         })
         .collect();
