@@ -39,8 +39,10 @@ use sha2::{Digest, Sha256};
 use super::gateway::{
     consume_passkey_step_up_token, home_session_cookie_header_for_token,
     is_wallet_connector_capsule_id, issue_home_launch_token_for_auth_grant,
-    require_home_launch_token_binding, require_runtime_wallet_authority, runtime_wallet_authority,
-    GatewayState, RuntimeWalletAdapter, RuntimeWalletAuthority, HOME_CAPSULE_ID, HOME_ROUTE,
+    issue_home_launch_token_with_context, require_home_launch_token_binding,
+    require_runtime_wallet_authority, runtime_wallet_authority, GatewayState,
+    HomeLaunchTokenContext, RuntimeWalletAdapter, RuntimeWalletAuthority, HOME_CAPSULE_ID,
+    HOME_ROUTE,
 };
 
 use crate::auth::AUTH_SESSION_TTL_SECS;
@@ -3112,13 +3114,33 @@ async fn recovery_kit_import_inner(
             &state.data_dir,
             crate::auth::RecoveryReassignmentTestFault::TokenPreparation,
         )?;
-        let home_token =
-            issue_home_launch_token_for_auth_grant(&state.data_dir, HOME_CAPSULE_ID, &grant)?;
-        let system_token = issue_home_launch_token_for_auth_grant(
+        // Tokens before commit: kit principal has no local record yet. Use the
+        // proof-derived Human Recovery Kit root (Rong S1-SR-0 recovery ruling).
+        let recovery_root =
+            crate::auth::ResolvedPrincipalRoot::from_verified_human_recovery_kit(&kit)?;
+        let home_token = issue_home_launch_token_with_context(
+            &state.data_dir,
+            HOME_CAPSULE_ID,
+            &HomeLaunchTokenContext::resolved(
+                recovery_root.clone(),
+                grant.principal_id.clone(),
+                grant.session_id.clone(),
+                Some(grant.proof_binding_id.clone()),
+                grant.grant_id.clone(),
+            ),
+        )?;
+        let system_token = issue_home_launch_token_with_context(
             &state.data_dir,
             super::gateway::SYSTEM_CAPSULE_ID,
-            &grant,
+            &HomeLaunchTokenContext::resolved(
+                recovery_root,
+                grant.principal_id.clone(),
+                grant.session_id.clone(),
+                Some(grant.proof_binding_id.clone()),
+                grant.grant_id.clone(),
+            ),
         )?;
+
         let signed_audit_event = crate::auth::sign_audit_event(
             &state.data_dir,
             audit_event(AuditEventInput {

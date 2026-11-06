@@ -6649,6 +6649,20 @@ fn ensure_recovered_root_reassignable_in_state(
     if current.proof_binding.passkey.is_none() {
         anyhow::bail!("proof binding is not a passkey");
     }
+    // Recovery kits have no kind; commit preserves the importer's kind. Refuse
+    // an Agent importer or any Agent record that would be replaced, so recovery
+    // cannot convert Agent -> Human (Human-only in this ruling).
+    if current.kind == PrincipalKind::Agent {
+        anyhow::bail!("Agent importer cannot recover a principal root");
+    }
+    if state.principals.iter().any(|principal| {
+        principal.kind == PrincipalKind::Agent
+            && principal.proof_binding_id != proof_binding_id
+            && (principal.principal_id == recovered_principal_id
+                || principal.localhost_root == recovered_localhost_root)
+    }) {
+        anyhow::bail!("cannot reassign recovery over an Agent record");
+    }
     // A Kit's material only proves itself. When this Home already knows the
     // recovered principal or root, the Kit must unwrap the same data key this
     // Home stored for it; otherwise anyone who knows a principal id could
@@ -7215,13 +7229,37 @@ impl ResolvedPrincipalRoot {
         principal_id: &str,
     ) -> anyhow::Result<Self> {
         let device = crate::collaboration_profile_authority::load_existing_device_did(data_dir)?;
-        if device.is_some_and(|did| PrincipalId::device_did(&did).as_str() == principal_id) {
+        if let Some(did) =
+            device.filter(|did| PrincipalId::device_did(did).as_str() == principal_id)
+        {
             // Today's device root: the one Users rule, applied to `device:<did>`.
-            return Ok(Self(RootArm::Local(principal_localhost_root(principal_id))));
+            return Ok(Self::device_local_root_for_did(&did));
         }
         principal_stored_localhost_root(Some(auth_data_dir), principal_id)
             .map(|root| Self(RootArm::Local(root)))
             .map_err(|err| anyhow!(err))
+    }
+
+    /// Shared D1 device arm: `PrincipalId::device_did` plus `principal_localhost_root`.
+    /// Never reads a stored principal record.
+    fn device_local_root_for_did(did: &str) -> Self {
+        let principal_id = PrincipalId::device_did(did);
+        Self(RootArm::Local(principal_localhost_root(
+            principal_id.as_str(),
+        )))
+    }
+
+    /// Proof-derived Human Recovery Kit root. Call only after
+    /// `verify_recovery_kit_material` and `ensure_recovered_root_reassignable`.
+    /// The kit carries no kind; Human Users root only — no Agent recovery.
+    pub(crate) fn from_verified_human_recovery_kit(kit: &RecoveryKitV1) -> anyhow::Result<Self> {
+        verify_recovery_kit_material(kit)?;
+        if kit.localhost_root != principal_localhost_root(&kit.principal_id) {
+            anyhow::bail!("recovered principal root is not canonical for the recovered principal");
+        }
+        Ok(Self(RootArm::Local(principal_localhost_root(
+            &kit.principal_id,
+        ))))
     }
 
     /// Test-only root for a fixture principal (A5-P2a-ii-0b's two
