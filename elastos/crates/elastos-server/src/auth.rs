@@ -7249,6 +7249,14 @@ impl ResolvedPrincipalRoot {
         )))
     }
 
+    /// The device arm for a launch token whose signature already verified against
+    /// `did`, the Runtime's trusted signer. A subordinate Runtime trusts its
+    /// parent's DID without holding that device key, so this MUST NOT call
+    /// `resolve` (no local identity/record for the parent DID).
+    pub(crate) fn verified_device_signer(did: &str) -> Self {
+        Self::device_local_root_for_did(did)
+    }
+
     /// Proof-derived Human Recovery Kit root. Call only after
     /// `verify_recovery_kit_material` and `ensure_recovered_root_reassignable`.
     /// The kit carries no kind; Human Users root only — no Agent recovery.
