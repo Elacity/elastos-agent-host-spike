@@ -26,7 +26,7 @@ pub fn operator_platform() -> Result<&'static str, &'static str> {
 pub fn write_operator_home(home: &ThrowawayHome) -> Result<PathBuf, Box<dyn Error>> {
     home.guard(home.home(), home.data())?;
     let provider = localhost_provider_under_test()?;
-    let bytes = fs::read(&provider.binary)?;
+    let bytes = fs::read(provider.verified_path()?)?;
     let installed = home.data().join("bin/localhost-provider");
     write_component_home(
         home,
@@ -51,7 +51,11 @@ pub fn write_component_home(
 ) -> Result<(), Box<dyn Error>> {
     home.guard(home.home(), home.data())?;
     let platform = operator_platform()?;
-    let source: Value = serde_json::from_slice(&fs::read(repository().join("components.json"))?)?;
+    let source_path = repository().join("components.json");
+    let source_bytes = fs::read(&source_path)
+        .map_err(|error| format!("read component source {}: {error}", source_path.display()))?;
+    let source: Value = serde_json::from_slice(&source_bytes)
+        .map_err(|error| format!("decode component source {}: {error}", source_path.display()))?;
     let mut entry = source["external"][component].clone();
     let platforms = entry["platforms"]
         .as_object_mut()
@@ -61,21 +65,43 @@ pub fn write_component_home(
         return Err(format!("repository {component} platform must be an object").into());
     }
 
-    fs::create_dir(home.data().join("bin"))?;
-    let mut copy = File::create_new(installed)?;
-    copy.write_all(bytes)?;
+    let bin = home.data().join("bin");
+    fs::create_dir(&bin)
+        .map_err(|error| format!("create component directory {}: {error}", bin.display()))?;
+    let mut copy = File::create_new(installed)
+        .map_err(|error| format!("create component file {}: {error}", installed.display()))?;
+    copy.write_all(bytes)
+        .map_err(|error| format!("write component file {}: {error}", installed.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        copy.set_permissions(fs::Permissions::from_mode(0o755))?;
+        copy.set_permissions(fs::Permissions::from_mode(0o755))
+            .map_err(|error| {
+                format!("set component permissions {}: {error}", installed.display())
+            })?;
     }
     info["checksum"] = json!(format!("sha256:{checksum}"));
-    info["size"] = json!(copy.metadata()?.len());
+    info["size"] = json!(copy
+        .metadata()
+        .map_err(|error| format!("read component metadata {}: {error}", installed.display()))?
+        .len());
     info["install_path"] = json!(format!("bin/{component}"));
     let manifest = json!({"external": {component: entry}, "profiles": {}});
+    let manifest_path = home.data().join("components.json");
     serde_json::to_writer_pretty(
-        File::create_new(home.data().join("components.json"))?,
+        File::create_new(&manifest_path).map_err(|error| {
+            format!(
+                "create component manifest {}: {error}",
+                manifest_path.display()
+            )
+        })?,
         &manifest,
-    )?;
+    )
+    .map_err(|error| {
+        format!(
+            "write component manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?;
     Ok(())
 }
