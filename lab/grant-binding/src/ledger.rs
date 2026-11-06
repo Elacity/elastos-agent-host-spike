@@ -5409,3 +5409,21 @@ fn model_child_hold_settles_after_the_issuing_expiry() {
         .expect_err("the issuing grant stays expired");
     assert_eq!(later, Refuse::Expired);
 }
+
+#[test]
+fn model_home_expiry_bind_leaves_the_standing_grant() {
+    let mut verifier = Verifier::new();
+    let home = verifier.register_instance("home", "session-a");
+    let photo = verifier.register_instance("photo", "session-a");
+    verifier
+        .bind_until(home, "UsersAI/home/desk", rights(), 10)
+        .expect_err("home does not mint");
+    let album = verifier
+        .bind_grant(photo, "UsersAI/photo/album", rights())
+        .expect("standing album");
+    verifier.set_verifier_now(10);
+    let decision = verifier
+        .use_grant(verifier.open_call(photo), &guest(album))
+        .expect("unset expiry is not due");
+    assert_eq!(decision.owned_root, "UsersAI/photo/album");
+}
