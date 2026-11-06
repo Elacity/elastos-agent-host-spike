@@ -9693,3 +9693,341 @@ A passing row gives the real Runtime no A3 credit. Two-capsule-run owns the real
 
 - 139: `bridge_envelope` records the capsule's capability line and spends the invoke amount through `use_grant`; a `once` hold is settled and a `session` hold stays open.
 
+## 141
+
+Comparison base, recorded before the first edit: `fc9f75ef44f30143631a2556979a67acb580b181`. `fc9f75ef` is an ancestor. `fff8f1761eb851f642f8e9b680ea1c6747974060` and `80a2405624121eef3404fe3b3814a558be4b7cb5` are not. `git status --short -- elastos capsules scripts examples` was empty before the edit and after `cargo fetch --locked --manifest-path elastos/Cargo.toml`, which completed with no output. wasmtime in `elastos/Cargo.lock` is `36.0.20`.
+
+Allow once: "Allow once authorizes one exact operation." Allow for this session: "Allow for this session authorizes a bounded operation set until the session ends or the grant is revoked." This task is the spend half of Allow for this session. It adds no mandate service and it does not revoke.
+
+The four refusal strings: `budget ask exceeds the admission cap: asked {asked}, cap {cap}`; `reservation exceeds the ceiling`; `measured figure exceeds the reservation`; `uncertain hold is not released`.
+
+`bridge_envelope` no longer compares `amount > 4_096` and does not name `EFFECT_BUDGET_CAP`. `admit_effect` remains the one cap check. `use_grant` reads one `#[cfg(test)]` flag after `admit_effect` reserves, then clears it. `arm_settle_fault(false)` treats that settle as `AboveReservation` and does not call the ledger. `arm_settle_fault(true)` settles `Unknown`, so the hold is uncertain. Both arms use the one release match: `Ok(())` returns the settle error, and `Err(release)` returns `Err((403, release.to_string()))`. `NotOutstanding` still skips release. A clear flag keeps a session hold and still settles a `once` grant with `SettleOutcome::Known`. The hostcall still calls `use_grant` with the body amount, `None`, and `None`.
+
+### Plants
+
+Each plant was restored before the next. Restored, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` has no plant: the working file has no `let _ = self.ledger.release` and no `amount > 4_096`. The planted crate compiled. The named test failed on the assertion below.
+
+- F-release-skip. Old: `match self.ledger.release(&call, &request, reservation) { Ok(()) => return Err((403, refusal.to_string())), Err(release) => return Err((403, release.to_string())), }`. New: `return Err((403, refusal.to_string()));`. The drain test passed. `standin-runtime/mod.rs:10723` `the once ask of the full amount answers with type and data`, left `{"code", "message", "type"}`. The once invoke of 4096 stayed `(Live, false)` and the message was `reservation exceeds the ceiling`. The session invoke of 3996 was refused with that same message and stayed `(Live, false)`. The surfaces row also went red, at `:10786`, with `unknown outcome keeps the hold`, because that row reads the release result.
+- F-release-discard. Old: the same match. New: `let _ = self.ledger.release(&call, &request, reservation); return Err((403, refusal.to_string()));`. The drain test and `standin_failed_settle_releases_only_that_hold` passed. `standin-runtime/mod.rs:10786` `the uncertain settle`, left `unknown outcome keeps the hold` against `uncertain hold is not released`.
+- Bridge compare, restored, not left in. Old: the invoke goes straight to `use_grant`. New: `if amount > 4_096` returns `admit_text` of `OverBudget` before `use_grant`. `standin-runtime/mod.rs:10665` `the sibling ask above the cap`, left `budget ask exceeds the admission cap: asked 4097, cap 4096`. With that sibling assertion removed, the owner ask of 4097 still passed. Restored, the compare is absent and the sibling assertion is back.
+
+### Docs
+
+`standin-runtime/README.md` adds one paragraph immediately before `## Callers`. Six session asks of 1 are admitted, 4091 is `reservation exceeds the ceiling`, a failed settle releases only that hold, an earlier session hold stays counted, the bridge keeps no second cap compare, and `use_grant` returns a release error. A PASS gives the Runtime no A6 credit. The bridge paragraph stays. `RUNBOOK.md` adds one paragraph after the last stand-in paragraph naming `standin_session_drain_refuses_past_the_remainder`, `standin_failed_settle_releases_only_that_hold` and `standin_failed_settle_surfaces_release_error`. Every other paragraph keeps its bytes.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged. `git diff` for `elastos`, `capsules`, `scripts`, `examples`, `tests/standin_grants.rs`, `tests/standin_contract.rs`, `tests/effects.rs`, `GAPS.md` and `falsifiers.json` printed nothing. The changed files are `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.34 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 266.33 seconds, inside the 600-second bound. Targets: lib 93 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; content_cid 2 passed; effects 63 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 14 passed; standin_grants 11 passed; standin_plan 8 passed; standin_residents 2 passed; probe 3 passed; doc-tests 0. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+
+### Proof
+
+After the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.29 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_session_drain_refuses_past_the_remainder -- --exact` exit 0, 1 passed, real 0.20 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_failed_settle_releases_only_that_hold -- --exact` exit 0, 1 passed, real 0.08 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_bridge_envelope_records_the_capsule_request -- --exact` exit 0, 1 passed, real 0.08 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_calls_use_grant -- --exact` exit 0, 1 passed, real 0.08 seconds. `git diff -- elastos` is empty. `fc9f75ef` is an ancestor.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | The invoke still passes the body amount at `standin-runtime/mod.rs:1497`. The new rows name a request id and an amount, not code or content. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `authorise` still runs before any hold at `:1323`. `arm_settle_fault` at `:1300` is `#[cfg(test)]` and grants nothing. |
+| 3. A second path or a second copy of one rule? | No | The bridge compare is gone. `admit_effect` at `:1955` is the one cap check. The one release match is at `:1366`. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`. `git diff -- elastos` is empty. |
+| 5. Refusals deny by default with a clear reason? | Yes | An ask past the remainder is `reservation exceeds the ceiling`. An ask of 4097 is the admission-cap text from `:1955`. A refused release returns that refusal at `:1368`, and the grant stays `Live`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The one hostcall stays `bridge_envelope` at `:1421`. It calls `use_grant` and adds no world import. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `:10619`, `:10701` and `:10776`. F-release-skip fails `:10723`. F-release-discard fails `:10786`. Restored, those tests pass, and the drain row stayed green while the skip plant was in. |
+| 8. Identity, admission and allowance stay separate? | Yes | A sibling ask of 4097 is `wrong capsule` from `authorise` at `:1323` before `admit_effect` at `:1332`. The cap check at `:1955` is admission. `reserve` is the session allowance. A failed settle returns that hold and does not spend the grant. |
+
+A passing row gives the real Runtime no A6 credit.
+
+- 141: a session grant spends each body amount against the one ceiling, and a failed settle releases only that hold.
+
+
+## 145
+
+Comparison base: `8da39dce977a12e97d8d32a0ecc3a881766ef865`, recorded before the first edit. HEAD remains that commit; its tree is `2243bccd1ad639e0a60b6b60ce330d071eac0c83`. The task branch owns this local change. The initial worktree is clean. `git merge-base --is-ancestor fc9f75ef44f30143631a2556979a67acb580b181 HEAD` returned 0. The same command for `fff8f1761eb851f642f8e9b680ea1c6747974060` and `80a2405624121eef3404fe3b3814a558be4b7cb5` returned 1 each.
+
+The required `env -u CARGO_NET_OFFLINE RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo fetch --locked --manifest-path elastos/Cargo.toml` ran once, exit 0, real 0.49 seconds. `elastos/Cargo.lock:6516` pins wasmtime `36.0.20`. The protected-path status check was empty before and after fetch. The probe and `offline_build` retain offline mode.
+
+Request flow step 7: “Runtime verifies the exact resource, action, operation, principal, session, capsule, grant, expiry, and revocation state.” Step 8: “If additional consent is required, Runtime records a pending request and Home or Inbox presents it. The UI does not mint the grant itself.” (`docs/AGENT_ARCHITECTURE.md:232-235`.) This task implements only the stand-in denial before that pending record.
+
+Read-only route evidence: `request_capability` in `elastos/crates/elastos-server/src/api/handlers/capability.rs:97-115` returns `status` `denied`, the reason, and absent request id and token before insertion. System reason: `system backends are not app capabilities; use elastos://content`. `is_system_only_backend_resource` in `elastos/crates/elastos-common/src/localhost.rs:36-53` compares the first segment before `/`, `?` or `#` as given against `elacity`, `elacity-sdk`, `gateway`, `ipfs`, `ipfs-cluster`, `ipfs-provider` and `kubo`. Wallet reason: `generic Wallet access is limited to read-only elastos://wallet/meta/status; use the private Runtime Wallet Bus for authority-bound operations`. `ensure_generic_wallet_capability` in `elastos/crates/elastos-server/src/provider_resource.rs:584-594` allows the exact `WALLET_STATUS_RESOURCE` (`elastos://wallet/meta/status`, line 12) with `read`.
+
+Plan: add one private `prestore_denial` after the live-instance refusal and before the existing `declared_ask`. Keep the existing signed-ask and store bodies. Exercise starting, running and stopped clients in one named journey, run each of the nine plants separately and restore each, then run the lane gates. Update the two existing documentation files and keep Runtime A6 credit separate.
+
+The first targeted build stopped at E0282 on the new empty-vector assertion (2.14 seconds). Both new empty expectations now state `Vec::<Value>::new()`; the full equality assertions remain. This was a source correction before the plant runs.
+
+### Change and named test
+
+`standin-runtime/mod.rs` adds the private `prestore_denial` and calls it once between the live-instance check and `declared_ask`. Each reason has one literal. The helper compares the first segment as given, checks system resources first, and permits only the exact read-only wallet status request. Every protected method body matches the comparison base. The only other added function is `standin_system_and_wallet_requests_never_become_pending` in `mod tests`. It signs exactly the six declared pairs, exercises starting, running and stopped clients, compares the complete denial and pending bodies, checks the request counter, and checks the ordered shell records and empty live-grant set. It builds neither an operator nor a probe.
+
+`standin-runtime/README.md` adds one paragraph immediately before `## Callers`. `RUNBOOK.md` adds one paragraph after the last stand-in paragraph. Removing each new paragraph reproduces its base file byte for byte, preserving the grant paragraph, plan approval and `declared_ask` sentence.
+
+### Hand-run falsifiers
+
+Each plant ran alone with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`, under the shared heavy-build lease. Command for every plant and restore: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_system_and_wallet_requests_never_become_pending -- --exact`. Each planted crate compiled and reported 0 passed / 1 failed on this named assertion; each restored run reported 1 passed / 0 failed. The corrected baseline passed in 2.00 seconds. No `falsifiers.json` id was added. Old and new bytes below are exact JSON string encodings, including whitespace and newline bytes.
+
+
+#### F-prestore-stub
+
+Old bytes: `"        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"`
+
+New bytes: `""`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9361:13`: assertion `left == right` failed: the stand-in did the work: starting elastos://ipfs/x is denied before the signed-ask check. Plant exit 101, 1.71 seconds; restored exit 0, 1.28 seconds.
+
+
+#### F-prestore-keep
+
+Old bytes: `"        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"`
+
+New bytes: `"        if let Some(reason) = prestore_denial(resource, &action) {\n            let request_id = format!(\"denied-{}\", self.requests.len());\n            self.seed_request(&request_id, session_id, resource, &action, reason)?;\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9376:9`: assertion `left == right` failed: the stand-in did the work: starting denials store nothing. Plant exit 101, 1.77 seconds; restored exit 0, 1.22 seconds.
+
+An initial keep plant used old bytes `"        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"` and new bytes `"        if let Some(reason) = prestore_denial(resource, &action) {\n            let request_id = format!(\"request-{}\", self.next_request);\n            self.seed_request(&request_id, session_id, resource, &action, reason)?;\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"`. It also compiled and failed (1.56 seconds) at `src/../standin-runtime/mod.rs:9366:13`, `starting elastos://wallet/open is denied before the signed-ask check`, because the second insertion reused the id. Restored, it passed in 1.49 seconds. The refined plant above uses distinct stored ids to reach the empty-store assertion directly.
+
+
+#### F-prestore-ask-first
+
+Old bytes: `"        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n        self.declared_ask(session_id, resource, &action)?;\n"`
+
+New bytes: `"        self.declared_ask(session_id, resource, &action)?;\n        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9364:13`: assertion `left == right` failed: the stand-in did the work: starting elastos://ipfs/x is denied before the signed-ask check. Plant exit 101, 1.62 seconds; restored exit 0, 1.2 seconds.
+
+
+#### F-prestore-wallet-read
+
+Old bytes: `"\"wallet\" if resource != \"elastos://wallet/meta/status\" || action != \"read\" => {"`
+
+New bytes: `"\"wallet\" => {"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9432:13`: assertion `left == right` failed: the stand-in did the work: declared elastos://wallet/meta/status Read still stores as request-3. Plant exit 101, 1.46 seconds; restored exit 0, 1.5 seconds.
+
+
+#### F-prestore-prefix
+
+Old bytes: `"let segment = rest.split(['/', '?', '#']).next()?;"`
+
+New bytes: `"let segment = rest.split(['/', '?', '#']).next()?;\n    let segment = if segment.starts_with(\"ipfs\") { \"ipfs\" } else { segment };"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9433:13`: assertion `left == right` failed: the stand-in did the work: declared elastos://ipfs-extra/x read still stores as request-4. Plant exit 101, 1.49 seconds; restored exit 0, 1.31 seconds.
+
+
+#### F-prestore-wallet-bypass
+
+Old bytes: `"Some(GENERIC_WALLET_REASON)"`
+
+New bytes: `"None"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9364:13`: assertion `left == right` failed: the stand-in did the work: starting elastos://wallet/open is denied before the signed-ask check. Plant exit 101, 1.46 seconds; restored exit 0, 2.0 seconds.
+
+
+#### F-prestore-running-only
+
+Old bytes: `"        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"`
+
+New bytes: `"        if matches!(phase, ResidentStatus::Running) {\n            if let Some(reason) = prestore_denial(resource, &action) {\n                return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n            }\n        }\n"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9366:13`: assertion `left == right` failed: the stand-in did the work: starting elastos://ipfs/x is denied before the signed-ask check. Plant exit 101, 1.52 seconds; restored exit 0, 1.81 seconds.
+
+
+#### F-prestore-before-live
+
+Old bytes: `"        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {\n            return Err(not_live(phase));\n        }\n        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n"`
+
+New bytes: `"        if let Some(reason) = prestore_denial(resource, &action) {\n            return Ok(json!({ \"status\": \"denied\", \"reason\": reason }));\n        }\n        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {\n            return Err(not_live(phase));\n        }\n"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9500:9`: assertion `left == right` failed: the stand-in did the work: the live-instance refusal precedes a system denial. Plant exit 101, 1.45 seconds; restored exit 0, 1.22 seconds.
+
+
+#### F-prestore-raw-action
+
+Old bytes: `"prestore_denial(resource, &action)"`
+
+New bytes: `"prestore_denial(resource, given_action)"`
+
+CAUGHT at `src/../standin-runtime/mod.rs:9432:13`: assertion `left == right` failed: the stand-in did the work: declared elastos://wallet/meta/status Read still stores as request-3. Plant exit 101, 2.11 seconds; restored exit 0, 1.35 seconds.
+
+
+All plants are restored. The candidate `standin-runtime/mod.rs` SHA-256 is `284142bf3296a412586ebba1f50b376da9119b1f3d3f9094ab18297448a74973`, matching the bytes before the first plant. The production diff contains only the gate, constants and helper.
+
+### Principles check
+
+| Question | Yes/No | Evidence (standin-runtime/mod.rs unless specified) |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `:9335-9352` changes the fixture asks before signed admission through `admit_shared`; resource strings describe operations and preserve the existing bundle identity. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `:958-960` returns the denial before any store; `:9522` checks the empty live-grant set. |
+| 3. A second path or copy of one rule? | No | `:958` is the single call to `prestore_denial`; `:2940-2950` is the single new predicate, and `declared_ask` keeps its body and place on the success path. Each reason has one literal at `:2936-2938`. |
+| 4. Runtime core grows? | No | `:2940` is lab-only. `git diff -- elastos capsules scripts examples` is empty. |
+| 5. New refusals fail closed with a clear reason? | Yes | `:958-960` returns only denied status and the reason defined at `:2936-2938`, ahead of id creation and storage. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `:918-974` retains the existing request route. The capsule, Bus and bridge stay unchanged; `:9334` exercises this stand-in alone. |
+| 7. Named tests and caught falsifiers prove each rule? | Yes | `:9334` is `standin_system_and_wallet_requests_never_become_pending`; all nine plants above compile and fail that test, and every restored run passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | `:9335-9352` admits the signed bundle; the accepted asks at `:9380-9384` and `:9427-9438` create pending records, and `:9522` checks that the route creates no live grant. Budget methods keep their bodies. |
+
+The branch/worktree inventory still identifies task 145 at the comparison base and its original tree. This branch has no upstream. Against the existing fetched `spike/spike/agent-host` ref (`3a3e5381f96fcbd33f7383d066d693bf4222c922`), `git rev-list --left-right --count refs/remotes/spike/spike/agent-host...HEAD` is `1471 1` (remote-only, local-only). These counts describe the available shallow history; no network refresh or branch change was made. The task branch holds unique local work for supervisor review. Other worktrees remain outside this task.
+
+### Gates and final proof
+
+All Cargo checks used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`, and the shared heavy-build lease. Gate commands ran in sequence.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.20 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 285.44 seconds, within 600 seconds. The suite reported 248 passed, 0 failed and 14 ignored. Its existing blocked rows stay ignored. The first full run passed, so the permitted outer rerun was unused.
+- After every plant was restored, `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.27 seconds.
+- Final `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_system_and_wallet_requests_never_become_pending -- --exact`: exit 0, 1 passed, real 0.21 seconds.
+- Basic repository gate: `git diff --check`, `node scripts/check-product-data.mjs`, `node --test scripts/check-product-data.test.mjs` (99 passed), `(cd elastos && cargo fmt --all -- --check)`, and `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` all passed. The first Node invocation used the workspace directory; the root-directory invocations above passed.
+
+`git diff -- elastos capsules scripts examples` is empty. The protected lane files, manifests and locks have empty diffs. The protected method bodies match the comparison base. Only `prestore_denial` is new above `mod tests`; only the named journey is added under it. HEAD remains the comparison base. The required ancestor check returns 0, and both excluded ancestors return 1. The source SHA-256 still matches the pre-plant candidate. The branch has no upstream and the fetched integration divergence remains `1471 1`; those are existing shallow refs, not a current-base compatibility claim.
+
+The local lifecycle inventory retains this branch as task 145 work for review, records existing lane build outputs for the supervisor's active gates, and marks task-owned proof scratch removed after its results were transferred here. Other branches, worktrees, test roots and existing caches were preserved. Installed Runtime acceptance stays with the Runtime owner; a passing stand-in denial gives the Runtime no A6 credit. Next owner: lane supervisor for its gates and independent reviews.
+
+- 145: the stand-in denies system-backend and generic-wallet requests before signed-ask checks and storage, with one journey and nine caught plants.
+
+## 146
+
+Comparison base, recorded before the first edit: `54dd4222c01d139555de5e3989393fb3eab25061` (tree `65e3f43a1a99d041b662a600b3bb8f35b4580038`). HEAD stays at this commit. The initial tree is clean. The required `fc9f75ef44f30143631a2556979a67acb580b181` ancestor check returns 0; the excluded `fff8f1761eb851f642f8e9b680ea1c6747974060` and `80a2405624121eef3404fe3b3814a558be4b7cb5` checks each return 1. The bridge exists, calls `use_grant(caller, token, None, None, amount)`, and has neither a frame check nor an `amount > 4_096` compare. This base already contains the session-drain and system/wallet-denial work; their bodies stay as found.
+
+The required `env -u CARGO_NET_OFFLINE cargo fetch --locked --manifest-path elastos/Cargo.toml` ran once and returned 0 with empty output. `elastos/Cargo.lock` pins `wasmtime` version `36.0.20`. The protected paths remain clean. Probe `build_probe` and `offline_build` keep offline resolution.
+
+Read-only contract, `docs/AGENT_ARCHITECTURE.md`, Request flow step 7: “Runtime verifies the exact resource, action, operation, principal, session, capsule, grant, expiry, and revocation state.” This task places a frame check before that work in the stand-in; it grants nothing.
+
+Read-only match, `elastos/crates/elastos-server/src/resource_bridge.rs`: `MAX_RESOURCE_FRAME_BYTES` is `1_048_576`. The request comparison is `line.len() > MAX_RESOURCE_FRAME_BYTES` before parsing. Its envelope uses id 0, code `request_too_large`, and message `resource frame exceeds maximum size`. The response comparison is `bytes.len() > MAX_RESOURCE_FRAME_BYTES`, with code `response_too_large`, message `resource response exceeds maximum size`, and the original id. Both use `>`, so exactly 1048576 bytes stays. The Runtime appends its newline after the comparison; this hostcall returns its JSON string without a newline.
+
+Implementation follows the spec correction: LONG/LONGER use `localhost://` plus 1048453/1048454 ASCII bytes. One private shared response limiter serves the existing success and error closures. Its success-envelope checks exercise the same serialization seam and pin the closure wiring, since the existing hostcall success bodies are small. Request parsing, grant use, and all protected method bodies retain their existing behavior. The new journey will check raw bytes, exact boundaries, full replacement objects, multiline framing, unchanged state, and multibyte replies, with compiling plants for each rule and each response bypass.
+
+The repository contains no humanizer skill. This handoff uses direct behavior and ownership statements. The initial disk check reports 59655696 KiB available; existing lane outputs use 11311612 KiB. Reusing those outputs with up to 10 GiB growth plus the required 2 GiB reserve fits the volume. The task branch has unique work for review and has no upstream; divergence from the existing fetched `spike/spike/agent-host` ref is 0 remote-only and 3 local-only commits. These are existing refs, without a network refresh.
+
+### Frame journey and hand-run plants
+
+`standin_hostcall_frame_fails_closed` in `standin-runtime/mod.rs` uses `Shared`, `launch_two_running`, `seed_grant`, `grant_record`, `request_entries`, and `assert_capsule`, without an operator or probe build. It checks 1048577 ASCII request bytes, exactly 1048576 invalid bytes, 524289 U+00E1 characters (1048578 bytes), leading spaces, the 1048576-byte denied reply, and the 1048577-byte denied reply. LONG and LONGER include the valid `localhost://` scheme and retain request lengths 1048556 and 1048557. An oversized multibyte denied reply proves response byte counting through the hostcall. The shared limiter also exercises oversized ASCII and multibyte success envelopes and an exact-size success envelope; a wiring assertion pins both existing closures to this limiter. Both replacement objects are compared in full and checked for a trailing newline. Both instances remain running, both request lists remain empty, and `req-once` remains `(Life::Live, false)`. The 3.09-second baseline passed.
+
+Every plant and every restore used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`, and the shared heavy-build lease. The exact command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_frame_fails_closed -- --exact`. Each plant compiled and failed that one named test on its assertion; each restore passed that test. No id was added to `falsifiers.json`. Exact old and new bytes below use JSON string encoding so newline and whitespace bytes are explicit.
+
+- F-frame-skip-request: CAUGHT. Old: `"        if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {\n            return Ok(denied(\n                0,\n                \"request_too_large\",\n                \"resource frame exceeds maximum size\",\n            ));\n        }\n"`. New: `""`. Assertion at `standin-runtime/mod.rs:10799:18`: the stand-in did the work: an oversized frame returns Ok before parsing: "Invalid JSON: expected value at line 1 column 1". Plant exit 101, 2.39 seconds; restored exit 0, 1.33 seconds.
+- F-frame-chars: CAUGHT. Old: `"if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {"`. New: `"if line.chars().count() > Self::RESOURCE_FRAME_BYTE_LIMIT {"`. Assertion at `standin-runtime/mod.rs:10806:18`: the stand-in did the work: an oversized frame returns Ok before parsing: "Invalid JSON: expected value at line 1 column 1". Plant exit 101, 1.35 seconds; restored exit 0, 1.31 seconds.
+- F-frame-trim: CAUGHT. Old: `"if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {"`. New: `"if line.trim().len() > Self::RESOURCE_FRAME_BYTE_LIMIT {"`. Assertion at `standin-runtime/mod.rs:10807:13`: the stand-in did the work: padded declared request stores no request. Plant exit 101, 1.47 seconds; restored exit 0, 1.33 seconds.
+- F-frame-inclusive: CAUGHT. Old: `"if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {"`. New: `"if line.len() >= Self::RESOURCE_FRAME_BYTE_LIMIT {"`. Assertion at `standin-runtime/mod.rs:10830:14`: the stand-in did the work: exactly 1048576 bytes still reaches parsing: "{\"id\":0,\"response\":{\"code\":\"request_too_large\",\"message\":\"resource frame exceeds maximum size\",\"type\":\"error\"}}". Plant exit 101, 1.39 seconds; restored exit 0, 1.37 seconds.
+- F-frame-keep-exact: CAUGHT. Old: `"        if text.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {"`. New: `"        if text.len() >= Self::RESOURCE_FRAME_BYTE_LIMIT {"`. Assertion at `standin-runtime/mod.rs:10848:9`: assertion `left == right` failed: the stand-in did the work: exactly 1048576 reply bytes stays unchanged. Plant exit 101, 1.42 seconds; restored exit 0, 1.53 seconds.
+- F-frame-skip-response: CAUGHT. Old: `"        if text.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {"`. New: `"        if false && text.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {"`. Assertion at `standin-runtime/mod.rs:10905:13`: the stand-in did the work: the ASCII oversized denied reply is replaced. Plant exit 101, 1.45 seconds; restored exit 0, 1.3 seconds.
+- F-frame-success-only: CAUGHT. Old: `"            .expect(\"the bridge error envelope is one JSON object\");\n            Self::limit_bridge_response(id, text)"`. New: `"            .expect(\"the bridge error envelope is one JSON object\");\n            text"`. Assertion at `standin-runtime/mod.rs:10905:13`: the stand-in did the work: the ASCII oversized denied reply is replaced. Plant exit 101, 1.75 seconds; restored exit 0, 1.47 seconds.
+- F-frame-skip-success: CAUGHT. Old: `"            .expect(\"the bridge ok envelope is one JSON object\");\n            Self::limit_bridge_response(id, text)"`. New: `"            .expect(\"the bridge ok envelope is one JSON object\");\n            text"`. Assertion at `standin-runtime/mod.rs:10955:13`: the stand-in did the work: the success closure uses the shared reply limiter. Plant exit 101, 1.59 seconds; restored exit 0, 1.33 seconds.
+- F-frame-response-chars: CAUGHT. Old: `"        if text.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {"`. New: `"        if text.chars().count() > Self::RESOURCE_FRAME_BYTE_LIMIT {"`. Assertion at `standin-runtime/mod.rs:10905:13`: the stand-in did the work: the multibyte oversized denied reply is replaced. Plant exit 101, 1.5 seconds; restored exit 0, 1.34 seconds.
+- F-frame-request-type: CAUGHT. Old: `"                \"id\": id,\n                \"response\": {\n                    \"type\": \"error\",\n                    \"code\": code,"`. New: `"                \"id\": id,\n                \"response\": {\n                    \"type\": if code == \"request_too_large\" { \"ok\" } else { \"error\" },\n                    \"code\": code,"`. Assertion at `standin-runtime/mod.rs:10822:13`: assertion `left == right` failed: the stand-in did the work: oversized ASCII returns the complete request limit envelope. Plant exit 101, 1.4 seconds; restored exit 0, 1.4 seconds.
+- F-frame-request-extra: CAUGHT. Old: `"                \"id\": id,\n                \"response\": {\n                    \"type\": \"error\",\n                    \"code\": code,"`. New: `"                \"id\": id,\n                \"extra\": null,\n                \"response\": {\n                    \"type\": \"error\",\n                    \"code\": code,"`. Assertion at `standin-runtime/mod.rs:10823:13`: assertion `left == right` failed: the stand-in did the work: oversized ASCII returns the complete request limit envelope. Plant exit 101, 1.39 seconds; restored exit 0, 1.36 seconds.
+- F-frame-request-newline: CAUGHT. Old: `"        if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {\n            return Ok(denied(\n                0,\n                \"request_too_large\",\n                \"resource frame exceeds maximum size\",\n            ));\n        }\n"`. New: `"        if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {\n            return Ok(format!(\"{}\\n\", denied(\n                0,\n                \"request_too_large\",\n                \"resource frame exceeds maximum size\",\n            )));\n        }\n"`. Assertion at `standin-runtime/mod.rs:10816:13`: the stand-in did the work: oversized ASCII returns no trailing newline. Plant exit 101, 1.44 seconds; restored exit 0, 1.31 seconds.
+- F-frame-response-type: CAUGHT. Old: `"            serde_json::to_string(&json!({\n                \"id\": id,\n                \"response\": {\n                    \"type\": \"error\",\n                    \"code\": \"response_too_large\",\n                    \"message\": \"resource response exceeds maximum size\",\n                }\n            }))\n            .expect(\"the bridge response limit envelope is one JSON object\")"`. New: `"            serde_json::to_string(&json!({\n                \"id\": id,\n                \"response\": {\n                    \"type\": \"ok\",\n                    \"code\": \"response_too_large\",\n                    \"message\": \"resource response exceeds maximum size\",\n                }\n            }))\n            .expect(\"the bridge response limit envelope is one JSON object\")"`. Assertion at `standin-runtime/mod.rs:10910:13`: assertion `left == right` failed: the stand-in did the work: the ASCII denied reply keeps the full replacement envelope. Plant exit 101, 1.45 seconds; restored exit 0, 1.34 seconds.
+- F-frame-response-extra: CAUGHT. Old: `"            serde_json::to_string(&json!({\n                \"id\": id,\n                \"response\": {\n                    \"type\": \"error\",\n                    \"code\": \"response_too_large\",\n                    \"message\": \"resource response exceeds maximum size\",\n                }\n            }))\n            .expect(\"the bridge response limit envelope is one JSON object\")"`. New: `"            serde_json::to_string(&json!({\n                \"id\": id,\n                \"extra\": null,\n                \"response\": {\n                    \"type\": \"error\",\n                    \"code\": \"response_too_large\",\n                    \"message\": \"resource response exceeds maximum size\",\n                }\n            }))\n            .expect(\"the bridge response limit envelope is one JSON object\")"`. Assertion at `standin-runtime/mod.rs:10911:13`: assertion `left == right` failed: the stand-in did the work: the ASCII denied reply keeps the full replacement envelope. Plant exit 101, 1.48 seconds; restored exit 0, 1.33 seconds.
+- F-frame-response-newline: CAUGHT. Old: `"            serde_json::to_string(&json!({\n                \"id\": id,\n                \"response\": {\n                    \"type\": \"error\",\n                    \"code\": \"response_too_large\",\n                    \"message\": \"resource response exceeds maximum size\",\n                }\n            }))\n            .expect(\"the bridge response limit envelope is one JSON object\")"`. New: `"            serde_json::to_string(&json!({\n                \"id\": id,\n                \"response\": {\n                    \"type\": \"error\",\n                    \"code\": \"response_too_large\",\n                    \"message\": \"resource response exceeds maximum size\",\n                }\n            }))\n            .expect(\"the bridge response limit envelope is one JSON object\") + \"\\n\""`. Assertion at `standin-runtime/mod.rs:10901:13`: the stand-in did the work: the ASCII response replacement has no trailing newline. Plant exit 101, 1.47 seconds; restored exit 0, 1.46 seconds.
+- F-frame-request-id: CAUGHT. Old: `"        if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {\n            return Ok(denied(\n                0,\n                \"request_too_large\",\n                \"resource frame exceeds maximum size\",\n            ));\n        }\n"`. New: `"        if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {\n            return Ok(denied(\n                9,\n                \"request_too_large\",\n                \"resource frame exceeds maximum size\",\n            ));\n        }\n"`. Assertion at `standin-runtime/mod.rs:10822:13`: assertion `left == right` failed: the stand-in did the work: oversized ASCII returns the complete request limit envelope. Plant exit 101, 1.38 seconds; restored exit 0, 1.33 seconds.
+- F-frame-response-id: CAUGHT. Old: `"            serde_json::to_string(&json!({\n                \"id\": id,\n                \"response\": {\n                    \"type\": \"error\",\n                    \"code\": \"response_too_large\",\n                    \"message\": \"resource response exceeds maximum size\",\n                }\n            }))\n            .expect(\"the bridge response limit envelope is one JSON object\")"`. New: `"            serde_json::to_string(&json!({\n                \"id\": 0,\n                \"response\": {\n                    \"type\": \"error\",\n                    \"code\": \"response_too_large\",\n                    \"message\": \"resource response exceeds maximum size\",\n                }\n            }))\n            .expect(\"the bridge response limit envelope is one JSON object\")"`. Assertion at `standin-runtime/mod.rs:10910:13`: assertion `left == right` failed: the stand-in did the work: the ASCII denied reply keeps the full replacement envelope. Plant exit 101, 1.53 seconds; restored exit 0, 1.36 seconds.
+
+All plants were restored. Candidate source SHA-256: `8694c58f8ac6b52d898c5fa83f62ce875f886b466a77eaacc23a25b766ea8b3d`. The protected method bodies match the comparison base byte for byte. The invoke still calls `use_grant(caller, token, None, None, amount)`. The base has no `amount > 4_096` compare and the candidate keeps it absent. Every protected path has an empty diff. The README has one extended hostcall paragraph, and all other paragraphs keep their bytes. The RUNBOOK gains only the requested paragraph after the last stand-in paragraph.
+
+### Principles check
+
+| Question | Answer | Evidence |
+| --- | --- | --- |
+| 1. Anything new names code or content by URL where a hash belongs? | No | `standin-runtime/mod.rs:10758` uses the existing signed `Shared` bundle. LONG/LONGER are request-size fixtures, while the existing launch identity stays unchanged. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `standin-runtime/mod.rs:1462` refuses the frame before parse, request storage or grant use; `:1536` preserves the existing grant call. |
+| 3. A second path or second copy of one rule? | No | `standin-runtime/mod.rs:1419` is the one response limiter used by both closures at `:1459` and `:1490`; `:1462` is the one request check on the existing hostcall. |
+| 4. Runtime core grows? | No | The implementation at `standin-runtime/mod.rs:1419` belongs to the lab. `git diff -- elastos capsules scripts examples` is empty. |
+| 5. Every new refusal denies by default with a clear reason? | Yes | `standin-runtime/mod.rs:1462` returns `request_too_large`; `:1420` returns `response_too_large`, each with the Runtime bridge's exact error message. |
+| 6. Capsule logic stays inside and calls down through granted Bus calls? | Yes | `standin-runtime/mod.rs:1536` retains the grant-use call. The capsule and Bus code keep their existing bytes; this task adds only lab frame handling and its proof. |
+| 7. Each new rule has a named test and a caught falsifier? | Yes | `standin-runtime/mod.rs:10758` is the named journey; all 17 plants above compile and fail that test, with a passing run after each restore. |
+| 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:1462` supplies only a frame limit. `:1536` still presents the caller and body amount to the existing grant and allowance path; the frame grants nothing. |
+
+### Gates and final proof
+
+The gate environment was `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, with outputs in lane `target/host` and `target/host-build`. The shared heavy-build lease held each build in sequence. The full suite had the process visibility and loopback access its existing fixtures require. Each command stayed within 600 seconds.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.2 seconds; format check passed.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 345.38 seconds; 249 passed, 0 failed, 14 ignored; existing blocked rows stay ignored. The first run passed, so the outer rerun was unused.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_frame_fails_closed -- --exact`: exit 0, real 0.33 seconds; 1 named test passed, 0 failed.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_calls_use_grant -- --exact`: exit 0, real 0.08 seconds; 1 named test passed, 0 failed.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_bridge_envelope_records_the_capsule_request -- --exact`: exit 0, real 0.08 seconds; 1 named test passed, 0 failed.
+
+Basic repository gate: `git diff --check` passed; `node scripts/check-product-data.mjs` passed (42 capsules, 2 profiles, 28 method contracts); `node --test scripts/check-product-data.test.mjs` passed all 99 tests; `(cd elastos && cargo fmt --all -- --check)` passed in 2.88 seconds; `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check` passed in 0.11 seconds. These read-only checks left protected paths clean.
+
+HEAD is still the comparison base. The required ancestor check returns 0 and both excluded ancestor checks return 1. `git diff -- elastos capsules scripts examples` and all protected lane-file diffs are empty. The protected method bodies match the comparison base. The restored source SHA-256 remains `8694c58f8ac6b52d898c5fa83f62ce875f886b466a77eaacc23a25b766ea8b3d`. Only the four authorized task files changed. The task branch has no upstream; the existing fetched integration ref has 0 remote-only and 3 local-only commits against HEAD. No Git state was changed and no network refresh or publication was performed.
+
+The local untracked lifecycle inventory keeps the task branch and its working tree for supervisor review. Existing lane build outputs remain for the supervisor's active gate rerun, with cleanup due when that gate closes. Task-owned plant and gate scratch files were removed after their exact edits and results moved into this record; the lifecycle inventory remains. Other worktrees and earlier retained test roots stay under the lane supervisor's ownership.
+
+Candidate: local task diff against the comparison base. Author checks: all gates above pass. Independent review: pending with the lane supervisor. Installed acceptance: this is the stand-in frame only; a PASS gives the Runtime no A15 credit. Browser, installed-provider and public-live checks are outside this lab-only change. Remaining gate: supervisor reruns and independent reviews. Next owner: lane supervisor.
+
+- 146: the one stand-in hostcall counts raw frame bytes before parse and uses one shared reply limiter, with the boundary journey and 17 caught hand-run plants.
+
+## 147
+
+Comparison base: `b25662e1549d51ea1ecd181140821f17cc7f9e2d`, from `git rev-parse HEAD` before the first edit. The worktree was clean. The required `fc9f75ef44f30143631a2556979a67acb580b181` ancestor check returned 0; the excluded `fff8f1761eb851f642f8e9b680ea1c6747974060` and `80a2405624121eef3404fe3b3814a558be4b7cb5` checks each returned 1. Every required method is present; `get_capability_pending` and `pending_expires_at` are absent on this base. This task keeps HEAD fixed and implements the list from this checkout.
+
+The one required fetch, `env -u CARGO_NET_OFFLINE RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo fetch --locked --manifest-path elastos/Cargo.toml`, passed (exit 0, 0.45 seconds). `elastos/Cargo.lock` names `wasmtime` version `36.0.20`. `git status --short -- elastos capsules scripts examples` was empty before and after the fetch. `build_probe` and `offline_build` keep their offline settings.
+
+Read-only contract evidence: `docs/AGENT_ARCHITECTURE.md`, Request flow step 8, says: "If additional consent is required, Runtime records a pending request and Home or Inbox presents it." It then says: "The UI does not mint the grant itself." Step 9 assigns dispatch of an approved operation and its audit record to Runtime and the owning provider. This list supplies the presentation step only.
+
+Read-only route evidence: `elastos/crates/elastos-server/src/api/handlers/capability.rs::list_pending` returns the sole body key `requests`. `PendingRequestOutput` names exactly `request_id`, `session_id`, `resource`, `action`, `reason`, `requested_at` and `expires_at`. The handler uses `pending.into_iter().map(|r| PendingRequestOutput { ... }).collect()` without a sort. The lab list uses the task's required session/request ordering and keeps the Runtime handler unchanged.
+
+The existing timeout is `REQUEST_TIMEOUT_SECS = 300` in `standin-runtime/mod.rs`; Runtime names the same timeout `DEFAULT_REQUEST_TIMEOUT_SECS = 300` in `elastos/crates/elastos-runtime/src/capability/pending.rs`. `set_instant` calls `expire_due`, whose age is `instant.saturating_sub(request.requested_at)`. The new expiry helper will reuse the existing stand-in constant.
+
+### Journey and hand-run falsifiers
+
+The baseline named test passed: exit 0, 1 passed, 0 failed, 7.97 seconds. It starts neither an operator nor a probe build. Each plant below runs alone, compiles, fails the named test on its assertion, and is restored before a passing run and before the next plant. Every run uses `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`, under the shared heavy-build lease. Exact command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_shell_lists_every_pending_request -- --exact`. Exact old and new bytes below use JSON string encoding to show whitespace and newline bytes. These are hand-run plants; `falsifiers.json` keeps its existing bytes.
+
+- F-pending-stub: CAUGHT. Old: `"    pub fn get_capability_pending(&self, caller: Caller<'_>) -> Result<Value, (u16, String)> {\n"`. New: `"    pub fn get_capability_pending(&self, caller: Caller<'_>) -> Result<Value, (u16, String)> {\n        return Ok(json!({ \"requests\": [] }));\n"`. Assertion: thread 'standin_runtime::tests::standin_shell_lists_every_pending_request' (337409142) panicked at src/../standin-runtime/mod.rs:8012:9: assertion `left == right` failed: the stand-in did the work: component-1 is refused before reading the list. Plant exit 101, 1.88 seconds; restored exit 0, 1.5 seconds.
+- F-pending-granted: CAUGHT. Old: `"            .filter(|request| request.status == RequestStatus::Pending)"`. New: `"            .filter(|request| matches!(request.status, RequestStatus::Pending | RequestStatus::Granted))"`. Assertion: thread 'standin_runtime::tests::standin_shell_lists_every_pending_request' (337410991) panicked at src/../standin-runtime/mod.rs:8135:9: assertion `left == right` failed: the stand-in did the work: a granted record leaves the pending list. Plant exit 101, 1.58 seconds; restored exit 0, 1.59 seconds.
+- F-pending-denied: CAUGHT. Old: `"            .filter(|request| request.status == RequestStatus::Pending)"`. New: `"            .filter(|request| matches!(request.status, RequestStatus::Pending | RequestStatus::Denied))"`. Assertion: thread 'standin_runtime::tests::standin_shell_lists_every_pending_request' (337413352) panicked at src/../standin-runtime/mod.rs:8112:9: assertion `left == right` failed: the stand-in did the work: a denied record leaves the pending list. Plant exit 101, 1.49 seconds; restored exit 0, 1.21 seconds.
+- F-pending-store-order: CAUGHT. Old: `"        listed.sort_by(|left, right| {\n            left.session_id\n                .cmp(&right.session_id)\n                .then_with(|| left.request_id.cmp(&right.request_id))\n        });\n"`. New: `""`. Assertion: thread 'standin_runtime::tests::standin_shell_lists_every_pending_request' (337415615) panicked at src/../standin-runtime/mod.rs:8039:9: assertion `left == right` failed: the stand-in did the work: pending requests sort by session then request id. Plant exit 101, 2.43 seconds; restored exit 0, 1.24 seconds.
+- F-pending-session-only: CAUGHT. Old: `"        listed.sort_by(|left, right| {\n            left.session_id\n                .cmp(&right.session_id)\n                .then_with(|| left.request_id.cmp(&right.request_id))\n        });\n"`. New: `"        listed.sort_by(|left, right| left.session_id.cmp(&right.session_id));\n"`. Assertion: thread 'standin_runtime::tests::standin_shell_lists_every_pending_request' (337416858) panicked at src/../standin-runtime/mod.rs:8040:9: assertion `left == right` failed: the stand-in did the work: pending requests sort by session then request id. Plant exit 101, 1.77 seconds; restored exit 0, 1.28 seconds.
+- F-pending-clock: CAUGHT. Old: `"                    \"expires_at\": pending_expires_at(request.requested_at),"`. New: `"                    \"expires_at\": request.requested_at,"`. Assertion: thread 'standin_runtime::tests::standin_shell_lists_every_pending_request' (337418542) panicked at src/../standin-runtime/mod.rs:8083:13: assertion `left == right` failed: the stand-in did the work: each pending entry carries its own request fields and expiry. Plant exit 101, 1.82 seconds; restored exit 0, 1.52 seconds.
+- F-pending-wrap: CAUGHT. Old: `"    requested_at.saturating_add(REQUEST_TIMEOUT_SECS)"`. New: `"    requested_at.wrapping_add(REQUEST_TIMEOUT_SECS)"`. Assertion: thread 'standin_runtime::tests::standin_shell_lists_every_pending_request' (337420092) panicked at src/../standin-runtime/mod.rs:8186:9: assertion `left == right` failed: the stand-in saturates the pending expiry at u64::MAX. Plant exit 101, 1.53 seconds; restored exit 0, 1.45 seconds.
+- F-pending-copy: CAUGHT. Old: `"            .map(|request| {\n                json!({\n                    \"request_id\": request.request_id,\n                    \"session_id\": request.session_id,\n                    \"resource\": request.resource,\n                    \"action\": request.action,\n                    \"reason\": request.reason,\n                    \"requested_at\": request.requested_at,\n                    \"expires_at\": pending_expires_at(request.requested_at),\n                })\n            })"`. New: `"            .map(|request| request_entry(request))"`. Assertion: thread 'standin_runtime::tests::standin_shell_lists_every_pending_request' (337421808) panicked at src/../standin-runtime/mod.rs:8068:13: assertion `left == right` failed: the stand-in did the work: a pending entry has exactly the seven presentation keys. Plant exit 101, 1.51 seconds; restored exit 0, 1.29 seconds.
+
+`cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, 0.22 seconds. Format check passed.
+
+### Implementation and source checks
+
+`StandIn::get_capability_pending` is the sole new public method. It calls `require_shell` before reading the existing request store, filters `Pending`, sorts once by `session_id` then `request_id`, and emits the seven presentation fields. The only new private production function, `pending_expires_at`, contains exactly `requested_at.saturating_add(REQUEST_TIMEOUT_SECS)`. The list takes `&self` and calls no writer. The named journey checks the two running instances, both client refusals, empty and populated shell reads, exact fields and ordering, shell denial, shell grant, expiry at 300, a later request's own timestamp, and saturation at `u64::MAX`. Each shell read compares the session records, live grants and instance list before and after.
+
+All eight plants are restored. Removing only the new method, expiry helper and named test from the candidate produces the comparison base's complete stand-in source byte for byte. This proves that the existing method bodies, stores, caps, grant path, hostcall, census and timeout keep their bytes. The helper text contains one `saturating_add` and none of the forbidden alternate additions or branches. The pending method has one sort, with the shell check before the store read, and calls none of the excluded readers or writers. All protected path diffs are empty, including the lane manifests, locks, falsifier list and tests owned by other tasks.
+
+`standin-runtime/README.md` adds one paragraph immediately before `## Callers`; its grant paragraph, plan-approval section and all other bytes match the base. `RUNBOOK.md` adds one paragraph after the last stand-in paragraph and preserves every other byte, including the existing 145 and 146 paragraphs. A passing stand-in list supplies presentation evidence only; Runtime A15 acceptance stays with its owner.
+
+### Principles check
+
+| Question | Answer | Evidence |
+| --- | --- | --- |
+| 1. Does anything new use a name or URL where a code/content hash belongs? | No | `standin-runtime/mod.rs:908` reads existing request resources for presentation. The signed bundle and CID launch path keep their bytes; `:7948` reuses the existing two-instance launch. |
+| 2. Does the capsule, Home or UI gain ungranted access or authority? | No | `standin-runtime/mod.rs:909` applies the shell privilege check before the store read. The list returns presentation fields only at `:924`. |
+| 3. Is there a second path or copy of one operation's rule? | No | `standin-runtime/mod.rs:910` reads the existing request store, `:915` sorts once, and `:2146` uses the existing timeout constant in one expiry function. |
+| 4. Does the Runtime core grow? | No | The new method at `standin-runtime/mod.rs:908` belongs to the lab. `git diff -- elastos capsules scripts examples` is empty. |
+| 5. Does every new refusal deny by default with a clear reason? | Yes | `standin-runtime/mod.rs:909` reuses `require_shell` at `:2372`, which returns status 403 and `This endpoint requires shell privileges`; the journey checks both clients at `:8011` and `:8095`. |
+| 6. Does capsule logic stay inside and call down only through granted Bus calls? | Yes | `standin-runtime/mod.rs:908` adds a shell read only. Capsule, provider and Bus code keep their bytes, and grant use stays on the existing path. |
+| 7. Do a named test and caught falsifiers prove each new rule? | Yes | `standin-runtime/mod.rs:7948` is the journey; the eight exact plants above each compile, fail that test on an assertion, and pass after restoration. The saturation assertion is at `:8194`. |
+| 8. Do identity, admission and allowance remain separate decisions? | Yes | `standin-runtime/mod.rs:908` presents stored requests and grants nothing. The grant method at `:1121` and existing admission and ledger methods keep their bytes. |
+
+Basic repository checks passed: `git diff --check`; `node scripts/check-product-data.mjs` (42 capsules, 2 profiles, 28 method contracts); `node --test scripts/check-product-data.test.mjs` (99 passed); `(cd elastos && cargo fmt --all -- --check)`; and `cargo fmt --manifest-path capsules/chain-provider/Cargo.toml -- --check`.
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101, 332.26 seconds. test result: ok. 96 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.83s test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.76s test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.72s test result: FAILED. 62 passed; 1 failed; 12 ignored; 0 measured; 0 filtered out; finished in 290.38s
+
+### Allowed outer rerun
+
+The first full gate failed only `grant_refused_from_a_new_session` at `tests/effects.rs:902:14`. Its cleanup census reported a process leftover with three holders and paths ending only in `ca.key`, `device.key` and `tls.key`; API sockets, temp paths and pending records were empty. The existing journey and the new list test passed their assertions. Acceptance item 6 permits one full-command rerun for this exact failure and path set. The source and census remain unchanged. The failed fixture Home stays retained under its existing owner; its data was left unread.
+
+Permitted rerun of `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, 264.01 seconds. test result: ok. 96 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 31.54s test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.70s test result: ok. 63 passed; 0 failed; 12 ignored; 0 measured; 0 filtered out; finished in 208.29s test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.79s test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.42s test result: ok. 10 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 14.21s test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Final restored proof: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, 0.25 seconds; passed.
+
+Final restored proof: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_shell_lists_every_pending_request -- --exact`: exit 0, 0.16 seconds; passed.
+
+### Final result and handoff
+
+The full locked suite passed on the single permitted outer rerun: **250 passed, 0 failed, 14 ignored**, in **264.01 seconds**. The first run took **332.26 seconds** and failed only the exact allowed process-leftover case recorded above. Both runs stayed inside 600 seconds. Existing blocked rows retain their ignores. Final restored formatting and the exact pending-list test both pass; the basic repository gate also passes.
+
+HEAD remains the recorded comparison base. The required ancestor check returns 0 and both excluded checks return 1. The final diff contains only `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this log. Every protected path has an empty diff. Removing the three new source blocks still reproduces the base byte for byte, so all existing methods, fields and stores keep their bytes. The restored source SHA-256 is `3aba972e5cf17139370a87e8ec452fbc50a253acdf99f49d339fa60bfe82885b`. Every plant is restored.
+
+The final branch/worktree inventory identifies this branch as unique task work in a dirty worktree, preserved for review. The branch has no upstream. Against the existing fetched integration ref, HEAD has 4 remote-only and 4 local-only commits; this is a fetched-ref comparison, with network refresh outside this task. This task changed no Git refs, index contents or HEAD. The fetched integration ref advanced during the gates; the final 4/4 comparison above records that divergence for the supervisor. The private lifecycle inventory records the current branch, tree and dirty state, the active supervisor gate outputs and the retained first-run fixture. Earlier retained fixtures and other worktrees remain under their existing owners; their data was left unread. The supervisor owns fixture retention and build-output cleanup after its active gates and reviews finish.
+
+Candidate: local task diff against `b25662e1549d51ea1ecd181140821f17cc7f9e2d`. Author checks: format, full locked suite, exact named test, eight caught and restored plants, source preservation and basic repository checks pass. Independent reviews: pending with the supervisor. Installed acceptance: this is the lab stand-in list; a PASS gives the Runtime no A15 credit. Browser, installed-provider and public-live checks belong to the corresponding product changes and were skipped for this lab-only read. Remaining gate: supervisor checks and independent reviews. Next owner: lane supervisor.
+
+- 147: the shell lists every session's pending requests from the existing store, and the one expiry helper saturates at `u64::MAX`, with a full journey and eight caught hand-run plants.
