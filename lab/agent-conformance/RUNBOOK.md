@@ -67,16 +67,57 @@ returns before the storage constructor; AC-006-STORAGE remains open. The
 ready-operator rows below prove the operator fixture;
 the grant and effect rows below extend it. Runtime bundle-CID launch stays separate.
 
+`offline_build_overrides_inherited_output_settings` runs one synthetic-parent
+worker through the bounded Home launcher. The shared `build::offline_build`
+sets offline Cargo, disabled incremental compilation and the selected target,
+build and temporary directories despite conflicting inherited settings. A shell
+witness observes those five values and the repository working directory, writes
+fixed markers under the selected target (with a space in its name), and leaves
+three owned decoys intact. The helper creates the selected `tmp` directory.
+Five separate removal plants prove these overrides. This is lab-only proof of
+M1 A9's contained-fixture prerequisite; Runtime owns capsule storage and product
+acceptance. Run it with `cargo test --locked --manifest-path
+lab/agent-conformance/Cargo.toml --test build
+offline_build_overrides_inherited_output_settings -- --exact`.
+
 `tests/common::write_operator_home` owns the operator fixture for this test and
-the ready-operator tests. It uses `write_component_home`, the shared entry-copy
+the ready-operator tests. Its shared preparation path checks the selected Home
+with the existing guard before preparing or reading the native provider. Tests
+use a counted byte loader on that same path to prove refusal and repair without
+starting a provider or Runtime. It uses `write_component_home`, the shared entry-copy
 and stamping helper, which also prepares the CID refusal fixture. The helper
-checks the Home guard and installs executable bytes. For the operator fixture,
+checks the Home guard before source reads or destination writes and installs
+executable bytes. For the operator fixture,
 it writes a manifest containing only the repository's `external.localhost-provider`
 entry and an empty `profiles` map; the CID fixture selects `external.ipfs-provider`.
 It stamps the current Mac platform with the
 copy's checksum, size and install path. The repository entry owns all other fields.
 The writer supports `darwin-arm64` and `darwin-amd64` and refuses other platforms
 with a reason. Exclusive creation keeps existing paths and symlinks intact.
+The operator writer then exclusively creates `config.toml` with the committed
+fixture bytes. A config create or write refusal names the operation, selected
+path and I/O cause; a loader error preserves its cause before installation.
+Repair the selected Home directory or remove its owned config collision, then
+use a fresh Home when component outputs already exist. Completed component
+writes stay in a refused fixture until its cleanup; the writer owns fixture
+preparation and Runtime owns product storage policy. The runtime-target tests
+`operator_home_guard_precedes_provider_load` and
+`operator_home_config_collision_is_reported` prove these refusal and recovery
+paths with lane-owned Homes and decoys.
+
+`component_home_writer_checks_guard_before_writing` replaces the owned Home
+with an in-root symlink and calls this writer. It captures the exact guard
+reason and absence of outputs before repairing the Home, then proves the
+repaired Home accepts the same bytes and checksum/size stamp.
+`component_home_writer_names_refused_destinations` uses fresh Homes for an
+existing `bin` directory, installed file, manifest file and manifest symlink.
+It checks the operation, exact refused path and underlying I/O cause, plus
+preserved marker bytes and the symlink. Source read/decode and destination
+directory, file, write, permission, metadata and manifest errors carry their
+operation and path; the Home guard keeps its existing reason. The writer may
+leave its earlier new fixture outputs after a later refusal. These fixed-byte
+tests support M1 A9's contained-fixture prerequisite in the lab. Runtime storage
+and installed-product acceptance keep their existing owners.
 
 The checksum test passes both `--addr 127.0.0.1:<free port>` and an in-root
 `--storage-path`. Provider verification stops startup before Carrier and HTTP
@@ -119,6 +160,25 @@ Task 013 adds these rows to the same Cargo-derived table:
 - `socket_census_requires_parseable_loopback_endpoints_and_api_listener`: checks field-format parsing with IPv4/IPv6, connected sockets, wildcard and remote addresses, malformed listings and missing API visibility.
 - `managed_child_stop_reaps_its_process_group`: checks SIGTERM and group cleanup with a parent and child fixture.
 - `managed_child_drop_kills_its_group_and_keeps_root`: checks emergency group cleanup and root retention when a handle is dropped before stop.
+- `managed_stop_escalates_and_keeps_root`: the leader and descendant ignore SIGTERM. Stop must return the exact ten-second timeout reason in at least ten and less than fifteen seconds, reap the leader, empty the group and retain the failed Home.
+- `managed_stop_waits_for_descendants`: the leader exits on SIGTERM while its descendant ignores it. The same timeout, escalation, group-drain and retention checks apply.
+
+The two stop-bound rows extend `child_group` through the existing Home APIs.
+Each signal handler is set before its readiness marker is written inside the
+fresh Home. A two-second readiness check matches both recorded PIDs against
+the managed group; startup delay alone supplies zero readiness evidence.
+The descendants run for 120 seconds, beyond the ten-second stop bound.
+Each row captures the stop result, monotonic elapsed time, leader state and
+group state before assertions or emergency cleanup. Bounded emergency cleanup
+signals only that fixture's group through `home.launch`, then checks leader
+reaping and group drain before any behavior assertion. Saved observations
+still fail a planted stop that leaves processes alive. Passing rows remove
+their retained roots only after the retention and empty-group checks pass;
+ordinary failures keep their roots for review. Setup and cleanup errors carry
+their own reasons and supply zero behavior or falsifier credit.
+These rows support the lab harness's physical-cleanup part of M1 A12.
+Capsule cancellation, grant settlement and installed Runtime acceptance keep
+their existing owners under the architecture's Harness conformance contract.
 
 The [operator recipe](GAPS.md#operator-in-a-throwaway-home) owns the ordered
 setup and its measurement limits. `fixtures/operator-config.toml` selects
@@ -136,9 +196,15 @@ the wildcard-socket refusal, then restore the fixture and require PASS.
 Run F-ac1k only against `launch_env_is_only_the_throwaway_home`; it removes the
 mDNS-off entry for that environment test alone. Restore it before any operator
 launch. F-census-a removes the API visibility requirement. F-managed-stop omits
-SIGTERM and checks the timeout failure and forced cleanup. F-managed-drop omits
+SIGTERM; its old test proves timeout refusal at `stop().expect(...)`, before
+its later cleanup assertions. The two stop-bound rows above prove escalation,
+group drain and retention. F-managed-drop omits
 the retained-root marker. Their exact edits and named tests are in
 `falsifiers.json`; each named test must fail planted and pass restored.
+Task 149's four hand-run plants omit the stop's kill or retention marker,
+accept an exited leader with a live descendant, or shorten the wait to zero.
+Their exact bytes, single-test commands and measured results belong in
+`LOG.md` under `## 149`; restore each plant before the next run.
 
 
 Task 003 adds these rows to the same table:
@@ -223,10 +289,29 @@ the commands and measured outcomes; this adds no second runner.
 
 ## Version receipt for each run
 
+Each cached native identity keeps its build digest. `BinaryUnderTest::verified_path`
+uses the existing hash helper immediately before each path-based Runtime launch
+and provider fixture copy. A changed digest refuses with `native binary SHA-256
+differs from recorded build`; an open or hash failure keeps its cause. Restoring
+the recorded bytes permits a later use. This per-use check preserves the build
+cache and receipt fields. `runtime::tests::native_identity_refuses_changed_or_missing_bytes`
+proves the original, changed, restored and missing states through bounded launch,
+managed start and parallel launch, with independent marker and run-start checks.
+F-native-identity-skip-compare disables only the digest comparison refusal and
+fails that named test on changed-script behavior. The check precedes path-based
+launch; installed-product acceptance stays with its installed journey.
+
 The existing report command writes `VERSIONS.json` into the fresh ignored
 `target/run-table.*` directory and prints its lane-relative path. Reviewers cite
 that path for the tested candidate. The report reads the full repository commit
 and dirty state for this invocation; local edits set `dirty: true`.
+
+`versions_receipt_reads_git_dirty_state` uses one isolated Git repository in a
+fresh throwaway Home. It checks clean, edited, staged, committed, deleted,
+restored and untracked states through the existing reader and receipt writer.
+Receipts sit beside the repository so they leave its state unchanged. These
+checks prove A14 reporting; live capsule and Runtime acceptance stay with their
+current owners.
 
 The receipt contains native hashes, every observed probe's effect, component
 SHA-256 and the complete bundle's lab CID (as `lab/capsule-identity` prints it),
@@ -293,7 +378,12 @@ reason must match an entry in `fixtures/grants.json` exactly. The entry supplies
 `fixture denies unlisted read`; a pending `elastos://net/stream` request
 receives `fixture denies unlisted elastos://net/stream`. An ambiguous match
 denies the whole pending snapshot with a reason. A consumed entry also refuses
-a later matching request.
+a later matching request. The scripted loopback tests capture each complete
+request under byte and time bounds, discard its headers, and check the decoded
+grant body after the server thread joins. The selected duration reaches the
+request even after a refused approval reply. These tests prove the fixture-only
+A6 grant-control prerequisite; Runtime owns grants and duration enforcement.
+They build and launch neither Runtime, providers nor probe capsules.
 
 - `granted_read_succeeds`: seeds `Public/agent-conformance-grants/granted.txt`,
   observes exactly one matching request and grant, and requires exit 0 after
@@ -306,6 +396,12 @@ a later matching request.
   prevents approval, including a resource that merely shares a path prefix.
 - `grants::tests::controller_refuses_ambiguous_requests_before_deciding`: two
   matches or reuse of an entry fail before a grant is selected.
+- `grants::tests::controller_sends_each_fixture_duration`: reversed pending order
+  and exchanged `once`/`session` entries send each request id's selected duration
+  with exactly the grant route's three body fields; both entries are consumed.
+- `grants::tests::controller_keeps_fixture_duration_after_refused_grant`: a
+  refused approval consumes zero entries; a second poll sends the same exact
+  request and grants once, for both durations. Match counts remain attempts.
 - `grants::tests::controller_requires_explicit_fixture_and_credentials`: missing
   coordinates, missing or empty attach data, and incomplete fixture rules refuse.
 - `grants::tests::controller_refuses_failed_attach_and_http_responses`: failed
@@ -399,11 +495,20 @@ before claiming their M1 results.
 
 Task 004 adds the agent-memory rows to the same Cargo-derived table:
 
-- `agent_cannot_read_human_space_without_grant`: the existing read feature asks for `Users/self` and requires the Runtime's principal-context refusal. This is the current unbound CLI's refusal half.
+- `agent_cannot_read_human_space_without_grant`: the `human-read` subselector of `read` asks for the trimmed `fixtures/human-read.txt` target through the one read Bus request. Ordinary read selects the trimmed `fixtures/ungranted-read.txt` target. The shared probe selector uses fixture bytes only; build labels and environment values supply zero resource authority. This live row requires Runtime's principal-context refusal for today's unbound CLI launch. Runtime owns principal binding and grants; the blocked principal journeys keep their acceptance gates.
 - `ungranted_memory_write_is_refused`: the new memory-write feature requests authority through the Bus and requires the Runtime's manifest refusal.
 - `no_policy_file_does_not_mean_allow`: one in-manifest read receives zero controller decisions when `fixtures/no-policy.json` is absent. The natural pending-request refusal must arrive within 40 seconds. A harness timeout fails.
 - `agent_memory_under_own_principal`, `agent_cannot_read_other_agent_memory`, and `agent_can_read_human_space_with_grant`: BLOCKED (UsersAI binding; AC-002-ARGS). GAPS.md names the Runtime changes and the future checks. These rows supply zero principal-isolation evidence today.
 - `real_agent_host_journal_under_usersai_principal`: BLOCKED (UsersAI binding), the P7 gap in the default table. Forced with `--ignored`, it reads the real manifest and requires every capability under `UsersAI/self`; agent-host moves its journal when the Runtime binding lands.
+
+The native `probe_read_targets_ignore_legacy_override` artifact test runs
+`tests::read_target_is_the_selected_fixture` with Cargo feature `read`, then
+`human-read`, each with a fixed harmless legacy environment override. It
+requires the complete selected fixture and one passing child test per build.
+`human_read_subselector_requires_read` requires the exact compile refusal
+`human-read requires read` for the raw subselector alone. These native checks
+start neither Runtime nor providers. Component hash and import tests still
+require distinct, reproducible variants with Bus-only imports.
 
 F-ac2a grants agent-b agent-a's exact memory path. F-ac2b gives both fixture
 instances the same principal. Both are retired under `UsersAI binding;
@@ -666,11 +771,29 @@ Sasha can select the additional real-capsule journey with:
 bash lab/agent-conformance/run.sh --agent-host
 ```
 
-The plain command includes the P7 manifest gap row. The opt-in journey, when
-forced with Cargo's `--ignored`, copies only `Cargo.toml`, `Cargo.lock`,
-`capsule.json` and `src/` under the lane target,
-places the read-only Bus contract beside that build tree, and uses the shared
-offline builder, bundle stager, operator, controller and cleanup census.
+The plain command includes the P7 manifest gap row. One `copy_agent_host`
+helper checks the source repository and a fresh destination under the lane
+target. It copies exactly `examples/agent-host/{Cargo.toml,Cargo.lock,capsule.json,src/**}`
+and `elastos/wit/elastos-bus-v1.wit` into that build root, then returns the
+copied capsule path. Directory, leaf-type and symlink checks run before
+destination creation. Existing destinations keep their bytes. Synthetic tests
+compare the complete file map, exact bytes and the guest's relative Bus lookup;
+invalid Bus inputs are refused before a destination is created.
+
+The opt-in `agent_host_copy_builds_with_relative_bus_contract` test compiles
+the real copy through the existing offline builder, validates the component
+and stages its manifest and payload through `stage_probe` in the same owned
+Home. It starts zero Runtime or provider processes and removes its Home after
+success. Under the shared heavy-build lease, run:
+
+```bash
+RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --locked \
+  --manifest-path lab/agent-conformance/Cargo.toml --features agent-host \
+  --test agent_host agent_host_copy_builds_with_relative_bus_contract -- --exact
+```
+
+The opt-in journey, when forced with Cargo's `--ignored`, uses this same copy
+and build path, bundle stager, operator, controller and cleanup census.
 A passing row requires exactly the journal write and read requests in that
 order, both fixture denials, exit 0, and an empty journal-path census. Its
 launched component SHA-256 and bundle lab CID belong to the same-run receipt.
@@ -686,6 +809,9 @@ The active agent-host checks under `--agent-host` include
 `agent_host_journal_census_detects_planted_paths`,
 `agent_host_grants::request_sequence_requires_exact_order_and_one_session`,
 `agent_host_copy_takes_only_listed_files`,
+`agent_host_copy_keeps_the_relative_bus_contract`,
+`agent_host_copy_refuses_bad_bus_inputs`,
+`agent_host_copy_builds_with_relative_bus_contract`,
 `agent_host_row_requires_its_launched_identity`, and
 `staging_uses_manifest_entrypoint_and_refuses_escape`. The shared
 `agent_host_grants::tests` also run. These exercise the harness with fixtures;
@@ -739,6 +865,14 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 `standin_guest_reads_its_request_later` is this stand-in, and a PASS there gives the Runtime no A11 credit for a later read.
 
 `standin_bridge_envelope_records_the_capsule_request` is this stand-in, two-capsule-run owns the real-bytes run, and a PASS here gives the Runtime no A3 credit.
+
+`standin_session_drain_refuses_past_the_remainder`, `standin_failed_settle_releases_only_that_hold` and `standin_failed_settle_surfaces_release_error` are this stand-in, and a PASS there gives the Runtime no A6 credit.
+
+`standin_system_and_wallet_requests_never_become_pending` is this stand-in, and a PASS there gives the Runtime no A6 credit for this denial.
+
+`standin_hostcall_frame_fails_closed` is this stand-in, and a PASS there gives the Runtime no A15 credit for this frame.
+
+`standin_shell_lists_every_pending_request` is this stand-in, and a PASS there gives the Runtime no A15 credit for this list.
 
 ## Content capsule named by its CID (M2 exit (e), PH6)
 
