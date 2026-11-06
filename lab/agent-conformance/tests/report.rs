@@ -468,6 +468,112 @@ fn read_receipt(path: &Path) -> Value {
 }
 
 #[test]
+fn versions_receipt_reads_git_dirty_state() {
+    let home = ThrowawayHome::new().unwrap();
+    let repository = home.root().join("repository");
+    let receipts = home.root().join("receipts");
+    fs::create_dir(&repository).unwrap();
+    fs::create_dir(&receipts).unwrap();
+    let git = |args: &[&str]| {
+        let mut command = vec!["-C", repository.to_str().unwrap()];
+        command.extend_from_slice(args);
+        let result = home
+            .launch(
+                Path::new("/usr/bin/git"),
+                &command,
+                std::time::Duration::from_secs(10),
+            )
+            .unwrap_or_else(|reason| panic!("fixture Git {args:?}: {reason}"));
+        assert!(
+            result.status.success(),
+            "fixture Git {args:?}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        String::from_utf8(result.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "--quiet", "--template="]);
+    for (key, value) in [
+        ("user.name", "A14 fixture"),
+        ("user.email", "a14@example.invalid"),
+        ("commit.gpgsign", "false"),
+        ("core.hooksPath", "/dev/null"),
+        ("core.excludesFile", "/dev/null"),
+    ] {
+        git(&["config", "--local", key, value]);
+    }
+    let tracked = repository.join("tracked.txt");
+    fs::write(&tracked, b"initial fixture bytes\n").unwrap();
+    git(&["add", "--", "tracked.txt"]);
+    git(&["commit", "--quiet", "-m", "Initial A14 fixture"]);
+    let initial_commit = git(&["rev-parse", "--verify", "HEAD"]);
+
+    let (observations, _) = synthetic(1, false);
+    let listed = format!("{LIVE}: test\n");
+    let observed = output(&observations);
+    let check = |case: &str, commit: &str, dirty: bool| {
+        let identity = GitIdentity::read(&repository)
+            .unwrap_or_else(|reason| panic!("{case}: Git identity: {reason}"));
+        assert_eq!(identity.commit, commit, "{case}: Git commit");
+        assert_eq!(identity.dirty, dirty, "{case}: Git dirty state");
+        let path = receipts.join(format!("{case}.json"));
+        let report = write_run(&listed, &observed, true, Ok(identity), &path, Some(""));
+        assert!(report.receipt_written, "{case}: receipt written");
+        assert!(report.passed, "{case}: {:?}", report.failures);
+        assert!(
+            report.table.contains("versions_receipt (A14) | PASS\n"),
+            "{case}: A14 passes"
+        );
+        let receipt = read_receipt(&path);
+        assert_eq!(
+            receipt["repository"]["commit"], commit,
+            "{case}: receipt commit"
+        );
+        assert_eq!(
+            receipt["repository"]["dirty"], dirty,
+            "{case}: receipt dirty state"
+        );
+        assert_eq!(
+            receipt["identity_status"], "complete",
+            "{case}: identity status"
+        );
+        assert_eq!(receipt["suite_outcome"], "PASS", "{case}: suite outcome");
+        assert_eq!(
+            receipt["report"]["table"], report.table,
+            "{case}: receipt table"
+        );
+    };
+
+    check("clean", &initial_commit, false);
+    fs::write(&tracked, b"edited fixture bytes\n").unwrap();
+    check("tracked-edit", &initial_commit, true);
+    git(&["add", "--", "tracked.txt"]);
+    check("staged-edit", &initial_commit, true);
+    git(&["commit", "--quiet", "-m", "Second A14 fixture"]);
+    let second_commit = git(&["rev-parse", "--verify", "HEAD"]);
+    assert_ne!(
+        second_commit, initial_commit,
+        "second commit: full Git ID changes"
+    );
+    check("second-commit", &second_commit, false);
+    fs::remove_file(&tracked).unwrap();
+    check("tracked-delete", &second_commit, true);
+    git(&[
+        "restore",
+        "--source=HEAD",
+        "--worktree",
+        "--",
+        "tracked.txt",
+    ]);
+    check("tracked-restore", &second_commit, false);
+    let untracked = repository.join("a14-untracked.txt");
+    fs::write(&untracked, b"untracked fixture bytes\n").unwrap();
+    check("untracked-file", &second_commit, true);
+    fs::remove_file(&untracked).unwrap();
+    check("untracked-remove", &second_commit, false);
+    home.finish().unwrap();
+}
+
+#[test]
 fn versions_receipt_binds_current_run() {
     let home = ThrowawayHome::new().unwrap();
     let mut documents = Vec::new();

@@ -228,6 +228,13 @@ The existing report command writes `VERSIONS.json` into the fresh ignored
 that path for the tested candidate. The report reads the full repository commit
 and dirty state for this invocation; local edits set `dirty: true`.
 
+`versions_receipt_reads_git_dirty_state` uses one isolated Git repository in a
+fresh throwaway Home. It checks clean, edited, staged, committed, deleted,
+restored and untracked states through the existing reader and receipt writer.
+Receipts sit beside the repository so they leave its state unchanged. These
+checks prove A14 reporting; live capsule and Runtime acceptance stay with their
+current owners.
+
 The receipt contains native hashes, every observed probe's effect, component
 SHA-256 and the complete bundle's lab CID (as `lab/capsule-identity` prints it),
 the suite outcome, and the exact graded table plus its SHA-256. The sibling
@@ -739,6 +746,14 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 `standin_guest_reads_its_request_later` is this stand-in, and a PASS there gives the Runtime no A11 credit for a later read.
 
 `standin_bridge_envelope_records_the_capsule_request` is this stand-in, two-capsule-run owns the real-bytes run, and a PASS here gives the Runtime no A3 credit.
+
+`standin_session_drain_refuses_past_the_remainder`, `standin_failed_settle_releases_only_that_hold` and `standin_failed_settle_surfaces_release_error` are this stand-in, and a PASS there gives the Runtime no A6 credit.
+
+`standin_system_and_wallet_requests_never_become_pending` is this stand-in, and a PASS there gives the Runtime no A6 credit for this denial.
+
+`standin_hostcall_frame_fails_closed` is this stand-in, and a PASS there gives the Runtime no A15 credit for this frame.
+
+`standin_shell_lists_every_pending_request` is this stand-in, and a PASS there gives the Runtime no A15 credit for this list.
 
 ## Content capsule named by its CID (M2 exit (e), PH6)
 
