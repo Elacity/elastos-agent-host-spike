@@ -152,12 +152,13 @@ pub(crate) use gateway_home_token::RuntimeWalletAuthority;
 pub(super) use gateway_home_token::{
     home_browser_origin, home_launch_token_header, home_session_clear_cookie_header,
     home_session_cookie_header_for_token, issue_home_launch_token_for_auth_grant,
-    issue_home_projection_launch_token_with_context, require_carried_home_launch_token,
-    require_home_launch_token, require_home_launch_token_binding,
-    require_home_launch_token_context, require_home_launch_token_for_any_app_context,
-    require_home_launch_token_for_any_context, require_home_projection_launch_token_context,
-    require_home_runtime_wallet_authority, require_home_token, require_home_token_context,
-    require_home_viewer_launch_token_context, require_internal_shell_launch_grant_for_any_context,
+    issue_home_launch_token_with_context, issue_home_projection_launch_token_with_context,
+    require_carried_home_launch_token, require_home_launch_token,
+    require_home_launch_token_binding, require_home_launch_token_context,
+    require_home_launch_token_for_any_app_context, require_home_launch_token_for_any_context,
+    require_home_projection_launch_token_context, require_home_runtime_wallet_authority,
+    require_home_token, require_home_token_context, require_home_viewer_launch_token_context,
+    require_internal_shell_launch_grant_for_any_context,
     require_internal_shell_runtime_wallet_authority, require_runtime_wallet_authority,
     runtime_wallet_authority, HomeLaunchContext, RequiredHomeLaunchToken,
 };
@@ -173,8 +174,7 @@ pub(super) use gateway_home_system_ai_provider::{
 #[cfg(test)]
 pub(in crate::api) use gateway_home_token::{
     issue_expired_home_launch_token_with_context, issue_home_launch_token,
-    issue_home_launch_token_with_context, local_home_launch_token_context,
-    set_test_home_launch_auth_data_dir, uuid_like_token,
+    local_home_launch_token_context, set_test_home_launch_auth_data_dir, uuid_like_token,
 };
 use gateway_home_wallet_connector::*;
 use gateway_inbox::*;
