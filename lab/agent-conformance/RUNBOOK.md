@@ -321,10 +321,14 @@ a later matching request.
   Cargo `FAILED` result produce `SKIPPED (<reason>)` and a failing command status.
 
 SKIPPED means an external setup failure prevented the probe from running, such
-as a refused loopback bind or failed probe build. The test prints
-`SKIPPED <test>: <reason>` and fails. Runtime refusals and failed assertions keep
-their FAIL grade. A SKIPPED marker paired with `ok`, an absent result, a repeated
-marker or an unlisted test also grades FAIL. `run.sh` prints the marker and the
+as a refused loopback bind or a probe build script that could not start. Build
+preparation and cleaning keep their setup treatment. The test prints
+`SKIPPED <test>: <reason>` and fails. A script that starts and exits unsuccessfully
+prints `FAILURE <test>: probe build failed: <status>` and grades FAIL. The build
+helper uses the process result and keeps tool output out of that diagnostic. The
+caller repairs the build inputs or setup named by the result and reruns the same
+command. Runtime refusals and failed assertions keep their FAIL grade. A SKIPPED
+marker paired with `ok`, an absent result, a repeated marker or an unlisted test also grades FAIL. `run.sh` prints the marker and the
 SKIPPED table row and exits non-zero. BLOCKED continues to mean a named open
 Runtime contract gap.
 
