@@ -137,16 +137,28 @@ fn launch_stops_a_child_past_its_bound() {
     owned.finish().unwrap();
 }
 
-fn child_group(home: &ThrowawayHome) -> RunningChild<'_> {
+#[derive(Clone, Copy)]
+enum ChildGroupMode {
+    Graceful,
+    IgnoreTerm,
+    ExitLeader,
+}
+
+fn child_group(home: &ThrowawayHome, mode: ChildGroupMode) -> RunningChild<'_> {
+    let script = match mode {
+        ChildGroupMode::Graceful => {
+            "trap 'kill -TERM \"$child\"; wait; exit 0' TERM; /bin/sleep 30 & child=$!; wait"
+        }
+        ChildGroupMode::IgnoreTerm => {
+            "trap '' TERM; /bin/sh -c 'trap \"\" TERM; printf \"%s\\n\" \"$$\" > \"$HOME/descendant-ready\"; exec /bin/sleep 120' & child=$!; printf '%s %s\\n' \"$$\" \"$child\" > \"$HOME/leader-ready\"; wait"
+        }
+        ChildGroupMode::ExitLeader => {
+            "trap 'exit 0' TERM; /bin/sh -c 'trap \"\" TERM; printf \"%s\\n\" \"$$\" > \"$HOME/descendant-ready\"; exec /bin/sleep 120' & child=$!; printf '%s %s\\n' \"$$\" \"$child\" > \"$HOME/leader-ready\"; wait"
+        }
+    };
     let child = home
-        .start(
-            Path::new("/bin/sh"),
-            &[
-                "-c",
-                "trap 'kill -TERM \"$child\"; wait; exit 0' TERM; /bin/sleep 30 & child=$!; wait",
-            ],
-        )
-        .unwrap();
+        .start(Path::new("/bin/sh"), &["-c", script])
+        .expect("fixture setup failed: could not start managed group");
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(2) {
         let output = home
@@ -155,21 +167,48 @@ fn child_group(home: &ThrowawayHome) -> RunningChild<'_> {
                 &["-g", &child.pgid().to_string()],
                 Duration::from_secs(1),
             )
-            .unwrap();
-        if output.status.success()
-            && std::str::from_utf8(&output.stdout).unwrap().lines().count() == 2
-        {
-            return child;
+            .expect("fixture setup failed: could not inspect managed group");
+        let members: Vec<u32> = std::str::from_utf8(&output.stdout)
+            .expect("fixture setup failed: group listing is not UTF-8")
+            .lines()
+            .map(|line| {
+                line.parse()
+                    .expect("fixture setup failed: invalid group PID")
+            })
+            .collect();
+        if output.status.success() && members.len() == 2 {
+            if matches!(mode, ChildGroupMode::Graceful) {
+                return child;
+            }
+            let leader = fs::read_to_string(home.home().join("leader-ready"));
+            let descendant = fs::read_to_string(home.home().join("descendant-ready"))
+                .ok()
+                .and_then(|pid| pid.trim().parse::<u32>().ok());
+            // An opened marker can still be empty while printf writes it.
+            if let (Ok(leader), Some(descendant)) = (leader, descendant) {
+                if leader.trim() == format!("{} {descendant}", child.pgid())
+                    && descendant != child.pgid()
+                    && members.contains(&child.pgid())
+                    && members.contains(&descendant)
+                {
+                    eprintln!(
+                        "fixture ready: leader={} descendant={descendant} pgid={}",
+                        child.pgid(),
+                        child.pgid()
+                    );
+                    return child;
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    panic!("fixture parent and child must share the managed process group");
+    panic!("fixture setup failed: ready leader and descendant must share the managed group within two seconds");
 }
 
 #[test]
 fn managed_child_stop_reaps_its_process_group() {
     let home = ThrowawayHome::new().unwrap();
-    let mut child = child_group(&home);
+    let mut child = child_group(&home, ChildGroupMode::Graceful);
     assert!(child.is_alive().unwrap());
     let pgid = child.pgid();
     child
@@ -185,7 +224,7 @@ fn managed_child_stop_reaps_its_process_group() {
 fn managed_child_drop_kills_its_group_and_keeps_root() {
     let home = ThrowawayHome::new().unwrap();
     let root = home.root().to_path_buf();
-    let child = child_group(&home);
+    let child = child_group(&home, ChildGroupMode::Graceful);
     let pgid = child.pgid();
     drop(child);
     assert!(!home.group_is_alive(pgid).unwrap());
@@ -197,6 +236,90 @@ fn managed_child_drop_kills_its_group_and_keeps_root() {
     assert!(root.is_dir());
     // This test has now verified the retained-root policy and empty group.
     fs::remove_dir_all(root).unwrap();
+}
+
+fn managed_stop_times_out(mode: ChildGroupMode) {
+    let home = ThrowawayHome::new().expect("fixture setup failed: fresh Home required");
+    let root = home.root().to_path_buf();
+    let mut child = child_group(&home, mode);
+    let pgid = child.pgid();
+    let started = Instant::now();
+    let result = child.stop();
+    let elapsed = started.elapsed();
+    let leader_alive = child.is_alive();
+    let group_alive = home.group_is_alive(pgid);
+    eprintln!("stop observed: result={result:?} elapsed={elapsed:?} leader_alive={leader_alive:?} group_alive={group_alive:?}");
+
+    // Capture first, then settle only this fixture's group before any behavior
+    // assertion. This also cleans a planted stop that accepts a live descendant
+    // or omits SIGKILL; the saved observations still make that plant fail.
+    if group_alive != Ok(false) || leader_alive != Ok(false) {
+        let killed = home.launch(
+            Path::new("/bin/kill"),
+            &["-KILL", &format!("-{pgid}")],
+            Duration::from_secs(1),
+        );
+        let cleanup_started = Instant::now();
+        loop {
+            let leader = child.is_alive();
+            let group = home.group_is_alive(pgid);
+            if leader == Ok(false) && group == Ok(false) {
+                break;
+            }
+            assert!(
+                cleanup_started.elapsed() < Duration::from_secs(2),
+                "fixture cleanup failed: owned group remains; kill={killed:?} leader={leader:?} group={group:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            matches!(killed, Ok(ref output) if output.status.success()),
+            "fixture cleanup failed: owned-group SIGKILL command failed: {killed:?}"
+        );
+    }
+    eprintln!("fixture cleanup: pgid={pgid} leader reaped and group empty");
+    assert_eq!(
+        result,
+        Err("managed child or its group exceeded the 10 second stop bound"),
+        "stop must refuse the undrained group at its bound"
+    );
+    assert!(
+        elapsed >= Duration::from_secs(10),
+        "stop must wait at least ten seconds: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "stop must finish within fifteen seconds: {elapsed:?}"
+    );
+    assert_eq!(
+        leader_alive,
+        Ok(false),
+        "stop must reap the leader before emergency cleanup"
+    );
+    assert_eq!(
+        group_alive,
+        Ok(false),
+        "stop must drain its group before emergency cleanup"
+    );
+    drop(child);
+    assert_eq!(
+        home.finish(),
+        Err("keep the root after an unstopped child or failed stop"),
+        "failed stop must retain its Home"
+    );
+    assert!(root.is_dir(), "failed stop root must still exist");
+    // Retention and the observed empty group have both passed.
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn managed_stop_escalates_and_keeps_root() {
+    managed_stop_times_out(ChildGroupMode::IgnoreTerm);
+}
+
+#[test]
+fn managed_stop_waits_for_descendants() {
+    managed_stop_times_out(ChildGroupMode::ExitLeader);
 }
 
 #[test]
