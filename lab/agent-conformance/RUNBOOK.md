@@ -321,10 +321,14 @@ a later matching request.
   Cargo `FAILED` result produce `SKIPPED (<reason>)` and a failing command status.
 
 SKIPPED means an external setup failure prevented the probe from running, such
-as a refused loopback bind or failed probe build. The test prints
-`SKIPPED <test>: <reason>` and fails. Runtime refusals and failed assertions keep
-their FAIL grade. A SKIPPED marker paired with `ok`, an absent result, a repeated
-marker or an unlisted test also grades FAIL. `run.sh` prints the marker and the
+as a refused loopback bind or a probe build script that could not start. Build
+preparation and cleaning keep their setup treatment. The test prints
+`SKIPPED <test>: <reason>` and fails. A script that starts and exits unsuccessfully
+prints `FAILURE <test>: probe build failed: <status>` and grades FAIL. The build
+helper uses the process result and keeps tool output out of that diagnostic. The
+caller repairs the build inputs or setup named by the result and reruns the same
+command. Runtime refusals and failed assertions keep their FAIL grade. A SKIPPED
+marker paired with `ok`, an absent result, a repeated marker or an unlisted test also grades FAIL. `run.sh` prints the marker and the
 SKIPPED table row and exits non-zero. BLOCKED continues to mean a named open
 Runtime contract gap.
 
@@ -439,6 +443,12 @@ fake marker. The probe uses the one Bus read path, selected at build time by
 checks its exact reason, marker-free captures and unchanged fake bytes.
 `host_key::fixture_path_uses_the_guarded_home_rule` checks the fixed resource's
 relative depth against the harness's Mac data-dir rule.
+`grants::tests::committed_fixture_has_no_host_file_grant` directly checks every
+committed grant entry against that resource, regardless of its other fields.
+The guest retains provider response bytes. Exact status `ok` succeeds; every
+other status gives the fixed lifecycle reason `host key provider read failed`.
+`tests::host_key_provider_result_uses_a_fixed_reason` checks opaque response
+bodies natively; Runtime acceptance comes from the existing live journey.
 
 `run.sh` prints `host key read:` along with the checked controller, census,
 refusal and identity lines, followed by the Cargo-derived test row. Read each
@@ -457,12 +467,18 @@ cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effe
 cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects attach_secret_stays_in_memory -- --exact --nocapture
 ```
 
-Both must fail on the changed refusal after credential coverage finishes.
+Each demo observes one grant, then requires `guest_provider_refusal:true` and
+`provider_body_absent:true`. The latter checks both captures for the former
+provider text. Both tests then fail at `expected exact manifest-bound lifecycle
+refusal`, after credential coverage finishes. The baseline keeps zero decisions
+and the original manifest refusal. Both the manifest bound and provider refuse
+the parent segments in the resource text, so this journey stops before the fake
+file. Its scope remains one route to one fake file.
 Restore both files, run the same tests, and require PASS. F-ac8-fixture changes
 the relative depth and must fail `host_key::fixture_path_uses_the_guarded_home_rule`.
 F-ac8-receipt removes the required launched identity and must fail
-`host_key_receipt_requires_this_launched_bundle`. These keep `command: lab`;
-the shared runner's lab arm remains with the provider lane.
+`host_key_receipt_requires_this_launched_bundle`. The existing falsifier list
+and shared runner keep their current registration.
 
 The existing synthetic-canary test and F-grant-capture also cover the new
 printed-journey surface. The controller keeps the exact lines it prints in
