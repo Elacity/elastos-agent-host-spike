@@ -1982,6 +1982,19 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
 
+    #[test]
+    fn committed_fixture_has_no_host_file_grant() {
+        let fixture = Fixture::committed().expect("committed grant fixture parses");
+        let resource = include_str!("../../fixtures/host-key-read.txt").trim();
+        assert!(
+            fixture
+                .entries
+                .iter()
+                .all(|entry| entry["resource"] != resource),
+            "committed fixture excludes every host-file resource grant"
+        );
+    }
+
     fn fixture() -> Fixture {
         Fixture::parse(r#"{"deny_reason":"fixture denial","grants":[{"resource":"localhost://Public/test/one","action":"read","reason":"test read","duration":"once"}]}"#).unwrap()
     }
