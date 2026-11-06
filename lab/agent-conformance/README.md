@@ -24,8 +24,10 @@ the pinned Rust toolchain, its `wasm32-unknown-unknown` target and cached Cargo
 dependencies. The shared `build::offline_build` setup keeps Cargo targets,
 intermediates and temporary files under this lane's `target/`. Probe builds
 treat warnings as errors; the Runtime build uses its normal warning policy.
-A missing build tool, target or dependency fails the check with a setup reason.
-Pre-probe setup failures grade SKIPPED and keep a nonzero command status.
+Build preparation, cleaning and failure to start the probe build script grade
+SKIPPED and keep a nonzero command status. Once the script starts, an unsuccessful
+exit grades FAIL with its exit status. The caller repairs the build inputs or
+setup named by that result, then reruns the same command.
 
 `runtime::runtime_under_test` builds the checkout's `elastos` binary once per
 test process with `cargo build --locked --offline --manifest-path
@@ -36,6 +38,12 @@ Rust flags. Its one target is `target/runtime`, with intermediates in `build/`
 and temporary files in `tmp/` below that target. It returns the absolute binary
 path and a SHA-256 computed from its bytes by macOS `shasum`. This identifies
 the Runtime tested on this machine; it is separate from capsule bundle identity.
+If the tool fails or returns a malformed digest, `binary SHA-256 failed` keeps
+the exit status and labelled stdout and stderr. Both streams use lossy UTF-8
+and escaped string formatting, so empty streams and line breaks stay visible
+on one diagnostic line. The builder repairs the input or tool setup named by
+the cause, then reruns the same command. Native identity is emitted only after
+a successful hash.
 
 `probe_imports_only_the_bus` validates the built component and checks its outer
 imports against the five-interface Bus v1 subset. `probe_hash_is_stable` makes two

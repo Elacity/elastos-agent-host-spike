@@ -7,10 +7,96 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const REFUSAL: &str = "This command requires a running runtime.";
+
+fn checksum_refusal_matches(
+    stderr: &str,
+    component: &str,
+    installed: &Path,
+    manifest: &Path,
+) -> bool {
+    let refusal = format!(
+        "installed component '{component}' at {} failed checksum verification against {}",
+        installed.display(),
+        manifest.display()
+    );
+    stderr.lines().any(|line| line.contains(&refusal))
+}
+
+#[test]
+fn checksum_refusal_requires_one_component_path_and_manifest() {
+    // Synthetic diagnostics check the lab assertion, not Runtime acceptance.
+    let root = Path::new("/fixture Home/Library/Application Support/elastos");
+    let manifest = root.join("components.json");
+    for component in ["localhost-provider", "ipfs-provider"] {
+        let installed = root.join("bin").join(component);
+        let valid = format!(
+            "installed component '{component}' at {} failed checksum verification against {}",
+            installed.display(),
+            manifest.display()
+        );
+        let prefixed = format!("WARN runtime: {valid}\n");
+        assert!(
+            checksum_refusal_matches(&valid, component, &installed, &manifest),
+            "complete checksum line must pass"
+        );
+        let other = format!(
+            "installed component 'did-provider' at {} failed checksum verification against {}",
+            root.join("bin/did-provider").display(),
+            manifest.display()
+        );
+        let cases = [
+            (
+                "separate component and checksum lines must be refused",
+                format!("checking {component}\n{other}\n"),
+            ),
+            (
+                "split checksum message must be refused",
+                valid.replace(" failed checksum", "\nfailed checksum"),
+            ),
+            (
+                "split manifest fragment must be refused",
+                valid.replace(" against ", " against\n"),
+            ),
+            (
+                "missing provider beside another checksum error must be refused",
+                format!("{component} not installed.\n{other}\n"),
+            ),
+            (
+                "near-match component must be refused",
+                valid.replace(component, &format!("{component}-copy")),
+            ),
+            (
+                "wrong installed path must be refused",
+                valid.replace(
+                    installed.to_str().unwrap(),
+                    root.join("other bin").join(component).to_str().unwrap(),
+                ),
+            ),
+            (
+                "wrong manifest path must be refused",
+                valid.replace(
+                    manifest.to_str().unwrap(),
+                    root.join("other components.json").to_str().unwrap(),
+                ),
+            ),
+            ("empty output must be refused", String::new()),
+        ];
+        for (label, stderr) in cases {
+            assert!(
+                !checksum_refusal_matches(&stderr, component, &installed, &manifest),
+                "{label}"
+            );
+            assert!(
+                checksum_refusal_matches(&prefixed, component, &installed, &manifest),
+                "complete prefixed line with spaces must recover"
+            );
+        }
+    }
+}
 
 fn run_probe(home: &ThrowawayHome) -> String {
     let runtime = runtime_under_test().expect("build the checkout Runtime offline");
@@ -49,6 +135,11 @@ fn run_without_operator_is_refused_with_reason() {
     // Identification only: compare the returned digest against the actual bytes
     // with the existing test dependency, and check repeated access shares it.
     assert!(runtime.binary.is_absolute());
+    assert_eq!(
+        runtime.binary,
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("target/runtime/debug/elastos"),
+        "cached Runtime must use the unchanged lane output path"
+    );
     assert!(std::ptr::eq(runtime, runtime_under_test().unwrap()));
     assert_eq!(
         runtime.sha256,
@@ -125,13 +216,13 @@ fn run_by_cid_refuses_content_provider_whose_bytes_differ_from_its_hash() {
             .unwrap(),
         "checksum refusal must happen before the content provider script is spawned"
     );
-    let refusal = format!(
-        "installed component 'ipfs-provider' at {} failed checksum verification against {}",
-        installed.display(),
-        home.data().join("components.json").display()
-    );
     assert!(
-        stderr.lines().any(|line| line.contains(&refusal)),
+        checksum_refusal_matches(
+            &stderr,
+            "ipfs-provider",
+            &installed,
+            &home.data().join("components.json")
+        ),
         "expected the complete content provider checksum refusal on one line; stderr:\n{stderr}"
     );
     assert_no_materialized_capsule(&home);
@@ -176,11 +267,17 @@ fn runtime_data_dir_is_under_throwaway_home() {
 
 #[test]
 fn serve_refuses_provider_whose_bytes_differ_from_its_hash() {
+    // Keep the provider first so a clean native target measures its cold build.
+    let provider = localhost_provider_under_test().expect("build the checkout provider offline");
     let runtime = runtime_under_test().expect("build the checkout Runtime offline");
     let home = ThrowawayHome::new().unwrap();
     let installed = common::write_operator_home(&home).expect("install the operator fixture");
-    let provider = localhost_provider_under_test().unwrap();
     assert!(provider.binary.is_absolute());
+    assert_eq!(
+        provider.binary,
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("target/runtime/debug/localhost-provider"),
+        "cached provider must use the unchanged lane output path"
+    );
     assert!(std::ptr::eq(
         provider,
         localhost_provider_under_test().unwrap()
@@ -231,17 +328,22 @@ fn serve_refuses_provider_whose_bytes_differ_from_its_hash() {
             Duration::from_secs(10),
         )
         .expect("serve must return within its bound through the one launch primitive");
-    let stderr = String::from_utf8(output.stderr)
-        .expect("Runtime stderr must be UTF-8")
-        .replace(lane().to_str().unwrap(), "<lane>");
+    let stderr = String::from_utf8(output.stderr).expect("Runtime stderr must be UTF-8");
+    let checksum_refused = checksum_refusal_matches(
+        &stderr,
+        "localhost-provider",
+        &installed,
+        &home.data().join("components.json"),
+    );
+    let stderr = stderr.replace(lane().to_str().unwrap(), "<lane>");
     println!("Provider refusal stderr: {stderr:?}");
     assert!(
         !output.status.success(),
         "serve must refuse the changed provider"
     );
     assert!(
-        stderr.contains("localhost-provider") && stderr.contains("failed checksum verification"),
-        "expected provider checksum refusal; stderr:\n{stderr}"
+        checksum_refused,
+        "expected the complete provider checksum refusal on one line; stderr:\n{stderr}"
     );
     assert!(!home
         .data()

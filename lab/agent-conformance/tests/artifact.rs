@@ -1,17 +1,254 @@
 #[path = "common/probe.rs"]
 mod probe;
 
-use agent_conformance::build::{lane, offline_build, repository};
+use agent_conformance::build::{lane, offline_build, repository, target};
 use agent_conformance::harness::ThrowawayHome;
 use agent_conformance::identity::{stage_probe, Observation, MANIFEST};
+use agent_conformance::report::{render_run, table, GitIdentity};
 use probe::{build_probe, Effect};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::process::Output;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 use wasmparser::{Encoding, Parser, Payload, Validator};
 
 static PROBE_BUILD: Mutex<()> = Mutex::new(());
+
+const BUILD_FIXTURE: &str = "probe_build_result_fixture";
+const TOOL_STDOUT: &str = "synthetic-probe-tool-stdout";
+const TOOL_STDERR: &str = "synthetic-probe-tool-stderr";
+const BUILD_CONTINUED: &str = "probe build fixture continued";
+
+#[test]
+fn probe_build_result_fixture() {
+    let directory = std::env::current_dir().unwrap();
+    if directory.file_name().and_then(|name| name.to_str()) != Some("home")
+        || directory.parent().and_then(Path::parent) != Some(target().as_path())
+        || !directory.join("probe-build-fixture").is_file()
+    {
+        return;
+    }
+    let home = ThrowawayHome::new().unwrap();
+    let result = home.launch(
+        &directory.join("probe-build-tool"),
+        &[],
+        Duration::from_secs(5),
+    );
+    if let Ok(output) = &result {
+        assert!(
+            output.stdout == TOOL_STDOUT.as_bytes(),
+            "fixture tool stdout"
+        );
+        assert!(
+            output.stderr == TOOL_STDERR.as_bytes(),
+            "fixture tool stderr"
+        );
+    }
+    home.finish().unwrap();
+    probe::probe_build_output(result);
+    println!("{BUILD_CONTINUED}");
+}
+
+fn build_fixture_home() -> ThrowawayHome {
+    let home = ThrowawayHome::new().unwrap();
+    home.guard(home.home(), home.data()).unwrap();
+    fs::write(home.home().join("probe-build-fixture"), b"").unwrap();
+    home
+}
+
+fn write_build_tool(home: &ThrowawayHome, status: u8) {
+    home.guard(home.home(), home.data()).unwrap();
+    let executable = home.home().join("probe-build-tool");
+    fs::write(
+        &executable,
+        format!("#!/bin/sh\nprintf '{TOOL_STDOUT}'\nprintf '{TOOL_STDERR}' >&2\nexit {status}\n"),
+    )
+    .unwrap();
+    fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+fn launch_build_fixture(home: &ThrowawayHome) -> Output {
+    home.launch(
+        &std::env::current_exe().unwrap(),
+        &[
+            BUILD_FIXTURE,
+            "--exact",
+            "--show-output",
+            "--color",
+            "never",
+        ],
+        Duration::from_secs(10),
+    )
+    .unwrap()
+}
+
+fn build_fixture_report(output: &Output, grade: &str) -> String {
+    let captured = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let listed = format!("{BUILD_FIXTURE}: test\n");
+    let (row, success) = table(&listed, &captured, output.status.success(), Some(""));
+    assert!(
+        row.contains(&format!("{BUILD_FIXTURE} | {grade}\n")),
+        "fixture observed grade"
+    );
+    assert!(!success, "fixture table command failed");
+    let report = render_run(
+        &listed,
+        &captured,
+        output.status.success(),
+        Ok(GitIdentity {
+            commit: "a".repeat(40),
+            dirty: true,
+        }),
+        Some(""),
+    );
+    assert!(
+        report
+            .table
+            .contains(&format!("{BUILD_FIXTURE} | {grade}\n")),
+        "fixture receipt grade"
+    );
+    let receipt: serde_json::Value = serde_json::from_slice(&report.receipt_bytes).unwrap();
+    assert!(!report.passed, "fixture report command failed");
+    assert_eq!(
+        receipt["cargo_success"], false,
+        "fixture real command status"
+    );
+    assert_eq!(
+        receipt["command_success"], false,
+        "fixture receipt command failed"
+    );
+    assert_eq!(
+        receipt["identity_status"], "incomplete",
+        "fixture identity stays incomplete"
+    );
+    for reason in [
+        "missing Runtime SHA-256",
+        "missing localhost-provider SHA-256",
+        "missing launched probe identity",
+    ] {
+        assert!(
+            report.failures.iter().any(|failure| failure == reason),
+            "fixture missing identity retained"
+        );
+    }
+    let receipt_text = String::from_utf8_lossy(&report.receipt_bytes);
+    for text in [
+        captured.as_str(),
+        report.table.as_str(),
+        receipt_text.as_ref(),
+    ] {
+        assert!(
+            !text.contains(TOOL_STDOUT) && !text.contains(TOOL_STDERR),
+            "fixture tool output stays private"
+        );
+    }
+    captured
+}
+
+fn assert_build_continues(home: &ThrowawayHome) {
+    write_build_tool(home, 0);
+    let output = launch_build_fixture(home);
+    assert!(
+        output.status.success(),
+        "fixture success continues normally"
+    );
+    let captured = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        captured.lines().any(|line| line == BUILD_CONTINUED),
+        "fixture continuation reached"
+    );
+    assert!(
+        !captured.contains("SKIPPED ") && !captured.contains("FAILURE "),
+        "fixture success has no refusal"
+    );
+    assert!(
+        captured.contains("test result: ok."),
+        "fixture success libtest result"
+    );
+}
+
+#[test]
+fn probe_build_failure_stays_fail() {
+    let home = build_fixture_home();
+    write_build_tool(&home, 31);
+    let output = launch_build_fixture(&home);
+    assert!(!output.status.success(), "failed build keeps failure exit");
+    let reason = "probe build failed: exit status: 31";
+    let captured = build_fixture_report(&output, &format!("FAIL | {reason}"));
+    let marker = format!("FAILURE {BUILD_FIXTURE}: {reason}");
+    assert_eq!(
+        captured.lines().filter(|line| *line == marker).count(),
+        1,
+        "failed build exact marker"
+    );
+    assert_eq!(
+        captured
+            .lines()
+            .filter(|line| line.starts_with("FAILURE "))
+            .count(),
+        1,
+        "failed build one failure marker"
+    );
+    assert!(
+        !captured.contains("SKIPPED "),
+        "failed build has zero skipped markers"
+    );
+    assert!(
+        captured.contains("test result: FAILED."),
+        "failed build libtest result"
+    );
+    assert!(
+        !captured.contains(BUILD_CONTINUED),
+        "failed build returns no artifact continuation"
+    );
+    assert_build_continues(&home);
+    home.finish().unwrap();
+}
+
+#[test]
+fn probe_start_failure_stays_skipped() {
+    let home = build_fixture_home();
+    assert!(
+        !home.home().join("probe-build-tool").exists(),
+        "fixture executable is absent"
+    );
+    let output = launch_build_fixture(&home);
+    assert!(!output.status.success(), "start failure keeps failure exit");
+    let reason = "start probe build: could not start child process";
+    let captured = build_fixture_report(&output, &format!("SKIPPED ({reason})"));
+    let marker = format!("SKIPPED {BUILD_FIXTURE}: {reason}");
+    assert_eq!(
+        captured.lines().filter(|line| *line == marker).count(),
+        1,
+        "start failure exact marker"
+    );
+    assert_eq!(
+        captured
+            .lines()
+            .filter(|line| line.starts_with("SKIPPED "))
+            .count(),
+        1,
+        "start failure one skipped marker"
+    );
+    assert!(!captured.contains("FAILURE "), "start failure stays setup");
+    assert!(
+        captured.contains("test result: FAILED."),
+        "start failure libtest result"
+    );
+    assert!(
+        !captured.contains(BUILD_CONTINUED),
+        "start failure has no continuation"
+    );
+    assert_build_continues(&home);
+    home.finish().unwrap();
+}
 
 fn builds() -> &'static [(Effect, [Vec<u8>; 2]); 15] {
     static BUILDS: OnceLock<[(Effect, [Vec<u8>; 2]); 15]> = OnceLock::new();
@@ -202,7 +439,7 @@ fn probe_effects_are_exclusive() {
     for (index, first) in features.iter().enumerate() {
         for second in &features[index + 1..] {
             let pair = format!("{first},{second}");
-            let output = offline_build("cargo", &lane().join("target/probe-feature-check"))
+            let output = offline_build("cargo", &target().join("probe-feature-check"))
                 .unwrap()
                 .args([
                     "check",
@@ -233,7 +470,7 @@ fn instance_subselectors_require_one_granted_read() {
         ("--cfg feature=\"instance-2\"", "instance requires granted-read"),
         ("--cfg feature=\"granted-read\" --cfg feature=\"instance-1\" --cfg feature=\"instance-2\"", "select exactly one instance"),
     ] {
-        let output = offline_build("cargo", &lane().join("target/probe-feature-check"))
+        let output = offline_build("cargo", &target().join("probe-feature-check"))
             .unwrap()
             .args(["check", "--locked", "--offline", "--manifest-path", "lab/agent-conformance/probe/Cargo.toml"])
             .env("RUSTFLAGS", flags)

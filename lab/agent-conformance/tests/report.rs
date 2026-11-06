@@ -368,50 +368,132 @@ fn agent_host_row_requires_its_launched_identity() {
 
 #[test]
 fn staging_uses_manifest_entrypoint_and_refuses_escape() {
-    for entrypoint in ["agent-host.component.wasm", "nested/agent.component.wasm"] {
+    let payload = b"synthetic component";
+    let marker = b"owned escape marker";
+    let check_staged = |home: &ThrowawayHome, manifest: &[u8], entrypoint: &str, case: &str| {
+        let result = stage_probe(home, payload, manifest, "agent-host");
+        assert!(
+            result.is_ok(),
+            "{case}: allowed entrypoint stages successfully"
+        );
+        let staged = result.unwrap();
+        assert_eq!(
+            staged.path,
+            home.root().join(format!("sha256-{}", sha256(payload))),
+            "{case}: payload hash names the bundle directory"
+        );
+        assert_eq!(
+            fs::read(staged.path.join("capsule.json")).unwrap(),
+            manifest,
+            "{case}: exact supplied manifest bytes"
+        );
+        assert!(
+            staged.path.join(entrypoint).is_file(),
+            "{case}: allowed selected entrypoint has payload"
+        );
+        assert_eq!(
+            fs::read(staged.path.join(entrypoint)).unwrap(),
+            payload,
+            "{case}: payload at the selected entrypoint"
+        );
+        assert!(
+            !staged
+                .path
+                .join(agent_conformance::identity::ENTRYPOINT)
+                .exists(),
+            "{case}: default entrypoint stays absent"
+        );
+        let checked = capsule_identity::checked_bundle(&staged.path).unwrap();
+        assert_eq!(
+            checked.entry("capsule.json"),
+            Some(manifest),
+            "{case}: checked manifest"
+        );
+        assert_eq!(
+            checked.entry(entrypoint),
+            Some(payload.as_slice()),
+            "{case}: checked payload"
+        );
+        assert_eq!(
+            staged.identity.component_sha256,
+            sha256(payload),
+            "{case}: component SHA-256"
+        );
+        assert_eq!(staged.identity.effect, "agent-host", "{case}: effect label");
+        assert_eq!(
+            staged.identity.bundle_lab_cid,
+            checked.cid().to_string(),
+            "{case}: checked bundle lab CID"
+        );
+        assert_eq!(home.run_starts(), 0, "{case}: staging starts zero children");
+    };
+    for (case, entrypoint) in [
+        ("flat", "agent-host.component.wasm"),
+        ("nested", "nested/agent.component.wasm"),
+    ] {
         let home = ThrowawayHome::new().unwrap();
         let mut manifest: Value = serde_json::from_slice(MANIFEST).unwrap();
         manifest["entrypoint"] = entrypoint.into();
-        let staged = stage_probe(
+        check_staged(
             &home,
-            b"synthetic component",
             &serde_json::to_vec(&manifest).unwrap(),
-            "agent-host",
-        )
-        .unwrap();
-        assert_eq!(
-            fs::read(staged.path.join(entrypoint)).unwrap(),
-            b"synthetic component"
-        );
-        assert_eq!(
-            staged.identity.bundle_lab_cid,
-            capsule_identity::checked_bundle(&staged.path)
-                .unwrap()
-                .cid()
-                .to_string()
+            entrypoint,
+            case,
         );
         home.finish().unwrap();
     }
-    for selected in ["../escape.wasm", "absolute", "", "./escape.wasm"] {
+    for (case, selected) in [
+        ("parent", "../escape.wasm"),
+        ("absolute", "absolute"),
+        ("empty", ""),
+        ("current-relative", "./escape.wasm"),
+        ("current", "."),
+        ("nested-parent", "nested/../../escape.wasm"),
+    ] {
         let home = ThrowawayHome::new().unwrap();
         let mut manifest: Value = serde_json::from_slice(MANIFEST).unwrap();
-        let absolute = home.root().join("escape.wasm");
-        let entrypoint = if selected == "absolute" {
-            absolute.to_str().unwrap()
+        let outside = home.root().join("escape.wasm");
+        fs::write(&outside, marker).unwrap();
+        let entrypoint = if case == "absolute" {
+            outside.to_str().unwrap()
         } else {
             selected
         };
         manifest["entrypoint"] = entrypoint.into();
-        assert!(stage_probe(
+        let result = stage_probe(
             &home,
-            b"synthetic component",
+            payload,
             &serde_json::to_vec(&manifest).unwrap(),
-            "agent-host"
-        )
-        .is_err());
+            "agent-host",
+        );
+        assert_eq!(
+            fs::read(&outside).unwrap(),
+            marker,
+            "{case}: owned marker unchanged before refusal"
+        );
         assert!(
-            !absolute.exists(),
-            "refused entrypoint must not write outside the bundle"
+            !home
+                .root()
+                .join(format!("sha256-{}", sha256(payload)))
+                .exists(),
+            "{case}: bundle absent before refusal"
+        );
+        assert_eq!(
+            result.err().as_deref(),
+            Some("probe staging: entrypoint must stay inside the bundle"),
+            "{case}: exact early entrypoint refusal"
+        );
+        manifest["entrypoint"] = "repaired/agent.component.wasm".into();
+        check_staged(
+            &home,
+            &serde_json::to_vec(&manifest).unwrap(),
+            "repaired/agent.component.wasm",
+            case,
+        );
+        assert_eq!(
+            fs::read(&outside).unwrap(),
+            marker,
+            "{case}: owned marker unchanged after repair"
         );
         home.finish().unwrap();
     }
