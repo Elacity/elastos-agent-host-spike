@@ -5377,6 +5377,15 @@ mod tests {
 
             let context = context();
             let timestamp = now().unwrap();
+            if crate::auth::ResolvedPrincipalRoot::resolve(
+                root.path(),
+                root.path(),
+                context.principal_id(),
+            )
+            .is_err()
+            {
+                crate::auth::store_test_human_principal(root.path(), context.principal_id());
+            }
             crate::auth::store_session_grant(
                 root.path(),
                 AuthSessionGrantV1 {
@@ -5577,6 +5586,11 @@ mod tests {
                 },
             );
             let timestamp = now().unwrap();
+            if crate::auth::ResolvedPrincipalRoot::resolve(root, root, context.principal_id())
+                .is_err()
+            {
+                crate::auth::store_test_human_principal(root, context.principal_id());
+            }
             crate::auth::store_session_grant(
                 root,
                 elastos_runtime::auth::AuthSessionGrantV1 {
@@ -9855,6 +9869,7 @@ server.serve_forever()
                 expires_at: now().unwrap() + 3600,
                 apps: vec!["marketplace".into()],
             };
+            crate::auth::store_test_human_principal(root.path(), context.principal_id());
             crate::auth::store_session_grant(root.path(), grant.clone()).unwrap();
             let token =
                 issue_home_launch_token_for_auth_grant(root.path(), "marketplace", &grant).unwrap();
