@@ -22,7 +22,7 @@ mod common;
 #[path = "common/probe.rs"]
 mod probe;
 
-use agent_conformance::build::{lane, repository};
+use agent_conformance::build::{repository, target};
 use agent_conformance::harness::ThrowawayHome;
 use agent_conformance::identity::MANIFEST;
 use probe::{build_probe, Effect};
@@ -58,7 +58,7 @@ fn viewer_name() -> String {
 /// manifest type requires: `viewer` is the viewer's string name, as the
 /// template's README states. The file bytes come from that one read.
 static CONTENT: LazyLock<PathBuf> = LazyLock::new(|| {
-    let staged = lane().join("target/content-cid-viewer-content");
+    let staged = target().join("content-cid-viewer-content");
     match fs::remove_dir_all(&staged) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -167,7 +167,7 @@ fn staging_refusal(home: &ThrowawayHome, manifest: &Value, label: &str) -> Strin
 /// The Runtime manifest type's words for a manifest that the one bundle check
 /// refused. The bytes are the same bytes the route staged.
 fn manifest_refusal(manifest: &Value) -> String {
-    let scratch = lane().join("target/content-cid-manifest-check");
+    let scratch = target().join("content-cid-manifest-check");
     let _ = fs::remove_dir_all(&scratch);
     fs::create_dir_all(&scratch).expect("create the manifest check directory");
     let entrypoint = manifest["entrypoint"]

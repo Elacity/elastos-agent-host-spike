@@ -7,7 +7,7 @@ mod common;
 #[path = "common/probe.rs"]
 mod probe;
 
-use agent_conformance::build::{copy_agent_host, lane, offline_build, repository};
+use agent_conformance::build::{copy_agent_host, offline_build, repository, target};
 use agent_conformance::harness::{Launch, RunningInstances, ThrowawayHome};
 use agent_conformance::identity::{stage_probe, Observation};
 use agent_conformance::runtime::{localhost_provider_under_test, runtime_under_test};
@@ -31,7 +31,7 @@ fn build_agent_host(home: &ThrowawayHome) -> (Vec<u8>, Vec<u8>) {
     assert!(fs::symlink_metadata(&wit).unwrap().is_file());
     fs::copy(wit, tree.join("elastos/wit/elastos-bus-v1.wit")).unwrap();
     let started = Instant::now();
-    let output = offline_build("bash", &lane().join("target/real-agent-host-build"))
+    let output = offline_build("bash", &target().join("real-agent-host-build"))
         .expect("prepare lane-owned build output")
         .arg(repository().join("scripts/build-component-capsule.sh"))
         .arg(&copy)

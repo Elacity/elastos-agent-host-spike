@@ -151,14 +151,8 @@ fn read_granted_file() -> Result<(), elastos::bus::types::BusError> {
         })?;
         #[cfg(feature = "host-key-read")]
         {
-            // The Bus owns refusal details. Keep successful bytes inside the guest.
-            if response.status == "ok" {
-                return Ok(());
-            }
-            return Err(BusError::Unavailable(
-                String::from_utf8(response.body)
-                    .unwrap_or_else(|_| "host key read returned a non-UTF-8 refusal".into()),
-            ));
+            return host_key_provider_result(&response.status, &response.body)
+                .map_err(BusError::Unavailable);
         }
         #[cfg(not(feature = "host-key-read"))]
         {
@@ -194,6 +188,16 @@ fn read_granted_file() -> Result<(), elastos::bus::types::BusError> {
         }
     }
     Ok(())
+}
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "host-key-read")))]
+fn host_key_provider_result(status: &str, _body: &[u8]) -> Result<(), String> {
+    // The guest owns its lifecycle result and retains every provider body.
+    if status == "ok" {
+        Ok(())
+    } else {
+        Err("host key provider read failed".into())
+    }
 }
 
 pub fn read_bytes_match(body: &[u8], instance: Option<usize>) -> bool {
@@ -291,6 +295,34 @@ export!(Probe);
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn host_key_provider_result_uses_a_fixed_reason() {
+        let marker = ["host key read:", " synthetic provider marker"].concat();
+        let large = marker.as_bytes().iter().copied().cycle().take(1 << 20).collect::<Vec<_>>();
+        let bodies: &[&[u8]] = &[b"", marker.as_bytes(), &[0xff, 0xfe], &large];
+        for body in bodies {
+            assert!(
+                super::host_key_provider_result("ok", body).is_ok(),
+                "exact success keeps arbitrary bytes inside the guest"
+            );
+            for status in ["OK", "", "unknown", marker.as_str()] {
+                match super::host_key_provider_result(status, body) {
+                    Err(reason) => {
+                        assert!(
+                            reason == "host key provider read failed",
+                            "host key provider failure reason is fixed"
+                        );
+                        assert!(
+                            reason.len() <= "host key provider read failed".len(),
+                            "host key provider failure reason is bounded"
+                        );
+                    }
+                    Ok(()) => panic!("non-success host key provider response is refused"),
+                }
+            }
+        }
+    }
+
     #[test]
     fn guest_checks_all_granted_file_bytes() {
         let expected = br#"{"data":{"content":"grant-fixture-bytes","encoding":"utf8","size":19},"status":"ok"}"#;
