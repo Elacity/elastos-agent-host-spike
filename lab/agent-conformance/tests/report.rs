@@ -368,50 +368,132 @@ fn agent_host_row_requires_its_launched_identity() {
 
 #[test]
 fn staging_uses_manifest_entrypoint_and_refuses_escape() {
-    for entrypoint in ["agent-host.component.wasm", "nested/agent.component.wasm"] {
+    let payload = b"synthetic component";
+    let marker = b"owned escape marker";
+    let check_staged = |home: &ThrowawayHome, manifest: &[u8], entrypoint: &str, case: &str| {
+        let result = stage_probe(home, payload, manifest, "agent-host");
+        assert!(
+            result.is_ok(),
+            "{case}: allowed entrypoint stages successfully"
+        );
+        let staged = result.unwrap();
+        assert_eq!(
+            staged.path,
+            home.root().join(format!("sha256-{}", sha256(payload))),
+            "{case}: payload hash names the bundle directory"
+        );
+        assert_eq!(
+            fs::read(staged.path.join("capsule.json")).unwrap(),
+            manifest,
+            "{case}: exact supplied manifest bytes"
+        );
+        assert!(
+            staged.path.join(entrypoint).is_file(),
+            "{case}: allowed selected entrypoint has payload"
+        );
+        assert_eq!(
+            fs::read(staged.path.join(entrypoint)).unwrap(),
+            payload,
+            "{case}: payload at the selected entrypoint"
+        );
+        assert!(
+            !staged
+                .path
+                .join(agent_conformance::identity::ENTRYPOINT)
+                .exists(),
+            "{case}: default entrypoint stays absent"
+        );
+        let checked = capsule_identity::checked_bundle(&staged.path).unwrap();
+        assert_eq!(
+            checked.entry("capsule.json"),
+            Some(manifest),
+            "{case}: checked manifest"
+        );
+        assert_eq!(
+            checked.entry(entrypoint),
+            Some(payload.as_slice()),
+            "{case}: checked payload"
+        );
+        assert_eq!(
+            staged.identity.component_sha256,
+            sha256(payload),
+            "{case}: component SHA-256"
+        );
+        assert_eq!(staged.identity.effect, "agent-host", "{case}: effect label");
+        assert_eq!(
+            staged.identity.bundle_lab_cid,
+            checked.cid().to_string(),
+            "{case}: checked bundle lab CID"
+        );
+        assert_eq!(home.run_starts(), 0, "{case}: staging starts zero children");
+    };
+    for (case, entrypoint) in [
+        ("flat", "agent-host.component.wasm"),
+        ("nested", "nested/agent.component.wasm"),
+    ] {
         let home = ThrowawayHome::new().unwrap();
         let mut manifest: Value = serde_json::from_slice(MANIFEST).unwrap();
         manifest["entrypoint"] = entrypoint.into();
-        let staged = stage_probe(
+        check_staged(
             &home,
-            b"synthetic component",
             &serde_json::to_vec(&manifest).unwrap(),
-            "agent-host",
-        )
-        .unwrap();
-        assert_eq!(
-            fs::read(staged.path.join(entrypoint)).unwrap(),
-            b"synthetic component"
-        );
-        assert_eq!(
-            staged.identity.bundle_lab_cid,
-            capsule_identity::checked_bundle(&staged.path)
-                .unwrap()
-                .cid()
-                .to_string()
+            entrypoint,
+            case,
         );
         home.finish().unwrap();
     }
-    for selected in ["../escape.wasm", "absolute", "", "./escape.wasm"] {
+    for (case, selected) in [
+        ("parent", "../escape.wasm"),
+        ("absolute", "absolute"),
+        ("empty", ""),
+        ("current-relative", "./escape.wasm"),
+        ("current", "."),
+        ("nested-parent", "nested/../../escape.wasm"),
+    ] {
         let home = ThrowawayHome::new().unwrap();
         let mut manifest: Value = serde_json::from_slice(MANIFEST).unwrap();
-        let absolute = home.root().join("escape.wasm");
-        let entrypoint = if selected == "absolute" {
-            absolute.to_str().unwrap()
+        let outside = home.root().join("escape.wasm");
+        fs::write(&outside, marker).unwrap();
+        let entrypoint = if case == "absolute" {
+            outside.to_str().unwrap()
         } else {
             selected
         };
         manifest["entrypoint"] = entrypoint.into();
-        assert!(stage_probe(
+        let result = stage_probe(
             &home,
-            b"synthetic component",
+            payload,
             &serde_json::to_vec(&manifest).unwrap(),
-            "agent-host"
-        )
-        .is_err());
+            "agent-host",
+        );
+        assert_eq!(
+            fs::read(&outside).unwrap(),
+            marker,
+            "{case}: owned marker unchanged before refusal"
+        );
         assert!(
-            !absolute.exists(),
-            "refused entrypoint must not write outside the bundle"
+            !home
+                .root()
+                .join(format!("sha256-{}", sha256(payload)))
+                .exists(),
+            "{case}: bundle absent before refusal"
+        );
+        assert_eq!(
+            result.err().as_deref(),
+            Some("probe staging: entrypoint must stay inside the bundle"),
+            "{case}: exact early entrypoint refusal"
+        );
+        manifest["entrypoint"] = "repaired/agent.component.wasm".into();
+        check_staged(
+            &home,
+            &serde_json::to_vec(&manifest).unwrap(),
+            "repaired/agent.component.wasm",
+            case,
+        );
+        assert_eq!(
+            fs::read(&outside).unwrap(),
+            marker,
+            "{case}: owned marker unchanged after repair"
         );
         home.finish().unwrap();
     }
@@ -465,6 +547,210 @@ fn output(observations: &[Observation]) -> String {
 
 fn read_receipt(path: &Path) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
+fn assert_command_receipt(
+    result: &std::process::Output,
+    path: &Path,
+    observations: &[Observation],
+) -> Value {
+    let document = read_receipt(path);
+    let table = document["report"]["table"].as_str().unwrap();
+    let receipt_line = format!(
+        "versions receipt: {}\n",
+        path.strip_prefix(agent_conformance::build::lane())
+            .unwrap()
+            .display()
+    );
+    assert_eq!(
+        result.stdout.strip_suffix(receipt_line.as_bytes()),
+        Some(table.as_bytes()),
+        "printed table prefix matches the stored table byte for byte"
+    );
+    assert_eq!(document["report"]["sha256"], sha256(table.as_bytes()));
+    assert_eq!(document["cargo_success"], true);
+    assert_eq!(
+        document["repository"],
+        serde_json::to_value(GitIdentity::read(&agent_conformance::build::repository()).unwrap())
+            .unwrap()
+    );
+    for observation in observations {
+        match observation {
+            Observation::Native { role, sha256 } => {
+                let field = match role.as_str() {
+                    "elastos" => "runtime_sha256",
+                    "localhost-provider" => "localhost_provider_sha256",
+                    _ => panic!("unexpected synthetic native role"),
+                };
+                assert_eq!(document[field], *sha256);
+            }
+            Observation::Launched { probe } => {
+                assert_eq!(document["probes"], serde_json::json!([probe]));
+            }
+            _ => panic!("unexpected synthetic observation"),
+        }
+    }
+    assert_eq!(document["build_only_probes"], serde_json::json!([]));
+    document
+}
+
+#[test]
+fn report_command_uses_lane_gaps_from_another_directory() {
+    let home = ThrowawayHome::new().unwrap();
+    home.guard(home.home(), home.data()).unwrap();
+    let name = "ungranted_model_call_is_refused";
+    let (observations, _) = synthetic(172, true);
+    let list_path = home.root().join("list");
+    let results_path = home.root().join("results");
+    fs::write(&list_path, format!("{LIVE}: test\n{name}: test\n")).unwrap();
+    fs::write(
+        &results_path,
+        format!(
+            "{}test {name} ... ignored, blocked: RT3\n",
+            output(&observations)
+        ),
+    )
+    .unwrap();
+    for (case, decoy) in [
+        ("absent", None),
+        (
+            "different-blocker",
+            Some(format!("| `{name}` | TASK172 | Synthetic change. |\n")),
+        ),
+        (
+            "duplicate-rows",
+            Some(format!(
+                "| `{name}` | RT3 | Synthetic change. |\n| `{name}` | RT3 | Synthetic change. |\n"
+            )),
+        ),
+    ] {
+        let cwd = home.home().join(case);
+        fs::create_dir(&cwd).unwrap();
+        let gaps_path = cwd.join("GAPS.md");
+        if let Some(bytes) = &decoy {
+            fs::write(&gaps_path, bytes).unwrap();
+        }
+        let receipt_path = home.root().join(format!("{case}.json"));
+        assert!(
+            list_path.is_absolute() && results_path.is_absolute() && receipt_path.is_absolute()
+        );
+        let result = std::process::Command::new(env!("CARGO_BIN_EXE_report"))
+            .current_dir(&cwd)
+            .arg(&list_path)
+            .arg(&results_path)
+            .arg("0")
+            .arg(&receipt_path)
+            .output()
+            .unwrap();
+        let document = assert_command_receipt(&result, &receipt_path, &observations);
+        match decoy {
+            Some(bytes) => assert_eq!(fs::read(&gaps_path).unwrap(), bytes.as_bytes()),
+            None => assert!(!gaps_path.exists()),
+        }
+        assert_eq!(
+            result.status.code(),
+            Some(0),
+            "{case}: the command must use the known lane RT3 row"
+        );
+        assert!(result.stderr.is_empty());
+        assert_eq!(
+            document["report"]["table"],
+            format!(
+                "test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\n{LIVE} | PASS\n{name} | BLOCKED (RT3)\nversions_receipt (A14) | PASS\n"
+            )
+        );
+        assert_eq!(document["identity_status"], "complete");
+        assert_eq!(document["command_success"], true);
+        assert_eq!(document["suite_outcome"], "BLOCKED");
+        assert_eq!(document["missing_or_invalid"], serde_json::json!([]));
+    }
+    home.finish().unwrap();
+}
+
+#[test]
+fn report_command_refuses_a_cwd_only_gap() {
+    let home = ThrowawayHome::new().unwrap();
+    home.guard(home.home(), home.data()).unwrap();
+    let cwd = home.home().join("child-only");
+    fs::create_dir(&cwd).unwrap();
+    let gaps_path = cwd.join("GAPS.md");
+    let decoy = b"| `task_172_cwd_only` | TASK172 | Synthetic change. |\n";
+    fs::write(&gaps_path, decoy).unwrap();
+    let reason = "GAPS.md: task_172_cwd_only: missing row for blocker IDs: TASK172";
+    let (observations, _) = synthetic(172, true);
+    let list_path = home.root().join("list");
+    let results_path = home.root().join("results");
+    let failed_path = home.root().join("failed.json");
+    let mut failed_bytes = Vec::new();
+    for (name, blocker, receipt_path) in [
+        ("task_172_cwd_only", "TASK172", failed_path.clone()),
+        (
+            "ungranted_model_call_is_refused",
+            "RT3",
+            home.root().join("repaired.json"),
+        ),
+    ] {
+        fs::write(&list_path, format!("{LIVE}: test\n{name}: test\n")).unwrap();
+        fs::write(
+            &results_path,
+            format!(
+                "{}test {name} ... ignored, blocked: {blocker}\n",
+                output(&observations)
+            ),
+        )
+        .unwrap();
+        assert!(
+            list_path.is_absolute() && results_path.is_absolute() && receipt_path.is_absolute()
+        );
+        let result = std::process::Command::new(env!("CARGO_BIN_EXE_report"))
+            .current_dir(&cwd)
+            .arg(&list_path)
+            .arg(&results_path)
+            .arg("0")
+            .arg(&receipt_path)
+            .output()
+            .unwrap();
+        let document = assert_command_receipt(&result, &receipt_path, &observations);
+        assert_eq!(fs::read(&gaps_path).unwrap(), decoy);
+        if name == "task_172_cwd_only" {
+            assert_eq!(
+                result.status.code(),
+                Some(1),
+                "the command must refuse a blocker found only in the child directory"
+            );
+            assert_eq!(
+                document["report"]["table"],
+                format!(
+                    "test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\n{LIVE} | PASS\n{name} | FAIL | {reason}\nversions_receipt (A14) | FAIL\n"
+                )
+            );
+            assert_eq!(
+                result.stderr,
+                format!("versions receipt failure: {reason}\n").as_bytes()
+            );
+            // Exact equality excludes identity-format, missing-launch and Git
+            // failures: only the command's GAPS source causes this refusal.
+            assert_eq!(document["missing_or_invalid"], serde_json::json!([reason]));
+            assert_eq!(document["command_success"], false);
+            assert_eq!(document["suite_outcome"], "FAIL");
+            failed_bytes = fs::read(&failed_path).unwrap();
+        } else {
+            assert_eq!(result.status.code(), Some(0));
+            assert!(result.stderr.is_empty());
+            assert_eq!(
+                document["report"]["table"],
+                format!(
+                    "test | PASS/FAIL/BLOCKED (id)/SKIPPED (reason)\n{LIVE} | PASS\n{name} | BLOCKED (RT3)\nversions_receipt (A14) | PASS\n"
+                )
+            );
+            assert_eq!(document["identity_status"], "complete");
+            assert_eq!(document["command_success"], true);
+            assert_eq!(document["suite_outcome"], "BLOCKED");
+            assert_eq!(document["missing_or_invalid"], serde_json::json!([]));
+            assert_eq!(fs::read(&failed_path).unwrap(), failed_bytes);
+        }
+    }
+    home.finish().unwrap();
 }
 
 #[test]
@@ -825,83 +1111,203 @@ fn versions_receipt_uses_the_staged_bundle_identity() {
 
 #[test]
 fn run_table_grades_skipped_only_with_failed_test() {
-    let marker = "SKIPPED case: loopback bind refused\n";
-    for cargo_ok in [false, true] {
-        let (text, passed) = table(
-            "case: test\n",
-            &format!("{marker}test case ... FAILED\n"),
-            cargo_ok,
-            Some(""),
-        );
-        assert!(!passed);
-        assert!(text.contains("case | SKIPPED (loopback bind refused)\n"));
-    }
-    for result in ["ok", "ignored, blocked: RT3", "unknown", ""] {
-        let (text, passed) = table(
-            "case: test\n",
-            &format!("{marker}test case ... {result}\n"),
-            true,
-            Some(if result == "ignored, blocked: RT3" {
-                "| `case` | RT3 | Fixture change. |"
-            } else {
-                ""
-            }),
-        );
-        assert!(!passed);
-        assert!(text.contains("case | FAIL\n"));
-    }
-    for output in [
-        marker.to_owned(),
-        format!("{marker}{marker}test case ... FAILED\n"),
-        "SKIPPED case: \ntest case ... FAILED\n".into(),
-        "test case ... FAILED\nRuntime refusal\n".into(),
+    for (name, reason) in [
+        ("case", "loopback bind refused"),
+        (
+            "cleanup_unix_socket_control_reports_its_scope",
+            "Unix socket control setup: interpreter could not start",
+        ),
+        (
+            "cleanup_unix_socket_control_reports_its_scope",
+            "Unix socket control setup: socket import failed: exit status: 37",
+        ),
     ] {
-        let (text, passed) = table("case: test\n", &output, false, Some(""));
-        assert!(!passed);
-        assert!(text.contains("case | FAIL\n"));
+        let marker = format!("SKIPPED {name}: {reason}\n");
+        let listed = format!("{name}: test\n");
+        for cargo_ok in [false, true] {
+            let (text, passed) = table(
+                &listed,
+                &format!("{marker}test {name} ... FAILED\n"),
+                cargo_ok,
+                Some(""),
+            );
+            assert!(!passed);
+            assert!(text.contains(&format!("{name} | SKIPPED ({reason})\n")));
+        }
+        for result in ["ok", "ignored, blocked: RT3", "unknown", ""] {
+            let (text, passed) = table(
+                &listed,
+                &format!("{marker}test {name} ... {result}\n"),
+                true,
+                Some(&if result == "ignored, blocked: RT3" {
+                    format!("| `{name}` | RT3 | Fixture change. |")
+                } else {
+                    String::new()
+                }),
+            );
+            assert!(!passed);
+            assert!(text.contains(&format!("{name} | FAIL\n")));
+        }
+        for output in [
+            marker.clone(),
+            format!("{marker}{marker}test {name} ... FAILED\n"),
+            format!("SKIPPED {name}: \ntest {name} ... FAILED\n"),
+            format!("test {name} ... FAILED\nRuntime refusal\n"),
+        ] {
+            let (text, passed) = table(&listed, &output, false, Some(""));
+            assert!(!passed);
+            assert!(text.contains(&format!("{name} | FAIL\n")));
+        }
+        assert!(table(
+            "",
+            &format!("{marker}test {name} ... FAILED\n"),
+            false,
+            Some("")
+        )
+        .0
+        .contains(&format!("{name} | FAIL\n")));
     }
-    assert!(table(
-        "",
-        &format!("{marker}test case ... FAILED\n"),
-        false,
-        Some("")
-    )
-    .0
-    .contains("case | FAIL\n"));
 }
 
 #[test]
 fn skipped_report_keeps_a_nonzero_exit() {
+    // These observations prove report classification, with zero capsule credit.
     let home = ThrowawayHome::new().unwrap();
     let (observations, git) = synthetic(1, true);
-    let listed = format!("{LIVE}: test\n");
-    let output = format!(
-        "SKIPPED {LIVE}: loopback bind refused: PermissionDenied\n{}",
-        output(&observations).replace(" ... ok", " ... FAILED")
-    );
-    let memory = agent_conformance::report::render_run(&listed, &output, false, Ok(git), Some(""));
-    assert!(!memory.passed);
-    assert!(memory.table.contains(&format!(
-        "{LIVE} | SKIPPED (loopback bind refused: PermissionDenied)\n"
-    )));
-    let document: Value = serde_json::from_slice(&memory.receipt_bytes).unwrap();
-    assert_eq!(document["command_success"], false);
-    assert_eq!(document["report"]["table"], memory.table);
-    let list_path = home.root().join("list");
-    let results_path = home.root().join("results");
-    fs::write(&list_path, listed).unwrap();
-    fs::write(&results_path, output).unwrap();
-    let result = std::process::Command::new(env!("CARGO_BIN_EXE_report"))
-        .arg(list_path)
-        .arg(results_path)
-        .arg("101")
-        .arg(home.root().join("VERSIONS.json"))
-        .output()
-        .unwrap();
-    assert_eq!(result.status.code(), Some(1));
-    assert!(String::from_utf8(result.stdout)
-        .unwrap()
-        .starts_with(&memory.table));
+    let name = "cleanup_unix_socket_control_reports_its_scope";
+    for (index, (row, reason, grade, success)) in [
+        (
+            LIVE,
+            "loopback bind refused: PermissionDenied",
+            "SKIPPED",
+            false,
+        ),
+        (
+            name,
+            "Unix socket control setup: interpreter could not start",
+            "SKIPPED",
+            false,
+        ),
+        (
+            name,
+            "Unix socket control setup: socket import failed: exit status: 37",
+            "SKIPPED",
+            false,
+        ),
+        (
+            name,
+            "Unix socket control exited before binding",
+            "FAIL",
+            false,
+        ),
+        (name, "", "PASS", true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut listed = format!("{LIVE}: test\n");
+        let mut evidence = output(&observations);
+        if row == LIVE {
+            evidence = evidence.replace(" ... ok", " ... FAILED");
+        } else {
+            listed.push_str(&format!("{row}: test\n"));
+            evidence.push_str(&format!(
+                "test {row} ... {}\n",
+                if success { "ok" } else { "FAILED" }
+            ));
+        }
+        if grade == "SKIPPED" {
+            evidence.push_str(&format!("SKIPPED {row}: {reason}\n"));
+        } else if !success {
+            evidence.push_str(&format!("FAILURE {row}: {reason}\n"));
+        }
+        let expected_row = match grade {
+            "SKIPPED" => format!("{row} | SKIPPED ({reason})\n"),
+            "FAIL" => format!("{row} | FAIL | {reason}\n"),
+            _ => format!("{row} | PASS\n"),
+        };
+        let receipt_path = home.root().join(format!("writer-{index}.json"));
+        let written = write_run(
+            &listed,
+            &evidence,
+            success,
+            Ok(git.clone()),
+            &receipt_path,
+            Some(""),
+        );
+        assert!(written.receipt_written);
+        assert_eq!(written.passed, success);
+        assert!(written.table.contains(&expected_row), "{}", written.table);
+        let memory = read_receipt(&receipt_path);
+        assert_eq!(memory["repository"], serde_json::to_value(&git).unwrap());
+        let list_path = home.root().join(format!("list-{index}"));
+        let results_path = home.root().join(format!("results-{index}"));
+        let command_receipt = home.root().join(format!("command-{index}.json"));
+        fs::write(&list_path, listed).unwrap();
+        fs::write(&results_path, evidence).unwrap();
+        let result = home
+            .launch(
+                Path::new(env!("CARGO_BIN_EXE_report")),
+                &[
+                    list_path.to_str().unwrap(),
+                    results_path.to_str().unwrap(),
+                    if success { "0" } else { "101" },
+                    command_receipt.to_str().unwrap(),
+                ],
+                std::time::Duration::from_secs(10),
+            )
+            .unwrap();
+        assert_eq!(result.status.code(), Some(if success { 0 } else { 1 }));
+        let command = read_receipt(&command_receipt);
+        assert_eq!(
+            command["repository"],
+            serde_json::to_value(
+                GitIdentity::read(&agent_conformance::build::repository()).unwrap()
+            )
+            .unwrap()
+        );
+        let receipt_line = format!(
+            "versions receipt: {}\n",
+            command_receipt
+                .strip_prefix(agent_conformance::build::lane())
+                .unwrap()
+                .display()
+        );
+        assert_eq!(
+            result.stdout.strip_suffix(receipt_line.as_bytes()),
+            Some(written.table.as_bytes())
+        );
+        for document in [&memory, &command] {
+            assert_eq!(document["identity_status"], "complete");
+            assert_eq!(document["missing_or_invalid"], serde_json::json!([]));
+            assert_eq!(document["command_success"], success);
+            assert_eq!(
+                document["suite_outcome"],
+                if success { "PASS" } else { "FAIL" }
+            );
+            assert_eq!(document["report"]["table"], written.table);
+            assert_eq!(
+                document["report"]["sha256"],
+                sha256(written.table.as_bytes())
+            );
+            for observation in &observations {
+                match observation {
+                    Observation::Native { role, sha256 } => {
+                        let field = if role == "elastos" {
+                            "runtime_sha256"
+                        } else {
+                            "localhost_provider_sha256"
+                        };
+                        assert_eq!(document[field], *sha256);
+                    }
+                    Observation::Launched { probe } => {
+                        assert_eq!(document["probes"], serde_json::json!([probe]))
+                    }
+                    _ => panic!("unexpected synthetic observation"),
+                }
+            }
+        }
+    }
     home.finish().unwrap();
 }
 

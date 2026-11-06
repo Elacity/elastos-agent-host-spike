@@ -1,4 +1,7 @@
 mod common;
+#[path = "common/probe.rs"]
+#[allow(dead_code)]
+mod probe;
 
 use agent_conformance::build::lane;
 use agent_conformance::harness::ThrowawayHome;
@@ -7,10 +10,331 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const REFUSAL: &str = "This command requires a running runtime.";
+
+fn checksum_refusal_matches(
+    stderr: &str,
+    component: &str,
+    installed: &Path,
+    manifest: &Path,
+) -> bool {
+    let refusal = format!(
+        "installed component '{component}' at {} failed checksum verification against {}",
+        installed.display(),
+        manifest.display()
+    );
+    stderr.lines().any(|line| line.contains(&refusal))
+}
+
+#[test]
+fn checksum_refusal_requires_one_component_path_and_manifest() {
+    // Synthetic diagnostics check the lab assertion, not Runtime acceptance.
+    let root = Path::new("/fixture Home/Library/Application Support/elastos");
+    let manifest = root.join("components.json");
+    for component in ["localhost-provider", "ipfs-provider"] {
+        let installed = root.join("bin").join(component);
+        let valid = format!(
+            "installed component '{component}' at {} failed checksum verification against {}",
+            installed.display(),
+            manifest.display()
+        );
+        let prefixed = format!("WARN runtime: {valid}\n");
+        assert!(
+            checksum_refusal_matches(&valid, component, &installed, &manifest),
+            "complete checksum line must pass"
+        );
+        let other = format!(
+            "installed component 'did-provider' at {} failed checksum verification against {}",
+            root.join("bin/did-provider").display(),
+            manifest.display()
+        );
+        let cases = [
+            (
+                "separate component and checksum lines must be refused",
+                format!("checking {component}\n{other}\n"),
+            ),
+            (
+                "split checksum message must be refused",
+                valid.replace(" failed checksum", "\nfailed checksum"),
+            ),
+            (
+                "split manifest fragment must be refused",
+                valid.replace(" against ", " against\n"),
+            ),
+            (
+                "missing provider beside another checksum error must be refused",
+                format!("{component} not installed.\n{other}\n"),
+            ),
+            (
+                "near-match component must be refused",
+                valid.replace(component, &format!("{component}-copy")),
+            ),
+            (
+                "wrong installed path must be refused",
+                valid.replace(
+                    installed.to_str().unwrap(),
+                    root.join("other bin").join(component).to_str().unwrap(),
+                ),
+            ),
+            (
+                "wrong manifest path must be refused",
+                valid.replace(
+                    manifest.to_str().unwrap(),
+                    root.join("other components.json").to_str().unwrap(),
+                ),
+            ),
+            ("empty output must be refused", String::new()),
+        ];
+        for (label, stderr) in cases {
+            assert!(
+                !checksum_refusal_matches(&stderr, component, &installed, &manifest),
+                "{label}"
+            );
+            assert!(
+                checksum_refusal_matches(&prefixed, component, &installed, &manifest),
+                "complete prefixed line with spaces must recover"
+            );
+        }
+    }
+}
+
+fn assert_component_outputs_absent(home: &ThrowawayHome, component: &str) {
+    for path in [
+        home.data().join("bin"),
+        home.data().join("bin").join(component),
+        home.data().join("components.json"),
+    ] {
+        assert!(
+            !path.try_exists().unwrap(),
+            "metadata refusal must leave output absent: {}",
+            path.display()
+        );
+    }
+}
+
+fn assert_component_install(
+    home: &ThrowawayHome,
+    component: &str,
+    platform: &str,
+    bytes: &[u8],
+    source: &serde_json::Value,
+) -> serde_json::Value {
+    let installed = home.data().join("bin").join(component);
+    assert_eq!(fs::read(&installed).unwrap(), bytes);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&installed).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "fixture bytes must be executable"
+        );
+    }
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(home.data().join("components.json")).unwrap()).unwrap();
+    let mut expected = source.clone();
+    let info = &mut expected["platforms"][platform];
+    info["checksum"] = serde_json::json!(format!("sha256:{:x}", Sha256::digest(bytes)));
+    info["size"] = serde_json::json!(bytes.len());
+    info["install_path"] = serde_json::json!(format!("bin/{component}"));
+    assert_eq!(
+        manifest,
+        serde_json::json!({"external": {component: expected}, "profiles": {}}),
+        "recorded metadata and minimal manifest must survive installed-byte stamping"
+    );
+    manifest
+}
+
+#[test]
+fn component_home_requires_recorded_platform() {
+    use serde_json::json;
+    const BYTES: &[u8] = b"harmless recorded-platform fixture\n";
+    let checksum = format!("{:x}", Sha256::digest(BYTES));
+
+    // The Home guard owns precedence, including over source loading.
+    let home = ThrowawayHome::new().unwrap();
+    let loaded = std::cell::Cell::new(false);
+    fs::remove_dir(home.data()).unwrap();
+    std::os::unix::fs::symlink(home.temp(), home.data()).unwrap();
+    let reason = common::write_component_home_with_source(
+        &home,
+        "ipfs-provider",
+        &home.data().join("bin/ipfs-provider"),
+        BYTES,
+        &checksum,
+        || {
+            loaded.set(true);
+            Ok((json!({"platforms": {"darwin-arm64": {}}}), "darwin-amd64"))
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        reason.to_string(),
+        "data directory must use directories without symlinks"
+    );
+    assert!(!loaded.get(), "guard refusal must precede source loading");
+    assert_component_outputs_absent(&home, "ipfs-provider");
+    fs::remove_file(home.data()).unwrap();
+    fs::create_dir(home.data()).unwrap();
+    common::write_component_home_with_source(
+        &home,
+        "ipfs-provider",
+        &home.data().join("bin/ipfs-provider"),
+        BYTES,
+        &checksum,
+        || {
+            loaded.set(true);
+            Ok((json!({"platforms": {"darwin-amd64": {}}}), "darwin-amd64"))
+        },
+    )
+    .unwrap();
+    assert!(loaded.get(), "repaired Home must load its source");
+    assert_component_install(
+        &home,
+        "ipfs-provider",
+        "darwin-amd64",
+        BYTES,
+        &json!({"platforms": {"darwin-amd64": {}}}),
+    );
+    home.finish().unwrap();
+
+    for component in ["localhost-provider", "ipfs-provider"] {
+        for (platform, row) in [
+            ("darwin-amd64", None),
+            ("fixture-absent", None),
+            ("darwin-amd64", Some(json!(null))),
+            ("darwin-amd64", Some(json!("fixture row"))),
+            ("darwin-amd64", Some(json!([]))),
+        ] {
+            let home = ThrowawayHome::new().unwrap();
+            let installed = home.data().join("bin").join(component);
+            let mut source = json!({
+                "fixture_component": "unchanged",
+                "platforms": {"darwin-arm64": {"fixture_arm": true}}
+            });
+            let expected_reason = if let Some(row) = row {
+                source["platforms"][platform] = row;
+                format!("repository {component} {platform} platform must be an object")
+            } else {
+                format!("{component} has no {platform} platform entry in components.json")
+            };
+            let original = source.clone();
+            let result = common::write_component_home_with_source(
+                &home,
+                component,
+                &installed,
+                BYTES,
+                &checksum,
+                || Ok((source.clone(), platform)),
+            );
+            assert_eq!(
+                result.err().map(|error| error.to_string()),
+                Some(expected_reason),
+                "selected metadata must return its exact refusal"
+            );
+            assert_eq!(source, original, "refusal must preserve source metadata");
+            assert_component_outputs_absent(&home, component);
+
+            // Repair only the selected input; absent outputs need zero cleanup.
+            source["platforms"][platform] = json!({"fixture_repaired": true});
+            let repaired = source.clone();
+            common::write_component_home_with_source(
+                &home,
+                component,
+                &installed,
+                BYTES,
+                &checksum,
+                || Ok((source.clone(), platform)),
+            )
+            .unwrap();
+            assert_eq!(
+                source, repaired,
+                "installation must preserve source metadata"
+            );
+            assert_component_install(&home, component, platform, BYTES, &source);
+            home.finish().unwrap();
+        }
+    }
+}
+
+#[test]
+fn component_home_preserves_recorded_platform_metadata() {
+    use serde_json::json;
+    const BYTES: &[u8] = b"harmless metadata-preservation fixture\n";
+    let checksum = format!("{:x}", Sha256::digest(BYTES));
+    for component in ["localhost-provider", "ipfs-provider"] {
+        let home = ThrowawayHome::new().unwrap();
+        let source = json!({
+            "fixture_component": {"keep": "component sentinel"},
+            "platforms": {
+                "darwin-arm64": {
+                    "fixture_platform": {"keep": "selected sentinel"},
+                    "release_path": "fixture release",
+                    "checksum": "old fixture checksum", "size": 999,
+                    "install_path": "old fixture path"
+                },
+                "fixture-other": {"keep": ["other platform sentinel"]}
+            }
+        });
+        let original = source.clone();
+        common::write_component_home_with_source(
+            &home,
+            component,
+            &home.data().join("bin").join(component),
+            BYTES,
+            &checksum,
+            || Ok((source.clone(), "darwin-arm64")),
+        )
+        .unwrap();
+        assert_eq!(
+            source, original,
+            "installation must preserve source metadata"
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(home.data().join("components.json")).unwrap())
+                .unwrap();
+        let entry = &manifest["external"][component];
+        assert_eq!(entry["fixture_component"], source["fixture_component"]);
+        assert_eq!(
+            entry["platforms"]["darwin-arm64"]["fixture_platform"],
+            source["platforms"]["darwin-arm64"]["fixture_platform"],
+            "selected platform sentinel must survive stamping"
+        );
+        assert_eq!(
+            entry["platforms"]["fixture-other"],
+            source["platforms"]["fixture-other"]
+        );
+        assert_component_install(&home, component, "darwin-arm64", BYTES, &source);
+        home.finish().unwrap();
+    }
+
+    // Harmless bytes exercise repository loading without building or executing a provider.
+    let home = ThrowawayHome::new().unwrap();
+    let source: serde_json::Value = serde_json::from_slice(
+        &fs::read(agent_conformance::build::repository().join("components.json")).unwrap(),
+    )
+    .unwrap();
+    let component = "ipfs-provider";
+    common::write_component_home(
+        &home,
+        component,
+        &home.data().join("bin").join(component),
+        BYTES,
+        &checksum,
+    )
+    .unwrap();
+    assert_component_install(
+        &home,
+        component,
+        common::operator_platform().unwrap(),
+        BYTES,
+        &source["external"][component],
+    );
+    home.finish().unwrap();
+}
 
 fn run_probe(home: &ThrowawayHome) -> String {
     let runtime = runtime_under_test().expect("build the checkout Runtime offline");
@@ -49,6 +373,11 @@ fn run_without_operator_is_refused_with_reason() {
     // Identification only: compare the returned digest against the actual bytes
     // with the existing test dependency, and check repeated access shares it.
     assert!(runtime.binary.is_absolute());
+    assert_eq!(
+        runtime.binary,
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("target/runtime/debug/elastos"),
+        "cached Runtime must use the unchanged lane output path"
+    );
     assert!(std::ptr::eq(runtime, runtime_under_test().unwrap()));
     assert_eq!(
         runtime.sha256,
@@ -125,13 +454,13 @@ fn run_by_cid_refuses_content_provider_whose_bytes_differ_from_its_hash() {
             .unwrap(),
         "checksum refusal must happen before the content provider script is spawned"
     );
-    let refusal = format!(
-        "installed component 'ipfs-provider' at {} failed checksum verification against {}",
-        installed.display(),
-        home.data().join("components.json").display()
-    );
     assert!(
-        stderr.lines().any(|line| line.contains(&refusal)),
+        checksum_refusal_matches(
+            &stderr,
+            "ipfs-provider",
+            &installed,
+            &home.data().join("components.json")
+        ),
         "expected the complete content provider checksum refusal on one line; stderr:\n{stderr}"
     );
     assert_no_materialized_capsule(&home);
@@ -176,11 +505,17 @@ fn runtime_data_dir_is_under_throwaway_home() {
 
 #[test]
 fn serve_refuses_provider_whose_bytes_differ_from_its_hash() {
+    // Keep the provider first so a clean native target measures its cold build.
+    let provider = localhost_provider_under_test().expect("build the checkout provider offline");
     let runtime = runtime_under_test().expect("build the checkout Runtime offline");
     let home = ThrowawayHome::new().unwrap();
     let installed = common::write_operator_home(&home).expect("install the operator fixture");
-    let provider = localhost_provider_under_test().unwrap();
     assert!(provider.binary.is_absolute());
+    assert_eq!(
+        provider.binary,
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("target/runtime/debug/localhost-provider"),
+        "cached provider must use the unchanged lane output path"
+    );
     assert!(std::ptr::eq(
         provider,
         localhost_provider_under_test().unwrap()
@@ -231,17 +566,22 @@ fn serve_refuses_provider_whose_bytes_differ_from_its_hash() {
             Duration::from_secs(10),
         )
         .expect("serve must return within its bound through the one launch primitive");
-    let stderr = String::from_utf8(output.stderr)
-        .expect("Runtime stderr must be UTF-8")
-        .replace(lane().to_str().unwrap(), "<lane>");
+    let stderr = String::from_utf8(output.stderr).expect("Runtime stderr must be UTF-8");
+    let checksum_refused = checksum_refusal_matches(
+        &stderr,
+        "localhost-provider",
+        &installed,
+        &home.data().join("components.json"),
+    );
+    let stderr = stderr.replace(lane().to_str().unwrap(), "<lane>");
     println!("Provider refusal stderr: {stderr:?}");
     assert!(
         !output.status.success(),
         "serve must refuse the changed provider"
     );
     assert!(
-        stderr.contains("localhost-provider") && stderr.contains("failed checksum verification"),
-        "expected provider checksum refusal; stderr:\n{stderr}"
+        checksum_refused,
+        "expected the complete provider checksum refusal on one line; stderr:\n{stderr}"
     );
     assert!(!home
         .data()
@@ -360,49 +700,259 @@ fn cleanup_census_refuses_each_leftover() {
             &["-c", "cd \"$HOME/..\"; exec /bin/sleep 20"],
         )
         .unwrap();
-    let reason = cleanup(&home, port).unwrap_err();
+    let observation = cleanup(&home, port);
+    child.stop().unwrap();
+    drop(child);
+    let reason = observation.unwrap_err();
     assert!(reason.contains("process leftover"));
     assert!(reason.contains("processes:1"));
     assert!(reason.contains("\".\""), "root cwd must be visible");
-    child.stop().unwrap();
-    drop(child);
-
-    // Bind by a relative path: the macOS sockaddr_un path limit is smaller
-    // than this worktree's absolute throwaway-Home path.
-    let mut socket_child = home.start(
-        std::path::Path::new("/usr/bin/python3"),
-        &["-c", "import socket,time; s=socket.socket(socket.AF_UNIX); s.bind('cleanup.sock'); s.listen(1); open('socket-ready','w').close(); time.sleep(20)"],
-    ).unwrap();
-    let started = std::time::Instant::now();
-    while !home.home().join("socket-ready").exists() {
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "Unix socket control readiness exceeded 5 seconds"
-        );
-        assert!(
-            socket_child.is_alive().unwrap(),
-            "Unix socket control exited before binding"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let socket_result = cleanup(&home, port);
-    socket_child.stop().unwrap();
-    drop(socket_child);
-    fs::remove_file(home.home().join("cleanup.sock")).unwrap();
-    fs::remove_file(home.home().join("socket-ready")).unwrap();
-    let reason = socket_result.unwrap_err();
-    // This Mac's +D census sees the holder through cwd/captures, but does
-    // not select its relative-path Unix socket. Keep the scope explicit.
-    assert!(reason.contains("process leftover"), "{reason}");
-    assert!(
-        !reason.contains("cleanup.sock"),
-        "recheck the documented Unix socket visibility limit"
-    );
-    println!("cleanup socket control: bound Unix socket omitted by root selection; holder refused as process leftover; Unix socket absence unmeasured");
 
     let line = cleanup(&home, port).unwrap();
     assert!(line.contains("processes:0 paths:[] API sockets:0 temp:0 paths:[]"));
     assert!(line.contains("excludes only test PID"));
+    home.finish().unwrap();
+}
+
+// Setup is an unavailable control prerequisite. Every later refusal is a
+// failed check, including guard, capture, timeout and managed-stop errors.
+#[derive(Debug, PartialEq, Eq)]
+enum UnixSocketFailure {
+    Setup(String),
+    Check(String),
+}
+
+impl UnixSocketFailure {
+    fn check(reason: impl Into<String>) -> Self {
+        Self::Check(reason.into())
+    }
+}
+
+fn unix_socket_preflight(home: &ThrowawayHome, executable: &Path) -> Result<(), UnixSocketFailure> {
+    home.guard(home.home(), home.data())
+        .map_err(UnixSocketFailure::check)?;
+    let output = match home.launch(
+        executable,
+        &["-I", "-S", "-B", "-c", "import socket"],
+        Duration::from_secs(5),
+    ) {
+        Ok(output) => output,
+        Err("could not start child process") => {
+            return Err(UnixSocketFailure::Setup(
+                "Unix socket control setup: interpreter could not start".into(),
+            ));
+        }
+        Err(reason) => return Err(UnixSocketFailure::check(reason)),
+    };
+    if !output.status.success() {
+        return Err(UnixSocketFailure::Setup(format!(
+            "Unix socket control setup: socket import failed: {}",
+            output.status
+        )));
+    }
+    Ok(())
+}
+
+fn unix_socket_control(
+    home: &ThrowawayHome,
+    executable: &Path,
+    port: u16,
+) -> Result<(), UnixSocketFailure> {
+    use agent_conformance::census::cleanup;
+    use std::os::unix::fs::FileTypeExt;
+
+    unix_socket_preflight(home, executable)?;
+    // Bind by a relative path: macOS's sockaddr_un limit is smaller than
+    // this worktree's absolute throwaway-Home path.
+    let mut child = home.start(
+        executable,
+        &["-I", "-S", "-B", "-c", "import socket,time; s=socket.socket(socket.AF_UNIX); s.bind('cleanup.sock'); s.listen(1); open('socket-ready','w').close(); time.sleep(20)"],
+    ).map_err(UnixSocketFailure::check)?;
+    let pgid = child.pgid();
+    let observed = (|| -> Result<_, String> {
+        let started = std::time::Instant::now();
+        while !home
+            .home()
+            .join("socket-ready")
+            .try_exists()
+            .map_err(|error| error.to_string())?
+        {
+            if started.elapsed() >= Duration::from_secs(5) {
+                return Err("Unix socket control readiness exceeded 5 seconds".into());
+            }
+            if !child.is_alive()? {
+                return Err("Unix socket control exited before binding".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let metadata = fs::symlink_metadata(home.home().join("cleanup.sock"))
+            .map_err(|error| format!("Unix socket control socket metadata: {error}"))?;
+        if !metadata.file_type().is_socket() {
+            return Err("Unix socket control path is not a Unix socket".into());
+        }
+        Ok(cleanup(home, port))
+    })();
+    // Always stop and reap before checking the saved observation, even when
+    // readiness or the census failed. A failed stop keeps its Home and cause.
+    let stopped = child.stop();
+    drop(child);
+    if let Err(reason) = stopped {
+        return Err(UnixSocketFailure::check(match observed {
+            Err(observed) => format!("{observed}; stop failed: {reason}"),
+            Ok(_) => reason.into(),
+        }));
+    }
+    if home
+        .group_is_alive(pgid)
+        .map_err(UnixSocketFailure::check)?
+    {
+        return Err(UnixSocketFailure::check(
+            "Unix socket control group remains after stop",
+        ));
+    }
+    let socket_result = observed.map_err(UnixSocketFailure::check)?;
+    home.guard(home.home(), home.data())
+        .map_err(UnixSocketFailure::check)?;
+    for name in ["cleanup.sock", "socket-ready"] {
+        fs::remove_file(home.home().join(name))
+            .map_err(|error| UnixSocketFailure::check(format!("remove {name}: {error}")))?;
+    }
+    let reason = socket_result.err().ok_or_else(|| {
+        UnixSocketFailure::check("Unix socket control holder was accepted by the census")
+    })?;
+    // This Mac's +D census sees cwd/captures, but omits the bound socket.
+    if !reason.contains("process leftover") {
+        return Err(UnixSocketFailure::check(reason));
+    }
+    if reason.contains("cleanup.sock") {
+        return Err(UnixSocketFailure::check(
+            "recheck the documented Unix socket visibility limit",
+        ));
+    }
+    println!("cleanup socket control: bound Unix socket omitted by root selection; holder refused as process leftover; Unix socket absence unmeasured");
+    let line = cleanup(home, port).map_err(UnixSocketFailure::check)?;
+    if !line.contains("processes:0 paths:[] API sockets:0 temp:0 paths:[]")
+        || !line.contains("excludes only test PID")
+    {
+        return Err(UnixSocketFailure::check(line));
+    }
+    Ok(())
+}
+
+#[test]
+fn cleanup_unix_socket_control_reports_its_scope() {
+    let home = ThrowawayHome::new().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    match unix_socket_control(&home, Path::new("/usr/bin/python3"), port) {
+        Ok(()) => home.finish().unwrap(),
+        Err(UnixSocketFailure::Setup(reason)) => probe::skipped(&reason),
+        Err(UnixSocketFailure::Check(reason)) => panic!("{reason}"),
+    }
+}
+
+fn socket_executable(home: &ThrowawayHome, import_status: u8) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    home.guard(home.home(), home.data()).unwrap();
+    let path = home.home().join("socket-executable");
+    fs::write(&path, format!(
+        "#!/bin/sh\n[ \"$1\" = -I ] && [ \"$2\" = -S ] && [ \"$3\" = -B ] && [ \"$4\" = -c ] || exit 65\nif [ \"$5\" = 'import socket' ]; then exit {import_status}; fi\n: > worker-started\nexit 23\n"
+    )).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    path
+}
+
+fn assert_socket_worker_absent(home: &ThrowawayHome) {
+    for name in ["worker-started", "cleanup.sock", "socket-ready"] {
+        assert!(
+            !home.home().join(name).try_exists().unwrap(),
+            "unexpected {name}"
+        );
+    }
+    assert!(
+        agent_conformance::census::root_holders(home, &[home.root().to_owned()])
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn unix_socket_control_setup_refusals_are_named() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = ThrowawayHome::new().unwrap();
+    let missing = home.home().join("missing-interpreter");
+    let start_reason = "Unix socket control setup: interpreter could not start";
+    let missing_result = unix_socket_control(&home, &missing, 0);
+    assert_socket_worker_absent(&home);
+    assert_eq!(
+        missing_result,
+        Err(UnixSocketFailure::Setup(start_reason.into()))
+    );
+
+    let executable = socket_executable(&home, 0);
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o600)).unwrap();
+    let unstartable = unix_socket_control(&home, &executable, 0);
+    assert_socket_worker_absent(&home);
+    assert_eq!(
+        unstartable,
+        Err(UnixSocketFailure::Setup(start_reason.into()))
+    );
+
+    let executable = socket_executable(&home, 37);
+    let refused = unix_socket_control(&home, &executable, 0);
+    assert_socket_worker_absent(&home);
+    assert_eq!(
+        refused,
+        Err(UnixSocketFailure::Setup(
+            "Unix socket control setup: socket import failed: exit status: 37".into()
+        )),
+        "unsuccessful import must refuse setup with its actual status"
+    );
+    let executable = socket_executable(&home, 0);
+    let repaired = unix_socket_preflight(&home, &executable);
+    assert_socket_worker_absent(&home);
+    assert_eq!(repaired, Ok(()), "repaired setup uses the same preflight");
+    home.finish().unwrap();
+}
+
+#[test]
+fn unix_socket_control_failure_after_setup_is_fail() {
+    let home = ThrowawayHome::new().unwrap();
+    let executable = socket_executable(&home, 0);
+    let result = unix_socket_control(&home, &executable, 0);
+    // The helper has stopped and reaped the worker before returning a refusal.
+    let holders =
+        agent_conformance::census::root_holders(&home, &[home.root().to_owned()]).unwrap();
+    assert!(holders.is_empty(), "failed worker group must be cleaned up");
+    assert!(home.home().join("worker-started").is_file());
+    for name in ["cleanup.sock", "socket-ready"] {
+        assert!(!home.home().join(name).try_exists().unwrap());
+    }
+    assert_eq!(
+        result,
+        Err(UnixSocketFailure::Check(
+            "Unix socket control exited before binding".into()
+        )),
+        "post-setup exit must remain a check-stage failure"
+    );
+    home.finish().unwrap();
+
+    let home = ThrowawayHome::new().unwrap();
+    let saved = home.root().join("saved-home");
+    fs::rename(home.home(), &saved).unwrap();
+    std::os::unix::fs::symlink(&saved, home.home()).unwrap();
+    let result = unix_socket_control(&home, Path::new("/usr/bin/python3"), 0);
+    fs::remove_file(home.home()).unwrap();
+    fs::rename(saved, home.home()).unwrap();
+    assert_socket_worker_absent(&home);
+    assert_eq!(
+        result,
+        Err(UnixSocketFailure::Check(
+            "home must use directories without symlinks".into()
+        )),
+        "guard refusal must remain a check-stage failure"
+    );
     home.finish().unwrap();
 }
 

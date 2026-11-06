@@ -321,6 +321,8 @@ struct Overlap {
     cancel: bool,
     kill: bool,
     cancelled_at: Option<Instant>,
+    #[cfg(test)]
+    before_last_observation: Option<Box<dyn FnMut(&mut RunningInstances<'_>) -> Result<()>>>,
 }
 
 impl Overlap {
@@ -336,6 +338,8 @@ impl Overlap {
             cancel: false,
             kill: false,
             cancelled_at: None,
+            #[cfg(test)]
+            before_last_observation: None,
         }
     }
 
@@ -367,6 +371,10 @@ impl Overlap {
         };
         if self.stage == 0 {
             self.first = ordered;
+        }
+        #[cfg(test)]
+        if let Some(observe) = self.before_last_observation.as_mut() {
+            observe(running)?;
         }
         // The listing and both alive observations must fit the same monotonic bound.
         if self.barrier_started.elapsed() >= OVERLAP_BOUND || !running.all_alive(2)? {
@@ -1251,7 +1259,11 @@ impl Controller {
         )
     }
 
-    pub fn check_report(&self, name: &str, observations: &[Observation]) -> Result<()> {
+    pub fn check_report(
+        &self,
+        name: &str,
+        observations: &[Observation],
+    ) -> std::result::Result<(), String> {
         self.check_journey(name, observations, true)
     }
 
@@ -1260,7 +1272,7 @@ impl Controller {
         name: &str,
         observations: &[Observation],
         passed: bool,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), String> {
         // Use the exact lines printed by this controller, including decisions
         // made before a grant token arrived. Recheck with all credentials known.
         let printed = self.printed.borrow();
@@ -1278,7 +1290,7 @@ impl Controller {
                 "fixture read: instance-2",
             ] {
                 if !printed.lines().any(|line| line.starts_with(prefix)) {
-                    return Err("required instance journey evidence is missing");
+                    return Err("required instance journey evidence is missing".into());
                 }
             }
         }
@@ -1287,7 +1299,7 @@ impl Controller {
                 .lines()
                 .any(|line| line.starts_with("absent-policy settlement:"))
         {
-            return Err("required orphan settlement evidence is missing");
+            return Err("required orphan settlement evidence is missing".into());
         }
         if matches!(
             name,
@@ -1298,7 +1310,7 @@ impl Controller {
             .iter()
             .all(|prefix| printed.lines().any(|line| line.starts_with(prefix)))
         {
-            return Err("required session-grant evidence is missing");
+            return Err("required session-grant evidence is missing".into());
         }
         if name == "instance_writes_only_under_own_storage_root" {
             let writes = printed
@@ -1309,13 +1321,21 @@ impl Controller {
                 .lines()
                 .any(|line| line.starts_with("owned root: sibling request "));
             if writes != 2 || !sibling {
-                return Err("required owned-root evidence is missing");
+                return Err("required owned-root evidence is missing".into());
             }
         }
+        let inventory = match report_inventory(name, observations, &printed, passed) {
+            Ok(inventory) => inventory,
+            Err(reason) => {
+                self.check_bytes(reason.as_bytes(), Surface::Report)?;
+                return Err(reason);
+            }
+        };
         self.check_inventory(
-            &report_inventory(name, observations, &printed, passed)?,
+            &inventory,
             &[Surface::Printed, Surface::Report, Surface::Receipt],
         )
+        .map_err(str::to_owned)
     }
 
     fn check_inventory(
@@ -1465,7 +1485,7 @@ fn report_inventory(
     observations: &[Observation],
     printed: &str,
     passed: bool,
-) -> Result<Vec<(Surface, Vec<u8>)>> {
+) -> std::result::Result<Vec<(Surface, Vec<u8>)>, String> {
     let listed = format!("{name}: test\n");
     let result = if passed { "ok" } else { "FAILED" };
     let mut output = format!("{printed}test {name} ... {result}\n");
@@ -1483,13 +1503,43 @@ fn report_inventory(
     // The suite grader still records a missing launch. A no-probe journey
     // scans that receipt; every other refusal still blocks the scan.
     if !report.failures.is_empty() && !launch_gap_only(&report.failures) {
-        return Err("credential check requires a complete report");
+        return Err(format!(
+            "credential check requires a complete report: {}",
+            report.failures.join("; ")
+        ));
     }
     Ok(vec![
         (Surface::Printed, printed.as_bytes().to_vec()),
         (Surface::Report, report.table.into_bytes()),
         (Surface::Receipt, report.receipt_bytes),
     ])
+}
+
+fn memory_observations() -> [Observation; 3] {
+    [
+        Observation::Native {
+            role: "elastos".into(),
+            sha256: "1".repeat(64),
+        },
+        Observation::Native {
+            role: "localhost-provider".into(),
+            sha256: "2".repeat(64),
+        },
+        Observation::Launched {
+            probe: agent_conformance::identity::ProbeIdentity {
+                effect: "default".into(),
+                component_sha256: "3".repeat(64),
+                bundle_lab_cid: capsule_identity::encode_entries(&[
+                    capsule_identity::BundleEntry {
+                        path: "synthetic.bin".into(),
+                        content: "4".repeat(64).into_bytes(),
+                    },
+                ])
+                .unwrap()
+                .to_string(),
+            },
+        },
+    ]
 }
 
 /// Synthetic mutation control. Plant every canary only in an in-memory copy
@@ -1527,30 +1577,7 @@ pub fn assert_memory_surfaces() {
     );
     fs::write(&paths[0][1], b"").unwrap();
     let mut inventory = source_inventory().unwrap();
-    let observations = [
-        Observation::Native {
-            role: "elastos".into(),
-            sha256: "1".repeat(64),
-        },
-        Observation::Native {
-            role: "localhost-provider".into(),
-            sha256: "2".repeat(64),
-        },
-        Observation::Launched {
-            probe: agent_conformance::identity::ProbeIdentity {
-                effect: "default".into(),
-                component_sha256: "3".repeat(64),
-                bundle_lab_cid: capsule_identity::encode_entries(&[
-                    capsule_identity::BundleEntry {
-                        path: "synthetic.bin".into(),
-                        content: "4".repeat(64).into_bytes(),
-                    },
-                ])
-                .unwrap()
-                .to_string(),
-            },
-        },
-    ];
+    let observations = memory_observations();
     inventory.extend(
         report_inventory(
             "default_activation_refuses_without_selector",
@@ -1982,6 +2009,19 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
 
+    #[test]
+    fn committed_fixture_has_no_host_file_grant() {
+        let fixture = Fixture::committed().expect("committed grant fixture parses");
+        let resource = include_str!("../../fixtures/host-key-read.txt").trim();
+        assert!(
+            fixture
+                .entries
+                .iter()
+                .all(|entry| entry["resource"] != resource),
+            "committed fixture excludes every host-file resource grant"
+        );
+    }
+
     fn fixture() -> Fixture {
         Fixture::parse(r#"{"deny_reason":"fixture denial","grants":[{"resource":"localhost://Public/test/one","action":"read","reason":"test read","duration":"once"}]}"#).unwrap()
     }
@@ -2145,6 +2185,141 @@ mod tests {
             Err("overlap: both clients must remain alive through both barriers")
         );
         home.finish().unwrap();
+    }
+
+    #[test]
+    fn overlap_last_observation_refuses_a_client_exit() {
+        let (fixture, first, sibling) = barrier_fixture();
+        let mut cases = Vec::new();
+        for stage in 0..2 {
+            let home = ThrowawayHome::new().unwrap();
+            let launches: Vec<_> = (0..2)
+                .map(|_| agent_conformance::harness::Launch {
+                    home: &home,
+                    program: Path::new("/bin/sleep"),
+                    args: vec!["3"],
+                })
+                .collect();
+            let mut running = RunningInstances::start(&launches, None).unwrap();
+            let mut overlap = Overlap::new();
+            let first_result = if stage == 1 {
+                let result = overlap.ready(&first, &fixture, &mut running);
+                overlap.advance();
+                Some(result)
+            } else {
+                None
+            };
+            let before = (overlap.waits.clone(), overlap.duration, overlap.stage);
+            let observed = std::rc::Rc::new(std::cell::Cell::new((0, false)));
+            let hook_observed = observed.clone();
+            overlap.before_last_observation = Some(Box::new(move |running| {
+                let alive = running.all_alive(2)?;
+                hook_observed.set((hook_observed.get().0 + 1, alive));
+                if !alive {
+                    return Err("test seam requires both owned clients alive");
+                }
+                running.kill_worker(0)
+            }));
+            let pending = if stage == 0 { &first } else { &sibling };
+            let result = overlap.ready(pending, &fixture, &mut running);
+            let elapsed = overlap.barrier_started.elapsed();
+            let kills = (running.kill_recorded(0), running.kill_recorded(1));
+            let completions = running.collect(Duration::from_secs(5)).unwrap();
+            cases.push((
+                home,
+                overlap,
+                first_result,
+                before,
+                observed,
+                result,
+                elapsed,
+                kills,
+                completions,
+            ));
+        }
+        // Collect and drain both stages before checking either refusal. A plant
+        // therefore exercises both real kills, even when stage 0 is accepted.
+        for (home, overlap, first_result, before, observed, result, elapsed, kills, completions) in
+            cases
+        {
+            if before.2 == 1 {
+                assert_eq!(first_result, Some(Ok(true)));
+                assert_eq!(before.0.len(), 1, "retain the completed first wait");
+            }
+            assert_eq!(observed.get(), (1, true), "both clients live at the seam");
+            assert_eq!(kills, (true, false), "only index 0 has a recorded kill");
+            assert_eq!(completions.len(), 2);
+            assert_eq!(completions[0].output.status.signal(), Some(9));
+            assert!(completions[0].kill_requested_at.is_some());
+            assert!(
+                completions[1].output.status.success(),
+                "live sibling exits normally"
+            );
+            assert!(completions[1].kill_requested_at.is_none());
+            assert!(elapsed < OVERLAP_BOUND, "refusal precedes the timeout");
+            assert_eq!(
+                result,
+                Err("overlap: clients left the barrier before its decision"),
+                "final observation refuses the real exit at stage {}",
+                before.2
+            );
+            assert_eq!(
+                (overlap.waits, overlap.duration, overlap.stage),
+                before,
+                "refusal preserves decisions, duration and stage"
+            );
+            home.finish().unwrap();
+        }
+    }
+
+    #[test]
+    fn overlap_last_observation_accepts_live_controls() {
+        let (fixture, first, sibling) = barrier_fixture();
+        for with_hook in [false, true] {
+            let home = ThrowawayHome::new().unwrap();
+            let launches: Vec<_> = (0..2)
+                .map(|_| agent_conformance::harness::Launch {
+                    home: &home,
+                    program: Path::new("/bin/sleep"),
+                    args: vec!["3"],
+                })
+                .collect();
+            let mut running = RunningInstances::start(&launches, None).unwrap();
+            let mut overlap = Overlap::new();
+            let observations = std::rc::Rc::new(std::cell::Cell::new(0));
+            if with_hook {
+                let observations = observations.clone();
+                overlap.before_last_observation = Some(Box::new(move |running| {
+                    if !running.all_alive(2)? {
+                        return Err("test seam requires both owned clients alive");
+                    }
+                    observations.set(observations.get() + 1);
+                    Ok(())
+                }));
+            }
+            let first_result = overlap.ready(&first, &fixture, &mut running);
+            overlap.advance();
+            let before = (overlap.waits.clone(), overlap.duration, overlap.stage);
+            let lone = overlap.ready(&sibling[..1], &fixture, &mut running);
+            let after_lone = (overlap.waits.clone(), overlap.duration, overlap.stage);
+            let second_result = overlap.ready(&sibling, &fixture, &mut running);
+            overlap.advance();
+            let completions = running.collect(Duration::from_secs(5)).unwrap();
+            assert_eq!(completions.len(), 2);
+            assert!(completions
+                .iter()
+                .all(|item| item.output.status.success() && item.kill_requested_at.is_none()));
+            assert_eq!(first_result, Ok(true));
+            assert_eq!(lone, Ok(false), "second barrier waits for both requests");
+            assert_eq!(after_lone, before, "a lone sibling records no decision");
+            assert_eq!(before.0.len(), 1);
+            assert_eq!(second_result, Ok(true));
+            assert_eq!(overlap.waits.len(), 2);
+            assert_eq!(overlap.stage, 2);
+            assert!(overlap.duration > Duration::ZERO);
+            assert_eq!(observations.get(), if with_hook { 2 } else { 0 });
+            home.finish().unwrap();
+        }
     }
 
     #[test]
@@ -2372,6 +2547,73 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "agent-host")]
+    fn controller_sequence_uses_recorded_requests() {
+        let expected = [
+            ("fixture-journal", "write", "fixture reason"),
+            ("fixture-journal", "read", "fixture reason"),
+        ];
+        let requests = vec![
+            json!({"request_id":"request-a", "session_id":"session-a", "resource":"fixture-journal", "action":"write", "reason":"fixture reason"}),
+            json!({"request_id":"request-b", "session_id":"session-a", "resource":"fixture-journal", "action":"read", "reason":"fixture reason"}),
+        ];
+        let sequence_reason =
+            "request sequence: one session, distinct requests and exact ordered fields required";
+        let check = |controller: &Controller, result, label: &str| {
+            let recorded = controller.requests.clone();
+            let counts = || {
+                let decisions = &controller.decisions;
+                (decisions.matched, decisions.granted, decisions.denied)
+            };
+            let before = counts();
+            assert_eq!(controller.check_requests(&expected), result, "{label}");
+            assert!(controller.requests == recorded, "{label}: store unchanged");
+            assert_eq!(counts(), before, "{label}: decision counts unchanged");
+        };
+        let mut controller = idle_controller(0);
+        controller.requests = requests.clone();
+        check(
+            &controller,
+            Ok(()),
+            "controller accepts valid recorded pair",
+        );
+
+        let mut reversed = requests.clone();
+        reversed.reverse();
+        let mut another_session = requests.clone();
+        another_session[1]["session_id"] = "other-session".into();
+        let mut repeated_id = requests.clone();
+        repeated_id[1]["request_id"] = "request-a".into();
+        for (recorded, reason, label) in [
+            (
+                reversed,
+                sequence_reason,
+                "controller refuses reversed order",
+            ),
+            (
+                another_session,
+                sequence_reason,
+                "controller refuses another session",
+            ),
+            (
+                repeated_id,
+                sequence_reason,
+                "controller refuses repeated ID",
+            ),
+            (
+                requests[..1].to_vec(),
+                "request sequence: exact request count required",
+                "controller refuses missing request",
+            ),
+        ] {
+            controller.requests = recorded;
+            check(&controller, Err(reason), label);
+            controller.requests = requests.clone();
+            check(&controller, Ok(()), "controller accepts repaired store");
+        }
+    }
+
+    #[test]
     fn attach_refusal_names_the_scope() {
         assert_eq!(
             shell_attach(0, "fixture-canary", "shell"),
@@ -2501,6 +2743,253 @@ mod tests {
         );
     }
 
+    fn memory_report(
+        name: &str,
+        observations: &[Observation],
+        printed: &str,
+        passed: bool,
+    ) -> agent_conformance::report::RunReport {
+        let result = if passed { "ok" } else { "FAILED" };
+        let mut output = format!("{printed}test {name} ... {result}\n");
+        for observation in observations {
+            output.push_str(&observation.line());
+            output.push('\n');
+        }
+        render_run(
+            &format!("{name}: test\n"),
+            &output,
+            passed,
+            GitIdentity::read(&repository()),
+            Some(include_str!("../../GAPS.md")),
+        )
+    }
+
+    #[test]
+    fn controller_reports_the_graders_stale_gap_reason() {
+        let controller = idle_controller(0);
+        let printed = "fixture read: synthetic report evidence\n";
+        controller.print_checked(printed.trim_end()).unwrap();
+        let observations = memory_observations();
+        let name = "ungranted_model_call_is_refused";
+        let cause = "GAPS.md: ungranted_model_call_is_refused: still lists it as blocked";
+        let expected = format!("credential check requires a complete report: {cause}");
+        let report = memory_report(name, &observations, printed, true);
+        assert_eq!(report.failures, [cause]);
+        assert!(report.table.contains(&format!("{name} | FAIL | {cause}\n")));
+        assert!(!report.passed);
+        let receipt: Value = serde_json::from_slice(&report.receipt_bytes).unwrap();
+        assert_eq!(receipt["command_success"], false);
+        for result in [
+            controller.check_report(name, &observations),
+            controller.check_journey(name, &observations, true),
+        ] {
+            assert!(result.is_err(), "stale gap requires a controller refusal");
+            assert_eq!(
+                result.err().as_deref(),
+                Some(expected.as_str()),
+                "stale gap refusal retains the grader reason"
+            );
+        }
+        let healthy = "default_activation_refuses_without_selector";
+        controller.check_report(healthy, &observations).unwrap();
+        controller
+            .check_journey(healthy, &observations, true)
+            .unwrap();
+
+        // A failed model fixture keeps its FAIL grade while scanning can finish.
+        // Synthetic observations supply zero model-call acceptance credit.
+        let failed = memory_report(name, &observations, printed, false);
+        assert!(failed.failures.is_empty());
+        assert!(failed.table.contains(&format!("{name} | FAIL\n")));
+        assert!(!failed.passed);
+        let receipt: Value = serde_json::from_slice(&failed.receipt_bytes).unwrap();
+        assert_eq!(receipt["command_success"], false);
+        controller
+            .check_journey(name, &observations, false)
+            .unwrap();
+    }
+
+    #[test]
+    fn controller_report_refusals_keep_safe_causes() {
+        let controller = idle_controller(0);
+        let name = "default_activation_refuses_without_selector";
+        let printed = "fixture read: synthetic report evidence\n";
+        controller.print_checked(printed.trim_end()).unwrap();
+        let healthy = memory_observations();
+        for (missing, causes) in [
+            (vec![0], vec!["missing Runtime SHA-256"]),
+            (vec![1], vec!["missing localhost-provider SHA-256"]),
+            (
+                vec![0, 1],
+                vec![
+                    "missing Runtime SHA-256",
+                    "missing localhost-provider SHA-256",
+                ],
+            ),
+        ] {
+            let observations: Vec<_> = healthy
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !missing.contains(index))
+                .map(|(_, observation)| observation.clone())
+                .collect();
+            let report = memory_report(name, &observations, printed, true);
+            assert_eq!(
+                report.failures, causes,
+                "grader keeps ordered native causes"
+            );
+            assert!(!report.passed);
+            let receipt: Value = serde_json::from_slice(&report.receipt_bytes).unwrap();
+            assert_eq!(receipt["command_success"], false);
+            let expected = format!(
+                "credential check requires a complete report: {}",
+                report.failures.join("; ")
+            );
+            for result in [
+                controller.check_report(name, &observations),
+                controller.check_journey(name, &observations, true),
+            ] {
+                assert!(
+                    result.is_err(),
+                    "missing identity requires a controller refusal"
+                );
+                let reason = result.unwrap_err();
+                assert_eq!(
+                    reason, expected,
+                    "report refusal retains ordered grader causes"
+                );
+                assert!(
+                    !reason.contains(printed.trim()),
+                    "refusal excludes raw printed text"
+                );
+                for observation in &observations {
+                    assert!(
+                        !reason.contains(&observation.line()),
+                        "refusal excludes observation JSON"
+                    );
+                }
+                assert!(
+                    !reason.contains(&report.table),
+                    "refusal excludes report table bytes"
+                );
+                assert!(
+                    !reason.contains(std::str::from_utf8(&report.receipt_bytes).unwrap()),
+                    "refusal excludes receipt bytes"
+                );
+            }
+            controller.check_report(name, &healthy).unwrap();
+            controller.check_journey(name, &healthy, true).unwrap();
+        }
+    }
+
+    #[test]
+    fn controller_redacts_report_refusal_credentials() {
+        let mut controller = idle_controller(0);
+        let name = "default_activation_refuses_without_selector";
+        controller
+            .print_checked("fixture read: synthetic report evidence")
+            .unwrap();
+        let printed = controller.printed.borrow().clone();
+        let counts = (
+            controller.decisions.matched,
+            controller.decisions.granted,
+            controller.decisions.denied,
+        );
+        let healthy = memory_observations();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let canary = format!("report-canary-{stamp}");
+        controller
+            .remember(&canary)
+            .expect("synthetic report credential registers");
+        let Observation::Launched { probe } = &healthy[2] else {
+            panic!("synthetic fixture has a launched observation");
+        };
+        let mut bad = probe.clone();
+        bad.effect = canary.clone();
+        bad.component_sha256 = "invalid".into();
+        let mut observations = healthy.to_vec();
+        observations.push(Observation::Launched { probe: bad });
+        let report = memory_report(name, &observations, &printed, true);
+        // Keep contaminated details out of assertion output, including under plants.
+        assert!(
+            report.failures == [format!("malformed component SHA-256: {canary}")],
+            "grader retains only the malformed component cause"
+        );
+        assert!(
+            !report.table.contains(&canary),
+            "canary stays outside the table"
+        );
+        for result in [
+            controller.check_report(name, &observations),
+            controller.check_journey(name, &observations, true),
+        ] {
+            assert!(
+                result.as_ref().err().map(String::as_str)
+                    == Some("fixture credential detected: report"),
+                "detailed refusal credential returns the fixed report reason"
+            );
+            assert!(
+                *controller.printed.borrow() == printed,
+                "refusal preserves printed evidence"
+            );
+            assert!(
+                (
+                    controller.decisions.matched,
+                    controller.decisions.granted,
+                    controller.decisions.denied
+                ) == counts,
+                "refusal preserves decision counters"
+            );
+        }
+        controller
+            .check_report(name, &healthy)
+            .expect("repaired report scans");
+        controller
+            .check_journey(name, &healthy, true)
+            .expect("repaired journey scans");
+        assert!(
+            *controller.printed.borrow() == printed,
+            "recovery preserves printed evidence"
+        );
+        assert!(
+            (
+                controller.decisions.matched,
+                controller.decisions.granted,
+                controller.decisions.denied
+            ) == counts,
+            "recovery preserves decision counters"
+        );
+
+        // Complete reports still scan printed and receipt surfaces through the
+        // shared inventory checker. Both controls keep contaminated bytes in memory.
+        controller.printed.borrow_mut().push_str(&canary);
+        let result = controller.check_report(name, &healthy);
+        assert!(
+            result.as_ref().err().map(String::as_str)
+                == Some("fixture credential detected: printed journey"),
+            "accepted report still scans printed evidence"
+        );
+        *controller.printed.borrow_mut() = printed.clone();
+        let mut receipt_observations = healthy.to_vec();
+        let mut receipt_probe = probe.clone();
+        receipt_probe.effect = canary;
+        receipt_observations.push(Observation::Launched {
+            probe: receipt_probe,
+        });
+        let result = controller.check_journey(name, &receipt_observations, true);
+        assert!(
+            result.as_ref().err().map(String::as_str)
+                == Some("fixture credential detected: version receipt"),
+            "accepted report still scans receipt evidence"
+        );
+        controller
+            .check_report(name, &healthy)
+            .expect("clean report recovers after scans");
+    }
+
     #[test]
     fn no_probe_receipt_is_scanned_and_other_gaps_are_refused() {
         assert!(launch_gap_only(&["missing launched probe identity".into()]));
@@ -2537,7 +3026,7 @@ mod tests {
                 true,
             )
             .err(),
-            Some("credential check requires a complete report")
+            Some("credential check requires a complete report: missing Runtime SHA-256; missing launched probe identity".into())
         );
     }
 
@@ -3133,7 +3622,7 @@ mod tests {
                 .join("\n");
             assert_eq!(
                 controller.check_journey("two_instances_overlap_with_separate_grants", &[], true),
-                Err("required instance journey evidence is missing")
+                Err("required instance journey evidence is missing".into())
             );
         }
         for (kill, name, prefix) in [
@@ -3163,7 +3652,7 @@ mod tests {
                     .join("\n");
                 assert_eq!(
                     controller.check_journey(name, &[], true),
-                    Err("required instance journey evidence is missing")
+                    Err("required instance journey evidence is missing".into())
                 );
             }
         }
@@ -3171,7 +3660,7 @@ mod tests {
         controller.printed.borrow_mut().clear();
         assert_eq!(
             controller.check_journey("no_policy_file_does_not_mean_allow", &[], true),
-            Err("required orphan settlement evidence is missing")
+            Err("required orphan settlement evidence is missing".into())
         );
     }
 
@@ -3328,7 +3817,7 @@ mod tests {
                 &natives,
                 false,
             ),
-            Err("required owned-root evidence is missing")
+            Err("required owned-root evidence is missing".into())
         );
         controller
             .print_checked(&format!(
@@ -3346,7 +3835,7 @@ mod tests {
                 &natives,
                 false,
             ),
-            Err("required owned-root evidence is missing")
+            Err("required owned-root evidence is missing".into())
         );
         controller
             .print_checked(&format!(
@@ -3373,16 +3862,67 @@ fn request_sequence_requires_exact_order_and_one_session() {
         json!({"request_id":"request-a", "session_id":"session-a", "resource":"fixture-journal", "action":"write", "reason":"fixture reason"}),
         json!({"request_id":"request-b", "session_id":"session-a", "resource":"fixture-journal", "action":"read", "reason":"fixture reason"}),
     ];
+    let count_reason = "request sequence: exact request count required";
+    let sequence_reason =
+        "request sequence: one session, distinct requests and exact ordered fields required";
     check_request_sequence(&requests, &expected).unwrap();
+    assert_eq!(
+        check_request_sequence(&requests, &expected),
+        Ok(()),
+        "request sequence accepts valid write/read pair"
+    );
+    assert_eq!(
+        check_request_sequence(&requests[..1], &expected),
+        Err(count_reason),
+        "request sequence refuses missing request"
+    );
     assert!(check_request_sequence(&requests[..1], &expected).is_err());
+    assert_eq!(
+        check_request_sequence(&requests, &expected),
+        Ok(()),
+        "request sequence recovers after missing request"
+    );
+    assert_eq!(
+        check_request_sequence(
+            &[requests.clone(), vec![requests[0].clone()]].concat(),
+            &expected
+        ),
+        Err(count_reason),
+        "request sequence refuses extra request"
+    );
     assert!(check_request_sequence(
         &[requests.clone(), vec![requests[0].clone()]].concat(),
         &expected
     )
     .is_err());
+    assert_eq!(
+        check_request_sequence(&requests, &expected),
+        Ok(()),
+        "request sequence recovers after extra request"
+    );
+    assert_eq!(
+        check_request_sequence(&[], &[]),
+        Err(count_reason),
+        "request sequence refuses empty requests and expectations"
+    );
+    assert_eq!(
+        check_request_sequence(&requests, &expected),
+        Ok(()),
+        "request sequence recovers after empty sequence"
+    );
     let mut reversed = requests.clone();
     reversed.reverse();
+    assert_eq!(
+        check_request_sequence(&reversed, &expected),
+        Err(sequence_reason),
+        "request sequence refuses reversed order"
+    );
     assert!(check_request_sequence(&reversed, &expected).is_err());
+    assert_eq!(
+        check_request_sequence(&requests, &expected),
+        Ok(()),
+        "request sequence recovers after reversed order"
+    );
     for (field, value) in [
         ("session_id", "other-session"),
         ("request_id", "request-a"),
@@ -3392,9 +3932,19 @@ fn request_sequence_requires_exact_order_and_one_session() {
     ] {
         let mut wrong = requests.clone();
         wrong[1][field] = value.into();
+        assert_eq!(
+            check_request_sequence(&wrong, &expected),
+            Err(sequence_reason),
+            "request sequence refuses {field}"
+        );
         assert!(
             check_request_sequence(&wrong, &expected).is_err(),
             "request sequence refuses {field}"
+        );
+        assert_eq!(
+            check_request_sequence(&requests, &expected),
+            Ok(()),
+            "request sequence recovers after {field}"
         );
     }
 }

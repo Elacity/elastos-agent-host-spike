@@ -723,12 +723,19 @@ is exactly `Internal("capsule manifest does not declare authority for localhost:
 `host_key_read_is_refused` requires that reason, a nonzero exit, zero controller
 decisions, marker-free stdout/stderr and unchanged fake-file bytes. F-ac8a adds
 only this exact manifest bound and the matching one-use fixture grant. Both
-named F-ac8a tests observed one grant, then the provider's
-`Path traversal not allowed` reason with unchanged fake bytes. Its parent-segment
-check is in `elastos/capsules/localhost-provider/src/main.rs:300`. LOG.md records
-the commands and same-run receipts.
+named F-ac8a tests require one grant followed by the guest's fixed
+`host key provider read failed` lifecycle reason, with the former provider
+text absent from captures and unchanged fake bytes. The probe keeps provider
+bodies inside the guest for both success and failure. Exact status `ok`
+succeeds; every other status has that same bounded reason. Native opaque-body
+tests prove this decision without Runtime acceptance. The committed-fixture
+test directly excludes the host resource for every action, reason and duration.
+LOG.md records the commands and same-run receipts.
 
-This proves one named Bus route to one fake file outside the Home roots. Other
+This proves one named Bus route to one fake file outside the Home roots. The
+manifest bound and the provider's parent-segment check
+(`elastos/capsules/localhost-provider/src/main.rs:300`) both refuse this resource
+by its text, which contains `..`; each run stops before the fake file. Other
 routes and key stores require separate journeys. The fixture owns only its fake
 file; Runtime keeps ownership of its first-run state. The real home and Runtime
 key stores stay outside the probe's inputs. AC-006-STORAGE retains the existing
@@ -761,10 +768,21 @@ snapshot. Every observed holder fails the check, even if it releases its
 handle after that snapshot. The tool runs through the existing spawn site in
 a separate scratch Home;
 after exit, its captures move into the journey's existing capture inventory.
-Task 026 plants a bound Unix socket in a bounded child through the one spawn
-site. On this Mac, `lsof +D` sees its cwd and capture handles but omits the
-socket. The child fails the process census and is stopped. Unix socket absence
-under the root remains unmeasured; `root checks PASS` covers the selected
+Task 026's bound-socket control now has its own row,
+`cleanup_unix_socket_control_reports_its_scope`; the original
+`cleanup_census_refuses_each_leftover` keeps independent API, temp, process
+and clean-root checks. The socket row preflights `/usr/bin/python3 -I -S -B`
+through the shared bounded Home launcher. Interpreter start unavailability
+and unsuccessful import emit distinct `Unix socket control setup: ` reasons;
+the import reason includes its exit status. These setup refusals display
+SKIPPED with suite outcome FAIL and a nonzero command status. Later worker,
+readiness, socket-type, census and cleanup errors retain FAIL. Synthetic
+setup and report fixtures supply zero capsule acceptance credit.
+The real worker binds an in-Home Unix socket within five seconds. The test
+saves the census, stops and reaps the owned worker, then checks that observation
+and removes its owned socket and ready marker. On this Mac, `lsof +D` sees
+its cwd and capture handles but omits the socket. Unix socket absence under
+the root remains unmeasured; `root checks PASS` covers the selected
 file/directory handles, API port and tmp entries only. A socket-absence claim
 needs a census selector with a passing bound-socket control.
 

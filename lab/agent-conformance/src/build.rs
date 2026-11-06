@@ -9,6 +9,11 @@ pub fn lane() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// Default root for lane-owned Homes and build outputs.
+pub fn target() -> PathBuf {
+    lane().join("target")
+}
+
 pub fn repository() -> PathBuf {
     lane().parent().unwrap().parent().unwrap().to_path_buf()
 }
@@ -21,7 +26,7 @@ pub fn copy_agent_host(source: &Path, destination: &Path) -> Result<(), String> 
         destination
             .parent()
             .ok_or("copy destination needs a parent")?,
-        &lane().join("target"),
+        &target(),
     )?;
     if destination.file_name().is_none()
         || destination
