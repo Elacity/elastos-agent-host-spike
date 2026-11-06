@@ -1462,12 +1462,12 @@ mod tests {
             ],
         };
         crate::auth::store_session_grant(data_dir.path(), grant.clone()).unwrap();
-        let context = HomeLaunchTokenContext {
-            principal_id: grant.principal_id.clone(),
-            session_id: grant.session_id.clone(),
-            proof_binding_id: Some(grant.proof_binding_id.clone()),
-            grant_id: grant.grant_id.clone(),
-        };
+        let context = HomeLaunchTokenContext::for_test(
+            grant.principal_id.clone(),
+            grant.session_id.clone(),
+            Some(grant.proof_binding_id.clone()),
+            grant.grant_id.clone(),
+        );
         let home_token =
             issue_home_launch_token_for_auth_grant(data_dir.path(), HOME_CAPSULE_ID, &grant)
                 .unwrap();
