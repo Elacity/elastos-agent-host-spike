@@ -771,8 +771,8 @@
       "edits": [
         {
           "file": "../../lab/agent-conformance/probe/src/lib.rs",
-          "old": "    #[cfg(feature = \"read\")]\n    let (resource, action)",
-          "new": "    #[cfg(feature = \"read\")]\n    if option_env!(\"AC_PROBE_READ_RESOURCE\").is_some_and(|r| r.starts_with(\"localhost://Users/\")) {\n        return Ok(());\n    }\n    #[cfg(feature = \"read\")]\n    let (resource, action)"
+          "old": "    #[cfg(feature = \"read\")]\n    let (resource, action) = (read_target(), \"read\");",
+          "new": "    if cfg!(feature = \"human-read\") {\n        return Ok(());\n    }\n    #[cfg(feature = \"read\")]\n    let (resource, action) = (read_target(), \"read\");"
         }
       ],
       "tests": [

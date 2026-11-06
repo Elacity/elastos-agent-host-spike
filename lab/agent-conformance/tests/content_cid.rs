@@ -164,29 +164,6 @@ fn staging_refusal(home: &ThrowawayHome, manifest: &Value, label: &str) -> Strin
     .unwrap_or_else(|| panic!("the one bundle check must refuse the `{label}` manifest"))
 }
 
-/// The Runtime manifest type's words for a manifest that the one bundle check
-/// refused. The bytes are the same bytes the route staged.
-fn manifest_refusal(manifest: &Value) -> String {
-    let scratch = lane().join("target/content-cid-manifest-check");
-    let _ = fs::remove_dir_all(&scratch);
-    fs::create_dir_all(&scratch).expect("create the manifest check directory");
-    let entrypoint = manifest["entrypoint"]
-        .as_str()
-        .expect("entrypoint")
-        .to_owned();
-    fs::write(
-        scratch.join("capsule.json"),
-        serde_json::to_vec(manifest).expect("manifest serializes"),
-    )
-    .expect("write the checked manifest");
-    fs::write(scratch.join(entrypoint), b"check-only").expect("write the entrypoint");
-    let refusal = capsule_identity::checked_bundle(&scratch)
-        .map(|_| "the bundle check accepted the manifest".to_owned())
-        .unwrap_or_else(|refusal| refusal.to_string());
-    let _ = fs::remove_dir_all(&scratch);
-    refusal
-}
-
 /// The handover record. The Runtime manifest type parses every staged manifest
 /// (`stage_probe` runs `capsule_identity::checked_bundle`, which runs that
 /// type's own `serde` parse and `validate`), and it refuses `cid` in a
@@ -198,17 +175,16 @@ fn requires_cid_is_refused_today() {
     let right = content_cid();
     let home = ThrowawayHome::new().unwrap();
     let refusal = staging_refusal(&home, &viewer_manifest(&right), "viewer-content-cid");
-    assert_eq!(
-        refusal, "probe staging: bundle identity refused",
+    assert!(
+        refusal.contains("unknown field `cid`") && refusal.contains("expected `name` or `kind`"),
+        "the refusal must be the manifest reader's own field refusal, got: {refusal}"
+    );
+    assert!(
+        refusal.starts_with("probe staging: bundle identity refused: "),
         "the staging refusal is the one bundle check, not a missing file"
     );
-    let said = manifest_refusal(&viewer_manifest(&right));
-    assert!(
-        said.contains("unknown field `cid`") && said.contains("expected `name` or `kind`"),
-        "the refusal must be the manifest reader's own field refusal, got: {said}"
-    );
     home.finish().expect("finish the throwaway Home");
-    eprintln!("{GAP}\nrefusal now: {said}");
+    eprintln!("{GAP}\nrefusal now: {refusal}");
     let later = capsule_identity::checked_bundle(&CONTENT).expect("re-read the content");
     assert_eq!(before, later.entries(), "the staged content is unchanged");
     assert_eq!(

@@ -417,6 +417,82 @@ fn staging_uses_manifest_entrypoint_and_refuses_escape() {
     }
 }
 
+#[test]
+fn staging_keeps_the_bundle_checker_reason() {
+    let bytes = b"synthetic staging component";
+    for field in ["name", "version"] {
+        let home = ThrowawayHome::new().unwrap();
+        let mut manifest: Value = serde_json::from_slice(MANIFEST).unwrap();
+        let entrypoint = manifest["entrypoint"].as_str().unwrap().to_owned();
+        if field == "name" {
+            manifest.as_object_mut().unwrap().remove("name");
+        } else {
+            manifest["version"] = "".into();
+        }
+        let manifest = serde_json::to_vec(&manifest).unwrap();
+        let refusal = stage_probe(&home, bytes, &manifest, field)
+            .err()
+            .expect("the bundle checker must refuse the manifest");
+        let bundle = home.root().join(format!("sha256-{}", sha256(bytes)));
+        let oracle = capsule_identity::checked_bundle(&bundle)
+            .err()
+            .expect("the same staged bytes must have the same bundle refusal");
+        let fragment = if field == "name" {
+            assert!(
+                matches!(&oracle, capsule_identity::Refusal::ManifestUnparsed(reason)
+                    if reason.contains("missing field `name`")),
+                "missing name must reach the manifest parser: {oracle}"
+            );
+            "missing field `name`"
+        } else {
+            assert!(
+                matches!(&oracle, capsule_identity::Refusal::ManifestInvalid(reason)
+                    if reason == "manifest version must not be empty"),
+                "empty version must reach manifest validation: {oracle}"
+            );
+            "manifest version must not be empty"
+        };
+        assert_eq!(
+            refusal,
+            format!("probe staging: bundle identity refused: {oracle}"),
+            "staging must retain the complete bundle checker cause exactly once"
+        );
+        assert!(
+            refusal.contains(fragment),
+            "staging must retain the field-specific cause: {refusal}"
+        );
+        let retry = stage_probe(&home, bytes, MANIFEST, field)
+            .err()
+            .expect("retry keeps exclusive bundle creation until the caller clears it");
+        assert_eq!(retry, "probe staging: create bundle directory");
+        assert_eq!(fs::read(bundle.join("capsule.json")).unwrap(), manifest);
+        assert_eq!(fs::read(bundle.join(&entrypoint)).unwrap(), bytes);
+
+        home.guard(home.home(), home.data()).unwrap();
+        fs::remove_dir_all(&bundle).unwrap();
+        let repaired = stage_probe(&home, bytes, MANIFEST, field).unwrap();
+        let checked = capsule_identity::checked_bundle(&repaired.path).unwrap();
+        assert_eq!(repaired.path, bundle);
+        assert_eq!(repaired.identity.effect, field);
+        assert_eq!(repaired.identity.component_sha256, sha256(bytes));
+        assert_eq!(repaired.identity.bundle_lab_cid, checked.cid().to_string());
+        assert_eq!(
+            checked
+                .entries()
+                .iter()
+                .find(|entry| entry.path == entrypoint)
+                .unwrap()
+                .content,
+            bytes
+        );
+        assert_eq!(
+            fs::read(repaired.path.join("capsule.json")).unwrap(),
+            MANIFEST
+        );
+        home.finish().unwrap();
+    }
+}
+
 // These synthetic hashes test report wiring only. They are never emitted as
 // this Cargo run's identities and supply zero live Runtime evidence.
 fn synthetic(seed: u8, dirty: bool) -> (Vec<Observation>, GitIdentity) {
@@ -465,6 +541,112 @@ fn output(observations: &[Observation]) -> String {
 
 fn read_receipt(path: &Path) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
+#[test]
+fn versions_receipt_reads_git_dirty_state() {
+    let home = ThrowawayHome::new().unwrap();
+    let repository = home.root().join("repository");
+    let receipts = home.root().join("receipts");
+    fs::create_dir(&repository).unwrap();
+    fs::create_dir(&receipts).unwrap();
+    let git = |args: &[&str]| {
+        let mut command = vec!["-C", repository.to_str().unwrap()];
+        command.extend_from_slice(args);
+        let result = home
+            .launch(
+                Path::new("/usr/bin/git"),
+                &command,
+                std::time::Duration::from_secs(10),
+            )
+            .unwrap_or_else(|reason| panic!("fixture Git {args:?}: {reason}"));
+        assert!(
+            result.status.success(),
+            "fixture Git {args:?}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        String::from_utf8(result.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "--quiet", "--template="]);
+    for (key, value) in [
+        ("user.name", "A14 fixture"),
+        ("user.email", "a14@example.invalid"),
+        ("commit.gpgsign", "false"),
+        ("core.hooksPath", "/dev/null"),
+        ("core.excludesFile", "/dev/null"),
+    ] {
+        git(&["config", "--local", key, value]);
+    }
+    let tracked = repository.join("tracked.txt");
+    fs::write(&tracked, b"initial fixture bytes\n").unwrap();
+    git(&["add", "--", "tracked.txt"]);
+    git(&["commit", "--quiet", "-m", "Initial A14 fixture"]);
+    let initial_commit = git(&["rev-parse", "--verify", "HEAD"]);
+
+    let (observations, _) = synthetic(1, false);
+    let listed = format!("{LIVE}: test\n");
+    let observed = output(&observations);
+    let check = |case: &str, commit: &str, dirty: bool| {
+        let identity = GitIdentity::read(&repository)
+            .unwrap_or_else(|reason| panic!("{case}: Git identity: {reason}"));
+        assert_eq!(identity.commit, commit, "{case}: Git commit");
+        assert_eq!(identity.dirty, dirty, "{case}: Git dirty state");
+        let path = receipts.join(format!("{case}.json"));
+        let report = write_run(&listed, &observed, true, Ok(identity), &path, Some(""));
+        assert!(report.receipt_written, "{case}: receipt written");
+        assert!(report.passed, "{case}: {:?}", report.failures);
+        assert!(
+            report.table.contains("versions_receipt (A14) | PASS\n"),
+            "{case}: A14 passes"
+        );
+        let receipt = read_receipt(&path);
+        assert_eq!(
+            receipt["repository"]["commit"], commit,
+            "{case}: receipt commit"
+        );
+        assert_eq!(
+            receipt["repository"]["dirty"], dirty,
+            "{case}: receipt dirty state"
+        );
+        assert_eq!(
+            receipt["identity_status"], "complete",
+            "{case}: identity status"
+        );
+        assert_eq!(receipt["suite_outcome"], "PASS", "{case}: suite outcome");
+        assert_eq!(
+            receipt["report"]["table"], report.table,
+            "{case}: receipt table"
+        );
+    };
+
+    check("clean", &initial_commit, false);
+    fs::write(&tracked, b"edited fixture bytes\n").unwrap();
+    check("tracked-edit", &initial_commit, true);
+    git(&["add", "--", "tracked.txt"]);
+    check("staged-edit", &initial_commit, true);
+    git(&["commit", "--quiet", "-m", "Second A14 fixture"]);
+    let second_commit = git(&["rev-parse", "--verify", "HEAD"]);
+    assert_ne!(
+        second_commit, initial_commit,
+        "second commit: full Git ID changes"
+    );
+    check("second-commit", &second_commit, false);
+    fs::remove_file(&tracked).unwrap();
+    check("tracked-delete", &second_commit, true);
+    git(&[
+        "restore",
+        "--source=HEAD",
+        "--worktree",
+        "--",
+        "tracked.txt",
+    ]);
+    check("tracked-restore", &second_commit, false);
+    let untracked = repository.join("a14-untracked.txt");
+    fs::write(&untracked, b"untracked fixture bytes\n").unwrap();
+    check("untracked-file", &second_commit, true);
+    fs::remove_file(&untracked).unwrap();
+    check("untracked-remove", &second_commit, false);
+    home.finish().unwrap();
 }
 
 #[test]
