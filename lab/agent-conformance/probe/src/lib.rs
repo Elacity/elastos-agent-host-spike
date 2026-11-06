@@ -17,6 +17,9 @@ const _: () = assert!(
     "select exactly one probe effect"
 );
 
+#[cfg(all(feature = "human-read", not(feature = "read")))]
+compile_error!("human-read requires read");
+
 // Subselectors of the existing granted-read feature are passed by the one
 // build helper. Keep Cargo manifests fixed; this allowance covers only these
 // two compiler cfg values (including native tests without either selector).
@@ -236,15 +239,20 @@ fn run_runaway() -> Result<(), elastos::bus::types::BusError> {
     }
 }
 
+#[cfg(feature = "read")]
+fn read_target() -> &'static str {
+    #[cfg(feature = "human-read")]
+    let fixture = include_str!("../../fixtures/human-read.txt");
+    #[cfg(not(feature = "human-read"))]
+    let fixture = include_str!("../../fixtures/ungranted-read.txt");
+    fixture.trim()
+}
+
 #[cfg(all(target_arch = "wasm32", any(feature = "read", feature = "network")))]
 fn request_effect() -> Result<(), elastos::bus::types::BusError> {
     use elastos::bus::{capabilities, types::CapabilityRequest};
     #[cfg(feature = "read")]
-    let (resource, action) = (
-        option_env!("AC_PROBE_READ_RESOURCE")
-            .unwrap_or(include_str!("../../fixtures/ungranted-read.txt").trim()),
-        "read",
-    );
+    let (resource, action) = (read_target(), "read");
     #[cfg(feature = "network")]
     let (resource, action) = (
         include_str!("../../fixtures/ungranted-network.txt").trim(),
@@ -291,6 +299,17 @@ export!(Probe);
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "read")]
+    #[test]
+    fn read_target_is_the_selected_fixture() {
+        let expected = if cfg!(feature = "human-read") {
+            include_str!("../../fixtures/human-read.txt")
+        } else {
+            include_str!("../../fixtures/ungranted-read.txt")
+        };
+        assert_eq!(super::read_target(), expected.trim());
+    }
+
     #[test]
     fn guest_checks_all_granted_file_bytes() {
         let expected = br#"{"data":{"content":"grant-fixture-bytes","encoding":"utf8","size":19},"status":"ok"}"#;
