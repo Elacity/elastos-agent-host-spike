@@ -46,7 +46,8 @@ impl Effect {
         // These cfg values select the declared Cargo features on the same source.
         match self {
             Self::Default => "-Dwarnings",
-            Self::Read | Self::HumanRead => "-Dwarnings --cfg feature=\"read\"",
+            Self::Read => "-Dwarnings --cfg feature=\"read\"",
+            Self::HumanRead => "-Dwarnings --cfg feature=\"read\" --cfg feature=\"human-read\"",
             Self::MemoryWrite => "-Dwarnings --cfg feature=\"memory-write\"",
             Self::Network => "-Dwarnings --cfg feature=\"network\"",
             Self::GrantedRead => "-Dwarnings --cfg feature=\"granted-read\"",
@@ -96,14 +97,6 @@ pub fn build_probe(effect: Effect, round: usize) -> Vec<u8> {
         .arg(root.join("scripts/build-component-capsule.sh"))
         .arg(lane.join("probe"))
         .env("RUSTFLAGS", effect.rustflags())
-        .env(
-            "AC_PROBE_READ_RESOURCE",
-            match effect {
-                Effect::HumanRead => include_str!("../../fixtures/human-read.txt"),
-                _ => include_str!("../../fixtures/ungranted-read.txt"),
-            }
-            .trim(),
-        )
         .env(
             "AC_PROBE_TASK_INDEX",
             match effect {

@@ -226,6 +226,74 @@ fn probe_effects_are_exclusive() {
 }
 
 #[test]
+fn probe_read_targets_ignore_legacy_override() {
+    let _serial = PROBE_BUILD.lock().unwrap();
+    for feature in ["read", "human-read"] {
+        let output = offline_build("cargo", &lane().join("target/probe-feature-check"))
+            .unwrap()
+            .args([
+                "test",
+                "--locked",
+                "--offline",
+                "--manifest-path",
+                "lab/agent-conformance/probe/Cargo.toml",
+                "--features",
+                feature,
+                "--lib",
+                "tests::read_target_is_the_selected_fixture",
+                "--",
+                "--exact",
+                "--color",
+                "never",
+            ])
+            .env(
+                "AC_PROBE_READ_RESOURCE",
+                "localhost://Public/agent-conformance-ignored-override",
+            )
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{feature} selected-target test failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line == "test tests::read_target_is_the_selected_fixture ... ok")
+                && stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+            "{feature} must run and pass the selected-target test:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn human_read_subselector_requires_read() {
+    let _serial = PROBE_BUILD.lock().unwrap();
+    let output = offline_build("cargo", &lane().join("target/probe-feature-check"))
+        .unwrap()
+        .args([
+            "check",
+            "--locked",
+            "--offline",
+            "--manifest-path",
+            "lab/agent-conformance/probe/Cargo.toml",
+        ])
+        .env("RUSTFLAGS", "--cfg feature=\"human-read\"")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "human-read without read must be refused"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("human-read requires read"));
+}
+
+#[test]
 fn instance_subselectors_require_one_granted_read() {
     let _serial = PROBE_BUILD.lock().unwrap();
     for (flags, reason) in [

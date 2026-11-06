@@ -27,7 +27,22 @@ fn field<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
     value[name]
         .as_str()
         .filter(|text| !text.is_empty())
-        .ok_or("grant protocol requires a nonempty string field")
+        .ok_or(match name {
+            "resource" => "grant protocol requires nonempty string resource",
+            "action" => "grant protocol requires nonempty string action",
+            "reason" => "grant protocol requires nonempty string reason",
+            "duration" => "grant protocol requires nonempty string duration",
+            "request_id" => "grant protocol requires nonempty string request_id",
+            "session_id" => "grant protocol requires nonempty string session_id",
+            "session_type" => "grant protocol requires nonempty string session_type",
+            "status" => "grant protocol requires nonempty string status",
+            "capsule_id" => "grant protocol requires nonempty string capsule_id",
+            "content" => "grant protocol requires nonempty string content",
+            "deny_reason" => "grant protocol requires nonempty string deny_reason",
+            "token" => "grant protocol requires nonempty string token",
+            "attach_secret" => "grant protocol requires nonempty string attach_secret",
+            _ => "grant protocol requires a nonempty string field",
+        })
 }
 
 impl Fixture {
@@ -1990,6 +2005,227 @@ mod tests {
         json!({"resource":"localhost://Public/test/one","action":"read","reason":"test read"})
     }
 
+    #[test]
+    fn grant_fields_name_the_missing_key() {
+        let canary = format!("synthetic-field-credential-{}", std::process::id());
+        let mut controller = idle_controller(0);
+        controller.credentials.push(canary.clone());
+        let cases = [
+            (
+                "resource",
+                "grant protocol requires nonempty string resource",
+            ),
+            ("action", "grant protocol requires nonempty string action"),
+            ("reason", "grant protocol requires nonempty string reason"),
+            (
+                "duration",
+                "grant protocol requires nonempty string duration",
+            ),
+            (
+                "request_id",
+                "grant protocol requires nonempty string request_id",
+            ),
+            (
+                "session_id",
+                "grant protocol requires nonempty string session_id",
+            ),
+            (
+                "session_type",
+                "grant protocol requires nonempty string session_type",
+            ),
+            ("status", "grant protocol requires nonempty string status"),
+            (
+                "capsule_id",
+                "grant protocol requires nonempty string capsule_id",
+            ),
+            ("content", "grant protocol requires nonempty string content"),
+            (
+                "deny_reason",
+                "grant protocol requires nonempty string deny_reason",
+            ),
+            ("token", "grant protocol requires nonempty string token"),
+            (
+                "attach_secret",
+                "grant protocol requires nonempty string attach_secret",
+            ),
+        ];
+        for (index, &(key, expected)) in cases.iter().enumerate() {
+            for malformed in [
+                None,
+                Some(Value::Null),
+                Some(json!("")),
+                Some(json!(42)),
+                Some(json!([canary])),
+                Some(json!({"credential": canary})),
+            ] {
+                let mut value = json!({"neighbor": canary});
+                if let Some(malformed) = malformed {
+                    value[key] = malformed;
+                }
+                let refusal = field(&value, key);
+                assert!(refusal == Err(expected), "named-key assertion");
+                assert!(
+                    refusal != Err(cases[(index + 1) % cases.len()].1),
+                    "different keys have distinct reasons"
+                );
+                assert!(
+                    controller
+                        .check_bytes(refusal.unwrap_err().as_bytes(), Surface::Printed)
+                        .is_ok(),
+                    "field refusal keeps credentials private"
+                );
+            }
+            for valid in ["exact valid string", " \t "] {
+                let value = json!({key: valid});
+                assert!(
+                    field(&value, key) == Ok(valid),
+                    "exact nonempty string accepted"
+                );
+            }
+        }
+        let value = json!({canary.clone(): {"credential": canary}, "neighbor": canary});
+        let refusal = field(&value, &canary);
+        assert!(
+            refusal == Err("grant protocol requires a nonempty string field"),
+            "peer-provided keys use a fixed fallback"
+        );
+        assert!(
+            controller
+                .check_bytes(refusal.unwrap_err().as_bytes(), Surface::Printed)
+                .is_ok(),
+            "peer-provided keys stay private"
+        );
+    }
+
+    #[test]
+    fn malformed_fixture_rules_name_the_field() {
+        let canary = format!("synthetic-fixture-credential-{}", std::process::id());
+        let mut controller = idle_controller(0);
+        controller.credentials.push(canary.clone());
+        let fixture = fixture();
+        let mut value = json!({
+            "deny_reason": fixture.deny_reason,
+            "grants": fixture.entries,
+            "files": [{
+                "resource": "localhost://Public/agent-conformance-grants/seed.txt",
+                "content": "synthetic seed bytes"
+            }],
+            "neighbor": canary
+        });
+        assert!(
+            Fixture::parse(&value.to_string()).is_ok(),
+            "valid fixture control"
+        );
+        for (path, expected) in [
+            (
+                "/deny_reason",
+                "grant protocol requires nonempty string deny_reason",
+            ),
+            (
+                "/grants/0/resource",
+                "grant protocol requires nonempty string resource",
+            ),
+            (
+                "/grants/0/action",
+                "grant protocol requires nonempty string action",
+            ),
+            (
+                "/grants/0/reason",
+                "grant protocol requires nonempty string reason",
+            ),
+            (
+                "/grants/0/duration",
+                "grant protocol requires nonempty string duration",
+            ),
+            (
+                "/files/0/resource",
+                "grant protocol requires nonempty string resource",
+            ),
+            (
+                "/files/0/content",
+                "grant protocol requires nonempty string content",
+            ),
+        ] {
+            let original = value.pointer(path).unwrap().clone();
+            let (parent, key) = path.rsplit_once('/').unwrap();
+            for malformed in [
+                None,
+                Some(Value::Null),
+                Some(json!("")),
+                Some(json!(42)),
+                Some(json!({"credential": canary})),
+            ] {
+                let object = value.pointer_mut(parent).unwrap().as_object_mut().unwrap();
+                object.remove(key);
+                if let Some(malformed) = malformed {
+                    object.insert(key.into(), malformed);
+                }
+                let refusal = Fixture::parse(&value.to_string()).err();
+                assert!(
+                    refusal == Some(expected),
+                    "malformed fixture empty-field refusal"
+                );
+                assert!(
+                    controller
+                        .check_bytes(refusal.unwrap().as_bytes(), Surface::Printed)
+                        .is_ok(),
+                    "fixture refusal keeps credentials private"
+                );
+                value
+                    .pointer_mut(parent)
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(key.into(), original.clone());
+                assert!(
+                    Fixture::parse(&value.to_string()).is_ok(),
+                    "same fixture parses after repair"
+                );
+            }
+        }
+        for (path, malformed, expected) in [
+            (
+                "/grants/0/duration",
+                json!("forever"),
+                "grant fixture duration must be once or session",
+            ),
+            (
+                "/files/0/resource",
+                json!("localhost://Public/agent-conformance-grants/../outside"),
+                "seed fixture refuses a parent-directory segment",
+            ),
+            (
+                "/files/0/resource",
+                json!("localhost://Public/outside"),
+                "seed fixture escaped its Home directory",
+            ),
+        ] {
+            let original = value.pointer(path).unwrap().clone();
+            *value.pointer_mut(path).unwrap() = malformed;
+            assert!(
+                Fixture::parse(&value.to_string()).err() == Some(expected),
+                "existing fixture refusal preserved"
+            );
+            *value.pointer_mut(path).unwrap() = original;
+            assert!(
+                Fixture::parse(&value.to_string()).is_ok(),
+                "fixture control repaired"
+            );
+        }
+        let duplicate = value["grants"][0].clone();
+        value["grants"].as_array_mut().unwrap().push(duplicate);
+        assert!(
+            Fixture::parse(&value.to_string()).err()
+                == Some("grant fixture repeats an exact match"),
+            "duplicate match refusal preserved"
+        );
+        value["grants"].as_array_mut().unwrap().pop();
+        assert!(
+            Fixture::parse(&value.to_string()).is_ok(),
+            "duplicate match repaired"
+        );
+    }
+
     fn barrier_fixture() -> (Fixture, Vec<Value>, Vec<Value>) {
         let first: Vec<_> = (1..=2)
             .map(|index| json!({
@@ -2317,45 +2553,313 @@ mod tests {
         .into_bytes()
     }
 
-    fn serve_frames(frames: Vec<Vec<u8>>) -> (u16, std::thread::JoinHandle<()>) {
+    struct ObservedRequest {
+        line: String,
+        body: Value,
+    }
+
+    // Keep only the request line and decoded body; headers stay in this read.
+    fn read_scripted_request(stream: &mut TcpStream, deadline: Instant) -> Result<ObservedRequest> {
+        const REQUEST_CAP: usize = 8192;
+        let mut bytes = Vec::new();
+        let mut framing = None;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|time| !time.is_zero())
+                .ok_or("scripted fixture request exceeded its deadline")?;
+            stream
+                .set_read_timeout(Some(remaining))
+                .map_err(|_| "could not bound scripted fixture read")?;
+            let mut chunk = [0; 1024];
+            let size = stream
+                .read(&mut chunk)
+                .map_err(|_| "scripted fixture request read failed")?;
+            if size == 0 {
+                return Err("scripted fixture request is incomplete");
+            }
+            if size > REQUEST_CAP - bytes.len() {
+                return Err("scripted fixture request exceeded size bound");
+            }
+            bytes.extend_from_slice(&chunk[..size]);
+            if framing.is_none() {
+                if let Some(split) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let head = std::str::from_utf8(&bytes[..split])
+                        .map_err(|_| "invalid scripted fixture request headers")?;
+                    let mut length = None;
+                    for line in head.split("\r\n").skip(1) {
+                        let (name, value) = line
+                            .split_once(':')
+                            .ok_or("invalid scripted fixture request header")?;
+                        if name.eq_ignore_ascii_case("content-length") {
+                            if length.is_some() {
+                                return Err("repeated scripted fixture request length");
+                            }
+                            length = Some(
+                                value
+                                    .trim()
+                                    .parse::<usize>()
+                                    .map_err(|_| "invalid scripted fixture request length")?,
+                            );
+                        }
+                    }
+                    let length = length.ok_or("scripted fixture request length is missing")?;
+                    let body_start = split + 4;
+                    if length > REQUEST_CAP - body_start {
+                        return Err("scripted fixture request exceeded size bound");
+                    }
+                    framing = Some((split, body_start + length));
+                }
+            }
+            if let Some((split, end)) = framing {
+                if bytes.len() > end {
+                    return Err("scripted fixture request length mismatch");
+                }
+                if bytes.len() == end {
+                    let line = std::str::from_utf8(&bytes[..split])
+                        .map_err(|_| "invalid scripted fixture request headers")?
+                        .split("\r\n")
+                        .next()
+                        .ok_or("scripted fixture request line is missing")?
+                        .to_owned();
+                    let body = &bytes[split + 4..end];
+                    let body = if body.is_empty() {
+                        Value::Null
+                    } else {
+                        serde_json::from_slice(body)
+                            .map_err(|_| "invalid scripted fixture request JSON")?
+                    };
+                    return Ok(ObservedRequest { line, body });
+                }
+            }
+        }
+    }
+
+    fn serve_frames(
+        frames: Vec<Vec<u8>>,
+    ) -> (u16, std::thread::JoinHandle<Result<Vec<ObservedRequest>>>) {
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         listener.set_nonblocking(true).unwrap();
         let handle = std::thread::spawn(move || {
-            let started = Instant::now();
-            let mut index = 0;
-            let mut last = Instant::now();
-            while index < frames.len() && started.elapsed() < Duration::from_secs(3) {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut requests = Vec::new();
+            while requests.len() < frames.len() && Instant::now() < deadline {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        stream.set_nonblocking(false).unwrap();
                         stream
-                            .set_read_timeout(Some(Duration::from_secs(1)))
-                            .unwrap();
-                        let mut buf = [0u8; 8192];
-                        let _ = stream.read(&mut buf);
-                        let _ = stream.write_all(&frames[index]);
-                        let _ = stream.shutdown(std::net::Shutdown::Write);
-                        index += 1;
-                        last = Instant::now();
+                            .set_nonblocking(false)
+                            .map_err(|_| "could not set scripted fixture stream mode")?;
+                        let request = read_scripted_request(
+                            &mut stream,
+                            deadline.min(Instant::now() + Duration::from_secs(1)),
+                        )?;
+                        stream
+                            .set_write_timeout(Some(Duration::from_secs(1)))
+                            .map_err(|_| "could not bound scripted fixture write")?;
+                        stream
+                            .write_all(&frames[requests.len()])
+                            .map_err(|_| "scripted fixture response write failed")?;
+                        stream
+                            .shutdown(std::net::Shutdown::Both)
+                            .map_err(|_| "scripted fixture stream close failed")?;
+                        requests.push(request);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        if index > 0 && last.elapsed() > Duration::from_millis(200) {
-                            break;
-                        }
                         std::thread::sleep(Duration::from_millis(5));
                     }
-                    Err(_) => break,
+                    Err(_) => return Err("scripted fixture accept failed"),
                 }
             }
+            Ok(requests)
         });
         (port, handle)
     }
 
     fn with_frames(frames: Vec<Vec<u8>>, check: impl FnOnce(u16)) {
         let (port, handle) = serve_frames(frames);
-        check(port);
-        handle.join().expect("scripted fixture response");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check(port)));
+        let observed = handle.join().expect("scripted fixture thread joined");
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+        // Existing refusal rows may deliberately stop before later replies.
+        assert!(
+            observed.is_ok(),
+            "scripted fixture request capture completed"
+        );
+    }
+
+    fn assert_grant_body(request: &ObservedRequest, id: &str, duration: &str, case: &str) {
+        assert!(
+            request.line == "POST /api/capability/grant HTTP/1.1",
+            "{case}: grant request route"
+        );
+        assert!(
+            request.body
+                == json!({
+                    "request_id": id,
+                    "duration": duration,
+                    "rationale": "isolated conformance fixture"
+                }),
+            "{case}: sent grant body has exact request id, fixture duration and rationale"
+        );
+    }
+
+    #[test]
+    fn controller_sends_each_fixture_duration() {
+        for (case, duration_a, duration_b) in [
+            ("once then session", "once", "session"),
+            ("session then once", "session", "once"),
+        ] {
+            let fixture = Fixture::parse(
+                &json!({
+                    "deny_reason": "fixture denial",
+                    "grants": [
+                        {"resource": "localhost://Public/test/one", "action": "read",
+                         "reason": "test read", "duration": duration_a},
+                        {"resource": "localhost://Public/test/two", "action": "write",
+                         "reason": "test write", "duration": duration_b}
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let pending = json!({"requests": [
+                {"request_id": "duration-b", "session_id": "session-b",
+                 "resource": "localhost://Public/test/two", "action": "write", "reason": "test write"},
+                {"request_id": "duration-a", "session_id": "session-a",
+                 "resource": "localhost://Public/test/one", "action": "read", "reason": "test read"}
+            ]});
+            let mut running = RunningInstances::start(&[], None).unwrap();
+            let (port, server) = serve_frames(vec![
+                framed("200 OK", &pending.to_string()),
+                framed("200 OK", r#"{"success":true,"token":"synthetic-grant-b"}"#),
+                framed("200 OK", r#"{"success":true,"token":"synthetic-grant-a"}"#),
+            ]);
+            let mut controller = idle_controller(port);
+            controller.fixture = fixture;
+            let result = controller.poll(&mut running);
+            let observed = server.join().expect("duration fixture thread joined");
+            let observed = observed.unwrap_or_else(|reason| panic!("{case}: {reason}"));
+            assert!(
+                observed.len() == 3,
+                "{case}: scripted fixture request missing"
+            );
+            assert!(result.is_ok(), "{case}: poll succeeds");
+            assert!(
+                observed[0].line == "GET /api/capability/pending HTTP/1.1"
+                    && observed[0].body.is_null(),
+                "{case}: one pending GET"
+            );
+            // Expected durations are keyed by request id, independent of the
+            // controller's selected index and the reversed pending order.
+            for (id, duration) in [("duration-a", duration_a), ("duration-b", duration_b)] {
+                let request = observed[1..]
+                    .iter()
+                    .find(|request| request.body["request_id"] == id);
+                assert!(request.is_some(), "{case}: expected grant request id");
+                assert_grant_body(request.unwrap(), id, duration, case);
+            }
+            assert!(
+                controller.decisions.matched == 2,
+                "{case}: two matched decisions"
+            );
+            assert!(
+                controller.decisions.granted == 2,
+                "{case}: two granted decisions"
+            );
+            assert!(controller.decisions.denied == 0, "{case}: zero denials");
+            assert!(
+                controller.used == BTreeSet::from([0, 1]),
+                "{case}: exactly two used entries"
+            );
+        }
+    }
+
+    #[test]
+    fn controller_keeps_fixture_duration_after_refused_grant() {
+        for duration in ["once", "session"] {
+            let fixture = Fixture::parse(
+                &json!({
+                    "deny_reason": "fixture denial",
+                    "grants": [{"resource": "localhost://Public/test/one", "action": "read",
+                                "reason": "test read", "duration": duration}]
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let pending = json!({"requests": [{
+                "request_id": "duration-retry", "session_id": "session-retry",
+                "resource": "localhost://Public/test/one", "action": "read", "reason": "test read"
+            }]});
+            let mut running = RunningInstances::start(&[], None).unwrap();
+            let (port, server) = serve_frames(vec![
+                framed("200 OK", &pending.to_string()),
+                framed("200 OK", r#"{"success":false}"#),
+                framed("200 OK", &pending.to_string()),
+                framed(
+                    "200 OK",
+                    r#"{"success":true,"token":"synthetic-retry-grant"}"#,
+                ),
+            ]);
+            let mut controller = idle_controller(port);
+            controller.fixture = fixture;
+            let first_result = controller.poll(&mut running);
+            let first_counts = (
+                controller.decisions.matched,
+                controller.decisions.granted,
+                controller.decisions.denied,
+            );
+            let first_used = controller.used.clone();
+            let second_result = controller.poll(&mut running);
+            let observed = server.join().expect("retry fixture thread joined");
+            assert!(
+                first_used.is_empty(),
+                "{duration}: first refused poll leaves used-entry set empty"
+            );
+            assert!(
+                first_result == Err("fixture approval route refused the decision"),
+                "{duration}: first poll has exact approval refusal"
+            );
+            assert!(
+                first_counts == (1, 0, 0),
+                "{duration}: first poll counts only the match attempt"
+            );
+            assert!(
+                observed.is_ok(),
+                "{duration}: complete retry request capture"
+            );
+            let observed = observed.unwrap_or_else(|reason| panic!("{reason}"));
+            assert!(
+                observed.len() == 4,
+                "{duration}: scripted fixture request missing"
+            );
+            assert!(second_result.is_ok(), "{duration}: retry succeeds");
+            for index in [0, 2] {
+                assert!(
+                    observed[index].line == "GET /api/capability/pending HTTP/1.1"
+                        && observed[index].body.is_null(),
+                    "{duration}: retry pending GET"
+                );
+            }
+            for index in [1, 3] {
+                assert_grant_body(&observed[index], "duration-retry", duration, duration);
+            }
+            assert!(
+                controller.decisions.matched == 2,
+                "{duration}: two match attempts"
+            );
+            assert!(
+                controller.decisions.granted == 1,
+                "{duration}: retry grants exactly once"
+            );
+            assert!(controller.decisions.denied == 0, "{duration}: zero denials");
+            assert!(
+                controller.used == BTreeSet::from([0]),
+                "{duration}: retry consumes only entry zero"
+            );
+        }
     }
 
     fn idle_controller(port: u16) -> Controller {
@@ -2368,6 +2872,100 @@ mod tests {
             decisions: Decisions::default(),
             overlap: None,
             requests: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn controller_keeps_the_refused_field_reason() {
+        let canary = format!("synthetic-controller-credential-{}", std::process::id());
+        for (key, expected) in [
+            (
+                "session_id",
+                "grant protocol requires nonempty string session_id",
+            ),
+            (
+                "request_id",
+                "grant protocol requires nonempty string request_id",
+            ),
+        ] {
+            for malformed in [None, Some(json!({"credential": canary}))] {
+                let attached = json!({"session_type": "capsule", "token": canary});
+                let info = json!({"session_type": "capsule", "session_id": "client-session"});
+                let mut damaged = if key == "session_id" {
+                    json!({"session_type": "capsule", "neighbor": canary})
+                } else {
+                    json!({"status": "pending", "neighbor": canary})
+                };
+                if let Some(malformed) = malformed {
+                    damaged[key] = malformed;
+                }
+                let mut frames = vec![framed("200 OK", &attached.to_string())];
+                if key == "session_id" {
+                    frames.extend([
+                        framed("200 OK", &damaged.to_string()),
+                        framed("200 OK", &attached.to_string()),
+                        framed("200 OK", &info.to_string()),
+                    ]);
+                } else {
+                    frames.extend([
+                        framed("200 OK", &info.to_string()),
+                        framed("200 OK", &damaged.to_string()),
+                        framed("200 OK", r#"{"status":"pending","request_id":"req-1"}"#),
+                        framed("200 OK", r#"{"requests":[{"request_id":"req-1","session_id":"client-session"}]}"#),
+                        framed("200 OK", &json!({"success": true, "token": canary}).to_string()),
+                        framed("200 OK", &json!({"status": "granted", "token": canary}).to_string()),
+                    ]);
+                }
+                with_frames(frames, |port| {
+                    let mut controller = idle_controller(port);
+                    controller.credentials.push(canary.clone());
+                    let session = if key == "session_id" {
+                        None
+                    } else {
+                        Some(
+                            controller
+                                .client_session()
+                                .expect("successful client attach control"),
+                        )
+                    };
+                    let refusal = match &session {
+                        None => controller.client_session().err(),
+                        Some(session) => controller
+                            .open_session_read(session, "localhost://Public/test/one", "test read")
+                            .err(),
+                    };
+                    let unchanged = controller.decisions.matched == 0
+                        && controller.decisions.granted == 0
+                        && controller.decisions.denied == 0
+                        && controller.used.is_empty();
+                    let repaired = match &session {
+                        None => controller
+                            .client_session()
+                            .is_ok_and(|session| session.session_id == "client-session"),
+                        Some(session) => controller
+                            .open_session_read(session, "localhost://Public/test/one", "test read")
+                            .is_ok_and(|grant| {
+                                grant.session_id() == "client-session"
+                                    && controller.credentials[grant.capability] == canary
+                            }),
+                    };
+                    assert!(refusal == Some(expected), "controller propagated reason");
+                    assert!(
+                        unchanged,
+                        "refusal preserves approval counters and fixture entries"
+                    );
+                    assert!(
+                        repaired,
+                        "repaired controller response returns the corresponding handle"
+                    );
+                    assert!(
+                        controller
+                            .check_bytes(refusal.unwrap().as_bytes(), Surface::Printed)
+                            .is_ok(),
+                        "controller refusal keeps credentials private"
+                    );
+                });
+            }
         }
     }
 
@@ -2456,7 +3054,7 @@ mod tests {
             (r#"{"requests":[]}"#, "pending request is missing"),
             (
                 r#"{"requests":[{"request_id":"req-1"}]}"#,
-                "grant protocol requires a nonempty string field",
+                "grant protocol requires nonempty string session_id",
             ),
         ] {
             with_frames(vec![framed("200 OK", body)], |port| {
@@ -2603,7 +3201,7 @@ mod tests {
             ),
             (
                 framed("200 OK", r#"{"status":"granted"}"#),
-                Err("grant protocol requires a nonempty string field"),
+                Err("grant protocol requires nonempty string token"),
             ),
             (
                 framed("200 OK", r#"{"status":"granted","token":"invalid token"}"#),

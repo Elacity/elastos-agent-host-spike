@@ -27,7 +27,7 @@ impl<'a> Operator<'a> {
             return Err("unknown operator API fixture host".into());
         }
         let child = home.start(
-            &runtime.binary,
+            runtime.verified_path()?,
             &[
                 "serve",
                 "--addr",
