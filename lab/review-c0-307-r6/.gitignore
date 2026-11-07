@@ -1,0 +1,3 @@
+standins/bin/
+standins/procfd.c
+evidence/*.tmp

@@ -1,0 +1,78 @@
+head=1344792715fc21fef94dca5e973e14231ce604a6
+launcher=/workspace/lab/fail-closed-linux/target/debug/fcl-launch
+granted-twice: CAUGHT started=True note=two pathname execve of the granted binary after start
+  hunter mode=granted-twice pid=2
+  reexec1 errno=1 path=/tmp/review-c0-307-r6/lab/review-c0-307-r6/standins/bin/hunter
+  reexec2 errno=1 path=/tmp/review-c0-307-r6/lab/review-c0-307-r6/standins/bin/hunter
+  started did-provider pid=12122
+symlink-swap: CAUGHT started=True note=execve of a symlink under storage that names the granted binary
+  hunter mode=exec-path pid=2
+  exec_path errno=1 path=/tmp/fcl-r6-8k08r_ye/symlink-swap/granted-link
+  started did-provider pid=12127
+bind-mount-swap: NOT RUN started=True note=host bind-mount errno/exit=32 (this uid)
+  started did-provider pid=12134
+  hunter mode=exec-path pid=2
+  exec_path errno=1 path=/tmp/fcl-r6-8k08r_ye/bind-granted
+proc-self-exe: CAUGHT started=True note=execve(/proc/self/exe) after start
+  started did-provider pid=12144
+  hunter mode=proc-exe pid=2
+  proc_exe errno=1 path=/proc/self/exe
+  proc_exe_execveat errno=1
+shebang-after-start: CAUGHT started=True note=execve of a #! script whose interpreter is ungranted
+  hunter mode=shebang pid=2
+  shebang errno=1 path=/tmp/fcl-r6-8k08r_ye/shebang-after/run.sh
+  started did-provider pid=12149
+shebang-as-granted: CAUGHT started=False note=granted path is a #! script; interpreter is the payload
+  stderr: fail-closed-linux refused to start did-provider: layer exec, step execve: Permission denied (os error 13); the provider was not started
+
+fd3-socket-dup2: CAUGHT started=True note=socket inherited on fd 3, then dup2 onto 0 after sanitize
+  hunter mode=dup2-sock pid=2
+  inherit_fd_3 gone errno=9
+  fd 0 kind=pipe
+  fd 1 kind=pipe
+  fd 2 kind=pipe
+  started did-provider pid=12169
+pipe-then-scm: CAUGHT started=True note=stdin is a pipe; host sendmsg SCM_RIGHTS send_ok=False errno=88
+  started did-provider pid=12184
+  hunter mode=pipe-scm pid=2
+  stdin_kind=pipe
+  stdin_recvmsg errno=88
+tiocsti-fd-above-2: CAUGHT started=True note=TIOCSTI on an inherited pty kept on fd 3+
+  started did-provider pid=12200
+  hunter mode=tiocsti-high pid=2
+  tiocsti_fd_3 errno=9
+  fd 0 kind=pipe
+  fd 1 kind=pipe
+  fd 2 kind=pipe
+wrong-arch-execve: CAUGHT started=True note=execve via int 0x80 and __X32_SYSCALL_BIT after start
+  hunter mode=wrong-arch pid=2
+  started did-provider pid=12214
+  wrong_arch_child signal=31
+clone3-into-cgroup: CAUGHT started=True note=clone3(CLONE_INTO_CGROUP); 38=ENOSYS 1=EPERM
+  started did-provider pid=12226
+  hunter mode=clone3 pid=2
+  clone3_cgroup errno=38 ret=-1
+io-uring-setup: CAUGHT started=True note=io_uring_setup / enter / register after start
+  started did-provider pid=12245
+  hunter mode=io-uring pid=2
+  io_uring_setup errno=1 ret=-1
+  io_uring_enter errno=95 ret=-1
+  io_uring_register errno=95 ret=-1
+ptrace-sibling: CAUGHT started=True note=ptrace(PTRACE_ATTACH) of a forked sibling
+  started did-provider pid=12250
+  hunter mode=ptrace pid=2
+  ptrace_sibling errno=1 ret=-1 child=4
+  ptrace_traceme errno=1 ret=-1
+prctl-dumpable: SURVIVED started=True note=PR_SET_DUMPABLE / PR_SET_PTRACER_ANY; sibling ptrace; host attach='0 0 '; set1=dumpable_set1 errno=0 ret=0 ptracer=set_ptracer_any errno=22 ret=-1
+  started did-provider pid=12256
+  hunter mode=dumpable pid=2
+  dumpable_get errno=0 val=1
+  dumpable_set1 errno=0 ret=0
+  dumpable_set0 errno=0 ret=0
+  dumpable_reset1 errno=0 ret=0
+  set_ptracer_any errno=22 ret=-1
+  ptrace_sibling errno=1 ret=-1 child=4
+  ptrace_traceme errno=1 ret=-1
+  host_ptrace: 0 0 
+r5-memfd-procfd: UNKNOWN started=True note=r5 leftover replant: memfd no MFD_EXEC, execve(/proc/self/fd/N)
+  started did-provider pid=12268

@@ -1,0 +1,10 @@
+evidence_mount=console-only
+reconstruct=qemu-console.txt
+reason=9p.ko failed to load (unknown fscache symbols on Alpine virt 5.15)
+kernel=5.15.208-0-virt
+landlock_abi=1
+qemu_exit=0
+suite=abi1
+passed=3
+failed=0
+status=PASS
