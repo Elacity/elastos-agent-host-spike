@@ -1,0 +1,4 @@
+=== cargo fmt lane ===
+lane-fmt-exit:0
+=== cargo fmt wasi-guest ===
+wasi-fmt-exit:0

@@ -1,0 +1,5 @@
+HEAD 1a82d25bdd00d3a383433de84e97c39a4184d107
+ccf9fc61b70f4c0e6a9b7c44de03ecfbac9a76595bdf07ddb55e55a84d34f17a  lab/a1-a8-hardening/tests/a1_wasi_import.rs
+3c03fdc79e8ac2d4f2f7bbeda81f77dae265d60f1f8e0c6f1e50577520722859  lab/a1-a8-hardening/tests/a8_agent_host_host_key.rs
+7ef1dea5f1bcb725c08f8e54e347a23caa9856992007a2306b8289896a0da992  elastos/crates/elastos-server/src/component.rs
+b8edb86cf709a23c1634e420691cf9916e07014f648009e19878285a3da076be  elastos/crates/elastos-server/src/resource_bridge.rs

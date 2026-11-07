@@ -1,0 +1,8 @@
+F-A1-runtime wasi_import_is_refused_at_admission: exit 101, caught
+  a1 runtime: elastos sha256 0575e9244a1605c5212bba366592885ce162a7434403bac135fd951c858b7c0f
+  a1 wasi build: sha256 a6aa5328127a6c08cd2aee4aae4ef58cf5bb0ca0047e9e3089dedd0b4a33d884 imports ["wasi:cli/environment@0.2.0", "elastos:bus/types@1.0.0"]
+  a1 control build: sha256 b2eaaf6f054837ca0880218909766100214706fbaa9a098aba4fca72e06f6c4f imports ["elastos:bus/types@1.0.0"]
+  a1 refused run: exit:Some(1) refusal_line:Some("Error: Component capsule failed: Invalid manifest: component core module import \"wasi:cli/environment@0.2.0::get-environment\" is forbidden")
+  a1 control run: exit:Some(0) admitted_line:Some("[run] Component capsule 'a1-wasi-guest' exited")
+restored elastos/crates/elastos-server/src/component.rs sha256 7ef1dea5f1bcb725c08f8e54e347a23caa9856992007a2306b8289896a0da992
+F-A1-runtime: CAUGHT (expected caught)
