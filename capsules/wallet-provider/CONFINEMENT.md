@@ -615,7 +615,9 @@ seccomp allow list generated from this provider's declared rights, with the one
 builder, the one mapping table, the one step sequencer and the one install
 function that file names
 (`seccomp_allow_list_from_declared_rights`, `SECCOMP_RULE_SYSCALLS`,
-`install_seccomp_with`, `install_seccomp`). On a real Linux host the wallet
+`install_seccomp_with`, `install_seccomp`). The model provider's filter adds argument-checked rules
+for five calls; `thread_rule_calls_are_not_in_the_unconditional_list` keeps those
+calls out of the unconditional list, where they would be admitted first. On a real Linux host the wallet
 provider starts under that filter and the four denied calls answer the filter's
 own marker there, as `CONFINEMENT-LINUX.md` records with its host, kernel and
 per-call answers. The Landlock file row has a recorded run there too. That is the

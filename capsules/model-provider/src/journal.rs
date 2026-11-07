@@ -2389,13 +2389,16 @@ fn create_missing_journal_directory(path: &Path) -> Result<(), ProviderFault> {
     validate_new_owner_only_directory(path)
 }
 
-/// Owner-only from its first moment, so a confined provider needs no path-based
-/// chmod and the directory never exists under wider bits.
+/// Owner-only from its first moment, so the directory never exists under wider
+/// bits. A restrictive umask can leave it narrower than 0700, so the bits are then
+/// set through the open directory: a confined provider needs `fchmod` on its own
+/// directory, not a path-based `fchmodat`.
 fn create_owner_only_directory(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt;
-        fs::DirBuilder::new().mode(0o700).create(path)
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        fs::DirBuilder::new().mode(0o700).create(path)?;
+        fs::File::open(path)?.set_permissions(fs::Permissions::from_mode(0o700))
     }
     #[cfg(not(unix))]
     {

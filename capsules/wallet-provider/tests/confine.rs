@@ -6760,13 +6760,11 @@ const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[
     "epoll_pwait",
     "eventfd2",
     "exit",
-    "fcntl",
     "flock",
     "futex",
     "geteuid",
     "madvise",
     "munmap",
-    "prlimit64",
     "rseq",
     "rt_sigprocmask",
     "sched_getaffinity",
@@ -6774,11 +6772,25 @@ const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[
     "set_tid_address",
     "sigaltstack",
 ];
-/// `clone`'s and `socketpair`'s first argument in `seccomp_data`, low word.
-const SECCOMP_ARG0_OFFSET: u32 = 16;
+/// Argument words in `seccomp_data`: each argument is 64 bits, low word first on
+/// both aarch64 and x86_64.
+const SECCOMP_ARG0_LOW: u32 = 16;
+const SECCOMP_ARG0_HIGH: u32 = 20;
+const SECCOMP_ARG1_LOW: u32 = 24;
+const SECCOMP_ARG2_LOW: u32 = 32;
+const SECCOMP_ARG2_HIGH: u32 = 36;
 const SECCOMP_BPF_JSET_K: u16 = 0x45;
+/// The calls `seccomp_program_with_thread_rules` admits only with checked arguments.
+const THREAD_RULE_CALLS: [&str; 5] = ["clone3", "clone", "socketpair", "fcntl", "prlimit64"];
+/// Linux ABI values, written out because this builder compiles on macOS too, where
+/// libc has different numbers or none. `linux_abi_constants_match_libc` checks them.
+const LINUX_ENOSYS: u32 = 38;
+const LINUX_CLONE_THREAD: u32 = 0x1_0000;
+const LINUX_AF_UNIX: u32 = 1;
+const LINUX_F_GETFD: u32 = 1;
+const LINUX_F_DUPFD_CLOEXEC: u32 = 1030;
 /// `SECCOMP_RET_ERRNO` with `ENOSYS`, so glibc falls back from `clone3` to `clone`.
-const SECCOMP_RET_ENOSYS: u32 = 0x0005_0000 | libc::ENOSYS as u32;
+const SECCOMP_RET_ENOSYS: u32 = 0x0005_0000 | LINUX_ENOSYS;
 
 /// The value the filter returns for a refused call: `SECCOMP_RET_ERRNO` with
 /// the deny marker.
@@ -6966,12 +6978,22 @@ fn seccomp_program(syscalls: &[&'static str], audit_arch: u32) -> Vec<SeccompIns
     program
 }
 
-/// `seccomp_program` with three rules a threaded runtime needs before the final
-/// denial. `clone3` answers `ENOSYS`, because a filter cannot read its argument
-/// struct, so glibc falls back to `clone`. `clone` is admitted only with
-/// `CLONE_THREAD`, so threads start and new processes don't. `socketpair` is
-/// admitted only for `AF_UNIX`, so `socket` and the network stay refused. Each
-/// rule returns on both arms, so the number stays loaded for the next one.
+/// `seccomp_program` with the argument-checked rules a threaded runtime needs,
+/// before the final denial. Each admits only the form the model was measured
+/// using:
+/// - `clone3` answers `ENOSYS`, because a filter cannot read its argument struct,
+///   so glibc falls back to `clone`;
+/// - `clone` only with `CLONE_THREAD`, so threads start and new processes don't;
+/// - `socketpair` only for `AF_UNIX`, so `socket` and the network stay refused;
+/// - `fcntl` only for `F_GETFD` and `F_DUPFD_CLOEXEC`, so no `F_SETOWN` can aim a
+///   signal at another process;
+/// - `prlimit64` only for pid 0 with no new limit, so it reads its own limits and
+///   changes nobody's.
+///
+/// Each rule returns on both arms, so the number stays loaded for the next one.
+/// None of these five calls may also sit in the unconditional list, or its
+/// `ALLOW` would come first; `thread_rule_calls_are_not_in_the_unconditional_list`
+/// pins that.
 fn seccomp_program_with_thread_rules(
     syscalls: &[&'static str],
     audit_arch: u32,
@@ -6982,19 +7004,42 @@ fn seccomp_program_with_thread_rules(
         seccomp_syscall_number(name, audit_arch)
             .unwrap_or_else(|| panic!("{name} must have a number on this architecture"))
     };
+    for call in THREAD_RULE_CALLS {
+        assert!(
+            !syscalls.contains(&call),
+            "{call} takes an argument-checked rule, so it must not be admitted unconditionally"
+        );
+    }
     let mut program = seccomp_program(syscalls, audit_arch);
     program.pop();
     program.extend([
         SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("clone3"), 0, 1),
         SeccompInstruction::stmt(SECCOMP_BPF_RET_K, SECCOMP_RET_ENOSYS),
         SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("clone"), 0, 4),
-        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG0_OFFSET),
-        SeccompInstruction::jump(SECCOMP_BPF_JSET_K, libc::CLONE_THREAD as u32, 0, 1),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG0_LOW),
+        SeccompInstruction::jump(SECCOMP_BPF_JSET_K, LINUX_CLONE_THREAD, 0, 1),
         allow,
         deny,
         SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("socketpair"), 0, 4),
-        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG0_OFFSET),
-        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, libc::AF_UNIX as u32, 0, 1),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG0_LOW),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_AF_UNIX, 0, 1),
+        allow,
+        deny,
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("fcntl"), 0, 5),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG1_LOW),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_GETFD, 1, 0),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_DUPFD_CLOEXEC, 0, 1),
+        allow,
+        deny,
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("prlimit64"), 0, 10),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG0_LOW),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, 0, 0, 7),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG0_HIGH),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, 0, 0, 5),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG2_LOW),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, 0, 0, 3),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG2_HIGH),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, 0, 0, 1),
         allow,
         deny,
         deny,
@@ -13214,6 +13259,83 @@ fn linux_model_filter_admits_threads_and_refuses_new_processes() {
             0,
             "an AF_UNIX pair must be admitted"
         );
+
+        // clone3 answers ENOSYS by name. Admitted, a zero size would be EINVAL.
+        assert_eq!(
+            libc::syscall(libc::SYS_clone3, std::ptr::null::<u8>(), 0usize),
+            -1
+        );
+        assert_eq!(
+            *libc::__errno_location(),
+            libc::ENOSYS,
+            "clone3 must answer ENOSYS"
+        );
+
+        // fcntl: the two measured commands work; F_SETOWN, which can aim a signal
+        // at another process, is refused by the filter.
+        assert!(
+            libc::fcntl(pair[0], libc::F_GETFD) >= 0,
+            "F_GETFD must work"
+        );
+        let dup = libc::fcntl(pair[0], libc::F_DUPFD_CLOEXEC, 3);
+        assert!(dup >= 0, "F_DUPFD_CLOEXEC must work");
+        assert_eq!(
+            libc::fcntl(pair[0], libc::F_SETOWN, 1),
+            -1,
+            "F_SETOWN must be refused"
+        );
+        assert_eq!(*libc::__errno_location(), SECCOMP_DENY_ERRNO);
+
+        // prlimit64: reading its own limit works; another process's limit, or
+        // setting one, is refused by the filter (the kernel would say EPERM).
+        let mut old = std::mem::zeroed::<libc::rlimit>();
+        assert_eq!(
+            libc::prlimit(0, libc::RLIMIT_STACK, std::ptr::null(), &mut old),
+            0
+        );
+        assert_eq!(
+            libc::prlimit(1, libc::RLIMIT_NOFILE, std::ptr::null(), &mut old),
+            -1,
+            "another process's limit must be refused"
+        );
+        assert_eq!(*libc::__errno_location(), SECCOMP_DENY_ERRNO);
+        let lower = libc::rlimit {
+            rlim_cur: old.rlim_cur,
+            rlim_max: old.rlim_max,
+        };
+        assert_eq!(
+            libc::prlimit(0, libc::RLIMIT_NOFILE, &lower, std::ptr::null_mut()),
+            -1,
+            "setting a limit must be refused"
+        );
+        assert_eq!(*libc::__errno_location(), SECCOMP_DENY_ERRNO);
+    }
+}
+
+/// The Linux ABI values the portable builder writes out are libc's on Linux.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_abi_constants_match_libc() {
+    assert_eq!(LINUX_ENOSYS, libc::ENOSYS as u32);
+    assert_eq!(LINUX_CLONE_THREAD, libc::CLONE_THREAD as u32);
+    assert_eq!(LINUX_AF_UNIX, libc::AF_UNIX as u32);
+    assert_eq!(LINUX_F_GETFD, libc::F_GETFD as u32);
+    assert_eq!(LINUX_F_DUPFD_CLOEXEC, libc::F_DUPFD_CLOEXEC as u32);
+}
+
+/// A call with an argument-checked rule placed in the unconditional list would be
+/// admitted before its rule is read, so the builder refuses that list.
+#[test]
+fn thread_rule_calls_are_not_in_the_unconditional_list() {
+    for call in THREAD_RULE_CALLS {
+        assert!(!MODEL_RUNTIME_ESSENTIALS.contains(&call), "{call}");
+        assert!(
+            LAUNCH_ESSENTIALS.iter().all(|(listed, _)| *listed != call),
+            "{call}"
+        );
+        let refused =
+            std::panic::catch_unwind(|| seccomp_program_with_thread_rules(&[call], 0xc000_00b7));
+        assert!(refused.is_err(), "{call} in the list must be refused");
     }
 }
 
