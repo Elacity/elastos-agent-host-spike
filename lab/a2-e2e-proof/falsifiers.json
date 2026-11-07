@@ -1,0 +1,13 @@
+{
+  "falsifiers": [
+    {
+      "id": "F-A2-REVISION",
+      "path": "elastos/crates/elastos-server/src/resource_bridge.rs",
+      "old": "                Err(err) if err.is::<crate::auth::PrincipalRootObjectWriteConflict>() => {\n                    Some(provider_error_result(\"revision_conflict\", &err.to_string()))\n                }",
+      "new": "                Err(err) if err.is::<crate::auth::PrincipalRootObjectWriteConflict>() => {\n                    Some(provider_ok_result(serde_json::json!({\n                        \"bytes_written\": content.len(),\n                        \"revision\": \"forged-stale\",\n                    })))\n                }",
+      "test": "resource_bridge::tests::a_stale_journal_revision_is_refused_and_the_stored_journal_is_kept",
+      "ignored": false,
+      "why": "A stale if_revision write is accepted instead of revision_conflict"
+    }
+  ]
+}
