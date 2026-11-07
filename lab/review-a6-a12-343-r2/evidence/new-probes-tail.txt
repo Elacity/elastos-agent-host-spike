@@ -1,0 +1,40 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 05s
+     Running unittests src/lib.rs (target-build/debug/deps/a6_a12_evidence_fix-dc283ce8e0e260af)
+
+running 15 tests
+r2 case variant: WrongCapsule { expected:instance-1 got:INSTANCE-1 }
+r2 unicode zwsp: WrongCapsule got_len=13
+test review_probes::r2_capsule_id_case_variant_is_refused ... ok
+test review_probes::r2_capsule_id_unicode_zwsp_is_refused ... ok
+r2 ELASTOS_TMP_ROOT=/ roots=["/storage", "/"]
+test review_probes::r2_elastos_tmp_root_slash_has_no_guard ... ok
+r2 unset ELASTOS_TMP_ROOT defaults to /tmp/elastos (shared Runtime temp)
+test review_probes::r2_elastos_tmp_root_unset_defaults_to_shared_tmp ... ok
+r2 relative ELASTOS_TMP_ROOT accepted: r2-relative-tmp leftover r2-relative-tmp/storage/a6-a12-evidence-fix-planted
+test review_probes::r2_elastos_tmp_root_relative_is_accepted ... ok
+r2 expired token: TokenExpired
+test review_probes::r2_expired_token_is_refused ... ok
+r2 owner other-resource: WrongResource
+test review_probes::r2_owner_other_resource_is_wrong_resource ... ok
+r2 unrelated rename leftovers=["/tmp/pr343-r2/lab/a6-a12-evidence-fix/target/a12-isolated/r2-unrelated-16614-1793053404386146164-1/named-root"] saw_marker=false
+test review_probes::r2_rename_to_unrelated_name_hides_marker ... ok
+r2 marker-absent rename leftovers=[] saw_plain=false
+test review_probes::r2_renamed_tree_without_marker_is_hidden ... ok
+r2: #343 does not claim Anders resident-instance A6
+test review_probes::r2_subject_does_not_claim_resident_instances ... ok
+r2 symlink loop refused: could not resolve symlink root /tmp/pr343-r2/lab/a6-a12-evidence-fix/target/a12-isolated/r2-loop-16614-1793053404386750134-3/loop-root
+test review_probes::r2_symlink_loop_does_not_pass_as_clean ... ok
+r2 tampered base64: from_base64 refused (failed to deserialize token: invalid value: integer `67108864`, expected variant index 0 <= i < 6)
+test review_probes::r2_tampered_base64_is_refused ... ok
+r2 revoked token: TokenRevoked
+test review_probes::r2_revoked_token_is_refused ... ok
+r2 other-action sibling: WrongCapsule { expected:instance-1 got:instance-2 }
+test review_probes::r2_token_for_other_action_sibling_is_still_wrong_capsule ... ok
+r2 other-resource sibling: WrongCapsule { expected:instance-1 got:instance-2 }
+test review_probes::r2_token_for_other_resource_sibling_is_still_wrong_capsule ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.03s
+
+new-probes cargo exit=0
+PROBES_EXIT:0
+ls: cannot access '/tmp/pr343-r2/lab/a6-a12-evidence-fix/src/review_probes.rs': No such file or directory

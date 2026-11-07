@@ -1,0 +1,18 @@
+independent #365 replants at 732b6990a4f8c2663eea4d13c549cbea402dcfd7
+restored /tmp/pr343-r2/elastos/crates/elastos-runtime/src/capability/manager.rs sha256=cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a cargo_exit=101
+CAUGHT M-A6-PREFIX-BIND by tests::a6_prefix_capsule_id_is_refused
+restored /tmp/pr343-r2/elastos/crates/elastos-runtime/src/capability/manager.rs sha256=cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a cargo_exit=101
+CAUGHT M-A6-EMPTY-TOKEN by tests::a6_empty_token_capsule_is_refused
+restored /tmp/pr343-r2/elastos/crates/elastos-runtime/src/capability/manager.rs sha256=cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a cargo_exit=101
+CAUGHT M-A6-COMMENT-STEP4 by tests::a6_sibling_presenting_owner_token_is_refused
+restored /tmp/pr343-r2/lab/a6-a12-evidence-fix/src/a12.rs sha256=e38987db09836cca4b1dde0377d359041add6fc382b816848f466c9276347966 cargo_exit=101
+CAUGHT M-A12-HARDCODE-FAIL by tests::a12_clean_isolated_root_passes
+restored /tmp/pr343-r2/lab/a6-a12-evidence-fix/src/a12.rs sha256=e38987db09836cca4b1dde0377d359041add6fc382b816848f466c9276347966 cargo_exit=101
+CAUGHT M-A12-SYMLINK-ROOT by tests::a12_symlink_root_is_scanned_through
+restored /tmp/pr343-r2/lab/a6-a12-evidence-fix/src/a12.rs sha256=e38987db09836cca4b1dde0377d359041add6fc382b816848f466c9276347966 cargo_exit=101
+CAUGHT M-A12-RENAME-ROOT by tests::a12_renamed_root_is_found_by_marker
+replants finished; manager.rs sha256=cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a
+a12.rs sha256=e38987db09836cca4b1dde0377d359041add6fc382b816848f466c9276347966
+REPLANT_EXIT:0
+cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a  /tmp/pr343-r2/elastos/crates/elastos-runtime/src/capability/manager.rs
+e38987db09836cca4b1dde0377d359041add6fc382b816848f466c9276347966  /tmp/pr343-r2/lab/a6-a12-evidence-fix/src/a12.rs
