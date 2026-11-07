@@ -1,0 +1,83 @@
+r6 hunts at 5547edeacab167bd822e90a6af7258c5d55f2ce1
+
+running 17 tests
+HUNT r6-bind-mount: NOT RUN | mount --bind and unshare -m are refused; lab must fail closed (NOT RUN), never PASS this class
+test review_probes::r6_bind_mount_into_watched_tree ... ok
+HUNT r6-subdir-ephemeral: SURVIVED | create-then-delete inside a /var/tmp subdirectory; live watch is only on the top of writable temps
+test review_probes::r6_create_delete_in_vartmp_subdir ... ok
+HUNT r6-detached-after-return: SURVIVED | setsid child wrote under /var/tmp after leftovers_in_run_window returned Ok; census PASSed a window it did not close
+test review_probes::r6_detached_child_writes_after_census_returns ... ok
+HUNT r6-detached-during: CAUGHT | setsid child wrote under /var/tmp after the first snapshot and the file still existed at the second census
+test review_probes::r6_detached_child_writes_during_window ... ok
+HUNT r6-hardlink-out: SURVIVED | inode still linked at /home/ubuntu/r6-hl-out-19221-1793062368766029309/keep.txt after watch copy deleted; dest not in leftovers (src_event=false)
+test review_probes::r6_hardlink_copied_out_then_deleted ... ok
+HUNT r6-home-cache: SURVIVED | XDG_CACHE_HOME set; extra_watch_roots watches_home_cache=false leftover_found=true (first run planted under isolation)
+# rerun with HOME=/home/ubuntu/r6-home-cache-* (outside isolation and /tmp):
+# HUNT r6-home-cache: SURVIVED | XDG_CACHE_HOME set; extra_watch_roots watches_home_cache=false leftover_found=false
+test review_probes::r6_home_cache_while_xdg_cache_home_set ... ok
+HUNT r6-overflow: CAUGHT | IN_Q_OVERFLOW fail closed after 18432 create/delete events: inotify queue overflow; leftover watch fail closed
+test review_probes::r6_inotify_queue_overflow_fail_closed ... ok
+HUNT r6-otmpfile: CAUGHT | O_TMPFILE + linkat AT_EMPTY_PATH into /var/tmp; file still present at second census
+test review_probes::r6_otmpfile_linkat_into_tree ... ok
+HUNT r6-pidns: NOT RUN | unshare -p refused (unshare: unshare failed: Operation not permitted
+); pid-namespace reuse must fail closed (NOT RUN), never PASS
+HUNT r6-pidns-self-pid1: CAUGHT | this pid + pid 1 still FAIL
+test review_probes::r6_pid_namespace_reuse ... ok
+HUNT r6-otmpfile-unlink: SURVIVED | O_TMPFILE + linkat into a /var/tmp subdir, then unlink before the second snapshot
+test review_probes::r6_otmpfile_linkat_then_unlink_in_subdir ... ok
+HUNT r6-preopen-existing: CAUGHT | write via fd opened before the snapshot on a file that still exists
+test review_probes::r6_preopened_fd_write_existing_file ... ok
+HUNT r6-ra6-current: BLOCKED | ask=RA-6 reason=RA-6: Runtime does not host two resident capsule instances in one process. Bus v2 / RT4 still owns resident lifecycle. Owner A6 rows use fixture deny across Homes, not validate step 4. See lab/a6-a12-evidence-fix/RA-6.md.
+test review_probes::r6_ready_journey_still_blocked ... ok
+HUNT r6-preopen-dirfd: SURVIVED | create+delete via dirfd opened before the watch, inside a /var/tmp subdir that is not recursively inotify-watched
+test review_probes::r6_preopened_dirfd_create_delete_in_subdir ... ok
+HUNT r6-rename-in: CAUGHT | rename from unwatched $HOME into /var/tmp
+test review_probes::r6_rename_unwatched_to_watched ... ok
+HUNT r6-run-user: NOT RUN | /run/user/1000 is absent and this user cannot create it; writable_temp_roots lists it=false. Must fail closed (NOT RUN), never PASS.
+test review_probes::r6_run_user_uid_temp ... ok
+HUNT r6-watch-limit: SURVIVED | LiveWatch::open / add_dir_watches_recursive ignore 2 add failures; exhausted max_user_watches would drop events and still PASS
+HUNT r6-watch-limit-host: NOT RUN | max_user_watches=127865; this user cannot write the sysctl; lab must fail closed when add fails rather than PASS
+test review_probes::r6_watch_limit_add_failures_are_ignored ... ok
+HUNT r6-rename-out-event: CAUGHT | IN_MOVED_FROM / source event recorded
+HUNT r6-rename-out-dest: SURVIVED | leftover still at unwatched /home/ubuntu/r6-ren-dest-19221-1793062514536993322.txt and dest path was not listed
+test review_probes::r6_rename_watched_to_unwatched ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 57 filtered out; finished in 232.85s
+
+new-hunts cargo r6_ exit=0
+
+== R6-IGNORE-OVERFLOW: drop IN_Q_OVERFLOW fail-closed ==
+
+== plant R6-IGNORE-OVERFLOW against tests::a12_create_then_delete_between_snapshots_is_found cargo_exit=0 ==
+   Compiling a6-a12-evidence-fix v0.0.0 (/tmp/pr343-r6/lab/a6-a12-evidence-fix)
+warning: unused import: `std::os::unix::fs::MetadataExt`
+ --> src/review_probes.rs:7:5
+  |
+7 | use std::os::unix::fs::MetadataExt;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `a6-a12-evidence-fix` (lib test) generated 1 warning (run `cargo fix --lib -p a6-a12-evidence-fix --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.08s
+     Running unittests src/lib.rs (target-build/debug/deps/a6_a12_evidence_fix-fac6703e7673a7a0)
+
+running 1 test
+A12 create-then-delete leftover found at /var/tmp/a6-a12-r5-transient-19309-1793062537931003826.txt
+test tests::a12_create_then_delete_between_snapshots_is_found ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 73 filtered out; finished in 23.58s
+HUNT R6-IGNORE-OVERFLOW SURVIVED against tests::a12_create_then_delete_between_snapshots_is_found (named test stayed green)
+
+== R6-IGNORE-WATCH-ADD: current code already uses let _ = watch.add ==
+804:                let _ = watch.add(&root);
+900:            let _ = watch.add(&path);
+HUNT R6-IGNORE-WATCH-ADD SURVIVED in source: watch add failures are ignored
+
+== R6-HOME-CACHE-SKIP: extra_watch_roots continue after XDG ==
+175:            continue;
+197:            continue;
+746:                continue;
+1107:            continue;
+HUNT R6-HOME-CACHE-SKIP source still skips HOME fallback when XDG is set
+new-hunts finished probe_exit=0
