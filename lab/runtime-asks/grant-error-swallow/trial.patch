@@ -1,0 +1,101 @@
+diff --git a/examples/agent-host/src/lib.rs b/examples/agent-host/src/lib.rs
+index ae50487d..da960ffd 100644
+--- a/examples/agent-host/src/lib.rs
++++ b/examples/agent-host/src/lib.rs
+@@ -3831,24 +3831,31 @@ struct JournalGrants {
+ }
+ 
+ /// Ask the Runtime for exactly two grants on this agent's own journal: write,
+-/// then read. Nothing else is asked for. A refusal leaves that grant empty, so
+-/// nothing is sent with it.
++/// then read. Nothing else is asked for. A Denied refusal leaves that grant
++/// empty, so nothing is sent with it. Any other Bus failure is returned, so
++/// an internal error is not an ordinary deny.
+ #[cfg(any(test, target_arch = "wasm32"))]
+-fn request_journal_grants(bus: &mut impl ResourceBus, cursor: &JournalCursor) -> JournalGrants {
++fn request_journal_grants(
++    bus: &mut impl ResourceBus,
++    cursor: &JournalCursor,
++) -> Result<JournalGrants, BusFailure> {
+     if !cursor.resource.starts_with(JOURNAL_ROOT) || host_path(&cursor.resource) {
+-        return JournalGrants {
++        return Ok(JournalGrants {
+             write: None,
+             read: None,
+-        };
++        });
+     }
+-    let mut ask = |action: &str| {
+-        bus.request_grant(&cursor.resource, action, "Agent Host task journal")
+-            .ok()
+-            .and_then(|id| JournalGrant::new(&id))
++    let mut ask = |action: &str| -> Result<Option<JournalGrant>, BusFailure> {
++        match bus.request_grant(&cursor.resource, action, "Agent Host task journal") {
++            Ok(id) => Ok(JournalGrant::new(&id)),
++            Err(BusFailure::Denied) => Ok(None),
++            Err(err) => Err(err),
++        }
+     };
+-    let write = ask("write");
+-    let read = ask("read");
+-    JournalGrants { write, read }
++    Ok(JournalGrants {
++        write: ask("write")?,
++        read: ask("read")?,
++    })
+ }
+ 
+ /// A Bus failure as the guest sees it. The Runtime refuses `denied` and
+@@ -8083,7 +8090,23 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
+         let mut cursor = journal_cursor("agent-host", "demo").map_err(|_| {
+             elastos::bus::types::BusError::Invalid("the journal id was refused".to_string())
+         })?;
+-        let grants = request_journal_grants(&mut WasmBus, &cursor);
++        let grants = match request_journal_grants(&mut WasmBus, &cursor) {
++            Ok(grants) => grants,
++            Err(BusFailure::Denied) => JournalGrants {
++                write: None,
++                read: None,
++            },
++            Err(BusFailure::Invalid) => {
++                return Err(elastos::bus::types::BusError::Invalid(
++                    "journal grant request was invalid".to_string(),
++                ));
++            }
++            Err(BusFailure::Other) => {
++                return Err(elastos::bus::types::BusError::Internal(
++                    "journal grant request failed internally".to_string(),
++                ));
++            }
++        };
+         let appended = append_journal(
+             &mut WasmBus,
+             &mut journal,
+@@ -17079,7 +17102,7 @@ mod tests {
+     #[test]
+     fn the_guest_asks_for_exactly_two_grants_on_its_own_journal() {
+         let (mut runtime, cursor) = fake_runtime();
+-        let grants = request_journal_grants(&mut runtime, &cursor);
++        let grants = request_journal_grants(&mut runtime, &cursor).expect("grant request");
+         assert_eq!(
+             grants.write.as_ref().map(JournalGrant::id),
+             Some(WRITE_GRANT)
+@@ -17111,7 +17134,7 @@ mod tests {
+     fn a_refused_grant_request_sends_nothing() {
+         let (mut runtime, mut cursor) = fake_runtime();
+         runtime.refuse_grants = true;
+-        let grants = request_journal_grants(&mut runtime, &cursor);
++        let grants = request_journal_grants(&mut runtime, &cursor).expect("denied is empty grants");
+         assert!(grants.write.is_none() && grants.read.is_none());
+         let mut journal = two_turns();
+         assert_eq!(
+@@ -17140,7 +17163,8 @@ mod tests {
+             "localhost://Users/self/.AppData/Agents/../../Documents/journal",
+         ] {
+             cursor.resource = resource.to_string();
+-            let grants = request_journal_grants(&mut runtime, &cursor);
++            let grants = request_journal_grants(&mut runtime, &cursor)
++                .expect("outside path is empty grants");
+             assert!(
+                 grants.write.is_none() && grants.read.is_none(),
+                 "{resource}"

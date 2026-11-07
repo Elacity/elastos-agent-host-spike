@@ -1,0 +1,16 @@
+[package]
+name = "grant-error-swallow"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+# The profiles in elastos/Cargo.toml.
+[profile.dev]
+opt-level = 0
+debug = "line-tables-only"
+
+[profile.test]
+opt-level = 0
+debug = "line-tables-only"
