@@ -14,8 +14,8 @@ declared rights; it does not load a profile that the provider supplies.
 `confine.sb` in this folder is the test oracle: the profile the Runtime
 generates for this provider must match it, with the same three parameters bound
 to the same paths. A lab generator, `generate_profile` in
-`capsules/wallet-provider/tests/confine.rs`, builds this profile from the
-declared-rights file and the contract head, and
+`capsules/wallet-provider/tests/common/profile_generator.rs`, builds this
+profile from the declared-rights file and the contract head, and
 `generated_did_and_wallet_profiles_match_their_committed_oracles` requires it
 to equal this oracle; the Runtime's own generator and its comparison are not
 built and stay in `elastos/`, outside this lane.
@@ -82,6 +82,11 @@ The generated profile binds three parameters, which the tests pass with
 - `STORAGE_ROOT`: `Init.base_path/did`.
 - `STORAGE_PARENT`: `Init.base_path`.
 
+One rule, `profile_parameter_section_problems`, under the test
+`every_confinement_document_states_its_bindings_from_the_one_derivation`,
+holds these three names and the two storage layouts to the one derivation the
+launch uses, and it does not check a path for `PROVIDER_EXECUTABLE`.
+
 The tests pass a temporary base and bind all three parameters before launch;
 the Runtime half of the bridge change does the same and is not built.
 
@@ -96,6 +101,11 @@ interpolates storage paths into `(regex ...)` rules rather than binding a
 inline with `sandbox-exec -p` rather than `-f confine.sb`. It does not share
 the file-profile contract and this document does not claim it does. Aligning
 the model provider is future Runtime work in `elastos/`, outside this lane.
+The rule `model_inline_profile_problems` reads this section's quoted forms
+against the bridge's production region, and the rule
+`model_inline_profile_copies_agree` reads the same section in both documents
+for one text; `model_inline_profile_sections_match_the_bridge` runs both, and
+the did and wallet providers run under their own profile.
 The model provider's own file profile, `../model-provider/confine.sb`,
 presents this contract as an oracle, and the shared test requires it; the
 generated profile for the model provider must match it too.
@@ -115,9 +125,32 @@ not decide whether the function is a `#[test]`. The check
 `every_operations_table_row_matches_its_provider_and_the_contract` holds every
 row to four rules: the row set follows the provider's own dispatch, a Right
 cell names a declared id or `none: needs no declared right`, a right row cites
-both sides, and every Linux cell stays `designed, not enforced`. A refusal
-under `(deny default)` is a denial, not a grant, and no row writes it as a
-right. The
+both sides, and every Linux cell stays `designed, not enforced`. A fifth rule,
+beside those four row rules, holds the capsule's own `capsule.json`, and
+`operations_table_row_check_refuses_each_bad_table` refuses a manifest that
+breaks it, because a manifest declares only operations the provider answers and
+a provider may own operations its manifest does not name. The same check
+reads each ordinary row's Inputs cell against the fields its `Request` arm
+declares, in declaration order, and reads a `wallet_contract` row. This table
+has none. The same check reads each row's Outputs cell against what its handler
+answers: the error side is the `Response` serde tag and its `Error` fields, and
+`data`'s children are the keys of that handler's one `json!`, in declaration
+order. `operations_table_row_check_refuses_each_bad_table`, in
+`../wallet-provider/tests/confine.rs`, refuses an Outputs cell that leaves a
+key out, adds one, or writes another error name. The check also reads a
+declared-right row's macOS cell for an allow form of that right, and a
+`none: needs no declared right` row quotes none, so
+`operations_table_row_check_refuses_each_bad_table` refuses a bad quote. The same
+check holds each row's Effect cell against the right the row declares and the
+dispatch class the contract's `class()` gives its kind: a
+`none: needs no declared right` row names no canonical parameter and quotes no
+allow form, and a `storage` row names `STORAGE_ROOT`. This table has no
+`wallet_contract` row, so the class half of that rule has nothing to read here.
+The rule reads the cells against that declared class; it does not show that a
+handler writes only what its cell names.
+`operations_table_row_check_refuses_each_bad_table` refuses a bad Effect cell. A
+refusal under `(deny default)` is a denial, not a grant, and no row writes it
+as a right. The
 startup grants stay in "What the profile allows". A `storage` row cites both
 sides of its right: `permitted:` names the test that shows the operation under
 `STORAGE_ROOT`, and `nearest outside refused:` names the test that shows the
@@ -158,18 +191,46 @@ one on `linux` is a skip, and a present one on `macos` runs the test.
 The one caller, `sandbox_available`, fails the test on that
 error; `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` calls
 it with `macos` and a missing path and expects the failure.
-This contract has no Linux enforcement or tests yet. A provider-status claim
+This contract has no Linux enforcement of its file rows. A provider-status claim
 needs host-specific test evidence and the Runtime acceptance step, so no status
-document records `did-provider` or `wallet-provider` as confined on Linux until
-that test exists (P10, P11). The status change lands when the Runtime side
-does.
+document records `did-provider` or `wallet-provider` as confined on Linux (P10,
+P11). The status change lands when the Runtime side does.
 
-Future Linux enforcement tests for this lab contract are designed in
-`../wallet-provider/CONFINEMENT-LINUX.md`: it is the one Linux mapping, its
-tests do not exist yet, and it claims no current behaviour. The existing
-source-only check `both_file_profiles_bind_one_storage_parameter_contract`,
-in `../wallet-provider/tests/confine.rs`, reads the three oracles and supplies
+The shared seccomp journey has a did caller,
+`linux_did_journey_runs_under_the_seccomp_allow_list`, in
+`../wallet-provider/tests/confine.rs`. It builds did's list from did's own
+committed declared-rights file through the one builder and requires the same
+program as wallet. It starts did through the shared stand-in and installer and
+requires `init`, `get_did` with a `did:key:` value, `resolve`, `set_nickname`,
+`get_nickname` and `get_persona_did` to answer under that filter.
+The did seccomp row awaits the shared policy owner's decision: the recorded
+`spark1.local` run (`aarch64`, Ubuntu 24.04.4, kernel `6.17.0-1029-nvidia`)
+needed `fchmodat` to save the nickname. The earlier successful run added that
+permission to wallet's policy too. The shared table now preserves wallet's
+policy, and the did test retains all its assertions. A fresh Linux run after the
+policy decision is required for did acceptance.
+
+No contract file row is enforced on Linux: a seccomp filter reads syscall numbers
+and not paths, so the file rows stay open, and `linux` stays out of
+`DECLARED_CONFINED_OS`. Namespaces, Landlock and capability dropping stay
+unbuilt. The one Linux mapping is `../wallet-provider/CONFINEMENT-LINUX.md`, which
+records the seccomp row, its host and its measured launch set; this document
+claims no other Linux behaviour. The existing source-only check
+`both_file_profiles_bind_one_storage_parameter_contract`, in
+`../wallet-provider/tests/confine.rs`, reads the three oracles and supplies
 contract evidence, not Linux execution evidence.
+
+The file row has a did caller, `linux_did_file_row_is_refused_outside_storage_root`,
+which is `linux_wallet_file_row_is_refused_outside_storage_root`'s one body with
+did's own binary, did's own declared rights, did's own bindings and
+`did_standin_permitted_operations` driven whole. `landlock_probe_paths_follow_the_bound_parameters`
+holds on every OS that did's probe reads `<base>/did`, `<base>` and did's own
+binary. The did half of that row is GAP. Task 160 ran it on `spark1.local`
+(`aarch64`, Ubuntu 24.04.4, kernel `6.17.0-1029-nvidia`, Landlock ABI 7) and
+recorded the cause in `../wallet-provider/CONFINEMENT-LINUX.md`: a launch needs
+`READ_FILE` on `PROVIDER_EXECUTABLE` as well as `EXECUTE`, and the journey
+requires the read of that file to be refused, so the shipped row starts
+neither provider. Did's loader measurement against the one list is GAP too.
 
 ## What the profile allows
 
@@ -193,6 +254,10 @@ contract evidence, not Linux execution evidence.
 three shared contract rules pinned verbatim by
 `both_file_profiles_bind_one_storage_parameter_contract`; the `STORAGE_PARENT`
 read is the one of them that did-provider keeps only for that contract.
+
+One rule, `profile_allow_table_problems`, under the test
+`every_confinement_document_lists_its_profiles_allow_rules`, holds the listed
+forms to `confine.sb`, and the reason column is not checked.
 
 Every other file read, file write, process and network operation falls to
 `(deny default)`.
@@ -319,15 +384,16 @@ and a missing or unreadable profile fails the check with a reason that names
 its path. The test runs on every platform because it reads files and starts
 no process.
 
-`every_did_and_wallet_allow_rule_has_a_registered_removal` in the same file
-requires a registered removal falsifier for every top-level allow rule of did's
-profile.
+`every_did_and_wallet_allow_rule_has_a_registered_removal` in
+`../wallet-provider/tests/confine.rs` requires a registered removal falsifier
+for every top-level allow rule of did's profile.
 
-`every_falsifier_id_is_named_in_its_confinement_document` in the same file
-reads this document, `../wallet-provider/CONFINEMENT.md` and both falsifier
-lists, and fails when a registered id is not named in its own document's
-`## Falsifiers` section or the section names an id that neither list
-registers. It reads files and starts no process.
+`every_falsifier_id_is_named_in_its_confinement_document` in
+`../wallet-provider/tests/confine.rs` reads this document,
+`../wallet-provider/CONFINEMENT.md` and both falsifier lists, and fails when a
+registered id is not named in its own document's `## Falsifiers` section or the
+section names an id that neither list registers. It reads files and starts no
+process.
 
 `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` checks the gate
 itself without starting a process: a missing `sandbox-exec` on `macos` is an
@@ -395,6 +461,13 @@ enforcement. The stand-in is test code and not the Runtime.
 This section records the lab evidence for M1 checks C0 and B3 for
 `did-provider`. It states what the evidence is and gives no verdict; cc-redteam
 judges C0 and B3.
+
+The rule `m1_summary_problems`, which
+`every_m1_summary_names_its_journey_and_its_falsifiers` runs over this summary,
+reads each part's `Journey test:` name and requires that name to be a `fn`
+declaration in `../wallet-provider/tests/confine.rs`, then reads the ids of that
+part's `CAUGHT falsifiers.` block and requires them to be exactly the ids
+wallet's `falsifiers.json` registers against that one test.
 
 Pins: `e31f0f517a3364c6067b1989c1c985c21f823312` is a fixed commit on this lane; every `confine.rs` line number in this section is read with `git show e31f0f517a3364c6067b1989c1c985c21f823312:capsules/wallet-provider/tests/confine.rs`, each wallet `falsifiers.json` entry line in this section is read with `git show e31f0f517a3364c6067b1989c1c985c21f823312:capsules/wallet-provider/falsifiers.json`, and each file pin below is a commit that holds the file, read with `git show <commit>:<path>`.
 
