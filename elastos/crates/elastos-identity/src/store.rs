@@ -267,13 +267,25 @@ pub fn save_nickname_with_device_key(
         std::fs::create_dir_all(parent)?;
     }
     let encrypted = encrypt_data(&derive_storage_key(device_key), nickname.as_bytes())?;
-    std::fs::write(&path, encrypted)?;
 
+    // Through the open file, so the bytes never sit under wider bits and a
+    // confined provider needs fchmod on its own file, not a path-based fchmodat.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        // `mode` applies only when the file is created, and an older file may be wider.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(&encrypted)?;
     }
+    #[cfg(not(unix))]
+    std::fs::write(&path, encrypted)?;
 
     Ok(())
 }
@@ -1186,6 +1198,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         save_nickname(dir.path(), "alice").unwrap();
         assert_eq!(load_nickname(dir.path()).unwrap().as_deref(), Some("alice"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nickname_file_is_private_even_over_an_older_wider_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = nickname_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"older").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        save_nickname(dir.path(), "Private").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(load_nickname(dir.path()).unwrap().as_deref(), Some("Private"));
     }
 
     #[test]

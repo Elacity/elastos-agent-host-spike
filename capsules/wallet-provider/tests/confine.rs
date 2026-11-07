@@ -6985,7 +6985,14 @@ const LANDLOCK_RULE_RIGHTS: &[(&str, u64)] = &[
             | LANDLOCK_ACCESS_FS_MAKE_DIR
             | LANDLOCK_ACCESS_FS_MAKE_REG,
     ),
-    (SHARED_RULES[0], LANDLOCK_ACCESS_FS_EXECUTE),
+    // READ_FILE as well: Landlock checks execve's open of the program as a read,
+    // so EXECUTE alone answers EACCES before the provider's first instruction
+    // (measured on kernels 6.17 and 7.0). Landlock cannot separate the two rights
+    // here, and a provider reading its own published binary reveals nothing.
+    (
+        SHARED_RULES[0],
+        LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE,
+    ),
     (SHARED_RULES[1], 0),
     (STARTUP_RULES[0], 0),
     (STARTUP_RULES[1], 0),
@@ -7145,8 +7152,8 @@ struct LandlockRuleset {
 ///   to map `libm.so.6` and exits with `error while loading shared libraries:
 ///   libm.so.6: cannot open shared object file`.
 ///
-/// This session did not repeat that drop-one measurement against the wallet
-/// binary on spark1, so `CONFINEMENT-LINUX.md` records the file row as GAP.
+/// That drop-one measurement was not repeated against each binary on the host
+/// `CONFINEMENT-LINUX.md` names; the run there shows the list is enough for both.
 /// The paths stay here so the ruleset the installer would apply is the one the
 /// Mac test reads. The table is compiled on every OS.
 const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
@@ -7501,8 +7508,8 @@ fn landlock_ruleset_follows_the_declared_rights() {
         );
         assert_eq!(
             rule("PROVIDER_EXECUTABLE").rights,
-            LANDLOCK_ACCESS_FS_EXECUTE,
-            "{name}: the bound-executable row must carry execution-only rights"
+            LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE,
+            "{name}: the bound-executable row must carry what execve needs and no more"
         );
         assert_eq!(
             rule("PROVIDER_EXECUTABLE").path,
@@ -12019,7 +12026,9 @@ fn linux_landlock_requires_no_new_privs() {
     for (call, answer) in LANDLOCK_PROBE_CALLS.into_iter().zip(report.answers) {
         if matches!(
             call,
-            LandlockProbeCall::ReadInside | LandlockProbeCall::WriteInside
+            LandlockProbeCall::ReadInside
+                | LandlockProbeCall::WriteInside
+                | LandlockProbeCall::ReadExecutable
         ) {
             assert!(
                 matches!(answer, LandlockAnswer::Returned(_)),
@@ -12075,6 +12084,7 @@ fn landlock_file_row_journey(
     bindings: &[(&'static str, PathBuf)],
     ruleset: &LandlockRuleset,
     permitted: impl FnOnce(&mut ConfinedProvider),
+    first_effect_outside: impl FnOnce(&mut ConfinedProvider, &Path) -> Value,
 ) {
     let profile_fixture = tempfile::tempdir().expect("temporary profile root");
     let profile_dir = resolved(profile_fixture.path());
@@ -12155,28 +12165,28 @@ fn landlock_file_row_journey(
     );
 
     let outside_base = storage_parent(name, base).join("landlock-outside-base");
-    let outside_init = provider.init(&outside_base);
+    let outside = first_effect_outside(&mut provider, &outside_base);
     assert_eq!(
-        outside_init["status"], "error",
-        "an Init for a base outside STORAGE_ROOT must be refused under the launch: {outside_init}"
+        outside["status"], "error",
+        "the first effect for a base outside STORAGE_ROOT must be refused under the launch: {outside}"
     );
     assert_eq!(
-        outside_init["code"], "storage_error",
-        "the outside Init must be a storage refusal: {outside_init}"
+        outside["code"], "storage_error",
+        "the outside effect must be a storage refusal: {outside}"
     );
-    let reason = outside_init["message"]
+    let reason = outside["message"]
         .as_str()
-        .unwrap_or_else(|| panic!("the outside Init must carry a reason: {outside_init}"));
+        .unwrap_or_else(|| panic!("the outside effect must carry a reason: {outside}"));
     assert!(
         reason.contains("Permission denied"),
-        "the outside Init must be refused by the kernel's own denial, and it answered: {reason}"
+        "the outside effect must be refused by the kernel's own denial, and it answered: {reason}"
     );
     assert!(
         !outside_base.exists() && !provider_storage_root(name, &outside_base).exists(),
-        "a refused outside Init must create nothing: {}",
+        "a refused outside effect must create nothing: {}",
         outside_base.display()
     );
-    eprintln!("launch outside Init: {outside_init}");
+    eprintln!("launch outside effect: {outside}");
     provider.shutdown();
 
     assert_eq!(
@@ -12206,19 +12216,21 @@ fn landlock_file_row_journey(
             .expect("the call is one of the probe's own");
         confined.answers[index]
     };
+    // The bound executable answers its bytes: execve needs that read, so the
+    // row that starts the provider also grants it.
     for call in [
         LandlockProbeCall::ReadInside,
         LandlockProbeCall::WriteInside,
+        LandlockProbeCall::ReadExecutable,
     ] {
         assert!(
             matches!(refused(call), LandlockAnswer::Returned(_)),
-            "{} must succeed inside STORAGE_ROOT under the ruleset, and it answered {:?}",
+            "{} must succeed under the ruleset, and it answered {:?}",
             call.name(),
             refused(call)
         );
     }
     for call in [
-        LandlockProbeCall::ReadExecutable,
         LandlockProbeCall::ReadBeneathParent,
         LandlockProbeCall::WriteBesideParent,
         LandlockProbeCall::TruncateBesideParent,
@@ -12286,6 +12298,7 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
                 "a fresh wallet lists no account"
             );
         },
+        |provider, outside| provider.init(outside),
     );
     assert!(
         provider_storage_root(WALLET_PROVIDER, &fixture.base)
@@ -12327,6 +12340,13 @@ fn linux_did_file_row_is_refused_outside_storage_root() {
         |provider| {
             let record = did_standin_permitted_operations(provider, &fixture.base, label);
             assert_suite_outcomes(label, &record, &DID_SUITE_CASES[..DID_PERMITTED_CASES]);
+        },
+        // did's Init records the root and writes nothing, so the kernel's refusal
+        // comes at its first write there.
+        |provider, outside| {
+            let init = provider.init(outside);
+            assert_eq!(init["status"], "ok", "did's Init writes nothing: {init}");
+            provider.send(&json!({ "op": "set_nickname", "nickname": "Outside" }))
         },
     );
 }
@@ -12553,8 +12573,8 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
     //
     // Each LAUNCH_ESSENTIALS entry was dropped alone from the whole list on that
     // host and the call that then failed was read, for wallet's binary and again
-    // for did's. The did measurement used the wider fchmodat policy recorded in
-    // CONFINEMENT-LINUX.md; its journey still needs a policy-owner decision.
+    // for did's. The did measurement used a wider fchmodat policy that did no
+    // longer needs, because its store now calls fchmod on the open file.
     // Both measurements named the same seven entries, so the set is one table:
     // close -> close(3) in the loader, refused before the first mapping;
     // exit_group -> exit_group(0) as the provider ended its own run; getrandom ->

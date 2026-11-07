@@ -10,12 +10,10 @@ This contract's current Linux behaviour is the seccomp allow list in "The
 seccomp allow list" below, and the file-row installer in "The file row". The
 seccomp part is a generated allow list and a recorded wallet Linux run in which
 the refused calls answer the filter's own marker. The did caller uses the same
-path and awaits the policy decision described under "The kernel proof". The
-file-row installer is the one Linux launch: it installs the Landlock ruleset
-and then the seccomp filter, and the one record carries a Landlock step. The
-file row of "The contract on Linux" is GAP. This session recorded no run that
-names the host, the kernel and the ABI the kernel reported, so that row is not
-written as passing.
+path. The file-row installer is the one Linux launch: it installs the Landlock
+ruleset and then the seccomp filter, and the one record carries a Landlock step.
+The file row of "The contract on Linux" passes for did and wallet on one recorded
+host, named in "The file row". The model provider has no Linux run yet.
 `confine.sb` stays each provider's one oracle. The contract is shared, so its
 Linux mapping is written once here, beside the one contract check (P10). The
 Linux policy that the Runtime would generate from the same approved declared
@@ -288,8 +286,8 @@ is asserted on every result before any arm can return, and the whole test is
 bounded well inside eight deadlines.
 
 Namespaces and the capability drop stay unbuilt. A seccomp filter reads syscall
-numbers and not paths. The file row in "The file row" is GAP, and no sentence
-here says a contract file row is enforced on Linux. `linux` stays out of
+numbers and not paths. "The file row" records the Landlock run for did and wallet,
+which is lab stand-in evidence on one host, not the Runtime. `linux` stays out of
 `DECLARED_CONFINED_OS`. A `linux` host under a `Seatbelt` policy keeps the words
 this lab already used, and a `linux` host under a `Seccomp` policy is accepted by
 the host rule and starts the provider under the filter; on any other OS the same
@@ -417,140 +415,98 @@ is decided here. `install_landlock` is the one kernel caller of that order.
 
 ## The file row
 
-The file row is GAP, and this pass measured why: no ruleset this installer can
-build both starts the provider and refuses every path outside `STORAGE_ROOT`.
+The file row passes for `wallet-provider` and `did-provider` on one recorded host,
+under the lab stand-in. This is not the Runtime, and it does not count toward
+B4-R. The model provider has no Linux run, so `linux` stays out of
+`DECLARED_CONFINED_OS`.
 
-Task 160 reached the spark1 host and ran both file-row journeys there, with
-cargo 1.91.0 from `~/.cargo/bin` on a fresh `rsync` copy. The run named
-`linux/aarch64`, Ubuntu 24.04.4, kernel `6.17.0-1029-nvidia`, and Landlock ABI
-7 once `PR_SET_NO_NEW_PRIVS` is set. Its label printed:
+    host: linux/aarch64, Ubuntu 24.04.5 in UTM, kernel 7.0.0-42-generic, Landlock ABI 8
+    rustc 1.91.0, binary sha256 e567baad76790ac298a9aa951cb6689a4de0d31c58b97409e92076eeef127160
+    cargo test --locked (capsules/wallet-provider), umask 022: 438 passed, 109 passed in tests/confine.rs
 
-    linux landlock file row: applicable, host linux/aarch64, kernel 6.17.0-1029-nvidia, Landlock ABI 7
+Every control call succeeded, and under the ruleset the two inside calls and the
+read of the bound executable succeeded while the other six answered `EACCES` (13).
+The outside effect was refused by the kernel for both providers and created
+nothing. Wallet's `Init` is that effect. did's `Init` records the root and writes
+nothing, so its first write is.
 
-Both journeys reported red on that host, for one measured cause. With the
-shipped row, `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))`
-carrying `EXECUTE` alone, the confined start is refused by the kernel and the
-provider never runs:
+### The bound-executable right
 
-    test linux_wallet_file_row_is_refused_outside_storage_root ... FAILED
-    thread 'linux_wallet_file_row_is_refused_outside_storage_root' (3297519) panicked at tests/confine.rs:11589:27:
-    the linux wallet-provider start must be confined: the test child must start: Permission denied (os error 13)
+The row carries `EXECUTE | READ_FILE`, where the oracle says only
+`(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))`. Landlock checks
+`execve`'s open of the program as a read, so `EXECUTE` alone answers `EACCES`
+before the provider's first instruction. That was measured on kernel
+`6.17.0-1029-nvidia` (ABI 7) and again on `7.0.0-42-generic` (ABI 8). So Linux
+cannot start the provider and also refuse it its own bytes, which is a real
+difference from macOS. Decided 8 Nov 2026 by Claude, acting as CTO on Sash's
+authority for this lab stand-in: grant the read, because a provider's published
+binary holds nothing it may not see. Rong may overrule it. The way back is to
+refuse the read and accept that the row cannot pass on Linux.
 
-    test linux_did_file_row_is_refused_outside_storage_root ... FAILED
-    thread 'linux_did_file_row_is_refused_outside_storage_root' (3297509) panicked at tests/confine.rs:11589:27:
-    the linux did-provider start must be confined: the test child must start: Permission denied (os error 13)
+### Running it
 
-`strace` on that host shows the child's own calls and the refusal:
+Three things in the host decide whether these rows can run:
 
-    3259854 openat(AT_FDCWD, "/tmp/.../ElastOS/SystemServices/Wallet", O_RDONLY|O_CLOEXEC|O_PATH) = 13
-    3259854 openat(AT_FDCWD, "/home/spark1/w160/capsules/wallet-provider/target/debug/wallet-provider", O_RDONLY|O_CLOEXEC|O_PATH) = 13
-    3259854 execve("/home/spark1/w160/capsules/wallet-provider/target/debug/wallet-provider", ...) = -1 EACCES (Permission denied)
+- Landlock ABI 5 or newer. Kernel 6.8 reports ABI 4, and the row refuses to start
+  with `the Landlock ABI cannot express the default-denial file rights`. That is
+  the fail-closed rule working, and it is not a test bug.
+- `umask 022`. Ubuntu's default `umask 002` leaves group-writable test folders,
+  which did's identity store correctly refuses.
+- A Linux run. On macOS these tests do not compile in, so a Mac gate says nothing
+  about them.
 
-Granting `READ_FILE` as well, and leaving everything else as shipped, starts
-both providers and leaves exactly one assertion unmet:
+### Falsifiers
 
-    confined read-bound-executable: control ok:256, ruleset ok:256
+These are Linux-only, so they are not in `falsifiers.json`: a
+`#[cfg(target_os = "linux")]` test cannot print a CAUGHT line on the Mac. Each was
+run once on the host above, one at a time, and restored with `cmp` showing equal
+bytes. All 109 passed afterwards.
 
-That is the conflict the row states and this task does not decide. 153's
-journey requires the read of the bound executable to answer `EACCES`; the
-kernel's `execve` also reads the program file, so a rule that lets the provider
-start answers that read with its bytes. The positive control, the two inside
-calls, the refusal of the read beneath `STORAGE_PARENT`, of the write beside
-it, of the truncation beside it and of all three listings, and the outside
-`Init` refused `storage_error` with `Permission denied`, were each observed in
-that grant-`READ_FILE` run:
+| Plant | Test | Red for this reason |
+| --- | --- | --- |
+| Skip only the launcher's Landlock install | `linux_wallet_file_row_is_refused_outside_storage_root` | The outside `Init` answered `ok` |
+| The same plant | `linux_did_file_row_is_refused_outside_storage_root` | The outside write answered `{"data":{"nickname":"Outside"},"status":"ok"}` |
+| Grant `READ_FILE` on the `STORAGE_PARENT` row | `linux_wallet_file_row_is_refused_outside_storage_root` | `read-beneath-storage-parent must be refused EACCES (13)`, and it answered `Returned(26)` |
+| `EXECUTE` alone on the executable row | `linux_wallet_file_row_is_refused_outside_storage_root` | `the test child must start: Permission denied (os error 13)` |
+| did's store chmods by path, not through its open file | `linux_did_journey_runs_under_the_seccomp_allow_list` | `fchmodat` is refused, so `get_nickname` answers `not_set` |
 
-    confined read-beneath-storage-parent: control ok:26, ruleset errno:13
-    confined write-beside-storage-parent: control ok:26, ruleset errno:13
-    confined truncate-beside-storage-parent: control ok:0, ruleset errno:13
-    confined list-storage-parent: control ok:6, ruleset errno:13
-    confined list-sibling: control ok:3, ruleset errno:13
-    confined list-sibling-private: control ok:3, ruleset errno:13
-    launch outside Init: {"code":"storage_error","message":"failed to create wallet storage directory: Permission denied (os error 13)","status":"error"}
+The last one is why did needs no wider policy. `save_nickname_with_device_key`
+creates the file with mode 0600 and calls `fchmod` on the open file, so
+`fchmodat` stays out of did's list and the bytes never sit under wider bits.
 
-The did caller was measured the same way. Its rule named did's own binary:
+### What this does not cover
 
-    DEBUG rule PROVIDER_EXECUTABLE "/home/spark1/w160/capsules/did-provider/target/debug/did-provider" rights=0x5
+Each call in the probe was run, but not every row of "The contract on Linux". The
+loader paths in `LANDLOCK_LOADER_PATHS` were not re-measured by dropping each one
+against each binary on this host; the run shows only that they are enough for both
+providers on this distribution. Other distributions may keep them elsewhere, in
+which case the start is refused rather than unconfined.
 
-so `landlock_probe_paths_follow_the_bound_parameters` holds the paths, and the
-did start answered the same way wallet's did.
+Two departures from "The frame" below stay open, so this row is lab evidence and
+not the designed policy:
 
-The two rows this installer is for — `(deny default)`, files, and
-`(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` — are not
-written as passing. Every other row of "The contract on Linux" was not run.
-`linux` stays out of `DECLARED_CONFINED_OS`. Nothing here says the Runtime
-installed a ruleset. The two callers are
-`linux_wallet_file_row_is_refused_outside_storage_root` and
-`linux_did_file_row_is_refused_outside_storage_root`, both one body with two
-thin callers, and neither provider's kernel run is accepted yet.
+- **The loader.** This dynamic build needs its interpreter and three libraries,
+  where the frame allows no library rule. With the interpreter executable and
+  `execve` on the list, a compromised provider could run a file it can read, such
+  as one from its own `STORAGE_ROOT`, through the interpreter. That program runs
+  under the same ruleset and filter, so it gains no path or syscall, but "only the
+  bound executable runs" does not hold. A no-loader build removes it. Found by the
+  night shift's did work (draft #1546).
+- **Namespaces and the capability drop** stay unbuilt, so the frame's PID, IPC,
+  mount and network rows are not carried here.
 
-What the harness holds, and what a later host run would record:
+### The one launch
 
-One Linux launch. `start_under_seccomp` and `start_under_landlock` both call
-`start_under_linux_policy`. That function makes one report socket, one
-`pre_exec` and one `spawn`. Inside `pre_exec` the order is the file row first,
-then `install_seccomp`. `install_landlock` runs `install_landlock_with`: create
-the ruleset with the handled mask, add each path rule, set
-`PR_SET_NO_NEW_PRIVS`, then `landlock_restrict_self`. `landlock_abi` reads the
-version with `LANDLOCK_CREATE_RULESET_VERSION` and returns the create step's
-refusal when the kernel answers `ENOSYS` or `EOPNOTSUPP`. The one record's
-first field `SECCOMP_LAUNCH_LANDLOCK` carries the failed step, and
+`start_under_seccomp` and `start_under_landlock` both call
+`start_under_linux_policy`. That function makes one report socket, one `pre_exec`
+and one `spawn`. Inside `pre_exec` the order is the file row first, then
+`install_seccomp`. `install_landlock` runs `install_landlock_with`: create the
+ruleset with the handled mask, add each path rule, set `PR_SET_NO_NEW_PRIVS`, then
+`landlock_restrict_self`. `landlock_abi` reads the version with
+`LANDLOCK_CREATE_RULESET_VERSION` and returns the create step's refusal when the
+kernel answers `ENOSYS` or `EOPNOTSUPP`. The one record's first field
+`SECCOMP_LAUNCH_LANDLOCK` carries the failed step, and
 `decode_seccomp_launch_record` turns it into that step's words.
-`write_seccomp_launch_record` is unchanged.
-
-The nine probe calls, in report order, are `read-inside-storage-root`,
-`write-inside-storage-root`, `read-bound-executable`,
-`read-beneath-storage-parent`, `write-beside-storage-parent`,
-`truncate-beside-storage-parent`, `list-storage-parent`, `list-sibling` and
-`list-sibling-private`. This pass recorded a control answer and a confined errno
-for each of them on spark1, under the grant-`READ_FILE` measurement above: every
-control call succeeded, the two inside calls succeeded, and the other seven
-answered `EACCES` (13) except the bound-executable read, which answered its
-bytes because `execve` needs that read. A passing run of the shipped row would
-also show that read answering `EACCES`, and no such run exists.
-
-`LANDLOCK_LOADER_PATHS` is the aarch64 loader and the three libraries a
-dynamically linked wallet maps. Each rule carries `EXECUTE | READ_FILE`. The
-failure that named each entry on the earlier host measurement, when that entry
-alone was dropped, is:
-
-| Entry | The failure that named it |
-| --- | --- |
-| `/lib/ld-linux-aarch64.so.1` | `execve` answers `EACCES` (13) before the provider's first instruction without `EXECUTE`; without `READ_FILE` the loader cannot map itself |
-| `/lib/aarch64-linux-gnu/libc.so.6` | the loader exits with `error while loading shared libraries: libc.so.6: cannot open shared object file` |
-| `/lib/aarch64-linux-gnu/libgcc_s.so.1` | the loader exits with `error while loading shared libraries: libgcc_s.so.1: cannot open shared object file` |
-| `/lib/aarch64-linux-gnu/libm.so.6` | the loader exits with `error while loading shared libraries: libm.so.6: cannot open shared object file` |
-
-This pass did not drop each entry again against the wallet binary on spark1,
-and it did not measure the loader list against the did binary. The grant-
-`READ_FILE` run started both providers with the one list unchanged, which says
-the four entries are enough for both. Those four lines are the earlier
-measurement the constant carries; they are not this pass's loader measurement,
-and the list stays the one constant (P10). The did loader measurement is GAP.
-
-Two Linux-only plants are not in `falsifiers.json`. A `#[cfg(target_os = "linux")]`
-test cannot print a CAUGHT line on the Mac. Each needs one red run on the host,
-and both callers' bodies are red on that host today, so neither plant's own red
-output exists yet. A plant cannot be quoted red until the row itself passes.
-
-- Skip only the launcher's Landlock install: in `start_under_linux_policy`,
-  replace `install_landlock(ruleset).map_err(SeccompInstallFailure::Landlock)`
-  with `Ok(())`. `linux_wallet_file_row_is_refused_outside_storage_root` and
-  `linux_did_file_row_is_refused_outside_storage_root` must fail on the
-  outside `Init`, which would no longer be `storage_error` with
-  `Permission denied`. Rerun:
-  `~/.cargo/bin/cargo test --locked --manifest-path capsules/wallet-provider/Cargo.toml -- linux_wallet_file_row_is_refused_outside_storage_root --exact --nocapture`.
-  This pass has no red output to quote.
-- Grant `READ_FILE` on the `STORAGE_PARENT` row: change `(SHARED_RULES[1], 0)`
-  to `(SHARED_RULES[1], LANDLOCK_ACCESS_FS_READ_FILE)`. The same journeys must
-  fail because `read-beneath-storage-parent` no longer answers `EACCES` (13).
-  The same command reruns them. This pass has no red output to quote.
-
-The bound-executable row is the open decision, and it is not this task's. A
-launch needs `READ_FILE` on `PROVIDER_EXECUTABLE` as well as `EXECUTE` on this
-kernel, and the journey requires the read of that same file to be refused. The
-row cannot hold both. Rong or the policy owner decides which right the oracle
-grants; until then the file row stays GAP.
 
 ## The frame
 
@@ -566,36 +522,37 @@ paths as on macOS: `PROVIDER_EXECUTABLE` is the provider binary; for
 `base_path/ElastOS/SystemServices/Wallet` and `STORAGE_PARENT` is
 `base_path/ElastOS/SystemServices`; the model profile states its own root.
 
-The Linux policy holds no path rule beyond the bound parameters: it adds none
-for `/`, `/proc`, `/sys` or a library directory, and `STORAGE_PARENT` carries no
+The designed Linux policy holds no path rule beyond the bound parameters, which
+needs a no-loader build (the lab run departs from this, as "The file row" records):
+it adds none for `/`, `/proc`, `/sys` or a library directory, and `STORAGE_PARENT` carries no
 rule, as its row says. The private `/proc` mount the mount namespace provides
 is a mount, not a grant. The policy is a second rendering of the same rights,
 and the one contract check stays the one check of the oracle.
 
 The Linux policy would be applied before the provider image is entered. Apart
-from the seccomp allow list above, this file is a design, and the file row is
-GAP as "The file row" records. Each other row names the Linux test that would
-prove it. Those rows were not run. No sentence here claims that any provider
-is confined on Linux beyond the recorded seccomp filter.
+from the seccomp allow list and "The file row" above, this file is a design. Each
+other row names the Linux test that would prove it, and those rows were not run.
+No sentence here claims that any provider is confined on Linux beyond those two
+records.
 
 The seccomp allow list's own Linux-test cells are the two journeys:
 `linux_wallet_journey_runs_under_the_seccomp_allow_list` and
 `linux_did_journey_runs_under_the_seccomp_allow_list`, both in
 `capsules/wallet-provider/tests/confine.rs`. Wallet carries the recorded kernel
-proof above. Did remains pending the shared policy decision and a fresh run
-with the accepted program; its earlier wider-policy run is not row acceptance.
+proof above. Did passed with the accepted program in the run "The file row" names,
+with no wider policy.
 
 ## The contract on Linux
 
 `(deny default)`, files, and
-`(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` are GAP, as
-"The file row" records. Every other row below was not run. The cells keep the
-design each row already stated.
+`(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` pass for did and
+wallet, as "The file row" records. Every other row below was not run. The cells
+keep the design each row already stated.
 
 | Oracle rule | Linux primitive that would carry it | How exact the match is | Linux test that would prove it |
 | --- | --- | --- | --- |
 | `(version 1)` | The generator's policy version; no kernel primitive carries it. | Exact: the generator emits one version, and the contract check refuses any other head. | `both_file_profiles_bind_one_storage_parameter_contract` |
-| `(deny default)`, files | A Landlock ruleset whose only path rules are `PROVIDER_EXECUTABLE` (`EXECUTE`) and `STORAGE_ROOT` (read and write). Every file right the ABI reports and that no rule covers fails. The capability drop removes `CAP_DAC_READ_SEARCH` and `CAP_DAC_OVERRIDE`, so privilege grants no file right. | Exact for every access right the ABI reports. Landlock's [filesystem flags](https://docs.kernel.org/userspace-api/landlock.html#filesystem-flags) report no right for `chdir`, `stat`, `flock`, `chmod`, `chown`, `setxattr`, `utime`, `fcntl` and `access`, so the ruleset does not restrict them. No layer of the design refuses `chdir`, `stat`, `access`, `chmod`, `utime` or `setxattr` on a fixture the provider owns with ordinary permissions, in a searchable fixture directory beneath searchable parents, so the mapping is wider than the oracle for those six; the kernel's ordinary permission check still applies, so the design claims no such success for a host-owned file or a file whose permissions deny the call. The capability drop removes `CAP_CHOWN`, so `chown` to a different owner is refused and the mapping is narrower than the oracle inside `STORAGE_ROOT`; an owner that keeps `uid` `-1` may still change its file's group to a group of which it is a member ([chown(2)](https://man7.org/linux/man-pages/man2/chown.2.html)), so the drop does not refuse every `chown`; the probe requires that group call to succeed and the resulting group to be the chosen mapped gid. The policy run checks its own fixture directory's mode and owner before its `chdir`, the same check the positive control makes on its copy, and reports a mismatch as missing evidence with its cause, not as a kernel change. A seccomp rule that refuses every `chown` by syscall number is the group-call falsifier only when the test reports the failing call as the group `chown` itself and every earlier call as a success; a failure at an earlier call is missing evidence. Landlock checks a new data open against the rules for its path, so a data open outside every grant fails; the rules are checked at open time, so a descriptor opened before enforcement is not checked: the [filesystem flags](https://docs.kernel.org/userspace-api/landlock.html#filesystem-flags) section states that "Files or directories opened before the sandboxing are not subject to these restrictions", and an `O_PATH` open does not open the file itself for reading or writing ([open(2)](https://man7.org/linux/man-pages/man2/open.2.html)); whether Landlock restricts it is open and unclaimed, and the probe's required success decides the row. The launch precondition is that a provider inherits no descriptor other than its stdin, stdout and stderr protocol streams, which are the harness pipes (`Stdio::piped()` in `ConfinedProvider::spawn` in `capsules/wallet-provider/tests/confine.rs`); future Runtime work proves it, for example by listing `/proc/self/fd` at provider start and allowing exactly 0, 1 and 2, and the design claims no falsifier for it. One raw `fcntl` call with the `F_DUPFD` command duplicates an outside `O_PATH` descriptor that the probe obtains with `openat` ([open(2)](https://man7.org/linux/man-pages/man2/open.2.html)) and gives no content read; the probe issues that raw command itself, not a library duplicate that may use another command such as `F_DUPFD_CLOEXEC`, so the `F_DUPFD`-only falsifier reaches the probe's call. The design claims that one raw call only, not every `fcntl` or `flock`, whose departures stay unclaimed. Falsifier for the duplication: add a seccomp rule that refuses `fcntl` only when its command argument is `F_DUPFD` ([fcntl(2)](https://man7.org/linux/man-pages/man2/fcntl.2.html)); the duplication fails and the test fails. The probe and the Rust runtime make other `fcntl` calls, so a rule that refuses every `fcntl` could stop the probe before its `F_DUPFD` call. Wider also where a rule on a directory covers the tree beneath it, as the next section says. A row that needs a right the ABI lacks departs as the `STORAGE_ROOT` row states, and the start is then refused, never weakened. | `outside_write_denied`, `outside_read_denied`, `confined_outside_write_is_denied`, `confined_outside_read_is_denied`, `linux_file_operations_landlock_cannot_restrict` and `linux_capability_drop_refuses_chown` |
+| `(deny default)`, files | A Landlock ruleset whose only path rules are `PROVIDER_EXECUTABLE` (`EXECUTE` and `READ_FILE`, as "The bound-executable right" explains), the loader paths, and `STORAGE_ROOT` (read and write). Every file right the ABI reports and that no rule covers fails. The capability drop removes `CAP_DAC_READ_SEARCH` and `CAP_DAC_OVERRIDE`, so privilege grants no file right. | Exact for every access right the ABI reports. Landlock's [filesystem flags](https://docs.kernel.org/userspace-api/landlock.html#filesystem-flags) report no right for `chdir`, `stat`, `flock`, `chmod`, `chown`, `setxattr`, `utime`, `fcntl` and `access`, so the ruleset does not restrict them. No layer of the design refuses `chdir`, `stat`, `access`, `chmod`, `utime` or `setxattr` on a fixture the provider owns with ordinary permissions, in a searchable fixture directory beneath searchable parents, so the mapping is wider than the oracle for those six; the kernel's ordinary permission check still applies, so the design claims no such success for a host-owned file or a file whose permissions deny the call. The capability drop removes `CAP_CHOWN`, so `chown` to a different owner is refused and the mapping is narrower than the oracle inside `STORAGE_ROOT`; an owner that keeps `uid` `-1` may still change its file's group to a group of which it is a member ([chown(2)](https://man7.org/linux/man-pages/man2/chown.2.html)), so the drop does not refuse every `chown`; the probe requires that group call to succeed and the resulting group to be the chosen mapped gid. The policy run checks its own fixture directory's mode and owner before its `chdir`, the same check the positive control makes on its copy, and reports a mismatch as missing evidence with its cause, not as a kernel change. A seccomp rule that refuses every `chown` by syscall number is the group-call falsifier only when the test reports the failing call as the group `chown` itself and every earlier call as a success; a failure at an earlier call is missing evidence. Landlock checks a new data open against the rules for its path, so a data open outside every grant fails; the rules are checked at open time, so a descriptor opened before enforcement is not checked: the [filesystem flags](https://docs.kernel.org/userspace-api/landlock.html#filesystem-flags) section states that "Files or directories opened before the sandboxing are not subject to these restrictions", and an `O_PATH` open does not open the file itself for reading or writing ([open(2)](https://man7.org/linux/man-pages/man2/open.2.html)); whether Landlock restricts it is open and unclaimed, and the probe's required success decides the row. The launch precondition is that a provider inherits no descriptor other than its stdin, stdout and stderr protocol streams, which are the harness pipes (`Stdio::piped()` in `ConfinedProvider::spawn` in `capsules/wallet-provider/tests/confine.rs`); future Runtime work proves it, for example by listing `/proc/self/fd` at provider start and allowing exactly 0, 1 and 2, and the design claims no falsifier for it. One raw `fcntl` call with the `F_DUPFD` command duplicates an outside `O_PATH` descriptor that the probe obtains with `openat` ([open(2)](https://man7.org/linux/man-pages/man2/open.2.html)) and gives no content read; the probe issues that raw command itself, not a library duplicate that may use another command such as `F_DUPFD_CLOEXEC`, so the `F_DUPFD`-only falsifier reaches the probe's call. The design claims that one raw call only, not every `fcntl` or `flock`, whose departures stay unclaimed. Falsifier for the duplication: add a seccomp rule that refuses `fcntl` only when its command argument is `F_DUPFD` ([fcntl(2)](https://man7.org/linux/man-pages/man2/fcntl.2.html)); the duplication fails and the test fails. The probe and the Rust runtime make other `fcntl` calls, so a rule that refuses every `fcntl` could stop the probe before its `F_DUPFD` call. Wider also where a rule on a directory covers the tree beneath it, as the next section says. A row that needs a right the ABI lacks departs as the `STORAGE_ROOT` row states, and the start is then refused, never weakened. | `outside_write_denied`, `outside_read_denied`, `confined_outside_write_is_denied`, `confined_outside_read_is_denied`, `linux_file_operations_landlock_cannot_restrict` and `linux_capability_drop_refuses_chown` |
 | `(deny default)`, processes and signals | A PID namespace; the empty capability set; a seccomp filter that refuses process creation other than the provider's own threads and every cross-process operation (`ptrace`, `process_vm_*`, `pidfd_getfd`). Landlock `EXECUTE` on `PROVIDER_EXECUTABLE` alone carries exec of any other file. | Exact for signals: a PID namespace contains no PID outside itself, so a signal to a host process cannot be expressed. Narrower for process creation because the provider's threads must start: the filter admits the thread form of `clone` and refuses a new process. The filter adds no exec rule: it sees only the syscall number and cannot read the path behind `execve`'s pointer, so it cannot separate the granted binary from another file, and a refusal by number would also refuse the provider's own launch, which the oracle permits. The Linux test decides the exact flag set. | `confined_provider_denies_process_and_signal_boundaries` |
 | `(deny default)`, IPC | An IPC namespace; seccomp refusing every `socket` and `socketpair` call, SysV IPC creation (`msgget` and `shmget` when the key is `IPC_PRIVATE` or the flags carry `IPC_CREAT`, both plain integer arguments the filter can read) and POSIX message queue creation (`mq_open` with `O_CREAT`); Landlock's default denial refusing reads and writes to shared-memory files. | Exact for host IPC objects: a private IPC namespace cannot name them, and the one SysV creation rule refuses every form including the private key. The `mq_open` rule refuses the `O_CREAT` form of the call, and the create also passes through the message queue filesystem ([mq_overview(7)](https://man7.org/linux/man-pages/man7/mq_overview.7.html)). Landlock's default denial would refuse that create only if the ruleset reaches the queue's internal mount; [Landlock's documentation](https://docs.kernel.org/userspace-api/landlock.html) does not settle that reach, and if it does not, no other layer refuses the create. The outcome is open, so the design leaves the `mq_open` falsifier unclaimed: a future isolated probe that drops only the `mq_open` `O_CREAT` refusal and records the outcome would settle it. Wider for a lookup of an existing object: `msgget(key, 0)` and `shmget(key, 0, 0)` are not refused, and inside the namespace they find nothing. Narrower for new objects if the provider needs none. The Linux test decides. | `confined_provider_denies_ipc_boundaries` |
 | `(deny default)`, kernel facts | A private, read-only `/proc` mount limited to the provider's own PID namespace and a hidden host `/sys`; Landlock denying reads outside the granted paths, with no `/proc` or `/sys` rule; seccomp refusing syscalls that read host kernel state (`bpf`, `perf_event_open`). | No exact match: the oracle denies every kernel-fact operation except `sysctl-read`, and Linux splits kernel facts across `/proc`, `/sys` and syscalls, so the map is wider in one place and narrower in another. The Linux test decides. | `confined_provider_denies_kernel_fact_boundaries` |

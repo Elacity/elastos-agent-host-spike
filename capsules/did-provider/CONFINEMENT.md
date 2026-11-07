@@ -203,19 +203,18 @@ committed declared-rights file through the one builder and requires the same
 program as wallet. It starts did through the shared stand-in and installer and
 requires `init`, `get_did` with a `did:key:` value, `resolve`, `set_nickname`,
 `get_nickname` and `get_persona_did` to answer under that filter.
-The did seccomp row awaits the shared policy owner's decision: the recorded
-`spark1.local` run (`aarch64`, Ubuntu 24.04.4, kernel `6.17.0-1029-nvidia`)
-needed `fchmodat` to save the nickname. The earlier successful run added that
-permission to wallet's policy too. The shared table now preserves wallet's
-policy, and the did test retains all its assertions. A fresh Linux run after the
-policy decision is required for did acceptance.
+The recorded `spark1.local` run (`aarch64`, Ubuntu 24.04.4, kernel
+`6.17.0-1029-nvidia`) needed `fchmodat` to save the nickname. That no longer
+holds: did's store now creates the file with mode 0600 and calls `fchmod` on the
+open file, so did needs no wider policy. The journey passes on the host named in
+"The file row" of `../wallet-provider/CONFINEMENT-LINUX.md`, with its falsifier.
 
-No contract file row is enforced on Linux: a seccomp filter reads syscall numbers
-and not paths, so the file rows stay open, and `linux` stays out of
-`DECLARED_CONFINED_OS`. Namespaces, Landlock and capability dropping stay
-unbuilt. The one Linux mapping is `../wallet-provider/CONFINEMENT-LINUX.md`, which
-records the seccomp row, its host and its measured launch set; this document
-claims no other Linux behaviour. The existing source-only check
+A seccomp filter reads syscall numbers and not paths, so the file row is carried
+by Landlock, and it passes for did on that one host. `linux` stays out of
+`DECLARED_CONFINED_OS` until the model provider has its run. Namespaces and
+capability dropping stay unbuilt. The one Linux mapping is
+`../wallet-provider/CONFINEMENT-LINUX.md`; this document claims no other Linux
+behaviour. The existing source-only check
 `both_file_profiles_bind_one_storage_parameter_contract`, in
 `../wallet-provider/tests/confine.rs`, reads the three oracles and supplies
 contract evidence, not Linux execution evidence.
