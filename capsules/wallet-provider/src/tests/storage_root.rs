@@ -365,7 +365,8 @@ fn wallet_operations_stay_under_root() {
 ///
 /// Falsifier: WP179 publishes the wallet directory's parent entry at the
 /// `src/main.rs` call, so the first case answers `storage_error`. Dropping the
-/// creation loop's parent publish makes the second case answer `ok`.
+/// creation loop's parent publish makes the second case answer `ok`. WP244 keeps
+/// the directories a failed publish created, so the retry answers `ok`.
 #[cfg(unix)]
 #[test]
 fn wallet_init_publishes_only_the_entries_it_creates() {
@@ -434,6 +435,28 @@ fn wallet_init_publishes_only_the_entries_it_creates() {
     assert!(
         provider.store_path.is_none() && provider.storage_key.is_none(),
         "a refused Init must leave no usable root"
+    );
+
+    // The failed publish removed what it created, so a retry cannot find a
+    // directory it did not publish and answer ok without the parent's sync.
+    assert!(
+        !wallet_dir.exists(),
+        "a failed publish must leave no wallet directory behind"
+    );
+    let mut permissions = fs::metadata(parent).unwrap().permissions();
+    permissions.set_mode(0o300);
+    fs::set_permissions(parent, permissions).unwrap();
+    let mut provider = WalletProvider::new();
+    let retried = init_with_config(
+        &mut provider,
+        json!({ "base_path": base.display().to_string() }),
+    );
+    let mut permissions = fs::metadata(parent).unwrap().permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(parent, permissions).unwrap();
+    assert_storage_refusal(
+        retried,
+        &format!("failed to sync wallet storage parent directory: {open_error}"),
     );
 }
 

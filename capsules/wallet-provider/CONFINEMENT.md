@@ -609,7 +609,8 @@ document records `did-provider` or `wallet-provider` as confined on Linux (P10,
 P11). The status change lands when the Runtime side does.
 
 Most Linux enforcement rows are designed in `CONFINEMENT-LINUX.md` and remain
-unbuilt. One row exists today as source with a real Linux run behind it: a
+unbuilt. Two exist today as source with a real Linux run behind them, both lab
+stand-in evidence: the Landlock file row "The file row" records there, and a
 seccomp allow list generated from this provider's declared rights, with the one
 builder, the one mapping table, the one step sequencer and the one install
 function that file names
@@ -617,10 +618,10 @@ function that file names
 `install_seccomp_with`, `install_seccomp`). On a real Linux host the wallet
 provider starts under that filter and the four denied calls answer the filter's
 own marker there, as `CONFINEMENT-LINUX.md` records with its host, kernel and
-per-call answers. That is the whole Linux claim: namespaces, Landlock,
-capability dropping and every file row of the contract remain unbuilt, so
-`linux` stays out of `DECLARED_CONFINED_OS` and every operations-table cell
-reads `designed, not enforced`.
+per-call answers. The Landlock file row has a recorded run there too. That is the
+whole Linux claim: namespaces, capability dropping and every other row of the
+contract remain unbuilt, so `linux` stays out of `DECLARED_CONFINED_OS` and every
+operations-table cell reads `designed, not enforced`.
 `both_file_profiles_bind_one_storage_parameter_contract` reads the three oracles
 and supplies contract evidence, not Linux execution evidence.
 
@@ -723,8 +724,8 @@ and supplies contract evidence, not Linux execution evidence.
   `linux_did_journey_runs_under_the_seccomp_allow_list` is the second caller of
   the same journey body, with did's own binary, declared rights and permitted
   operations. It compares the full program with wallet's and leaves the
-  four-call probe to wallet. Did acceptance awaits the shared policy decision
-  recorded in `CONFINEMENT-LINUX.md`;
+  four-call probe to wallet. It passes with no wider policy, as
+  `CONFINEMENT-LINUX.md` records;
   `linux_seccomp_launch_refuses_each_failed_install` requires each install
   failure and an architecture refusal to start nothing;
   `linux_seccomp_launcher_runs_the_requested_program` requires the child's own
@@ -1656,6 +1657,7 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - WP243: The citation rule accepts a wallet test named only in did's document,
   so the cross-crate read passes.
   `every_declared_test_is_cited_in_its_own_documents` checks this rule.
+- WP244: A failed publish keeps the directories it created, so a retry answers ok without the parent's sync. Caught by `wallet_init_publishes_only_the_entries_it_creates`.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

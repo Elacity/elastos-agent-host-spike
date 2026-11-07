@@ -25,11 +25,8 @@ file exists (P10).
 One part of this design exists today as source for both providers: a seccomp
 allow list generated from each provider's own declared rights. Wallet supplies
 the recorded Linux proof of the four denied calls; did compares its full
-program with wallet's and awaits acceptance of its operation journey.
-Namespaces and the capability drop stay unbuilt. The file-row installer is in
-the harness, and the contract file row is GAP until a recorded run names the
-host, the kernel and the reported ABI. A seccomp filter is the Linux
-confinement this lab has recorded.
+program with wallet's, and its operation journey passes on the host "The file
+row" names. Namespaces and the capability drop stay unbuilt.
 
 One function builds the list:
 `seccomp_allow_list_from_declared_rights(name, declared)` in
@@ -384,8 +381,8 @@ wallet profile holds:
 
 | Allow form | Rights the row carries |
 | --- | --- |
-| `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` | read-file, read-dir, write-file, remove-file, remove-dir, make-dir and make-reg, because `init` creates the wallet directory and its key file inside the root |
-| `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))` | `EXECUTE` |
+| `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` | read-file, read-dir, write-file, remove-file, remove-dir, make-dir and make-reg, truncate, because `init` creates the wallet directory and its key file inside the root |
+| `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))` | `EXECUTE` and `READ_FILE`, as "The bound-executable right" explains |
 | `(allow file-read* (literal (param "STORAGE_PARENT")))` | none: a directory grant covers the whole tree beneath the parent |
 | `(allow file-read* (literal "/"))` | none: a read rule on `/` would grant the whole filesystem |
 | `(allow sysctl-read)` | none: Landlock has no sysctl right |
@@ -417,8 +414,8 @@ is decided here. `install_landlock` is the one kernel caller of that order.
 
 The file row passes for `wallet-provider` and `did-provider` on one recorded host,
 under the lab stand-in. This is not the Runtime, and it does not count toward
-B4-R. The model provider has no Linux run, so `linux` stays out of
-`DECLARED_CONFINED_OS`.
+B4-R. `linux` stays out of `DECLARED_CONFINED_OS`: the model provider has no Linux
+run, and the departures under "What this does not cover" stay open too.
 
     host: linux/aarch64, Ubuntu 24.04.5 in UTM, kernel 7.0.0-42-generic, Landlock ABI 8
     rustc 1.91.0, binary sha256 e567baad76790ac298a9aa951cb6689a4de0d31c58b97409e92076eeef127160
@@ -436,9 +433,11 @@ The row carries `EXECUTE | READ_FILE`, where the oracle says only
 `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))`. Landlock checks
 `execve`'s open of the program as a read, so `EXECUTE` alone answers `EACCES`
 before the provider's first instruction. That was measured on kernel
-`6.17.0-1029-nvidia` (ABI 7) and again on `7.0.0-42-generic` (ABI 8). So Linux
-cannot start the provider and also refuse it its own bytes, which is a real
-difference from macOS. Decided 8 Nov 2026 by Claude, acting as CTO on Sash's
+`6.17.0-1029-nvidia` (ABI 7) and again on `7.0.0-42-generic` (ABI 8). So this launch
+path, which applies the ruleset before `execve`, cannot start the provider and also
+refuse it its own bytes, which is a real difference from macOS. A trusted bootstrap
+that tightens the rules after loading might avoid it, but that is a different
+launch design with no proof yet. Decided 8 Nov 2026 by Claude, acting as CTO on Sash's
 authority for this lab stand-in: grant the read, because a provider's published
 binary holds nothing it may not see. Rong may overrule it. The way back is to
 refuse the read and accept that the row cannot pass on Linux.
@@ -468,6 +467,7 @@ bytes. All 109 passed afterwards.
 | The same plant | `linux_did_file_row_is_refused_outside_storage_root` | The outside write answered `{"data":{"nickname":"Outside"},"status":"ok"}` |
 | Grant `READ_FILE` on the `STORAGE_PARENT` row | `linux_wallet_file_row_is_refused_outside_storage_root` | `read-beneath-storage-parent must be refused EACCES (13)`, and it answered `Returned(26)` |
 | `EXECUTE` alone on the executable row | `linux_wallet_file_row_is_refused_outside_storage_root` | `the test child must start: Permission denied (os error 13)` |
+| Drop `TRUNCATE` from the `STORAGE_ROOT` row | `linux_did_file_row_is_refused_outside_storage_root` | The second `set_nickname` answers `Permission denied (os error 13)`: replacing a file is a truncation, which the oracle's `file-write*` grants |
 | did's store chmods by path, not through its open file | `linux_did_journey_runs_under_the_seccomp_allow_list` | `fchmodat` is refused, so `get_nickname` answers `not_set` |
 
 The last one is why did needs no wider policy. `save_nickname_with_device_key`
@@ -764,6 +764,9 @@ oracle text rather than the Linux policy:
 `profile_denies_network`. `linux` joins `DECLARED_CONFINED_OS` only when the
 Linux counterparts exist and pass, and the gate then holds Linux to them (027).
 Until then, adding `linux` fails the gate on purpose.
+
+The model provider's two Linux tests are `linux_model_journey_runs_under_the_seccomp_allow_list`
+and `linux_model_file_row_is_refused_outside_storage_root`.
 
 Today `sandbox_gate` requires `/usr/bin/sandbox-exec`, and
 `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` explicitly expects

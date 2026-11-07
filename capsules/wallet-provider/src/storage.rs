@@ -148,6 +148,37 @@ fn sync_directory(_path: &Path, _label: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A retry would find these directories and publish nothing, so none may stay
+/// behind looking finished. Each was made empty by this call, so `remove_dir` can
+/// fail only if another writer has entered the provider's own root meanwhile; the
+/// answer then names it, and a retry could still find that directory unpublished.
+fn remove_created_directories(created: &[std::path::PathBuf], err: String) -> String {
+    for directory in created.iter().rev() {
+        if let Err(remove) = fs::remove_dir(directory) {
+            if remove.kind() != std::io::ErrorKind::NotFound {
+                return format!(
+                    "{err}; and failed to remove {}: {remove}",
+                    directory.display()
+                );
+            }
+        }
+    }
+    err
+}
+
+fn publish_created_directories(created: &[std::path::PathBuf]) -> Result<(), String> {
+    for directory in created {
+        ensure_directory(directory, "wallet storage directory")?;
+        sync_directory(directory, "wallet storage directory")?;
+        let parent = directory
+            .parent()
+            .ok_or_else(|| "wallet storage directory has no parent to synchronize".to_string())?;
+        ensure_directory(parent, "wallet storage parent directory")?;
+        sync_directory(parent, "wallet storage parent directory")?;
+    }
+    Ok(())
+}
+
 pub(super) fn create_wallet_dir_durable(wallet_dir: &Path) -> Result<(), String> {
     let mut missing = Vec::new();
     let mut cursor = wallet_dir;
@@ -177,23 +208,28 @@ pub(super) fn create_wallet_dir_durable(wallet_dir: &Path) -> Result<(), String>
         }
     }
 
-    fs::create_dir_all(wallet_dir)
-        .map_err(|err| format!("failed to create wallet storage directory: {err}"))?;
+    // One level at a time, so `created` holds only what this call made. A directory
+    // another actor made after the walk is that actor's to publish and to keep.
+    let mut created = Vec::new();
     for directory in missing.iter().rev() {
-        ensure_directory(directory, "wallet storage directory")?;
-        sync_directory(directory, "wallet storage directory")?;
-        let parent = directory
-            .parent()
-            .ok_or_else(|| "wallet storage directory has no parent to synchronize".to_string())?;
-        ensure_directory(parent, "wallet storage parent directory")?;
-        sync_directory(parent, "wallet storage parent directory")?;
+        match fs::create_dir(directory) {
+            Ok(()) => created.push(directory.clone()),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(err) => {
+                let err = format!("failed to create wallet storage directory: {err}");
+                return Err(remove_created_directories(&created, err));
+            }
+        }
+    }
+    if let Err(err) = publish_created_directories(&created) {
+        return Err(remove_created_directories(&created, err));
     }
     ensure_directory(wallet_dir, "wallet storage directory")?;
     sync_directory(wallet_dir, "wallet storage directory")?;
-    // The loop above publishes the parent entry of every directory the
-    // `missing` walk observed absent and `create_dir_all` then created. An
-    // existing wallet directory was created by another actor, so that actor
-    // publishes its entry and this provider only inspects the parent.
+    // `publish_created_directories` publishes the parent entry of every directory
+    // this call created, and a failed publish removes them. So an existing wallet
+    // directory was created by another actor, which publishes its entry, and this
+    // provider only inspects the parent.
     let parent = wallet_dir
         .parent()
         .ok_or_else(|| "wallet storage directory has no parent to inspect".to_string())?;

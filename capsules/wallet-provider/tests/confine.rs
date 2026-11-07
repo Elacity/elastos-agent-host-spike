@@ -6281,6 +6281,23 @@ const STARTUP_RULES: [&str; 2] = [
     r#"(allow file-read* (literal "/"))"#,
     r#"(allow sysctl-read)"#,
 ];
+/// The model profile reads the root directory with this narrower form.
+const MODEL_ROOT_READ_RULE: &str = r#"(allow file-read-data (literal "/"))"#;
+/// The calls a process makes reading the root directory at startup.
+const ROOT_READ_SYSCALLS: &[&str] = &[
+    "faccessat",
+    "fstat",
+    "getdents64",
+    "lseek",
+    "newfstatat",
+    "openat",
+    "openat2",
+    "pread64",
+    "read",
+    "readlinkat",
+    "readv",
+    "statx",
+];
 /// The one id the shared contract names for each pinned allow rule: the three
 /// shared rules and the two startup forms. A shared rule must be claimed by its
 /// id, and a startup form must be claimed by its id whenever the profile holds
@@ -6592,23 +6609,10 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
             "writev",
         ],
     ),
-    (
-        STARTUP_RULES[0],
-        &[
-            "faccessat",
-            "fstat",
-            "getdents64",
-            "lseek",
-            "newfstatat",
-            "openat",
-            "openat2",
-            "pread64",
-            "read",
-            "readlinkat",
-            "readv",
-            "statx",
-        ],
-    ),
+    (STARTUP_RULES[0], ROOT_READ_SYSCALLS),
+    // The model profile's narrower spelling of the same startup read. A seccomp
+    // filter reads syscall numbers, so the two spellings answer alike.
+    (MODEL_ROOT_READ_RULE, ROOT_READ_SYSCALLS),
     (STARTUP_RULES[1], &["uname", "sysinfo"]),
 ];
 
@@ -7027,8 +7031,9 @@ const LANDLOCK_ACCESS_FS_IOCTL_DEV: u64 = 1 << 15;
 ///   remove-file, remove-dir, make-dir and make-reg, because `init` creates the
 ///   wallet directory and its key file inside the root, and a path rule on that
 ///   directory covers the tree `subpath` names;
-/// - the `bound-executable` exec form carries only `EXECUTE` on that file,
-///   which is what the declared `process-exec` permission authorizes;
+/// - the `bound-executable` exec form carries `EXECUTE` and `READ_FILE` on that
+///   file: `process-exec` authorizes the execution, and Landlock checks `execve`'s
+///   open of the program as a read;
 /// - the `STORAGE_PARENT` read form carries no right: a Landlock path rule on a
 ///   directory covers the whole tree beneath it, so a read rule on the parent
 ///   would grant every sibling of `STORAGE_ROOT`;
@@ -7051,7 +7056,8 @@ const LANDLOCK_RULE_RIGHTS: &[(&str, u64)] = &[
             | LANDLOCK_ACCESS_FS_REMOVE_FILE
             | LANDLOCK_ACCESS_FS_REMOVE_DIR
             | LANDLOCK_ACCESS_FS_MAKE_DIR
-            | LANDLOCK_ACCESS_FS_MAKE_REG,
+            | LANDLOCK_ACCESS_FS_MAKE_REG
+            | LANDLOCK_ACCESS_FS_TRUNCATE,
     ),
     // READ_FILE as well: Landlock checks execve's open of the program as a read,
     // so EXECUTE alone answers EACCES before the provider's first instruction
@@ -7063,6 +7069,8 @@ const LANDLOCK_RULE_RIGHTS: &[(&str, u64)] = &[
     ),
     (SHARED_RULES[1], 0),
     (STARTUP_RULES[0], 0),
+    // None either: a read rule on `/` would grant the whole filesystem.
+    (MODEL_ROOT_READ_RULE, 0),
     (STARTUP_RULES[1], 0),
 ];
 
@@ -7552,8 +7560,9 @@ fn landlock_ruleset_follows_the_declared_rights() {
                 | LANDLOCK_ACCESS_FS_REMOVE_FILE
                 | LANDLOCK_ACCESS_FS_REMOVE_DIR
                 | LANDLOCK_ACCESS_FS_MAKE_DIR
-                | LANDLOCK_ACCESS_FS_MAKE_REG,
-            "{name}: the storage subpath row must carry the seven rights init needs"
+                | LANDLOCK_ACCESS_FS_MAKE_REG
+                | LANDLOCK_ACCESS_FS_TRUNCATE,
+            "{name}: the storage subpath row must carry the eight rights its writes need"
         );
         assert_eq!(rule("STORAGE_ROOT").path, bound("STORAGE_ROOT"));
         // The expected root is written from the layout this provider keeps, not
@@ -7773,7 +7782,22 @@ fn landlock_ruleset_refuses_an_abi_that_cannot_express_a_row() {
         "a right with no ABI table entry is its own refusal"
     );
 
-    for (too_low, needed) in [(1, 5), (2, 5), (4, 5)] {
+    // The storage row needs ABI 3 for its truncation right, so ABIs 1 and 2 are
+    // refused on that row before the default denial is reached.
+    for too_low in [1, 2] {
+        let refusal = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, too_low, &[])
+            .expect_err("an ABI below the storage row's rights must be refused");
+        assert_eq!(
+            refusal,
+            format!(
+                "linux confinement refused: the Landlock ABI cannot express the {} row, \
+                 which needs ABI 3 and this kernel reports ABI {too_low}",
+                SHARED_RULES[2]
+            ),
+            "an ABI that cannot carry the storage row must be refused in these words"
+        );
+    }
+    for (too_low, needed) in [(4, 5)] {
         let refusal = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, too_low, &[])
             .expect_err("an ABI below the default denial's rights must be refused");
         assert_eq!(
@@ -8013,7 +8037,7 @@ fn landlock_install_record_decodes_each_failed_step() {
 }
 
 /// Wallet's ruleset names each measured loader entry with `EXECUTE | READ_FILE`,
-/// and the storage-root rule keeps the seven rights the declared row carries.
+/// and the storage-root rule keeps the eight rights the declared row carries.
 /// The test builds the ruleset from wallet's committed declared-rights file
 /// through `landlock_path_rules` and `LANDLOCK_LOADER_PATHS`. It starts no
 /// process and calls no kernel, so it runs on every OS.
@@ -8066,8 +8090,9 @@ fn landlock_ruleset_names_each_measured_loader_entry() {
             | LANDLOCK_ACCESS_FS_REMOVE_FILE
             | LANDLOCK_ACCESS_FS_REMOVE_DIR
             | LANDLOCK_ACCESS_FS_MAKE_DIR
-            | LANDLOCK_ACCESS_FS_MAKE_REG,
-        "the storage-root rule must keep the seven rights the declared row carries"
+            | LANDLOCK_ACCESS_FS_MAKE_REG
+            | LANDLOCK_ACCESS_FS_TRUNCATE,
+        "the storage-root rule must keep the eight rights the declared row carries"
     );
 }
 
@@ -12129,12 +12154,13 @@ fn linux_landlock_requires_no_new_privs() {
 ///
 /// The positive control uses the same uid and the same fixtures and no ruleset,
 /// and every control call must succeed. The confined run requires `EACCES` (13),
-/// never `EPERM`, for the read of the bound executable, the read beneath
+/// never `EPERM`, for the read beneath
 /// `STORAGE_PARENT`, the write beside it, the truncation beside it, and the
 /// listings of `STORAGE_PARENT`, `sibling` and `sibling/private`. The inside
-/// read and write succeed. The caller drives its own permitted calls through
+/// read and write succeed, and so does the read of the bound executable, because
+/// `execve` needs it. The caller drives its own permitted calls through
 /// `permitted`, because `status` is wallet's and did's `handle` has no such
-/// arm. An `Init` for a base outside `STORAGE_ROOT` is refused with the
+/// arm. The caller's first effect outside `STORAGE_ROOT` is refused with the
 /// caller's own `outside_code` and `outside_reason` and creates nothing:
 /// wallet's and did's answer `storage_error` with `Permission denied`, and
 /// model's answers `journal_access_denied` with `model run journal is not
@@ -12417,6 +12443,16 @@ fn linux_did_file_row_is_refused_outside_storage_root() {
         |provider| {
             let record = did_standin_permitted_operations(provider, &fixture.base, label);
             assert_suite_outcomes(label, &record, &DID_SUITE_CASES[..DID_PERMITTED_CASES]);
+            // A second write replaces the file, which Landlock checks as a
+            // truncation the oracle's `file-write*` grants. A fresh file does not.
+            let replaced =
+                provider.send(&json!({ "op": "set_nickname", "nickname": "ConfinedAgain" }));
+            assert_eq!(replaced["status"], "ok", "{label}: {replaced}");
+            let nickname = provider.send(&json!({ "op": "get_nickname" }));
+            assert_eq!(
+                nickname["data"]["nickname"], "ConfinedAgain",
+                "{label}: the replaced nickname must read back: {nickname}"
+            );
         },
         // did's Init records the root and writes nothing, so the kernel's refusal
         // comes at its first write there.
