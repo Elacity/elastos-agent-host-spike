@@ -2380,13 +2380,27 @@ fn create_missing_journal_directory(path: &Path) -> Result<(), ProviderFault> {
             )))
         }
     }
-    fs::create_dir(path).map_err(|create_err| {
+    create_owner_only_directory(path).map_err(|create_err| {
         ProviderFault::journal_write_io(
             &format!("create provider journal directory {}", path.display()),
             create_err,
         )
     })?;
-    set_owner_only_directory_mode(path)
+    validate_new_owner_only_directory(path)
+}
+
+/// Owner-only from its first moment, so a confined provider needs no path-based
+/// chmod and the directory never exists under wider bits.
+fn create_owner_only_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().mode(0o700).create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir(path)
+    }
 }
 
 fn open_temp_file_owner_only(path: &Path) -> Result<fs::File, ProviderFault> {
@@ -2463,16 +2477,9 @@ fn validate_existing_file(path: &Path, metadata: &fs::Metadata) -> Result<(), Pr
     validate_unix_owner_and_mode(path, metadata, 0o600, "file")
 }
 
-fn set_owner_only_directory_mode(path: &Path) -> Result<(), ProviderFault> {
+fn validate_new_owner_only_directory(path: &Path) -> Result<(), ProviderFault> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|err| {
-            ProviderFault::corrupt_journal(format!(
-                "failed to secure provider journal directory {}: {err}",
-                path.display()
-            ))
-        })?;
         validate_existing_directory(
             path,
             &fs::symlink_metadata(path).map_err(|err| {
@@ -3094,20 +3101,21 @@ mod tests {
         let root = temp_root("mode-and-sync-failures");
         fs::create_dir(&root).unwrap();
 
-        // chmod needs search permission on the parent; without it it is EACCES.
+        // Reading its metadata needs search permission on the parent; without it
+        // it is EACCES, and a directory that can't be checked stays corrupt.
         let parent = root.join("blocked-parent");
         let target = parent.join("runs");
         fs::create_dir_all(&target).unwrap();
         set_mode(&target, 0o700);
         set_mode(&parent, 0o400);
-        let raw = fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap_err();
-        let error = set_owner_only_directory_mode(&target).unwrap_err();
+        let raw = fs::symlink_metadata(&target).unwrap_err();
+        let error = validate_new_owner_only_directory(&target).unwrap_err();
         assert_eq!(error.code(), "journal_corrupt");
         assert_eq!(
             error.detail(),
             Some(
                 format!(
-                    "failed to secure provider journal directory {}: {raw}",
+                    "failed to inspect provider journal directory {}: {raw}",
                     target.display()
                 )
                 .as_str()

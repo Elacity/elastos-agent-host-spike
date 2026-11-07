@@ -2074,7 +2074,7 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "        other => panic!(\n            \"the stand-in serves only {DID_PROVIDER} and {WALLET_PROVIDER}, \\\n             so {other} has no storage root layout\"\n        ),",
+          "old": "        other => panic!(\n            \"the stand-in serves only {DID_PROVIDER}, {WALLET_PROVIDER} and {MODEL_PROVIDER}, \\\n             so {other} has no storage root layout\"\n        ),",
           "new": "        _ => wallet_dir(base),"
         }
       ],

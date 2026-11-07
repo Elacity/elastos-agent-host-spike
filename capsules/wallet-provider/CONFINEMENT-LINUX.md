@@ -765,8 +765,9 @@ oracle text rather than the Linux policy:
 Linux counterparts exist and pass, and the gate then holds Linux to them (027).
 Until then, adding `linux` fails the gate on purpose.
 
-The model provider's two Linux tests are `linux_model_journey_runs_under_the_seccomp_allow_list`
-and `linux_model_file_row_is_refused_outside_storage_root`.
+The model provider's three Linux tests are `linux_model_journey_runs_under_the_seccomp_allow_list`,
+`linux_model_file_row_is_refused_outside_storage_root` and
+`linux_model_filter_admits_threads_and_refuses_new_processes`.
 
 Today `sandbox_gate` requires `/usr/bin/sandbox-exec`, and
 `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` explicitly expects

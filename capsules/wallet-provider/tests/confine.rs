@@ -6626,32 +6626,47 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
 /// refusal on the Linux host.
 const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("bpf", Some(321), Some(280)),
+    ("brk", Some(12), Some(214)),
+    ("clone", Some(56), Some(220)),
+    ("clone3", Some(435), Some(435)),
     ("close", Some(3), Some(57)),
     ("connect", Some(42), Some(203)),
+    ("epoll_create1", Some(291), Some(20)),
+    ("epoll_ctl", Some(233), Some(21)),
+    ("epoll_pwait", Some(281), Some(22)),
+    ("eventfd2", Some(290), Some(19)),
     ("execve", Some(59), Some(221)),
     ("execveat", Some(322), Some(281)),
+    ("exit", Some(60), Some(93)),
     ("exit_group", Some(231), Some(94)),
     ("faccessat", Some(269), Some(48)),
     ("fchmod", Some(91), Some(52)),
+    ("fcntl", Some(72), Some(25)),
     ("fdatasync", Some(75), Some(83)),
+    ("flock", Some(73), Some(32)),
     ("fstat", Some(5), Some(80)),
     ("fsync", Some(74), Some(82)),
     ("ftruncate", Some(77), Some(46)),
+    ("futex", Some(202), Some(98)),
     ("getdents64", Some(217), Some(61)),
+    ("geteuid", Some(107), Some(175)),
     ("getrandom", Some(318), Some(278)),
     ("keyctl", Some(250), Some(219)),
     ("linkat", Some(265), Some(37)),
     ("lseek", Some(8), Some(62)),
+    ("madvise", Some(28), Some(233)),
     ("mkdirat", Some(258), Some(34)),
     ("mmap", Some(9), Some(222)),
     ("mount", Some(165), Some(40)),
     ("mprotect", Some(10), Some(226)),
+    ("munmap", Some(11), Some(215)),
     ("newfstatat", Some(262), Some(79)),
     ("openat", Some(257), Some(56)),
     ("openat2", Some(437), Some(437)),
     ("pidfd_getfd", Some(438), Some(438)),
     ("ppoll", Some(271), Some(73)),
     ("pread64", Some(17), Some(67)),
+    ("prlimit64", Some(302), Some(261)),
     ("process_vm_readv", Some(310), Some(270)),
     ("process_vm_writev", Some(311), Some(271)),
     ("ptrace", Some(101), Some(117)),
@@ -6661,8 +6676,14 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("readv", Some(19), Some(65)),
     ("recvmsg", Some(47), Some(212)),
     ("renameat2", Some(316), Some(276)),
+    ("rseq", Some(334), Some(293)),
     ("rt_sigaction", Some(13), Some(134)),
+    ("rt_sigprocmask", Some(14), Some(135)),
+    ("sched_getaffinity", Some(204), Some(123)),
     ("sendmsg", Some(46), Some(211)),
+    ("set_robust_list", Some(273), Some(99)),
+    ("set_tid_address", Some(218), Some(96)),
+    ("sigaltstack", Some(131), Some(132)),
     ("socket", Some(41), Some(198)),
     ("socketpair", Some(53), Some(199)),
     ("statx", Some(332), Some(291)),
@@ -6727,6 +6748,38 @@ impl SeccompInstruction {
     }
 }
 
+/// What a runtime with threads needs beyond `LAUNCH_ESSENTIALS`, measured with
+/// strace on the model provider's `init`, `status` and `shutdown` on aarch64,
+/// kernel 7.0. did and wallet are single-threaded and have none of these, so their
+/// programs stay byte-equal. `clone`, `clone3` and `socketpair` are not here: they
+/// take the argument-checked rules in `seccomp_program_with_thread_rules`.
+const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[
+    "brk",
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_pwait",
+    "eventfd2",
+    "exit",
+    "fcntl",
+    "flock",
+    "futex",
+    "geteuid",
+    "madvise",
+    "munmap",
+    "prlimit64",
+    "rseq",
+    "rt_sigprocmask",
+    "sched_getaffinity",
+    "set_robust_list",
+    "set_tid_address",
+    "sigaltstack",
+];
+/// `clone`'s and `socketpair`'s first argument in `seccomp_data`, low word.
+const SECCOMP_ARG0_OFFSET: u32 = 16;
+const SECCOMP_BPF_JSET_K: u16 = 0x45;
+/// `SECCOMP_RET_ERRNO` with `ENOSYS`, so glibc falls back from `clone3` to `clone`.
+const SECCOMP_RET_ENOSYS: u32 = 0x0005_0000 | libc::ENOSYS as u32;
+
 /// The value the filter returns for a refused call: `SECCOMP_RET_ERRNO` with
 /// the deny marker.
 const fn seccomp_deny_return() -> u32 {
@@ -6770,9 +6823,18 @@ impl SeccompAllowList {
     /// journey that installs the result is Linux-only, and the list a launch
     /// would install can be read and compared wherever the tests run.
     fn with_launch_essentials(&self) -> Self {
+        let threaded = self.provider == MODEL_PROVIDER;
         let mut syscalls = self.syscalls.clone();
-        for (syscall, _) in LAUNCH_ESSENTIALS {
-            let syscall = *syscall;
+        let runtime: &[&'static str] = if threaded {
+            MODEL_RUNTIME_ESSENTIALS
+        } else {
+            &[]
+        };
+        for syscall in LAUNCH_ESSENTIALS
+            .iter()
+            .map(|(syscall, _)| *syscall)
+            .chain(runtime.iter().copied())
+        {
             if !syscalls.contains(&syscall) {
                 syscalls.push(syscall);
             }
@@ -6781,7 +6843,11 @@ impl SeccompAllowList {
         Self {
             provider: self.provider.clone(),
             audit_arch: self.audit_arch,
-            program: seccomp_program(&syscalls, self.audit_arch),
+            program: if threaded {
+                seccomp_program_with_thread_rules(&syscalls, self.audit_arch)
+            } else {
+                seccomp_program(&syscalls, self.audit_arch)
+            },
             syscalls,
             #[cfg(target_os = "linux")]
             injected_step_failure: self.injected_step_failure,
@@ -6897,6 +6963,42 @@ fn seccomp_program(syscalls: &[&'static str], audit_arch: u32) -> Vec<SeccompIns
         SECCOMP_BPF_RET_K,
         seccomp_deny_return(),
     ));
+    program
+}
+
+/// `seccomp_program` with three rules a threaded runtime needs before the final
+/// denial. `clone3` answers `ENOSYS`, because a filter cannot read its argument
+/// struct, so glibc falls back to `clone`. `clone` is admitted only with
+/// `CLONE_THREAD`, so threads start and new processes don't. `socketpair` is
+/// admitted only for `AF_UNIX`, so `socket` and the network stay refused. Each
+/// rule returns on both arms, so the number stays loaded for the next one.
+fn seccomp_program_with_thread_rules(
+    syscalls: &[&'static str],
+    audit_arch: u32,
+) -> Vec<SeccompInstruction> {
+    let deny = SeccompInstruction::stmt(SECCOMP_BPF_RET_K, seccomp_deny_return());
+    let allow = SeccompInstruction::stmt(SECCOMP_BPF_RET_K, SECCOMP_RET_ALLOW);
+    let number = |name| {
+        seccomp_syscall_number(name, audit_arch)
+            .unwrap_or_else(|| panic!("{name} must have a number on this architecture"))
+    };
+    let mut program = seccomp_program(syscalls, audit_arch);
+    program.pop();
+    program.extend([
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("clone3"), 0, 1),
+        SeccompInstruction::stmt(SECCOMP_BPF_RET_K, SECCOMP_RET_ENOSYS),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("clone"), 0, 4),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG0_OFFSET),
+        SeccompInstruction::jump(SECCOMP_BPF_JSET_K, libc::CLONE_THREAD as u32, 0, 1),
+        allow,
+        deny,
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("socketpair"), 0, 4),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG0_OFFSET),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, libc::AF_UNIX as u32, 0, 1),
+        allow,
+        deny,
+        deny,
+    ]);
     program
 }
 
@@ -7525,7 +7627,7 @@ fn landlock_ruleset_follows_the_declared_rights() {
         let ruleset = landlock_path_rules(name, declared, bindings, 7, &[])
             .unwrap_or_else(|err| panic!("{err}"));
         assert!(ruleset.injected_step_failure.is_none());
-        assert_eq!(LANDLOCK_RULE_RIGHTS.len(), 5);
+        assert_eq!(LANDLOCK_RULE_RIGHTS.len(), 6);
 
         let rule = |parameter: &str| {
             ruleset
@@ -12015,6 +12117,12 @@ fn landlock_file_fixture(
     create_shared_ancestors(&bindings);
     let root = provider_storage_root(name, &base);
     fs::create_dir_all(&root).expect("the provider root must be creatable");
+    if name == MODEL_PROVIDER {
+        // The model's journal refuses a root anyone else can read.
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+            .expect("the model root must take owner-only bits");
+    }
 
     let reported_abi = landlock_abi().unwrap_or_else(|failure| {
         panic!("the host must report a Landlock ABI for this row: {failure}")
@@ -12502,7 +12610,17 @@ fn linux_model_file_row_is_refused_outside_storage_root() {
             assert_eq!(status["status"], "ok", "status must answer: {status}");
             assert_serving(&status["data"]);
         },
-        |provider, outside| provider.send(&provider_init_request(MODEL_PROVIDER, outside)),
+        // The model refuses a second Init whose configuration differs, before
+        // touching any file, so that answer would prove nothing about the
+        // kernel. A fresh model under the same ruleset and filter takes the
+        // outside base as its first Init instead.
+        |_, outside| {
+            let allow = seccomp_probe_list(MODEL_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+            let mut fresh =
+                ConfinedProvider::start_under_landlock(&allow, &fixture.ruleset, binary)
+                    .unwrap_or_else(|err| panic!("a second confined model must start: {err}"));
+            fresh.send(&provider_init_request(MODEL_PROVIDER, outside))
+        },
     );
 }
 
@@ -12774,12 +12892,34 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
         "the seccomp allow list must name the provider it was built for"
     );
     let wallet_allow = seccomp_probe_list(WALLET_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
-    assert_eq!(
-        allow.program, wallet_allow.program,
-        "the {name} program must equal wallet's: the two declared-rights files \
-         declare the same rights and the same two platform-baseline ids with \
-         identical rule text, so a difference is a per-provider widening"
-    );
+    if name == MODEL_PROVIDER {
+        // The model differs from wallet by exactly the runtime's measured calls
+        // and the three argument-checked thread rules, so any other difference
+        // is a widening.
+        let mut expected = wallet_allow.syscalls.clone();
+        for syscall in MODEL_RUNTIME_ESSENTIALS {
+            if !expected.contains(syscall) {
+                expected.push(syscall);
+            }
+        }
+        expected.sort_unstable();
+        assert_eq!(
+            allow.syscalls, expected,
+            "the model list must differ only by the runtime"
+        );
+        assert_eq!(
+            allow.program,
+            seccomp_program_with_thread_rules(&expected, allow.audit_arch),
+            "the model program must be that list with the thread rules"
+        );
+    } else {
+        assert_eq!(
+            allow.program, wallet_allow.program,
+            "the {name} program must equal wallet's: the two declared-rights files \
+             declare the same rights and the same two platform-baseline ids with \
+             identical rule text, so a difference is a per-provider widening"
+        );
+    }
     eprintln!("{}", linux_seccomp_journey_label());
 
     let fixture = tempfile::tempdir().expect("temporary provider base");
@@ -13027,6 +13167,56 @@ fn linux_did_journey_runs_under_the_seccomp_allow_list() {
 /// writes the named outside sibling is WP177's plant on this caller, caught by
 /// the absent sibling. Both reach a Linux-only test, so neither is registered in
 /// `falsifiers.json`.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_model_filter_admits_threads_and_refuses_new_processes() {
+    const CHILD: &str = "ELASTOS_MODEL_FILTER_CHILD";
+    let test = "linux_model_filter_admits_threads_and_refuses_new_processes";
+    if std::env::var_os(CHILD).is_none() {
+        // Its own process, so the filter never reaches the rest of the test run.
+        let status = Command::new(std::env::current_exe().expect("this test binary"))
+            .args(["--exact", test, "--test-threads=1", "--nocapture"])
+            .env(CHILD, "1")
+            .status()
+            .expect("the filter child must start");
+        assert!(status.success(), "the filter child must pass: {status}");
+        return;
+    }
+    let allow = seccomp_probe_list(MODEL_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+    install_seccomp(&allow).unwrap_or_else(|err| panic!("{err:?}"));
+
+    let thread = std::thread::spawn(|| 7);
+    assert_eq!(
+        thread.join().expect("a thread must run under the filter"),
+        7
+    );
+
+    // SAFETY: each call takes plain integers or a local array, and each result is
+    // only compared. A fork that wrongly succeeds exits at once in the child.
+    unsafe {
+        let child = libc::fork();
+        if child == 0 {
+            libc::_exit(0);
+        }
+        assert_eq!(child, -1, "a new process must be refused");
+        assert_eq!(*libc::__errno_location(), SECCOMP_DENY_ERRNO);
+        assert_eq!(libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0), -1);
+        assert_eq!(*libc::__errno_location(), SECCOMP_DENY_ERRNO);
+        let mut pair = [0; 2];
+        assert_eq!(
+            libc::socketpair(libc::AF_INET, libc::SOCK_STREAM, 0, pair.as_mut_ptr()),
+            -1,
+            "a non-AF_UNIX pair must be refused"
+        );
+        assert_eq!(*libc::__errno_location(), SECCOMP_DENY_ERRNO);
+        assert_eq!(
+            libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, pair.as_mut_ptr()),
+            0,
+            "an AF_UNIX pair must be admitted"
+        );
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_model_journey_runs_under_the_seccomp_allow_list() {
