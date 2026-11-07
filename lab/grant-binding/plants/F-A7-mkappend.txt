@@ -1,0 +1,8 @@
+id: F-A7-mkappend
+file: src/ledger.rs
+test: ledger::model_forged_append_does_not_skip_the_uncertain_mark
+--- old
+                            open.uncertain = true;
+--- new
+                            open.uncertain = !request.forged_append;
+--- end

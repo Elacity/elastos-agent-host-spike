@@ -178,6 +178,10 @@ struct HomeSnapshot {
     actions: Vec<ActionInfo>,
     #[serde(default)]
     notice: Option<String>,
+    /// Set when the stored nickname exists but cannot be read. A storage error
+    /// is not absence, so the summary names the failure instead of "not set".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nickname_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -630,7 +634,7 @@ pub(crate) async fn run(status: bool, json: bool) -> anyhow::Result<()> {
     }
 
     if status {
-        if let Err(err) = print_home_state_probe(&snapshot) {
+        if let Err(err) = write_home_state_probe(&mut std::io::stdout().lock(), &snapshot) {
             if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
                 if is_broken_pipe(io_err) {
                     return Ok(());
@@ -1146,13 +1150,16 @@ async fn gather_snapshot_from_parts(
         let _ = elastos_server::notifications::sync_room_notifications(data_dir, &room_summary);
         Some(elastos_server::notifications::load_summary(data_dir).unwrap_or_default())
     };
-    let nickname = if gateway_owned {
-        required_projected_home_display_name(home_summary_projection.as_ref())?
+    let (nickname, nickname_error) = if gateway_owned {
+        (
+            required_projected_home_display_name(home_summary_projection.as_ref())?,
+            None,
+        )
     } else if let Some(display_name) = projected_home_display_name(home_summary_projection.as_ref())
     {
-        Some(display_name)
+        (Some(display_name), None)
     } else {
-        load_runtime_nickname(data_dir).await
+        load_runtime_nickname(data_dir).await?
     };
     let did = if gateway_owned {
         Some(required_projected_home_identity(
@@ -1307,6 +1314,7 @@ async fn gather_snapshot_from_parts(
             .collect(),
         actions: Vec::new(),
         notice: None,
+        nickname_error,
     };
 
     snapshot.system_services = gather_system_services(&snapshot.components);
@@ -2272,8 +2280,17 @@ fn load_existing_did(data_dir: &Path) -> Option<String> {
         .map(|(_, did)| did)
 }
 
-async fn load_runtime_nickname(data_dir: &Path) -> Option<String> {
-    elastos_identity::load_nickname(data_dir).ok().flatten()
+async fn load_runtime_nickname(
+    data_dir: &Path,
+) -> anyhow::Result<(Option<String>, Option<String>)> {
+    match elastos_identity::load_nickname(data_dir) {
+        Ok(nickname) => Ok((nickname, None)),
+        // The reason carries the single prefix; readers print it as it is.
+        Err(_) => Ok((
+            None,
+            Some(crate::identity_cmd::unreadable_nickname_reason(data_dir)),
+        )),
+    }
 }
 
 fn load_default_source(data_dir: &Path) -> anyhow::Result<Option<SourceStatus>> {
@@ -2845,16 +2862,21 @@ async fn write_localhost_file(
     Ok(())
 }
 
-fn print_home_state_probe(snapshot: &HomeSnapshot) -> anyhow::Result<()> {
-    let mut out = std::io::stdout().lock();
+fn write_home_state_probe(
+    out: &mut impl std::io::Write,
+    snapshot: &HomeSnapshot,
+) -> anyhow::Result<()> {
     writeln!(out, "ElastOS Home State Probe")?;
     writeln!(out, "  Version:   {}", snapshot.version)?;
     writeln!(out, "  User:      {}", snapshot.user)?;
-    writeln!(
-        out,
-        "  Nickname:  {}",
-        snapshot.nickname.as_deref().unwrap_or("(not set)")
-    )?;
+    match snapshot.nickname_error.as_deref() {
+        Some(reason) => writeln!(out, "  Nickname:  {reason}")?,
+        None => writeln!(
+            out,
+            "  Nickname:  {}",
+            snapshot.nickname.as_deref().unwrap_or("(not set)")
+        )?,
+    }
     writeln!(
         out,
         "  Identity:  {}",
@@ -2936,25 +2958,17 @@ fn print_home_state_probe(snapshot: &HomeSnapshot) -> anyhow::Result<()> {
     writeln!(out)?;
 
     writeln!(out, "People")?;
-    writeln!(
-        out,
-        "  Nick:      {}",
-        snapshot.nickname.as_deref().unwrap_or("(not set)")
-    )?;
-    writeln!(
-        out,
-        "  Carrier:   {} reachable",
-        snapshot.runtime.peer_count.unwrap_or_default()
-    )?;
-    writeln!(
-        out,
-        "  Delivery:  {}",
-        if snapshot.runtime.peer_count.unwrap_or_default() == 0 {
-            "local only until another Home joins Chat"
-        } else {
-            "open Chat and send a line to confirm delivery"
-        }
-    )?;
+    match snapshot.nickname_error.as_deref() {
+        Some(reason) => writeln!(out, "  Nick:      {reason}")?,
+        None => writeln!(
+            out,
+            "  Nick:      {}",
+            snapshot.nickname.as_deref().unwrap_or("(not set)")
+        )?,
+    }
+    let (carrier, delivery) = people_carrier_status(snapshot.runtime.peer_count);
+    writeln!(out, "  Carrier:   {}", carrier)?;
+    writeln!(out, "  Delivery:  {}", delivery)?;
     writeln!(out, "  Roots:     localhost://Users, localhost://UsersAI")?;
     writeln!(out, "  Profile:   elastos identity nickname set")?;
     if let Some(ticket) = &snapshot.runtime.ticket {
@@ -3026,6 +3040,22 @@ fn print_home_state_probe(snapshot: &HomeSnapshot) -> anyhow::Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// The People section's Carrier and Delivery lines. A count Home has not
+/// learned yet says so instead of reading as an outage (#391).
+fn people_carrier_status(peer_count: Option<usize>) -> (String, &'static str) {
+    match peer_count {
+        Some(0) => (
+            "0 reachable".to_string(),
+            "local only until another Home joins Chat",
+        ),
+        Some(peers) => (
+            format!("{} reachable", peers),
+            "open Chat and send a line to confirm delivery",
+        ),
+        None => ("checking".to_string(), "checking"),
+    }
 }
 
 fn is_broken_pipe(err: &std::io::Error) -> bool {
@@ -3324,6 +3354,136 @@ mod tests {
         );
     }
 
+    #[test]
+    fn home_snapshot_names_the_nickname_file_when_it_is_unreadable() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let did_dir = dir.path().join("did");
+        fs::create_dir_all(&did_dir).unwrap();
+        let nickname_path = did_dir.join("nickname.enc");
+
+        // Absent: no nickname file means no nickname and no error.
+        assert_eq!(
+            rt.block_on(load_runtime_nickname(dir.path())).unwrap(),
+            (None, None)
+        );
+
+        // Stored but unreadable: the check must report it, not read absence.
+        fs::write(&nickname_path, b"permission-denied").unwrap();
+
+        fs::set_permissions(&did_dir, fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = fs::read(&nickname_path).err();
+        let result = rt.block_on(load_runtime_nickname(dir.path()));
+        fs::set_permissions(&did_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let Some(_denied) = denied else {
+            eprintln!("skipping: running with permission override (root)");
+            return;
+        };
+
+        let (nickname, error) = result.unwrap();
+        assert_eq!(nickname, None);
+        let error = error.expect("unreadable nickname must be reported, not read as absence");
+        assert_eq!(
+            error,
+            format!("nickname unreadable: {}", nickname_path.display())
+        );
+
+        let mut snapshot = sample_snapshot_with_components(&[]);
+        // The file is present and only its contents are unreadable: the summary
+        // must not fall back to the "no nickname" wording.
+        snapshot.nickname = None;
+        snapshot.nickname_error = Some(error);
+        let mut out = Vec::new();
+        write_home_state_probe(&mut out, &snapshot).unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+        let nick_line = rendered
+            .lines()
+            .find(|line| line.trim_start().starts_with("Nickname:"))
+            .unwrap_or_else(|| panic!("no Nickname line: {rendered}"));
+        assert_eq!(
+            nick_line.matches("nickname unreadable").count(),
+            1,
+            "the prefix must be printed once: {nick_line}"
+        );
+        assert!(
+            nick_line.contains("nickname.enc"),
+            "the reason must name the file: {nick_line}"
+        );
+        assert!(
+            !nick_line.contains("(not set)"),
+            "unreadable is not absent: {nick_line}"
+        );
+
+        // The People section renders the same reason, not the fallback.
+        let people_line = rendered
+            .lines()
+            .find(|line| line.trim_start().starts_with("Nick:"))
+            .unwrap_or_else(|| panic!("no Nick line: {rendered}"));
+        assert_eq!(
+            people_line.matches("nickname unreadable").count(),
+            1,
+            "the reason must be printed once: {people_line}"
+        );
+        assert!(
+            people_line.contains("nickname.enc") && !people_line.contains("(not set)"),
+            "unreadable is not absent: {people_line}"
+        );
+
+        // With no nickname file and no error, both lines still say "(not set)".
+        let empty_dir = tempfile::tempdir().unwrap();
+        let (absent_nickname, absent_error) = rt
+            .block_on(load_runtime_nickname(empty_dir.path()))
+            .unwrap();
+        assert!(absent_nickname.is_none() && absent_error.is_none());
+        let mut absent = sample_snapshot_with_components(&[]);
+        absent.nickname = absent_nickname;
+        absent.nickname_error = absent_error;
+        let mut absent_out = Vec::new();
+        write_home_state_probe(&mut absent_out, &absent).unwrap();
+        let absent_rendered = String::from_utf8(absent_out).unwrap();
+        for label in ["Nickname:", "Nick:"] {
+            let line = absent_rendered
+                .lines()
+                .find(|line| line.trim_start().starts_with(label))
+                .unwrap_or_else(|| panic!("no {label} line: {absent_rendered}"));
+            assert!(
+                line.trim_end().ends_with("(not set)"),
+                "{label} must say (not set): {line}"
+            );
+        }
+
+        // Present: the nickname is returned with no error.
+        let data_dir = tempfile::tempdir().unwrap();
+        let (signing_key, _did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        drop(signing_key);
+        elastos_identity::save_nickname(data_dir.path(), "owner").unwrap();
+        assert_eq!(
+            rt.block_on(load_runtime_nickname(data_dir.path())).unwrap(),
+            (Some("owner".to_string()), None)
+        );
+    }
+
+    #[test]
+    fn home_status_says_checking_when_the_carrier_count_is_unknown() {
+        let render = |peer_count| {
+            let mut snapshot = sample_snapshot_with_components(&[]);
+            snapshot.runtime.peer_count = peer_count;
+            let mut out = Vec::new();
+            write_home_state_probe(&mut out, &snapshot).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let unknown = render(None);
+        assert!(unknown.contains("  Carrier:   checking\n"), "{unknown}");
+        assert!(unknown.contains("  Delivery:  checking\n"), "{unknown}");
+        assert!(!unknown.contains("0 reachable"), "{unknown}");
+        let none = render(Some(0));
+        assert!(none.contains("  Carrier:   0 reachable\n"), "{none}");
+        assert!(none.contains("  Delivery:  local only until another Home joins Chat\n"));
+        assert!(render(Some(2)).contains("  Carrier:   2 reachable\n"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn home_cli_renderer_rejects_nonexecutable_link_and_corrupt_files() {
@@ -3373,6 +3533,43 @@ mod tests {
         }
     }
 
+    /// The 1106 Q1 (a) rule: a gateway-owned Home CLI context names a principal
+    /// that must have a stored record. The fixture stores it through the
+    /// production store API in the data dir the guarded call reads, so
+    /// `ResolvedPrincipalRoot::resolve` reads a real record instead of refusing
+    /// "has no stored record". The caller passes a `data_dir` inside its own
+    /// temp dir: either `default_data_dir()` after scoping HOME/XDG_DATA_HOME to
+    /// that temp dir, or `temp.path()` directly. Every caller that derives it
+    /// from `default_data_dir()` asserts it is under the temp dir before its
+    /// first write, so this writes nothing outside the temp tree.
+    fn store_home_cmd_test_principal(data_dir: &Path, principal_id: &str) {
+        fs::create_dir_all(data_dir).unwrap();
+        let now = elastos_server::auth::now_ts();
+        let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
+            elastos_runtime::auth::PasskeyWebAuthnBinding {
+                credential_id: format!("fixture-{principal_id}"),
+                public_key: "fixture-public-key".to_string(),
+                sign_count: 1,
+                user_verified: true,
+                origin: "http://localhost".to_string(),
+                rp_id: "localhost".to_string(),
+                created_at: now,
+                last_used_at: now,
+                revoked_at: None,
+            },
+        );
+        let stored = elastos_server::auth::upsert_principal_for_binding_as_role_named(
+            data_dir,
+            binding,
+            principal_id.to_string(),
+            elastos_server::auth::RuntimePrincipalRole::Guest,
+            None,
+            now,
+        )
+        .expect("fixture principal must be stored through the production store");
+        assert_eq!(stored.principal_id, principal_id);
+    }
+
     #[test]
     fn gateway_owned_home_cli_authority_helper_reads_gateway_env() {
         let _guard = HOME_CMD_ENV_LOCK.blocking_lock();
@@ -3380,6 +3577,12 @@ mod tests {
         let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
         let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
         let data_dir = default_data_dir();
+        assert!(
+            data_dir.starts_with(temp.path()),
+            "fixture data_dir {} escapes the test temp dir",
+            data_dir.display()
+        );
+        store_home_cmd_test_principal(&data_dir, "principal-a");
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
         let _principal = ScopedEnvVar::set(
@@ -3463,22 +3666,54 @@ mod tests {
 
     #[tokio::test]
     async fn gateway_owned_home_summary_projection_fails_on_gateway_http_error() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
         let _guard = HOME_CMD_ENV_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
+        let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
+        // Stored in the data dir the call passes, so record and token agree.
+        store_home_cmd_test_principal(temp.path(), "person:test-home-cli");
+        let _coords = ScopedEnvVar::set(
+            "ELASTOS_RUNTIME_COORDS_FILE",
+            temp.path().join("missing-runtime-coords.json"),
+        );
+        // A plain thread answers, so the reply never waits on the test's own
+        // runtime. The accept deadline turns an early refusal into a red, not a hang.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
-        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 1024];
-            let _ = socket.read(&mut buf).await;
-            socket
-                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
-                .await
-                .unwrap();
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let (mut socket, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "gateway stub got no request within its accept deadline",
+                            ));
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(err) => return Err(err),
+                }
+            };
+            let mut request = [0u8; 1024];
+            let mut read = 0;
+            while !request[..read]
+                .windows(4)
+                .any(|window| window == b"\r\n\r\n")
+            {
+                let n = std::io::Read::read(&mut socket, &mut request[read..])?;
+                if n == 0 {
+                    break;
+                }
+                read += n;
+            }
+            std::io::Write::write_all(
+                &mut socket,
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n",
+            )
         });
 
         let _owned =
@@ -3504,12 +3739,17 @@ mod tests {
             format!("http://{addr}"),
         );
 
-        let err = gather_home_summary_projection(temp.path(), None)
+        let failure = gather_home_summary_projection(temp.path(), None)
             .await
-            .unwrap_err()
-            .to_string();
+            .unwrap_err();
+        let err = failure.to_string();
 
-        server.await.unwrap();
+        // Gathered before the join, so a refusal shows its own full reason chain.
+        let reached = server.join().expect("gateway stub thread panicked");
+        assert!(
+            reached.is_ok(),
+            "the guarded call must reach the gateway stub and get its 503: {failure:#}"
+        );
         assert!(err.contains("gateway-owned Home CLI summary unavailable"));
         assert!(err.contains("returned 503 Service Unavailable"));
     }
@@ -3536,8 +3776,19 @@ mod tests {
     async fn gateway_owned_home_snapshot_uses_admitted_summary_shared_facts() {
         let _guard = HOME_CMD_ENV_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
+        let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
+        // The env names the principal the store holds: a failure here leaves the
+        // test without a stored record, rather than with a poisoned env.
+        let data_dir = default_data_dir();
+        assert!(
+            data_dir.starts_with(temp.path()),
+            "fixture data_dir {} escapes the test temp dir",
+            data_dir.display()
+        );
+        store_home_cmd_test_principal(&data_dir, "person:v07-admin");
         let _principal = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
             "person:v07-admin",
@@ -3554,8 +3805,6 @@ mod tests {
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_GRANT_ID_ENV,
             "grant-v07-admin",
         );
-        let data_dir = temp.path().join("data");
-        std::fs::create_dir_all(&data_dir).unwrap();
         write_home_cmd_test_capsule(&data_dir, "home-gui", "shell", Vec::new());
         write_home_cmd_test_capsule(&data_dir, "home-cli", "shell", Vec::new());
         write_home_cmd_active_shell_state(&data_dir, "person:v07-admin", "home-gui");
@@ -3630,14 +3879,31 @@ mod tests {
         assert_eq!(snapshot.notifications.unread_count, 1);
         assert_eq!(snapshot.notifications.attention_count, 1);
         assert_eq!(snapshot.active_shell["active"], "home-cli");
+        // The lookup must read this temp dir's authority, not another Home's.
+        assert_eq!(snapshot.session.mode, "browser_pty");
+        assert_eq!(
+            snapshot.session.passkey_state,
+            "launch-token authorized browser Home session"
+        );
     }
 
     #[tokio::test]
     async fn gateway_owned_home_snapshot_rejects_unsigned_summary_authority() {
         let _guard = HOME_CMD_ENV_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
+        let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
+        // The env names the principal the store holds: a failure here leaves the
+        // test without a stored record, rather than with a poisoned env.
+        let data_dir = default_data_dir();
+        assert!(
+            data_dir.starts_with(temp.path()),
+            "fixture data_dir {} escapes the test temp dir",
+            data_dir.display()
+        );
+        store_home_cmd_test_principal(&data_dir, "person:v07-admin");
         let _principal = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
             "person:v07-admin",
@@ -3654,8 +3920,6 @@ mod tests {
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_GRANT_ID_ENV,
             "grant-v07-admin",
         );
-        let data_dir = temp.path().join("data");
-        std::fs::create_dir_all(&data_dir).unwrap();
         let projection: HomeSummaryFactsProjection = serde_json::from_value(serde_json::json!({
             "authority": {
                 "signed_in": false,
@@ -3701,8 +3965,19 @@ mod tests {
     async fn gateway_owned_home_snapshot_rejects_mismatched_summary_authority() {
         let _guard = HOME_CMD_ENV_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
+        let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
+        // The env names the principal the store holds: a failure here leaves the
+        // test without a stored record, rather than with a poisoned env.
+        let data_dir = default_data_dir();
+        assert!(
+            data_dir.starts_with(temp.path()),
+            "fixture data_dir {} escapes the test temp dir",
+            data_dir.display()
+        );
+        store_home_cmd_test_principal(&data_dir, "person:v07-admin");
         let _principal = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
             "person:v07-admin",
@@ -3719,8 +3994,6 @@ mod tests {
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_GRANT_ID_ENV,
             "grant-v07-admin",
         );
-        let data_dir = temp.path().join("data");
-        std::fs::create_dir_all(&data_dir).unwrap();
         let projection: HomeSummaryFactsProjection = serde_json::from_value(serde_json::json!({
             "authority": {
                 "signed_in": true,
@@ -3818,6 +4091,7 @@ mod tests {
             command_groups: Vec::new(),
             actions: Vec::new(),
             notice: None,
+            nickname_error: None,
         }
     }
 
@@ -3910,6 +4184,11 @@ mod tests {
             "",
         );
         let data_dir = default_data_dir();
+        assert!(
+            data_dir.starts_with(temp.path()),
+            "fixture data_dir {} escapes the test temp dir",
+            data_dir.display()
+        );
         write_home_cmd_test_capsule(&data_dir, "home-gui", "shell", Vec::new());
         write_home_cmd_test_capsule(
             &data_dir,

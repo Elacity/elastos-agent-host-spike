@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# A stand-in tools/build that writes no module but a link at
+# OUT_DIR/capsule.wasm to the file "sentinel-file" beside OUT_DIR ($1).
+set -euo pipefail
+ln -s "$(cd "$1/.." && pwd)/sentinel-file" "$1/capsule.wasm"

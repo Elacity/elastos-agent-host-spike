@@ -1,0 +1,12 @@
+id: F-A7-concurrent
+file: src/ledger.rs
+test: ledger::model_concurrent_reserves_keep_one_ceiling
+--- old
+        let mut ledger = self.ledger.lock().expect("ledger lock");
+        let held = ledger.held;
+--- new
+        let held = self.ledger.lock().expect("ledger lock").held;
+        static GATE: std::sync::OnceLock<std::sync::Barrier> = std::sync::OnceLock::new();
+        GATE.get_or_init(|| std::sync::Barrier::new(2)).wait();
+        let mut ledger = self.ledger.lock().expect("ledger lock");
+--- end

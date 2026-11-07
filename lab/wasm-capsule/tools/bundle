@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Write a new lab bundle of the wc-001 capsule, or name an existing one.
+#
+#   tools/bundle OUT_DIR             build with tools/build, write OUT_DIR/bundle/, print its lab CID
+#   tools/bundle --name BUNDLE_DIR   print the lab CID of an existing bundle
+#
+# OUT_DIR is required and must not exist. OUT_DIR/bundle/ then holds exactly
+# capsule.json (this capsule's elastos.capsule/v1 manifest) and capsule.wasm
+# (the module tools/build wrote and receipted, moved in unchanged). stdout
+# carries only the lab CID; a refusal goes to stderr with its reason (exit
+# status 2 for the arguments, 1 for the run). The name is cc-capsule-identity's
+# lab CID, through wasm_capsule_tools::bundle_identity; it is not the
+# Runtime's CID. README.md, "tools/bundle", has the rules.
+#
+# The work is done by the tools crate's `bundle` binary (tools/src/bin/bundle.rs).
+set -euo pipefail
+
+LANE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec cargo run --quiet --locked --manifest-path "$LANE_DIR/Cargo.toml" \
+  --package wasm-capsule-tools --bin bundle -- "$@"

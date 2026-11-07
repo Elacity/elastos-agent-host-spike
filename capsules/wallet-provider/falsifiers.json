@@ -1,0 +1,2342 @@
+{
+  "about": "Wallet-provider lane falsifiers merged by tasks 010 and 004 (PRs #62 and #63). WP01 restores a temp-directory fallback when base_path is missing, WP02 accepts an empty root the same way, and WP03 replaces the non-absolute refusal with the same temp fallback; the named storage-root test then fails in each case. WP04 replaces the profile's `(deny default)` with `(allow default)`, and WP05 appends `(allow network*)` beside the profile's existing `(deny network*)`; those are the two profile falsifiers proven by task 004. A falsifier counts as caught only when every named test fails. Unit-test names of the form `tests::<module>::<fn>` resolve under `src/tests/` and must be registered in the unit test executable; bare integration-test names resolve against `tests/confine.rs`, which is a separate binary. Edit file paths are relative to examples/agent-host, the runner's rule. This list records the three storage-root refusals, the two profile mutations above, and the shared-contract mutations from task 014: WP06 drops the explicit `(deny network*)` requirement from the one check, and WP09 skips a missing required did profile. Task 018 re-anchors WP07 to drop the model profile from the one required list, retires WP08 and WP10 because the model-only branch they broke no longer exists, and registers WP26, which skips a missing model profile as NotFound. WP11 from task 015 removes the did profile's shared `STORAGE_PARENT` read grant, which the one contract check requires even though no did confinement test needs it. WP12 removes the network-allow rule from the one check while the shared predicate stays, and WP13 narrows that predicate to the exact form `(allow network*)`; `file_profile_contract_rejects_a_network_allow` catches each one. WP05's appended `(allow network*)` also fails `both_file_profiles_bind_one_storage_parameter_contract`, because the one check runs over the real wallet profile. Task 016 removes every allow form from this profile that no confinement test needed on macOS 26.5.2 arm64 (the program-image read, the three system-library subpaths and the `/dev/urandom` read) and registers the five allow rules it keeps: WP14 drops the shared process-exec grant, WP15 the root-directory read, WP16 the kernel-fact read, WP17 the shared `STORAGE_PARENT` read and WP18 the storage-root state grant. Each edit leaves the profile well formed and is caught only when every listed test fails. WP18 is the removed storage-root write rule that CONFINEMENT.md documents. Task 020 registers the appended `(allow default)`: WP19 removes the allow-default refusal from the one check while the shared predicate stays, and WP20 appends `(allow default)` after the profile's default denial; `file_profile_contract_rejects_an_allow_default` catches WP19, and WP20 fails `profile_denies_network`, `both_file_profiles_bind_one_storage_parameter_contract`, `confined_outside_read_is_denied` and `confined_outside_write_is_denied`. Task 021 registers the one check's canonical-token rule and the three profile falsifiers against it: WP21 removes the token refusal from the shared check, WP22 renames wallet's `STORAGE_ROOT` and WP23 renames did's, and WP24 appends the sibling-read allowance. `file_profile_contract_rejects_a_non_canonical_token` catches WP21; `both_file_profiles_bind_one_storage_parameter_contract` catches WP22 and WP23 and the token in WP24; `confined_outside_read_is_denied` catches WP24's granted key read. Task 024 registers WP25: the honesty test resolves edit paths from the repository root again, so `falsifiers_list_is_honest` fails on WP01's missing file and `falsifiers_list_rejects_a_repository_relative_path` fails because the WP01 refusal does not come. Task 027 adds WP27, which returns `Ok(false)` from the sandbox gate's declared-OS branch, so a missing `/usr/bin/sandbox-exec` on macOS skips and passes; `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` fails on its `macos` case. Task 029 adds WP28, which starts the provider binary directly when the profile file is missing so the startup refusal test times out on the bounded wait, and WP29, which drops the child's standard error from the one failure message so the startup refusal test loses `sandbox-exec`'s line. Task 050 adds WP30, which returns `false` from the error arm of `sandbox_available`, so a missing `/usr/bin/sandbox-exec` on macOS returns and the test passes; `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` fails. Task 054 registers WP31, which restores the plain cut at every `;` and the parenthesis count inside strings, and WP32 to WP37, which disable escaping, whitespace inside a string, whitespace collapse outside strings, a comment's end at its newline, and the two parser refusals; `file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does` catches WP31 to WP35, `profile_forms_rejects_unclosed_string` catches WP36, and `profile_forms_rejects_unclosed_form` catches WP37. WP38 drops the newline that ends a comment, so the tokens around it glue together and pass the check; `a_comment_inside_a_form_keeps_its_tokens_apart` catches it. WP39 drops the split outside every form, so a bare value such as `1` glues onto the next form and hides an `(allow default)` from the check; `a_bare_top_level_value_is_its_own_form` catches it. WP40 adds the separator space after an opening parenthesis, so `( allow default)` escapes both allow predicates and passes the check; `a_space_after_the_opening_parenthesis_still_names_its_rule` catches it. Task 053 adds WP41, which starts the stderr drainer only after the wait, so the fixture blocks on a full pipe and `stderr_is_drained_before_wait` fails on its exit assertion; WP42, which makes `unanswered` use a fixed `Operation not permitted` instead of the child's standard error, so `startup_denial_reports_its_reason` fails on its `execvp()` assertion; and WP43, which returns the shared unanswered message from the invalid-JSON branch, so `invalid_json_answer_names_the_request_and_the_parse_error` fails. Task 055 registers WP44, which appends `(allow file-read* (literal \"/etc\"))` to the did profile, WP45 to WP48, which drop the removal check's `expect`, profile-path, `old` and `new` conditions, and WP49 to WP53, which turn its profile-read, profile-parse, list-read, not-JSON and missing-list refusals into skips. Run the whole listfrom the repository root with `python3 -I examples/agent-host/falsify.py --from capsules/wallet-provider/falsifiers.json`; the sandbox entries need `/usr/bin/sandbox-exec`, so a full run is a Mac gate. Task 058 appends WP54, which drops the canonical-parameter refusal in `start_with_profile`, so `start_with_profile_refuses_a_canonical_parameter` fails. Task 058's encoding repair adds WP55, which checks the caller's whole name instead of the name before the first `=`, so `start_with_profile_refuses_an_encoded_canonical_parameter` fails. Task 059 appends WP56, which appends an unpinned `(allow process-exec)` after the exec rule, so `unbound_copy_is_refused_under_profile` fails on its deadline assertion. Task 060 appends WP57, which widens the parent read from `literal` to `subpath`, so `planted_key_beneath_storage_parent_is_not_read` fails because the planted key loads and `init` answers ok. Task 061 appends WP58, which drops the section check's own-id rule; `falsifier_section_check_reports_missing_and_stale_ids` catches it. WP59 drops that check's unregistered-id rule, which the same test catches. WP60 matches an id as a substring instead of a whole token, which the same test catches. WP61 runs the section to the end of the file instead of the next `## ` heading, which `falsifier_section_check_rejects_a_document_without_its_section` catches. WP62 bypasses the missing-heading refusal, which the same test catches. WP63 bypasses the duplicate-heading refusal, which the same test catches. WP64 skips an unreadable `CONFINEMENT.md` instead of refusing it, and `falsifier_document_read_rejects_unreadable_source` catches it. The same task names every registered id in its own document's `## Falsifiers` section and checks both documents with `every_falsifier_id_is_named_in_its_confinement_document`. Task 062 appends WP65, which appends `(allow file-write* (subpath (param \"STORAGE_PARENT\")))` to this profile, so `confined_outside_write_is_denied` fails because the fresh base beneath the parent is created. Task 063 appends WP66, which restores the silent drop of an entry without a string id in the one list reader, so `allow_rule_removal_check_rejects_bad_inputs` fails because that entry is skipped instead of refused. Task 064 appends WP67, which drops the section check's character-before rule, so `XDID1` names `DID1`, and WP68, which drops its character-after rule, so `DID1a` names `DID1`; `falsifier_section_check_reports_missing_and_stale_ids` fails on the matching case because the missing-id problem does not come. Task 066 appends WP69, which disables the second-exec-allow refusal in `check_profile_contract`, so `file_profile_contract_rejects_a_second_exec_allow` fails because the `/bin/sh` fixture passes. WP70 reads no `)` as a token boundary in the exec predicate, so `process*)` is neither `process*` nor `process-exec`; the same test fails on its `(allow process*)` case because that profile passes. Task 067 extends the exec predicate to every operation name of an allow form and narrows the refusal to every exec allow except the shared rule, and registers WP71, which quotes every exec allow after the first, WP72, which reads only the operation names before the first filter, WP73, which quotes only the first extra rule, WP74, which counts a token inside a nested filter, and WP75, which counts text inside a string; `file_profile_contract_rejects_a_second_exec_allow` catches each. Task 067's second round reuses `profile_characters` as the exec predicate's one string reader, accepts a filter directly after `allow`, and registers WP76, which drops the escape flag in `profile_characters`, and WP77, which requires a space after `allow`; `file_profile_contract_rejects_a_second_exec_allow` catches both, and `file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does` catches WP76. Task 068 adds WP78, which renames the did-provider test the operations table cites, so `every_operations_table_cites_existing_tests` fails on the missing function. WP79 bypasses the unresolved-file refusal; `operations_table_check_reports_each_missing_citation` catches it. WP80 bypasses the no-citation refusal; `operations_table_check_reports_each_missing_citation` catches it. WP81 bypasses the absolute-path refusal; `operations_table_check_rejects_paths_outside_provider` catches it. WP82 bypasses the resolved-path containment refusal; `operations_table_check_rejects_paths_outside_provider` catches it. Task 069's WP83 renames the wallet operations table's cited `confined_outside_write_is_denied` test in `capsules/wallet-provider/tests/confine.rs`, so `every_operations_table_cites_existing_tests` fails because the cited function is gone. Task 070 adds WP84, which appends an allow rule to the did profile that no declared right names, and WP85, which appends the same rule to the wallet profile; `every_did_and_wallet_allow_rule_traces_to_one_declared_right` catches both. Task 073 adds WP86, which renames the one platform-baseline key the declared-rights check reads to the old startup-needs key, and WP87, which drops the justification refusal; `every_did_and_wallet_allow_rule_traces_to_one_declared_right`, `model_declared_rights_read_on_the_did_and_wallet_template` and `declared_rights_trace_refuses_each_bad_input` catch them. Task 072 adds WP88, which appends a read and write grant on `STORAGE_PARENT`, so `account_operations_beneath_storage_parent_are_refused` fails because the sibling `init` and the account call succeed. Task 074 adds WP89, which drops the pin table's two startup rows, so the swapped startup rules and the root read moved under `storage` pass, WP90, which drops the repeated-id refusal, WP91, which drops the repeated-rule refusal, and WP92, which drops the duplicate-form refusal, so the profile that holds `(allow sysctl-read)` twice reads the old reason; `declared_rights_trace_refuses_each_bad_input` fails on each case. Task 075 adds WP93, which drops the prefix refusal, so a justification that names another provider passes, and WP94, which drops the empty-reason refusal, so a bare provider prefix passes; `declared_rights_trace_refuses_each_bad_input` fails on the matching case. Task 076 adds WP95, which drops the role refusal, WP96, which drops the provider refusal, and WP97, which drops the platform-baseline status refusal, so each wrong value passes; `declared_rights_trace_refuses_each_bad_input` fails on the matching case. Task 077 adds WP98, which replaces the missing rights-list refusal with an empty list, WP99, which replaces the missing platform-baseline refusal with an empty map, and WP100, which replaces the missing baseline rules-list refusal with an empty list, so the check goes on and refuses later with other words; `declared_rights_trace_refuses_each_bad_input` fails on the matching case. Task 078 adds WP101, which replaces the missing-id refusal with an empty id, WP102, which replaces the missing-rules-list refusal with an empty list, WP103, which skips a rule that is not a string, and WP104, which drops only the pin table's `startup-sysctl` row, so `declared_rights_trace_refuses_each_bad_input` fails on its platform-baseline id case, its missing-rules-list case, its non-string-rule case and its sysctl-moved-under-storage case. Task 084 adds `managed_approvals_persist_under_storage_root` to WP18's tests, so the managed approval calls also fail when the storage-root grant is removed. Task 089 adds WP105, which makes the lab generator emit `(allow file-read* (literal \"/private/var/cc-confine-generated\"))` after the head, so `generated_did_and_wallet_profiles_match_their_committed_oracles` fails at the no-claimant refusal of the declared-rights check. Task 090 adds WP106, which makes the rights-list id refusal never fire, and WP107, which makes the platform-baseline id refusal never fire, so `generator_refuses_an_unnamed_right_and_the_start_is_refused` fails at its refusal check in the did case; WP108 makes the lab writer create the profile path before the generator refuses, so the same test fails on its no-file assertion. Task 091 adds WP109, which makes the lab generator append `(deny file-write* (literal \"/private/var/cc-confine-generated\"))` after the declared rules; only the sorted-tail oracle comparison catches it, because the profile head keeps its order and neither contract check reads a deny form, so the comparison fails on its `differs from its committed oracle` panic with that form under \"only in generated\". Task 093 adds WP110, which names `generate_profile` in `capsules/wallet-provider/src/main.rs`, so `lab_generator_is_named_only_in_test_code` fails because its walk reads a non-test file and its refusal names that path. WP111 names it in `capsules/did-provider/src/main.rs`, so the same test fails because the walk reaches the other crate. Task 094 adds WP112, which starts the binary bare in the stand-in launcher's host refusal, so `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` fails on case (a); WP113, which starts it bare after a failed `init`, so the same test fails on case (e); WP114, which replaces the stand-in's generated-profile start with a bare start, so the same test fails at the outside `init`; and WP115, which ignores the lab writer's refusal and starts under the committed `confine.sb`, so the same test fails on case (d). Task 095 adds WP116, which binds the stand-in's `STORAGE_ROOT` to the base instead of the wallet directory, so `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite` fails on a denied case the widened grant permits; and WP117, which writes the generated profile but starts under the committed `confine.sb`, so `standin_start_runs_under_the_generated_profile_not_the_committed_file` fails because the start is then Started. Task 097 adds WP118, which removes the stand-in's check that the confinement tool is `SANDBOX_EXEC`, so `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` fails on case (c2), which is then Started; WP119, which removes the binary-file check, so the same test panics in `resolved` on case (c3); and WP120, which returns `Ok(provider)` for an `init` answer that is not `ok`, so the same test fails on case (f), which is then Started. Task 098 adds WP121, which removes the planted-key push, so `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite` fails naming the missing case; WP122, which drops the refusal `code` in `suite_entry`, so `suite_entry_keeps_the_refusal_code` fails because two refusals that differ only in code compare equal; and WP123, which records every bound result as `Ok` in `wallet_suite_entry`, so `wallet_suite_entry_records_an_inner_refusal_as_refused` fails because the entry reads `Ok`. Task 096 adds WP124, which makes the stand-in use wallet's root layout for did, so `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite` fails because the did start is refused at its first `init`. Task 099 adds WP125, which makes the absent-tool check never fire, so case (c) is answered by the wrong-tool reason and lacks `is absent`; and WP126, which drops the OS from the wrong-tool reason, so case (c2) lacks `on macos`. Both make `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` fail on the matching case. Task 100 adds WP127, which appends a write grant on `STORAGE_PARENT` to the stand-in's generated profile for did after the writer, so `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite` fails at did's launched-profile check, where `check_declared_rights` refuses the appended allow form because no declared right names it; the suite never runs. Task 101 adds WP128, which returns did's `target/debug/did-provider` path from the one build-output reader instead of the reported `executable`, so `did_binary_is_the_executable_the_build_reports` fails on its fixture path outside any target directory while `standin_launcher_finds_the_built_did_binary` alone still passes because the guessed file exists after did's build; and WP129, which returns `wallet_dir(base)` for the unknown-name arm of `provider_storage_root`, so `provider_storage_root_refuses_an_unknown_provider_name` fails because no refusal comes. Task 103 adds WP130, which disables the kind check in the one build-output reader, so `did_binary_is_the_executable_the_build_reports` fails because it reads the non-bin artifact's executable before the bin artifact's. Task 104 folds the three stand-in launcher tests into the one C0 journey test, `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host`, which runs did first and then wallet, and re-anchors WP112 on the host refusal. Its refusal table adds three simulated Linux host reports that each name one missing primitive and a Linux host that reports nothing missing; those are host reports, not a Linux run. Task 104 adds WP131, which starts the binary bare on a simulated Linux host with a missing primitive, so the journey fails at did's Landlock row, and WP132, which returns one fixed reason that names no primitive, so the journey fails on that row's words. Task 105 folds the two suite tests into that B3 journey, which reads the file the stand-in launched, and adds WP133, which appends one allow form the suite does not exercise to that file, so the journey fails at did's launched-profile check, where `check_declared_rights` refuses the appended allow form because no declared right names it, and WP134, which removes `(deny network*)` from it, so the journey fails at that check, where `check_profile_contract` refuses the profile without its explicit network denial. Task 107 adds WP135, which moves the `DECLARED_CONFINED_OS` lookup back above the missing-primitive check, so the journey fails at did's new `macos` Landlock row; WP136, the reviewers' reproduction, which prefixes the missing-primitive reason with `linux has no confinement design; `, so the journey fails at did's Landlock row; and WP137, which drops the `{name} start on {os} is refused: ` prefix from the final `Err`, so the journey fails at did's first host row. Task 108 adds WP138, which appends `(deny file-write* (literal \"/private/var/cc-confine-launched\"))` to the file the stand-in launches after the writer; only `compare_profile_to_its_oracle` catches it, at did's launched-profile check, because the head keeps its order, the contract checks read only allow forms and no suite case reads that literal, so the journey fails at its launched profile and its oracle disagree panic, which names the planted form. Task 116 adds WP139, which reads `/etc/hosts`, outside every grant, in `status`'s ok arm and answers `storage_error` when that read is denied, so `status` stops answering ok and `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` fails on its first answer; and WP140, which appends one byte to `wallet-key.hex` inside the granted root in the same arm while every answer stays ok, so only that test's wallet directory comparison catches it. Task 117 adds WP141, which removes the row-set rule's call so a table may omit a row its dispatch answers or add one its dispatch does not, and the row cases of `operations_table_row_check_refuses_each_bad_table` fail; WP142, which makes the Right-vocabulary refusal return early, so the undeclared-id and `no named test shows this` cases pass; WP143, which makes the both-sides refusal return early, so the one-side cases pass; and WP144, which makes the Linux-status refusal return early, so the enforced-cell case passes. Task 119 adds WP145, which writes one file into the wallet directory in the `Request::Shutdown` arm of `fn handle` before it answers `Response::empty_ok()`, so `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` fails at its final wallet directory compare after `shutdown`, which finds a name the setup did not leave.",
+  "falsifiers": [
+    {
+      "id": "WP01",
+      "title": "a missing storage root falls back to a temp directory instead of refusing",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/src/main.rs",
+          "old": "    let Some(raw) = config.get(\"base_path\").and_then(Value::as_str) else {\n        return Err(STORAGE_PATH_NOT_SET.to_string());\n    };",
+          "new": "    let Some(raw) = config.get(\"base_path\").and_then(Value::as_str) else {\n        return Ok(std::env::temp_dir().join(\"wallet-provider-falsifier\"));\n    };"
+        }
+      ],
+      "tests": [
+        "tests::storage_root::missing_storage_root_is_refused"
+      ]
+    },
+    {
+      "id": "WP02",
+      "title": "an empty storage root is accepted instead of refused",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/src/main.rs",
+          "old": "    if raw.trim().is_empty() {\n        return Err(STORAGE_PATH_EMPTY.to_string());\n    }",
+          "new": "    if raw.trim().is_empty() {\n        return Ok(std::env::temp_dir().join(\"wallet-provider-falsifier\"));\n    }"
+        }
+      ],
+      "tests": [
+        "tests::storage_root::empty_storage_root_is_refused"
+      ]
+    },
+    {
+      "id": "WP03",
+      "title": "a relative storage root is accepted instead of refused",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/src/main.rs",
+          "old": "    if !root.is_absolute() {\n        return Err(STORAGE_PATH_NOT_ABSOLUTE.to_string());\n    }",
+          "new": "    if !root.is_absolute() {\n        return Ok(std::env::temp_dir().join(\"wallet-provider-falsifier\"));\n    }"
+        }
+      ],
+      "tests": [
+        "tests::storage_root::relative_storage_root_is_refused"
+      ]
+    },
+    {
+      "id": "WP04",
+      "title": "the profile allows every operation by default",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/confine.sb",
+          "old": "(deny default)",
+          "new": "(allow default)"
+        }
+      ],
+      "tests": [
+        "confined_outside_write_is_denied",
+        "confined_outside_read_is_denied"
+      ]
+    },
+    {
+      "id": "WP05",
+      "title": "the profile adds a network allow beside its explicit network denial",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/confine.sb",
+          "old": "(deny network*)",
+          "new": "(deny network*)\n(allow network*)"
+        }
+      ],
+      "tests": [
+        "profile_denies_network",
+        "both_file_profiles_bind_one_storage_parameter_contract"
+      ]
+    },
+    {
+      "id": "WP06",
+      "title": "the shared contract check no longer requires the explicit network denial",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    if !forms.iter().any(|form| form == \"(deny network*)\") {\n        return Err(format!(\n            \"{name} must deny the network explicitly with (deny network*)\"\n        ));\n    }",
+          "new": "    // falsifier: the explicit network denial is no longer required"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_profile_without_deny_network",
+        "file_profile_contract_checks_the_model_profile_when_present"
+      ]
+    },
+    {
+      "id": "WP07",
+      "title": "the model profile is dropped from the one required list",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "const FILE_PROFILES: [&str; 3] = [\"did-provider\", \"wallet-provider\", \"model-provider\"];",
+          "new": "const FILE_PROFILES: [&str; 2] = [\"did-provider\", \"wallet-provider\"];"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_checks_the_model_profile_when_present"
+      ]
+    },
+    {
+      "id": "WP09",
+      "title": "a missing required did profile is skipped instead of refused",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            Err(err) => {\n                return Err(format!(\n                    \"{name} profile {} must be readable: {err}\",\n                    path.display()\n                ))\n            }",
+          "new": "            Err(_) => continue,"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_checks_the_model_profile_when_present"
+      ]
+    },
+    {
+      "id": "WP11",
+      "title": "the did profile drops the shared STORAGE_PARENT read the one contract requires",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/did-provider/confine.sb",
+          "old": "(allow file-read* (literal (param \"STORAGE_PARENT\")))",
+          "new": ";; Removed: shared STORAGE_PARENT read grant."
+        }
+      ],
+      "tests": [
+        "both_file_profiles_bind_one_storage_parameter_contract"
+      ]
+    },
+    {
+      "id": "WP12",
+      "title": "the shared contract check no longer refuses a network allow",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        if is_network_allow(form) {\n            return Err(format!(\n                \"{name} must not grant network access; a network allow is refused: {form}\"\n            ));\n        }",
+          "new": "        // falsifier: the check no longer refuses a network allow"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_network_allow"
+      ]
+    },
+    {
+      "id": "WP13",
+      "title": "the shared network-allow predicate accepts only the exact form (allow network*)",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "fn is_network_allow(form: &str) -> bool {\n    form.starts_with(\"(allow \") && form.contains(\"network\")\n}",
+          "new": "fn is_network_allow(form: &str) -> bool {\n    form == \"(allow network*)\"\n}"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_network_allow"
+      ]
+    },
+    {
+      "id": "WP14",
+      "title": "the profile drops the process-exec grant, so the provider cannot start",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/confine.sb",
+          "old": "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))",
+          "new": ";; Removed: shared process-exec grant."
+        }
+      ],
+      "tests": [
+        "confined_provider_serves_wallet_operations_under_its_root",
+        "confined_outside_read_is_denied",
+        "confined_outside_write_is_denied",
+        "both_file_profiles_bind_one_storage_parameter_contract"
+      ]
+    },
+    {
+      "id": "WP15",
+      "title": "the profile drops the root-directory read, so the provider cannot start",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/confine.sb",
+          "old": "(allow file-read* (literal \"/\"))",
+          "new": ";; Removed: root-directory read grant."
+        }
+      ],
+      "tests": [
+        "confined_provider_serves_wallet_operations_under_its_root",
+        "confined_outside_read_is_denied",
+        "confined_outside_write_is_denied"
+      ]
+    },
+    {
+      "id": "WP16",
+      "title": "the profile drops the kernel-fact read, so the provider cannot start",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/confine.sb",
+          "old": "(allow sysctl-read)",
+          "new": ";; Removed: sysctl-read grant."
+        }
+      ],
+      "tests": [
+        "confined_provider_serves_wallet_operations_under_its_root",
+        "confined_outside_read_is_denied",
+        "confined_outside_write_is_denied"
+      ]
+    },
+    {
+      "id": "WP17",
+      "title": "the profile drops the shared STORAGE_PARENT read, so Init cannot inspect the storage parent",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/confine.sb",
+          "old": "(allow file-read* (literal (param \"STORAGE_PARENT\")))",
+          "new": ";; Removed: shared STORAGE_PARENT read grant."
+        }
+      ],
+      "tests": [
+        "confined_provider_serves_wallet_operations_under_its_root",
+        "confined_outside_write_is_denied",
+        "both_file_profiles_bind_one_storage_parameter_contract"
+      ]
+    },
+    {
+      "id": "WP18",
+      "title": "the profile drops the storage-root grant, so account and key state cannot be written",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/confine.sb",
+          "old": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))",
+          "new": ";; Removed: storage-root state grant."
+        }
+      ],
+      "tests": [
+        "confined_provider_serves_wallet_operations_under_its_root",
+        "account_edits_persist_under_storage_root",
+        "managed_recovery_writes_persist_under_storage_root",
+        "evm_proofs_and_link_persist_under_storage_root",
+        "bitcoin_proofs_persist_under_storage_root",
+        "managed_approvals_persist_under_storage_root",
+        "connector_handoff_and_chain_outcome_persist_under_storage_root",
+        "protected_content_rights_request_persists_under_storage_root",
+        "confined_outside_write_is_denied",
+        "account_operations_beneath_storage_parent_are_refused",
+        "both_file_profiles_bind_one_storage_parameter_contract"
+      ]
+    },
+    {
+      "id": "WP19",
+      "title": "the shared contract check no longer refuses an (allow default) rule",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        if is_default_allow(form) {\n            return Err(format!(\"{name} must reject (allow default): {form}\"));\n        }",
+          "new": "        // falsifier: the check no longer refuses (allow default)"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_an_allow_default"
+      ]
+    },
+    {
+      "id": "WP20",
+      "title": "the profile adds (allow default) after its default denial",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/confine.sb",
+          "old": "(deny network*)",
+          "new": "(deny network*)\n(allow default)"
+        }
+      ],
+      "tests": [
+        "profile_denies_network",
+        "both_file_profiles_bind_one_storage_parameter_contract",
+        "confined_outside_read_is_denied",
+        "confined_outside_write_is_denied"
+      ]
+    },
+    {
+      "id": "WP21",
+      "title": "the shared contract check no longer refuses a non-canonical parameter token",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            if !CANONICAL_PARAMS.contains(&token) {\n                return Err(format!(\n                    \"{name} declares the non-canonical parameter token {token}; \\\n                     every file profile binds STORAGE_ROOT, STORAGE_PARENT and PROVIDER_EXECUTABLE\"\n                ));\n            }",
+          "new": "            // falsifier: the check no longer refuses a non-canonical parameter token"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_non_canonical_token"
+      ]
+    },
+    {
+      "id": "WP22",
+      "title": "the wallet profile renames the shared STORAGE_ROOT parameter to a wallet-prefixed token",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/confine.sb",
+          "old": "(subpath (param \"STORAGE_ROOT\"))",
+          "new": "(subpath (param \"WALLET_STORAGE_ROOT\"))"
+        }
+      ],
+      "tests": [
+        "both_file_profiles_bind_one_storage_parameter_contract"
+      ]
+    },
+    {
+      "id": "WP23",
+      "title": "the did profile renames the shared STORAGE_ROOT parameter to a did-prefixed token",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/did-provider/confine.sb",
+          "old": "(subpath (param \"STORAGE_ROOT\"))",
+          "new": "(subpath (param \"DID_STORAGE_ROOT\"))"
+        }
+      ],
+      "tests": [
+        "both_file_profiles_bind_one_storage_parameter_contract"
+      ]
+    },
+    {
+      "id": "WP24",
+      "title": "the wallet profile grants a sibling file read through a non-canonical parameter token",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/confine.sb",
+          "old": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))",
+          "new": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))\n(allow file-read* (literal (param \"READ_FIXTURE_KEY\")))"
+        }
+      ],
+      "tests": [
+        "confined_outside_read_is_denied",
+        "both_file_profiles_bind_one_storage_parameter_contract"
+      ]
+    },
+    {
+      "id": "WP25",
+      "title": "the honesty test resolves edit paths from the repository root again",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/src/tests/falsifiers.rs",
+          "old": "    let edit_base = root.join(\"examples/agent-host\");",
+          "new": "    let edit_base = root;"
+        }
+      ],
+      "tests": [
+        "tests::falsifiers::falsifiers_list_is_honest",
+        "tests::falsifiers::falsifiers_list_rejects_a_repository_relative_path"
+      ]
+    },
+    {
+      "id": "WP26",
+      "title": "a missing model profile is skipped again instead of refused",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        let profile = match fs::read_to_string(&path) {\n            Ok(profile) => profile,\n            Err(err) => {",
+          "new": "        let profile = match fs::read_to_string(&path) {\n            Ok(profile) => profile,\n            Err(err) if name == \"model-provider\" && err.kind() == std::io::ErrorKind::NotFound => continue,\n            Err(err) => {"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_checks_the_model_profile_when_present"
+      ]
+    },
+    {
+      "id": "WP27",
+      "title": "the sandbox gate skips on a declared OS instead of failing",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    if DECLARED_CONFINED_OS.contains(&os) {\n        return Err(format!(\n            \"CONFINEMENT.md says the confinement tests exercise these profiles on {os}, \\\n             so a test there must run, not skip: {} is absent\",\n            sandbox_exec.display()\n        ));\n    }\n    Ok(false)",
+          "new": "    if DECLARED_CONFINED_OS.contains(&os) {\n        return Ok(false);\n    }\n    Ok(false)"
+        }
+      ],
+      "tests": [
+        "sandbox_gate_fails_instead_of_skipping_on_a_declared_os"
+      ]
+    },
+    {
+      "id": "WP28",
+      "title": "the launch builder starts the provider directly when its profile is missing",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        let mut command = Command::new(SANDBOX_EXEC);\n        command.arg(\"-f\").arg(profile);\n        for (name, path) in bindings {\n            command.arg(\"-D\").arg(format!(\"{name}={}\", path.display()));\n        }\n        command.arg(program);\n        Self::spawn(command)",
+          "new": "        let mut command = Command::new(program);\n        if profile.is_file() {\n            command = Command::new(SANDBOX_EXEC);\n            command.arg(\"-f\").arg(profile);\n            for (name, path) in bindings {\n                command.arg(\"-D\").arg(format!(\"{name}={}\", path.display()));\n            }\n            command.arg(program);\n        }\n        Self::spawn(command)"
+        }
+      ],
+      "tests": [
+        "startup_is_refused_when_the_profile_cannot_be_applied"
+      ]
+    },
+    {
+      "id": "WP29",
+      "title": "the failure message leaves out the child's standard error",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        let stderr = self.stderr().to_string();\n        format!(\n            \"provider did not answer request {request} ({cause}); child {exit}; standard error: {stderr}\"\n        )",
+          "new": "        let _ = self.stderr();\n        format!(\"provider did not answer request {request} ({cause}); child {exit}\")"
+        }
+      ],
+      "tests": [
+        "startup_is_refused_when_the_profile_cannot_be_applied"
+      ]
+    },
+    {
+      "id": "WP30",
+      "title": "the one caller returns false from the gate's error instead of failing the test",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        Err(reason) => panic!(\"{reason}\"),",
+          "new": "        Err(_reason) => false,"
+        }
+      ],
+      "tests": [
+        "sandbox_available_fails_for_macos_when_sandbox_exec_is_missing"
+      ]
+    },
+    {
+      "id": "WP31",
+      "title": "the profile parser cuts each line at its first `;` and counts parentheses inside strings",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    for (ch, in_string) in profile_characters(profile) {",
+          "new": "    let text: String = profile\n        .lines()\n        .map(|line| line.split(';').next().unwrap_or(\"\"))\n        .collect::<Vec<_>>()\n        .join(\"\\n\");\n    for (ch, in_string) in text.chars().map(|ch| (ch, false)) {"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does"
+      ]
+    },
+    {
+      "id": "WP32",
+      "title": "the profile reader lets an escaped character end its string",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        if escaped {\n            characters.push((ch, true));\n            escaped = false;\n            continue;\n        }",
+          "new": "        if escaped {\n            characters.push((ch, true));\n            escaped = false;\n        }"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does"
+      ]
+    },
+    {
+      "id": "WP33",
+      "title": "the profile parser drops whitespace that sits inside a string",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            space_due = false;\n            current.push(ch);\n            continue;",
+          "new": "            space_due = false;\n            if !ch.is_whitespace() {\n                current.push(ch);\n            }\n            continue;"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does"
+      ]
+    },
+    {
+      "id": "WP34",
+      "title": "the profile parser keeps whitespace outside strings instead of collapsing it",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            _ if ch.is_whitespace() => space_due = true,",
+          "new": "            _ if ch.is_whitespace() => current.push(ch),"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does"
+      ]
+    },
+    {
+      "id": "WP35",
+      "title": "the profile reader runs a comment to the end of the profile instead of its line",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            in_comment = ch != '\\n';",
+          "new": "            in_comment = true;"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does"
+      ]
+    },
+    {
+      "id": "WP36",
+      "title": "the profile reader drops the unclosed-string refusal",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        !in_string,",
+          "new": "        true,"
+        }
+      ],
+      "tests": [
+        "profile_forms_rejects_unclosed_string"
+      ]
+    },
+    {
+      "id": "WP37",
+      "title": "the profile parser drops the unclosed-form refusal",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        current.is_empty(),",
+          "new": "        true,"
+        }
+      ],
+      "tests": [
+        "profile_forms_rejects_unclosed_form"
+      ]
+    },
+    {
+      "id": "WP38",
+      "title": "the profile reader drops the newline that ends a comment and glues the tokens around it",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            in_comment = ch != '\\n';\n            if !in_comment {\n                characters.push((ch, false));\n            }",
+          "new": "            in_comment = ch != '\\n';"
+        }
+      ],
+      "tests": [
+        "a_comment_inside_a_form_keeps_its_tokens_apart"
+      ]
+    },
+    {
+      "id": "WP39",
+      "title": "the profile parser joins a bare top-level value onto the next form",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        if depth == 0 && (ch.is_whitespace() || ch == '(') && !current.is_empty() {",
+          "new": "        if false {"
+        }
+      ],
+      "tests": [
+        "a_bare_top_level_value_is_its_own_form"
+      ]
+    },
+    {
+      "id": "WP40",
+      "title": "a space after the opening parenthesis names a second allow form",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "fn push_separator(current: &mut String) {\n    if !current.is_empty() && !current.ends_with('(') {\n        current.push(' ');\n    }\n}",
+          "new": "fn push_separator(current: &mut String) {\n    if !current.is_empty() {\n        current.push(' ');\n    }\n}"
+        }
+      ],
+      "tests": [
+        "a_space_after_the_opening_parenthesis_still_names_its_rule"
+      ]
+    },
+    {
+      "id": "WP41",
+      "title": "the stderr drainer starts reading only after the wait",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    stderr_reader: Option<JoinHandle<String>>,",
+          "new": "    stderr_pipe: Option<std::process::ChildStderr>,"
+        },
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        let mut stderr_pipe = child.stderr.take().expect(\"provider stderr\");\n        let stderr_reader = std::thread::spawn(move || {\n            let mut bytes = Vec::new();\n            let _ = stderr_pipe.read_to_end(&mut bytes);\n            String::from_utf8_lossy(&bytes).into_owned()\n        });",
+          "new": "        let stderr_pipe = child.stderr.take().expect(\"provider stderr\");"
+        },
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            stderr_reader: Some(stderr_reader),",
+          "new": "            stderr_pipe: Some(stderr_pipe),"
+        },
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        if let Some(reader) = self.stderr_reader.take() {\n            self.stderr_text = reader.join().expect(\"the stderr drainer must not panic\");\n        }",
+          "new": "        if let Some(mut pipe) = self.stderr_pipe.take() {\n            let mut bytes = Vec::new();\n            let _ = pipe.read_to_end(&mut bytes);\n            self.stderr_text = String::from_utf8_lossy(&bytes).into_owned();\n        }"
+        },
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        if let Some(reader) = self.stderr_reader.take() {\n            let _ = reader.join();\n        }",
+          "new": "        let _ = self.stderr_pipe.take();"
+        }
+      ],
+      "tests": [
+        "stderr_is_drained_before_wait"
+      ]
+    },
+    {
+      "id": "WP42",
+      "title": "a fixed Operation not permitted stands in for the child's standard error",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        let stderr = self.stderr().to_string();",
+          "new": "        let stderr = \"Operation not permitted\".to_string();"
+        }
+      ],
+      "tests": [
+        "startup_denial_reports_its_reason"
+      ]
+    },
+    {
+      "id": "WP43",
+      "title": "the invalid-JSON branch reports the shared unanswered message",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            Ok(_) => serde_json::from_str(&response).map_err(|err| {\n                format!(\"provider answered request {request} with invalid JSON: {err}: {response}\")\n            }),",
+          "new": "            Ok(_) => match serde_json::from_str(&response) {\n                Ok(answer) => Ok(answer),\n                Err(_) => Err(self.unanswered(request, \"the answer was not JSON\")),\n            },"
+        }
+      ],
+      "tests": [
+        "invalid_json_answer_names_the_request_and_the_parse_error"
+      ]
+    },
+    {
+      "id": "WP44",
+      "title": "the did profile appends a file-read grant that no falsifier removes",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/did-provider/confine.sb",
+          "old": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))",
+          "new": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))\n(allow file-read* (literal \"/etc\"))"
+        }
+      ],
+      "tests": [
+        "every_did_and_wallet_allow_rule_has_a_registered_removal"
+      ]
+    },
+    {
+      "id": "WP45",
+      "title": "the removal check no longer requires a caught expectation",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    entry[\"expect\"].as_str() == Some(\"caught\")\n        && entry[\"edits\"]\n            .as_array()\n            .is_some_and(|edits| edits.iter().any(|edit| edit_removes(edit, target, form)))",
+          "new": "    entry[\"edits\"]\n        .as_array()\n        .is_some_and(|edits| edits.iter().any(|edit| edit_removes(edit, target, form)))"
+        }
+      ],
+      "tests": [
+        "allow_rule_removal_check_reports_an_unremoved_rule"
+      ]
+    },
+    {
+      "id": "WP46",
+      "title": "the removal check counts an edit that names the other provider's profile",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let Some(file) = edit[\"file\"].as_str() else {\n        return false;\n    };\n    if runner_edit_path(file).as_deref() != Some(target) {\n        return false;\n    }",
+          "new": "    if edit[\"file\"].as_str().is_none() {\n        return false;\n    }"
+        }
+      ],
+      "tests": [
+        "allow_rule_removal_check_reports_an_unremoved_rule"
+      ]
+    },
+    {
+      "id": "WP47",
+      "title": "the removal check counts an edit whose old forms do not hold the rule",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let old = edit[\"old\"].as_str().unwrap_or_default();\n    let new = edit[\"new\"].as_str().unwrap_or_default();\n    profile_forms(old).iter().any(|candidate| candidate == form)\n        && !profile_forms(new).iter().any(|candidate| candidate == form)",
+          "new": "    let _old = edit[\"old\"].as_str().unwrap_or_default();\n    let new = edit[\"new\"].as_str().unwrap_or_default();\n    !profile_forms(new).iter().any(|candidate| candidate == form)"
+        }
+      ],
+      "tests": [
+        "allow_rule_removal_check_reports_an_unremoved_rule"
+      ]
+    },
+    {
+      "id": "WP48",
+      "title": "the removal check counts an edit whose new forms still hold the rule",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let old = edit[\"old\"].as_str().unwrap_or_default();\n    let new = edit[\"new\"].as_str().unwrap_or_default();\n    profile_forms(old).iter().any(|candidate| candidate == form)\n        && !profile_forms(new).iter().any(|candidate| candidate == form)",
+          "new": "    let old = edit[\"old\"].as_str().unwrap_or_default();\n    let _new = edit[\"new\"].as_str().unwrap_or_default();\n    profile_forms(old).iter().any(|candidate| candidate == form)"
+        }
+      ],
+      "tests": [
+        "allow_rule_removal_check_reports_an_unremoved_rule"
+      ]
+    },
+    {
+      "id": "WP49",
+      "title": "an unreadable profile is skipped instead of refused",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let profile = fs::read_to_string(path).map_err(|err| {\n        format!(\n            \"{name} allow-rule profile {} must be readable: {err}\",\n            path.display()\n        )\n    })?;",
+          "new": "    let profile = fs::read_to_string(path).unwrap_or_default();"
+        }
+      ],
+      "tests": [
+        "allow_rule_removal_check_rejects_bad_inputs"
+      ]
+    },
+    {
+      "id": "WP50",
+      "title": "an unreadable falsifier list is skipped instead of refused",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            Err(err) => {\n                return Err(format!(\n                    \"{name} falsifier list {} must be readable: {err}\",\n                    path.display()\n                ))\n            }",
+          "new": "            Err(_err) => continue,"
+        }
+      ],
+      "tests": [
+        "allow_rule_removal_check_rejects_bad_inputs"
+      ]
+    },
+    {
+      "id": "WP51",
+      "title": "a falsifier list that is not JSON is skipped instead of refused",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        let doc: Value = match serde_json::from_str(&text) {\n            Ok(doc) => doc,\n            Err(err) => {\n                return Err(format!(\n                    \"{name} falsifier list {} must be valid JSON: {err}\",\n                    path.display()\n                ))\n            }\n        };",
+          "new": "        let doc: Value = match serde_json::from_str(&text) {\n            Ok(doc) => doc,\n            Err(_err) => continue,\n        };"
+        }
+      ],
+      "tests": [
+        "allow_rule_removal_check_rejects_bad_inputs"
+      ]
+    },
+    {
+      "id": "WP52",
+      "title": "a falsifier list without a falsifiers list is skipped instead of refused",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        let Some(list) = doc.get(\"falsifiers\").and_then(Value::as_array) else {\n            return Err(format!(\n                \"{name} falsifier list {} must hold a falsifiers list\",\n                path.display()\n            ));\n        };",
+          "new": "        let Some(list) = doc.get(\"falsifiers\").and_then(Value::as_array) else {\n            continue;\n        };"
+        }
+      ],
+      "tests": [
+        "allow_rule_removal_check_rejects_bad_inputs"
+      ]
+    },
+    {
+      "id": "WP53",
+      "title": "a profile that does not parse is skipped instead of refused",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    std::panic::catch_unwind(|| profile_forms(&profile))\n        .map_err(|reason| {\n            let detail = reason\n                .downcast_ref::<String>()\n                .map(String::as_str)\n                .unwrap_or(\"the profile does not parse\");\n            format!(\n                \"{name} allow-rule profile {} must parse: {detail}\",\n                path.display()\n            )\n        })\n        .map(|_forms| profile)",
+          "new": "    Ok(profile)"
+        }
+      ],
+      "tests": [
+        "allow_rule_removal_check_rejects_bad_inputs"
+      ]
+    },
+    {
+      "id": "WP54",
+      "title": "a second binding of a canonical parameter is accepted",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        for (name, _) in parameters {\n            // Match the name sandbox-exec reads from the serialized -D binding.\n            let binding_name = name.split_once('=').map_or(*name, |(binding, _)| binding);\n            assert!(\n                !CANONICAL_PARAMS.contains(&binding_name),\n                \"the launch must not bind the canonical parameter {name} again: \\\n                 canonical bindings come only from canonical_bindings\"\n            );\n        }",
+          "new": "    // WP54 drops the canonical-parameter refusal from this constructor."
+        }
+      ],
+      "tests": [
+        "start_with_profile_refuses_a_canonical_parameter"
+      ]
+    },
+    {
+      "id": "WP55",
+      "title": "an encoded second binding of a canonical parameter is accepted",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            let binding_name = name.split_once('=').map_or(*name, |(binding, _)| binding);",
+          "new": "            let binding_name = *name;"
+        }
+      ],
+      "tests": [
+        "start_with_profile_refuses_an_encoded_canonical_parameter"
+      ]
+    },
+    {
+      "id": "WP56",
+      "title": "a second, unpinned exec rule lets any program start",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/confine.sb",
+          "old": "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))",
+          "new": "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))\n(allow process-exec)"
+        }
+      ],
+      "tests": [
+        "unbound_copy_is_refused_under_profile"
+      ]
+    },
+    {
+      "id": "WP57",
+      "title": "the parent read widens to a subpath, so a file beneath the base is readable",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/confine.sb",
+          "old": "(literal (param \"STORAGE_PARENT\"))",
+          "new": "(subpath (param \"STORAGE_PARENT\"))"
+        }
+      ],
+      "tests": [
+        "planted_key_beneath_storage_parent_is_not_read"
+      ]
+    },
+    {
+      "id": "WP58",
+      "title": "the section check drops the rule that an own list id must be named",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    for id in own_ids {\n        if !names_falsifier_id(&section, id) {\n            problems.push(format!(\n                \"{document_name} CONFINEMENT.md: own falsifier id {id} is not named in \\\n                 {FALSIFIER_HEADING}\"\n            ));\n        }\n    }",
+          "new": "    // WP58 drops the own-id rule from the falsifier section check."
+        }
+      ],
+      "tests": [
+        "falsifier_section_check_reports_missing_and_stale_ids"
+      ]
+    },
+    {
+      "id": "WP59",
+      "title": "the section check drops the rule that an id must be registered",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let mut seen: Vec<&str> = Vec::new();\n    for token in falsifier_id_tokens(&section) {\n        if registered_ids.iter().any(|id| id == token) || seen.contains(&token) {\n            continue;\n        }\n        seen.push(token);\n        problems.push(format!(\n            \"{document_name} CONFINEMENT.md: {FALSIFIER_HEADING} names {token}, which neither \\\n             falsifier list registers\"\n        ));\n    }",
+          "new": "    // WP59 drops the unregistered-id rule from the falsifier section check."
+        }
+      ],
+      "tests": [
+        "falsifier_section_check_reports_missing_and_stale_ids"
+      ]
+    },
+    {
+      "id": "WP60",
+      "title": "an id matches as a substring instead of a whole token",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "fn names_falsifier_id(section: &str, id: &str) -> bool {\n    falsifier_id_tokens(section).contains(&id)\n}",
+          "new": "fn names_falsifier_id(section: &str, id: &str) -> bool {\n    section.contains(id)\n}"
+        }
+      ],
+      "tests": [
+        "falsifier_section_check_reports_missing_and_stale_ids"
+      ]
+    },
+    {
+      "id": "WP61",
+      "title": "the section runs to the end of the file instead of the next heading",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let section_end = lines[section_start..]\n        .iter()\n        .position(|line| line.starts_with(\"## \"))\n        .map_or(lines.len(), |offset| section_start + offset);",
+          "new": "    let section_end = lines.len();"
+        }
+      ],
+      "tests": [
+        "falsifier_section_check_rejects_a_document_without_its_section"
+      ]
+    },
+    {
+      "id": "WP62",
+      "title": "a document without its falsifier section is accepted",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let Some(only) = heading_lines.first().copied() else {\n        return Err(vec![format!(\n            \"{document_name} CONFINEMENT.md must hold one line {heading}; found none\"\n        )]);\n    };",
+          "new": "    let Some(only) = heading_lines.first().copied() else {\n        return Err(Vec::new());\n    };"
+        }
+      ],
+      "tests": [
+        "falsifier_section_check_rejects_a_document_without_its_section"
+      ]
+    },
+    {
+      "id": "WP63",
+      "title": "a document with two falsifier sections is accepted",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    if heading_lines.len() > 1 {\n        return Err(vec![format!(\n            \"{document_name} CONFINEMENT.md must hold one line {heading}; found {}\",\n            heading_lines.len()\n        )]);\n    }",
+          "new": "    // WP63 accepts a second heading and reads the first section."
+        }
+      ],
+      "tests": [
+        "falsifier_section_check_rejects_a_document_without_its_section"
+      ]
+    },
+    {
+      "id": "WP64",
+      "title": "an unreadable confinement document is skipped instead of refused",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    fs::read_to_string(&path).map_err(|err| {\n        format!(\n            \"{name} confinement document {} must be readable: {err}\",\n            path.display()\n        )\n    })",
+          "new": "    Ok(fs::read_to_string(&path).unwrap_or_default())"
+        }
+      ],
+      "tests": [
+        "falsifier_document_read_rejects_unreadable_source"
+      ]
+    },
+    {
+      "id": "WP65",
+      "title": "a write grant on the parent is appended, so a file beneath the base is writable",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/confine.sb",
+          "old": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))",
+          "new": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))\n(allow file-write* (subpath (param \"STORAGE_PARENT\")))"
+        }
+      ],
+      "tests": [
+        "confined_outside_write_is_denied"
+      ]
+    },
+    {
+      "id": "WP66",
+      "title": "an entry without a string id is dropped instead of refused",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        let mut ids = Vec::with_capacity(entries.len());\n        for (index, entry) in entries.iter().enumerate() {\n            let Some(id) = entry[\"id\"].as_str() else {\n                return Err(format!(\n                    \"{name} falsifier list {} must give entry {index} a string id\",\n                    path.display()\n                ));\n            };\n            ids.push(id.to_owned());\n        }",
+          "new": "        let ids = entries\n            .iter()\n            .filter_map(|entry| entry[\"id\"].as_str().map(str::to_owned))\n            .collect();"
+        }
+      ],
+      "tests": [
+        "allow_rule_removal_check_rejects_bad_inputs"
+      ]
+    },
+    {
+      "id": "WP67",
+      "title": "a token directly after a letter, digit or _ names its own id",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        if text[..index]\n            .chars()\n            .next_back()\n            .is_some_and(falsifier_id_character)\n        {\n            continue;\n        }",
+          "new": "        // WP67 drops the character-before check."
+        }
+      ],
+      "tests": [
+        "falsifier_section_check_reports_missing_and_stale_ids"
+      ]
+    },
+    {
+      "id": "WP68",
+      "title": "a token directly before a letter or _ names its own id",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        if text[end..]\n            .chars()\n            .next()\n            .is_some_and(falsifier_id_character)\n        {\n            continue;\n        }",
+          "new": "        // WP68 drops the character-after check."
+        }
+      ],
+      "tests": [
+        "falsifier_section_check_reports_missing_and_stale_ids"
+      ]
+    },
+    {
+      "id": "WP69",
+      "title": "the second exec allow is not refused",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    if exec_allows.len() > 1 {\n        let shared = exec_allows.iter().position(|form| *form == SHARED_RULES[0]);\n        let quoted = exec_allows\n            .iter()\n            .enumerate()\n            .filter(|(index, _)| Some(*index) != shared)\n            .map(|(_, form)| format!(\"`{form}`\"))\n            .collect::<Vec<_>>()\n            .join(\", \");\n        return Err(format!(\n            \"{name} holds more than one process-exec allow, so it has a second exec path (P10); \\\n             the extra rules are {quoted}\"\n        ));\n    }",
+          "new": "    // WP69 drops the second-exec-allow refusal."
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_second_exec_allow"
+      ]
+    },
+    {
+      "id": "WP70",
+      "title": "the exec predicate stops reading `)` as a token boundary",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            '(' | ')' => {\n                flush_operation(&mut operation, depth, &mut operations);",
+          "new": "            '(' => {\n                flush_operation(&mut operation, depth, &mut operations);"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_second_exec_allow"
+      ]
+    },
+    {
+      "id": "WP71",
+      "title": "the refusal quotes every exec allow after the first",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        let shared = exec_allows.iter().position(|form| *form == SHARED_RULES[0]);\n        let quoted = exec_allows\n            .iter()\n            .enumerate()\n            .filter(|(index, _)| Some(*index) != shared)\n            .map(|(_, form)| format!(\"`{form}`\"))\n            .collect::<Vec<_>>()\n            .join(\", \");",
+          "new": "        let quoted = exec_allows[1..]\n            .iter()\n            .map(|form| format!(\"`{form}`\"))\n            .collect::<Vec<_>>()\n            .join(\", \");"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_second_exec_allow"
+      ]
+    },
+    {
+      "id": "WP72",
+      "title": "the exec predicate reads only the operations before the first filter",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    for (ch, in_string) in profile_characters(rest) {",
+          "new": "    for (ch, in_string) in profile_characters(rest.split('(').next().unwrap_or_default()) {"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_second_exec_allow"
+      ]
+    },
+    {
+      "id": "WP73",
+      "title": "the refusal quotes only the first extra exec rule",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            .filter(|(index, _)| Some(*index) != shared)",
+          "new": "            .filter(|(index, _)| Some(*index) != shared)\n            .take(1)"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_second_exec_allow"
+      ]
+    },
+    {
+      "id": "WP74",
+      "title": "the exec predicate counts a nested filter's token",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    if depth == 0 && !operation.is_empty() {",
+          "new": "    if !operation.is_empty() {"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_second_exec_allow"
+      ]
+    },
+    {
+      "id": "WP75",
+      "title": "the exec predicate counts a string's text",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        if in_string {\n            flush_operation(&mut operation, depth, &mut operations);\n            continue;\n        }",
+          "new": "        if in_string {\n            if ch != '\"' {\n                operation.push(ch);\n            }\n            continue;\n        }"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_second_exec_allow"
+      ]
+    },
+    {
+      "id": "WP76",
+      "title": "the one string reader drops the escape flag",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            escaped = true;",
+          "new": "            // WP76 drops the escape flag."
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_second_exec_allow",
+        "file_profile_contract_reads_strings_and_comments_as_sandbox_exec_does"
+      ]
+    },
+    {
+      "id": "WP77",
+      "title": "the exec predicate requires a space after allow",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let Some(rest) = form.strip_prefix(\"(allow\") else {\n        return false;\n    };\n    if !rest.starts_with([' ', '(']) {\n        return false;\n    }",
+          "new": "    let Some(rest) = form.strip_prefix(\"(allow \") else {\n        return false;\n    };"
+        }
+      ],
+      "tests": [
+        "file_profile_contract_rejects_a_second_exec_allow"
+      ]
+    },
+    {
+      "id": "WP78",
+      "title": "the operations-table check accepts a citation of a missing function",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/did-provider/tests/confine.rs",
+          "old": "fn outside_write_denied()",
+          "new": "fn outside_write_denied_renamed()"
+        }
+      ],
+      "tests": [
+        "every_operations_table_cites_existing_tests"
+      ]
+    },
+    {
+      "id": "WP79",
+      "title": "the operations-table check skips a cited file whose path cannot be resolved",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        let resolved = match fs::canonicalize(&path) {\n            Ok(resolved) => resolved,\n            Err(err) => {\n                problems.push(format!(\n                    \"{document_name} CONFINEMENT.md: {span} names a file that is not \\\n                     readable because its path cannot be resolved: {} ({err})\",\n                    path.display()\n                ));\n                continue;\n            }\n        };",
+          "new": "        let resolved = match fs::canonicalize(&path) {\n            Ok(resolved) => resolved,\n            Err(_) => continue,\n        };"
+        }
+      ],
+      "tests": [
+        "operations_table_check_reports_each_missing_citation"
+      ]
+    },
+    {
+      "id": "WP80",
+      "title": "the operations-table check accepts a section that cites no test",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    if citations.is_empty() {",
+          "new": "    if false && citations.is_empty() {"
+        }
+      ],
+      "tests": [
+        "operations_table_check_reports_each_missing_citation"
+      ]
+    },
+    {
+      "id": "WP81",
+      "title": "the operations-table check accepts an absolute citation path",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        if Path::new(file).is_absolute() {",
+          "new": "        if false && Path::new(file).is_absolute() {"
+        }
+      ],
+      "tests": [
+        "operations_table_check_rejects_paths_outside_provider"
+      ]
+    },
+    {
+      "id": "WP82",
+      "title": "the operations-table check accepts a citation that resolves outside its provider",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        if !resolved.starts_with(&provider_root) {",
+          "new": "        if false && !resolved.starts_with(&provider_root) {"
+        }
+      ],
+      "tests": [
+        "operations_table_check_rejects_paths_outside_provider"
+      ]
+    },
+    {
+      "id": "WP83",
+      "title": "the operations-table check accepts a wallet citation of a missing function",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "fn confined_outside_write_is_denied()",
+          "new": "fn confined_outside_write_is_denied_renamed()"
+        }
+      ],
+      "tests": [
+        "every_operations_table_cites_existing_tests"
+      ]
+    },
+    {
+      "id": "WP84",
+      "title": "the did profile adds an allow rule that no declared right names",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/did-provider/confine.sb",
+          "old": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))",
+          "new": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))\n(allow file-read* (literal \"/private/var/cc-confine-unnamed\"))"
+        }
+      ],
+      "tests": [
+        "every_did_and_wallet_allow_rule_traces_to_one_declared_right"
+      ]
+    },
+    {
+      "id": "WP85",
+      "title": "the wallet profile adds an allow rule that no declared right names",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/confine.sb",
+          "old": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))",
+          "new": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))\n(allow file-read* (literal \"/private/var/cc-confine-unnamed\"))"
+        }
+      ],
+      "tests": [
+        "every_did_and_wallet_allow_rule_traces_to_one_declared_right"
+      ]
+    },
+    {
+      "id": "WP86",
+      "title": "the declared-rights check reads the old startup-needs key instead of the platform baseline",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "\"platform_baseline\"",
+          "new": "\"observed_startup_needs\""
+        }
+      ],
+      "tests": [
+        "every_did_and_wallet_allow_rule_traces_to_one_declared_right",
+        "model_declared_rights_read_on_the_did_and_wallet_template"
+      ]
+    },
+    {
+      "id": "WP87",
+      "title": "the declared-rights check accepts a platform-baseline entry with no justification",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        let Some(justification) = entry[\"justification\"].as_str() else {\n            return Err(format!(\n                \"{name} platform baseline {} must give a string justification\",\n                claim.id\n            ));\n        };",
+          "new": "        let Some(justification) = entry[\"justification\"].as_str() else {\n            continue;\n        };"
+        }
+      ],
+      "tests": [
+        "declared_rights_trace_refuses_each_bad_input"
+      ]
+    },
+    {
+      "id": "WP88",
+      "title": "a read and write grant on the parent is appended, so account operations beneath the base are served",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/confine.sb",
+          "old": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))",
+          "new": "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))\n(allow file-read* file-write* (subpath (param \"STORAGE_PARENT\")))"
+        }
+      ],
+      "tests": [
+        "account_operations_beneath_storage_parent_are_refused"
+      ]
+    },
+    {
+      "id": "WP89",
+      "title": "the pin table drops its two startup rows, so each startup rule traces to any id",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    (STARTUP_RULES[0], \"startup-root-directory\"),\n    (STARTUP_RULES[1], \"startup-sysctl\"),",
+          "new": "    // The pin table drops its two startup rows (WP89)."
+        }
+      ],
+      "tests": [
+        "declared_rights_trace_refuses_each_bad_input"
+      ]
+    },
+    {
+      "id": "WP90",
+      "title": "the declared-rights check accepts an id declared more than once",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    for (index, claim) in claims.iter().enumerate() {\n        if claims[..index].iter().any(|earlier| earlier.id == claim.id) {\n            return Err(format!(\"{name} declares {} more than once\", claim.id));\n        }\n    }",
+          "new": "    // The repeated-id refusal is dropped (WP90)."
+        }
+      ],
+      "tests": [
+        "declared_rights_trace_refuses_each_bad_input"
+      ]
+    },
+    {
+      "id": "WP91",
+      "title": "the declared-rights check accepts a rule repeated inside one entry",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    for claim in &claims {\n        for (index, rule) in claim.rules.iter().enumerate() {\n            if claim.rules[..index].contains(rule) {\n                return Err(format!(\n                    \"{name} declares {} with the rule {rule} more than once\",\n                    claim.id\n                ));\n            }\n        }\n    }",
+          "new": "    // The repeated-rule refusal is dropped (WP91)."
+        }
+      ],
+      "tests": [
+        "declared_rights_trace_refuses_each_bad_input"
+      ]
+    },
+    {
+      "id": "WP92",
+      "title": "the declared-rights check accepts a profile that holds one allow form twice",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    for (index, form) in forms.iter().enumerate() {\n        if forms[..index].contains(form) {\n            return Err(format!(\n                \"{name} profile holds the allow rule {form} more than once\"\n            ));\n        }\n    }",
+          "new": "    // The duplicate-form refusal is dropped (WP92)."
+        }
+      ],
+      "tests": [
+        "declared_rights_trace_refuses_each_bad_input"
+      ]
+    },
+    {
+      "id": "WP93",
+      "title": "the declared-rights check accepts a justification that names another provider",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        if !justification.starts_with(&prefix) {",
+          "new": "        if false && !justification.starts_with(&prefix) {"
+        }
+      ],
+      "tests": [
+        "declared_rights_trace_refuses_each_bad_input"
+      ]
+    },
+    {
+      "id": "WP94",
+      "title": "the declared-rights check accepts a platform-baseline justification with no reason",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        if justification[prefix.len()..].trim().is_empty() {",
+          "new": "        if false && justification[prefix.len()..].trim().is_empty() {"
+        }
+      ],
+      "tests": [
+        "declared_rights_trace_refuses_each_bad_input"
+      ]
+    },
+    {
+      "id": "WP95",
+      "title": "the declared-rights check accepts a file without the lab role",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    if declared[\"role\"].as_str() != Some(DECLARED_RIGHTS_ROLE) {",
+          "new": "    if false && declared[\"role\"].as_str() != Some(DECLARED_RIGHTS_ROLE) {"
+        }
+      ],
+      "tests": [
+        "declared_rights_trace_refuses_each_bad_input"
+      ]
+    },
+    {
+      "id": "WP96",
+      "title": "the declared-rights check accepts a file that names another provider",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    if declared[\"provider\"].as_str() != Some(name) {",
+          "new": "    if false && declared[\"provider\"].as_str() != Some(name) {"
+        }
+      ],
+      "tests": [
+        "declared_rights_trace_refuses_each_bad_input"
+      ]
+    },
+    {
+      "id": "WP97",
+      "title": "the declared-rights check accepts a platform baseline without its status sentence",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    if baseline.get(\"status\").and_then(Value::as_str) != Some(status.as_str()) {",
+          "new": "    if false && baseline.get(\"status\").and_then(Value::as_str) != Some(status.as_str()) {"
+        }
+      ],
+      "tests": [
+        "declared_rights_trace_refuses_each_bad_input"
+      ]
+    },
+    {
+      "id": "WP98",
+      "title": "the declared-rights check accepts a file without a rights list",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let Some(rights) = declared[\"rights\"].as_array() else {\n        return Err(format!(\n            \"{name} declared-rights file must hold a rights list\"\n        ));\n    };",
+          "new": "    let empty_rights: Vec<serde_json::Value> = Vec::new();\n    let rights = declared[\"rights\"].as_array().unwrap_or(&empty_rights);"
+        }
+      ],
+      "tests": [
+        "declared_rights_trace_refuses_each_bad_input"
+      ]
+    },
+    {
+      "id": "WP99",
+      "title": "the declared-rights check accepts a file without a platform baseline",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let Some(baseline) = declared[PLATFORM_BASELINE].as_object() else {\n        return Err(format!(\n            \"{name} declared-rights file must hold a platform baseline\"\n        ));\n    };",
+          "new": "    let empty_baseline = serde_json::Map::new();\n    let baseline = declared[PLATFORM_BASELINE]\n        .as_object()\n        .unwrap_or(&empty_baseline);"
+        }
+      ],
+      "tests": [
+        "declared_rights_trace_refuses_each_bad_input"
+      ]
+    },
+    {
+      "id": "WP100",
+      "title": "the declared-rights check accepts a platform baseline without its rules list",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let Some(baseline_rules) = baseline.get(\"rules\").and_then(Value::as_array) else {\n        return Err(format!(\"{name} platform baseline must hold a rules list\"));\n    };",
+          "new": "    let empty_rules: Vec<serde_json::Value> = Vec::new();\n    let baseline_rules = baseline\n        .get(\"rules\")\n        .and_then(Value::as_array)\n        .unwrap_or(&empty_rules);"
+        }
+      ],
+      "tests": [
+        "declared_rights_trace_refuses_each_bad_input"
+      ]
+    },
+    {
+      "id": "WP101",
+      "title": "the declared-rights check accepts an entry without a string id by falling back to an empty id",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        let Some(id) = entry[\"id\"].as_str() else {\n            return Err(format!(\n                \"{name} {label} entry {index} must give a string id\"\n            ));\n        };",
+          "new": "        let id = entry[\"id\"].as_str().unwrap_or_default();"
+        }
+      ],
+      "tests": [
+        "declared_rights_trace_refuses_each_bad_input"
+      ]
+    },
+    {
+      "id": "WP102",
+      "title": "the declared-rights check accepts an entry without a rules list by falling back to an empty list",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        let Some(rules) = entry[\"rules\"].as_array() else {\n            return Err(format!(\"{name} declares {id} without a rules list\"));\n        };",
+          "new": "        let empty_rules = Vec::new();\n        let rules = entry[\"rules\"].as_array().unwrap_or(&empty_rules);"
+        }
+      ],
+      "tests": [
+        "declared_rights_trace_refuses_each_bad_input"
+      ]
+    },
+    {
+      "id": "WP103",
+      "title": "the declared-rights check skips a rule that is not a string",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        for rule in rules {\n            let Some(rule) = rule.as_str() else {\n                return Err(format!(\n                    \"{name} declares {id} with a rule that is not a string\"\n                ));\n            };\n            claimed.push(rule.to_owned());\n        }",
+          "new": "        for rule in rules {\n            let Some(rule) = rule.as_str() else {\n                continue;\n            };\n            claimed.push(rule.to_owned());\n        }"
+        }
+      ],
+      "tests": [
+        "declared_rights_trace_refuses_each_bad_input"
+      ]
+    },
+    {
+      "id": "WP104",
+      "title": "the pin table drops only its startup-sysctl row, so the sysctl read traces to any id",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    (STARTUP_RULES[1], \"startup-sysctl\"),",
+          "new": "    // The pin table drops its sysctl row (WP104)."
+        }
+      ],
+      "tests": [
+        "declared_rights_trace_refuses_each_bad_input"
+      ]
+    },
+    {
+      "id": "WP105",
+      "title": "the lab generator emits an allow rule that neither declared-rights file names",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    for form in PROFILE_HEAD {\n        profile.push_str(form);\n        profile.push('\\n');\n    }",
+          "new": "    for form in PROFILE_HEAD {\n        profile.push_str(form);\n        profile.push('\\n');\n    }\n    profile.push_str(\"(allow file-read* (literal \\\"/private/var/cc-confine-generated\\\"))\\n\");"
+        }
+      ],
+      "tests": [
+        "generated_did_and_wallet_profiles_match_their_committed_oracles"
+      ]
+    },
+    {
+      "id": "WP106",
+      "title": "the rights-list id refusal never fires",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "if !CONTRACT_RIGHTS.contains(&claim.id.as_str()) {",
+          "new": "if false && !CONTRACT_RIGHTS.contains(&claim.id.as_str()) {"
+        }
+      ],
+      "tests": [
+        "generator_refuses_an_unnamed_right_and_the_start_is_refused"
+      ]
+    },
+    {
+      "id": "WP107",
+      "title": "the platform-baseline id refusal never fires",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "if !PLATFORM_BASELINE_IDS.contains(&claim.id.as_str()) {",
+          "new": "if false && !PLATFORM_BASELINE_IDS.contains(&claim.id.as_str()) {"
+        }
+      ],
+      "tests": [
+        "generator_refuses_an_unnamed_right_and_the_start_is_refused"
+      ]
+    },
+    {
+      "id": "WP108",
+      "title": "the lab writer creates the profile path before the generator refuses",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let profile = generate_profile(name, declared)?;",
+          "new": "    fs::write(path, \"\").map_err(|err| {\n        format!(\"{name} generated profile {} must be writable: {err}\", path.display())\n    })?;\n    let profile = generate_profile(name, declared)?;"
+        }
+      ],
+      "tests": [
+        "generator_refuses_an_unnamed_right_and_the_start_is_refused"
+      ]
+    },
+    {
+      "id": "WP109",
+      "title": "the lab generator appends a deny form that only the oracle comparison refuses",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    for claim in rights.iter().chain(&baseline) {\n        for rule in &claim.rules {\n            profile.push_str(rule);\n            profile.push('\\n');\n        }\n    }\n    Ok(profile)",
+          "new": "    for claim in rights.iter().chain(&baseline) {\n        for rule in &claim.rules {\n            profile.push_str(rule);\n            profile.push('\\n');\n        }\n    }\n    profile.push_str(\"(deny file-write* (literal \\\"/private/var/cc-confine-generated\\\"))\\n\");\n    Ok(profile)"
+        }
+      ],
+      "tests": [
+        "generated_did_and_wallet_profiles_match_their_committed_oracles"
+      ]
+    },
+    {
+      "id": "WP110",
+      "title": "a wallet-provider source file names the lab generator",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/src/main.rs",
+          "old": "//! ElastOS Wallet Provider Capsule",
+          "new": "//! ElastOS Wallet Provider Capsule\n//! WP110 names generate_profile outside test code."
+        }
+      ],
+      "tests": [
+        "lab_generator_is_named_only_in_test_code"
+      ]
+    },
+    {
+      "id": "WP111",
+      "title": "a did-provider source file names the lab generator",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/did-provider/src/main.rs",
+          "old": "//! ElastOS DID Provider Capsule",
+          "new": "//! ElastOS DID Provider Capsule\n//! WP111 names generate_profile outside test code."
+        }
+      ],
+      "tests": [
+        "lab_generator_is_named_only_in_test_code"
+      ]
+    },
+    {
+      "id": "WP112",
+      "title": "the stand-in host refusal starts the binary bare",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    standin_host_refusal(name, host)?;",
+          "new": "    if standin_host_refusal(name, host).is_err() {\n        return Ok(ConfinedProvider::spawn(Command::new(binary_path)));\n    }"
+        }
+      ],
+      "tests": [
+        "standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host"
+      ]
+    },
+    {
+      "id": "WP113",
+      "title": "the stand-in failed-init refusal starts the binary bare",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        Err(failure) => Err(format!(\"{name} start is refused: {failure}\")),\n    }\n}",
+          "new": "        Err(_failure) => {\n            let command = Command::new(binary_path);\n            Ok(ConfinedProvider::spawn(command))\n        }\n    }\n}"
+        }
+      ],
+      "tests": [
+        "standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host"
+      ]
+    },
+    {
+      "id": "WP114",
+      "title": "the stand-in skips the generator and sandbox-exec for a bare start",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let profile = profile_dir.join(format!(\"{name}-standin.sb\"));\n    write_generated_profile(name, declared, &profile)?;\n    let canonical = canonical_bindings(name, base_path, binary_path);\n    create_shared_ancestors(&canonical);\n    let bindings: Vec<(&str, &Path)> = canonical\n        .iter()\n        .map(|(binding, path)| (*binding, path.as_path()))\n        .collect();\n    let mut provider = ConfinedProvider::start_under(&profile, &bindings, binary_path);",
+          "new": "    let mut provider = ConfinedProvider::spawn(Command::new(binary_path));"
+        }
+      ],
+      "tests": [
+        "standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host"
+      ]
+    },
+    {
+      "id": "WP115",
+      "title": "the stand-in ignores the writer's refusal and uses the committed profile",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    write_generated_profile(name, declared, &profile)?;",
+          "new": "    let profile = match write_generated_profile(name, declared, &profile) {\n        Ok(()) => profile,\n        Err(_refusal) => PathBuf::from(PROFILE_PATH),\n    };"
+        }
+      ],
+      "tests": [
+        "standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host"
+      ]
+    },
+    {
+      "id": "WP116",
+      "title": "the stand-in binds STORAGE_ROOT to the base instead of the wallet directory",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let canonical = canonical_bindings(name, base_path, binary_path);\n    create_shared_ancestors(&canonical);\n",
+          "new": "    let mut canonical = canonical_bindings(name, base_path, binary_path);\n    canonical[0].1 = base_path.to_path_buf();\n    create_shared_ancestors(&canonical);\n"
+        }
+      ],
+      "tests": [
+        "standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite"
+      ]
+    },
+    {
+      "id": "WP117",
+      "title": "the stand-in writes the generated profile but starts under the committed confine.sb",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let mut provider = ConfinedProvider::start_under(&profile, &bindings, binary_path);\n    let init = json!({",
+          "new": "    let mut provider = ConfinedProvider::start_under(Path::new(PROFILE_PATH), &bindings, binary_path);\n    let init = json!({"
+        }
+      ],
+      "tests": [
+        "standin_start_runs_under_the_generated_profile_not_the_committed_file"
+      ]
+    },
+    {
+      "id": "WP118",
+      "title": "the stand-in checks no tool and runs the real sandbox-exec",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    if sandbox_exec != Path::new(SANDBOX_EXEC) {\n        return Err(format!(\n            \"{name} start on {os} is refused: the confinement tool {} is not {SANDBOX_EXEC}, \\\n             which is the one the stand-in runs\",\n            sandbox_exec.display()\n        ));\n    }",
+          "new": "    // WP118 removed the check that the tool is SANDBOX_EXEC."
+        }
+      ],
+      "tests": [
+        "standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host"
+      ]
+    },
+    {
+      "id": "WP119",
+      "title": "the stand-in checks no binary file and resolves a missing one",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    if !binary_path.is_file() {\n        return Err(format!(\n            \"{name} start is refused: the provider binary {} is not a file\",\n            binary_path.display()\n        ));\n    }",
+          "new": "    // WP119 removed the binary-file check."
+        }
+      ],
+      "tests": [
+        "standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host"
+      ]
+    },
+    {
+      "id": "WP120",
+      "title": "the stand-in accepts an init answer that is not ok",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        Ok(answer) => Err(format!(\"{name} start is refused: init answered {answer}\")),",
+          "new": "        Ok(_answer) => Ok(provider),"
+        }
+      ],
+      "tests": [
+        "standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host"
+      ]
+    },
+    {
+      "id": "WP121",
+      "title": "the suite does not push the planted-key case",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let denied = provider.init(&planted);\n    record.push(suite_entry(\n        \"planted key beneath STORAGE_PARENT\",\n        SuiteClass::Denied,\n        &denied,\n    ));",
+          "new": "    let _denied = provider.init(&planted);\n    // WP121 removed the planted-key push."
+        }
+      ],
+      "tests": [
+        "standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite"
+      ]
+    },
+    {
+      "id": "WP122",
+      "title": "a suite refusal drops the answer's code",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            code: refusal_field(answer.get(\"code\")),\n",
+          "new": "            code: refusal_field(None),\n"
+        }
+      ],
+      "tests": [
+        "suite_entry_keeps_the_refusal_code"
+      ]
+    },
+    {
+      "id": "WP123",
+      "title": "the wallet suite entry records every bound result as ok",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let outcome = match result {\n        WalletResultV2::Ok { .. } => SuiteOutcome::Ok,\n        WalletResultV2::Error { code, message } => SuiteOutcome::Refused {\n            status: refusal_field(answer.get(\"status\")),\n            code,\n            message: stable_message_start(&message),\n        },\n    };",
+          "new": "    let outcome = match result {\n        WalletResultV2::Ok { .. } => SuiteOutcome::Ok,\n        WalletResultV2::Error { .. } => SuiteOutcome::Ok,\n    };"
+        }
+      ],
+      "tests": [
+        "wallet_suite_entry_records_an_inner_refusal_as_refused"
+      ]
+    },
+    {
+      "id": "WP124",
+      "title": "the stand-in uses wallet's root layout for did",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let canonical = canonical_bindings(name, base_path, binary_path);\n",
+          "new": "    let canonical = canonical_bindings(WALLET_PROVIDER, base_path, binary_path);\n"
+        }
+      ],
+      "tests": [
+        "standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite"
+      ]
+    },
+    {
+      "id": "WP125",
+      "title": "the stand-in never fires its absent-tool refusal",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    if !sandbox_exec.is_file() {\n",
+          "new": "    if false {\n"
+        }
+      ],
+      "tests": [
+        "standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host"
+      ]
+    },
+    {
+      "id": "WP126",
+      "title": "the stand-in's wrong-tool reason drops the OS",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    if sandbox_exec != Path::new(SANDBOX_EXEC) {\n        return Err(format!(\n            \"{name} start on {os} is refused: the confinement tool {} is not {SANDBOX_EXEC}, \\\n             which is the one the stand-in runs\",\n            sandbox_exec.display()\n        ));\n    }",
+          "new": "    if sandbox_exec != Path::new(SANDBOX_EXEC) {\n        return Err(format!(\n            \"{name} start is refused: the confinement tool {} is not {SANDBOX_EXEC}, \\\n             which is the one the stand-in runs\",\n            sandbox_exec.display()\n        ));\n    }"
+        }
+      ],
+      "tests": [
+        "standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host"
+      ]
+    },
+    {
+      "id": "WP127",
+      "title": "the stand-in's did profile also grants a write beneath the base, so the sibling write succeeds",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let mut provider = ConfinedProvider::start_under(&profile, &bindings, binary_path);\n",
+          "new": "    if name == DID_PROVIDER {\n        let mut profile_text =\n            fs::read_to_string(&profile).expect(\"the generated profile must be readable\");\n        profile_text.push_str(\"(allow file-write* (subpath (param \\\"STORAGE_PARENT\\\")))\\n\");\n        fs::write(&profile, profile_text).expect(\"the appended grant must be written\");\n    }\n    let mut provider = ConfinedProvider::start_under(&profile, &bindings, binary_path);\n"
+        }
+      ],
+      "tests": [
+        "standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite"
+      ]
+    },
+    {
+      "id": "WP128",
+      "title": "the build-output reader returns a guessed target/debug path instead of the reported executable",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        if let Some(executable) = message[\"executable\"].as_str() {\n            return Ok(PathBuf::from(executable));\n        }",
+          "new": "        if message[\"executable\"].as_str().is_some() {\n            return Ok(did_provider_dir().join(\"target/debug/did-provider\"));\n        }"
+        }
+      ],
+      "tests": [
+        "did_binary_is_the_executable_the_build_reports"
+      ]
+    },
+    {
+      "id": "WP129",
+      "title": "the layout derivation gives an unknown provider name the wallet layout",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        other => panic!(\n            \"the stand-in serves only {DID_PROVIDER} and {WALLET_PROVIDER}, \\\n             so {other} has no storage root layout\"\n        ),",
+          "new": "        _ => wallet_dir(base),"
+        }
+      ],
+      "tests": [
+        "provider_storage_root_refuses_an_unknown_provider_name"
+      ]
+    },
+    {
+      "id": "WP130",
+      "title": "the build-output reader skips the kind check",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        if !is_bin {\n",
+          "new": "        if !is_bin && false {\n"
+        }
+      ],
+      "tests": [
+        "did_binary_is_the_executable_the_build_reports"
+      ]
+    },
+    {
+      "id": "WP131",
+      "title": "the stand-in starts a simulated Linux host with a missing primitive bare",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    standin_host_refusal(name, host)?;",
+          "new": "    if standin_host_refusal(name, host).is_err() && host.unavailable.is_some() {\n        return Ok(ConfinedProvider::spawn(Command::new(binary_path)));\n    }\n    standin_host_refusal(name, host)?;"
+        }
+      ],
+      "tests": [
+        "standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host"
+      ]
+    },
+    {
+      "id": "WP132",
+      "title": "the missing-primitive refusal returns one fixed reason that names no primitive",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        let reason = primitive.design_refusal();\n",
+          "new": "        let reason = \"linux confinement refused: a required primitive is missing\";\n"
+        }
+      ],
+      "tests": [
+        "standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host"
+      ]
+    },
+    {
+      "id": "WP133",
+      "title": "the stand-in appends an allow rule the suite does not exercise to the profile it launches",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    write_generated_profile(name, declared, &profile)?;\n",
+          "new": "    write_generated_profile(name, declared, &profile)?;\n    let mut launched =\n        fs::read_to_string(&profile).expect(\"the generated profile must be readable\");\n    launched.push_str(\"(allow file-read* (literal \\\"/private/etc/hosts\\\"))\\n\");\n    fs::write(&profile, launched).expect(\"the appended allow rule must be written\");\n"
+        }
+      ],
+      "tests": [
+        "standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite"
+      ]
+    },
+    {
+      "id": "WP134",
+      "title": "the stand-in removes the network deny from the profile it launches",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    write_generated_profile(name, declared, &profile)?;\n",
+          "new": "    write_generated_profile(name, declared, &profile)?;\n    let launched =\n        fs::read_to_string(&profile).expect(\"the generated profile must be readable\");\n    let without_network_deny = launched.replacen(\"(deny network*)\\n\", \"\", 1);\n    assert_ne!(launched, without_network_deny, \"the profile must deny network\");\n    fs::write(&profile, without_network_deny)\n        .expect(\"the profile without its network deny must be written\");\n"
+        }
+      ],
+      "tests": [
+        "standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite"
+      ]
+    },
+    {
+      "id": "WP135",
+      "title": "the declared-OS lookup moves back above the missing-primitive check",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    if let Some(primitive) = host.unavailable {\n        let reason = primitive.design_refusal();\n        return Err(format!(\"{name} start on {} is refused: {reason}\", host.os));\n    }\n    if DECLARED_CONFINED_OS.contains(&host.os) {\n        return Ok(());\n    }\n",
+          "new": "    if DECLARED_CONFINED_OS.contains(&host.os) {\n        return Ok(());\n    }\n    if let Some(primitive) = host.unavailable {\n        let reason = primitive.design_refusal();\n        return Err(format!(\"{name} start on {} is refused: {reason}\", host.os));\n    }\n"
+        }
+      ],
+      "tests": [
+        "standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host"
+      ]
+    },
+    {
+      "id": "WP136",
+      "title": "the missing-primitive reason gains the Linux no-design prefix",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        let reason = primitive.design_refusal();\n        return Err(format!(\"{name} start on {} is refused: {reason}\", host.os));\n",
+          "new": "        let reason =\n            format!(\"linux has no confinement design; {}\", primitive.design_refusal());\n        return Err(format!(\"{name} start on {} is refused: {reason}\", host.os));\n"
+        }
+      ],
+      "tests": [
+        "standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host"
+      ]
+    },
+    {
+      "id": "WP137",
+      "title": "the final host-refusal reason drops the name, OS and prefix",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    Err(format!(\"{name} start on {} is refused: {reason}\", host.os))\n}\n",
+          "new": "    Err(reason)\n}\n"
+        }
+      ],
+      "tests": [
+        "standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host"
+      ]
+    },
+    {
+      "id": "WP138",
+      "title": "the stand-in appends a deny form that only the oracle comparison refuses",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    write_generated_profile(name, declared, &profile)?;\n",
+          "new": "    write_generated_profile(name, declared, &profile)?;\n    let mut launched =\n        fs::read_to_string(&profile).expect(\"the generated profile must be readable\");\n    launched.push_str(\"(deny file-write* (literal \\\"/private/var/cc-confine-launched\\\"))\\n\");\n    fs::write(&profile, launched).expect(\"the appended deny form must be written\");\n"
+        }
+      ],
+      "tests": [
+        "standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite"
+      ]
+    },
+    {
+      "id": "WP139",
+      "title": "status reads a path outside every grant and answers storage_error when that read is denied",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/src/main.rs",
+          "old": "    fn status(&self) -> Response {\n        let now = now_ts();\n        Response::ok(json!({\n",
+          "new": "    fn status(&self) -> Response {\n        let now = now_ts();\n        if let Err(err) = std::fs::read(\"/etc/hosts\") {\n            return Response::error(STORAGE_ERROR_CODE, err.to_string());\n        }\n        Response::ok(json!({\n"
+        }
+      ],
+      "tests": [
+        "no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged"
+      ]
+    },
+    {
+      "id": "WP140",
+      "title": "status appends one byte to the wallet key inside the granted root and still answers ok",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/src/main.rs",
+          "old": "    fn status(&self) -> Response {\n        let now = now_ts();\n        Response::ok(json!({\n",
+          "new": "    fn status(&self) -> Response {\n        let now = now_ts();\n        if let Some(wallet_dir) = self.store_path.as_ref().and_then(|path| path.parent()) {\n            let key_path = wallet_dir.join(WALLET_KEY_FILE);\n            let mut key_bytes = std::fs::read(&key_path).expect(\"the wallet key must be readable\");\n            key_bytes.push(b' ');\n            std::fs::write(&key_path, key_bytes).expect(\"the wallet key must be writable\");\n        }\n        Response::ok(json!({\n"
+        }
+      ],
+      "tests": [
+        "no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged"
+      ]
+    },
+    {
+      "id": "WP141",
+      "title": "the row-set rule never fires, so a table may omit a row its dispatch answers",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "            problems.extend(row_set_problems(\n                document_name,\n                &rows,\n                &source,\n                &provider_path,\n            ));\n",
+          "new": "            let _ = &source;\n"
+        }
+      ],
+      "tests": [
+        "operations_table_row_check_refuses_each_bad_table"
+      ]
+    },
+    {
+      "id": "WP142",
+      "title": "the Right-vocabulary rule never fires, so an undeclared id or no named test shows this passes",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "fn right_vocabulary_problems(document_name: &str, row: &OperationsRow) -> Vec<String> {\n    if declared_right_cell(&row.right) {\n",
+          "new": "fn right_vocabulary_problems(document_name: &str, row: &OperationsRow) -> Vec<String> {\n    if declared_right_cell(&row.right) || true {\n"
+        }
+      ],
+      "tests": [
+        "operations_table_row_check_refuses_each_bad_table"
+      ]
+    },
+    {
+      "id": "WP143",
+      "title": "the both-sides rule never fires, so a right row may cite one side and a none: row a side",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "fn right_side_problems(document_name: &str, row: &OperationsRow) -> Vec<String> {\n    if !declared_right_cell(&row.right) {\n",
+          "new": "fn right_side_problems(document_name: &str, row: &OperationsRow) -> Vec<String> {\n    if !declared_right_cell(&row.right) || true {\n"
+        }
+      ],
+      "tests": [
+        "operations_table_row_check_refuses_each_bad_table"
+      ]
+    },
+    {
+      "id": "WP144",
+      "title": "the Linux-status rule never fires, so a Linux cell may claim enforcement",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "fn linux_status_problems(document_name: &str, row: &OperationsRow) -> Vec<String> {\n    if row.linux == LINUX_STATUS {\n",
+          "new": "fn linux_status_problems(document_name: &str, row: &OperationsRow) -> Vec<String> {\n    if row.linux == LINUX_STATUS || true {\n"
+        }
+      ],
+      "tests": [
+        "operations_table_row_check_refuses_each_bad_table"
+      ]
+    },
+    {
+      "id": "WP145",
+      "title": "shutdown writes one file into the wallet directory before it answers",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/src/main.rs",
+          "old": "            Request::Shutdown => Response::empty_ok(),",
+          "new": "            Request::Shutdown => {\n                if let Some(wallet_dir) = self.store_path.as_ref().and_then(|path| path.parent()) {\n                    std::fs::write(wallet_dir.join(\"shutdown-falsifier.hex\"), b\"planted\")\n                        .expect(\"the wallet directory must be writable\");\n                }\n                Response::empty_ok()\n            }"
+        }
+      ],
+      "tests": [
+        "no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged"
+      ]
+    }
+  ]
+}

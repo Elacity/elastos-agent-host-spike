@@ -770,7 +770,11 @@ async fn test_home_cli_terminal_developer_mode_policy_matrix() {
             for authority in [&owner, &guest] {
                 let token =
                     app_token_for_authority(dir.path(), HOME_CLI_CAPSULE_ID_FOR_TEST, authority);
-                if developer_mode && !registration_enabled {
+                // `elastos home` runs as the host user: guests never get it (#405).
+                if developer_mode
+                    && !registration_enabled
+                    && authority.principal_id == owner.principal_id
+                {
                     let contract = app
                         .clone()
                         .oneshot(
@@ -786,6 +790,27 @@ async fn test_home_cli_terminal_developer_mode_policy_matrix() {
                     continue;
                 }
                 assert_terminal_routes_refused(&app, &token).await;
+                if developer_mode && !registration_enabled {
+                    let refused = app
+                        .clone()
+                        .oneshot(
+                            test_browser_request("localhost:61180", "null")
+                                .method("POST")
+                                .uri("/api/apps/home-cli/terminal/sessions")
+                                .header("x-elastos-home-token", &token)
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    let body = axum::body::to_bytes(refused.into_body(), usize::MAX)
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        String::from_utf8_lossy(&body),
+                        "Only the Home owner can use the web terminal."
+                    );
+                }
             }
         }
     }
@@ -793,8 +818,9 @@ async fn test_home_cli_terminal_developer_mode_policy_matrix() {
     assert!(!marker.exists(), "a refused request started a host process");
 
     // The same command fixture must start when the policy permits the owner.
-    // Then each policy switch must close the existing process as well.
-    for enable_registration in [false, true] {
+    // Then each policy switch, and demoting the owner, must close the existing
+    // process as well.
+    for switch in ["developer mode off", "registration on", "owner demoted"] {
         let dir = tempfile::tempdir().unwrap();
         let owner = passkey_authority(dir.path());
         std::fs::write(dir.path().join("config.toml"), "developer_mode = true\n").unwrap();
@@ -828,11 +854,36 @@ async fn test_home_cli_terminal_developer_mode_policy_matrix() {
         })
         .await
         .unwrap();
-        if enable_registration {
-            crate::auth::set_guest_registration_enabled(dir.path(), true, crate::auth::now_ts())
+        match switch {
+            "developer mode off" => {
+                std::fs::write(dir.path().join("config.toml"), "developer_mode = false\n").unwrap();
+            }
+            "registration on" => {
+                crate::auth::set_guest_registration_enabled(
+                    dir.path(),
+                    true,
+                    crate::auth::now_ts(),
+                )
                 .unwrap();
-        } else {
-            std::fs::write(dir.path().join("config.toml"), "developer_mode = false\n").unwrap();
+            }
+            _ => {
+                // Another admin keeps the Home owned, so only the demotion
+                // closes the terminal.
+                passkey_authority_with_profile_role_credential(
+                    dir.path(),
+                    "Other admin",
+                    crate::auth::RuntimePrincipalRole::Admin,
+                    "other-terminal-admin",
+                );
+                let mut auth = crate::auth::load_auth_state(dir.path()).unwrap();
+                auth.principals
+                    .iter_mut()
+                    .find(|entry| entry.principal_id == owner.principal_id)
+                    .unwrap()
+                    .role = crate::auth::RuntimePrincipalRole::Guest;
+                crate::auth::save_auth_state(dir.path(), &auth).unwrap();
+                assert!(home_terminal_policy_allows(dir.path()));
+            }
         }
         assert_terminal_routes_refused(&app, &token).await;
         tokio::time::timeout(Duration::from_secs(3), async {
@@ -1254,12 +1305,13 @@ async fn home_summary_accepts_gateway_owned_home_cli_token_under_home_owned_gran
     let app = gateway_router(test_state(dir.path()));
     let now = now_ts();
     let _auth = set_test_home_launch_auth_data_dir(dir.path());
-    let context = HomeLaunchTokenContext {
-        principal_id: "person:home-cli-test".to_string(),
-        session_id: "auth:home-cli-test".to_string(),
-        proof_binding_id: Some("proof:passkey:home-cli-test".to_string()),
-        grant_id: "grant:home-cli-test".to_string(),
-    };
+    store_home_cli_principal(dir.path());
+    let context = HomeLaunchTokenContext::for_test(
+        "person:home-cli-test",
+        "auth:home-cli-test",
+        Some("proof:passkey:home-cli-test".to_string()),
+        "grant:home-cli-test",
+    );
     crate::auth::store_session_grant(
         dir.path(),
         AuthSessionGrantV1 {
@@ -1310,12 +1362,13 @@ async fn direct_home_cli_token_rejects_home_owned_grant_authority() {
     let dir = tempfile::tempdir().unwrap();
     let now = now_ts();
     let _auth = set_test_home_launch_auth_data_dir(dir.path());
-    let context = HomeLaunchTokenContext {
-        principal_id: "person:home-cli-test".to_string(),
-        session_id: "auth:home-cli-test".to_string(),
-        proof_binding_id: Some("proof:passkey:home-cli-test".to_string()),
-        grant_id: "grant:home-cli-test".to_string(),
-    };
+    store_home_cli_principal(dir.path());
+    let context = HomeLaunchTokenContext::for_test(
+        "person:home-cli-test",
+        "auth:home-cli-test",
+        Some("proof:passkey:home-cli-test".to_string()),
+        "grant:home-cli-test",
+    );
     crate::auth::store_session_grant(
         dir.path(),
         AuthSessionGrantV1 {
@@ -1347,12 +1400,13 @@ async fn gateway_owned_home_cli_issuer_projects_non_cli_capsules_under_home_auth
     let dir = tempfile::tempdir().unwrap();
     let now = now_ts();
     let _auth = set_test_home_launch_auth_data_dir(dir.path());
-    let context = HomeLaunchTokenContext {
-        principal_id: "person:home-cli-test".to_string(),
-        session_id: "auth:home-cli-test".to_string(),
-        proof_binding_id: Some("proof:passkey:home-cli-test".to_string()),
-        grant_id: "grant:home-cli-test".to_string(),
-    };
+    store_home_cli_principal(dir.path());
+    let context = HomeLaunchTokenContext::for_test(
+        "person:home-cli-test",
+        "auth:home-cli-test",
+        Some("proof:passkey:home-cli-test".to_string()),
+        "grant:home-cli-test",
+    );
     crate::auth::store_session_grant(
         dir.path(),
         AuthSessionGrantV1 {
@@ -2980,6 +3034,51 @@ impl elastos_runtime::provider::Provider for ServicesCarrierRelayProvider {
                 "path":self.path, "stream_id":"provider:stream:1"}}}),
         )
     }
+}
+
+#[tokio::test]
+async fn an_admin_with_two_passkeys_serves_a_shared_exit_grant() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
+    let (trusted_key, _) = generate_keypair();
+    let network = configured_discovery_network_profile_for_test(&trusted_key, "services-contacts");
+    let alice = services_contact_fixture(left.path(), "Alice", bus.clone(), network.clone()).await;
+    let bob = services_contact_fixture(right.path(), "Bob", bus.clone(), network.clone()).await;
+    accept_services_contact_pair(&alice, &bob);
+    let action = services_contact_pending_request(left.path(), right.path(), &alice, &bob).await;
+    let request_id = action.strip_prefix("service-approve-request:").unwrap();
+    let grant_id = format!(
+        "services-remote-exit-grant-{}",
+        hex::encode(&Sha256::digest(request_id.as_bytes())[..8])
+    );
+    let source = alice.peer_id.parse::<iroh::PublicKey>().unwrap();
+    let request = json!({"grant_id":grant_id,"principal_id":alice.authority.principal_id,
+        "stream_id":"consumer:stream:1","target":"tls://example.com:443"});
+    let token = app_token_for_authority(right.path(), INBOX_CAPSULE_ID, &bob.authority);
+    let (status, body) = services_contact_post(
+        &bob.app,
+        &token,
+        "/api/apps/inbox/actions",
+        json!({"action_id":action}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    add_second_active_passkey(
+        right.path(),
+        &bob.authority.principal_id,
+        crate::auth::RuntimePrincipalRole::Admin,
+    );
+    let grant = crate::api::gateway::authorize_home_service_exit(
+        right.path(),
+        &network,
+        &source,
+        &request,
+        now_ts(),
+    )
+    .unwrap();
+    assert_eq!(grant.provider_principal_id, bob.authority.principal_id);
+    assert_eq!(grant.grant_id, grant_id);
 }
 
 #[tokio::test]
@@ -4669,6 +4768,67 @@ async fn damaged_home_state_file_leaves_shell_and_summaries_answering() {
             );
         }
         assert_eq!(std::fs::read(&path).unwrap(), damaged, "{file}");
+    }
+}
+
+/// #447 N1: System → Appearance upload and reset never delete a damaged
+/// background image; both are refused with the notice that names it.
+#[tokio::test]
+async fn damaged_background_image_survives_upload_and_reset() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let localhost_root = crate::auth::principal_localhost_root(&authority.principal_id);
+    let file = "Appearance/background-image.jpg";
+    let uri = format!("{localhost_root}/.AppData/ElastOS/Home/{file}");
+    let path = elastos_common::localhost::rooted_localhost_fs_path(dir.path(), &uri).unwrap();
+    crate::auth::create_owner_only_dir_all(dir.path(), path.parent().unwrap()).unwrap();
+    crate::auth::write_principal_root_object(
+        dir.path(),
+        &authority.principal_id,
+        &localhost_root,
+        &uri,
+        &path,
+        b"jpeg",
+    )
+    .unwrap();
+    let mut damaged = std::fs::read(&path).unwrap();
+    damaged[9] = 0xff;
+    std::fs::write(&path, &damaged).unwrap();
+    let uploaded = path.with_file_name("background-image.png");
+
+    for (method, content_type, body) in [
+        ("POST", "image/png", "new-image"),
+        ("DELETE", "text/plain", ""),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                test_browser_request("localhost:61180", "null")
+                    .method(method)
+                    .uri("/api/apps/system/appearance/background-image")
+                    .header("x-elastos-home-token", authority.system_token.as_str())
+                    .header(CONTENT_TYPE, content_type)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let text = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&text);
+        assert!(!status.is_success(), "{method}: {text}");
+        assert!(
+            text.contains(&format!(
+                ".AppData/ElastOS/Home/{file} does not carry the label"
+            )),
+            "{method}: {text}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), damaged, "{method}");
+        assert!(!uploaded.exists(), "{method}");
     }
 }
 
@@ -8776,6 +8936,7 @@ async fn test_home_launch_starts_chat_room_capsule_and_reports_runtime_activity(
     assert_eq!(grant_context.principal_id, authority.principal_id);
 
     let summary = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/api/apps/system/summary")
@@ -8807,6 +8968,38 @@ async fn test_home_launch_starts_chat_room_capsule_and_reports_runtime_activity(
                 .as_str()
                 .unwrap_or_default()
                 .contains("chat-room")));
+
+    // The Runtime audit log covers the whole host; a guest gets none of it (#404).
+    let guest = passkey_authority_with_name_role(
+        dir.path(),
+        Some("guest"),
+        crate::auth::RuntimePrincipalRole::Guest,
+    );
+    let summary = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/apps/system/summary")
+                .header(HOST, "localhost:61180")
+                .header("origin", "null")
+                .header("x-elastos-home-token", guest.system_token.as_str())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(summary.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(summary.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["runtime"]["running"], true);
+    assert_eq!(payload["runtime_log"]["available"], false);
+    assert_eq!(payload["runtime_log"]["events"], json!([]));
+    assert!(payload["runtime_log"]["total_in_memory"].is_null());
+    assert_eq!(
+        payload["runtime_log"]["note"],
+        "Only the Home owner can see Runtime activity."
+    );
 }
 
 #[tokio::test]
@@ -9914,6 +10107,239 @@ async fn test_inbox_projects_approved_model_grant_outside_pending_counts() {
     );
 }
 
+#[tokio::test]
+async fn test_only_an_admin_approves_a_hosted_model_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let admin = passkey_authority_with_profile(dir.path(), "Mac");
+    let guest = passkey_authority_with_profile_role_credential(
+        dir.path(),
+        "Guest",
+        crate::auth::RuntimePrincipalRole::Guest,
+        "gateway-test-guest-passkey",
+    );
+    let app = gateway_router(test_state(dir.path()));
+    let hosted = "model:hosted-0123456789abcdef0123456789abcdef";
+    let local = "model:local-0123456789abcdef0123456789abcdef";
+    for (authority, model_id, refused) in [
+        (&guest, hosted, true),
+        (&guest, local, false),
+        (&admin, hosted, false),
+    ] {
+        let now = crate::auth::now_ts();
+        write_home_principal_object_json_for_authority(
+            dir.path(),
+            authority,
+            "services-requests.json",
+            json!({
+                "schema": "elastos.services.requests/v1",
+                "principal_id": authority.principal_id,
+                "localhost_root": crate::auth::principal_localhost_root(&authority.principal_id),
+                "updated_at": now,
+                "requests": { "model-request-1": {
+                    "request_id": "model-request-1",
+                    "offer_id": "local:provider:model",
+                    "service_uri": "elastos://peer/model",
+                    "service_kind": "remote_model",
+                    "service_display_name": "Mac model",
+                    "requested_model_offer_id": model_id,
+                    "requested_model_offer_revision": format!("sha256:{}", "a".repeat(64)),
+                    "requester_peer_id": "peer-seed",
+                    "requester_did": "did:key:seed",
+                    "requester_principal_id": "seed-principal-a",
+                    "requester_display_name": "Seed",
+                    "created_at": now,
+                    "updated_at": now,
+                    "status": "pending",
+                    "authenticated_request": true
+                } }
+            }),
+        );
+        let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, authority);
+        let (status, body) = services_contact_post(
+            &app,
+            &token,
+            "/api/apps/inbox/actions",
+            json!({"action_id":"service-approve-request:model-request-1"}),
+        )
+        .await;
+        // No contact is accepted here, so every approval stops; only a guest's
+        // hosted approval stops at the admin rule.
+        assert!(!status.is_success(), "{body}");
+        assert_eq!(
+            body == "Only an admin can approve use of this Home's hosted AI connection.",
+            refused,
+            "{model_id}: {body}"
+        );
+        let saved = services_mailbox_saved_state(dir.path(), authority, "services-requests.json");
+        assert_eq!(
+            saved["requests"]["model-request-1"]["status"], "pending",
+            "{saved}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_only_an_admin_approves_an_offer_its_listing_marks_hosted() {
+    use crate::api::model_provider_config::{HostedAiProvider, HostedOfferSave};
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
+    let (trusted_key, _) = generate_keypair();
+    let network = configured_discovery_network_profile_for_test(&trusted_key, "services-contacts");
+    let alice = services_contact_fixture(left.path(), "Alice", bus.clone(), network.clone()).await;
+    let bob = services_contact_fixture(right.path(), "Bob", bus.clone(), network).await;
+    accept_services_contact_pair(&alice, &bob);
+    // Hosted by its listing only: the id check alone lets this through.
+    let custom = "model:custom";
+    assert!(!crate::api::model_provider_config::is_hosted_offer_id(
+        custom
+    ));
+    let named = "model:hosted-0123456789abcdef0123456789abcdef";
+    crate::api::model_provider_config::save_hosted_offer(
+        right.path(),
+        None,
+        HostedOfferSave {
+            provider: HostedAiProvider::Venice,
+            api_key: "fixture-key",
+            model: "fixture/text",
+            expected_response_model: None,
+            privacy: None,
+            name: "Hosted test",
+            instance_id: Some(named),
+        },
+    )
+    .await
+    .unwrap();
+    crate::api::model_provider_config::set_hosted_offer_share(
+        right.path(),
+        named,
+        true,
+        Some(HostedAiProvider::Venice.share_terms_ack()),
+    )
+    .unwrap();
+    // Share it under the custom id too, as an operator-written config would.
+    let mut offers =
+        crate::api::model_provider_config::load_model_provider_operator_offers(right.path())
+            .unwrap();
+    let mut operator_custom = offers
+        .iter()
+        .find(|offer| offer["id"] == named)
+        .unwrap()
+        .clone();
+    operator_custom["id"] = json!(custom);
+    offers.push(operator_custom);
+    std::fs::write(
+        right.path().join("providers/model-provider/config.json"),
+        serde_json::to_vec(&json!({ "offers": offers })).unwrap(),
+    )
+    .unwrap();
+    let revision = format!("sha256:{}", "a".repeat(64));
+    bob.registry
+        .register_sub_provider(
+            "model",
+            Arc::new(ServicesCatalogModelProvider {
+                offer: json!({"id":custom,"title":"Custom","operation":"text.generate",
+                    "hosted":{"placement":"hosted","backend_provider_label":"Venice"}}),
+                revision: Arc::new(std::sync::Mutex::new(revision.clone())),
+            }),
+        )
+        .await
+        .unwrap();
+    let offer = format!(
+        "offer:{}:model",
+        home_people_contact_id(&bob.profile.document().profile_did)
+    );
+    let token = app_token_for_authority(left.path(), SERVICES_CAPSULE_ID, &alice.authority);
+    let (status, body) = services_contact_post(
+        &alice.app,
+        &token,
+        "/api/apps/services/offers",
+        json!({"offer_id":offer,"section":"catalog","selected":true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    bob.discovery_service
+        .sync_services_mailboxes_once(right.path(), 0)
+        .await;
+    let (status, summary) =
+        home_test_get_json(&alice.app, "/api/apps/services/summary", &token, "null").await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    assert_eq!(
+        summary["model_catalogs"][&offer][0]["id"], custom,
+        "{summary}"
+    );
+    let (status, body) = services_contact_post(
+        &alice.app,
+        &token,
+        "/api/apps/services/offers",
+        json!({"offer_id":offer,"section":"others","selected":true,
+            "model_offer_id":custom,"model_offer_revision":revision}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    bob.discovery_service
+        .sync_services_mailboxes_once(right.path(), 0)
+        .await;
+    let saved =
+        services_mailbox_saved_state(right.path(), &bob.authority, "services-requests.json");
+    let (request_id, request) = saved["requests"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .next()
+        .unwrap();
+    assert_eq!(request["requested_model_offer_id"], custom, "{saved}");
+    let request_id = request_id.clone();
+    let approve = json!({"action_id":format!("service-approve-request:{request_id}")});
+    let inbox_token = app_token_for_authority(right.path(), INBOX_CAPSULE_ID, &bob.authority);
+    let set_bob_role = |role| {
+        let mut auth = crate::auth::load_auth_state(right.path()).unwrap();
+        auth.principals
+            .iter_mut()
+            .find(|entry| entry.principal_id == bob.authority.principal_id)
+            .unwrap()
+            .role = role;
+        crate::auth::save_auth_state(right.path(), &auth).unwrap();
+    };
+
+    set_bob_role(crate::auth::RuntimePrincipalRole::Guest);
+    let (status, body) = services_contact_post(
+        &bob.app,
+        &inbox_token,
+        "/api/apps/inbox/actions",
+        approve.clone(),
+    )
+    .await;
+    assert!(!status.is_success(), "{body}");
+    assert_eq!(
+        body,
+        "Only an admin can approve use of this Home's hosted AI connection."
+    );
+    let saved =
+        services_mailbox_saved_state(right.path(), &bob.authority, "services-requests.json");
+    let request = &saved["requests"][&request_id];
+    assert_eq!(request["status"], "pending", "{saved}");
+    assert!(request["grant_expires_at"].is_null(), "{saved}");
+    assert!(
+        request["approved_offer_ids"]
+            .as_array()
+            .is_none_or(Vec::is_empty),
+        "{saved}"
+    );
+
+    set_bob_role(crate::auth::RuntimePrincipalRole::Admin);
+    let (status, body) =
+        services_contact_post(&bob.app, &inbox_token, "/api/apps/inbox/actions", approve).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let saved =
+        services_mailbox_saved_state(right.path(), &bob.authority, "services-requests.json");
+    let request = &saved["requests"][&request_id];
+    assert_eq!(request["status"], "approved", "{saved}");
+    assert_eq!(request["approved_offer_ids"], json!([custom]), "{saved}");
+    assert_eq!(request["approved_offer_revision"], revision, "{saved}");
+    assert!(request["grant_expires_at"].is_u64(), "{saved}");
+}
+
 async fn services_contact_pending_engine_request(
     left: &std::path::Path,
     right: &std::path::Path,
@@ -10159,7 +10585,26 @@ async fn test_services_remote_engine_signed_approval_retains_scoped_execution_gr
         2,
         "foreign requests never reach Engine"
     );
+    // #485: a second passkey for the same admin principal keeps the grant
+    // serving; the rest of this test, including cancellation, runs with both.
+    add_second_active_passkey(
+        right.path(),
+        &bob.authority.principal_id,
+        crate::auth::RuntimePrincipalRole::Admin,
+    );
     let authority_request = json!({"op":"status","principal_id":alice.authority.principal_id,"grant_id":grant["grant_id"]});
+    let two_passkey = crate::api::gateway::authorize_home_service_engine(
+        right.path(),
+        &network,
+        &endpoint.id(),
+        &authority_request,
+        now_ts(),
+    )
+    .unwrap();
+    assert_eq!(
+        two_passkey.provider_principal_id,
+        bob.authority.principal_id
+    );
     assert!(crate::api::gateway::authorize_home_service_engine(
         right.path(),
         &network,
@@ -10339,9 +10784,117 @@ async fn test_services_remote_engine_signed_approval_retains_scoped_execution_gr
     assert_eq!(record["status"], "denied");
     assert!(record.get("remote_engine_grant").is_none());
     assert!(alice.exit_provider.requests.lock().await.is_empty());
+    // Two different principals holding the same grant ID stay ambiguous.
+    let carol = passkey_authority_with_profile_role_credential(
+        right.path(),
+        "Carol",
+        crate::auth::RuntimePrincipalRole::Admin,
+        "gateway-test-carol-passkey",
+    );
+    let mut copied =
+        services_contact_saved_state(right.path(), &bob.authority, "services-requests.json");
+    copied["principal_id"] = json!(carol.principal_id);
+    copied["localhost_root"] = json!(crate::auth::principal_localhost_root(&carol.principal_id));
+    write_home_principal_object_json_for_authority(
+        right.path(),
+        &carol,
+        "services-requests.json",
+        copied,
+    );
+    let refused =
+        authorize_home_engine_preparation_cancellation(right.path(), &endpoint.id(), &cancellation)
+            .unwrap_err();
+    assert!(refused.to_string().contains("does not own"), "{refused}");
     local.shutdown().await.unwrap();
     remote.shutdown().await.unwrap();
 }
+
+/// wiring row: pins which store resolve reads; not a fail-closed proof
+/// (Rong 1106 sec. 3).
+#[tokio::test]
+async fn p2a_i_a_wiring_loop_resolve_reads_the_listing_store() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
+    let (trusted_key, _) = generate_keypair();
+    let network = configured_discovery_network_profile_for_test(&trusted_key, "services-contacts");
+    let alice = services_contact_fixture(left.path(), "Alice", bus.clone(), network.clone()).await;
+    let bob = services_contact_fixture(right.path(), "Bob", bus.clone(), network.clone()).await;
+    accept_services_contact_pair(&alice, &bob);
+    let action =
+        services_contact_pending_engine_request(left.path(), right.path(), &alice, &bob).await;
+    let request_id = action.strip_prefix("service-approve-request:").unwrap();
+    let request = json!({"op":"status","principal_id":alice.authority.principal_id,
+        "grant_id":crate::carrier::engine_grant_id(request_id)});
+    let token = app_token_for_authority(right.path(), INBOX_CAPSULE_ID, &bob.authority);
+    let (status, body) = services_contact_post(
+        &bob.app,
+        &token,
+        "/api/apps/inbox/actions",
+        json!({"action_id":action}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // The listing store (`right`) still authorizes while the launch-auth
+    // override points at an empty directory.
+    let empty = tempfile::tempdir().unwrap();
+    let _override = crate::api::gateway::set_test_home_launch_auth_data_dir(empty.path());
+    let source = alice.peer_id.parse::<iroh::PublicKey>().unwrap();
+    let grant = crate::api::gateway::authorize_home_service_engine(
+        right.path(),
+        &network,
+        &source,
+        &request,
+        now_ts(),
+    )
+    .unwrap();
+    assert_eq!(grant.provider_principal_id, bob.authority.principal_id);
+}
+
+/// The one reachable refusal (Rong 1106 sec. 3): a provider principal with no
+/// stored record is refused by the root resolver even though its Services
+/// selection state shares the local model offer. The control principal proves
+/// the same share state answers true once a record exists.
+#[test]
+fn p2a_i_b_local_model_offer_unshared_for_provider_without_stored_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider_id = "passkey:p2a-i-b-provider-without-record";
+    let record_owner = passkey_authority_with_name(dir.path(), Some("carol"));
+    for principal_id in [provider_id, record_owner.principal_id.as_str()] {
+        let localhost_root = crate::auth::principal_localhost_root(principal_id);
+        let object_uri = format!("{localhost_root}/.AppData/ElastOS/Home/services-state.json");
+        let path = rooted_localhost_fs_path(dir.path(), &object_uri).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let state = json!({
+            "schema": "elastos.services.state/v1",
+            "principal_id": principal_id,
+            "localhost_root": localhost_root,
+            "updated_at": 0,
+            "local_offer_ids": [MODEL_LOCAL_OFFER],
+        });
+        crate::auth::write_principal_root_object(
+            dir.path(),
+            principal_id,
+            &localhost_root,
+            &object_uri,
+            &path,
+            &serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["local_offer_ids"], json!([MODEL_LOCAL_OFFER]));
+    }
+    assert!(!crate::api::gateway::local_model_offer_is_shared(
+        dir.path(),
+        provider_id
+    ));
+    assert!(crate::api::gateway::local_model_offer_is_shared(
+        dir.path(),
+        &record_owner.principal_id
+    ));
+}
+
 // Regression for a configured Gateway whose Carrier is already in process.
 fn configured_services_runtime_remove_attached_runtime(
     data_dir: &std::path::Path,
@@ -11420,6 +11973,57 @@ async fn test_system_ai_provider_guest_get_forbidden() {
 }
 
 #[tokio::test]
+async fn test_system_ai_provider_requires_a_passkey_bound_admin_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let passkey_admin = passkey_authority_with_name(dir.path(), Some("owner"));
+    let now = crate::auth::now_ts();
+    let binding = ProofBinding {
+        kind: elastos_runtime::auth::ProofBindingKind::DidKey,
+        subject: "did:key:z6MkpasskeylessAdminFixture".to_string(),
+        chain_id: None,
+        verified_at: now,
+        passkey: None,
+    };
+    let principal = crate::auth::upsert_principal_for_binding_as_role_named(
+        dir.path(),
+        binding,
+        "principal:passkeyless-admin".to_string(),
+        crate::auth::RuntimePrincipalRole::Admin,
+        Some("wallet admin"),
+        now,
+    )
+    .unwrap();
+    assert!(crate::auth::is_admin(&principal));
+    let grant = AuthSessionGrantV1 {
+        schema: AuthSessionGrantV1::SCHEMA.to_string(),
+        grant_id: format!("grant:{}", uuid_like_token()),
+        session_id: format!("auth:{}", uuid_like_token()),
+        principal_id: principal.principal_id.clone(),
+        proof_binding_id: principal.proof_binding_id.clone(),
+        issued_at: now,
+        expires_at: now + 60 * 60,
+        apps: vec![SYSTEM_CAPSULE_ID.to_string()],
+    };
+    crate::auth::store_session_grant(dir.path(), grant.clone()).unwrap();
+    let token =
+        issue_home_launch_token_for_auth_grant(dir.path(), SYSTEM_CAPSULE_ID, &grant).unwrap();
+
+    let (status, _) =
+        ai_provider_raw(&app, "GET", "/api/apps/system/ai-provider", &token, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = ai_provider_raw(
+        &app,
+        "GET",
+        "/api/apps/system/ai-provider",
+        &passkey_admin.system_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn test_system_ai_provider_invalid_key_leaves_that_provider_absent() {
     for (provider, api_key, invalid_text, install) in [
         (
@@ -11480,6 +12084,48 @@ async fn test_system_ai_provider_invalid_key_leaves_that_provider_absent() {
         .await;
         clear_hosted_ai_validate_doubles();
         assert_eq!(status, StatusCode::BAD_REQUEST, "{provider} {body}");
+        assert!(!ai_provider_config_path(dir.path()).exists());
+    }
+}
+
+/// OpenRouter serves its model list to any caller, so a rejected key must be
+/// caught by the key endpoint before the list is loaded.
+#[tokio::test]
+async fn test_system_ai_provider_openrouter_key_rejected_by_provider_is_not_saved() {
+    for status in [
+        reqwest::StatusCode::UNAUTHORIZED,
+        reqwest::StatusCode::FORBIDDEN,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let app = gateway_router(test_state(dir.path()));
+        let authority = passkey_authority(dir.path());
+        install_valid_hosted_doubles();
+        install_openrouter_key_response(status, br#"{"error":{"code":401}}"#);
+        let (code, body) = ai_provider_raw(
+            &app,
+            "POST",
+            "/api/apps/system/ai-provider/validate",
+            &authority.system_token,
+            Some(json!({"provider": "openrouter", "api_key": "sk-or-fixture-rejected"})),
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{status} {body}");
+        assert_eq!(body, "invalid OpenRouter key");
+        let (code, body) = ai_provider_raw(
+            &app,
+            "POST",
+            "/api/apps/system/ai-provider",
+            &authority.system_token,
+            Some(json!({
+                "provider": "openrouter",
+                "api_key": "sk-or-fixture-rejected",
+                "model": "fixture/model"
+            })),
+        )
+        .await;
+        clear_hosted_ai_validate_doubles();
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{status} {body}");
+        assert_eq!(body, "invalid OpenRouter key");
         assert!(!ai_provider_config_path(dir.path()).exists());
     }
 }
@@ -12420,4 +13066,112 @@ async fn home_external_link_names_the_launched_app_and_the_exact_address() {
     let (status, _) =
         home_external_link_raw(&app, "http://localhost:61180", &home_token, extra).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// The fixture's person, stored through the production principal store (Rong
+/// 1106 Q1 a), so the gateway resolver finds a record and never a bypass.
+fn store_home_cli_principal(dir: &std::path::Path) {
+    let binding = ProofBinding {
+        kind: elastos_runtime::auth::ProofBindingKind::DidKey,
+        subject: "did:key:z6MkhomeCliTestFixture".to_string(),
+        chain_id: None,
+        verified_at: now_ts(),
+        passkey: None,
+    };
+    let id = "person:home-cli-test".to_string();
+    crate::auth::upsert_principal_for_binding_as(dir, binding, id, now_ts()).unwrap();
+}
+
+#[tokio::test]
+async fn gateway_context_refuses_an_unstored_person() {
+    let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _auth = set_test_home_launch_auth_data_dir(dir.path());
+    let refused = home_launch_token_context_from_parts(dir.path(), "person:x", "auth:x", None, "g");
+    assert!(refused
+        .unwrap_err()
+        .to_string()
+        .contains("has no stored record"));
+}
+
+/// Gateway wiring: a person stored only in the auth store (not the runtime
+/// data dir) resolves, so the gateway reads principals from `auth_data_dir`.
+#[tokio::test]
+async fn gateway_context_resolves_a_person_stored_in_the_auth_store() {
+    let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
+    let (dir, auth) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let _auth = set_test_home_launch_auth_data_dir(auth.path());
+    store_home_cli_principal(auth.path());
+    let context = home_launch_token_context_from_parts(
+        dir.path(),
+        "person:home-cli-test",
+        "auth:home-cli-test",
+        None,
+        "grant:home-cli-test",
+    );
+    assert_eq!(context.unwrap().principal_id, "person:home-cli-test");
+}
+
+/// Proof-bound row (Rong 0344 L-1499-1): with a proof binding, the active
+/// session grant is loaded from the same trusted auth dir as the principal.
+/// A grant stored only in the runtime data dir does not count.
+#[tokio::test]
+async fn gateway_context_checks_a_proof_bound_grant_in_the_auth_store() {
+    let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
+    let (dir, auth) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let _auth = set_test_home_launch_auth_data_dir(auth.path());
+    store_home_cli_principal(auth.path());
+    let now = now_ts();
+    let grant = AuthSessionGrantV1 {
+        schema: AuthSessionGrantV1::SCHEMA.to_string(),
+        grant_id: "grant:home-cli-test".to_string(),
+        session_id: "auth:home-cli-test".to_string(),
+        principal_id: "person:home-cli-test".to_string(),
+        proof_binding_id: "proof:passkey:home-cli-test".to_string(),
+        issued_at: now,
+        expires_at: now + 300,
+        apps: vec![HOME_CAPSULE_ID.to_string()],
+    };
+    let context_from = || {
+        home_launch_token_context_from_parts(
+            dir.path(),
+            "person:home-cli-test",
+            "auth:home-cli-test",
+            Some("proof:passkey:home-cli-test"),
+            "grant:home-cli-test",
+        )
+    };
+    crate::auth::store_session_grant(dir.path(), grant.clone()).unwrap();
+    assert!(context_from()
+        .unwrap_err()
+        .to_string()
+        .contains("auth session not found"));
+    crate::auth::store_session_grant(auth.path(), grant).unwrap();
+    let context = context_from().unwrap();
+    assert_eq!(context.principal_id, "person:home-cli-test");
+    assert_eq!(
+        context.proof_binding_id.as_deref(),
+        Some("proof:passkey:home-cli-test")
+    );
+}
+
+/// Converse (Codex r1 #1462): a record only in the runtime data dir, not the
+/// selected auth store, refuses; the runtime dir is not a principal store.
+#[tokio::test]
+async fn gateway_context_refuses_a_person_stored_only_in_the_runtime_dir() {
+    let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
+    let (dir, auth) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let _auth = set_test_home_launch_auth_data_dir(auth.path());
+    store_home_cli_principal(dir.path());
+    let refused = home_launch_token_context_from_parts(
+        dir.path(),
+        "person:home-cli-test",
+        "auth:home-cli-test",
+        None,
+        "grant:home-cli-test",
+    );
+    assert!(refused
+        .unwrap_err()
+        .to_string()
+        .contains("has no stored record"));
 }

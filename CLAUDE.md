@@ -3,7 +3,7 @@
 Read `examples/photo-viewer/handoff/KICKOFF.md` first, then `ROADMAP.md`, then `PRINCIPLES.md` (all 19),
 `docs/CAPSULE_MODEL.md`, `docs/CAPSULE_AUTHORING.md` and `SECURITY.md`.
 
-- Private repo only (SashaMIT/elastos-agent-host-spike). Never push to Elacity. Never touch main.
+- Public fork (Elacity/elastos-agent-host-spike), run in parallel with the Runtime. Never push to Elacity/elastos-runtime. Never touch main.
 - One branch per slice (`claude/photo-<slice>`), draft PR into `spike/photo-viewer`, merge commits only. Sasha merges.
 - No rebase, amend, force-push or branch deletion.
 - No shipping Runtime change outside test modules without Sasha's yes.

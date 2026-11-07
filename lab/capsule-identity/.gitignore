@@ -1,0 +1,7 @@
+# Build output is never committed (no large files, HANDOFF rule 7). Tests
+# build wc-001's capsule.wasm into a temp dir; none belongs in this tree.
+/target/
+capsule.wasm
+receipt.txt
+# Seed files are key material. Key files are already ignored at the repository root.
+*.seed

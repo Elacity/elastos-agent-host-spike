@@ -1,0 +1,13 @@
+id: F-M4-revoke
+file: src/lib.rs
+test: model_revoke_one_app_stops_only_that_app
+--- old
+        #[rustfmt::skip]
+        self.end_grant(handle);
+--- new
+        #[rustfmt::skip]
+        let ended_handles = self.grants.keys().copied().collect::<Vec<_>>();
+        for ended_handle in ended_handles {
+            self.end_grant(ended_handle);
+        }
+--- end

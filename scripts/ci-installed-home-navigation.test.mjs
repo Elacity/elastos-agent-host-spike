@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import http from "node:http";
 import { extname } from "node:path";
 import test from "node:test";
+import vm from "node:vm";
 import { openInstalledApp, openInstalledAssistant, reopenInstalledAssistant, resizeInstalledHome, returnInstalledHome } from "./ci-installed-home-navigation.mjs";
 import { publicJourneyFailure } from "./ci-installed-home-failure.mjs";
 
@@ -274,9 +275,13 @@ test("installed navigation waits for real Home GUI restoration and preserves app
             window.calls=[];window.pendingSavedWindows=[];let released=false;
             const frame=document.querySelector('#active-shell-frame');
             const reply=(message)=>frame.contentWindow.postMessage(message,'*');
+            window.resendSummary=()=>reply({type:'home:shell-summary',summary:${JSON.stringify(summary)}});
             const launch=(message)=>{
               if(message.target==='assistant'&&${JSON.stringify(mode)}==='launch_refused'){
                 reply({type:'home:shell-response',requestId:message.requestId,error:'Fixture Assistant launch refused',status:403});return;
+              }
+              if(message.target==='marketplace'&&${JSON.stringify(mode)}==='window_refused'){
+                reply({type:'home:shell-response',requestId:message.requestId,error:'Fixture Marketplace launch refused',status:403});return;
               }
               reply({type:'home:shell-response',requestId:message.requestId,result:{target:message.target,title:message.target,
                 attach_kind:'iframe',route:message.target==='assistant'?'/apps/assistant/?home_origin=${encodeURIComponent(origin)}#home_token=fixture'
@@ -334,7 +339,7 @@ test("installed navigation waits for real Home GUI restoration and preserves app
   try {
     browser = await chromium.launch({ headless: true });
     const origin = `http://127.0.0.1:${server.address().port}`;
-    for (const mode of ["restored", "shell_unready", "launch_refused"]) {
+    for (const mode of ["restored", "shell_unready", "launch_refused", "window_refused"]) {
       await t.test(mode, async navigation => {
         const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
         const pageErrors = [];
@@ -351,10 +356,14 @@ test("installed navigation waits for real Home GUI restoration and preserves app
         });
         let opening;
         try {
-          opening = openInstalledAssistant(page, `${origin}/home/?mode=${mode}`, mode === "restored" ? 10000 : 2000);
+          opening = openInstalledAssistant(page, `${origin}/home/?mode=${mode}`, ["restored", "window_refused"].includes(mode) ? 10000 : 2000);
           opening.catch(() => {});
           await page.waitForFunction(() => window.pendingSavedWindows?.some(message => message.target === "marketplace"), null, { timeout: 5000 });
+          // Home refreshes its summary on its own timers; one arriving while saved
+          // windows still reopen must not mark the Shell ready (#433).
+          await page.evaluate(() => window.resendSummary());
           const shell = page.frameLocator("#active-shell-frame");
+          await shell.locator("body").evaluate(() => new Promise(resolve => setTimeout(resolve, 250)));
           assert.equal(await page.getAttribute("body", "data-home-status"), "ready");
           assert.equal(await shell.locator("body").getAttribute("data-home-authority"), "signed");
           assert.equal(await shell.locator("body").getAttribute("data-home-status"), "booting");
@@ -366,7 +375,12 @@ test("installed navigation waits for real Home GUI restoration and preserves app
             assert.deepEqual(await shell.locator("body").evaluate(() => window.assistantClicks), []);
           } else {
             await page.evaluate(() => window.releaseSavedWindows());
-            if (mode === "launch_refused") {
+            if (mode === "window_refused") {
+              // A saved window that cannot reopen is skipped; Home still becomes ready.
+              const assistant = await opening;
+              await assistant.locator('#agent-harness.is-visible[aria-hidden="false"]').waitFor({ state: "visible", timeout: 5000 });
+              assert.equal(await shell.locator("body").getAttribute("data-home-status"), "ready");
+            } else if (mode === "launch_refused") {
               await assert.rejects(opening, error => error.name === "TimeoutError");
               assert.equal(await shell.locator("#assistant-space-error").isVisible(), true);
               assert.match(await shell.locator("#assistant-space-error-detail").textContent(), /Fixture Assistant launch refused/);
@@ -462,7 +476,7 @@ test("installed navigation waits for real Home GUI restoration and preserves app
               });
             }
             assert.deepEqual(await shell.locator("body").evaluate(() => window.assistantClicks), [{ status: "ready", authority: "signed" }]);
-            assert.equal(await shell.locator('.window[data-target="marketplace"]').count(), 1);
+            assert.equal(await shell.locator('.window[data-target="marketplace"]').count(), mode === "window_refused" ? 0 : 1);
             assert.equal(await shell.locator('.window[data-target="wallet"]').count(), 1);
           }
           const launches = await page.evaluate(() => window.calls.filter(message => message.type === "home:launch-target").map(message => message.target));
@@ -479,6 +493,57 @@ test("installed navigation waits for real Home GUI restoration and preserves app
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
   }
+});
+
+test("Home GUI readiness waits for the one restore, survives a failed restore and a late context", async () => {
+  // The real Shell functions run against controlled projection and restore steps.
+  const source = readFileSync(new URL("../capsules/home-gui/browser/home-gui-shell.js", import.meta.url), "utf8");
+  const named = name => {
+    const start = source.search(new RegExp(`^(async )?function ${name}\\(`, "m"));
+    assert(start >= 0, name);
+    return source.slice(start, source.indexOf("\n}\n", start) + 2);
+  };
+  const fixture = () => {
+    const restores = [], logged = [];
+    const context = vm.createContext({
+      document: { body: { dataset: { homeStatus: "booting" } } },
+      console: { error: (...values) => logged.push(values) },
+      projectHomeGuiAuthority() {},
+      syncHomeGuiProjection: async () => {},
+      hasContext: false,
+      acceptHomeBrowserContextId() { context.hasContext = true; return true; },
+      hasHomeBrowserContextId: () => context.hasContext,
+      restoreHomeGuiSession: () => new Promise((resolve, reject) => restores.push({ resolve, reject })),
+    });
+    vm.runInContext(`let currentSummary = null;\nlet sessionRestore = null;\n${
+      ["applySummary", "restoreSessionWhenReady", "acceptShellContext"].map(named).join("\n")}`, context);
+    return { context, restores, logged, status: () => context.document.body.dataset.homeStatus };
+  };
+  const signed = { authority: { signed_in: true } };
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+
+  const ordered = fixture();
+  ordered.context.acceptShellContext("browser:fixture");
+  const first = ordered.context.applySummary(signed);
+  await settle();
+  const second = ordered.context.applySummary(signed);
+  await settle();
+  assert.equal(ordered.restores.length, 1, "one restore for every summary");
+  assert.equal(ordered.status(), "booting", "a later summary waits for the running restore");
+  ordered.restores[0].reject(new Error("restore failed"));
+  await Promise.all([first, second]);
+  assert.equal(ordered.status(), "ready", "a failed restore never leaves Home booting or in error");
+  assert.equal(ordered.logged.length, 1);
+
+  const late = fixture();
+  await late.context.applySummary(signed);
+  assert.equal(late.status(), "ready", "no context yet, so nothing to restore");
+  late.context.acceptShellContext("browser:fixture");
+  assert.equal(late.status(), "booting", "a context after the summary restores before Home is ready again");
+  assert.equal(late.restores.length, 1);
+  late.restores[0].resolve();
+  await settle();
+  assert.equal(late.status(), "ready");
 });
 
 test("a resize across the phone boundary waits out Home's stage reset and reopens the Assistant room it closed", async () => {

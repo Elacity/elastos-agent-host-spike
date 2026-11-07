@@ -1,0 +1,17 @@
+id: F-B2-guestsess
+file: src/ops.rs
+test: ops::model_forged_session_does_not_move_the_child_path
+--- old
+        super::resource_name(&grant.identity, path, Some(&grant.owned_root))
+            .map_err(OperateRefuse::Binding)?;
+--- new
+        super::resource_name(
+            request
+                .forged_session
+                .as_deref()
+                .unwrap_or(&grant.identity),
+            path,
+            Some(&grant.owned_root),
+        )
+        .map_err(OperateRefuse::Binding)?;
+--- end

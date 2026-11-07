@@ -14,7 +14,7 @@
     <link rel="manifest" href="./manifest.webmanifest?v=home-20260805a" />
     <link rel="icon" href="./elastos-home-icon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="./elastos-home-icon-192.png" />
-    <link rel="stylesheet" href="./style.css?v=home-20261017a" />
+    <link rel="stylesheet" href="./style.css?v=home-20261021a" />
   </head>
   <body data-home-status="booting" data-home-shell="resolving" data-home-gui="resolving">
     <div class="home-host-shell">
@@ -196,8 +196,15 @@
           </div>
         </div>
       </section>
+
+      <!-- After an update this page and every open window keep the code they
+           loaded; Reload loads the new code. Never over a Home sheet (style.css). -->
+      <section id="home-update-bar" class="home-update-bar" role="status" hidden>
+        <p>Home was updated. Reload to finish.</p>
+        <button id="home-update-reload" class="home-prompt-button" type="button">Reload</button>
+      </section>
     </div>
 
-    <script type="module" src="./home-shell-host.js?v=home-update-20261017b"></script>
+    <script type="module" src="./home-shell-host.js?v=home-update-20261021a"></script>
   </body>
 </html>

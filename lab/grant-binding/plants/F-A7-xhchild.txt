@@ -1,0 +1,8 @@
+id: F-A7-xhchild
+file: src/ledger.rs
+test: ledger::model_forged_child_journal_does_not_mark_another_handle
+--- old
+                        if handles_match(open.handle, request.handle) {
+--- new
+                        if handles_match(open.handle, request.handle) || request.forged_child_journal {
+--- end

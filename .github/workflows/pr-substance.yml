@@ -1,0 +1,123 @@
+# Block low-substance agent PRs: e.g. #670 "That comment is a comment" and tiny spark/* "Cite …" markdown-only merges counted as progress.
+# A PR that genuinely needs only a comment or citation should be folded into the task that needs it—not opened standalone.
+# pr-substance enforces a minimum diff on pull_request.
+
+name: pr-substance
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pr-substance:
+    name: pr-substance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - name: refuse comment-only and citation-only PRs
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          python3 <<'PY'
+          import os
+          import subprocess
+          import sys
+
+          COMMENT_PREFIXES = ("//", "#", "/*", "*", "*/", "<!--", "--", ";")
+
+
+          def is_comment_or_blank_line(line: str) -> bool:
+              if not line.strip():
+                  return True
+              content = line.lstrip()
+              stripped = line.strip()
+              if content.startswith("#"):
+                  if len(content) > 1 and content[1] in "[!":
+                      return False
+                  return True
+              if stripped == "*" or stripped.startswith("* ") or stripped.startswith("*/"):
+                  return True
+              other_prefixes = ("//", "/*", "<!--", "--", ";")
+              return any(content.startswith(prefix) for prefix in other_prefixes)
+
+
+          def parse_diff(diff_text: str) -> dict[str, dict[str, list[str]]]:
+              files: dict[str, dict[str, list[str]]] = {}
+              current_file: str | None = None
+              for raw in diff_text.splitlines():
+                  if raw.startswith("diff --git "):
+                      parts = raw.split()
+                      if len(parts) >= 4 and parts[3].startswith("b/"):
+                          current_file = parts[3][2:]
+                      continue
+                  if raw.startswith("+++") or raw.startswith("---"):
+                      continue
+                  if raw.startswith("@@"):
+                      continue
+                  if current_file is None:
+                      continue
+                  bucket = files.setdefault(current_file, {"add": [], "remove": []})
+                  if raw.startswith("+") and not raw.startswith("+++"):
+                      bucket["add"].append(raw[1:])
+                  elif raw.startswith("-") and not raw.startswith("---"):
+                      bucket["remove"].append(raw[1:])
+              return files
+
+
+          base_ref = os.environ["BASE_REF"]
+          head_sha = os.environ["HEAD_SHA"]
+          head_ref = os.environ.get("HEAD_REF", "")
+
+          proc = subprocess.run(
+              [
+                  "git",
+                  "diff",
+                  "--unified=0",
+                  f"origin/{base_ref}...{head_sha}",
+              ],
+              capture_output=True,
+              text=True,
+              check=True,
+          )
+          files = parse_diff(proc.stdout)
+
+          if not files:
+              print("::error::EMPTY: no file changed")
+              sys.exit(1)
+
+          n_files = len(files)
+          all_added_removed: list[str] = []
+          for per_file in files.values():
+              all_added_removed.extend(per_file["add"])
+              all_added_removed.extend(per_file["remove"])
+          changed_lines = sum(1 for line in all_added_removed if line.strip())
+
+          non_md_paths = [path for path in files if not path.endswith(".md")]
+          if non_md_paths:
+              non_md_lines: list[str] = []
+              for path in non_md_paths:
+                  non_md_lines.extend(files[path]["add"])
+                  non_md_lines.extend(files[path]["remove"])
+              if non_md_lines and all(is_comment_or_blank_line(line) for line in non_md_lines):
+                  print(
+                      "::error::COMMENT-ONLY: non-markdown files only have comment or blank line changes"
+                  )
+                  sys.exit(1)
+
+          if head_ref.startswith("spark/"):
+              if all(path.endswith(".md") for path in files) and changed_lines < 10:
+                  print(
+                      "::error::CITATION-ONLY: spark branch changed only markdown with fewer than 10 non-blank lines"
+                  )
+                  sys.exit(1)
+
+          print(f"pr-substance: OK ({n_files} files, {changed_lines} changed lines)")
+          PY

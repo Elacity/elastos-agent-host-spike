@@ -30,8 +30,8 @@ function createFakeClassList(initial = []) {
 
 function createFakePropertyCopyButton() {
   const attributes = new Map([
-    ["data-prop-copy", "elastos://published"],
-    ["data-copy-label", "published link"],
+    ["data-prop-copy", "localhost://Users/smoke/Documents/Guide.md"],
+    ["data-copy-label", "path"],
     ["data-copy-purpose", "resource.uri"],
   ]);
   const copyIcon = { hidden: false };
@@ -127,8 +127,8 @@ async function assertDialogCopyFeedbackBehavior() {
     successDialog.dispatch("click", { target: successButton });
     assert(successCalls.length === 1, "Library Properties copy must call the existing clipboard path once.");
     assert(
-      successCalls[0][0] === "elastos://published"
-        && successCalls[0][1] === "published link"
+      successCalls[0][0] === "localhost://Users/smoke/Documents/Guide.md"
+        && successCalls[0][1] === "path"
         && successCalls[0][2] === "resource.uri",
       "Library Properties copy must keep the existing Home Clipboard purpose binding.",
     );
@@ -137,7 +137,7 @@ async function assertDialogCopyFeedbackBehavior() {
     await flushMicrotasks();
     assert(successButton.classList.contains("copied"), "Library must show copied feedback after copy succeeds.");
     assert(successButton.dataset.copied === "true", "Library must record copied feedback only after success.");
-    assert(successButton.getAttribute("aria-label") === "Copied published link", "Library must expose copied feedback accessibly after success.");
+    assert(successButton.getAttribute("aria-label") === "Copied path", "Library must expose copied feedback accessibly after success.");
     assert(successButton.querySelector(".el-copy-icon").hidden, "Library must hide the copy glyph after success.");
     assert(!successButton.querySelector(".el-copy-check").hidden, "Library must show the check glyph after success.");
     assert(timers.length === 1, "Library success feedback must schedule one reset timer.");
@@ -172,6 +172,36 @@ async function assertDialogCopyFeedbackBehavior() {
     globalThis.setTimeout = realSetTimeout;
     globalThis.clearTimeout = realClearTimeout;
   }
+}
+
+async function assertPropertiesOfferNoElastosCopy() {
+  const dialogModuleUrl = `${pathToFileURL(path.resolve("capsules/library/browser/src/dialog.js")).href}?library-smoke-elastos=${Date.now()}`;
+  const { createLibraryDialog } = await import(dialogModuleUrl);
+  const dialog = createFakeDialog();
+  const api = createLibraryDialog({
+    copyText: async () => {},
+    dialog,
+    hideMenu: () => {},
+    objectByUri: () => null,
+    onBeforeClose: () => {},
+  });
+  api.showProperties({
+    uri: "localhost://WebSpaces/Elastos/content/bafy-smoke-content",
+    name: "Guide.md",
+    kind: "file",
+    published: true,
+    published_cid: "bafy-smoke-published",
+    metadata: { resolver: "webspace", target_uri: "elastos://bafy-smoke-content" },
+  });
+  assert(
+    dialog.innerHTML.includes("elastos://bafy-smoke-published") &&
+      dialog.innerHTML.includes("elastos://bafy-smoke-content"),
+    "Library Properties must still show elastos:// URIs as technical text.",
+  );
+  assert(
+    !dialog.innerHTML.includes('data-prop-copy="elastos://'),
+    "Library Properties must not offer to copy an elastos:// link while a recipient cannot open it in Home.",
+  );
 }
 
 async function run() {
@@ -297,6 +327,7 @@ async function run() {
     "Library UIUX CSS must include the donor search, motion, and resizer presentation behavior.",
   );
   await assertDialogCopyFeedbackBehavior();
+  await assertPropertiesOfferNoElastosCopy();
 
   console.log("PASS Library product behavior smoke");
 }

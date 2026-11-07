@@ -1,0 +1,9 @@
+id: F-A7-unrel
+file: src/ledger.rs
+test: ledger::model_release_after_unknown_is_refused
+--- old
+        if uncertain {
+            return Err(ReleaseRefuse::Uncertain);
+        }
+--- new
+--- end

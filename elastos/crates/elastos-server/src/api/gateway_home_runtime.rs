@@ -433,7 +433,7 @@ fn principal_display_name_for_context(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
 ) -> Option<String> {
-    let proof_binding_id = context.proof_binding_id.as_deref()?;
+    let proof_binding_id = context.proof_binding_id()?;
     crate::auth::load_principal_for_proof_binding(data_dir, proof_binding_id)
         .ok()
         .and_then(|principal| {
@@ -985,8 +985,8 @@ pub(super) fn home_state(data_dir: &std::path::Path) -> HomeState {
     let people = home_people_summary(&room_summary, identity.did.as_deref());
     let services = home_services_summary(data_dir, &room_summary, &people);
     let mut notifications = crate::notifications::load_summary(data_dir).unwrap_or_default();
-    // Legacy hosted-route prompts are projected from private owner decisions
-    // only in Inbox. Keep them out of the shared Home notification summary.
+    // Legacy hosted-route prompts in the store are superseded by the owner's
+    // private decisions (gateway_inbox::owner_hosted_routes).
     notifications.entries.retain(|entry| {
         !entry
             .action_ref
@@ -1923,12 +1923,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let context = HomeLaunchTokenContext {
-            principal_id: "fixture".to_string(),
-            session_id: "fixture".to_string(),
-            proof_binding_id: None,
-            grant_id: "fixture".to_string(),
-        };
+        let context = HomeLaunchTokenContext::for_test("fixture", "fixture", None, "fixture");
         let outcome = launch_runtime_backed_home_target(data_dir, "shell", &context)
             .await
             .unwrap();

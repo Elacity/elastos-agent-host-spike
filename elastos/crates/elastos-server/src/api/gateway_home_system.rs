@@ -131,7 +131,6 @@ struct HomeRealtimeSnapshot {
     profile_readiness: ProfileReadinessSummary,
     notification_signature: Vec<String>,
     wallet_request_signature: Vec<String>,
-    capability_request_count: usize,
     desktop_signature: Vec<String>,
     room_signature: String,
     people_signature: Vec<String>,
@@ -203,7 +202,8 @@ struct HomePeopleDiscoveryPeerSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     handle: Option<String>,
     last_seen_at: u64,
-    status: String,
+    /// `visible` (no relationship yet), `contact`, `requested` or `pending`.
+    status: &'static str,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -483,15 +483,17 @@ pub(super) async fn home_summary(
     };
     if let (Some(context), Some(authority)) = (context.as_ref(), wallet_authority.as_ref()) {
         let wallet_approvals = system_wallet_approvals_summary(&state, authority, false).await;
-        append_wallet_approval_notifications(
-            &mut notifications,
+        append_inbox_requests(
+            &state,
+            context,
             wallet_approvals.approval_requests,
-        );
-        if let Ok(capability_requests) = runtime_capability_pending_requests(&state.data_dir).await
-        {
-            append_runtime_capability_notifications(&mut notifications, capability_requests);
+            &mut notifications,
+        )
+        .await;
+        #[cfg(unix)]
+        if let Ok(routes) = owner_hosted_routes(&state.data_dir, context) {
+            append_hosted_route_notifications(&mut notifications, &routes);
         }
-        append_home_service_access_notifications(&state.data_dir, context, &mut notifications);
     }
     let targets = home_targets_from_catalog(&capsule_catalog);
     let capsule_interfaces = capsule_interface_registry_summary_with_bindings_from_catalog(
@@ -566,8 +568,10 @@ pub(super) async fn people_summary(
         let discovery = if let (Some(service), Some(authority)) =
             (discovery_service.as_ref(), contact_authority.as_ref())
         {
+            let snapshot = authority.store.read_only_snapshot()?;
             configured_people_discovery_summary(
-                &service.read_only_status(authority.store.as_ref(), &authority.profile, now)?,
+                &service.read_only_status_from_snapshot(&snapshot, &authority.profile, now)?,
+                &contact_relationships(&snapshot, now),
                 now,
             )
         } else {
@@ -883,6 +887,41 @@ pub(super) struct ConfiguredContactAuthority {
     pub(super) store: std::sync::Arc<crate::collaboration_contact_store::CollaborationContactStore>,
 }
 
+/// Profile DID to (`contact` | `requested` | `pending`, direct conversation)
+/// from this principal's signed contact store. People absent from the map
+/// have no relationship yet; a store that cannot be read yields none.
+pub(super) type ContactRelationships =
+    std::collections::HashMap<String, (&'static str, Option<String>)>;
+
+pub(super) fn contact_relationships(
+    store: &crate::collaboration_contact_store::CollaborationContactReadSnapshot<'_>,
+    now: u64,
+) -> ContactRelationships {
+    let mut relationships = ContactRelationships::new();
+    if let Ok(requests) = store.pending_incoming_requests() {
+        for request in requests {
+            relationships.insert(
+                request.requester_profile_did().to_string(),
+                ("pending", None),
+            );
+        }
+    }
+    if let Ok(requests) = store.outgoing_pending_requests(now) {
+        for request in requests {
+            relationships.insert(request.remote_profile_did, ("requested", None));
+        }
+    }
+    if let Ok(snapshot) = store.snapshot() {
+        for contact in snapshot.contacts() {
+            relationships.insert(
+                contact.remote_profile_did().to_string(),
+                ("contact", Some(contact.conversation_id().to_string())),
+            );
+        }
+    }
+    relationships
+}
+
 /// Adds this principal's durable pending contact requests to one Home/Inbox
 /// read response. The contact store remains the only persistent truth.
 pub(super) fn apply_contact_request_notification_projection(
@@ -1017,9 +1056,9 @@ pub(super) fn register_configured_contact_sync_for_context(
     discovery_service.register_sync_context(
         authority.store.clone(),
         authority.profile.clone(),
-        &context.session_id,
-        context.proof_binding_id.as_deref(),
-        &context.grant_id,
+        context.session_id(),
+        context.proof_binding_id(),
+        context.grant_id(),
         now,
     )
 }
@@ -1099,14 +1138,23 @@ where
     {
         return Err(home_error_response(err));
     }
+    let store = Arc::clone(&authority.store);
     let status = action(service, authority, now)
         .await
         .map_err(home_error_response)?;
-    Ok(configured_people_discovery_summary(&status, now))
+    let snapshot = store.read_only_snapshot().map_err(home_error_response)?;
+    Ok(configured_people_discovery_summary(
+        &status,
+        &contact_relationships(&snapshot, now),
+        now,
+    ))
 }
 
+/// Each visible person carries their relationship (`visible` when there is
+/// none yet), so People offers Add contact only to people it can add.
 fn configured_people_discovery_summary(
     status: &crate::collaboration_discovery_runtime::CollaborationDiscoveryStatus,
+    relationships: &ContactRelationships,
     now: u64,
 ) -> HomePeopleDiscoverySummary {
     let discovered_peers = status
@@ -1117,7 +1165,9 @@ fn configured_people_discovery_summary(
             display_name: person.display_name().to_string(),
             handle: person.handle().map(str::to_string),
             last_seen_at: person.last_seen_at(),
-            status: "visible".to_string(),
+            status: relationships
+                .get(person.profile_did())
+                .map_or("visible", |(relationship, _)| *relationship),
         })
         .collect::<Vec<_>>();
     let request_count = status.incoming_requests().len();
@@ -1271,6 +1321,7 @@ mod discovery_summary_tests {
                     ),
                 ],
             ),
+            &ContactRelationships::new(),
             100,
         );
 
@@ -1286,6 +1337,61 @@ mod discovery_summary_tests {
     }
 
     #[test]
+    fn configured_discovery_summary_marks_people_who_already_have_a_relationship() {
+        let visible = ["ad-new", "ad-contact", "ad-requested", "ad-pending"]
+            .into_iter()
+            .map(|id| {
+                crate::collaboration_discovery_runtime::DiscoveryVisiblePerson::test_new(
+                    id, id, None, 100, 700,
+                )
+            })
+            .collect();
+        let relationships = ContactRelationships::from([
+            (
+                "did:key:test-ad-contact".to_string(),
+                ("contact", Some("direct:abc".to_string())),
+            ),
+            ("did:key:test-ad-requested".to_string(), ("requested", None)),
+            ("did:key:test-ad-pending".to_string(), ("pending", None)),
+        ]);
+        let summary = configured_people_discovery_summary(
+            &crate::collaboration_discovery_runtime::CollaborationDiscoveryStatus::test_new(
+                true,
+                true,
+                Some(700),
+                None,
+                visible,
+                Vec::new(),
+            ),
+            &relationships,
+            100,
+        );
+
+        let json = serde_json::to_value(&summary).unwrap();
+        let statuses = json["discovered_peers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|peer| {
+                (
+                    peer["advertisement_id"].as_str().unwrap(),
+                    peer["status"].as_str().unwrap(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            statuses,
+            std::collections::BTreeMap::from([
+                ("ad-contact", "contact"),
+                ("ad-new", "visible"),
+                ("ad-pending", "pending"),
+                ("ad-requested", "requested"),
+            ])
+        );
+        assert!(!json.to_string().contains("did:key:"));
+    }
+
+    #[test]
     fn configured_discovery_summary_honestly_reports_off_pending_expiry() {
         let summary = configured_people_discovery_summary(
             &crate::collaboration_discovery_runtime::CollaborationDiscoveryStatus::test_new(
@@ -1296,6 +1402,7 @@ mod discovery_summary_tests {
                 Vec::new(),
                 Vec::new(),
             ),
+            &ContactRelationships::new(),
             100,
         );
 
@@ -1322,6 +1429,7 @@ mod discovery_summary_tests {
                 Vec::new(),
                 Vec::new(),
             ),
+            &ContactRelationships::new(),
             100,
         );
 
@@ -1343,6 +1451,7 @@ mod discovery_summary_tests {
                 Vec::new(),
             )
             .with_connecting_for_test(),
+            &ContactRelationships::new(),
             100,
         );
 
@@ -1374,6 +1483,7 @@ mod discovery_summary_tests {
                     ),
                 ],
             ),
+            &ContactRelationships::new(),
             100,
         );
 
@@ -1839,12 +1949,12 @@ mod discovery_summary_tests {
 
         assert_eq!(fixture.store.snapshot().unwrap().contacts().len(), 1);
         let response_read = fixture.store.read_only_snapshot().unwrap();
-        let context = HomeLaunchTokenContext {
-            principal_id: fixture.store.principal_id().to_string(),
-            session_id: "session".to_string(),
-            proof_binding_id: Some("proof".to_string()),
-            grant_id: "grant".to_string(),
-        };
+        let context = HomeLaunchTokenContext::for_test(
+            fixture.store.principal_id().to_string(),
+            "session".to_string(),
+            Some("proof".to_string()),
+            "grant".to_string(),
+        );
         let authority = ConfiguredContactAuthority {
             profile: fixture.local_profile.clone(),
             store: fixture.store.clone(),
@@ -1986,12 +2096,12 @@ mod discovery_summary_tests {
             &mut notifications,
         )
         .is_err());
-        let context = HomeLaunchTokenContext {
-            principal_id: "person:local:foreign-home-reader".to_string(),
-            session_id: "session".to_string(),
-            proof_binding_id: Some("proof".to_string()),
-            grant_id: "grant".to_string(),
-        };
+        let context = HomeLaunchTokenContext::for_test(
+            "person:local:foreign-home-reader".to_string(),
+            "session".to_string(),
+            Some("proof".to_string()),
+            "grant".to_string(),
+        );
         assert!(home_services_peer_contacts_state_from_snapshot(&context, Some(&read)).is_err());
     }
 
@@ -2004,12 +2114,12 @@ mod discovery_summary_tests {
         let principal_id = "person:local:legacy-people-ignore".to_string();
         let protection =
             crate::auth::store_test_principal_root_protection(&data_root, &principal_id);
-        let context = HomeLaunchTokenContext {
-            principal_id: principal_id.clone(),
-            session_id: "session".to_string(),
-            proof_binding_id: Some("proof".to_string()),
-            grant_id: "grant".to_string(),
-        };
+        let context = HomeLaunchTokenContext::for_test(
+            principal_id.clone(),
+            "session".to_string(),
+            Some("proof".to_string()),
+            "grant".to_string(),
+        );
         let legacy_path = home_services_peer_contacts_path(&data_root, &context).unwrap();
         let legacy_state = HomeServicesPeerContactsState {
             schema: HOME_SERVICES_PEER_CONTACTS_SCHEMA.to_string(),
@@ -2188,7 +2298,7 @@ pub(super) async fn people_profile_update(
         crate::collaboration_profile_authority::require_profile_authority_passkey_binding(
             &state.data_dir,
             &home_browser_principal_id(&context),
-            context.proof_binding_id.as_deref(),
+            context.proof_binding_id(),
         )
     {
         return (StatusCode::FORBIDDEN, err.to_string()).into_response();
@@ -2213,14 +2323,13 @@ pub(super) async fn people_profile_update(
             let principal = crate::auth::load_principal_for_proof_binding(
                 &state.data_dir,
                 context
-                    .proof_binding_id
-                    .as_deref()
+                    .proof_binding_id()
                     .ok_or_else(|| anyhow::anyhow!("Profile requires passkey authority"))?,
             )?;
             crate::api::auth_gateway::initialize_local_profile(
                 &state,
                 &principal,
-                &context.session_id,
+                context.session_id(),
                 &req.display_name,
             )
         })();
@@ -2560,7 +2669,7 @@ pub(super) async fn services_offer_update(
 fn home_services_selection_state_uri(context: &HomeLaunchTokenContext) -> String {
     format!(
         "{}/.AppData/ElastOS/Home/services-state.json",
-        crate::auth::principal_localhost_root(&context.principal_id)
+        crate::auth::principal_localhost_root(context.principal_id())
     )
 }
 
@@ -2590,8 +2699,8 @@ fn home_services_default_selection_state(
 ) -> HomeServicesSelectionState {
     HomeServicesSelectionState {
         schema: HOME_SERVICES_STATE_SCHEMA.to_string(),
-        principal_id: context.principal_id.clone(),
-        localhost_root: crate::auth::principal_localhost_root(&context.principal_id),
+        principal_id: context.principal_id().to_string(),
+        localhost_root: crate::auth::principal_localhost_root(context.principal_id()),
         updated_at: 0,
         local_offer_ids: BTreeSet::new(),
         remote_offer_ids: BTreeSet::new(),
@@ -2699,7 +2808,7 @@ fn home_state_write_error(err: anyhow::Error, path: &std::path::Path) -> anyhow:
 fn home_services_requests_state_uri(context: &HomeLaunchTokenContext) -> String {
     format!(
         "{}/.AppData/ElastOS/Home/services-requests.json",
-        crate::auth::principal_localhost_root(&context.principal_id)
+        crate::auth::principal_localhost_root(context.principal_id())
     )
 }
 
@@ -2716,8 +2825,8 @@ fn home_services_default_requests_state(
 ) -> HomeServicesRequestsState {
     HomeServicesRequestsState {
         schema: HOME_SERVICES_REQUESTS_SCHEMA.to_string(),
-        principal_id: context.principal_id.clone(),
-        localhost_root: crate::auth::principal_localhost_root(&context.principal_id),
+        principal_id: context.principal_id().to_string(),
+        localhost_root: crate::auth::principal_localhost_root(context.principal_id()),
         updated_at: 0,
         requests: BTreeMap::new(),
         catalog_last_response_at: BTreeMap::new(),
@@ -2892,12 +3001,24 @@ pub(in crate::api::gateway) fn local_model_offer_is_shared(
     data_dir: &std::path::Path,
     principal_id: &str,
 ) -> bool {
-    let context = HomeLaunchTokenContext {
-        principal_id: principal_id.to_string(),
-        session_id: String::new(),
-        proof_binding_id: None,
-        grant_id: String::new(),
+    let root = match crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id) {
+        Ok(root) => root,
+        Err(err) => {
+            tracing::warn!(
+                principal_id = %principal_id,
+                error = %err,
+                "local_model_offer_is_shared: principal root unresolved; offer not shared"
+            );
+            return false;
+        }
     };
+    let context = HomeLaunchTokenContext::resolved(
+        root,
+        principal_id.to_string(),
+        String::new(),
+        None,
+        String::new(),
+    );
     home_services_local_model_shared(data_dir, &context).unwrap_or(false)
 }
 
@@ -2975,7 +3096,7 @@ fn home_services_send_access_request(
         "target_peer_id": target_peer_id,
         "requester_peer_id": &runtime.peer_id,
         "requester_did": requester_did,
-        "requester_principal_id": &context.principal_id,
+        "requester_principal_id": &context.principal_id(),
         "display_name": requester_display_name,
         "handle": requester_handle,
         "offer_id": &offer.offer_id,
@@ -3046,7 +3167,7 @@ fn home_services_request_model_catalog(
         "target_peer_id":contact.peer_id,
         "requester_peer_id":runtime.peer_id,
         "requester_did":home_services_local_device_did(data_dir)?,
-        "requester_principal_id":context.principal_id,
+        "requester_principal_id":context.principal_id(),
         "created_at":requested_at,
     });
     crate::carrier::sign_service_message(data_dir, &mut payload)?;
@@ -3370,7 +3491,7 @@ fn home_services_sync_access_decisions(
         "gossip_recv",
         serde_json::json!({
             "topic": HOME_SERVICES_REQUESTS_TOPIC,
-            "consumer_id": format!("home-services-decisions:{}", context.principal_id),
+            "consumer_id": format!("home-services-decisions:{}", context.principal_id()),
             "skip_sender_id": runtime.peer_id,
             "limit": 64,
         }),
@@ -3442,7 +3563,7 @@ fn home_services_merge_model_catalog(
     anyhow::ensure!(
         payload["schema"] == "elastos.model-offer-catalog/v1"
             && payload["target_requester_peer_id"].as_str() == Some(local_peer_id)
-            && payload["target_requester_principal_id"].as_str() == Some(&context.principal_id),
+            && payload["target_requester_principal_id"].as_str() == Some(context.principal_id()),
         "model catalog target is invalid"
     );
     let request_id = home_services_payload_text(payload, "request_id", 256)
@@ -3823,6 +3944,64 @@ fn home_services_remote_exit_id(display_name: &str, request_id: &str) -> String 
     }
 }
 
+/// One entry per principal from the active passkey records. A principal with
+/// several passkeys has one record per passkey but owns one set of service
+/// requests, so the grant loops must read it once. The flag is true only when
+/// every active record for that principal is an admin (fail closed).
+fn passkey_principals_once(
+    records: Vec<crate::auth::PrincipalRecord>,
+) -> Vec<(crate::auth::PrincipalRecord, bool)> {
+    let mut once: Vec<(crate::auth::PrincipalRecord, bool)> = Vec::new();
+    for record in records {
+        let admin = crate::auth::is_admin(&record);
+        match once
+            .iter_mut()
+            .find(|(seen, _)| seen.principal_id == record.principal_id)
+        {
+            Some((_, all_admin)) => *all_admin &= admin,
+            None => once.push((record, admin)),
+        }
+    }
+    once
+}
+
+/// Resolves the principal's root in the store that listed it: these callers
+/// read `active_passkey_principals(data_dir)`, so both resolver arguments are
+/// `data_dir`. These are Runtime-side authorize checks, not launch tokens, so
+/// the session and grant ids stay empty.
+fn stored_passkey_principal_context(
+    data_dir: &std::path::Path,
+    principal: &crate::auth::PrincipalRecord,
+) -> anyhow::Result<HomeLaunchTokenContext> {
+    let root =
+        crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, &principal.principal_id)?;
+    Ok(HomeLaunchTokenContext::resolved(
+        root,
+        principal.principal_id.clone(),
+        String::new(),
+        Some(principal.proof_binding_id.clone()),
+        String::new(),
+    ))
+}
+
+/// Authorize loops skip a principal whose root won't resolve; log why, no secrets.
+fn ctx_or_warn(
+    data_dir: &std::path::Path,
+    principal: &crate::auth::PrincipalRecord,
+    fn_name: &'static str,
+) -> Option<HomeLaunchTokenContext> {
+    stored_passkey_principal_context(data_dir, principal)
+        .inspect_err(|err| {
+            tracing::warn!(
+                principal_id = %principal.principal_id,
+                error = %err,
+                fn_name,
+                "principal root unresolved; skipped"
+            )
+        })
+        .ok()
+}
+
 pub(crate) fn authorize_home_service_exit(
     data_dir: &std::path::Path,
     network: &crate::collaboration_network::VerifiedCollaborationNetworkProfile,
@@ -3838,12 +4017,9 @@ pub(crate) fn authorize_home_service_exit(
     let local_did = crate::collaboration_profile_authority::load_existing_device_did(data_dir)?
         .ok_or_else(|| anyhow::anyhow!("Exit signing identity unavailable"))?;
     let mut authorized = None;
-    for principal in principals {
-        let context = HomeLaunchTokenContext {
-            principal_id: principal.principal_id,
-            proof_binding_id: Some(principal.proof_binding_id),
-            session_id: String::new(),
-            grant_id: String::new(),
+    for (principal, _) in passkey_principals_once(principals) {
+        let Some(context) = ctx_or_warn(data_dir, &principal, "authorize_home_service_exit") else {
+            continue;
         };
         let state = home_services_requests_state(data_dir, &context)?;
         for record in state.requests.values().filter(|record| {
@@ -3862,7 +4038,7 @@ pub(crate) fn authorize_home_service_exit(
                 .ok_or_else(|| anyhow::anyhow!("Exit profile authority unavailable"))?;
             let store = crate::collaboration_contact_store::CollaborationContactStore::new(
                 data_dir,
-                &context.principal_id,
+                context.principal_id(),
                 &home_browser_localhost_root(&context),
                 network.clone(),
                 &profile,
@@ -3879,7 +4055,7 @@ pub(crate) fn authorize_home_service_exit(
                 "Exit requester is no longer an accepted contact"
             );
             let grant = crate::carrier::BrowserExitGrant {
-                provider_principal_id: context.principal_id.clone(),
+                provider_principal_id: context.principal_id().to_string(),
                 requester_principal_id: record
                     .requester_principal_id
                     .clone()
@@ -3921,12 +4097,13 @@ pub(crate) fn authorize_home_engine_preparation_cancellation(
         "Engine cancellation authority scope unavailable"
     );
     let mut matched = false;
-    for principal in principals {
-        let context = HomeLaunchTokenContext {
-            principal_id: principal.principal_id,
-            proof_binding_id: Some(principal.proof_binding_id),
-            session_id: String::new(),
-            grant_id: String::new(),
+    for (principal, _) in passkey_principals_once(principals) {
+        let Some(context) = ctx_or_warn(
+            data_dir,
+            &principal,
+            "authorize_home_engine_preparation_cancellation",
+        ) else {
+            continue;
         };
         let state = home_services_requests_state(data_dir, &context)?;
         for record in state
@@ -3971,12 +4148,10 @@ pub(crate) fn authorize_home_service_engine(
     let local_did = crate::collaboration_profile_authority::load_existing_device_did(data_dir)?
         .ok_or_else(|| anyhow::anyhow!("Engine signing identity unavailable"))?;
     let mut authorized = None;
-    for principal in principals {
-        let context = HomeLaunchTokenContext {
-            principal_id: principal.principal_id,
-            proof_binding_id: Some(principal.proof_binding_id),
-            session_id: String::new(),
-            grant_id: String::new(),
+    for (principal, _) in passkey_principals_once(principals) {
+        let Some(context) = ctx_or_warn(data_dir, &principal, "authorize_home_service_engine")
+        else {
+            continue;
         };
         let state = home_services_requests_state(data_dir, &context)?;
         for record in state.requests.values().filter(|record| {
@@ -3995,7 +4170,7 @@ pub(crate) fn authorize_home_service_engine(
                 .ok_or_else(|| anyhow::anyhow!("Engine profile authority unavailable"))?;
             let store = crate::collaboration_contact_store::CollaborationContactStore::new(
                 data_dir,
-                &context.principal_id,
+                context.principal_id(),
                 &home_browser_localhost_root(&context),
                 network.clone(),
                 &profile,
@@ -4014,7 +4189,7 @@ pub(crate) fn authorize_home_service_engine(
             let grant = crate::carrier::BrowserEngineGrant {
                 execution_allowed: record.grant_scope.as_deref()
                     == Some(crate::carrier::browser_engine_binding::EXECUTION_SCOPE),
-                provider_principal_id: context.principal_id.clone(),
+                provider_principal_id: context.principal_id().to_string(),
                 requester_principal_id: record
                     .requester_principal_id
                     .clone()
@@ -4110,7 +4285,7 @@ fn home_services_remote_exit_grant(
         "peer_did": provider_peer_id,
         "carrier_service": "elastos://exit/open_stream",
         "connect_ticket": connect_ticket,
-        "allowed_principals": [context.principal_id.as_str()],
+        "allowed_principals": [context.principal_id()],
         "allowed_hosts": ["*"],
         "allowed_schemes": ["tcp", "tls"],
         "allowed_ports": [80, 443],
@@ -4157,7 +4332,7 @@ fn home_services_remote_engine_grant(
         serde_json::json!({"schema":"elastos.service.remote-engine-grant/v1",
         "id":format!("remote-engine-{}", hex::encode(&Sha256::digest(record.request_id.as_bytes())[..8])),
         "grant_id":grant["grant_id"],"peer_did":record.target_peer_id,"connect_ticket":ticket,
-        "principal_id":context.principal_id,"operations":grant["operations"],"expires_at":expiry}),
+        "principal_id":context.principal_id(),"operations":grant["operations"],"expires_at":expiry}),
     )
 }
 
@@ -4207,7 +4382,7 @@ fn home_services_remote_model_grant(
         "grant_id": grant["grant_id"],
         "peer_did": record.target_peer_id,
         "connect_ticket": ticket,
-        "principal_id": context.principal_id,
+        "principal_id": context.principal_id(),
         "service_display_name": record.service_display_name,
         "offer_ids": offer_ids,
         "offer_revision": offer_revision,
@@ -4243,7 +4418,7 @@ pub(in crate::api::gateway) fn home_services_remote_model_grants(
         {
             if let Some(grant) = &record.remote_model_grant {
                 anyhow::ensure!(
-                    grant["principal_id"].as_str() == Some(&context.principal_id),
+                    grant["principal_id"].as_str() == Some(context.principal_id()),
                     "model grant owner changed"
                 );
                 if grant["expires_at"]
@@ -4282,12 +4457,10 @@ pub(crate) fn authorize_home_service_model(
     let local_did = crate::collaboration_profile_authority::load_existing_device_did(data_dir)?
         .ok_or_else(|| anyhow::anyhow!("model signing identity unavailable"))?;
     let mut authorized = None;
-    for principal in principals {
-        let context = HomeLaunchTokenContext {
-            principal_id: principal.principal_id,
-            proof_binding_id: Some(principal.proof_binding_id),
-            session_id: String::new(),
-            grant_id: String::new(),
+    for (principal, provider_is_admin) in passkey_principals_once(principals) {
+        let Some(context) = ctx_or_warn(data_dir, &principal, "authorize_home_service_model")
+        else {
+            continue;
         };
         let state = home_services_requests_state(data_dir, &context)?;
         for record in state
@@ -4295,11 +4468,17 @@ pub(crate) fn authorize_home_service_model(
             .values()
             .filter(|record| super::model_grant_id(&record.request_id) == grant_id)
         {
+            // Only a current admin hands out the Home's hosted AI connection.
             anyhow::ensure!(
                 record.authenticated_request
                     && record.status == "approved"
                     && record.service_uri == super::MODEL_SERVICE_URI
                     && record.service_kind == super::MODEL_SERVICE_KIND
+                    && (provider_is_admin
+                        || !record
+                            .approved_offer_ids
+                            .iter()
+                            .any(|id| crate::api::model_provider_config::is_hosted_offer_id(id)))
                     && (home_services_local_model_shared(data_dir, &context)?
                         || crate::api::any_hosted_model_shared(data_dir)),
                 "model grant is not active"
@@ -4308,7 +4487,7 @@ pub(crate) fn authorize_home_service_model(
                 .ok_or_else(|| anyhow::anyhow!("model profile authority unavailable"))?;
             let store = crate::collaboration_contact_store::CollaborationContactStore::new(
                 data_dir,
-                &context.principal_id,
+                context.principal_id(),
                 &home_browser_localhost_root(&context),
                 network.clone(),
                 &profile,
@@ -4325,7 +4504,7 @@ pub(crate) fn authorize_home_service_model(
                 "model requester is no longer an accepted contact"
             );
             let grant = super::ModelServiceGrant {
-                provider_principal_id: context.principal_id.clone(),
+                provider_principal_id: context.principal_id().to_string(),
                 requester_principal_id: record
                     .requester_principal_id
                     .clone()
@@ -4342,6 +4521,7 @@ pub(crate) fn authorize_home_service_model(
                     .ok_or_else(|| anyhow::anyhow!("model grant expiry required"))?,
                 approved_offer_ids: record.approved_offer_ids.clone(),
                 approved_offer_revision: record.approved_offer_revision.clone(),
+                provider_may_share_hosted: provider_is_admin,
             };
             grant.validate(source, requester_principal_id, now)?;
             anyhow::ensure!(authorized.is_none(), "model grant ownership is ambiguous");
@@ -4376,7 +4556,7 @@ pub(in crate::api::gateway) fn home_services_remote_engine_grants(
         {
             if let Some(grant) = &record.remote_engine_grant {
                 anyhow::ensure!(
-                    grant["principal_id"].as_str() == Some(&context.principal_id),
+                    grant["principal_id"].as_str() == Some(context.principal_id()),
                     "Engine grant owner changed"
                 );
                 grants.push(grant.clone());
@@ -4408,11 +4588,16 @@ pub(crate) fn sync_runtime_services_mailboxes(
         return Ok(());
     }
     let principal = &principals[round % principals.len()];
-    let context = HomeLaunchTokenContext {
-        principal_id: principal.principal_id.clone(),
-        proof_binding_id: Some(principal.proof_binding_id.clone()),
-        session_id: String::new(),
-        grant_id: String::new(),
+    let context = match stored_passkey_principal_context(data_dir, principal) {
+        Ok(context) => context,
+        Err(err) => {
+            tracing::warn!(
+                principal_id = %principal.principal_id,
+                error = %err,
+                "Services mailbox sync skipped: principal root unresolved"
+            );
+            return Ok(());
+        }
     };
     if load_configured_contact_authority_for_context(data_dir, &context, Some(discovery_service))?
         .is_none()
@@ -4474,7 +4659,7 @@ pub(super) fn home_services_sync_access_requests(
         "gossip_recv",
         serde_json::json!({
             "topic": HOME_SERVICES_REQUESTS_TOPIC,
-            "consumer_id": format!("home-services-requests:{}", context.principal_id),
+            "consumer_id": format!("home-services-requests:{}", context.principal_id()),
             "skip_sender_id": runtime.peer_id,
             "limit": 64,
         }),
@@ -4781,6 +4966,8 @@ fn home_services_request_notification_copy(kind: &str, uri: &str) -> (&'static s
 
 const PRIVATE_ENGINE_APPROVAL_COPY: &str =
     "Your Browser Engine is private. Share it in Services before approving this request.";
+const HOSTED_MODEL_APPROVAL_COPY: &str =
+    "Only an admin can approve use of this Home's hosted AI connection.";
 
 pub(super) fn append_home_service_access_notifications(
     data_dir: &std::path::Path,
@@ -5023,6 +5210,16 @@ fn home_services_record_access_decision(
         anyhow::bail!("service request requires an authenticated requester");
     }
     if status == "approved" {
+        if request.service_kind == super::MODEL_SERVICE_KIND
+            && request.service_uri == super::MODEL_SERVICE_URI
+            && request
+                .requested_model_offer_id
+                .as_deref()
+                .is_some_and(crate::api::model_provider_config::is_hosted_offer_id)
+            && require_admin_principal(data_dir, context).is_err()
+        {
+            anyhow::bail!(HOSTED_MODEL_APPROVAL_COPY);
+        }
         let contacts = home_services_peer_contacts_state(data_dir, context, discovery_service)?;
         if !contacts.contacts.values().any(|contact| {
             contact.peer_id == request.requester_peer_id && contact.did == request.requester_did
@@ -5056,13 +5253,19 @@ fn home_services_record_access_decision(
             .as_deref()
             .filter(|id| super::gateway_model_service::safe_id(id, 256))
             .ok_or_else(|| anyhow::anyhow!("exact model offer request required"))?;
-        super::gateway_model_service::shareable_offer_for_home(
+        let offer = super::gateway_model_service::shareable_offer_for_home(
             &result,
             data_dir,
             home_services_local_model_shared(data_dir, context)?,
             requested_id,
         )
         .ok_or_else(|| anyhow::anyhow!("requested model offer is unavailable"))?;
+        // Sharing decides "hosted" from the listing, whatever the offer id.
+        if super::gateway_model_service::listed_offer_is_hosted(&offer)
+            && require_admin_principal(data_dir, context).is_err()
+        {
+            anyhow::bail!(HOSTED_MODEL_APPROVAL_COPY);
+        }
         let offer_revision =
             super::gateway_model_service::offer_execution_revision(&result, requested_id)
                 .ok_or_else(|| anyhow::anyhow!("requested model offer revision unavailable"))?;
@@ -5124,7 +5327,14 @@ pub(super) fn require_admin_principal(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<()> {
-    let Some(proof_binding_id) = context.proof_binding_id.as_deref() else {
+    require_admin_proof_binding(data_dir, context.proof_binding_id())
+}
+
+fn require_admin_proof_binding(
+    data_dir: &std::path::Path,
+    proof_binding_id: Option<&str>,
+) -> anyhow::Result<()> {
+    let Some(proof_binding_id) = proof_binding_id else {
         anyhow::bail!("admin passkey required");
     };
     let principal = crate::auth::load_principal_for_proof_binding(data_dir, proof_binding_id)?;
@@ -5133,6 +5343,12 @@ pub(super) fn require_admin_principal(
         anyhow::bail!("admin passkey required");
     }
     Ok(())
+}
+
+/// The host itself (its proofless local token) or an admin passkey. Guests
+/// never reach host-wide surfaces such as the Runtime audit log or terminal.
+pub(super) fn acts_for_host(data_dir: &std::path::Path, proof_binding_id: Option<&str>) -> bool {
+    proof_binding_id.is_none() || require_admin_proof_binding(data_dir, proof_binding_id).is_ok()
 }
 
 fn apply_hosted_share_selection(data_dir: &std::path::Path, selected: &mut BTreeSet<String>) {
@@ -5476,13 +5692,13 @@ async fn home_realtime_snapshot(
         })
         .collect::<Vec<_>>();
     wallet_request_signature.sort();
-    append_wallet_approval_notifications(&mut notifications, wallet_approvals.approval_requests);
-    let capability_requests = runtime_capability_pending_requests(&state.data_dir)
-        .await
-        .unwrap_or_default();
-    let capability_request_count = capability_requests.len();
-    append_runtime_capability_notifications(&mut notifications, capability_requests);
-    append_home_service_access_notifications(&state.data_dir, context, &mut notifications);
+    append_inbox_requests(
+        state,
+        context,
+        wallet_approvals.approval_requests,
+        &mut notifications,
+    )
+    .await;
     let mut notification_signature = notifications
         .entries
         .iter()
@@ -5497,9 +5713,18 @@ async fn home_realtime_snapshot(
     if contact_authority_unavailable {
         notification_signature.push("contact-authority-unavailable".to_string());
     }
+    // Hosted access decisions are owner Inbox items (gateway_inbox::owner_hosted_routes);
+    // a request, decision, End or expiry reaches Inbox and System as `inbox.changed`.
+    #[cfg(unix)]
+    if ensure_admin_context(&state.data_dir, context).is_ok() {
+        match crate::api::model_provider_egress_decision::realtime_signature(&state.data_dir) {
+            Ok(hosted) => notification_signature.extend(hosted),
+            Err(_) => notification_signature.push("hosted-routes-unavailable".to_string()),
+        }
+    }
     let browser_sessions = super::gateway_browser::browser_gateway_session_status(
         &state.data_dir,
-        &context.principal_id,
+        context.principal_id(),
         None,
         None,
     )
@@ -5519,7 +5744,7 @@ async fn home_realtime_snapshot(
     }
     let services_signature = home_services_realtime_signature(&home_state.services);
     HomeRealtimeSnapshot {
-        principal_id: context.principal_id.clone(),
+        principal_id: context.principal_id().to_string(),
         runtime_signature: home_runtime_realtime_signature(&state.data_dir),
         recovery_readiness,
         profile_readiness: profile_readiness_for_principal(
@@ -5530,7 +5755,6 @@ async fn home_realtime_snapshot(
         .readiness,
         notification_signature,
         wallet_request_signature,
-        capability_request_count,
         desktop_signature,
         room_signature,
         people_signature,
@@ -5592,7 +5816,6 @@ fn home_realtime_cursor_parts(snapshot: &HomeRealtimeSnapshot) -> HomeRealtimeCu
         inbox: stable_cursor_hash(&(
             &snapshot.notification_signature,
             &snapshot.wallet_request_signature,
-            snapshot.capability_request_count,
         )),
         wallet: stable_cursor_hash(&snapshot.wallet_request_signature),
         browser: stable_cursor_hash(&browser_sessions_cursor_value(&snapshot.browser_sessions)),
@@ -5976,12 +6199,11 @@ fn require_home_active_shell_update_token_context(
 fn home_authority_summary(context: &HomeLaunchTokenContext) -> HomeAuthoritySummary {
     HomeAuthoritySummary {
         signed_in: true,
-        principal_id: context.principal_id.clone(),
-        session_id: context.session_id.clone(),
-        proof_binding_id: context.proof_binding_id.clone(),
+        principal_id: context.principal_id().to_string(),
+        session_id: context.session_id().to_string(),
+        proof_binding_id: context.proof_binding_id().map(ToString::to_string),
         wallet_connected: context
-            .proof_binding_id
-            .as_deref()
+            .proof_binding_id()
             .is_some_and(|value| value.starts_with("proof:wallet:")),
     }
 }
@@ -6349,11 +6571,11 @@ fn home_save_active_shell(
 }
 
 fn home_browser_principal_id(context: &HomeLaunchTokenContext) -> String {
-    context.principal_id.clone()
+    context.principal_id().to_string()
 }
 
 fn home_browser_localhost_root(context: &HomeLaunchTokenContext) -> String {
-    crate::auth::principal_localhost_root(&context.principal_id)
+    crate::auth::principal_localhost_root(context.principal_id())
 }
 
 fn home_desktop_uri(context: &HomeLaunchTokenContext) -> String {
@@ -6386,7 +6608,7 @@ async fn home_desktop_objects_summary(
     };
     let request = serde_json::json!({
         "op": "list",
-        "principal_id": &context.principal_id,
+        "principal_id": context.principal_id(),
         "uri": uri,
     });
     let response = match registry.send_raw("object", &request).await {
@@ -6455,7 +6677,7 @@ async fn home_trash_desktop_object(
     let registry = state.provider_registry.as_ref()?;
     let request = serde_json::json!({
         "op": "roots",
-        "principal_id": &context.principal_id,
+        "principal_id": context.principal_id(),
     });
     let response = registry.send_raw("object", &request).await.ok()?;
     if response.get("status").and_then(serde_json::Value::as_str) != Some("ok") {
@@ -6514,7 +6736,7 @@ async fn home_desktop_events_signature(
     ] {
         let request = serde_json::json!({
             "op": "events",
-            "principal_id": &context.principal_id,
+            "principal_id": context.principal_id(),
             "uri": uri,
             "limit": 32,
         });
@@ -7321,11 +7543,22 @@ pub(super) async fn system_summary(
         };
     let context = authority.home_launch_context();
 
+    let host_log_allowed = acts_for_host(&state.data_dir, context.proof_binding_id());
     let (runtime, wallet_accounts, wallet_approvals, runtime_log, runtime_update) = tokio::join!(
         home_runtime_summary(&state.data_dir),
         system_wallet_accounts_summary(&state, &authority),
         system_wallet_approvals_summary(&state, &authority, false),
-        system_runtime_log(&state.data_dir),
+        async {
+            // The Runtime audit log covers the whole host (#404).
+            if host_log_allowed {
+                system_runtime_log(&state.data_dir).await
+            } else {
+                SystemRuntimeLogSummary {
+                    note: Some("Only the Home owner can see Runtime activity.".to_string()),
+                    ..SystemRuntimeLogSummary::default()
+                }
+            }
+        },
         system_runtime_update_summary(&state.data_dir, &context)
     );
     Json(SystemSummaryResponse {
@@ -7519,7 +7752,7 @@ fn system_access_summary(
 ) -> SystemAccessSummary {
     let guest_registration_enabled =
         crate::auth::guest_registration_enabled(data_dir).unwrap_or(false);
-    let Some(proof_binding_id) = context.proof_binding_id.as_deref() else {
+    let Some(proof_binding_id) = context.proof_binding_id() else {
         return SystemAccessSummary {
             role: "local".to_string(),
             guest_registration_enabled,
@@ -7550,7 +7783,7 @@ pub(super) async fn system_guest_registration_update(
             Ok(context) => context,
             Err(err) => return system_error_response(err),
         };
-    let Some(proof_binding_id) = context.proof_binding_id.as_deref() else {
+    let Some(proof_binding_id) = context.proof_binding_id() else {
         return system_error_response(anyhow::anyhow!("admin passkey required"));
     };
     let principal =
@@ -7848,7 +8081,7 @@ fn home_appearance_summary(
 }
 
 fn home_appearance_cache_scope(context: &HomeLaunchTokenContext) -> String {
-    let digest = Sha256::digest(context.principal_id.as_bytes());
+    let digest = Sha256::digest(context.principal_id().as_bytes());
     hex::encode(&digest[..8])
 }
 
@@ -8083,12 +8316,32 @@ fn home_reset_background_image(
     home_appearance_summary(data_dir, context)
 }
 
+/// Upload and reset replace the background, but never delete a damaged
+/// image: the refusal is the damage notice that names the file, as for every
+/// other Home state save (#447). Every image is checked before any is removed.
 fn remove_home_background_images(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<()> {
+    let mut paths = Vec::with_capacity(HOME_BACKGROUND_IMAGE_FILES.len());
     for &(file_name, _content_type) in HOME_BACKGROUND_IMAGE_FILES {
         let path = home_appearance_path(data_dir, context, file_name)?;
+        if path.is_file() {
+            if let Err(err) = crate::auth::read_principal_root_object(
+                data_dir,
+                &home_browser_principal_id(context),
+                &home_browser_localhost_root(context),
+                &home_appearance_object_uri(context, file_name),
+                &path,
+            ) {
+                if is_damaged_home_state(&err) {
+                    return Err(err);
+                }
+            }
+        }
+        paths.push(path);
+    }
+    for path in paths {
         match std::fs::remove_file(path) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -8134,8 +8387,7 @@ fn update_profile_for_context(
         &home_browser_principal_id(context),
         &home_browser_localhost_root(context),
         context
-            .proof_binding_id
-            .as_deref()
+            .proof_binding_id()
             .ok_or_else(|| anyhow::anyhow!("proof-bound passkey session required"))?,
         display_name,
         None,
@@ -8427,7 +8679,6 @@ mod home_realtime_tests {
             profile_readiness: ProfileReadinessSummary::setup_required(),
             notification_signature: Vec::new(),
             wallet_request_signature: Vec::new(),
-            capability_request_count: 0,
             desktop_signature: Vec::new(),
             room_signature: String::new(),
             people_signature: Vec::new(),
@@ -8468,7 +8719,6 @@ mod home_realtime_tests {
             profile_readiness: ProfileReadinessSummary::setup_required(),
             notification_signature: Vec::new(),
             wallet_request_signature: Vec::new(),
-            capability_request_count: 0,
             desktop_signature: Vec::new(),
             room_signature: String::new(),
             people_signature: vec!["contact:alice:Alice".to_string()],
@@ -8512,7 +8762,6 @@ mod home_realtime_tests {
             profile_readiness: ProfileReadinessSummary::ready(),
             notification_signature: Vec::new(),
             wallet_request_signature: Vec::new(),
-            capability_request_count: 0,
             desktop_signature: Vec::new(),
             room_signature: String::new(),
             people_signature: Vec::new(),
@@ -8543,7 +8792,6 @@ mod home_realtime_tests {
             profile_readiness: ProfileReadinessSummary::setup_required(),
             notification_signature: Vec::new(),
             wallet_request_signature: Vec::new(),
-            capability_request_count: 0,
             desktop_signature: Vec::new(),
             room_signature: String::new(),
             people_signature: Vec::new(),
@@ -8776,7 +9024,6 @@ mod home_events_pacing_tests {
             profile_readiness: ProfileReadinessSummary::setup_required(),
             notification_signature: Vec::new(),
             wallet_request_signature: Vec::new(),
-            capability_request_count: 0,
             desktop_signature: Vec::new(),
             room_signature: String::new(),
             people_signature: Vec::new(),

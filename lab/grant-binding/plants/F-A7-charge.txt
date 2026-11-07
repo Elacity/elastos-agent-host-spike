@@ -1,0 +1,12 @@
+id: F-A7-charge
+file: src/ledger.rs
+test: ledger::model_settle_past_the_u64_charge_is_refused
+--- old
+        let charged = match ledger.charged.checked_add(charge) {
+            Some(charged) => charged,
+            None => return Err(SettleRefuse::ChargeOverflow),
+        };
+        ledger.charged = charged;
+--- new
+        ledger.charged = ledger.charged.wrapping_add(charge);
+--- end

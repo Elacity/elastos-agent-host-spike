@@ -1,0 +1,8 @@
+id: F-B2-overwrite
+file: src/ops.rs
+test: ops::model_overwrite_grant_does_not_permit_append
+--- old
+            Operation::Append if !grant.rights.append => Err(OperateRefuse::AppendNotGranted),
+--- new
+            Operation::Append if !grant.rights.overwrite => Err(OperateRefuse::AppendNotGranted),
+--- end

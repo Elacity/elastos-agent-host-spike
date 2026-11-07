@@ -65,8 +65,8 @@ pub(in crate::api::gateway) async fn reject_wallet_approval_request(
                 WalletApprovalAuditInput {
                     capsule_id,
                     event_type: "wallet.approval.rejected",
-                    principal_id: &context.principal_id,
-                    session_id: &context.session_id,
+                    principal_id: context.principal_id(),
+                    session_id: context.session_id(),
                     request_id,
                     result: "rejected",
                     reason: "Wallet approval rejected through Runtime authority",
@@ -89,7 +89,7 @@ pub(in crate::api::gateway) async fn system_wallet_approval_approve(
             Ok(launch) => launch,
             Err(err) => return system_error_response(err),
         };
-    let authority = match runtime_wallet_authority(&launch) {
+    let authority = match runtime_wallet_authority(&state.data_dir, &launch) {
         Ok(authority) => authority,
         Err(err) => return system_error_response(err),
     };
@@ -221,8 +221,8 @@ pub(in crate::api::gateway) async fn approve_pending_managed_wallet_request(
         WalletApprovalAuditInput {
             capsule_id,
             event_type: "wallet.approval.completed",
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id,
             result: "completed",
             reason: "Built-in managed wallet signed after Runtime approval",
@@ -269,8 +269,8 @@ pub(in crate::api::gateway) async fn approve_external_wallet_request(
         WalletApprovalAuditInput {
             capsule_id,
             event_type: "wallet.approval.approved",
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id,
             result: "approved",
             reason: "External wallet approval reviewed through approval method",
@@ -314,8 +314,8 @@ pub(in crate::api::gateway) async fn complete_external_wallet_approval(
         WalletApprovalAuditInput {
             capsule_id,
             event_type: "wallet.approval.completed",
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id,
             result: "completed",
             reason: audit_reason,

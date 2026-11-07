@@ -1,0 +1,972 @@
+{
+  "about": "Audit crate falsifiers, proved by hand in the lab workspace while canonical runner gap R1 is pending. Paths are relative to examples/agent-host/. Every caught entry must build and all its named tests must run and fail. F-CWA0c expects Cargo to refuse the nested workspace under --locked. Restore each changed file byte-identical before the next entry.",
+  "falsifiers": [
+    {
+      "id": "F-CWA0a",
+      "title": "wasmparser loses its exact version pin",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/Cargo.toml",
+          "old": "version = \"=0.258.0\"",
+          "new": "version = \"0.258.0\""
+        }
+      ],
+      "tests": [
+        "manifest_pins_only_wasmparser_and_wat_exactly"
+      ]
+    },
+    {
+      "id": "F-CWA0b",
+      "title": "wat becomes a caller dependency",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/Cargo.toml",
+          "old": "\n[dev-dependencies]\nwat = \"=1.258.0\"",
+          "new": "\nwat = \"=1.258.0\""
+        }
+      ],
+      "tests": [
+        "manifest_pins_only_wasmparser_and_wat_exactly"
+      ]
+    },
+    {
+      "id": "F-CWA0c",
+      "title": "audit declares a nested workspace",
+      "command": "lab",
+      "expect": "compile_error",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/Cargo.toml",
+          "old": "wat = \"=1.258.0\"",
+          "new": "wat = \"=1.258.0\"\n\n[workspace]"
+        }
+      ],
+      "tests": []
+    },
+    {
+      "id": "F-CWA0e",
+      "title": "a second public audit entry point is added",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "pub const AUDIT_API: u32 = 1;",
+          "new": "pub const AUDIT_API: u32 = 1;\n\npub fn audit_all() {}"
+        }
+      ],
+      "tests": [
+        "public_api_is_v1"
+      ]
+    },
+    {
+      "id": "F-CWA1a",
+      "title": "WASI imports are skipped",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "                imports.push(DeclaredImport {",
+          "new": "                if import.module.starts_with(\"wasi\") { continue; }\n                imports.push(DeclaredImport {"
+        }
+      ],
+      "tests": [
+        "undeclared_wasi_import_is_refused_by_name",
+        "clock_random_and_socket_imports_are_refused"
+      ]
+    },
+    {
+      "id": "F-CWA1b",
+      "title": "Only import counts are compared",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "    for import in &imports {\n        if !declared.contains(import) {",
+          "new": "    for import in imports.iter().rev().take(1) {\n        if imports.len() != declared.len() {"
+        }
+      ],
+      "tests": [
+        "declared_import_passes_and_only_that_one"
+      ]
+    },
+    {
+      "id": "F-CWA1c",
+      "title": "Invalid bytes return the imports seen so far",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "return Err(invalid);",
+          "new": "return Ok(());"
+        }
+      ],
+      "tests": [
+        "malformed_module_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA1d",
+      "title": "Custom-section payloads bypass the code check",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if content.windows(4).any(|bytes| bytes == b\"\\0asm\") {",
+          "new": "if false && content.windows(4).any(|bytes| bytes == b\"\\0asm\") {"
+        }
+      ],
+      "tests": [
+        "custom_section_carrying_code_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA1e",
+      "title": "The Malformed Display string drifts from API v1",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "Self::Malformed => f.write_str(\"malformed module\"),",
+          "new": "Self::Malformed => f.write_str(\"malformed input\"),"
+        }
+      ],
+      "tests": [
+        "public_api_is_v1",
+        "malformed_module_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA1f",
+      "title": "Validation narrows the default features to WASM1",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "Validator::new()",
+          "new": "Validator::new_with_features(wasmparser::WasmFeatures::WASM1)"
+        }
+      ],
+      "tests": [
+        "zero_import_module_passes"
+      ]
+    },
+    {
+      "id": "F-CWA1g",
+      "title": "Only single imports are read; compact groups are skipped",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "section.into_imports()",
+          "new": "section.into_iter().filter_map(|group| match group { Ok(wasmparser::Imports::Single(_, import)) => Some(Ok(import)), Ok(_) => None, Err(error) => Some(Err(error)) })"
+        }
+      ],
+      "tests": [
+        "compact_import_groups_are_listed_and_refused_by_name"
+      ]
+    },
+    {
+      "id": "F-CWA1h",
+      "title": "Success copies declarations instead of imports read",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "    Ok(imports)\n}",
+          "new": "    Ok(declared.to_vec())\n}"
+        }
+      ],
+      "tests": [
+        "compact_import_groups_are_listed_and_refused_by_name"
+      ]
+    },
+    {
+      "id": "F-CWA2a",
+      "title": "Ignore Component imports and inspect only embedded core-module imports",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "        if let Payload::ComponentImportSection(section) = payload {\n            for import in section {\n                let import = import.map_err(|_| Refusal::NotAComponent)?;\n                interfaces.push(import.name.name.to_owned());\n            }\n        }",
+          "new": "        if let Payload::ImportSection(section) = payload {\n            for import in section.into_imports() {\n                let import = import.map_err(|_| Refusal::NotAComponent)?;\n                interfaces.push(format!(\"{}.{}\", import.module, import.name));\n            }\n        }"
+        },
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "payload if depth == 1 => read_imports(payload)?,",
+          "new": "payload if depth >= 1 => read_imports(payload)?,"
+        }
+      ],
+      "tests": [
+        "component_importing_wasi_filesystem_is_refused_by_name"
+      ]
+    },
+    {
+      "id": "F-CWA2b",
+      "title": "Match interfaces by package prefix instead of exact name and version",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| name.split('/').next() == declared.split('/').next()) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA2c",
+      "title": "Skip the Component encoding check and accept a core module",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "Encoding::Component => (Parser::is_component(wasm), Refusal::NotAComponent),",
+          "new": "Encoding::Component => (true, Refusal::NotAComponent),"
+        }
+      ],
+      "tests": [
+        "core_module_bytes_are_not_accepted_as_a_component"
+      ]
+    },
+    {
+      "id": "F-CWA2d",
+      "title": "Check Component custom sections only at the outermost level",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "Payload::CustomSection(section) => {",
+          "new": "Payload::CustomSection(section) if encoding == Encoding::Module || depth == 1 => {"
+        }
+      ],
+      "tests": [
+        "component_custom_section_carrying_code_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA2e",
+      "title": "Return declared interfaces instead of the names read",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "    Ok(interfaces)\n}",
+          "new": "    Ok(declared_interfaces.iter().map(|name| (*name).to_owned()).collect())\n}"
+        }
+      ],
+      "tests": [
+        "component_importing_only_a_declared_interface_passes"
+      ]
+    },
+    {
+      "id": "F-CWA2f",
+      "title": "Skip full validation of Component bytes",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !right_encoding || validator.validate_all(wasm).is_err() {",
+          "new": "if !right_encoding || (encoding == Encoding::Module && validator.validate_all(wasm).is_err()) {"
+        }
+      ],
+      "tests": [
+        "invalid_component_bytes_are_refused"
+      ]
+    },
+    {
+      "id": "F-CWA2g",
+      "title": "Treat nested Component imports as outside authority",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "payload if depth == 1 => read_imports(payload)?,",
+          "new": "payload if depth >= 1 => read_imports(payload)?,"
+        }
+      ],
+      "tests": [
+        "embedded_imports_are_internal"
+      ]
+    },
+    {
+      "id": "F-CWA3a",
+      "title": "Read only custom-section data and skip the name and its length",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "                    let range = section.range();\n                    let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;\n                    let start = start.checked_sub(1).ok_or_else(|| invalid.clone())?;\n                    let end = usize::try_from(range.end).map_err(|_| invalid.clone())?;\n                    let content = wasm.get(start..end).ok_or_else(|| invalid.clone())?;\n                    if content.windows(4).any(|bytes| bytes == b\"\\0asm\") {",
+          "new": "                if section.data().windows(4).any(|bytes| bytes == b\"\\0asm\") {"
+        }
+      ],
+      "tests": [
+        "custom_section_carrying_code_is_refused",
+        "component_custom_section_carrying_code_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA3b",
+      "title": "Scan the custom-section name and data separately, skipping runs across fields",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "                    let range = section.range();\n                    let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;\n                    let start = start.checked_sub(1).ok_or_else(|| invalid.clone())?;\n                    let end = usize::try_from(range.end).map_err(|_| invalid.clone())?;\n                    let content = wasm.get(start..end).ok_or_else(|| invalid.clone())?;\n                    if content.windows(4).any(|bytes| bytes == b\"\\0asm\") {",
+          "new": "                if section.name().as_bytes().windows(4).any(|bytes| bytes == b\"\\0asm\")\n                    || section.data().windows(4).any(|bytes| bytes == b\"\\0asm\")\n                {"
+        }
+      ],
+      "tests": [
+        "custom_section_carrying_code_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA4a",
+      "title": "Refusal loses its Eq derive",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "#[derive(Debug, Clone, PartialEq, Eq)]\n#[non_exhaustive]\npub enum Refusal {",
+          "new": "#[derive(Debug, Clone, PartialEq)]\n#[non_exhaustive]\npub enum Refusal {"
+        }
+      ],
+      "tests": [
+        "public_api_is_v1"
+      ]
+    },
+    {
+      "id": "F-CWA4b",
+      "title": "Refusal becomes exhaustive in the source",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "#[non_exhaustive]\npub enum Refusal {",
+          "new": "pub enum Refusal {"
+        }
+      ],
+      "tests": [
+        "public_api_is_v1"
+      ]
+    },
+    {
+      "id": "F-CWA4c",
+      "title": "Refusal becomes exhaustive in the API document",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/INTERFACE.md",
+          "old": "#[non_exhaustive]\npub enum Refusal {",
+          "new": "pub enum Refusal {"
+        }
+      ],
+      "tests": [
+        "public_api_is_v1"
+      ]
+    },
+    {
+      "id": "F-CWA4d",
+      "title": "Both entry points name the last undeclared entry",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "    for import in &imports {",
+          "new": "    for import in imports.iter().rev() {"
+        },
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "    for name in &interfaces {",
+          "new": "    for name in interfaces.iter().rev() {"
+        }
+      ],
+      "tests": [
+        "audit_refusals_follow_the_documented_order",
+        "component_refusals_follow_the_documented_order"
+      ]
+    },
+    {
+      "id": "F-CWA4e",
+      "title": "Refuse undeclared entries during parsing before later custom sections",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "                imports.push(DeclaredImport {\n                    module: import.module.to_owned(),\n                    name: import.name.to_owned(),\n                });",
+          "new": "                let import = DeclaredImport {\n                    module: import.module.to_owned(),\n                    name: import.name.to_owned(),\n                };\n                if !declared.contains(&import) {\n                    return Err(Refusal::Undeclared {\n                        module: import.module,\n                        name: import.name,\n                    });\n                }\n                imports.push(import);"
+        },
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "                interfaces.push(import.name.name.to_owned());",
+          "new": "                let name = import.name.name.to_owned();\n                if !declared_interfaces.contains(&name.as_str()) {\n                    return Err(Refusal::UndeclaredInterface { name });\n                }\n                interfaces.push(name);"
+        }
+      ],
+      "tests": [
+        "audit_refusals_follow_the_documented_order",
+        "component_refusals_follow_the_documented_order"
+      ]
+    },
+    {
+      "id": "F-CWA4f",
+      "title": "Run full validation after parsing and custom-section checks",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "    if !right_encoding || validator.validate_all(wasm).is_err() {",
+          "new": "    if !right_encoding {"
+        },
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "            _ => {}\n        }\n    }\n    Ok(())\n}",
+          "new": "            _ => {}\n        }\n    }\n    if validator.validate_all(wasm).is_err() {\n        return Err(invalid);\n    }\n    Ok(())\n}"
+        }
+      ],
+      "tests": [
+        "audit_refusals_follow_the_documented_order",
+        "component_refusals_follow_the_documented_order"
+      ]
+    },
+    {
+      "id": "F-CWA4g",
+      "title": "Skip the core header check and accept a Component as a module",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "Encoding::Module => (wasm.starts_with(b\"\\0asm\\x01\\0\\0\\0\"), Refusal::Malformed),",
+          "new": "Encoding::Module => (true, Refusal::Malformed),"
+        }
+      ],
+      "tests": [
+        "malformed_module_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA5a",
+      "title": "Match interface names and major versions while ignoring minor and patch versions",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| declared.split('.').next() == name.split('.').next()) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA5b",
+      "title": "Read only the first nonempty top-level Component import section",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "        if let Payload::ComponentImportSection(section) = payload {",
+          "new": "        if let Payload::ComponentImportSection(section) = payload {\n            if !interfaces.is_empty() { return Ok(()); }"
+        }
+      ],
+      "tests": [
+        "component_importing_wasi_filesystem_is_refused_by_name",
+        "component_importing_only_a_declared_interface_passes"
+      ]
+    },
+    {
+      "id": "F-CWA6a",
+      "title": "Validation enables every feature and accepts Component import name options",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "Validator::new()",
+          "new": "Validator::new_with_features(wasmparser::WasmFeatures::all())"
+        }
+      ],
+      "tests": [
+        "component_import_names_with_options_are_refused"
+      ]
+    },
+    {
+      "id": "F-CWA7a",
+      "title": "Skip the size's last byte when scanning custom sections",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "                    let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;\n                    let start = start.checked_sub(1).ok_or_else(|| invalid.clone())?;",
+          "new": "                let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;"
+        }
+      ],
+      "tests": [
+        "custom_section_carrying_code_is_refused",
+        "component_custom_section_carrying_code_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA7b",
+      "title": "Refuse custom sections whose size ends in zero even without code",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if content.windows(4).any(|bytes| bytes == b\"\\0asm\") {",
+          "new": "if content.first() == Some(&0) || content.windows(4).any(|bytes| bytes == b\"\\0asm\") {"
+        }
+      ],
+      "tests": [
+        "custom_section_carrying_code_is_refused",
+        "component_custom_section_carrying_code_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA8a",
+      "title": "Run the encoding check after parsing and custom-section checks",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "    if !right_encoding || validator.validate_all(wasm).is_err() {",
+          "new": "    if validator.validate_all(wasm).is_err() {"
+        },
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "            _ => {}\n        }\n    }\n    Ok(())\n}",
+          "new": "            _ => {}\n        }\n    }\n    if !right_encoding {\n        return Err(invalid);\n    }\n    Ok(())\n}"
+        }
+      ],
+      "tests": [
+        "audit_refusals_follow_the_documented_order",
+        "component_refusals_follow_the_documented_order"
+      ]
+    },
+    {
+      "id": "F-CWA8b",
+      "title": "DeclaredImport loses its Eq derive in the API document",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/INTERFACE.md",
+          "old": "#[derive(Debug, Clone, PartialEq, Eq)]\npub struct DeclaredImport {",
+          "new": "#[derive(Debug, Clone, PartialEq)]\npub struct DeclaredImport {"
+        }
+      ],
+      "tests": [
+        "public_api_is_v1"
+      ]
+    },
+    {
+      "id": "F-CWA9a",
+      "title": "Match interface versions while ignoring build metadata",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| declared.split('+').next() == name.split('+').next()) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA9b",
+      "title": "Match interface versions while ignoring the pre-release",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| match (declared.split_once('@'), name.split_once('@')) { (Some((declared_interface, declared_version)), Some((interface, version))) => declared_interface == interface && declared_version.split('-').next() == version.split('-').next(), _ => *declared == name.as_str(), }) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA10a",
+      "title": "Validation adds cm-implements to the default features",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "Validator::new()",
+          "new": "Validator::new_with_features(wasmparser::WasmFeatures::default() | wasmparser::WasmFeatures::CM_IMPLEMENTS)"
+        }
+      ],
+      "tests": [
+        "component_import_names_with_options_are_refused"
+      ]
+    },
+    {
+      "id": "F-CWA11a",
+      "title": "Read the custom-section size's last byte only at depth 1",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "let start = start.checked_sub(1).ok_or_else(|| invalid.clone())?;",
+          "new": "let start = if depth == 1 { start.checked_sub(1).ok_or_else(|| invalid.clone())? } else { start };"
+        }
+      ],
+      "tests": [
+        "component_custom_section_carrying_code_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA13a",
+      "title": "Match a declared build version to the release by dropping only its build metadata",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| declared.split('+').next() == Some(name.as_str())) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA13b",
+      "title": "Match a declared pre-release to the release by dropping only its pre-release suffix",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| match (declared.split_once('@'), name.split_once('@')) { (Some((declared_interface, declared_version)), Some((interface, version))) => declared_interface == interface && declared_version.split('-').next() == Some(version), _ => *declared == name.as_str(), }) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA14a",
+      "title": "Match the module and name against separate declared entries",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared.contains(import) {",
+          "new": "if !(declared.iter().any(|entry| entry.module == import.module) && declared.iter().any(|entry| entry.name == import.name)) {"
+        }
+      ],
+      "tests": [
+        "declared_import_passes_and_only_that_one"
+      ]
+    },
+    {
+      "id": "F-CWA15a",
+      "title": "Match the import name by a declared prefix while the module matches exactly",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared.contains(import) {",
+          "new": "if !declared.iter().any(|entry| entry.module == import.module && import.name.starts_with(entry.name.as_str())) {"
+        }
+      ],
+      "tests": [
+        "declared_import_passes_and_only_that_one"
+      ]
+    },
+    {
+      "id": "F-CWA15b",
+      "title": "Match the import module by a declared prefix while the name matches exactly",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared.contains(import) {",
+          "new": "if !declared.iter().any(|entry| import.module.starts_with(entry.module.as_str()) && entry.name == import.name) {"
+        }
+      ],
+      "tests": [
+        "declared_import_passes_and_only_that_one"
+      ]
+    },
+    {
+      "id": "F-CWA16a",
+      "title": "Match the whole interface name ignoring ASCII case",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| declared.eq_ignore_ascii_case(name)) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA16b",
+      "title": "Match after lowercasing only the declared interface",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| declared.to_ascii_lowercase() == name.as_str()) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA17a",
+      "title": "Match the import name by a declared suffix while the module matches exactly",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared.contains(import) {",
+          "new": "if !declared.iter().any(|entry| entry.module == import.module && import.name.ends_with(entry.name.as_str())) {"
+        }
+      ],
+      "tests": [
+        "declared_import_passes_and_only_that_one"
+      ]
+    },
+    {
+      "id": "F-CWA17b",
+      "title": "Match the import module by a declared suffix while the name matches exactly",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared.contains(import) {",
+          "new": "if !declared.iter().any(|entry| import.module.ends_with(entry.module.as_str()) && entry.name == import.name) {"
+        }
+      ],
+      "tests": [
+        "declared_import_passes_and_only_that_one"
+      ]
+    },
+    {
+      "id": "F-CWA18a",
+      "title": "Match an interface name that ends with a declared interface",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| name.ends_with(*declared)) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA20a",
+      "title": "Drop every memory maximum",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "maximum: ty.maximum,",
+          "new": "maximum: None,"
+        }
+      ],
+      "tests": [
+        "defined_memory_reports_its_page_limits",
+        "imported_memory_reports_its_page_limits",
+        "memory64_is_reported",
+        "shared_memory_is_reported",
+        "memories_follow_import_then_definition_order"
+      ]
+    },
+    {
+      "id": "F-CWA21a",
+      "title": "Match an interface when the declared name ends with the import",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| declared.ends_with(name.as_str())) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA23a",
+      "title": "The component-type branch never runs, so the magic window decides",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if component_type {",
+          "new": "if false && component_type {"
+        }
+      ],
+      "tests": [
+        "wit_bindgen_component_type_section_is_accepted",
+        "component_type_section_that_does_not_parse_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA23b",
+      "title": "Any data under a component-type name is accepted",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "fn type_only_component(data: &[u8]) -> Result<(), Refusal> {",
+          "new": "fn type_only_component(data: &[u8]) -> Result<(), Refusal> {\n    let _ = data;\n    return Ok(());"
+        }
+      ],
+      "tests": [
+        "component_type_section_that_does_not_parse_is_refused",
+        "component_type_section_with_a_core_module_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA23c",
+      "title": "A component that parses is accepted whatever its payloads are",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "        _ => Err(Refusal::CodeInCustomSection),",
+          "new": "        _ => Ok(()),"
+        }
+      ],
+      "tests": [
+        "component_type_section_with_a_core_module_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA23d",
+      "title": "Nested component-type sections keep recursing",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if nested && component_type {",
+          "new": "if false && nested && component_type {"
+        }
+      ],
+      "tests": [
+        "component_type_section_inside_component_type_data_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA24a",
+      "title": "The one-section count never runs, so a second section is accepted",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if component_type_sections > 1 {",
+          "new": "if false && component_type_sections > 1 {"
+        }
+      ],
+      "tests": [
+        "second_component_type_section_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA24b",
+      "title": "The allowlist never runs, so a type-only component-type name is enough",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "    if type_imports.is_empty()\n        || type_imports\n            .iter()\n            .any(|name| !ALLOWED_BUS_IMPORTS.contains(&name.as_str()))\n    {",
+          "new": "    if false {"
+        }
+      ],
+      "tests": [
+        "type_level_wasi_or_env_import_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA24c",
+      "title": "A type-level name passes when it starts with a listed name or with elastos:bus",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "            .any(|name| !ALLOWED_BUS_IMPORTS.contains(&name.as_str()))",
+          "new": "            .any(|name| {\n                !ALLOWED_BUS_IMPORTS\n                    .iter()\n                    .any(|allowed| name.starts_with(allowed))\n                    && !name.starts_with(\"elastos:bus\")\n            })"
+        }
+      ],
+      "tests": [
+        "type_level_wasi_or_env_import_is_refused"
+      ]
+    }
+  ]
+}

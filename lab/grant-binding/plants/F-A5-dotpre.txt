@@ -1,0 +1,8 @@
+id: F-A5-dotpre
+file: src/lib.rs
+test: model_dotdot_prefix_segment_is_a_plain_name
+--- old
+        .any(|part| part.is_empty() || *part == "." || *part == "..")
+--- new
+        .any(|part| part.is_empty() || *part == "." || (*part).starts_with(".."))
+--- end

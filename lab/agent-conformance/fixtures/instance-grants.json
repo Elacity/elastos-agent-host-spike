@@ -1,0 +1,27 @@
+{
+  "deny_reason": "fixture denies unlisted read",
+  "grants": [
+    {
+      "resource": "localhost://Public/agent-conformance-grants/instance-1/own.txt",
+      "action": "read",
+      "reason": "agent conformance: instance-1 own",
+      "duration": "session"
+    },
+    {
+      "resource": "localhost://Public/agent-conformance-grants/instance-2/own.txt",
+      "action": "read",
+      "reason": "agent conformance: instance-2 own",
+      "duration": "session"
+    }
+  ],
+  "files": [
+    {
+      "resource": "localhost://Public/agent-conformance-grants/instance-1/own.txt",
+      "content": "instance-one-bytes"
+    },
+    {
+      "resource": "localhost://Public/agent-conformance-grants/instance-2/own.txt",
+      "content": "instance-two-bytes"
+    }
+  ]
+}

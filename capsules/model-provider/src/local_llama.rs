@@ -24,6 +24,8 @@ const GUARD_START_TIMEOUT: Duration = Duration::from_secs(2);
 const GUARD_EXIT_GRACE: Duration = Duration::from_secs(1);
 /// An engine with no request for this long is stopped to give its memory back.
 const IDLE_RELEASE_DELAY: Duration = Duration::from_secs(60);
+/// How often a loading or generating model checks the host's memory pressure.
+const PRESSURE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) const INTERNAL_GUARD_ARG: &str = "--internal-local-llama-guard";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,10 +34,19 @@ pub(crate) enum LocalLlamaFault {
     /// The engine could not be spawned or exited before it became ready.
     StartFailed,
     Timeout,
-    /// Free memory does not cover this model; nothing was started.
-    MemoryUnavailable,
+    /// The host's room does not cover this model; nothing was started. The
+    /// bytes of room the host had and the bytes the model needs.
+    MemoryUnavailable {
+        available: u64,
+        required: u64,
+    },
     /// Runtime could not observe the host's memory limits; nothing was started.
     MemoryObservationUnavailable,
+    /// macOS reported critical memory pressure; nothing was started.
+    MemoryPressureCritical,
+    /// macOS reported critical memory pressure while the model loaded or
+    /// generated. The caller stops the engine to release its memory.
+    StoppedForMemoryPressure,
 }
 
 pub(crate) enum LocalTimingStage {
@@ -121,6 +132,8 @@ pub(crate) struct LocalLlamaEngines {
     idle_release: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     idle_delay: Duration,
     read_host_memory: crate::local_memory::HostMemoryReader,
+    read_memory_pressure: crate::local_memory::MemoryPressureReader,
+    pressure_interval: Duration,
 }
 
 impl Default for LocalLlamaEngines {
@@ -132,12 +145,75 @@ impl Default for LocalLlamaEngines {
 /// Held for the whole of one local run. Dropping it arms the idle release.
 pub(crate) struct LocalRun {
     engines: LocalLlamaEngines,
+    pressure: PressureWatch,
     _permit: OwnedSemaphorePermit,
+}
+
+impl LocalRun {
+    /// The run's pressure watch, for its loading and generating waits.
+    pub(crate) fn pressure(&mut self) -> &mut PressureWatch {
+        &mut self.pressure
+    }
 }
 
 impl Drop for LocalRun {
     fn drop(&mut self) {
         self.engines.schedule_idle_release();
+    }
+}
+
+/// Checks the host's memory pressure for one local run: at its first wait,
+/// then about once per interval. The run owns it and no task runs it, so no
+/// check outlives the run.
+pub(crate) struct PressureWatch {
+    /// None once the platform has shown it reports no level.
+    read: Option<crate::local_memory::MemoryPressureReader>,
+    ticks: tokio::time::Interval,
+    due: bool,
+}
+
+impl PressureWatch {
+    fn new(read: crate::local_memory::MemoryPressureReader, interval: Duration) -> Self {
+        let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        Self {
+            read: Some(read),
+            ticks,
+            due: true,
+        }
+    }
+
+    /// Resolves once the host reports critical pressure, never where the
+    /// platform reports no level. Cancel-safe: the only await is the tick, and
+    /// a select that drops it and calls it again keeps the interval.
+    pub(crate) async fn critical(&mut self) {
+        use crate::local_memory::MemoryPressure;
+        while let Some(read) = self.read {
+            if std::mem::take(&mut self.due) {
+                match read() {
+                    MemoryPressure::Critical => {
+                        self.due = true;
+                        return;
+                    }
+                    MemoryPressure::NotReported => {
+                        self.read = None;
+                        continue;
+                    }
+                    MemoryPressure::Normal | MemoryPressure::Warning => {}
+                }
+            }
+            self.ticks.tick().await;
+            self.due = true;
+        }
+        std::future::pending::<()>().await
+    }
+}
+
+/// Pending forever without a watch, so callers outside a run never stop on it.
+pub(crate) async fn critical_pressure(watch: Option<&mut PressureWatch>) {
+    match watch {
+        Some(watch) => watch.critical().await,
+        None => std::future::pending::<()>().await,
     }
 }
 
@@ -188,7 +264,24 @@ impl LocalLlamaEngines {
             read_host_memory: crate::local_memory::host_memory,
             #[cfg(test)]
             read_host_memory: crate::local_memory::test_host_memory,
+            #[cfg(not(test))]
+            read_memory_pressure: crate::local_memory::memory_pressure,
+            #[cfg(test)]
+            read_memory_pressure: crate::local_memory::test_memory_pressure,
+            pressure_interval: PRESSURE_CHECK_INTERVAL,
         }
+    }
+
+    /// Engines whose runs watch `read` every `interval`.
+    #[cfg(test)]
+    pub(crate) fn with_memory_pressure(
+        mut self,
+        read: crate::local_memory::MemoryPressureReader,
+        interval: Duration,
+    ) -> Self {
+        self.read_memory_pressure = read;
+        self.pressure_interval = interval;
+        self
     }
 
     pub(crate) async fn update_runtime_sockets(&self, sockets: BTreeMap<String, String>) {
@@ -196,7 +289,8 @@ impl LocalLlamaEngines {
     }
 
     /// Waits for the single local execution slot and cancels any pending idle
-    /// release, so the engine stays up for this run.
+    /// release, so the engine stays up for this run. The run's pressure watch
+    /// starts with it.
     pub(crate) async fn begin_run(&self) -> Result<LocalRun, LocalLlamaFault> {
         let permit = self
             .execution
@@ -207,6 +301,7 @@ impl LocalLlamaEngines {
         self.cancel_idle_release();
         Ok(LocalRun {
             engines: self.clone(),
+            pressure: PressureWatch::new(self.read_memory_pressure, self.pressure_interval),
             _permit: permit,
         })
     }
@@ -272,10 +367,15 @@ impl LocalLlamaEngines {
             settings,
             Duration::from_secs(30),
             None,
+            None,
         )
         .await
     }
 
+    /// Starts or reuses the offer's engine. `cancel` and `pressure` stop the
+    /// waits for it; after `StoppedForMemoryPressure` the caller closes the
+    /// offer, as after cancellation, so the engine's memory is released.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn endpoint_with_timeout(
         &self,
         offer_id: &str,
@@ -284,10 +384,13 @@ impl LocalLlamaEngines {
         settings: &LocalLlamaSettings,
         timeout: Duration,
         cancel: Option<&mut watch::Receiver<bool>>,
+        pressure: Option<&mut PressureWatch>,
     ) -> Result<LocalLlamaEndpoint, LocalLlamaFault> {
         let timing = LocalTiming::start();
         let result = self
-            .endpoint_with_timing(offer_id, engine, model, settings, timeout, &timing, cancel)
+            .endpoint_with_timing(
+                offer_id, engine, model, settings, timeout, &timing, cancel, pressure,
+            )
             .await;
         timing.record(match &result {
             Ok(_) => LocalTimingStage::EngineReady,
@@ -307,6 +410,7 @@ impl LocalLlamaEngines {
         timeout: Duration,
         timing: &LocalTiming,
         mut cancel: Option<&mut watch::Receiver<bool>>,
+        mut pressure: Option<&mut PressureWatch>,
     ) -> Result<LocalLlamaEndpoint, LocalLlamaFault> {
         let deadline = Instant::now() + timeout;
         let mut engines = tokio::time::timeout(timeout, self.engines.lock())
@@ -326,6 +430,7 @@ impl LocalLlamaEngines {
             Some(running) => match tokio::select! {
                 biased;
                 _ = local_stop_requested(cancel.as_deref_mut()) => Err(LocalLlamaFault::Failed),
+                _ = critical_pressure(pressure.as_deref_mut()) => Err(LocalLlamaFault::StoppedForMemoryPressure),
                 ready = running_engine_is_ready(running, deadline) => ready,
             }? {
                 true => return Ok(running.endpoint.clone()),
@@ -417,6 +522,7 @@ impl LocalLlamaEngines {
                         tokio::select! {
                             biased;
                             _ = local_stop_requested(cancel) => Err(LocalLlamaFault::Failed),
+                            _ = critical_pressure(pressure) => Err(LocalLlamaFault::StoppedForMemoryPressure),
                             healthy = wait_until_healthy(
                                 &mut running.child,
                                 running.guard_group,
@@ -905,10 +1011,9 @@ async fn finish_guard_shutdown(
             if !exited_guard_signal_can_settle(guard_exited, error.raw_os_error()) {
                 return Err(guard_close_failed("guard_signal", error.raw_os_error()));
             }
-            // Darwin excludes zombies from killpg recipients and can return
-            // EPERM for a zombie-only group (XNU bsd/kern/kern_sig.c, killpg1).
-            // This permits only the owned reap below, not successful closure:
-            // the post-reap group probe must still establish ESRCH.
+            // The guard has already exited, so this permits only the owned reap
+            // below, not successful closure: the post-reap group probe must
+            // still establish ESRCH.
         }
     }
     let deadline = tokio::time::Instant::now() + GUARD_EXIT_GRACE;
@@ -916,16 +1021,26 @@ async fn finish_guard_shutdown(
         .await
         .map_err(|_| LocalLlamaFault::Timeout)?
         .map_err(|error| guard_close_failed("guard_wait", error.raw_os_error()))?;
+    // Only ESRCH proves the group holds no member at all. A Darwin EPERM does
+    // not: it covers a group of only zombies and a live member that refuses the
+    // signal. Poll through that answer to the deadline, then report why the
+    // closure stayed unproven.
     loop {
         if unsafe { libc::kill(-guard_group, 0) } != 0 {
             let errno = std::io::Error::last_os_error().raw_os_error();
-            return if errno == Some(libc::ESRCH) {
-                Ok(())
-            } else {
-                Err(guard_close_failed("guard_absence", errno))
-            };
-        }
-        if tokio::time::Instant::now() >= deadline {
+            if errno == Some(libc::ESRCH) {
+                return Ok(());
+            }
+            if !group_eperm_is_unsettled(errno) {
+                return Err(guard_close_failed("guard_absence", errno));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                // Unproven closure keeps its reason: the group may hold a live
+                // member whose signal the OS refused.
+                return Err(guard_close_failed("guard_absence", Some(libc::EPERM)));
+            }
+        } else if tokio::time::Instant::now() >= deadline {
+            // A live member keeps the group present; absence is not established.
             return Err(LocalLlamaFault::Timeout);
         }
         sleep(
@@ -946,11 +1061,33 @@ async fn finish_guard_shutdown(
 }
 
 #[cfg(unix)]
+fn group_eperm_is_unsettled(errno: Option<i32>) -> bool {
+    // XNU's killpg1 (bsd/kern/kern_sig.c) excludes zombies from its recipients
+    // and reports a group of only zombies as EPERM; it also reports EPERM when
+    // every live member refuses the signal. The answer never settles the
+    // group's state, and only Darwin gives it for a zombie-only group, so the
+    // rule is platform-scoped: the group stays unsettled until ESRCH or the
+    // deadline.
+    cfg!(target_os = "macos") && errno == Some(libc::EPERM)
+}
+
+#[cfg(unix)]
 fn exited_guard_signal_can_settle(guard_exited: bool, errno: Option<i32>) -> bool {
-    cfg!(target_os = "macos") && guard_exited && errno == Some(libc::EPERM)
+    guard_exited && group_eperm_is_unsettled(errno)
+}
+
+// The last closure diagnostic this test thread reported. Tests use it to prove
+// that a refusal keeps its reason; it records only what `guard_close_failed`
+// already prints and does not change behaviour.
+#[cfg(all(test, unix))]
+thread_local! {
+    static LAST_CLOSURE_STAGE: std::cell::RefCell<Option<(&'static str, Option<i32>)>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 fn guard_close_failed(stage: &'static str, errno: Option<i32>) -> LocalLlamaFault {
+    #[cfg(all(test, unix))]
+    LAST_CLOSURE_STAGE.with(|last| *last.borrow_mut() = Some((stage, errno)));
     // Private diagnostics carry only a fixed stage and OS error number, never
     // artifact paths, model text, or caller identity. Failure semantics stay exact.
     eprintln!("[model-provider] local engine closure stage={stage} errno={errno:?}");
@@ -1275,7 +1412,15 @@ mod tests {
         Ok(crate::local_memory::HostMemory {
             total: 8 * GIB,
             available: GIB,
-            pressure_normal: false,
+            pressure: crate::local_memory::MemoryPressure::NotReported,
+        })
+    }
+
+    fn critical_memory_with_room() -> Result<crate::local_memory::HostMemory, LocalLlamaFault> {
+        Ok(crate::local_memory::HostMemory {
+            total: 8 * GIB,
+            available: 8 * GIB,
+            pressure: crate::local_memory::MemoryPressure::Critical,
         })
     }
 
@@ -1283,9 +1428,22 @@ mod tests {
     async fn insufficient_free_memory_refuses_before_spawn() {
         let (mut engines, engine, model, settings, events) = fixture("healthy");
         engines.read_host_memory = scarce_memory;
+        let refused = engines.endpoint("offer", &engine, &model, &settings).await;
+        assert!(
+            matches!(
+                refused,
+                Err(LocalLlamaFault::MemoryUnavailable { available, required })
+                    if available == GIB && required > available
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(event_count(&events, "start:"), 0);
+        assert!(!engines.retains_artifacts().await);
+
+        engines.read_host_memory = critical_memory_with_room;
         assert_eq!(
             engines.endpoint("offer", &engine, &model, &settings).await,
-            Err(LocalLlamaFault::MemoryUnavailable)
+            Err(LocalLlamaFault::MemoryPressureCritical)
         );
         assert_eq!(event_count(&events, "start:"), 0);
         assert!(!engines.retains_artifacts().await);
@@ -1345,6 +1503,185 @@ mod tests {
             .unwrap();
         assert_eq!(event_count(&events, "start:"), 2);
         assert!(answers(&endpoint).await);
+        engines.shutdown().await.unwrap();
+    }
+
+    const WATCH_INTERVAL: Duration = Duration::from_millis(10);
+
+    /// The fake engine's pid once it has started, without blocking the
+    /// runtime that is starting it.
+    async fn started_pid(path: &std::path::Path) -> i32 {
+        let deadline = StdInstant::now() + FIXTURE_EVENT_TIMEOUT;
+        loop {
+            if let Some(pid) = event_lines(path)
+                .into_iter()
+                .find_map(|line| line.strip_prefix("start:").and_then(|pid| pid.parse().ok()))
+            {
+                return pid;
+            }
+            assert!(StdInstant::now() < deadline, "missing fake engine start");
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn critical_pressure_while_loading_stops_the_engine() {
+        use crate::local_memory::MemoryPressure;
+        static CRITICAL: AtomicBool = AtomicBool::new(false);
+        fn pressure() -> MemoryPressure {
+            if CRITICAL.load(Ordering::SeqCst) {
+                MemoryPressure::Critical
+            } else {
+                MemoryPressure::Warning
+            }
+        }
+        // The engine starts but never reports healthy, so the run stays loading.
+        let (engines, engine, model, settings, events) = fixture("timeout");
+        let engines = engines.with_memory_pressure(pressure, WATCH_INTERVAL);
+        let mut run = engines.begin_run().await.unwrap();
+        let (stopped, pid) = tokio::join!(
+            engines.endpoint_with_timeout(
+                "offer",
+                &engine,
+                &model,
+                &settings,
+                Duration::from_secs(30),
+                None,
+                Some(run.pressure()),
+            ),
+            async {
+                // Warning pressure lets it load this far.
+                let pid = started_pid(&events).await;
+                CRITICAL.store(true, Ordering::SeqCst);
+                pid
+            }
+        );
+        assert_eq!(stopped, Err(LocalLlamaFault::StoppedForMemoryPressure));
+        // The load wait closed the engine itself: its memory is released.
+        assert_eq!(event_count(&events, "term"), 1);
+        assert!(!process_exists(pid));
+        assert!(!engines.retains_artifacts().await);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pressure_watch_reads_only_while_its_run_waits() {
+        use crate::local_memory::MemoryPressure;
+        use std::sync::atomic::AtomicUsize;
+        static READS: AtomicUsize = AtomicUsize::new(0);
+        fn pressure() -> MemoryPressure {
+            READS.fetch_add(1, Ordering::SeqCst);
+            MemoryPressure::Warning
+        }
+        // Each health probe takes 225 ms, so loading spans several intervals.
+        let (engines, engine, model, settings, _events) = fixture("slow_health");
+        let engines = engines.with_memory_pressure(pressure, WATCH_INTERVAL);
+        let mut run = engines.begin_run().await.unwrap();
+        let endpoint = engines
+            .endpoint_with_timeout(
+                "offer",
+                &engine,
+                &model,
+                &settings,
+                Duration::from_secs(30),
+                None,
+                Some(run.pressure()),
+            )
+            .await
+            .unwrap();
+        // Warning pressure was read repeatedly and the engine loaded and answers.
+        assert!(READS.load(Ordering::SeqCst) > 1);
+        assert!(answers(&endpoint).await);
+        drop(run);
+        // No check outlives the run.
+        let reads = READS.load(Ordering::SeqCst);
+        sleep(WATCH_INTERVAL * 10).await;
+        assert_eq!(READS.load(Ordering::SeqCst), reads);
+        engines.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pressure_watch_stops_reading_where_no_level_is_reported() {
+        use crate::local_memory::MemoryPressure;
+        use std::sync::atomic::AtomicUsize;
+        static READS: AtomicUsize = AtomicUsize::new(0);
+        fn pressure() -> MemoryPressure {
+            READS.fetch_add(1, Ordering::SeqCst);
+            MemoryPressure::NotReported
+        }
+        let mut watch = PressureWatch::new(pressure, WATCH_INTERVAL);
+        assert!(tokio::time::timeout(WATCH_INTERVAL * 10, watch.critical())
+            .await
+            .is_err());
+        assert_eq!(READS.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn memory_stop_on_a_warm_engine_then_idle_release_and_restart() {
+        use crate::local_memory::MemoryPressure;
+        static CRITICAL: AtomicBool = AtomicBool::new(false);
+        fn pressure() -> MemoryPressure {
+            if CRITICAL.load(Ordering::SeqCst) {
+                MemoryPressure::Critical
+            } else {
+                MemoryPressure::Warning
+            }
+        }
+        let (mut engines, engine, model, settings, events) = fixture("healthy");
+        engines.idle_delay = Duration::from_millis(50);
+        let engines = engines.with_memory_pressure(pressure, WATCH_INTERVAL);
+        async fn open(
+            engines: &LocalLlamaEngines,
+            (engine, model, settings): (
+                &LocalArtifactConfig,
+                &LocalArtifactConfig,
+                &LocalLlamaSettings,
+            ),
+            run: &mut LocalRun,
+        ) -> Result<LocalLlamaEndpoint, LocalLlamaFault> {
+            engines
+                .endpoint_with_timeout(
+                    "offer",
+                    engine,
+                    model,
+                    settings,
+                    Duration::from_secs(30),
+                    None,
+                    Some(run.pressure()),
+                )
+                .await
+        }
+        let artifacts = (&engine, &model, &settings);
+        let mut run = engines.begin_run().await.unwrap();
+        open(&engines, artifacts, &mut run).await.unwrap();
+        let first = started_pid(&events).await;
+        // Ending the run arms the idle release; the next run cancels it.
+        drop(run);
+
+        // Critical as the next run checks its warm engine: the caller owns the
+        // close, as after cancellation, while the run still holds the slot.
+        CRITICAL.store(true, Ordering::SeqCst);
+        let mut run = engines.begin_run().await.unwrap();
+        assert_eq!(
+            open(&engines, artifacts, &mut run).await,
+            Err(LocalLlamaFault::StoppedForMemoryPressure)
+        );
+        sleep(Duration::from_millis(200)).await;
+        assert!(process_exists(first), "idle release waits for the run");
+        engines.close_offer("offer").await.unwrap();
+        assert!(!process_exists(first));
+
+        // The idle release armed when the run ends finds nothing left to stop.
+        drop(run);
+        sleep(Duration::from_millis(200)).await;
+        assert!(!engines.retains_artifacts().await);
+
+        // The next run under warning pressure starts a fresh engine.
+        CRITICAL.store(false, Ordering::SeqCst);
+        let mut run = engines.begin_run().await.unwrap();
+        let endpoint = open(&engines, artifacts, &mut run).await.unwrap();
+        assert_eq!(event_count(&events, "start:"), 2);
+        assert!(answers(&endpoint).await);
+        drop(run);
         engines.shutdown().await.unwrap();
     }
 
@@ -1669,6 +2006,107 @@ mod tests {
             "post-reap shutdown signalled the surviving member"
         );
         assert!(!process_exists(member_pid));
+    }
+
+    fn last_closure_stage() -> Option<(&'static str, Option<i32>)> {
+        LAST_CLOSURE_STAGE.with(|last| *last.borrow())
+    }
+
+    fn reset_last_closure_stage() {
+        LAST_CLOSURE_STAGE.with(|last| *last.borrow_mut() = None);
+    }
+
+    /// A reaped guard whose group still holds one zombie: a killed child of this
+    /// test that nobody has reaped yet. The test owns every Child handle, so
+    /// cleanup never signals a group it does not own.
+    async fn reaped_guard_with_zombie_member() -> (Child, libc::pid_t, Child, libc::pid_t) {
+        use std::os::unix::process::CommandExt as _;
+
+        let mut guard_command = Command::new("/bin/cat");
+        guard_command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        guard_command.as_std_mut().process_group(0);
+        let mut guard = guard_command.spawn().unwrap();
+        let group = guard.id().unwrap() as libc::pid_t;
+        let mut member_command = Command::new("/bin/cat");
+        member_command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        member_command.as_std_mut().process_group(group);
+        let member = member_command.spawn().unwrap();
+        let member_pid = member.id().unwrap() as libc::pid_t;
+
+        guard.kill().await.unwrap(); // Owned wait leaves child.id() == None.
+        assert_eq!(unsafe { libc::kill(member_pid, libc::SIGKILL) }, 0);
+        // waitid with WNOWAIT observes the exit without reaping it, so the
+        // member stays a zombie until this test reaps its own Child.
+        let deadline = StdInstant::now() + FIXTURE_EVENT_TIMEOUT;
+        while !child_exited_without_reaping(member_pid).unwrap() {
+            assert!(
+                StdInstant::now() < deadline,
+                "the zombie member never reported its exit"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+        reset_last_closure_stage();
+        (guard, group, member, member_pid)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn zombie_only_group_closes_once_the_zombie_is_reaped() {
+        let (mut guard, group, mut member, member_pid) = reaped_guard_with_zombie_member().await;
+        // The zombie's owner reaps it well inside the closure deadline. Darwin
+        // answers EPERM for the group until then, and that answer must keep the
+        // probe polling instead of failing the close.
+        let reaper = tokio::spawn(async move {
+            sleep(Duration::from_millis(100)).await;
+            member.wait().await
+        });
+        let result = tokio::time::timeout(
+            FIXTURE_EVENT_TIMEOUT,
+            finish_guard_shutdown(&mut guard, group, Duration::from_millis(100)),
+        )
+        .await;
+        let reaped = reaper.await;
+        assert_eq!(result.unwrap(), Ok(()));
+        assert!(!process_exists(member_pid));
+        assert_eq!(last_closure_stage(), None);
+        reaped.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn zombie_left_past_the_deadline_is_a_close_failure() {
+        let (mut guard, group, mut member, member_pid) = reaped_guard_with_zombie_member().await;
+        let result = tokio::time::timeout(
+            FIXTURE_EVENT_TIMEOUT,
+            finish_guard_shutdown(&mut guard, group, Duration::from_millis(100)),
+        )
+        .await;
+        // The zombie is reaped only after the close returned, so the probe never
+        // saw ESRCH and closure stayed unproven.
+        let member_exit = member.wait().await;
+        assert!(!process_exists(member_pid));
+        member_exit.unwrap();
+        if cfg!(target_os = "macos") {
+            // An EPERM that lasts to the deadline is a refusal with its reason,
+            // not an anonymous timeout: the group may also hold a live member
+            // whose signal the OS refused.
+            assert_eq!(result.unwrap(), Err(LocalLlamaFault::Failed));
+            assert_eq!(
+                last_closure_stage(),
+                Some(("guard_absence", Some(libc::EPERM)))
+            );
+        } else {
+            // Linux counts the zombie as a group member, so the probe keeps
+            // succeeding until the deadline.
+            assert_eq!(result.unwrap(), Err(LocalLlamaFault::Timeout));
+            assert_eq!(last_closure_stage(), None);
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

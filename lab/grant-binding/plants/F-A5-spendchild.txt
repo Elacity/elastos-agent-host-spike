@@ -1,0 +1,10 @@
+id: F-A5-spendchild
+file: src/ops.rs
+test: ops::model_child_effect_spends_the_issuing_limit
+--- old
+                    grant.effect_limit = ancestor.effect_limit;
+                    grant.effects = ancestor.effects;
+--- new
+                    let _ = ancestor.effect_limit;
+                    let _ = ancestor.effects;
+--- end

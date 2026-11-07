@@ -84,6 +84,33 @@ test("joined but unreachable shows the failure and blocks Community Send", () =>
   assert.deepEqual(chat.submits, []);
 });
 
+test("exhausted recovery shows Home restart guidance and keeps Direct controls", () => {
+  const chat = loadChat();
+  chat.render("recovery_exhausted", true, true);
+  checkState(chat, "recovery_exhausted", "Community can't connect. Restart Home to reconnect.", false);
+  chat.pressEnter();
+  assert.deepEqual(chat.submits, []);
+  chat.input.disabled = false;
+  chat.send.disabled = false;
+  chat.render("recovery_exhausted", false, true);
+  assert.equal(chat.input.disabled, false);
+  assert.equal(chat.send.disabled, false);
+  assert.equal(chat.status.hidden, false);
+  chat.render("live", true, true);
+  checkState(chat, "live", "Community live", true);
+});
+
+test("Runtime's exhausted status is the exact copy Chat detects and shows", () => {
+  // Chat detects exhaustion by string equality with Runtime's status, so a copy
+  // edit on one side alone would silently bring back "Community unreachable" (#451).
+  const chat = loadChat();
+  chat.render("recovery_exhausted", true, true);
+  const copy = chat.status.textContent;
+  const read = path => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+  assert.ok(read("elastos/crates/elastos-server/src/collaboration_product.rs").includes(`"${copy}".to_string()`));
+  assert.ok(read("capsules/chat-room-ui/src/lib.rs").includes(`Self::RecoveryExhausted => "${copy}"`));
+});
+
 test("live enables one Enter submission while the base Send guard still applies", () => {
   const chat = loadChat();
   chat.render("live", true, true);

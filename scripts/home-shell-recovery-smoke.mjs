@@ -394,6 +394,7 @@ function eventFixture() {
     showHostAuthGate: async () => { prompts++; },
     postToActiveShell: message => broadcasts.push(message),
     requestShellSummaryRefresh: () => {}, console: { warn() {}, error() {} },
+    homeLink: { reportSuccess() {}, reportFailure: () => false },
   });
   vm.runInContext(`${eventConstants}\n${eventFunctions}`, context);
   const fireNext = async () => {

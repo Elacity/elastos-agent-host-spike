@@ -1,0 +1,12 @@
+id: F-A5-public
+file: src/lib.rs
+test: model_public_storage_read_is_refused
+--- old
+    if parts.first() == Some(&"Public") {
+        return Err(Refuse::PublicRead);
+    }
+--- new
+    if parts.first() == Some(&"Public") {
+        return Ok(name.to_owned());
+    }
+--- end

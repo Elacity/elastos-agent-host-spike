@@ -3248,4 +3248,83 @@ mod tests {
         let result = CapsuleProvider::to_resource_response(ResourceAction::Read, resp);
         assert!(matches!(result, Err(ProviderError::NotFound(_))));
     }
+
+    /// Falsifier A removes the `install_on_command` attach (bridge.rs:882) and
+    /// this test fails at its `no_new_privs` assertion: bridge.rs:3296:9 on the
+    /// aarch64 Jetson run, bridge.rs:3308:9 on x86_64. Scope:
+    /// rong-review/C9-plan-stacked-v3-20261030.md, S1a bar 5. The aarch64 Jetson
+    /// run (Linux 5.15.148-tegra) is done: 1 passed, and the same falsifier
+    /// failed at bridge.rs:3296:9 (c9-s1a-jetson-20261030-1640.md).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn spawn_confined_model_linux_child_inherits_socket_filter() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let source = tempdir.path().join("linux-model-seccomp-probe.rs");
+        std::fs::write(
+            &source,
+            include_str!("../../tests/fixtures/linux_model_seccomp_probe.rs"),
+        )
+        .unwrap();
+        let probe = tempdir.path().join("linux-model-seccomp-probe");
+        let built = std::process::Command::new("rustc")
+            .args(["--edition", "2021"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&probe)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "probe build failed: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        // The probe reports into `<its own executable path>.observed`, so no
+        // process variable is set while other tests run in this thread pool.
+        let observed = probe.with_extension("observed");
+        let config = ProviderConfig {
+            base_path: tempdir.path().to_string_lossy().into_owned(),
+            extra: serde_json::json!({
+                "offers": [{"id":"fixture-local", "adapter":{"kind":"local_llama_cpp_text"}}],
+            }),
+            ..Default::default()
+        };
+        let spawned = ProviderBridge::spawn_confined_model_linux(&probe, config).await;
+        let (bridge, sockets, vacant, _) = spawned.unwrap();
+        let pid = bridge
+            .child
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .id()
+            .expect("egress-filtered provider pid");
+        // One `name=value` line per kernel observation, each asserted alone.
+        let report = std::fs::read_to_string(&observed)
+            .expect("probe did not inherit the egress filter from the route");
+        let inherited = report
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(inherited.get("no_new_privs"), Some(&"1"), "{report:?}");
+        assert_eq!(inherited.get("seccomp"), Some(&"2"), "{report:?}");
+        assert_eq!(inherited.get("inet_socket"), Some(&"EPERM"), "{report:?}");
+        assert_eq!(sockets.len(), 1);
+        assert!(sockets["fixture-local"].ends_with("/0.sock"));
+        assert_eq!(vacant.len(), MAX_LOCAL_MODEL_SLOTS - 1);
+        assert!(
+            process_exists(&pid.to_string()),
+            "provider exited after Init"
+        );
+        bridge.shutdown().await.unwrap();
+        for _ in 0..250 {
+            if !process_exists(&pid.to_string()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            !process_exists(&pid.to_string()),
+            "provider survived shutdown"
+        );
+    }
 }

@@ -1,0 +1,8 @@
+id: F-A5-empty
+file: src/lib.rs
+test: model_empty_segment_in_the_owned_root_is_refused
+--- old
+        .any(|part| part.is_empty() || *part == "." || *part == "..")
+--- new
+        .any(|part| *part == "." || *part == "..")
+--- end

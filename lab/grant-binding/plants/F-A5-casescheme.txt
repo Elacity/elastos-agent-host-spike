@@ -1,0 +1,12 @@
+id: F-A5-casescheme
+file: src/lib.rs
+test: model_case_different_usersai_segment_is_refused
+--- old
+    if parts.len() < 3 || parts[0] != "UsersAI" || parts[1] != agent {
+        return Err(Refuse::OutsidePrincipal);
+    }
+--- new
+    if parts.len() < 3 || !parts[0].eq_ignore_ascii_case("UsersAI") || parts[1] != agent {
+        return Err(Refuse::OutsidePrincipal);
+    }
+--- end

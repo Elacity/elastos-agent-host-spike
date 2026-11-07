@@ -6,12 +6,15 @@ import vm from "node:vm";
 
 const source = readFileSync(new URL("../capsules/system/browser/system.js", import.meta.url), "utf8");
 const controller = source.slice(source.indexOf("function configureAiProvider() {"), source.indexOf("function configurePasskeyAccess() {"));
+const keyCheckOutcomes = source.slice(source.indexOf("const HOSTED_KEY_CHECK_PENDING ="), source.indexOf("function showError("));
+const homeRuntimeEvents = source.match(/^function homeRuntimeEventsFrom\([\s\S]*?^}$/m)?.[0] ?? "";
+const HOME_ORIGIN = "https://home.example";
 
-function fixture(connections = [], guest = false, staged = []) {
+function fixture(connections = [], guest = false, staged = [], status = {}) {
   const nodes = new Map();
   const element = () => ({
     value: "", hidden: false, disabled: false, dataset: {}, selectedOptions: [], children: [], handlers: {},
-    focus() {},
+    focus() {}, contains() { return false; },
     addEventListener(event, callback) { this.handlers[event] = callback; },
     append(...items) { this.children.push(...items); },
     after() {},
@@ -22,32 +25,60 @@ function fixture(connections = [], guest = false, staged = []) {
     if (!nodes.has(selector)) nodes.set(selector, element());
     return nodes.get(selector);
   };
-  const saved = new Map(), messages = [], attempts = [], discarded = [];
+  const saved = new Map(), messages = [], attempts = [], discarded = [], reads = [], revoked = [];
+  const timers = new Map(), listeners = new Map(), top = {};
+  let timerId = 0, gate = null;
   let stagedConnections = staged.slice();
   let rejectActivation = true;
-  let consentPending = false;
+  let consentPending = false, rejectKey = false, failDiscard = false, failReads = false;
+  const stateNode = element();
+  const document = {
+    hidden: false, querySelector: node, createElement: element,
+    querySelectorAll: selector => selector === '[data-field="ai-provider-state"]' ? [stateNode] : [],
+    addEventListener: (type, handler) => listeners.set(`document:${type}`, handler),
+  };
   const context = vm.createContext({
-    crypto: { randomUUID },
-    document: { querySelector: node, querySelectorAll: () => [], createElement: element },
+    crypto: { randomUUID }, document, homeParentOrigin: HOME_ORIGIN,
+    window: {
+      top,
+      addEventListener: (type, handler) => listeners.set(type, handler),
+      setTimeout: handler => { timers.set(++timerId, handler); return timerId; },
+    },
     hasShellAccess: () => true,
     readText: value => typeof value === "string" ? value.trim() : "",
     setTextFields: (field, message) => { if (field === "ai-provider-state") messages.push(message); },
     shellHeaders: extra => extra || {}, publicSystemError: (_, fallback) => fallback,
-    hostedProviderValidationError: () => "This Home could not check the key. Try again.",
     openCapsuleTarget: () => {},
     fetchJson: async (_url, init = {}) => {
+      if (init.method && gate) await gate.promise;
+      if (_url.endsWith("/approval-lens/revoke")) {
+        revoked.push(JSON.parse(init.body).id);
+        return { approval: "ended" };
+      }
       if (init.method === "DELETE" && _url.endsWith("/staged")) {
+        if (failDiscard) throw new Error("request failed: 500 staged hosted connection unavailable");
         const { id } = JSON.parse(init.body);
         discarded.push(id);
         stagedConnections = stagedConnections.filter(entry => entry.id !== id);
         return { discarded: true };
       }
       if (init.method !== "POST") {
+        reads.push(_url);
         if (guest) throw new Error("request failed: 403 admin passkey required");
-        return { connections, staged_connections: stagedConnections };
+        if (failReads) throw new Error("request failed: 503 service unavailable");
+        // Each read is a fresh reply, as over HTTP.
+        return structuredClone({ ...status, connections, staged_connections: stagedConnections });
       }
       const body = JSON.parse(init.body);
       attempts.push(body);
+      if (rejectKey && _url.endsWith("/validate")) {
+        // Runtime stages the checked key (typed, earlier staged, or saved) before the provider answers.
+        if (!stagedConnections.some(entry => entry.id === body.id)) {
+          stagedConnections.push({ id: body.id, provider: body.provider,
+            has_saved_model: connections.some(entry => entry.id === body.id) });
+        }
+        throw new Error("request failed: 400 invalid OpenRouter key");
+      }
       if (consentPending) {
         if (!stagedConnections.some(entry => entry.id === body.id)) {
           stagedConnections.push({ id: body.id, provider: body.provider, has_saved_model: false });
@@ -59,10 +90,82 @@ function fixture(connections = [], guest = false, staged = []) {
       return { connections: [] };
     },
   });
-  vm.runInContext(`${controller}\nconfigureAiProvider();`, context);
-  return { node, saved, messages, attempts, discarded,
-    activate: () => { rejectActivation = false; }, pending: () => { consentPending = true; } };
+  vm.runInContext(`${keyCheckOutcomes}\n${homeRuntimeEvents}\n${controller}\nconfigureAiProvider();`, context);
+  const runTimers = async () => {
+    for (const [id, handler] of [...timers]) {
+      timers.delete(id);
+      await handler();
+    }
+    await new Promise(setImmediate);
+  };
+  const hold = () => {
+    let release;
+    gate = { promise: new Promise(resolve => { release = resolve; }) };
+    return () => { gate = null; release(); };
+  };
+  return { node, saved, messages, attempts, discarded, stateNode, reads, revoked, document, top, runTimers, hold,
+    message: event => listeners.get("message")(event),
+    shown: () => listeners.get("document:visibilitychange")(),
+    activate: () => { rejectActivation = false; }, pending: () => { consentPending = true; },
+    rejectKey: () => { rejectKey = true; }, failDiscard: () => { failDiscard = true; },
+    failReads: () => { failReads = true; },
+    staged: () => stagedConnections };
 }
+
+test("saved hosted connections keep management controls while Inbox owns access", async () => {
+  const f = fixture([{
+    id: "model:hosted-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", name: "My hosted model",
+    provider: "openrouter", processor_label: "OpenRouter", selected_model: "fixture/model",
+    connected: true, operation: "text.generate", egress_state: "consent_required",
+  }], false, [], { hosted_external_https: "consent_required" });
+  await new Promise(setImmediate);
+  const card = f.node("#ai-provider-instances").children[0];
+  const controls = [];
+  const collect = element => {
+    controls.push(element.textContent);
+    for (const child of element.children) collect(child);
+  };
+  collect(card);
+  assert.ok(controls.includes("My hosted model"));
+  assert.ok(controls.includes("Needs Inbox review"));
+  assert.ok(!controls.some(text => /^Instance: /.test(text || "")));
+  assert.ok(controls.includes("Disconnect"));
+  assert.ok(controls.includes("Edit"));
+  assert.equal(f.node("#ai-provider-egress-note").hidden, true);
+  assert.equal(f.node("#ai-provider-egress-note").textContent, "");
+  assert.equal(f.attempts.length, 0);
+});
+
+test("saved hosted card labels only states that need attention", async () => {
+  const card = (id, fields) => ({ id: `model:hosted-${id.repeat(32)}`, name: id, provider: "openrouter",
+    processor_label: "OpenRouter", selected_model: "fixture/model", connected: true, operation: "text.generate", ...fields });
+  const f = fixture([
+    card("a", { egress_approval_state: "ended", egress_state: "consent_required" }),
+    card("b", { egress_state: "paused" }),
+    card("c", { egress_state: "ready", approval_state: "approved", share_enabled: true }),
+  ]);
+  await new Promise(setImmediate);
+  const labels = f.node("#ai-provider-instances").children
+    .map(node => node.children[0].children.map(child => child.textContent));
+  assert.deepEqual(labels, [["Hosted approval ended"], ["External HTTPS paused"], []]);
+});
+
+test("Inbox approval prompts are neutral; real failures are errors", async () => {
+  const f = fixture();
+  f.pending();
+  f.node("#ai-provider-add").handlers.click();
+  await f.node("#ai-provider-validate").handlers.click();
+  assert.equal(f.messages.at(-1), "Approve this connection in Inbox, then check the key again.");
+  assert.equal(f.stateNode.dataset.tone, "");
+  await f.node("#ai-provider-save").handlers.click();
+  assert.equal(f.messages.at(-1), "Approve this connection in Inbox, then select Save again.");
+  assert.equal(f.stateNode.dataset.tone, "");
+  const g = fixture();
+  g.node("#ai-provider-add").handlers.click();
+  await g.node("#ai-provider-validate").handlers.click();
+  assert.equal(g.messages.at(-1), "This Home could not check the key. Try again.");
+  assert.equal(g.stateNode.dataset.tone, "error");
+});
 
 test("guest setup does not keep an entered key or offer an unusable Add form", async () => {
   const f = fixture([], true);
@@ -100,30 +203,46 @@ test("hosted Save keeps one identity and entered key across activation failure a
   assert.notEqual(f.attempts[2].id, first.id);
 });
 
-test("hosted key feedback separates paused egress, Home authority, and provider rejection", () => {
-  const functions = source.slice(
-    source.indexOf("function publicSystemError("),
-    source.indexOf("function showError("),
-  );
+test("hosted key check names each known Runtime outcome and hides unknown detail", () => {
   const context = vm.createContext({ readText: value => typeof value === "string" ? value.trim() : "" });
-  vm.runInContext(functions, context);
+  vm.runInContext(keyCheckOutcomes, context);
   const message = detail => vm.runInContext(
     `hostedProviderValidationError(new Error(${JSON.stringify(detail)}))`, context,
   );
-  assert.equal(
-    message("request failed: 400 Hosted external HTTPS is paused until Runtime network authority is available."),
-    "External HTTPS is paused on this Home. The key has not been checked.",
-  );
-  assert.equal(message("request failed: 403 admin passkey required"), "Sign in as the Home admin to check provider keys.");
-  assert.equal(message("request failed: 403 home launch token expired"), "This Home could not check the key. Try again.");
-  assert.equal(message("request failed: 400 invalid Venice key"), "The provider could not validate this key.");
-  assert.match(message("request failed: 400 The hosted connection request was denied. Try again after the decision window."), /was denied/);
-  assert.match(message("request failed: 400 Hosted access was denied or ended. Review Inbox."), /denied or ended/);
-  assert.match(message("request failed: 400 Hosted HTTPS was ended on this Home. Start a new connection check in Inbox."), /was ended/);
-  assert.match(message("request failed: 400 Runtime blocked this hosted route. Review the connection configuration."), /blocked this hosted route/);
-  assert.match(message("request failed: 400 Hosted HTTPS could not reach the host. Check the network and try again."), /network/);
-  assert.equal(message("request failed: 502 Bad Gateway"), "This Home could not check the key. Try again.");
-  assert(!source.includes('publicSystemError(error, "This key is invalid.")'));
+  // Each Runtime response below is copied from elastos-server api/gateway_home_system_ai_provider.rs.
+  const outcomes = [
+    ["request failed: 400 Approve this hosted connection in Inbox, then check the key again.",
+      "Approve this connection in Inbox, then check the key again."],
+    ["request failed: 400 The hosted connection request was denied. Try again after the decision window.",
+      "This connection was denied in Inbox. Try again later."],
+    ["request failed: 400 Hosted access was denied or ended. Review Inbox.",
+      "This connection was denied or ended. Review Inbox."],
+    ["request failed: 400 Hosted HTTPS was ended on this Home. Start a new connection check in Inbox.",
+      "Hosted access was ended. Check the key again to ask in Inbox."],
+    ["request failed: 400 Runtime blocked this hosted route. Review the connection configuration.",
+      "This Home blocked the route to the host."],
+    ["request failed: 400 Hosted HTTPS could not reach the host. Check the network and try again.",
+      "Could not reach the host. Check the network and try again."],
+    ["request failed: 400 invalid Venice key", "The provider rejected this key."],
+    ["request failed: 400 invalid OpenRouter key", "The provider rejected this key."],
+    ["request failed: 500 Venice validation unavailable", "The provider sent an unexpected response. Try again later."],
+    ["request failed: 500 OpenRouter validation unavailable", "The provider sent an unexpected response. Try again later."],
+    ["request failed: 403 admin passkey required", "Sign in with the Home admin passkey to check keys."],
+    ["request failed: 403 proof-bound passkey session required", "Sign in with the Home admin passkey to check keys."],
+    ["request failed: 400 Hosted external HTTPS is paused until Runtime network authority is available.",
+      "External HTTPS is paused on this Home."],
+  ];
+  for (const [detail, expected] of outcomes) assert.equal(message(detail), expected, detail);
+  const generic = "This Home could not check the key. Try again.";
+  for (const detail of [
+    "request failed: 400 This Home could not check the hosted connection. Try again.",
+    "request failed: 403 home launch token expired",
+    "request failed: 502 Bad Gateway",
+    "request failed: 500 OpenRouter validation transport unset",
+    "request failed: 400 invalid AI provider",
+    "request failed: 500 error sending request for url (https://api.venice.ai/api/v1/models?key=sk-secret)",
+    "",
+  ]) assert.equal(message(detail), generic, detail);
 });
 
 test("Cancel after a failed Add restores provider choice and gives the next form a new identity", async () => {
@@ -153,7 +272,7 @@ test("staged key survives reload and Close; Discard clears only the staged setup
   await new Promise(setImmediate);
   const card = f.node("#ai-provider-instances").children[0];
   card.children[1].handlers.click();
-  assert.equal(f.node("#ai-provider-cancel").textContent, "Close; keep staged key");
+  assert.equal(f.node("#ai-provider-cancel").textContent, "Close");
   f.node("#ai-provider-cancel").handlers.click();
   assert.equal(f.discarded.length, 0);
   assert.equal(f.node("#ai-provider-instances").children.length, 1);
@@ -172,17 +291,18 @@ test("discarding a staged key change keeps the saved model card", async () => {
   await stagedCard.children[2].handlers.click();
   assert.deepEqual(f.discarded, [id]);
   assert.equal(f.node("#ai-provider-instances").children.length, 1);
-  assert.match(f.messages.at(-1), /saved model key remains/);
+  assert.equal(f.messages.at(-1), "Staged key removed.");
 });
 
-test("Edit uses the existing identity with a blank key and explains server-side key retention", async () => {
+test("Edit uses the existing identity with a blank key and marks the key field as optional", async () => {
   const id = `model:hosted-${"a".repeat(32)}`;
   const f = fixture([{ id, name: "Text model", provider: "openrouter", connected: true,
     selected_model: "openai/gpt-4o-mini", operation: "text.generate" }]);
   await new Promise(setImmediate);
   const card = f.node("#ai-provider-instances").children[0];
   card.children[2].children.find(button => button.textContent === "Edit").handlers.click();
-  assert.match(f.messages.at(-1), /Leave the API key blank to keep the stored key/);
+  assert.equal(f.messages.at(-1), "");
+  assert.equal(f.node("#ai-provider-key").placeholder, "Leave blank to keep the stored key");
   assert.equal(f.node("#ai-provider-kind").disabled, true);
   assert.equal(f.node("#ai-provider-key").value, "");
   f.activate();
@@ -192,6 +312,210 @@ test("Edit uses the existing identity with a blank key and explains server-side 
   assert.equal(f.attempts[0].model, "openai/gpt-4o-mini");
 });
 
+const veniceCard = () => ({ id: `model:hosted-${"c".repeat(32)}`, name: "Venice", provider: "venice",
+  processor_label: "Venice", selected_model: "venice/model", connected: true, operation: "text.generate",
+  egress_state: "consent_required", egress_approval_state: "none" });
+const APPROVED = { egress_approval_state: "approved", egress_state: "ready" };
+const ENDED = { egress_approval_state: "none", egress_state: "consent_required" };
+const homeEvents = (...events) => ({ type: "elastos:runtime-events", schema: "elastos.home.runtime-events/v1", events });
+const INBOX_CHANGED = homeEvents({ scope: "home", kind: "home.summary.changed" }, { scope: "inbox", kind: "inbox.changed" });
+// Card children: title, detail, actions, "Details and access" (summary, access controls).
+const accessControls = f => f.node("#ai-provider-instances").children[0].children[3].children[1].children;
+const accessLabels = f => accessControls(f).map(node => node.textContent);
+
+test("an Inbox decision reaches open System through Home's inbox event or System being shown again", async () => {
+  const venice = veniceCard();
+  const f = fixture([venice]);
+  await new Promise(setImmediate);
+  assert.deepEqual(accessLabels(f), ["Share as service", "Disconnect"]);
+  const reads = f.reads.length;
+  Object.assign(venice, APPROVED); // The person approves the new request in Inbox.
+  f.message({ source: f.top, origin: "https://foreign.example", data: INBOX_CHANGED });
+  f.message({ source: {}, origin: HOME_ORIGIN, data: INBOX_CHANGED });
+  f.message({ source: f.top, origin: HOME_ORIGIN, data: { ...INBOX_CHANGED, schema: "elastos.other/v1" } });
+  f.message({ source: f.top, origin: HOME_ORIGIN,
+    data: homeEvents({ scope: "chat-room", kind: "chat-room.changed" }, { scope: "people", kind: "people.changed" }) });
+  await f.runTimers();
+  assert.equal(f.reads.length, reads, "foreign, framed-sibling, malformed and unrelated messages do not read");
+  assert.deepEqual(accessLabels(f), ["Share as service", "Disconnect"]);
+  f.message({ source: f.top, origin: HOME_ORIGIN, data: INBOX_CHANGED });
+  f.message({ source: f.top, origin: HOME_ORIGIN, data: homeEvents({ scope: "inbox", kind: "inbox.changed" }) });
+  await f.runTimers();
+  assert.equal(f.reads.length, reads + 1, "a burst of Inbox events shares one read");
+  assert.deepEqual(accessLabels(f), ["Share as service", "End hosted approval", "Disconnect"]);
+  Object.assign(venice, ENDED); // Ended in another window while System was hidden.
+  f.document.hidden = true;
+  f.shown();
+  f.message({ source: f.top, origin: HOME_ORIGIN, data: INBOX_CHANGED });
+  await f.runTimers();
+  assert.equal(f.reads.length, reads + 1, "a hidden System does not read");
+  f.document.hidden = false;
+  f.shown();
+  await f.runTimers();
+  assert.equal(f.reads.length, reads + 2);
+  assert.deepEqual(accessLabels(f), ["Share as service", "Disconnect"]);
+});
+
+test("a live refresh waits for the person's open form and for the page's own request", async () => {
+  const venice = veniceCard();
+  const f = fixture([venice]);
+  await new Promise(setImmediate);
+  const reads = f.reads.length;
+  f.node("#ai-provider-add").handlers.click();
+  f.node("#ai-provider-name").value = "Typed name";
+  f.node("#ai-provider-key").value = "typed-key";
+  Object.assign(venice, APPROVED);
+  f.message({ source: f.top, origin: HOME_ORIGIN, data: INBOX_CHANGED });
+  f.shown();
+  await f.runTimers();
+  assert.equal(f.reads.length, reads, "nothing is read or rebuilt under the open form");
+  assert.equal(f.node("#ai-provider-form").hidden, false);
+  assert.equal(f.node("#ai-provider-name").value, "Typed name");
+  assert.equal(f.node("#ai-provider-key").value, "typed-key");
+  f.node("#ai-provider-cancel").handlers.click();
+  await f.runTimers();
+  assert.equal(f.reads.length, reads + 1, "closing the form catches up once");
+  assert.deepEqual(accessLabels(f), ["Share as service", "End hosted approval", "Disconnect"]);
+
+  const card = f.node("#ai-provider-instances").children[0];
+  const end = accessControls(f).find(node => node.textContent === "End hosted approval");
+  const release = f.hold();
+  const ending = end.handlers.click();
+  Object.assign(venice, ENDED);
+  f.message({ source: f.top, origin: HOME_ORIGIN, data: INBOX_CHANGED });
+  await f.runTimers();
+  assert.equal(f.reads.length, reads + 1, "no read while End is in flight");
+  assert.equal(f.node("#ai-provider-instances").children[0], card, "the card End acts on is not rebuilt");
+  assert.equal(end.disabled, true);
+  release();
+  await ending;
+  await f.runTimers();
+  assert.deepEqual(f.revoked, [venice.id]);
+  assert.equal(f.reads.length, reads + 3, "End reads once, then the held Inbox event reads once");
+  assert.deepEqual(accessLabels(f), ["Share as service", "Disconnect"]);
+});
+
+test("a key the provider rejects is not kept staged; a check waiting for Inbox keeps its key behind Close", async () => {
+  const f = fixture();
+  f.rejectKey();
+  f.node("#ai-provider-add").handlers.click();
+  f.node("#ai-provider-key").value = "test";
+  await f.node("#ai-provider-validate").handlers.click();
+  assert.equal(f.messages.at(-1), "The provider rejected this key.");
+  assert.equal(f.stateNode.dataset.tone, "error");
+  assert.deepEqual(f.discarded, [f.attempts[0].id], "the rejected key is discarded through the staged-key path");
+  assert.equal(f.node("#ai-provider-form").hidden, false, "the form stays open for another key");
+  assert.equal(f.node("#ai-provider-cancel").textContent, "Cancel");
+  assert.equal(f.node("#ai-provider-kind").disabled, false, "the next key check starts a new connection");
+  await f.node("#ai-provider-validate").handlers.click();
+  assert.notEqual(f.attempts[1].id, f.attempts[0].id);
+
+  const g = fixture();
+  g.pending();
+  g.node("#ai-provider-add").handlers.click();
+  await g.node("#ai-provider-validate").handlers.click();
+  assert.equal(g.messages.at(-1), "Approve this connection in Inbox, then check the key again.");
+  assert.deepEqual(g.discarded, []);
+  assert.equal(g.node("#ai-provider-cancel").textContent, "Close");
+});
+
+test("a key the provider rejects while editing a saved connection is discarded; Save with a blank field cannot send it", async () => {
+  const saved = { ...veniceCard(), ...APPROVED, provider: "openrouter", processor_label: "OpenRouter" };
+  const f = fixture([saved]);
+  await new Promise(setImmediate);
+  f.node("#ai-provider-instances").children[0].children[2].children.find(node => node.textContent === "Edit").handlers.click();
+  f.rejectKey();
+  f.node("#ai-provider-key").value = "rejected-key";
+  await f.node("#ai-provider-validate").handlers.click();
+  assert.equal(f.messages.at(-1), "The provider rejected this key.");
+  assert.deepEqual(f.discarded, [saved.id]);
+  assert.deepEqual(f.staged(), []);
+  assert.equal(f.node("#ai-provider-cancel").textContent, "Cancel");
+  f.node("#ai-provider-key").value = "";
+  f.activate();
+  await f.node("#ai-provider-save").handlers.click();
+  const save = f.attempts.at(-1);
+  assert.equal(save.id, saved.id, "Edit keeps its saved connection");
+  assert.equal(save.api_key, "");
+  assert.deepEqual(f.staged(), [], "no rejected key is left for a blank-field Save to send");
+});
+
+test("a blank-field check of the saved key that the provider rejects removes nothing", async () => {
+  const saved = { ...veniceCard(), ...APPROVED, provider: "openrouter", processor_label: "OpenRouter" };
+  const f = fixture([saved]);
+  await new Promise(setImmediate);
+  f.node("#ai-provider-instances").children[0].children[2].children.find(node => node.textContent === "Edit").handlers.click();
+  f.rejectKey();
+  await f.node("#ai-provider-validate").handlers.click();
+  assert.deepEqual(f.discarded, []);
+  assert.equal(f.messages.at(-1), "The provider rejected this key.");
+  assert.equal(f.stateNode.dataset.tone, "error");
+});
+
+test("a rejected key that cannot be removed is reported and stays on its card", async () => {
+  const f = fixture();
+  f.rejectKey();
+  f.failDiscard();
+  f.node("#ai-provider-add").handlers.click();
+  f.node("#ai-provider-key").value = "test";
+  await f.node("#ai-provider-validate").handlers.click();
+  const id = f.attempts[0].id;
+  assert.equal(f.messages.at(-1), "The rejected key could not be removed. Select Close, then Discard staged key on its card.");
+  assert.equal(f.stateNode.dataset.tone, "error");
+  assert.equal(f.node("#ai-provider-cancel").textContent, "Close", "the form keeps the staged connection");
+  assert.equal(f.node("#ai-provider-kind").disabled, true);
+  f.node("#ai-provider-cancel").handlers.click();
+  const card = f.node("#ai-provider-instances").children[0];
+  assert.equal(card.children[0].textContent, "openrouter · Key check needed");
+  assert.equal(card.children[2].textContent, "Discard staged key");
+  assert.deepEqual(f.staged().map(entry => entry.id), [id]);
+});
+
+test("a rejected key that cannot be removed while status cannot load points to a Home reload", async () => {
+  const f = fixture();
+  await new Promise(setImmediate);
+  f.rejectKey();
+  f.failDiscard();
+  f.node("#ai-provider-add").handlers.click();
+  f.node("#ai-provider-key").value = "test";
+  f.failReads();
+  await f.node("#ai-provider-validate").handlers.click();
+  assert.equal(f.messages.at(-1), "The rejected key could not be removed. Reload Home, then select Discard staged key on its card.");
+  assert.equal(f.stateNode.dataset.tone, "error");
+  assert.equal(f.node("#ai-provider-cancel").textContent, "Cancel", "the shown status has no staged card yet");
+  assert.deepEqual(f.staged().map(entry => entry.id), [f.attempts[0].id]);
+});
+
+test("a live refresh that changes the cards clears an earlier success line; a neutral line stays", async () => {
+  const venice = veniceCard();
+  const stagedId = `model:hosted-${"d".repeat(32)}`;
+  const f = fixture([venice], false, [{ id: stagedId, provider: "openrouter", has_saved_model: false }]);
+  await new Promise(setImmediate);
+  const stagedCard = f.node("#ai-provider-instances").children[1];
+  await stagedCard.children[2].handlers.click();
+  assert.equal(f.messages.at(-1), "Staged key removed.");
+  f.message({ source: f.top, origin: HOME_ORIGIN, data: INBOX_CHANGED });
+  await f.runTimers();
+  assert.equal(f.messages.at(-1), "Staged key removed.", "an unchanged card list keeps the line");
+  Object.assign(venice, APPROVED);
+  f.message({ source: f.top, origin: HOME_ORIGIN, data: INBOX_CHANGED });
+  await f.runTimers();
+  assert.deepEqual(accessLabels(f), ["Share as service", "End hosted approval", "Disconnect"]);
+  assert.equal(f.messages.at(-1), "", "the success line no longer describes the cards");
+
+  const other = { ...veniceCard(), ...APPROVED };
+  const g = fixture([other]);
+  await new Promise(setImmediate);
+  await accessControls(g).find(node => node.textContent === "End hosted approval").handlers.click();
+  const ended = "Hosted approval ended. A later request needs Inbox review again.";
+  assert.equal(g.messages.at(-1), ended);
+  Object.assign(other, ENDED, { egress_approval_state: "pending" });
+  g.message({ source: g.top, origin: HOME_ORIGIN, data: INBOX_CHANGED });
+  await g.runTimers();
+  assert.equal(g.reads.length, 3, "the Inbox request changed the card");
+  assert.deepEqual(accessLabels(g), ["Share as service", "End hosted approval", "Disconnect"]);
+  assert.equal(g.messages.at(-1), ended, "a neutral line stays");
+});
 
 test("hosted handoff replaces the previous selection with the exact requested offer", () => {
   const entry = readFileSync(new URL("../capsules/assistant/browser/home-agent.js", import.meta.url), "utf8");
@@ -225,7 +549,7 @@ function updateFixture(overrides = {}) {
     runtimeUpdateNode: panel, runtimeUpdateButton: button, runtimeUpdateStatusNode: status,
     runtimeUpdate: undefined, runtimeUpdatePending: null, runtimeUpdateBusy: false,
     runtimeUpdateActive: true, runtimeUpdateTimer: 0, runtimeUpdateReconnects: 0,
-    runtimeUpdateRequests: new Set(), runtimeUpdateInProgressSeen: false,
+    runtimeUpdateRequests: new Set(), runtimeUpdateInProgressSeen: false, runtimeUpdateFeedback: "",
     RUNTIME_UPDATE_RESTART_TEXT: source.match(/RUNTIME_UPDATE_RESTART_TEXT = "([^"]+)"/)?.[1],
     RUNTIME_UPDATE_RESTART_POLLS: Number(source.match(/RUNTIME_UPDATE_RESTART_POLLS = (\d+)/)?.[1]),
     systemSummaryInFlight: null, homeParentOrigin: "https://home.example",
@@ -358,6 +682,25 @@ test("Home update freezes one exact passkey intent and retries a lost response w
   assert.equal(f.context.runtimeUpdatePending, null);
   assert.equal(f.status.textContent, "Home is up to date.");
   assert.equal(f.context.window.location.reloads, 1, "the finished update loads the new System");
+});
+
+test("System reloaded by its update says to reload Home; opened again it does not", () => {
+  const navigation = type => ({ performance: { getEntriesByType: kind => kind === "navigation" ? [{ type }] : [] } });
+  const updated = { phase: "updated", id: "a".repeat(32), new_version: "1.1.0", message: "Home is up to date." };
+  const reloaded = updateFixture(navigation("reload"));
+  reloaded.context.renderRuntimeUpdate({ ...reloaded.offer, available: false, current_version: "1.1.0", controller: updated });
+  assert.equal(reloaded.status.textContent, "Updated to 1.1.0. Reload Home to finish.");
+  assert.equal(reloaded.context.window.location.reloads, 0, "System never reloads Home or itself for it");
+  for (const [overrides, controller, text] of [
+    [navigation("navigate"), updated, "Home is up to date."],
+    [{}, updated, "Home is up to date."],
+    [navigation("reload"), { ...updated, phase: "restored", message: "The previous Runtime is ready." }, "The previous Runtime is ready."],
+    [navigation("reload"), { ...updated, phase: "failed", message: "The update failed." }, "The update failed."],
+  ]) {
+    const f = updateFixture(overrides);
+    f.context.renderRuntimeUpdate({ ...f.offer, available: false, controller });
+    assert.equal(f.status.textContent, text, controller.phase);
+  }
 });
 
 test("Home update keeps an ambiguous submission pending and stops bounded progress recovery", async () => {
@@ -747,6 +1090,12 @@ test("System cancellation explains the unchanged Home and keeps private errors o
     assert.equal(f.status.textContent, "You cancelled the update. Home is unchanged.");
     assert.equal(f.posts.length, 0);
     assert.equal(f.button.disabled, false);
+    // The next refresh (#392) keeps it readable; only the next Update replaces it.
+    f.context.renderRuntimeUpdate(f.offer);
+    assert.equal(f.status.textContent, "You cancelled the update. Home is unchanged.");
+    f.context.requestPasskeyStepUp = () => new Promise(() => {});
+    f.context.onRuntimeUpdateApply();
+    assert.equal(f.status.textContent, "Verify your passkey to start the update.");
   }
   const f = updateFixture({ requestPasskeyStepUp: async () => { throw new Error("private signing path"); } });
   await f.context.onRuntimeUpdateApply();

@@ -1,0 +1,16 @@
+id: F-A5-usechild
+file: src/lib.rs
+test: model_forged_child_journal_does_not_widen_the_use_path
+--- old
+        resource_name(&record.identity, path, Some(&record.owned_root))?;
+--- new
+        resource_name(
+            &record.identity,
+            path,
+            if !request.forged_child_journal {
+                Some(&record.owned_root)
+            } else {
+                None
+            },
+        )?;
+--- end

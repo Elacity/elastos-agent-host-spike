@@ -1,0 +1,1 @@
+localhost://Public/agent-conformance-ungranted/outside-fixture.txt

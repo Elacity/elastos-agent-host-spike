@@ -186,7 +186,7 @@ export function bindLibraryEvents({
     if (!item?.dataset.uri) return;
     prepareDragSelection(item.dataset.uri, item);
     event.dataTransfer.effectAllowed = "copyMove";
-    event.dataTransfer.setData("application/x-elastos-library-uris", JSON.stringify(Array.from(state.selectedUris)));
+    event.dataTransfer.setData("application/x-elastos-library-uris", JSON.stringify(selectedObjects().map((object) => object.uri)));
     event.dataTransfer.setData("text/plain", item.dataset.uri);
   });
   elements.content.addEventListener("dragover", (event) => {

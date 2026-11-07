@@ -26,3 +26,7 @@ url = "2.5"
 [dev-dependencies]
 # Paused Tokio clock for tests that hold a deadline until a fixture engine has started.
 tokio = { version = "1.0", features = ["test-util"] }
+# `tests/process.rs` drives the shared live-grant stand-in through the crate
+# that owns it, instead of compiling a second copy of its source.
+agent-conformance = { path = "../../lab/agent-conformance" }
+tempfile = "3"

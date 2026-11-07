@@ -1,0 +1,3901 @@
+# wasm-capsule lab — wc-001, its lab name (task 010), `tools/bundle` (task 009), the verifier (wc-004) and the bare-capsule ABI gap (wc-008)
+
+The lab's foundation: one minimal **core Wasm** capsule that anyone can rebuild
+byte for byte on this one Mac, and whose lab CID names one bundle whichever
+path it is built at (see "Claim scope"). A lab bundle of it is named by
+cc-capsule-identity's lab CID (task 010); wc-004 verifies a test-key signature
+over that name and audits its module; wc-005a runs it on one engine,
+wc-005b (task 015) on two, and wc-005c (task 016) writes a receipt of that run
+with the engine versions as the engines printed them. This is lab tooling
+Anders may adopt; it is not a second Runtime.
+
+## What the capsule is
+
+`capsule/src/lib.rs` compiles to a core Wasm module for `wasm32-unknown-unknown`
+with **no imports**. It exports `digest` and, since task 068, the
+`product-capsule-v1` world's `lifecycle.run`:
+
+```wat
+(func (export "digest") (param i32) (result i64))
+(func (export "elastos:bus/lifecycle@1.0.0#run") (result i32))
+```
+
+`digest` is a splitmix64-style mix: total (no panics), deterministic, `core`
+only. The capsule is a small self-contained computer that traps down to nothing
+(Rong's DigitCapsule; PRINCIPLES P3, P18). `digest_impl` is the single shared
+implementation the Wasm export and the host test both call, so there is one path
+for the behaviour (P10). The world's `run` returns `Ok(())` and calls no Bus
+import, so the capsule is a real `elastos:bus@1.0.0` capsule of
+`product-capsule-v1` that gains no authority (lab stand-in, not admission; see
+"lifecycle export (task 068, carry of 067)", below).
+
+## Layout
+
+```
+Cargo.toml            root package `capsule` + members `audit`, `tools`; its own [workspace]
+Cargo.lock            committed; the one lockfile for every member and path dependency
+capsule/src/lib.rs    the guest (std on wasm32; `wit-bindgen` bindings) + the digest host test
+capsule/capsule.json  this capsule's `elastos.capsule/v1` manifest
+audit/                the `wasm-capsule-audit` crate (owned by the cx-wasm-audit lane)
+tools/build           the reproducible build script (bash)
+tools/bundle          writes a new lab bundle and prints its lab CID (bash wrapper)
+tools/Cargo.toml      the `wasm-capsule-tools` crate: the lab's host-side library
+tools/src/lib.rs      `bundle_identity` (the shared lab CID, one re-export) + the manifest bytes
+tools/src/bundle.rs   `tools/bundle`'s rules: `parse_args` and `run`
+tools/src/verify.rs   wc-004's one verify path: `verify_checked` and `verify_bundle`
+tools/src/run.rs      wc-005a's `run_engine` (one host engine on the verified entrypoint) and
+                      wc-005b's `run` (verify once, ask both `--version`, then wasmtime,
+                      then wasmer, same stdout)
+tools/src/receipt.rs  wc-005c's run receipt: `render` and `write_receipt`
+tools/src/bin/bundle.rs  the `bundle` binary: parse, run, print, exit status
+tests/                host-side named tests + the shape reader (never in the capsule)
+  common/             build driver (and the copy layout) + minimal wasm shape reader
+                      (core Wasm, the `digest` signature and, task 068, the
+                      `lifecycle.run` signature; it reads no imports, the
+                      zero-import check reads through `audit/`, task 053)
+  bundle_builds/      small stand-in build scripts for `tools/bundle`'s tests
+falsifiers.json       planted bugs, each caught by a named test (provider format)
+rust-toolchain.toml   pins rustc 1.91.0 + the wasm target (for adoption)
+```
+
+The lane is a Cargo workspace whose root is the package `capsule` (not a virtual
+workspace), so the lane gates — `cargo fmt`/`cargo test --manifest-path
+.../Cargo.toml` — act on `capsule` without `--all`/`--workspace`. Its other
+members are `audit/` and `tools/`. `audit/` is the `wasm-capsule-audit` crate:
+the one import-audit path (P10), which wc-004's verifier calls through a path
+dependency. The cx-wasm-audit lane owns it; this lane does not edit it. Test it
+from this directory with `cargo test -p wasm-capsule-audit --locked`. `tools/`
+is the `wasm-capsule-tools` crate, the lab's host-side library (the lab name
+the verifier and the runner, below).
+
+The runner (`tools/src/run.rs`) starts two host engines. Rong's ruling (26 Oct):
+Both engines, wasmtime and wasmer, are test-only and not endorsed. The engine choice is Anders's.
+
+`capsule` itself has **one dependency**: `wit-bindgen = "0.57.1"` (task 068),
+the Runtime's component-app template's own line, which generates the
+`product-capsule-v1` guest bindings and is built only for the wasm32 guest
+(P18: one dependency, no vendored copy, no fallback). Its tests'
+dev-dependencies are built only for tests: `wasm-capsule-tools`, the
+Runtime's `elastos-common` (a read-only path dependency, for its
+`CapsuleManifest`) with `serde_json` to read it, and for wc-004's tests
+`capsule-identity`, `wasm-capsule-audit`, the Runtime's `elastos-identity`
+(read-only, for `encode_signing_key_did`), `ed25519-dalek` and `rand` (fresh
+test keys in memory). `tools/` path-depends on `lab/capsule-identity/` (the
+cc-capsule-identity lane's crate, read-only here), on `wasm-capsule-audit`
+(`../audit`), and on `elastos-common` with `serde_json` (the Runtime's
+manifest reader). `capsule-identity` path-depends on `elastos/crates/elastos-common` and
+`elastos/crates/elastos-identity`. `Cargo.lock` pins all their crates: the
+audit's `wasmparser` 0.258.0 and dev-only `wat` 1.258.0, capsule-identity's
+`ed25519-dalek` 2.2.0, `rustix` 1.1.4, `sha2` 0.10.9, `hex` 0.4.3 and
+`serde_json` 1.0.151, the Runtime crates' own dependencies, and their transitive
+dependencies: 150 registry crates (wc-004 added none: every crate it uses
+was already locked; task 068 added 15, the `wit-bindgen` 0.57.1 set, each at
+the version `examples/hello/Cargo.lock` holds: `heck` 0.5.0, `id-arena` 2.3.0,
+`log` 0.4.34, `macro-string` 0.2.0, `prettyplease` 0.2.37, `unicode-xid` 0.2.6,
+`wasm-encoder` 0.247.0, `wasm-metadata` 0.247.0, `wasmparser` 0.247.0,
+`wit-bindgen` 0.57.1, `wit-bindgen-core` 0.57.1, `wit-bindgen-rust` 0.57.1,
+`wit-bindgen-rust-macro` 0.57.1, `wit-component` 0.247.0 and `wit-parser`
+0.247.0). `tools/build` compiles only `capsule`, so
+none of them is in the artifact. But Cargo resolves the whole workspace, so
+every build, `tools/build` included, needs those crates in the local cargo
+cache. They are cached on this Mac, so the lane builds offline here; on a
+machine with an empty cargo cache the first build needs the network.
+
+## Build
+
+```bash
+tools/build [OUT_DIR]     # default OUT_DIR is the lane root
+```
+
+writes `OUT_DIR/capsule.wasm` and `OUT_DIR/receipt.txt`. The build is pinned:
+one codegen unit, LTO, a stripped binary and `panic = "abort"` (the release
+profile in `Cargo.toml`), a fixed `SOURCE_DATE_EPOCH`, no incremental cache, a
+fresh isolated target dir, and `--remap-path-prefix` for the source tree,
+`CARGO_HOME` and the toolchain sysroot. Since task 032 it also passes
+`-Clink-arg=--max-memory=67108864`, so the capsule declares its own memory
+maximum, 1024 pages ("Module memory maximum discovery (wc-010d0)", "The capsule
+declares its maximum (task 032)"). A failing build exits non-zero even after
+its cleanup trap, also for a `set -u` error on this Mac's `/bin/bash` 3.2.57
+(task 035, `build_script_fails_closed_after_an_unbound_variable`). The fresh
+target dir is made inside `$TMPDIR` (`/tmp` when it is unset) from an explicit
+`mktemp -d` template, since macOS `mktemp -d` alone ignores `TMPDIR`; both the
+failure trap and the trap the last line re-arms remove it (task 036,
+`finished_build_leaves_its_tmpdir_empty`).
+
+### Receipt
+
+```
+schema: wc-001.receipt/v1
+artifact: capsule.wasm
+artifact_sha256: <sha256 of capsule.wasm>
+rustc_version: rustc 1.91.0 (f8297e351 2025-10-28)
+target: wasm32-unknown-unknown
+lockfile_sha256: <sha256 of Cargo.lock>
+source_date_epoch: 1700000000
+```
+
+The receipt binds the artifact to the exact toolchain and inputs so a rebuild
+can be checked (P13).
+
+## Claim scope (narrow, on purpose)
+
+Reproducible on **this one Mac**, across paths and clean caches only.
+Cross-machine reproduction is **unverified**: Cargo's symbol hashes depend on
+the build machine (same note as the agent-host guest hash). Reference values
+from two clean builds at different temp paths on 2026-10-29:
+
+- rustc: `rustc 1.91.0 (f8297e351 2025-10-28)`, host `aarch64-apple-darwin`
+- target: `wasm32-unknown-unknown`
+- `capsule.wasm` sha256 (both builds): `e7f17f707a1d12600f5ffe8d0376e1ef8a3fe4b7d89b539f644363556d9b8774`
+  (29 Oct 2026, re-pinned by task 068: two `tools/build` builds and a
+  `python3 -I` `hashlib` recomputation agree, LOG.md task 068; it was
+  `2002429e73ee1a5e983df008f5b53728882646f109d55a9d1a93e831690631e1`, 180
+  bytes, `no_std` with the `digest` export only)
+- size: 17,658 bytes (one memory: minimum 17 pages, maximum 1024 pages)
+
+On this stripped release cdylib nothing absolute leaks, so
+`--remap-path-prefix` is defensive (it would neutralise a leak from debug info
+or a dependency). F-WC1 is realised by embedding `env!("CARGO_MANIFEST_DIR")`,
+an absolute path `--remap-path-prefix` does not rewrite, which is why the two
+builds then differ.
+
+## The lab name: cc-capsule-identity's lab CID
+
+### What a lab bundle is
+
+A lab bundle of this capsule is a folder holding this capsule's manifest as
+`capsule.json` and the module as `capsule.wasm`. Its name is
+cc-capsule-identity's **lab CID**: the CIDv1 SHA-256 UnixFS directory root of
+the bundle, printed as 59 characters that start `bafybei` (that lane's task
+018 swapped the printed form to this root; the rules are in
+`lab/capsule-identity/README.md`, "The encoding"). The lab CID covers every regular file in the folder, so a file added beside the two
+changes the name; the shared walk refuses links, FIFOs, sockets, devices and
+names that are not UTF-8.
+
+### One export
+
+Every lab tool names a bundle through one function:
+
+```rust
+wasm_capsule_tools::bundle_identity(bundle: &Path) -> Result<LabCid, Refusal>
+```
+
+It is cc-capsule-identity's `lab_cid`, re-exported once and unchanged in
+`tools/src/lib.rs` (`pub use ... lab_cid as bundle_identity;`). Its `LabCid`
+result and `Refusal` are that lane's. This lane adds no function body and no
+identity rule: that lane owns the hash, the walk and the manifest check (the
+Runtime's `CapsuleManifest` parse, then `validate()`). Callers treat a
+`LabCid` as an opaque value: they compare it and print it, and leave the
+prefix, the hash and any CID codec to that lane. The encoding and the walk's
+rules are in `lab/capsule-identity/README.md` ("The encoding").
+
+The direction is cc-capsule-identity's too. Anders proposed a CIDv1 SHA-256
+UnixFS directory root as the bundle identity, and that lane's task 018 made
+`lab_cid` print it; `bundle_identity` needed no change. The root is still a
+prototype: that lane owns it, and its reproducibility tests are the gate before
+that profile is frozen. It also owns the separate signed record kept outside
+the package. This lane keeps one identity path: no UnixFS code, fallback or
+choice of rule of its own. When a test needs to read a printed lab CID, it uses
+that lane's one parse (`str::parse::<capsule_identity::LabCid>`), never a
+format check of its own.
+
+### A lab CID, not a CID
+
+The lab CID is a lab value. It is not the Runtime's CID: the Runtime names a
+published capsule by the CID its IPFS provider gets for the capsule archive
+(ADOPTION.md, the wc-003 discovery). No Runtime admission or launch path reads a
+lab CID.
+
+This lane's pinned vector, `MODULE_BUNDLE_LAB_CID` in `tests/common/mod.rs`,
+used by `this_capsule_bundle_has_the_pinned_lab_cid` and
+`tools_bundle_name_mode_prints_the_lab_cid`: the bundle of this capsule's
+277-byte `capsule/capsule.json` and the 8-byte empty module
+`00 61 73 6d 01 00 00 00` is
+
+```
+bafybeihtyzfql54i7irft23lg2mk44toqdww53ryuhs2psrknfjw4qhpcy
+```
+
+Task 024 recomputed it outside the lab code, with a `python3 -I` script
+(standard library only) written from cc-capsule-identity's README rules, not
+from its Rust code. The script first gave that lane's committed
+`content-sample` pin, and a different value after one byte of that fixture
+changed. It was pinned only because it equals what `bundle_identity` prints for
+the same folder. The script is not committed; LOG quotes its full text and the
+runs. It also guards this lane: if the shared rule changes under it, this test
+fails.
+
+### This capsule's manifest
+
+`capsule/capsule.json` is an `elastos.capsule/v1` manifest with only fields of
+the Runtime's `CapsuleManifest`: `schema`, `name` and `version` (the root
+package's own, kept equal by a test), `description`, `role` `app`, `type`
+`wasm` and `entrypoint` `capsule.wasm`. The tools crate compiles its bytes in
+as `wasm_capsule_tools::CAPSULE_MANIFEST`, so nothing reads the file by a path
+at run time. Nothing in the lane parses it except the Runtime's type, inside
+`bundle_identity` and in `lab_manifest_passes_runtime_validate`.
+
+It lists no Wasm imports, and the Runtime's type has no field for them. Rong's
+ruling (26 Oct): the module's own import section is the declaration. It sits
+inside the lab CID, and the audit crate's import list is its one reader. This
+module's import section is empty.
+
+### The lockfile coupling
+
+The tools crate path-depends on `lab/capsule-identity/`, so this workspace's
+`Cargo.lock` holds that crate's dependencies. A dependency change in
+`lab/capsule-identity/Cargo.toml` therefore breaks `cargo test --locked` here
+(and in cx-wasm-audit's gate, which runs in this workspace) until this lane
+re-locks. It also breaks capsule-identity's own
+`wc001_capsule_bundle_gets_a_stable_lab_cid`, which runs this lane's
+`tools/build --locked`. Such a change needs a coordinated owner and order
+(BACKLOG ask C3).
+
+The reproducibility copy (`tests/common/build.rs`) lays each copy out as
+`<root>/lab/wasm-capsule/...`, and reaches `<root>/lab/capsule-identity` and
+`<root>/elastos` through symbolic links to the real folders. Cargo loads their
+manifests to resolve the lockfile, even though `tools/build` compiles only
+`capsule`, and writes into neither. Without the links,
+`two_clean_builds_in_different_paths_are_byte_identical` fails with cargo's
+"failed to load manifest" error (F-WC3-COPY-DEPS).
+
+**C4.** A copy of `lab/wasm-capsule/` alone no longer builds: its
+`tools/build` stops with cargo's "failed to load manifest" error for
+`capsule-identity`. cc-redteam's probe
+`lab/redteam/py/test_wasm_capsule_receipt.py` makes such copies. The fix is
+cc-redteam's: lay its copies out the same way. It is finding C4, owned by
+cc-redteam.
+
+### History
+
+007's lane-own name rule (PR #105) was retired by task 010, on Rong's one-rule
+note: one bundle-identity rule for the two lab lanes. Its library, its 18 tests
+and its 24 falsifiers are deleted. cc-capsule-identity's own tests and
+falsifiers cover the walk and the encoding.
+
+Task 017: the retired name label is checked in every git-listed lane file,
+docs, `falsifiers.json` and `audit/` included (falsifier
+F-WC3-RETIRED-LABEL-DOC); the code names keep the docs exemption.
+Task 018: `lane_files_reads_names_git_would_quote` lists a temp git repo
+holding `review"note.md`; dropping `-z` fails it (runner-caught as
+F-WC3-LANE-FILES-QUOTED, task 029; counted in "## Falsifiers").
+
+### Why the tests live in the root package
+
+The lane gate `cargo test --locked --manifest-path lab/wasm-capsule/Cargo.toml`
+runs only the root package `capsule` (there is no `--workspace`), so a test
+inside `tools/` would never run in the gate. So every named test is in
+`tests/`, and `capsule` reaches the tools crate through a dev-dependency. The
+gate's `cargo fmt` also covers only `capsule`; check the tools crate with
+`cargo fmt -p wasm-capsule-tools --manifest-path lab/wasm-capsule/Cargo.toml -- --check`.
+
+## tools/bundle
+
+```bash
+tools/bundle OUT_DIR             # build, write OUT_DIR/bundle/, print its lab CID
+tools/bundle --name BUNDLE_DIR   # print the lab CID of an existing bundle
+```
+
+On success stdout is exactly the lab CID and a newline, and the exit status is
+0. An argument refusal prints `bundle: <reason>` and the usage line on stderr,
+exit status 2. A run refusal prints `bundle: refused: <path>: <reason>` on
+stderr, exit status 1. A refusal prints nothing to stdout. The wrapper execs
+`cargo run --quiet --locked` for the tools crate's `bundle` binary, which only
+parses, runs, prints and sets the status. The rules are library functions in
+`tools/src/bundle.rs`, tested in-process.
+
+**One name rule (P10).** Both modes name a bundle only with
+`wasm_capsule_tools::bundle_identity` and print its Display form. Its
+refusals pass through unchanged (for example, a link in a bundle gets the
+shared walk's own link reason).
+
+**A new OUT_DIR.** OUT_DIR is required (there is no default) and must not
+exist. The build mode:
+
+1. makes OUT_DIR with `create_dir`, which refuses anything already there: a
+   folder, a file or a link;
+2. runs `tools/build OUT_DIR` by its path (never a PATH lookup), with its
+   stdout sent to stderr, so stdout carries only the name;
+3. makes `OUT_DIR/bundle/` with `create_dir`, so a link planted there during
+   the build is refused;
+4. makes `bundle/capsule.json` with `create_new`, which refuses any entry
+   already there (a link included), and writes this capsule's manifest bytes
+   (`CAPSULE_MANIFEST`). This is the shared writer `write_new_file`, which the
+   run receipts use too, so its two refusals name no file; the path in front
+   names it: `<OUT_DIR>/bundle/capsule.json: cannot be created as a new file:
+   <OS error>` and `<OUT_DIR>/bundle/capsule.json: was created, but its bytes
+   cannot be written: <cause>` (task 050);
+5. moves the module in with `rename(OUT_DIR/capsule.wasm,
+   OUT_DIR/bundle/capsule.wasm)`. A rename moves a folder entry: it reads and
+   writes no file content and never follows a link. A link at the source moves
+   as a link, and step 6 refuses it;
+6. names `OUT_DIR/bundle` with `bundle_identity` and prints the name.
+
+So `bundle/` holds exactly `capsule.json` and `capsule.wasm`, and nothing is
+written through a link at OUT_DIR or under it. A refused run leaves what it
+made in OUT_DIR, to look at; it removes nothing.
+
+**The receipt.** `OUT_DIR/receipt.txt` stays where `tools/build` wrote it.
+Its `artifact_sha256` describes `bundle/capsule.wasm`: the same file, moved
+there unchanged (its `artifact: capsule.wasm` line names the file before the
+move). The receipt is outside the bundle, so it is not in the lab CID (P13:
+the bundle carries the artifact `tools/build` receipted).
+
+**One name across paths.** A bundle has one lab CID whichever path it is built
+at, as long as the module is byte-identical. The test
+`two_bundles_in_different_paths_have_one_lab_cid` bundles three copies of the
+lane through each copy's real `tools/bundle`, which runs that copy's
+`tools/build` by a slash path. Two copies are siblings, so their parent paths
+have the same length and depth; the third sits below a parent one level
+deeper and with a longer name, so the three parents differ in both length and
+depth. The test also asserts that layout on its own fixture, so a build input
+keyed on the path's length or depth cannot agree across all three. The test
+requires the three `capsule.wasm` files to be byte-identical and the three
+printed CIDs to be one, then flips one byte of one bundle's module and
+requires `--name` to print another. Byte identity is required by the test, not
+produced by it: the module carries the resolved paths of its workspace's
+`capsule-identity` dependency, and a build input that carries one of those
+paths unremapped makes the test fail (plants `F-WC1` and
+`F-WC1-SPACED-PATH`). The plant `F-BUNDLE-REMAP-UNEVEN` keeps the lane path
+as the caller named it; README, "F-BUNDLE-REMAP-UNEVEN", records why it is a
+hand proof.
+
+**Not covered.** The guarantee is for the OUT_DIR leaf and the entries under
+it. Links in OUT_DIR's parent folders are followed as usual by `create_dir`
+and `rename`. Another process changing OUT_DIR during the run is not covered
+either: that needs folder-relative opens. The retired lane-own name had the
+same limit.
+
+**Reference lab CID on this Mac** (2026-10-29, re-pinned by task 068), for
+this capsule's 277-byte manifest beside `capsule.wasm`
+`e7f17f707a1d12600f5ffe8d0376e1ef8a3fe4b7d89b539f644363556d9b8774`:
+
+```
+bafybeigbjo5l3o5wmqf3ccdwfpcyci455r4c3elfpg2i6lhj5qwp2qwvou
+```
+
+`tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid` pins it
+(`REFERENCE_LAB_CID`). Task 024 recomputed it with the same outside
+`python3 -I` script, over the bundle `tools/bundle` wrote on this Mac, and
+pinned it only because it equals what `bundle_identity` prints for that folder.
+Task 068 did the same for the new `capsule.wasm` (LOG.md, task 068); the value
+before it was `bafybeiebyzg55l4s6kb6daroty4prlkximwp6uvo32ovacfzdx7cahywqm`.
+It is a lab CID, not the Runtime's CID.
+
+**The test seam.** `run(mode, build_script)` takes the build script's path, so
+the tests pass small stand-in scripts from `tests/bundle_builds/` (one plants a
+link during the build, one fails with status 3, and so on). They change no
+environment, working folder or resource limit. Exactly one test spawns the
+real `tools/bundle`. Its child `cargo run` gets its own `CARGO_TARGET_DIR` and
+`CARGO_BUILD_BUILD_DIR` under that test's own temp dir, set on the child only,
+so it never waits on the outer `cargo test`'s build lock and writes nothing in
+the checkout. Each run builds the command fresh there.
+
+## Verify (wc-004)
+
+```rust
+wasm_capsule_tools::verify::verify_checked(checked: CheckedBundle, signature: Option<&NameSignature>,
+    accepted: &[String]) -> Result<VerifiedBundle, VerifyRefusal>
+wasm_capsule_tools::verify::verify_bundle(bundle: &Path, signature: Option<&NameSignature>,
+    accepted: &[String]) -> Result<VerifiedBundle, VerifyRefusal>
+```
+
+**One call, four checks, in order.** `verify_checked` takes a
+`CheckedBundle` from cc-capsule-identity's `checked_bundle` (the lab CID with
+the bytes its one walk read), the bundle's in-memory `NameSignature` and the
+accepted signer DIDs. Task 065 removed its granted imports (Rong's WC-1 and
+WC-2; "Bus v1 import contract (wc-009b)", below). The first refusal is the
+answer:
+
+1. no signature (`None`): refused as unsigned;
+2. cc-capsule-identity's `verify_checked_signature` on the checked value: a
+   canonical `did:key`, the accepted list, the signed name against the checked
+   bytes, then Ed25519;
+3. the manifest's `entrypoint`, read from the checked `capsule.json` with the
+   Runtime's `CapsuleManifest` (the one reader of that file), names the module
+   among the checked entries;
+4. the cx-wasm-audit crate's `audit(module, &[])` on that module's checked
+   bytes: no core-module import is granted (task 065), so the module's first
+   import, if it has one, is refused by its own name.
+
+`verify_bundle` is `checked_bundle` and then `verify_checked`, with no check of
+its own, so the walk's refusals come first. The tools crate has exactly one
+`verify_checked_signature` call and one `audit` call, and no name, walk, hash,
+signature or import code of its own (no `wasmparser`).
+
+**The reasons.** Each has its own exact text:
+
+- unsigned: `the bundle has no signature: an unsigned bundle is refused`;
+- the entrypoint is not in the bundle:
+  `the manifest's entrypoint "<path>" is not a file in the bundle`;
+- every cc-capsule-identity refusal (the walk's, a malformed signer DID, a
+  signer not in the accepted list, which an empty list gives every signer,
+  bytes that do not match the signed name, naming both values, and a
+  signature that does not verify), carried unchanged and printed exactly as
+  that lane prints it;
+- every audit refusal (`undeclared import {module}.{name}`, `malformed module`,
+  `code in custom section`), carried unchanged.
+
+A fifth reason, `the Runtime's CapsuleManifest could not read the checked
+capsule.json: <reason>`, cannot happen for a value `checked_bundle` made: the
+walk runs the same parse and refuses first. It is kept so the verifier fails
+closed with a reason rather than a panic, and no test can reach it.
+
+**The value.** `VerifiedBundle` holds the checked bundle and which of its
+entries is the entrypoint (found by step 3, the one manifest read), read
+through `cid()`, `entries()` and `entrypoint()`, and the declared
+`memory_mb()`. Task 065 removed `imports()` and `unused_grants()`: the module
+imports nothing, and no grant is passed. `entrypoint()` returns the checked entry the manifest's
+`entrypoint` names, the module the audit read, so no caller reads the manifest
+again. Its fields are private, and it has no public constructor, no `&mut`
+access and no `Deserialize`, so a value exists only as `verify_checked` made
+it. wc-005a's runner (task 014) writes `entrypoint()`'s bytes.
+
+**The checked bytes, never the folder again.** The audit reads the module
+bytes the signed name covers, from the checked value. The verifier reads no
+bundle file by a path; its one file read is the caller's lab grants file, in
+`read_grants` (task 065: v3, below), which is never part of the bundle. If the
+folder changes after `checked_bundle`, `verify_checked`
+on the held value still judges the held bytes, and `verify_bundle` on the
+changed folder is refused with the identity lane's mismatch reason.
+
+**No command and no signature file.** cc-capsule-identity's answer to ask C2:
+reuse its `sign_bundle`, `verify_checked_signature` and `NameSignature`, and
+keep the signature in memory only. So there is no `tools/sign` or
+`tools/verify`, no signature file and no serialized signature here. Signing and
+verifying are library calls, tested in process with keys made fresh in memory
+inside each test. If a file form is ever wanted, cc-capsule-identity owns it.
+
+**No core import.** The module's own import section is the declaration
+(Rong, 26 Oct, ruling (c)). Since task 065 the one `audit` call gets an empty
+list, so the module may import nothing; wc-009a's granted list (task 020) is
+retired ("Granted imports only (wc-009a)", below).
+
+**Claim scope.** An offline lab check, on this one Mac with test keys only,
+that a bundle's bytes match a signed lab CID, that an accepted test key signed
+it, and that its entrypoint module imports nothing. It answers
+nothing about "may this run": it makes no admission, launch or
+publisher-trust decision and sits in no admission or launch path. The signed
+name is a lab CID, not the Runtime's CID.
+
+## Run one engine (wc-005a)
+
+```rust
+wasm_capsule_tools::run::run_engine(bundle: &VerifiedBundle, engine: Engine, program: &Path,
+    work_root: &Path, control: &RunControl) -> Result<EngineRun, Refusal>
+
+pub struct RunControl { /* private */ }   // task 043: RunControl::new(budget: Duration)
+                                          // task 045: .cancel_handle() -> CancelHandle
+
+pub struct EngineRun { pub status: ExitStatus, pub stdout: Vec<u8> }
+```
+
+A library function; there is no command and no binary. It runs one host
+engine (`Engine::Wasmtime` or `Engine::Wasmer`) once on the verified
+entrypoint and returns its exit status (as the OS reported it; only a success
+is returned) and its stdout. In order, the first refusal is the answer:
+
+0. task 043: a zero run budget (`RunControl::new(Duration::ZERO)`) is refused
+   before anything is made or started; task 033: then the verified module's
+   memory is checked (`check_module_memory`, "The runner checks the module's
+   maximum (task 033)"), and a module with more than one memory, a memory with
+   no maximum or a maximum above the declared size is refused before anything
+   is made or started; task 045: a cancelled control is refused between those
+   two checks, before anything is made or started ("Cancel (M1 A10 lab half)");
+1. `program` must be absolute (`./wasmtime` or a bare `wasmtime` is refused),
+   so it is never looked up on PATH; the same path is the one started;
+2. `work_root` must be absolute, resolve, be byte for byte its own
+   `std::fs::canonicalize` result, so no link is anywhere in it (an
+   option-like `--env=X` is relative, so it is refused), and be a folder by
+   its own `fs::metadata` (`work_root_folder`; a failed metadata read keeps
+   its OS cause, never reported as "not a folder");
+3. one new folder, `<work_root>/<engine name>`, is made with `create_dir`
+   and mode `0o700`; a name already there is refused, never reused;
+4. `entrypoint()`'s checked bytes are written from memory as
+   `<run folder>/module.wasm` with the shared `bundle::write_new_file`
+   (`create_new`, never through a link);
+5. the engine starts as one process:
+   `<program> run --invoke digest <absolute module path> 1592590337`
+   (`1592590337` is `FIXED_INPUT`, `0x5EED_0001`), with stdin null and an
+   empty environment (`engine_command`, the one place these two rules are
+   set, which task 016's version query uses too). The module argument is absolute, so it is never read as
+   an option. There is no `--dir`, `--mapdir`, `--env` or `--net` flag.
+   Task 043: the runner waits for it at most the run budget (below);
+6. task 039: once the engine has exited (its outcome is read first), the run
+   folder and its module file are removed, on every outcome after step 3: a
+   refused module write, an engine that did not start, failed or succeeded
+   (`finish_run`, then `remove_run_dir`). The module file is removed only if
+   this run made it (not after a refused create), then the folder with
+   `fs::remove_dir`, never `remove_dir_all`, so an entry someone else put in
+   the folder is never deleted: the folder then stays and the removal fails.
+
+**Which answer wins (task 039).** After a success, a failed removal refuses the
+run with `the run folder cannot be removed after the engine exited: <OS error>`
+and the path it stopped at (the module file or the run folder). After a
+refusal, the first refusal stays the answer (the runner's rule), and a failed
+removal is not reported: a known limit. A runner process that is itself killed
+leaves its folder: a known limit (task 040's census covers a killed engine, not
+a killed runner). A run folder name is still never reused while it exists
+(`RunDirExists`); a second run in the same work root finds no folder and makes
+a new one.
+
+That argv is the one wc-005's discovery recorded for `wasmtime` 45.0.1 and
+`wasmer` 7.5.0 (task 006's LOG); both engines take it unchanged.
+
+**The reasons.** Each has its own exact text, after `<path>: `:
+
+- `the engine program path is not absolute: an engine is started only by an absolute path`;
+- `the work root is not an absolute path`;
+- `the work root cannot be resolved: <OS error>`;
+- `the work root is not canonical: it resolves to <canonical path>`;
+- `the work root's metadata cannot be read: <OS error>`;
+- `the work root is not a folder`;
+- `the run folder already exists: the runner makes a new one and never reuses it`;
+- `the run folder cannot be created: <OS error>`;
+- `the verified entrypoint cannot be created: <OS error>` and
+  `the verified entrypoint cannot be written: <OS error>` (the shared writer's
+  two refusals, with their path and cause kept; any other writer reason is
+  carried unchanged as `the shared writer refused: <reason>`);
+- `<engine> did not start: <OS error>` (for example a missing program);
+- `<engine> rejected the memory cap argument -W <argument> (exit status: <n>): <its stderr>; the module is not run without its cap`
+  (task 038, below);
+- `<engine> failed (exit status: <n>): <its stderr>`;
+- `the run folder cannot be removed after the engine exited: <OS error>`
+  (task 039, after a success only);
+- task 043: `the run budget is zero: no engine is started` (its path is the
+  work root); `<engine> still ran at its run budget of <n> ms: the runner
+  stopped it with SIGKILL`; `the runner could not stop <engine> with SIGKILL:
+  <OS error>`; `the runner could not wait for <engine>: <OS error>` (a failed
+  poll, `reap`'s `wait4(pid, WNOHANG)` since task 062, after which the engine is
+  stopped too, or a failed reap after a kill, `Child::wait`); and
+  `<engine>'s output could not be read: <OS error>`;
+- task 045: `the run on <engine> was cancelled by its caller: no engine starts
+  after a cancel, and a running one is stopped with SIGKILL` (its path is the
+  engine program; "Cancel (M1 A10 lab half)").
+
+**The run budget (task 043, M1 A7 lab half).** Every module run has a
+wall-clock budget, applied by the runner from outside the engine process. The
+caller passes it explicitly as `RunControl::new(budget)`: there is no default,
+and none is read from the environment or a file
+(`runner_uses_only_explicit_inputs`). `start_engine` starts the engine with the
+same argv, empty environment and null stdin as before, reads its stdout and
+stderr on a thread each (so a full pipe never blocks it), and polls `reap`
+(`wait4(pid, WNOHANG)`, since task 062; task 043 polled `try_wait`) every
+`WAIT_POLL` (10 ms) until the engine exits or the budget, counted from
+just after the start, has passed. An engine that exits in time gives the same
+success or refusal as before. One still running at the budget is sent SIGKILL
+by the runner (`Child::kill`), reaped (`Child::wait`), both readers are joined,
+its run folder is removed (`finish_run`, step 6), and the run is refused with
+the budget reason above, which names the engine and the budget in ms. A kill
+that fails is refused with its own reason and OS cause, never ignored. An
+engine killed by someone else is still `<engine> failed (signal: 9 ...)`, never
+the budget reason. The budget is never given to the engine or the guest: no
+fuel flag, no timeout flag, the argv is unchanged, so the guest can neither see
+nor change it. `run` gives each module run the same control and each counts
+its own budget from its own start, `wasmtime`'s and then `wasmer`'s, never one
+shared clock. Known limits: the `--version` queries have no budget; the budget
+is wall-clock time, not CPU time; a stopped run's partial stdout and stderr are
+dropped; a runner process that is itself killed leaves its engine running, as
+it leaves its folder (task 039); after the kill, the runner joins both readers
+(`joined`), which wait for end-of-file on the engine's stdout and stderr, so
+an engine that started a child holding those pipes open would keep the runner
+waiting past the budget (task 050: the pinned engines start no child, and no
+test covers this). This is lab input for M1 A7, not a Runtime
+admission or launch claim. The refusal receipt (task 044) is in "Run receipt
+(wc-005c)"; cancel (task 045) is in "Cancel (M1 A10 lab half)".
+
+**A rejected cap argument (task 038).** A module run that was given a memory
+cap argument (`wasmtime` only; "Memory cap (wc-010b)") and exits with the
+status and stderr that task 038 measured on the pinned wasmtime 45.0.1 for a
+`-W` argument it rejects is refused with the rejected-cap reason above, which
+names the argument. The measured values, from two probes (an unknown `-W` key
+and a bad value; LOG.md, task 038): exit status 2, and a first stderr line
+that starts with `error: ` and holds ` -W `. Each is one `const` in
+`tools/src/run.rs`. The module is never started again without its cap: no
+retry, no fallback, and `wasmer` is not started after it. Any other nonzero
+exit stays `<engine> failed ...`, unchanged, and so does a failure of a run
+given no cap argument (`wasmer`), whatever it prints.
+
+`run_engine` makes no `--version` query and does not check the engine's
+version; `run`, the entry that starts both engines, checks the pins (next two
+sections), so `run_engine`'s one start per call holds.
+
+**The claim.** The bytes the engine is given come from the verified value,
+`entrypoint()`, never from a second read of the bundle on disk: the verified
+`cid()` is the name, and the bytes written are exactly the bytes that name
+covers. The runner reads no environment variable and no file, parses no
+manifest or module, writes nothing outside the new folder, and (task 039)
+leaves nothing it made in the work root once `run_engine` returns, except when
+removing it failed: that run folder stays (step 6), and after a success the
+run is refused (task 042 corrects this sentence). The engine gets
+no folder, env or network flag, and an empty environment. This is a behaviour
+proof on one core module, not the Component ABI. `wasmtime` and `wasmer` are
+test-only host engines, not endorsed.
+
+**Scope of the isolation claim.** It covers the argv, the empty environment
+and what the guest is given: with no folder, env or network flag, the guest
+gets no host resource. The engine itself is a native process with the user's
+own authority, and this runner does not confine it.
+
+**Known limit, not claimed.** A host engine CLI opens the module by its path.
+A concurrent process running as the same user could replace the file, or swap
+the run folder or the work root, between the runner's write and the engine's
+open; the folder and file writes are path-based too. This runner does not
+defend against that. Binding launch to verified bytes is the Runtime's launch
+path, not lab tooling. The runner makes no admission or launch decision.
+
+The two-engine comparison with `verify_bundle` is the next section (task 015);
+the receipt with engine versions is the section after it (task 016).
+
+## Same output on two engines (wc-005b)
+
+```rust
+wasm_capsule_tools::run::run(input: &RunInput) -> Result<TwoEngineRun, TwoEngineRefusal>
+
+pub struct RunInput<'a> {
+    pub bundle: &'a Path,                       // the bundle folder
+    pub signature: Option<&'a NameSignature>,   // in memory only
+    pub accepted: &'a [String],                 // accepted signer DIDs
+    pub wasmtime: &'a Path,                     // absolute program paths
+    pub wasmer: &'a Path,
+    pub work_root: &'a Path,
+    pub control: &'a RunControl,                // task 043: each module run's budget
+}
+```
+
+A library function; there is no command, no binary and no signature file. Every
+input is in the struct; nothing is read from the environment. In order, the
+first refusal is the answer:
+
+0. task 043: a zero budget in `input.control` is refused (the same check as
+   `run_engine`'s) as `TwoEngineRefusal::Engine`, before verification and any
+   `--version` query;
+1. wc-004's `verify_bundle(input.bundle, input.signature, input.accepted)`
+   is called once (task 065: no granted imports; wc-009a passed them). A
+   module with any core import is refused, `undeclared import
+   <module>.<name>`. A refusal comes back unchanged as `TwoEngineRefusal::Verify`, printing exactly
+   as the verifier prints it; nothing is written and no engine is started;
+   task 033: then the same `check_module_memory` `run_engine` calls checks the
+   verified module's memory once; a refusal comes back as
+   `TwoEngineRefusal::Memory`, printing the runner's `Refusal` unchanged, and
+   no engine process starts, not even a `--version` query;
+2. task 016: each engine is asked `--version`, `wasmtime` and then `wasmer`
+   (the next section). Task 038: the first line must name the pinned version,
+   `wasmtime 45.0.1` or `wasmer 7.5.0` (the next section). A refusal comes
+   back as `TwoEngineRefusal::Version`, and no module run starts. Task 045: a
+   cancelled control is refused before each query, also as
+   `TwoEngineRefusal::Version` (the step it stopped before);
+3. `run_engine` (above) runs `wasmtime` on the verified value and returns;
+4. only then `run_engine` runs `wasmer` on the same value. The two are separate
+   processes, one after the other, never nested or overlapping. `run_engine` is
+   the one module run path;
+5. both stdouts must be byte-identical (never trimmed).
+
+**Wasmer is not started after Wasmtime is refused.** A refusal of either engine
+(a failed exit, a program that does not start, a run folder already there, any
+of `run_engine`'s reasons) comes back unchanged as `TwoEngineRefusal::Engine`,
+with its own path and cause. So two engines that would fail the same way are
+refused with the first failure's own reason
+(`<path>: wasmtime failed (exit status: <n>): <stderr>`), never as equal
+outputs. Two successful runs with different stdout are refused with
+`the engines' outputs differ: wasmtime printed "<stdout>", wasmer printed "<stdout>"`.
+
+On success `TwoEngineRun` holds the verified `cid()` (the lab CID the signature
+was checked against, taken from the verified value, never by naming the folder
+again), both raw stdouts, `wasmtime()` and `wasmer()` (or `stdout(engine)`), and
+from task 016 each engine's observed `version(engine)` and `status(engine)`.
+Task 065 removed task 020's `linked()` and `unused_grants()`. Its fields are private, so only `run` makes one. `run` writes no receipt; the
+caller writes one with `receipt::write_receipt` (next section).
+
+**The claim.** On this Mac, the capsule `tools/build` makes, bundled, signed
+with a fresh test key and verified, printed `230101071268130872`
+(`FIXED_OUTPUT`) for `1592590337` (`FIXED_INPUT`) on both `wasmtime` 45.0.1 and
+`wasmer` 7.5.0, byte for byte (`same_name_same_output_on_wasmtime_and_wasmer`).
+This is a behaviour proof on one **core module** on this one Mac, not the
+Component ABI. Both engines are test-only host engines, not endorsed.
+This is separate from Wasmer's role inside a capsule as the POSIX RTOS PoC. The
+run makes no admission or launch decision, and its lab CID is not the Runtime's
+CID. The known limit of `run_engine` above holds for both runs.
+
+## Run receipt (wc-005c)
+
+```rust
+wasm_capsule_tools::receipt::render(run: &TwoEngineRun) -> String
+wasm_capsule_tools::receipt::write_receipt(run: &TwoEngineRun, path: &Path) -> Result<(), bundle::RunRefusal>
+```
+
+**The versions are observed, not configured.** After verification and before
+any module run, `run` asks each engine `--version`: one process each, by the
+same absolute program path the module run starts, through the same
+`engine_command` (an empty environment, stdin null), `wasmtime` first. It keeps
+the first line of stdout as printed, without its newline, and the receipt
+records that line, never a configured one.
+
+**Only the pinned versions run (task 038).** The runner's memory promise rests
+on facts measured on one engine version each: wasmtime 45.0.1 takes `-W
+max-memory-size=...` (wc-010a, task 021), and wasmer 7.5.0 applies the
+module's own maximum (task 030). So `run` starts only those versions. Split on
+single spaces, the first `--version` line's first word must be the engine's
+name and its second word must equal the engine's pinned version, exactly
+(`WASMTIME_VERSION` = `45.0.1`, `WASMER_VERSION` = `7.5.0`, one `const` each
+in `tools/src/run.rs`); anything after the second word is allowed, so
+`wasmtime 45.0.1 (83166ba31 2026-06-05)` passes. The check runs inside the
+version query, on the first line as soon as it is read, so an unpinned
+`wasmtime` is refused before `wasmer` is asked, and no module run starts on
+either engine and no run folder is made. There is no range or list of
+accepted versions. An engine upgrade is refused until the pin is changed, and
+changing a pin is a deliberate edit after a fresh probe like 021 and 030.
+A pin names the version the facts were measured on, not an engine choice:
+both engines stay test-only and not endorsed, and the choice is Anders's.
+
+A version query is refused, with its own reason after `<path>: `, and no
+module run starts:
+
+- a relative program: the module run's own reason, `the engine program path is not absolute: ...`;
+- `<engine> --version did not start: <OS error>` (for example a missing program);
+- `<engine> --version failed (exit status: <n>): <its stderr>`;
+- `<engine> --version printed no version: its first stdout line is empty`;
+- `<engine> --version printed "<first line>", not the pinned version <engine> <pinned>: no module run starts`
+  (task 038).
+
+**The receipt.** `render` gives `key: value` lines in the shape of wc-001's
+build receipt (`tools/build:82`), under its own schema line. Every value comes
+from the run. The real receipt from this Mac, from
+`real_receipt_names_both_installed_engines` on 28 Oct 2026, task 062 (the
+capsule `tools/build` makes, bundled, signed with a fresh test key, verified
+and run on Homebrew's `/opt/homebrew/bin/wasmtime` and `/opt/homebrew/bin/wasmer`;
+the test asserts `bundle: <bundle_identity of the run's bundle>`, which holds
+the same two files as `REFERENCE_LAB_CID`'s bundle):
+
+```
+schema: wc-005.run-receipt/v4
+bundle: bafybeiebyzg55l4s6kb6daroty4prlkximwp6uvo32ovacfzdx7cahywqm
+function: digest
+argument: 1592590337
+wasmtime_version: "wasmtime 45.0.1 (83166ba31 2026-06-05)"
+wasmtime_status: exit status: 0
+wasmtime_stdout: "230101071268130872\n"
+wasmer_version: "wasmer 7.5.0"
+wasmer_status: exit status: 0
+wasmer_stdout: "230101071268130872\n"
+memory_mb: 64
+memory_cap_bytes: 67108864
+wasmtime_memory_cap: ENFORCED max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y
+wasmer_memory_cap: SKIPPED: no memory cap flag in wasmer run --help or wasmer --help (wc-010a)
+wasmtime_memory_maximum_bytes: 67108864
+wasmer_memory_maximum_bytes: 67108864
+wasmtime_process_max_rss_bytes: 14368768 (engine process RSS, not linear memory)
+wasmer_process_max_rss_bytes: 18710528 (engine process RSS, not linear memory)
+```
+
+`bundle` is the verified `cid()`'s Display form, treated as opaque; it is the
+pinned lab CID of this capsule's bundle, the reference value above (same
+manifest, same `capsule.wasm`); every line is that run's. The engine versions sit beside it and
+are no part of it: the same bundle run under other versions has the same name
+(P15: the hash names the content; versions are provenance beside it).
+`function` and `argument` are the runner's own `DIGEST_EXPORT` and
+`DIGEST_ARGUMENT`, the values its argv passes. Quoted values are the printed
+bytes through `escape_ascii`, so every byte is kept and no value can add a
+line. The status is the module run's `ExitStatus` as the OS reported it; a
+passing run always exited 0, because `run_engine` refuses any other status.
+
+**The memory lines (wc-010c, task 028; schema v2).** After the v1 lines,
+`render` adds, in this order:
+
+- `memory_mb: <declared>`: the manifest's `resources.memory_mb` the module runs
+  were given (this capsule declares no `resources`, so the Runtime's default 64);
+- `memory_cap_bytes: <declared × 1048576>`, by the same conversion that makes
+  `wasmtime`'s cap argument (no second MB to bytes rule);
+- per engine, `wasmtime` then `wasmer`, `<engine>_memory_cap: ENFORCED
+  <argument>` with the exact cap argument that engine's module run was started
+  with, or `<engine>_memory_cap: SKIPPED: no memory cap flag in <engine> run
+  --help or <engine> --help (wc-010a)` when it was started with none.
+
+The cap argument is not configured beside the run: `start_engine` reads it back
+from the argv the engine process was started with (the argument after `-W`),
+so a receipt cannot say ENFORCED for an argv without the cap, and the line
+never follows the engine's name or a constant. On this base `wasmtime` gets
+`max-memory-size=<bytes>,max-memories=1,trap-on-grow-failure=y` and `wasmer`
+gets none ("Memory cap (wc-010b)").
+
+**The module maximum lines (task 034; schema v3).** After the v2 lines,
+`render` adds, per engine, `wasmtime` then `wasmer`:
+
+- `<engine>_memory_maximum_bytes: <pages × 65536>`, the module memory maximum
+  that engine's run was checked against, or
+- `<engine>_memory_maximum_bytes: none (the module has no memory)` when that
+  run's check found no memory (the 8-byte `MODULE` fixture).
+
+The receipt's maximum lines come from `run`'s one `memories` check, per
+engine: each `run_engine` call keeps the maximum its own `check_module_memory`
+call returned (`EngineRun::memory_maximum`, in pages), `run` keeps both in
+`TwoEngineRun`, and `memory_maximum_bytes` turns pages into bytes by the same
+`page_bytes` function the check uses (no second page to bytes rule). No line is
+taken from the manifest, a constant or the engine's name, so a module maximum
+below the declared size is recorded as it is (16 pages under a declared 2 MB
+gives `1048576`), and both lines can be tested against the manifest. The
+`wasmer_memory_cap: SKIPPED` line still reports only that wasmer was given no
+cap flag; wasmer's cap is the module's own maximum, which its maximum line
+records.
+
+**The peak lines (task 062; schema v4).** After the v3 lines, `render` adds,
+per engine, `wasmtime` then `wasmer`, exactly:
+
+- `<engine>_process_max_rss_bytes: <n> (engine process RSS, not linear memory)`.
+
+What is measured: `n` is the maximum resident set size of that one engine's
+module-run process, in bytes. The runner's one poll loop asks with
+`wait4(pid, WNOHANG)` in place of `try_wait`; the call that reaps the engine
+returns its exit status and that process's own `rusage`, and `n` is its
+`ru_maxrss`, the same kernel counter `/usr/bin/time -l` prints as "maximum
+resident set size". On macOS it is in bytes (`man 2 getrusage`: "the maximum
+resident set size utilized (in bytes)"). The exit status is built from the
+same call, so each engine process is reaped exactly once and never waited for
+again. `getrusage(RUSAGE_CHILDREN)` is not used: it mixes every child the
+calling process has reaped. The `--version` queries record no peak. A run the
+runner stops (budget, cancel, failed wait) is refused, so it has no peak, and
+the refusal receipt has no peak line.
+
+What it is not: the capsule's linear memory. Linear-memory pages the guest
+never touched are not resident, so they are not counted, and the engine's own
+code, data and compiled module are. wc-010a's probes grew linear memory to
+64 MB and both engines stayed under 20 MB resident ("Peak memory for wc-010's
+receipt"); a guest that fills 48 MiB pushes both past 48 MiB
+(`process_peak_rss_follows_the_memory_the_engine_touched`). That is why every
+line carries its label, and why no line claims that RSS stays under the cap.
+
+Why there is no wrapper: running the engine under `/usr/bin/time` would add a
+process and change every engine argv that the census tests (040, 042), the
+recording shims (041, 049) and `argv_faults` read. `wait4` reads the same
+counter with the argv unchanged.
+
+No linear-memory peak is recorded, because nothing here measures one: no
+receipt line has a key that names linear memory. Flint's answer (INBOX,
+28 Oct 00:25) asked for exactly this label, and for a linear-memory peak only
+if it is actually measured, never cited.
+
+**Writing it.** `write_receipt` writes `render`'s text to a caller-given path
+with the shared `bundle::write_new_file` (`create_new`). An existing file, a
+live link or a dangling link at that path is refused with that writer's own
+reason and cause, unchanged, and nothing at or behind the path changes. The
+writer's reason names no file, so the path before it, the receipt's, is the
+only file name (`<path>: cannot be created as a new file: File exists (os error
+17)`).
+
+**The claim, unchanged from task 015.** One core module, on this one Mac,
+with both engines test-only and not endorsed; not the Component ABI. The
+receipt is lab text: it is not signed, it is no admission or launch value,
+and its lab CID is not the Runtime's CID.
+
+### The refusal receipt (task 044, M1 A7 lab half)
+
+```rust
+wasm_capsule_tools::receipt::refusal_reason(refusal: &TwoEngineRefusal) -> (&'static str, Option<Engine>)
+wasm_capsule_tools::receipt::render_refused(refusal: &TwoEngineRefusal) -> String
+wasm_capsule_tools::receipt::write_refused_receipt(refusal: &TwoEngineRefusal, path: &Path) -> Result<(), bundle::RunRefusal>
+```
+
+A refused run gets a receipt too, rendered from the `TwoEngineRefusal` that
+`run` returned. `render_refused` gives exactly these lines, in this order:
+
+```
+schema: wc-005.run-refusal/v1
+outcome: <refused|cancelled>
+reason: <id>
+engine: <wasmtime|wasmer|none>
+detail: "<the refusal's Display, through escape_ascii>"
+```
+
+`reason` is a stable id per refusal kind, from `refusal_reason`: one
+exhaustive `match` over every `TwoEngineRefusal` variant and every
+`run::Reason` variant, with no wildcard arm, so a new variant without an id
+does not build. The ids are lowercase snake_case and pairwise distinct: one
+per `Reason` variant (for example `budget_exceeded`, `budget_zero`,
+`engine_failed`, `version_not_pinned`), plus `verify_refused` for any verifier
+refusal and `outputs_differ`. A version query's refusal and a module run's
+carry the same `Reason` type, so each `Reason` has one id. So 043's budget
+stop reads `reason: budget_exceeded`, never a generic failure. `engine` is the
+engine the reason names, else `none` (a verifier refusal, `OutputsDiffer`, a
+work-root reason). `detail` is the refusal's own text: a verifier refusal's is
+the verifier's own words. Every value comes from the refusal; nothing is
+configured. There is no lab CID line, since a verifier refusal may have none.
+`write_refused_receipt` writes it through the same `bundle::write_new_file`, so
+an existing file or link at the path is refused with that writer's own reason
+and cause, unchanged; that reason names no file, so the refusal receipt's path
+is the only name in it. The refusal receipt is lab text: it makes no admission
+decision, and it is not signed. The passed-run receipt above is unchanged.
+
+Task 045: `outcome` is `cancelled` for a run the caller cancelled (id
+`cancelled`, "Cancel (M1 A10 lab half)") and `refused` for every other
+refusal. It is read from the id alone (`refusal_outcome`), so there is no
+second rule for which refusal is a cancel.
+
+## Runtime ABI for a bare capsule (wc-008)
+
+**Decision: `NO_ABI_FOR_BARE_CAPSULE`.** `elastos.capsule/v1` has no
+`runtime_abi` for this capsule, a zero-import core Wasm module that is not a
+Component. Each of the seven `CapsuleRuntimeAbi` values needs Component,
+projection, provider, shell, microVM or data metadata, or is refused outright;
+with no `runtime_abi` the manifest validates, but both Runtime run paths refuse
+a `wasm` capsule that is not a Component. The file:line facts are in
+ADOPTION.md ("Runtime ABI for a bare capsule (wc-008)"), and both gaps are in
+its "Gaps for Anders". `capsule/capsule.json` and the pinned lab CID are
+unchanged: the lane picks no near-fit ABI and invents no field.
+
+The tests, in `tests/runtime_abi.rs`:
+
+- `bare_capsule_runtime_abi_is_recorded_as_skipped` — **SKIPPED**, not
+  passed: `#[ignore = "NO_ABI_FOR_BARE_CAPSULE: ..."]` with the gap and
+  https://github.com/Elacity/elastos-runtime/issues/463, and a body that
+  panics with the same text. Cargo lists it as `ignored`.
+- `no_runtime_abi_names_a_bare_core_module` — evidence of the gap, not a
+  passed capability. It puts each ABI value into this capsule's manifest bytes
+  in memory and checks that `validate()` refuses it with that value's own
+  reason (an exact string, so a manifest broken some other way does not pass
+  as the gap). Its `match` on `CapsuleRuntimeAbi` has no wildcard arm, so a
+  new value in the Runtime fails the build. It also checks that the committed
+  manifest has no `runtime_abi` and is not a Component. It prints
+  `NO_ABI_FOR_BARE_CAPSULE` and the seven results.
+- `an_unknown_manifest_field_is_refused_by_name` — adding `lab_imports` to the
+  manifest bytes is refused by the Runtime's `CapsuleManifest` with an error
+  that names `lab_imports`, and `bundle_identity` refuses a bundle of those
+  bytes with the same manifest-parse reason. This is the guard against
+  inventing a field, and the evidence for the gap "No summary of Wasm imports
+  in the manifest".
+
+## Granted imports only (wc-009a)
+
+Retired by task 065 (Rong WC-1, WC-2): no core-module import is granted; see 'Bus v1 import contract (wc-009b)'.
+
+```rust
+wasm_capsule_tools::verify::read_grants(path: &Path) -> Result<Vec<DeclaredImport>, GrantsRefusal>
+```
+
+**The link rule, in Rong's words (W2 (c), through Flint, 26 Oct 08:27).** "The
+module's own import section in the signed capsule.wasm IS the declaration; it is
+in the lab-cid closure and covered by the signature, and cx-wasm-audit's cwa-001
+import list is the one reader for it (P10). Link rule: link an import only if it
+is in the signed module AND in the lab grants file; the grants file stays
+outside the bundle, labelled 'lab stand-in, not admission'. No unsigned
+declaration file."
+
+So there is no declaration file here. The declaration is the module's own
+import section, inside `capsule.wasm`, so inside the lab CID and under the
+signature. The grants file is the caller's input, like the bundle path; it sits
+outside the bundle and is never part of the lab CID.
+
+**The grants file.** JSON, read once with `fs::read` and parsed from memory,
+exactly (task 031 made it v2: each grant names a right):
+
+```json
+{"schema": "wc-009.lab-grants/v2", "label": "lab stand-in, not admission", "imports": [{"module": "env", "name": "f", "right": "call"}]}
+```
+
+An empty `imports` list is valid. A v1 file (grants with no `right`) is refused
+by the schema check. The label is exactly "lab stand-in, not
+admission": the file stands in for the Runtime's grant decision
+(https://github.com/Elacity/elastos-runtime/issues/464), and is never
+admission. `read_grants` returns the grants in file order, without their
+rights. It is the one grants
+reader and lives in `tools/src/verify.rs`, beside the verifier input it feeds;
+no other code in the tools crate reads grants or imports. Each refusal has its
+own reason, after `<path>: `:
+
+- `the grants file cannot be read: <OS error>`;
+- `the grants file is not JSON: <serde_json's reason>`;
+- `the grants file is not a JSON object`;
+- `the grants file has an unknown key "<key>"`;
+- `the grants file has no "<schema|label|imports>" key`;
+- `the grants file's schema is <value as JSON>, not "wc-009.lab-grants/v2"`;
+- `the grants file's label is <value as JSON>, not "lab stand-in, not admission"`;
+- `the grants file's imports is not a list`;
+- `grant <index> is not an object of exactly three strings, module, name and right`;
+- `the grant <module>.<name> is listed twice`;
+- `the grant <module>.<name> names the right "<granted>", but its typed lab
+  operation needs "<needed>"` (task 031: the grant of an import that has a
+  typed lab operation names any right but the one it needs).
+
+A key written twice in one JSON object is not refused: `serde_json` keeps its
+last value, so the file reads as that value. This is a known limit of the lab
+reader, not a claim.
+
+**How it links.** The caller passes `read_grants`'s list as
+`RunInput::granted`, and `run` passes it unchanged to its one `verify_bundle`
+call, so to the verifier's one `audit(module, granted)` call. There is no
+second import check, parser or walk. A module with an import that is not
+granted is refused there, `undeclared import <module>.<name>`, and never
+reaches an engine: no run folder is made and neither engine is started, not
+even for `--version`. Task 031: a module import that is granted but has no
+typed lab operation (below) is refused the same way, right after that `audit`
+call, on the audit's own list, `no typed lab operation for import
+<module>.<name>`. On success the run reports:
+
+- `linked()`: the audit's own list, the imports both in the signed module and
+  granted, in section order;
+- `unused_grants()`: the grants the module does not import, in file order.
+  They link nothing; they are reported. The verifier works them out once from
+  the audit's list and the grants, with no second import read.
+
+**Allowed through, not hosted (wc-009b).** The runner gives the engines no host
+function of its own yet. A granted import is only let through verification; no
+engine is given a function for it. This capsule has zero imports, so its run
+needs none. Hosting a granted import in both engines is wc-009b, after this
+task, and starts with a read-only discovery.
+
+**Who decides (Q8, Flint, 26 Oct 10:40).** The Runtime's launch path verifies
+the accepted record, the selected platform variant and the installed contents.
+Those checks are Runtime work, outside this lane. The grants file is "lab
+stand-in, not admission" everywhere: this lane decides no admission, launch or
+publisher trust, and its lab name is not the Runtime's CID.
+
+### Typed lab operations (M1 B4 lab half)
+
+Retired by task 065 (Rong WC-1, WC-2): no core-module import is granted; see 'Bus v1 import contract (wc-009b)'.
+
+Task 031 (Flint, INBOX 26 Oct 23:50, "one permission model"). Each import the
+lab runner can link is listed once as a typed operation in `pub const
+LAB_OPERATIONS` (`tools/src/verify.rs`): its module and name, its inputs and
+outputs (Wasm value type names), the one right a grant of it must name, and its
+effect (`none`, `read` or `write`). It is the only copy of the table in code,
+and `readme_lists_each_typed_lab_operation` fails if this list and the table
+differ:
+
+- `env.f`: inputs `()`, outputs `()`, right `call`, effect `none`
+
+Two refusals use it, both before any engine starts:
+
+- The grants reader, `read_grants`, refuses a grant whose `right` is not its
+  operation's right (`env.f` granted `write`: `the grant env.f names the right
+  "write", but its typed lab operation needs "call"`). A grant of an import
+  with no typed operation names no needed right; it is read, and it links
+  nothing unless the module imports it.
+- The verifier, `verify_checked`, refuses a module import with no typed
+  operation, even when granted: `no typed lab operation for import env.g`. The
+  check runs on the audit's own returned list, right after the one `audit`
+  call, so it reads no import of its own (P10), and a grant the module does
+  not import stays an unused grant, reported as before. A module importing
+  `env.g` with no grant is still refused by the audit first, `undeclared import
+  env.g`.
+
+No manifest field is added: the module's own import section stays the
+declaration (https://github.com/Elacity/elastos-runtime/issues/464).
+Gap: the lab checks Bus interface names only, never their WIT types, so a linked Bus interface is not type-checked; this blocks the type half of M1 B4 (one permission model).
+Task 065 reworded task 046's gap from the typed table to the Bus path: the
+audit's `audit_component` returns each import's interface name only
+(`audit/INTERFACE.md`), so `bus_imports` matches by name; task 046 keeps
+this as ADOPTION's "Gaps for Anders" item 4, and
+`import_type_gap_is_a_named_row_and_nothing_claims_a_type_check` holds it.
+The table and the grants are a lab stand-in, not admission: input for
+Anders's typed-operations model, not the Runtime's rights model.
+
+## Memory cap discovery (wc-010a)
+
+Read-only discovery for wc-010 ("fixed bare memory with a host-enforced
+limit"). No runner, argv, receipt, test or `falsifiers.json` change; `run.rs`
+still passes no memory flag. (26 Oct, task 027: no longer so; wc-010b gives
+`wasmtime` the cap from the manifest, see "Memory cap (wc-010b)" below.) Facts are what each engine's CLI does on this Mac
+only, at base `a5b4e8a105fca181469ce15b2b84c03b86f0266d`, with
+`/opt/homebrew/bin/wasmtime --version` = `wasmtime 45.0.1 (83166ba31
+2026-06-05)` and `/opt/homebrew/bin/wasmer --version` = `wasmer 7.5.0`. Each
+engine ran as its own process from a shell (no engine inside an engine, no
+VM, no Docker). This is not the ~4 GB DigitCapsule and not any-RTOS loading.
+
+**The declared size.** `elastos/crates/elastos-common/src/manifest.rs` at this
+base: `CapsuleManifest` has `#[serde(default)] pub resources: ResourceLimits`
+(lines 102-103); `ResourceLimits` has `#[serde(default = "default_memory")]
+pub memory_mb: u32` (lines 1167-1169), and `fn default_memory() -> u32 { 64 }`
+(lines 1188-1190). `capsule/capsule.json` has no `resources` key
+(`grep -n resources lab/wasm-capsule/capsule/capsule.json` prints nothing,
+exit 1), so this capsule declares the default, 64 MB. The manifest does not say
+whether MB is 10^6 or 2^20 bytes; the probes read it as 64 × 2^20 =
+67108864 bytes = 1024 Wasm pages of 64 KiB. wc-010b must state the same
+reading. No field was invented and `capsule.json` is unchanged.
+
+**The probe modules** (WAT text under the git-ignored `target/wc010a/`, never
+committed; both engines took the `.wat` file directly, so no `wat` crate step
+was needed):
+
+```wat
+(module
+  (memory (export "memory") 1)
+  (func (export "grow") (param i32) (result i32)
+    local.get 0
+    memory.grow))
+```
+
+`grow.wat` starts at 1 page and has no declared maximum. `memory.grow` returns
+the old size in pages (1) on success and -1 on failure. Growing by 1023 pages
+reaches exactly 1024 pages (64 MB, at the cap); growing by 1024 reaches 1025
+pages (67174400 bytes, past it). `big-min.wat` is
+`(module (memory (export "memory") 1025) (func (export "size") (result i32) memory.size))`:
+its own minimum is one page above the cap.
+
+### wasmtime 45.0.1: FOUND
+
+The flag, from `wasmtime -W help`:
+
+```text
+  -W                         max-memory-size=N -- Maximum size, in bytes, that a linear memory is allowed to reach.
+  -W                trap-on-grow-failure[=y|n] -- Force a trap to be raised on `memory.grow` and `table.grow` failure instead of returning -1 from these instructions.
+```
+
+Unit: bytes, so 64 MB is `-W max-memory-size=67108864`. Runs from
+`lab/wasm-capsule/target/wc010a/`, engine path `/opt/homebrew/bin/wasmtime`
+(each first stderr line is the CLI's own `--invoke` warning, quoted as
+printed):
+
+| Run | Command | Exit | stdout | stderr |
+|---|---|---|---|---|
+| (i) within the cap | `wasmtime run -W max-memory-size=67108864 --invoke grow grow.wat 1023` | 0 | `1` | ``warning: using `--invoke` with a function that takes arguments is experimental and may break in the future`` |
+| (ii) past the cap | `wasmtime run -W max-memory-size=67108864 --invoke grow grow.wat 1024` | 0 | `-1` | the same warning |
+| (ii-t) past the cap, trap flag | `wasmtime run -W max-memory-size=67108864,trap-on-grow-failure=y --invoke grow grow.wat 1024` | 1 | (none) | the same warning, then ``Error: failed to run main module `grow.wat` `` and, last, `2: forcing trap when growing memory to 67174400 bytes` |
+| (i-t) within the cap, trap flag | `wasmtime run -W max-memory-size=67108864,trap-on-grow-failure=y --invoke grow grow.wat 1023` | 0 | `1` | the same warning |
+| (iii) past 64 MB, no flag | `wasmtime run --invoke grow grow.wat 1024` | 0 | `1` | the same warning |
+| start, above-cap minimum | `wasmtime run -W max-memory-size=67108864 --invoke size big-min.wat` | 1 | (none) | ``Error: failed to run main module `big-min.wat` ``, then `0: failed to instantiate "big-min.wat"` and `1: memory minimum size of 1025 pages exceeds memory limits` |
+| start, no flag | `wasmtime run --invoke size big-min.wat` | 0 | `1025` | ``warning: using `--invoke` with a function that returns values is experimental and may break in the future`` |
+
+(iii) returning `1` where (ii) returned `-1`, on the same module and argument,
+shows the flag, not the module, made the grow fail.
+
+### wasmer 7.5.0: SKIPPED
+
+No memory cap flag in its help. Searched `wasmer run --help` and
+`wasmer --help` (both exit 0) case-insensitively for `memory`, `grow`, `trap`,
+`limit`, `pages`, `max`, `heap`, `size`, `resource`, `rlimit` and `bytes`.
+`wasmer --help` matched none. `wasmer run --help` matched only lines about
+other things, each in the help of one of these flags:
+`--enable-experimental-unaligned-memory-accesses`,
+`--enable-bulk-memory`, `--enable-multi-memory`, `--enable-memory64` (Wasm
+features), `--with-compact-on-growth` (journal compaction; its `grow` and
+`size` matches), `--enable-cpu-backoff`'s CPU back-off "maximum amount of
+time", `--stack-size <STACK_SIZE>` with "Set the default stack size (default
+is 1048576)" (the stack, not linear memory), `--skip-journal-stdio` with "Skip
+writes to stdout and stderr when replying journal events to bootstrap a
+module" (journal replay; `trap` matches inside "bootstrap"), and
+`--COREDUMP_PATH <COREDUMP_PATH>` with "Generate a coredump at this path if a
+WebAssembly trap occurs" (where to write a crash dump after a trap; it sets no
+limit). Task 060 re-ran each search and lists every matched line in LOG. So
+this CLI gives no way to cap a module's linear memory, and a cap cannot be claimed for
+wasmer. The contrast and start runs, engine path `/opt/homebrew/bin/wasmer`,
+from the same folder (stderr empty, 0 bytes, on each):
+
+| Run | Command | Exit | stdout |
+|---|---|---|---|
+| (iii) past 64 MB, no flag | `wasmer run --invoke grow grow.wat 1024` | 0 | `1` |
+| grow to 65536 pages (the wasm32 limit), no flag | `wasmer run --invoke grow grow.wat 65535` | 0 | `1` |
+| start, above-cap minimum | `wasmer run --invoke size big-min.wat` | 0 | `1025` |
+
+### The answer for wc-010b
+
+- wasmtime: **grow returns -1** with `-W max-memory-size=67108864`; adding
+  `-W trap-on-grow-failure=y` turns that -1 into a **trap** (exit 1,
+  "forcing trap when growing memory to 67174400 bytes"); a module whose own
+  minimum is above the cap is **start refused** ("memory minimum size of 1025
+  pages exceeds memory limits").
+- wasmer: **SKIPPED** (no memory cap flag in `wasmer run --help` or
+  `wasmer --help`); no flag turns a failed grow into a trap, and with no cap
+  the grow past 64 MB succeeds.
+- The two engines differ. Rong's draft name
+  `memory_grow_past_limit_traps_on_both` is not right: only wasmtime traps,
+  and only with the extra flag. wc-010b's wasmer memory test must report
+  SKIPPED with the reason above, never PASS.
+
+**Peak memory for wc-010's receipt.** `/usr/bin/time -l` prints a "maximum
+resident set size" line. This is the **engine process's resident memory**, not
+the capsule's linear memory:
+
+- `/usr/bin/time -l /opt/homebrew/bin/wasmtime run -W max-memory-size=67108864 --invoke grow grow.wat 1023`
+  printed `            14696448  maximum resident set size` (and
+  `             5538248  peak memory footprint`).
+- `/usr/bin/time -l /opt/homebrew/bin/wasmer run --invoke grow grow.wat 1023`
+  printed `            19218432  maximum resident set size` (and
+  `             5374408  peak memory footprint`).
+
+Both runs grew linear memory to 64 MB, yet each process's resident size is
+below that: untouched pages are not resident. So this number is no measure of
+the capsule's declared or used linear memory. Task 062 records this counter in
+the run receipt with exactly that label ("The peak lines", in "Run receipt
+(wc-005c)").
+
+## Memory cap (wc-010b)
+
+[Proposal] The claim, exactly: "a self-contained capsule in a fixed flat space
+with a host-enforced cap", on wasmtime by its flag (task 027) and, since task
+033, on both engines by the module's own maximum, on this one Mac; not the ~4 GB
+DigitCapsule, not any-RTOS loading. The memory flag is a test-only limit, never an engine choice; the engine choice is Anders's.
+Phase 2 groundwork; it claims no spike grade row.
+
+**The declared size.** The cap is the Runtime manifest's existing
+`resources.memory_mb` (`CapsuleManifest.resources: ResourceLimits`,
+`#[serde(default)]`; `memory_mb: u32`, default 64). No field is invented.
+`tools/src/verify.rs`'s one manifest read (`manifest_entrypoint`, the one
+`CapsuleManifest` parse) keeps it in the sealed `VerifiedBundle`, read through
+one accessor, `memory_mb()`. The runner takes it from that value only, never
+from a file or the environment. This capsule's `capsule.json` has no
+`resources` key, so it declares the default, 64; `capsule.json` and the lab
+CID pins are unchanged. The declared size is an allowance (a resource budget),
+kept apart from identity (the lab CID) and from admission, which this lane
+never decides.
+
+**MB is read as 2^20 bytes**, as wc-010a's probes read it: the runner's cap is
+`memory_mb × 1048576` bytes, in `u64`, so no `u32` overflows (`u32::MAX` MB is
+4503599626321920 bytes). This capsule's 64 MB = 64 × 2^20 = 67108864 bytes =
+1024 Wasm pages of 64 KiB.
+
+**wasmtime 45.0.1: ENFORCED.** Its module run gets exactly one more argument
+pair, after `run --invoke digest` and before the module path: `-W` and
+`max-memory-size=<bytes>,max-memories=1,trap-on-grow-failure=y`. The unit is
+bytes (`wasmtime -W help`, wc-010a). `max-memory-size` caps each linear
+memory on its own, so the declared size is the capsule's whole linear memory
+only with `max-memories=1` ("Maximum number of WebAssembly linear memories
+allowed to be created", `wasmtime -W help`): a module with a second memory is
+refused at start with "resource limit exceeded: memory count too high at 2"
+(task 027 round 2, from the Codex review; the verifier's import audit accepts
+such a module). Since task 033 such a module never reaches wasmtime: `run`
+refuses a second memory before any start. With `trap-on-grow-failure=y` a `memory.grow`
+past the cap traps (exit 1, "forcing trap when growing memory to 67174400
+bytes") instead of returning -1, so the runner refuses the run with
+`EngineFailed` and wasmtime's stderr. The `--version` query is unchanged.
+Checked once by hand in this order before the code (LOG.md, task 027): `run
+--invoke grow -W max-memory-size=67108864,trap-on-grow-failure=y grow.wat 1024`
+exits 1 with that trap line, and `... 1023` exits 0 and prints `1`. Round 2,
+by hand with `max-memories=1` added: the same two results, and the two-memory
+module under a 2 MB cap exits 1 with the memory count line (exit 0 and `64`
+without it).
+
+**wasmer 7.5.0: SKIPPED.** No memory cap flag in `wasmer run --help` or
+`wasmer --help` (wc-010a), so its argv is unchanged and it gets no cap flag.
+Since task 033 its cap is the module's own memory maximum, which `run` checks
+against the declared size before any start ("The runner checks the module's
+maximum (task 033)"). `memory_cap_on_wasmer_is_skipped` is an `#[ignore]` test
+for the flag, with that reason, never counted as a PASS. No other route (an rlimit, a wrapper, an
+engine inside an engine, a VM) is used. No test name says "on_both" for the
+cap.
+
+Not in this task: the receipt's cap lines (wc-010c, task 028, in "Run receipt
+(wc-005c)") and measured peak memory, a maximum inside `capsule.wasm`, and any
+admission or launch decision.
+
+**Fail closed on the cap (task 038).** The cap argument rests on wasmtime
+45.0.1's measured behaviour, so `run` starts only the pinned versions ("Run
+receipt (wc-005c)"). A capped start that wasmtime rejects (exit 2, a first
+stderr line that starts `error: ` and holds ` -W `, measured in LOG.md, task
+038) is refused as a rejected cap, and the module is never run without its cap
+("Run one engine (wc-005a)"). Task 043: the runner applies one other limit,
+a wall-clock budget per module run, by SIGKILL from outside the engine
+("Run one engine (wc-005a)", "The run budget"). It promises no fuel limit and
+passes no fuel or timeout flag; nothing about the budget is in the engine argv
+or reaches the guest.
+
+## Module memory maximum discovery (wc-010d0)
+
+Read-only discovery for the C0 refusal (Flint, 26 Oct 23:50: refuse to start
+an engine that cannot apply the capsule's declared memory cap, never run it
+uncapped). wasmer 7.5.0 has no cap flag (wc-010a), so the question here is
+the other route: the cap written into the module itself, as its memory's
+declared maximum, which a Wasm engine must apply with no flag. No runner,
+argv, receipt, test, `falsifiers.json`, `capsule/`, `tools/build` or pin
+change; `capsule.wasm` is not re-pinned. Facts are what each engine's CLI does
+on this Mac only, at base `a541cd7ba8e656ddc07466b3fc533118c5771ac7`, with
+`/opt/homebrew/bin/wasmtime --version` = `wasmtime 45.0.1 (83166ba31
+2026-06-05)` and `/opt/homebrew/bin/wasmer --version` = `wasmer 7.5.0` (both
+exit 0). Each engine ran by its absolute path as its own process from a shell
+(no engine inside an engine, no VM, no Docker), with **no cap flag** (no
+`max-memory-size`). Both engines stay test-only; this picks neither.
+
+**The probe modules** (WAT text under the git-ignored `target/wc010d/r1/`,
+never committed; both engines took the `.wat` files directly). The maximum
+1024 pages is 64 × 2^20 bytes, the capsule's declared default, read as
+wc-010a reads MB.
+
+`grow-max.wat`:
+
+```wat
+(module (memory (export "memory") 1 1024) (func (export "grow") (param i32) (result i32) local.get 0 memory.grow))
+```
+
+`bad-max.wat` (its minimum, 1025, is above its own maximum, 1024):
+
+```wat
+(module (memory (export "memory") 1025 1024) (func (export "size") (result i32) memory.size))
+```
+
+`grow-nomax.wat` is the contrast: `grow-max.wat` with no maximum,
+`(module (memory (export "memory") 1) (func (export "grow") (param i32) (result i32) local.get 0 memory.grow))`.
+`memory.grow` returns the old size in pages (1) on success and -1 on failure;
+growing by 1023 reaches exactly 1024 pages (at the maximum), by 1024 reaches
+1025 (past it). Runs from `lab/wasm-capsule/target/wc010d/r1/`.
+
+### wasmtime 45.0.1
+
+Each successful `grow` run's stderr is the CLI's own two `--invoke` warnings,
+``warning: using `--invoke` with a function that takes arguments is experimental and may break in the future``
+and the same for "returns values".
+
+| Run | Command | Exit | stdout | stderr |
+|---|---|---|---|---|
+| (w1) at the maximum | `/opt/homebrew/bin/wasmtime run --invoke grow grow-max.wat 1023` | 0 | `1` | the two warnings |
+| (w2) past the maximum | `/opt/homebrew/bin/wasmtime run --invoke grow grow-max.wat 1024` | 0 | `-1` | the two warnings |
+| (w2-t) past the maximum, trap flag only | `/opt/homebrew/bin/wasmtime run -W trap-on-grow-failure=y --invoke grow grow-max.wat 1024` | 1 | (none) | the first warning, ``Error: failed to run main module `grow-max.wat` ``, then ``0: failed to invoke `grow` ``, `1: error while executing at wasm backtrace:` and, last, `2: forcing trap when growing memory to 67174400 bytes` |
+| (w1-t) at the maximum, trap flag only | `/opt/homebrew/bin/wasmtime run -W trap-on-grow-failure=y --invoke grow grow-max.wat 1023` | 0 | `1` | the two warnings |
+| (w3) start, minimum above maximum | `/opt/homebrew/bin/wasmtime run --invoke size bad-max.wat` | 1 | (none) | `Error: failed to parse WebAssembly module`, then `size minimum must not be greater than maximum (at offset 0x16)` |
+| (w4) contrast, no maximum | `/opt/homebrew/bin/wasmtime run --invoke grow grow-nomax.wat 1024` | 0 | `1` | the two warnings |
+
+(w4) returning `1` where (w2) returned `-1`, with the same argument and no
+flag on either, shows the module's own maximum made the grow fail. (w2-t)
+shows `trap-on-grow-failure=y` alone, with no `max-memory-size`, turns that
+failure into a trap.
+
+### wasmer 7.5.0
+
+stderr is empty (0 bytes) on each run that exits 0.
+
+| Run | Command | Exit | stdout | stderr |
+|---|---|---|---|---|
+| (m1) at the maximum | `/opt/homebrew/bin/wasmer run --invoke grow grow-max.wat 1023` | 0 | `1` | (none) |
+| (m2) past the maximum | `/opt/homebrew/bin/wasmer run --invoke grow grow-max.wat 1024` | 0 | `-1` | (none) |
+| (m3) start, minimum above maximum | `/opt/homebrew/bin/wasmer run --invoke size bad-max.wat` | 1 | (none) | `error: Unable to compile "bad-max.wat"`, then `╰─▶ 1: compile error: Validate("size minimum must not be greater than maximum (at offset 0x16)")` |
+| (m4) contrast, no maximum | `/opt/homebrew/bin/wasmer run --invoke grow grow-nomax.wat 1024` | 0 | `1` | (none) |
+
+(m4) against (m2) is the same contrast: wasmer applies the module's own
+maximum with no flag. wasmer has no flag that turns the -1 into a trap
+(wc-010a), so on wasmer a grow past the maximum returns -1 and the capsule
+keeps running.
+
+### The capsule's memory section
+
+Read by a `python3 -I` script written from the Wasm core binary format
+(section id 5; limits flag 0x00 = minimum only, 0x01 = minimum and maximum),
+never committed; its full text is in LOG.md, task 030. The audit crate's v1
+API returns imports only (`audit/INTERFACE.md`), so it cannot answer this.
+
+- Today's capsule, `tools/build target/wc010d/r1/today` (exit 0): sha256
+  `6dd9af1a8d33d14f48514611663e3f5b262f91ef2729de4ec851441af9b22b13` (the
+  pinned value), 178 bytes, one memory: **minimum 16 pages, maximum none**.
+- A control build by hand, `tools/build`'s recipe (its `SOURCE_DATE_EPOCH`,
+  `CARGO_INCREMENTAL=0`, the three `--remap-path-prefix` flags in
+  `CARGO_ENCODED_RUSTFLAGS`, `cargo build --locked --package capsule --release
+  --target wasm32-unknown-unknown`) with `CARGO_TARGET_DIR` set to
+  `target/wc010d/r1/build-control`: the same sha256, `6dd9af1a…`, so the hand
+  recipe is `tools/build`'s.
+- The scratch build, that recipe plus `-C link-arg=--max-memory=67108864`, with
+  `CARGO_TARGET_DIR` set to `target/wc010d/r1/build-max`: sha256
+  `2002429e73ee1a5e983df008f5b53728882646f109d55a9d1a93e831690631e1`, 180 bytes,
+  one memory: **minimum 16 pages, maximum 1024 pages**. It is not committed;
+  task 032 then made that scratch build the committed capsule, and task 068
+  re-pinned its newer bytes ("Claim scope", above).
+
+`--invoke digest 1592590337` on each, as `env -i <engine> run --invoke digest
+<absolute module path> 1592590337 < /dev/null`, `<D>` = the absolute path of
+`lab/wasm-capsule/target/wc010d/r1`:
+
+| Module | Engine | Exit | stdout | stderr |
+|---|---|---|---|---|
+| `<D>/capsule-max.wasm` (scratch, maximum 1024) | `/opt/homebrew/bin/wasmtime` | 0 | `230101071268130872` | the two warnings |
+| `<D>/capsule-max.wasm` (scratch, maximum 1024) | `/opt/homebrew/bin/wasmer` | 0 | `230101071268130872` | (none) |
+| `<D>/today/capsule.wasm` (pinned, no maximum) | `/opt/homebrew/bin/wasmtime` | 0 | `230101071268130872` | the two warnings |
+| `<D>/today/capsule.wasm` (pinned, no maximum) | `/opt/homebrew/bin/wasmer` | 0 | `230101071268130872` | (none) |
+
+`230101071268130872` is `FIXED_OUTPUT` (`0x0331_7BB4_875F_B038`,
+`capsule/src/lib.rs`) for `FIXED_INPUT` `0x5EED_0001` = 1592590337. `digest`
+never grows memory, so these runs show the same output, not a grow refusal in
+the capsule.
+
+### The answer for the C0 refusal
+
+- (a) FOUND: wasmtime refuses a grow past the module's own maximum with no
+  flag: (w2) returns `-1`, against (w4)'s `1`; with only
+  `trap-on-grow-failure=y` it traps, (w2-t).
+- (b) FOUND: wasmer does: (m2) returns `-1`, against (m4)'s `1`. It returns
+  -1 only; it has no trap flag.
+- (c) FOUND: both refuse a module whose minimum is above its maximum at start,
+  before any call: (w3) and (m3), each exit 1 with "size minimum must not be
+  greater than maximum".
+- (d) NOT FOUND: `capsule.wasm` declared no maximum at that time: minimum 16
+  pages, maximum none ("The capsule's memory section", today's capsule).
+- (e) FOUND: the `--max-memory=67108864` build gives the capsule a maximum of
+  exactly 1024 pages (sha256 `2002429e…`) with the same digest output,
+  `230101071268130872`, on both engines (the `capsule-max.wasm` rows).
+
+What the C0 refusal still needs that this lane cannot write: a reader of the
+module's memory maximum (each memory's maximum, and that there is only one
+memory), and the audit crate (cx-wasm-audit) is the one module reader, so that
+ask goes to cx-wasm-audit through Flint, not into a second reader here.
+
+### The capsule declares its maximum (task 032)
+
+[Proposal] Since task 032 (27 Oct), `tools/build` passes
+`-Clink-arg=--max-memory=67108864`, so `capsule.wasm` declares a maximum of
+1024 pages, its declared `memory_mb` (64) × 2^20 bytes; its minimum is still 16
+pages and its `digest` output is unchanged. Both engines apply a module's own
+maximum with no flag ((w2) and (m2) above): wasmer returns -1 to a grow past
+it, where wasmtime with `run`'s flag traps. Since task 033, `run` checks a
+module's maximum before any start (next part); its argv and the receipt's cap
+lines are unchanged, so wasmer's receipt line still says SKIPPED: it reports
+the flag `run` passed. The claim stays "a
+self-contained capsule in a fixed flat space with a host-enforced cap", on
+this one Mac only: not the ~4 GB DigitCapsule and not any-RTOS loading.
+
+### The runner checks the module's maximum (task 033)
+
+[Proposal] M1 C0 lab half, step (iii): the runner never starts an engine that
+cannot apply the capsule's declared memory size. The one cap both engines
+apply with no flag is the module's own memory maximum ((w2) and (m2) above),
+so `run` and `run_engine` check it, with no fallback:
+
+- the verified entrypoint's memory limits are read only through
+  `wasm_capsule_audit::memories` (`audit/INTERFACE.md`, "Additive under v1"),
+  the lab's one module reader (P10); `tools/` has no reader of its own;
+- one private function in `tools/src/run.rs`, `check_module_memory`, holds the
+  rule; `run_engine` calls it right after the zero-budget check, before any
+  folder is made, and `run` calls it once right after `verify_bundle`, before
+  the two `--version` queries. A refused module starts no engine process;
+- a module with no memory passes: it has no linear memory to grow (the 8-byte
+  `MODULE` and `IMPORTING_MODULE` fixtures);
+- more than one memory, imported or defined, is refused
+  (`MemoryCountAboveOne`): `the module has 2 memories: the declared size caps
+  one linear memory, so the module is not run uncapped`;
+- a memory with no maximum is refused (`MemoryMaximumMissing`): `the module's
+  memory (minimum 1 × 64 KiB) declares no maximum: the module is not run
+  uncapped`;
+- a maximum whose bytes (pages × 65536, in `u64`, saturating) are above the
+  declared size (`memory_mb × 1048576`, the one conversion) is refused
+  (`MemoryMaximumAboveDeclared`): `the module's memory maximum, 33 × 64 KiB,
+  is above the declared 2 MB (32 × 64 KiB): the module is not run uncapped`;
+- a `memories` refusal is carried unchanged (`MemoryNotRead`). The verifier's
+  `audit` parses the same bytes first, so a verified module is not expected to
+  meet it;
+- each refusal's path is the entrypoint's path in the bundle, `capsule.wasm`;
+  `run` returns it as `TwoEngineRefusal::Memory`, and the refusal receipt names
+  its reason (`memory_count_above_one`, `memory_maximum_missing`,
+  `memory_maximum_above_declared`, `memory_not_read`; `engine: none`, since it
+  names the module, not an engine). A 64-bit or shared memory is not refused
+  as such; its maximum is checked like any other.
+
+The check returns the checked maximum in pages; task 034 records it per engine
+in the run receipt ("The module maximum lines"). On a grow past the maximum, wasmer
+returns -1 and keeps running (`memory_grow_past_the_module_maximum_returns_minus_one_on_wasmer`);
+wasmtime traps, because task 027 gives it `trap-on-grow-failure=y`, so the
+runner refuses that run as `EngineFailed`. wasmtime's argv is unchanged. The
+claim stays "a self-contained capsule in a fixed flat space with a
+host-enforced cap", on this one Mac only. Both engines stay test-only; the
+engine choice is Anders's.
+
+**One test for the whole cap claim (task 063, wc-010c's cap half).** Flint's
+note (INBOX, 28 Oct 00:25) asked for one named test that runs the capsule on
+each engine with its declared cap and shows it never exceeds it.
+`capsule_stays_under_declared_memory_cap` (`tests/run.rs`) reads the rules of
+tasks 027, 033 and 034 through both receipts, per engine, and adds no rule:
+(a) the built capsule (declared 64 MB) through `run` on both real engines: its
+v4 receipt says `memory_cap_bytes: 67108864`, `wasmtime_memory_cap` is ENFORCED
+with `max-memory-size=67108864`, each `<engine>_memory_maximum_bytes` is at
+most 67108864, and each `<engine>_process_max_rss_bytes` line is there with
+task 062's label; (b) `grow_module(GROW_PAST_THE_CAP)`, one page past the
+declared 64 MB, through `run` on both real engines is refused because wasmtime
+traps (refusal receipt `reason: engine_failed`, `engine: wasmtime`, the trap
+in its detail), and the same module through `run_engine` on real wasmer prints
+`-1`; (c) a module whose maximum is 1025 pages, one over, through `run` on
+counting stand-ins is refused as `memory_maximum_above_declared`, and neither
+stand-in is started, not even for `--version`. RSS is never compared with the
+cap: it is engine process RSS, not linear memory (task 062's label). A missing
+real engine prints SKIPPED for (a) and (b) and the test prints no PASS; (c)
+needs no engine. Falsifier F-WC10G-CAP-RAISED ("## Falsifiers").
+
+## Granted import hosting discovery (wc-009b0)
+
+Read-only discovery for wc-009b. wc-009a lets a granted import through the
+verifier, but `run` gives the engines no host function, so a granted import is
+allowed, not hosted. This section records whether each engine's CLI can supply
+a named core-module import from a second Wasm module file (no host code of the
+engine's own, no WASI flag), the exact flag, and what happens without it. It is
+what each CLI does on this Mac only, not a choice of import path, and no
+Component Model or Bus claim. No runner, argv, receipt, test or
+`falsifiers.json` change; `run.rs` still passes no such flag. Base
+`3a4d2812aa71fce5a92e6bf7b314aee9844c7293`, with
+`/opt/homebrew/bin/wasmtime --version` = `wasmtime 45.0.1 (83166ba31
+2026-06-05)` and `/opt/homebrew/bin/wasmer --version` = `wasmer 7.5.0`. Each
+engine ran as its own process from a shell (no engine inside an engine, no VM,
+no Docker), in the runner's shape: `env -i` (an empty environment), stdin from
+`/dev/null`, and `run --invoke digest <absolute module path> 1592590337` plus
+only the flag under test.
+
+Rong's ruling (26 Oct), which every answer below is read under:
+Discovery only: no engine-specific host-function route (a preload module or a CLI flag) becomes the lab's import path; granted imports stay a stand-in for the Runtime/provider contract (P10, P18).
+
+**The probe modules** (WAT text under the git-ignored `target/wc009b0/`, never
+committed; both engines took the `.wat` files directly, so no `wat` crate step
+was needed). `main.wat` uses the import name of `IMPORTING_MODULE`, `env.f`:
+
+```wat
+(module
+  (import "env" "f" (func $f (param i32) (result i32)))
+  (func (export "digest") (param i32) (result i32)
+    local.get 0
+    call $f))
+```
+
+`host.wat` has no imports and exports `f`, which returns its argument plus 1:
+
+```wat
+(module
+  (func (export "f") (param i32) (result i32)
+    local.get 0
+    i32.const 1
+    i32.add))
+```
+
+`host-wasi.wat` is `host.wat` plus
+`(import "wasi_snapshot_preview1" "proc_exit" (func (param i32)))`, never
+called. `host-unknown.wat` is `host.wat` plus
+`(import "nope" "g" (func (param i32)))`, never called: a contrast for (iv). In
+the commands, `<D>` is the absolute path of
+`lab/wasm-capsule/target/wc009b0` and each module path is absolute. Each
+table row gives its complete command as run, from a shell; each was run again
+once by task 026 with exactly that command and gave the same exit and stdout.
+
+### wasmtime 45.0.1: FOUND, `--preload env=<path>`
+
+The flag, from `/opt/homebrew/bin/wasmtime run --help`:
+
+```text
+      --preload <NAME=MODULE_PATH>
+          Load the given WebAssembly module before the main module
+```
+
+`NAME` is the import module name the preloaded module's exports answer, so
+`env.f` is supplied by `--preload env=<D>/host.wat`. The runs (each successful
+run's stderr is the CLI's own two `--invoke` warnings, the first being
+``warning: using `--invoke` with a function that takes arguments is experimental and may break in the future``):
+
+| Run | Complete command as run | Exit | stdout | stderr (first line, then the cause) |
+|---|---|---|---|---|
+| (i) `host` as `env` | `env -i /opt/homebrew/bin/wasmtime run --preload env=<D>/host.wat --invoke digest <D>/main.wat 1592590337 < /dev/null` | 0 | `1592590338` | the warnings |
+| (ii) nothing supplied | `env -i /opt/homebrew/bin/wasmtime run --invoke digest <D>/main.wat 1592590337 < /dev/null` | 1 | (none) | ``Error: failed to run main module `<D>/main.wat` ``; last: ``1: unknown import: `env::f` has not been defined`` |
+| (iii) `host` as `other` | `env -i /opt/homebrew/bin/wasmtime run --preload other=<D>/host.wat --invoke digest <D>/main.wat 1592590337 < /dev/null` | 1 | (none) | the same as (ii), word for word |
+| (iv) `host-wasi` as `env` | `env -i /opt/homebrew/bin/wasmtime run --preload env=<D>/host-wasi.wat --invoke digest <D>/main.wat 1592590337 < /dev/null` | 0 | `1592590338` | the warnings |
+| (iv-c) `host-unknown` as `env` | `env -i /opt/homebrew/bin/wasmtime run --preload env=<D>/host-unknown.wat --invoke digest <D>/main.wat 1592590337 < /dev/null` | 1 | (none) | ``Error: failed to process preload `env` at `<D>/host-unknown.wat` ``; last: ``unknown import: `nope::g` has not been defined`` |
+
+(ii) is the contrast: the same `main.wat` and argument, without the flag, is
+refused at start, and the message names both `env` and `f`. (iii) shows the
+name matters: a module preloaded under another name supplies nothing.
+
+**(iv): a supplied module can bring WASI in.** wasmtime did not refuse
+`host-wasi.wat`: it linked the supplied module's `wasi_snapshot_preview1`
+import with no WASI flag on the command line, and the run printed
+`1592590338`. (iv-c) shows the import was really resolved, not skipped: an
+import wasmtime has no definition for is refused when the preload is
+processed. So on this CLI, a module supplied with `--preload` can bring
+wasmtime's own WASI into the run by its own imports. wc-009b must not treat a
+preloaded module as authority-free.
+
+**The flag on a zero-import module.** The real `tools/build` capsule (built
+into `<D>/build/`, sha256
+`6dd9af1a8d33d14f48514611663e3f5b262f91ef2729de4ec851441af9b22b13`, the pinned
+value): without the flag, exit 0, stdout `230101071268130872`; with
+`--preload env=<D>/host.wat`, exit 0, stdout `230101071268130872`, the same
+two warnings on stderr each time. Both equal `FIXED_OUTPUT` for `1592590337`,
+so with the preload, this capsule's output for `1592590337` was unchanged; this one comparison says nothing about any other effect of a preloaded module.
+
+### wasmer 7.5.0: SKIPPED
+
+No flag in its help supplies a core-module import from another module file.
+Searched `/opt/homebrew/bin/wasmer run --help` and
+`/opt/homebrew/bin/wasmer --help` (both exit 0) case-insensitively for
+`preload`, `import`, `link`, `module`, `host`, `use` and `env`. `wasmer --help`
+matched none of `preload`, `import`, `link`, `module` or `host`; its `use` and
+`env` matches are about logs (`--log-format`, `--log-events`), the `config`
+command and the `whoami` command (the registry login). In
+`wasmer run --help` no line matched `preload`; `import` matched only "Require
+WASI modules to only import 1 version of WASI" (`--deny-multiple-wasi-versions`)
+and "Enable experimental N-API imports for modules that require them"
+(`--experimental-napi`); `link` matched only `--enable-module-linking`. The
+`module`, `host`, `use` and `env` matches are about other things than
+supplying an import, each in the help of one of these flags: Wasmer's own
+home and cache folders (`--wasmer-dir`, `--cache-dir`, `--disable-cache`), the
+registry and its token (`--registry`, `--token`), logs (`--log-format`,
+`--log-events`), the compiler and compile threads (`--cranelift`,
+`--experimental-artifact`, `--compiler-threads`), Wasm features
+(`--enable-multi-value`, whose text names host functions returning multiple
+values, and `--enable-module-linking`), folders and the CWD (`--volume`,
+`--cwd`), containers (`--use`), network (`--net`), threads and CPU back-off
+(`--enable-async-threads`, `--enable-cpu-backoff`), journals and snapshots
+(`--journal`, `--journal-writable`, `--snapshot-on`, `--stop-after-snapshot`,
+`--skip-journal-stdio`), the webc entrypoint (`--entrypoint`), the two
+`import` flags above, and the guest environment (the three flags below). Each
+`[env: NAME=]` line says which host variable sets that wasmer option, not a
+guest variable. Three flags give the guest environment variables:
+`--env <KEY=VALUE>`, "Pass custom environment variables"; `--env-file <PATH>`,
+"Load environment variables from a dotenv file"; and `--forward-host-env`,
+"Forward all host env variables to guest".
+All three are ambient, not imports: they hand the guest host environment.
+Task 060 re-ran each search and lists every matched line in LOG. Two lines
+look close, and each was tried once:
+
+```text
+      --enable-module-linking
+          Enable support for the module linking proposal
+      --use <USE>
+          List of other containers this module depends on
+```
+
+`--use` names containers (webc packages), not a module that answers an import
+name, and `--enable-module-linking` is a Wasm feature switch that takes no
+module. Neither supplies `env.f`:
+
+| Run | Complete command as run | Exit | stdout | stderr |
+|---|---|---|---|---|
+| (ii) nothing supplied | `env -i /opt/homebrew/bin/wasmer run --invoke digest <D>/main.wat 1592590337 < /dev/null` | 1 | (none) | `error: Unable to instantiate the WebAssembly module`, then `╰─▶ 1: Error while importing "env"."f": unknown import. Expected Function(FunctionType { params: [I32], results: [I32] })` |
+| `--use` | `env -i /opt/homebrew/bin/wasmer run --use <D>/host.wat --offline --invoke digest <D>/main.wat 1592590337 < /dev/null` | 1 | (none) | the same two lines as (ii) |
+| `--enable-module-linking` | `env -i /opt/homebrew/bin/wasmer run --enable-module-linking --invoke digest <D>/main.wat 1592590337 < /dev/null` | 1 | (none) | `error: No backends support the required features for the Wasm module. Feel free to open an issue at https://github.com/wasmerio/wasmer/issues` |
+
+(`--offline` keeps `--use` from asking a registry: "Resolve only from local
+sources ... never the registry".) The (ii) refusal names both `env` and `f`.
+So wasmer 7.5.0's CLI cannot host `env.f` from a second module file, and
+hosting cannot be claimed for wasmer.
+
+### The answer for wc-009b
+
+- wasmtime: hosts by flag `--preload env=<path>` (the name before `=` is the
+  import module name); without it, start is refused naming `env::f`; a
+  preloaded module gets wasmtime's WASI linked in by its own imports, with no
+  flag.
+- wasmer: SKIPPED: neither `wasmer run --help` nor `wasmer --help` has a flag
+  that supplies a core-module import from another module; `--use` and
+  `--enable-module-linking` were tried and do not.
+- The engines differ. Only wasmtime's (i) printed `1592590338`. So "same
+  results on both engines" cannot be tested for a hosted granted import with
+  these two CLIs; both refuse an unsupplied `env.f` at start, naming it, which
+  is the only result they share. wc-009b's wasmer hosting test must report
+  SKIPPED with this reason, never PASS.
+
+## Bus v1 import contract (wc-009b)
+
+Task 064, the first half of wc-009b (M1 B4 and C0 lab half, one permission
+model and fail closed; P10, one canonical path). Rong's import contract (28
+Oct, relayed by Flint in INBOX 28 Oct 00:30, verdict C+) says the contract
+already exists and must be used, not rewritten: world `product-capsule-v1` of
+package `elastos:bus@1.0.0` in `elastos/wit/elastos-bus-v1.wit`. It imports
+`runtime`, `identity`, `capabilities` and `providers` (with their shared
+`types`) and exports `lifecycle`. His finding WC-1 (High): the lab's one typed
+operation, `env.f`, is a core import, and the Runtime refuses a core module at
+admission and any core import holding `env`, so a link rule for it proves an
+ABI that will never ship. Everything below is a lab stand-in, not admission.
+
+- `runtime_bus_interfaces` (`tools/src/verify.rs`) is the one allowlist read:
+  it reads the names in the Runtime's own `ALLOWED_BUS_IMPORTS`
+  (`elastos/crates/elastos-server/src/component.rs`, read only) in file order.
+  The lab keeps no second copy of the list.
+  `bus_interfaces_are_the_runtime_admission_list` calls it and fails if the
+  read fails or if `tools/src/verify.rs` holds a second copy.
+- `bus_imports(component)` is cx-wasm-audit's `audit_component` with exactly
+  the names that read returned, and nothing else; a refusal comes back as
+  `VerifyRefusal::Audit`, unchanged: `undeclared interface <name>` for an
+  import outside Bus v1 (exact name and version, so
+  `wasi:cli/environment@0.2.0`, `elastos:bus/runtime@2.0.0` and the world's
+  export `elastos:bus/lifecycle@1.0.0` are each refused by name), and `not a
+  component` for core-module bytes, `env.f`'s module among them. It lists the
+  Bus interfaces the lab would link; no Bus host exists in the lab. The tools
+  crate calls `audit_component` exactly once (`verifier_has_one_check_path`).
+- The Runtime's own wrapper, `elastos/tools/componentize`, wraps the built
+  `capsule.wasm`, run read only as `scripts/build-component-capsule.sh` runs
+  it, plus `--offline`: `cargo run --quiet --locked --offline --manifest-path
+  elastos/tools/componentize/Cargo.toml -- <in> <out>`, with its build in this
+  lane's git-ignored `target/componentize` and its files in a test temp
+  folder (`tests/common/componentize.rs`). Nothing of the tool is copied, and
+  this lane's lockfile holds none of its crates.
+  `componentized_capsule_is_a_product_capsule_v1_with_lifecycle_run` (task
+  068; it replaces task 064's
+  `runtime_componentize_wraps_the_built_capsule_with_no_bus_import`): the built capsule is a core module with the required
+  shape, the wrapper is a component (exit 0), and `bus_imports` lists exactly
+  `["elastos:bus/types@1.0.0"]` for it, each name the allowlist read returned
+  (measured first, LOG.md, task 068).
+  `runtime_componentize_refuses_the_env_f_module`: the same tool refuses
+  `IMPORTING_MODULE` (exit 1), with this stderr line (measured first, LOG.md,
+  task 064). That is the Runtime's own tool refusing WC-1's import.
+
+  ```
+      2: module requires an import interface named `env`
+  ```
+
+Not covered:
+
+- The two engines still run the zero-import core module. No Bus call is hosted
+  or linked by any engine, and no engine runs a component.
+- `audit_component` is not the Runtime's `validate_component_imports`: the
+  Runtime also lets through the generated names `import-type-*` and
+  `import-func-run`, and checks embedded core imports for its authority
+  markers (`env`, `wasi` and others). Neither is applied here.
+- No engine runs the component or calls `lifecycle.run`. Rong's contract (one
+  bounded run, 100M fuel, 128 MiB) is cited, not tested.
+- `audit_component` reads imports only, so the `lifecycle.run` export is
+  proved by the core shape reader (`tests/common/wasm_shape.rs`) and by the
+  Runtime's componentize validation.
+- Admission (`validate_component_imports`) is not run.
+- `capsule/capsule.json` still names the core module, so no bundle holds the
+  component.
+- `env.f` is retired (task 065): no core-module import is granted, and the
+  grants file names resource and actions (below).
+
+### lifecycle export (task 068, carry of 067)
+
+Task 068 is the lab half of mission step 3's first real signed capsule app
+(M1 C0/B4), and it carries stopped task 067. The capsule now implements the
+world the contract already names. Everything in this part is a lab stand-in,
+not admission.
+
+- The contract is `elastos/wit/elastos-bus-v1.wit`: `interface lifecycle` at
+  :84-87 declares `run: func() -> result<_, bus-error>`, and world
+  `product-capsule-v1` at :90 exports it. Rong's import contract (28 Oct; its
+  row for the export: `lifecycle.run`, `func() -> result<_, bus-error>`, one
+  bounded run, 100M fuel, 128 MiB, `component.rs:29-30`) says the contract
+  exists and must be used, not rewritten. No new contract, WIT file, world or
+  interface name is written here.
+- Flint's notes decide the shape. His 28 Oct 04:18 note chose route (a): accept
+  a `component-type*` custom section whose bytes parse as a type-only
+  component, which cx-wasm-audit task 030 landed (PR #912, merge
+  `235e390c9`). His 29 Oct 03:25 note asked for this capsule to export
+  `lifecycle.run`, so it is a real `product-capsule-v1` capsule of
+  `elastos:bus@1.0.0`.
+- `capsule/src/lib.rs` calls `wit_bindgen::generate!` with `path:
+  "../../elastos/wit"` and `world: "product-capsule-v1"`, behind
+  `#[cfg(target_arch = "wasm32")]`, as the Runtime's own component-app
+  template does (`templates/capsules/component-app/src/lib.rs`). It implements
+  `exports::elastos::bus::lifecycle::Guest` with `run` returning `Ok(())` and
+  calling no import, and has one `export!(Capsule);` line. `digest` and
+  `digest_impl` are unchanged. Root `Cargo.toml` names the template's one
+  dependency, `wit-bindgen = "0.57.1"` ("Layout", above).
+- The capsule uses `std` on wasm32, as the template does. `no_std` cannot hold:
+  cargo says "no global memory allocator found but one is required; link to
+  std or add #[global_allocator]" for the generated bindings (measured in 067).
+  The guest still calls no import; `std` supplies the allocator they need.
+- Measured on this Mac (LOG.md, task 068): two `tools/build` builds are
+  byte-identical, 17,658 bytes, sha256
+  `e7f17f707a1d12600f5ffe8d0376e1ef8a3fe4b7d89b539f644363556d9b8774`; the
+  core module has no imports and exports `digest (i32) -> (i64)` and
+  `elastos:bus/lifecycle@1.0.0#run () -> (i32)`; the Runtime's componentize
+  wraps it with exit 0; `bus_imports` on the component gives
+  `["elastos:bus/types@1.0.0"]`. The `component-type:*` custom section the
+  bindings write is the 1,382-byte world encoding that cx-wasm-audit task
+  030's audit rule accepts.
+- Named tests: `componentized_capsule_is_a_product_capsule_v1_with_lifecycle_run`
+  (`tests/run.rs`; "Named tests", below) and
+  `rejects_wrong_lifecycle_signature` (`tests/wasm_shape.rs`) for the one
+  shape reader.
+
+### Core imports retired, grants name resource and actions (task 065)
+
+The second half of wc-009b, Rong's WC-1 (High) and WC-2 (Medium), relayed by
+Flint (INBOX 28 Oct 00:30). WC-2, in his words: "Grants file v2 names a
+`right` per import. In the Runtime the import is fixed and the grant is per
+resource and action, carried in `providers.invoke` ... Skip it and two grant
+models drift. Fix: lab grants name `resource` and `actions` exactly as
+`capability-request`, labelled 'lab stand-in, not admission'."
+
+- **No core import is granted.** The verifier's one `audit` call gets `&[]`,
+  and `verify_checked`, `verify_bundle` and `RunInput` take no granted list. A
+  module with any core import is refused with the audit's own `undeclared
+  import <module>.<name>`, before any `--version` query or module run
+  (`core_module_import_is_refused_before_any_engine_start`). The typed table,
+  its effect type, the per-import right and their two refusals are removed;
+  with `env.f` gone they had nothing left to type or check. The passed-run
+  receipt is unchanged: it never held the linked or unused-grant lines.
+- **Grants file v3**, read by `read_grants(path) -> Result<Vec<LabGrant>,
+  GrantsRefusal>`, the one grants reader, in file order. `LabGrant` is `{ pub
+  resource: String, pub actions: Vec<String> }`, the WIT `capability-request`'s
+  `resource` and `actions` (`elastos/wit/elastos-bus-v1.wit:24-28`; both
+  `resource-uri` and `action` are `string`). It has no `reason` and the lab
+  mints no grant record:
+
+  ```json
+  {"schema": "wc-009.lab-grants/v3", "label": "lab stand-in, not admission", "grants": [{"resource": "localhost://Users/self/Photos", "actions": ["read", "list"]}]}
+  ```
+
+  The top-level keys are exactly `schema`, `label` and `grants`; an empty
+  `grants` list is valid. Each entry is exactly `resource`, a non-empty
+  string, and `actions`, a non-empty list of non-empty, distinct strings, and
+  a resource is granted once. Task 020's refusals keep their text, with
+  `grants` in place of `imports` where they named it; the entry shape and
+  duplicate refusals now name a resource. Each refusal, after `<path>: `:
+  - `the grants file cannot be read: <OS error>`;
+  - `the grants file is not JSON: <serde_json's reason>`;
+  - `the grants file is not a JSON object`;
+  - `the grants file has an unknown key "<key>"` (a v2 file's `imports` too);
+  - `the grants file has no "<schema|label|grants>" key`;
+  - `the grants file's schema is <value as JSON>, not "wc-009.lab-grants/v3"`;
+  - `the grants file's label is <value as JSON>, not "lab stand-in, not admission"`;
+  - `the grants file's grants is not a list`;
+  - `grant <index> has the retired key "<module|name|right>": a lab grant names
+    resource and actions, as capability-request`;
+  - `grant <index> is not an object of exactly resource, a string, and
+    actions, a list of strings`;
+  - `grant <index> names an empty resource`;
+  - `the grant of "<resource>" names no action`;
+  - `the grant of "<resource>" names an empty action`;
+  - `the grant of "<resource>" names the action "<action>" twice`;
+  - `the resource "<resource>" is granted twice`.
+
+Nothing in `run` reads the grants file, because the lab has no Bus host: the file is a lab stand-in, not admission.
+
+A key written twice in one JSON object is still not refused (`serde_json`
+keeps its last value), the known limit of task 020's reader.
+`retired_core_grant_names_are_gone_from_the_tools` fails if any file under
+`tools/src/`, comments included, names `LAB_OPERATIONS`, `lab-grants/v2`,
+`UntypedImport` or `RightNotNeeded`.
+
+## Cancel (M1 A10 lab half)
+
+Task 045. The rule: a run the caller cancels settles as `cancelled`, with a
+reason in its refusal receipt, and leaves nothing behind under the work root.
+
+The handle. There is no `tools/run` command: by C2 answer (c), `run` is a
+library call. So the signal is a handle the caller holds:
+`RunControl::cancel_handle()` gives a `CancelHandle` (`Clone + Send`; it
+shares an `Arc<AtomicBool>` with the control and its clones), and
+`CancelHandle::cancel()` sets it, from any thread. A future command's signal
+handler, or a test thread, calls it. The runner reads no signal, environment
+variable or file for it (`runner_uses_only_explicit_inputs`); it needs no new
+dependency.
+
+Where the runner checks it:
+
+- `run_engine`, right after the zero-budget check: a cancelled control makes no
+  run folder and starts no engine;
+- every poll of the wait loop (task 043), before the exit status and the
+  budget: a cancel stops the engine with SIGKILL (`Child::kill`), reaps it
+  (`Child::wait`), drops its output, removes the run folder through
+  `finish_run` (step 6) and refuses the run, so a cancel is never reported as
+  `BudgetExceeded` or `EngineFailed`;
+- `run`, before each `--version` query (as `TwoEngineRefusal::Version`) and,
+  through `run_engine`, before each module run (as `TwoEngineRefusal::Engine`).
+  So after a cancel no further engine starts: `wasmer` never starts after
+  `wasmtime` is cancelled.
+
+The refusal is `Reason::Cancelled { engine }`, its path the engine program,
+its text `the run on <engine> was cancelled by its caller: no engine starts
+after a cancel, and a running one is stopped with SIGKILL`. Its receipt id is
+`cancelled`, and the refusal receipt says `outcome: cancelled`; every other
+refusal still says `outcome: refused`.
+
+What the census covers: after a cancel during the run on each real engine,
+after a cancel set before the call, and after a cancel during `wasmtime` in a
+two-engine `run`, the census ("Cleanup census (M1 A12)") finds no engine
+process, entry or open file under the work root. On this Mac the real engines
+answered within tens of milliseconds of `cancel()`; the test allows 5 s.
+
+Limits, not claimed:
+
+- No command and no OS signal handler exists; the handle is the library form.
+- A `--version` query is not interrupted mid-query (it has no budget either),
+  and the verifier is not cancelled mid-call; a cancel is seen at the next
+  check.
+- A runner process that is itself killed leaves its engine and its run folder.
+- It is lab input for Anders (M1 A10 lab half), not a Runtime claim; the lane
+  claims no spike grade row.
+
+## Cleanup census (M1 A12)
+
+Task 040, the lab half of M1 A12, step 2 of 2 (task 039 is step 1: `run_engine`
+removes its run folder on every outcome). After a normal, a trapped and a
+killed run, on each real engine, one census in `tests/run.rs`, `census(work_root)`,
+lists everything the lab runner started or made that is still under the work
+root it was given, each line with its kind. It returns an empty list only when
+all its counts are zero. Every census tool is started by its absolute path; a
+tool that does not start fails the test with that path, it never skips.
+
+The four counts, and how each is read:
+
+- Entries (`entry: <name>`): `fs::read_dir` of the work root. None is zero
+  entries.
+- Processes (`process: <pid> <argv>`): `/usr/bin/pgrep -f <work root>`, so any
+  live process whose argv holds the work root, which an engine's does through
+  its module path. None is exit 1 with nothing on stdout or stderr. Exit 0
+  lists pids; `/bin/ps -o args= -p <pid>` gives each one's argv for the line.
+  The pattern is a regular expression, so a `.` in the path matches any
+  character: it can only match more, never less.
+- Open files (`open file: <lsof line>`): `/usr/sbin/lsof +D <work root>`. None
+  is exit 1 with nothing on stdout or stderr. This Mac's `lsof` exits 1 even
+  when it lists an open file (measured by `census_reports_each_kind_of_leftover`,
+  LOG.md, task 040), so a listing with exit 0 or 1 is read as open files.
+- Preopened folders: checked on the live engine in the killed run, from its own
+  argv (`/bin/ps -o args= -p <pid>`): no `--dir`, `--mapdir`, `--env`, `--net`
+  or `-S` flag (a prefix match, so `--dir=x` or `-Sinherit-network` too), no
+  path under the work root but the module file, and the module file exactly
+  once. The argv is fixed (task 014); this records what a real process got.
+
+Any other answer from a census tool (another exit status, or anything on
+stderr) is a leftover line, `census failed: <tool, args, status, stdout,
+stderr>`, never a pass.
+
+The three runs, each on wasmtime 45.0.1 and wasmer 7.5.0 (`/opt/homebrew/bin`,
+the pinned versions, task 038), each followed by an empty census:
+
+- Normal (`normal_run_leaves_nothing_under_the_scratch_root`): one two-engine
+  `run` of the signed capsule `tools/build` makes; both engines print
+  `FIXED_OUTPUT`, equal.
+- Trapped (`trapped_run_leaves_nothing_under_the_scratch_root`): `run_engine`
+  per engine on a hand-written module whose `digest` runs `unreachable`.
+  Refused as `EngineFailed`: wasmtime with exit status 134 and ``wasm trap:
+  wasm `unreachable` instruction executed`` on stderr, wasmer with exit status
+  1 and `error: RuntimeError: unreachable`.
+- Killed (`killed_run_leaves_nothing_under_the_scratch_root`): `run_engine` per
+  engine on a thread, on a module whose `digest` loops forever. The test polls
+  `pgrep -f <work root>` (at most 10 s) until the one engine process is up,
+  reads its argv, sends it `SIGKILL` with `/bin/kill -KILL <pid>` and joins the
+  thread: refused as `EngineFailed`, stopped by signal 9. Task 042: the
+  thread is joined on every path before any check can fail. If the wait fails
+  (a `pgrep` that does not start or answers with an error, no engine process
+  within 10 s, or the run ending first), or `/bin/kill` does not start or
+  fails, the test first runs `/usr/bin/pkill -KILL -f <work root>` every 50 ms
+  until the thread has finished (at most 10 s), then joins it, and only then
+  fails with the first reason. If the thread still runs after those 10 s, the
+  join waits for it, so no detached thread is left that can still start the
+  engine, and a failed check never leaves an engine looping (hand-proven,
+  pending R1: "Falsifiers", task 042). A census tool that does not start is
+  now an `Err` like any other census failure, not a panic, so the stop can run
+  first; the census still fails the test with its path. The argv seen: `<wasmtime> run --invoke digest -W
+  max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y <work
+  root>/wasmtime/module.wasm 1592590337` and `<wasmer> run --invoke digest
+  <work root>/wasmer/module.wasm 1592590337`.
+
+Task 045 adds two kinds of run, each followed by an empty census:
+
+- Cancelled (`cancelled_run_settles_as_cancelled_and_leaves_nothing_on_both_engines`,
+  `run_cancelled_during_wasmtime_never_starts_wasmer`): the looping module on
+  each real engine, and a stand-in `wasmtime` that sleeps in a two-engine
+  `run`, each cancelled once its process is live ("Cancel (M1 A10 lab half)").
+  A cancel set before the call (`cancel_before_start_starts_no_engine`) leaves
+  an empty work root.
+- Refused and failed, through `run`
+  (`refused_and_failed_runs_leave_nothing_under_the_scratch_root`): a verifier
+  refusal (an import that is not granted), an unpinned `--version` (stand-in),
+  an engine that fails (stand-in, exit 3) and task 043's budget stop (stand-in
+  sleeper, 200 ms).
+
+`census_reports_each_kind_of_leftover` proves the census sees what it counts,
+with no engine: a file left in a work root, a live `/bin/sleep 30` whose
+`argv[0]` is a path under it (`sleep` takes only time intervals) and a file
+handle this test process holds open under it are each reported once, by kind;
+once the handle is closed, the process stopped and the file removed, the
+census is empty.
+
+Falsifier F-WC-A12-TEMP-LEAK (runner-caught, "## Falsifiers"): `run_engine`
+makes one extra folder `<work root>/<engine>.scratch` before its run folder and
+never removes it; all three run tests fail at their census assertion.
+
+Limits, not claimed:
+
+- A runner process that is itself killed is not covered: the run folder it
+  made stays (task 039's known limit). Only a killed engine is tested.
+- The census sees only the scratch root. An engine's own caches or files
+  elsewhere (for example wasmtime's compile cache, or anything an engine keeps
+  under the user's home folder) are outside it and are not counted.
+- A process is seen only through its argv or an open file under the scratch
+  root; a process an engine started with neither would not be seen. Neither
+  engine was seen to start one (the killed run found exactly one process).
+- The census is a snapshot taken after `run` or `run_engine` returned, on this
+  one Mac.
+
+## Host secrets denied (M1 A8 lab half)
+
+Task 041. A host secret in the user's home folder does not reach a lab run on
+either pinned engine, and a module that asks for a file or the environment is
+refused before any engine is asked anything. No `tools/src/` code changed for
+this; the tests show what the runner already does.
+
+The fixture: a throwaway home folder `<tmp>/home` holding
+`keys/host-secret`, whose content is a marker made fresh in the test from a
+fresh test key's DID (`host-secret-marker did:key:...`). It is never a real
+key and is never written inside the lane tree.
+
+Why a child process: no test may change process-wide state, and every test
+in `tests/run.rs` shares one process. So `HOME` is never set in the test
+process. The outer test, `host_secret_fixture_never_reaches_either_real_engine`,
+builds the capsule first (cargo and rustup read `HOME`), writes the fixture
+and the shims, then starts this test binary itself (`current_exe()`, `--exact
+host_secret_fixture_run_inside_the_child --ignored --nocapture`) with `HOME`
+set to `<tmp>/home` and `WASM_CAPSULE_LAB_A8_CASE` naming the case folder. The
+inner test is `#[ignore]` with a reason naming the outer test, and fails at
+once if `HOME` is not the fixture home or the case variable is unset. The
+outer test passes only when the child exits 0 and its libtest line reads
+`test result: ok. 1 passed;`; otherwise it prints the child's stdout and
+stderr. If either real engine is not on PATH it prints `SKIPPED: ... (no
+result, not a PASS)` and starts no child.
+
+How the engines are seen: a recording shell shim stands in front of each real
+engine (`#!/bin/sh`: write `"$@"` one per line and `/usr/bin/env`'s output to
+files in the case folder, then `exec` the real engine by its absolute path
+with the same arguments). The shim is replaced by the engine, so there is no
+engine inside an engine. The `--version` query goes through the shim too, so
+the pin check (task 038) still reads the real engine's line.
+
+What each engine got, on this Mac (`/opt/homebrew/bin`, `wasmtime 45.0.1
+(83166ba31 2026-06-05)` and `wasmer 7.5.0`, as each printed it), with the
+inner test's `run` of the signed built capsule and an empty grants file:
+
+- wasmtime's module run argv: `run --invoke digest -W
+  max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y <work
+  root>/wasmtime/module.wasm 1592590337`.
+- wasmer's module run argv: `run --invoke digest <work
+  root>/wasmer/module.wasm 1592590337`.
+- Each `--version` query's argv: `--version` alone.
+- The environment, for both engines and both starts: `PWD=<the test's
+  working folder>`, `SHLVL=1` and `_=/usr/bin/env`. These three are the shim
+  shell's own (`/bin/sh` sets them even when started with an empty
+  environment); the runner starts every engine with an empty environment
+  (`engine_command`, held by `engine_starts_with_an_empty_environment`). No
+  `HOME`, and no value holding the home folder, the fixture path or the
+  marker.
+- Both stdouts: `FIXED_OUTPUT` and a newline, holding neither the marker nor
+  the fixture path.
+
+The inner test asserts each of these for each engine: the module run's argv
+passes task 040's `argv_faults` (no `--dir`, `--mapdir`, `--env`, `--net` or
+`-S` flag, no work-root path but the module, the module path once) and no
+argument holds the home folder; each of the four environment records (two
+engines, `version` and `run` starts) is not empty and holds the exact line
+`_=/usr/bin/env`, which proves `/usr/bin/env` wrote it (task 049,
+`HostSecretCase::recorded_env`, checked before the absence checks); no
+recorded environment line starts with `HOME=` or holds the home folder, the
+fixture path or the marker; and the stdout is exactly `FIXED_OUTPUT` and a
+newline. A shim whose record write fails exits 70 with one stderr line naming
+the record, before `exec`, so the real engine never starts unrecorded.
+
+The five probe imports (`host_secret_probe_imports_are_refused_before_any_engine_starts`),
+each a signed module with one `() -> ()` import from `wasi_snapshot_preview1`,
+built by the one module builder `importing(module, name)` in
+`tests/common/grants.rs` (`importing("env", "f")` is `IMPORTING_MODULE` byte
+for byte): `path_open`, `fd_read`, `fd_prestat_get`, `environ_get` and
+`environ_sizes_get`. Each goes through `run` (`run_counting` since task 065,
+counting stand-ins) and is refused as `undeclared import
+wasi_snapshot_preview1.<name>` (`VerifyRefusal::Audit(Undeclared)`). Task 041
+also refused each with a `call` grant, as an import with no typed lab
+operation; task 065 grants no core import, so that case is gone.
+
+No run folder is made and neither engine is asked `--version` or started for a
+module run. This rule is the verifier's, already held by the audit's
+undeclared refusal (F-WC9-LINK-ALL, F-WC9B-CORE-IMPORT-GRANTED), so it gets no
+new falsifier.
+
+Falsifier F-WC-A8-HOME-PREOPEN (runner-caught, "## Falsifiers"):
+`start_engine` adds `--dir=<HOME>` after the memory cap arguments, a preopen
+of the runner's home folder. The real wasmtime took it and ran; the inner test
+failed at its `argv_faults` assertion ("a preopen, env or network flag:
+--dir=<tmp>/home"), so the outer test failed at "the child ... did not pass".
+
+Limits, not claimed:
+
+- It covers this runner's argv and environment, and the verifier's import
+  refusal, on this one Mac. It does not cover what an engine reads for itself
+  outside the guest (for example a compile cache, or engine config under the
+  real home folder); the child's engines saw no `HOME` at all.
+- The environment is recorded by the shim's `/usr/bin/env`, the environment
+  the shim's `exec` passes on; the engine process's own environment is not
+  read from the kernel.
+- It is lab tooling, not the Runtime: no Runtime claim is made.
+
+## Named tests
+
+`cargo test --manifest-path lab/wasm-capsule/Cargo.toml`:
+
+- `digest_returns_the_fixed_value` — the shared impl returns the pinned value.
+- `two_clean_builds_in_different_paths_are_byte_identical` — the foundation claim.
+- `build_script_fails_closed_after_an_unbound_variable` — task 035: a copy of
+  `tools/build` with `: "$WC_UNSET_PROBE"` right after its cleanup trap, run
+  with `/bin/bash` 3.2.57 and that variable unset, exits non-zero with bash's
+  `unbound variable` line and writes no capsule or receipt. Task 036: it first
+  fails with a clear reason unless `/bin/bash --version` names 3.2 (never a
+  SKIP; this `/bin/bash` 3.2 guard, `require_system_bash_3_2`, is hand-proven,
+  pending R1: "Falsifiers", task 036); the planted copy also prints its target dir, which must be inside the
+  TMPDIR the test gives it, so the check that this TMPDIR is left empty watches
+  the folder the trap deletes.
+- `finished_build_leaves_its_tmpdir_empty` — task 036: one real build with
+  TMPDIR set to a new empty folder succeeds and leaves that folder empty.
+- `the_receipt_names_the_exact_toolchain` — receipt rustc/target match the build.
+- `receipt_hashes_match_artifact_and_lockfile` — receipt hashes match the files.
+- `built_capsule_has_the_required_wasm_shape` — core Wasm, zero imports, digest
+  sig, and (task 068) the `lifecycle.run` sig.
+  Task 053: the zero imports are read only through `wasm_capsule_audit::audit`
+  (`audit(&bytes, &[])` returns `Ok` with an empty list), the lab's one module
+  reader (P10); the shape reader checks only core Wasm, the `digest` signature
+  and (task 068) the `elastos:bus/lifecycle@1.0.0#run` signature.
+- plus crafted-byte coverage of the shape reader: `rejects_wrong_lifecycle_signature`
+  (task 068) feeds one export section holding a right `digest` and
+  a wrong lifecycle signature, and requires the required-shape check to be
+  false; `reads_the_required_shape_from_a_crafted_module` now carries both
+  exports. Task 037 removed task 032's
+  three memory tests with the shape reader's memory parse: the shape reader
+  reads no memory. Task 053 removed its import count: it reads no imports, and
+  `refuses_a_module_with_an_import_section` (in place of
+  `counts_an_import_and_is_not_the_required_shape`) holds its one exact refusal
+  of a module with an import section, which names `wasm_capsule_audit::audit`.
+
+The lab name, in `tests/lab_cid.rs` (through `wasm_capsule_tools::bundle_identity`):
+
+- `lab_manifest_passes_runtime_validate` — `bundle_identity` accepts this
+  capsule's bundle, and the manifest, read with the Runtime's `CapsuleManifest`,
+  validates, is `type` `wasm` with `entrypoint` `capsule.wasm`, and has the root
+  package's `name` and `version`.
+- `this_capsule_bundle_has_the_pinned_lab_cid` — the pinned vector above.
+- `the_lane_keeps_no_bundle_name_rule_of_its_own` — no lane file listed by
+  `git ls-files` holds the retired name label; the same files without `audit/`,
+  the docs and `falsifiers.json` hold none of 007's retired code names (the
+  runner's `*.falsify-original` backups are left out), and the shared crate's
+  naming functions (`lab_cid`,
+  `lab_cid_observed`, `checked_bundle_observed`, `encode_entries`) are named by
+  the one export line only. wc-004's imports of the checked bundle and the name
+  signature are allowed. If git cannot run, it fails.
+- `the_lane_tests_list_files_in_one_place` (task 056) — of the lane's listed
+  `.rs` files under `tests/` and `tools/` (not `audit/`, cx-wasm-audit's
+  crate), only `tests/common/build.rs` runs git's file lister, and only once:
+  `lane_paths` there is the lane tests' one lister (P10). A failure names each
+  file and line where the quoted lister word appears.
+
+`tools/bundle`, in `tests/bundle.rs`:
+
+- `tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid` — the one test
+  that spawns the real wrapper. A fresh OUT_DIR gives one stdout line, equal to
+  `bundle_identity(OUT_DIR/bundle)` and to the reference lab CID; the bundle
+  holds exactly the two regular files; `capsule.wasm`'s sha256 is the
+  receipt's `artifact_sha256` and the pinned `e7f17f70…` (task 068);
+  `capsule.json` is
+  `CAPSULE_MANIFEST`; `--name` prints the same name. Then the same OUT_DIR
+  again, an empty folder for `--name` (the shared reason, unchanged) and
+  `--unknown` are each refused with the right status, the path and reason on
+  stderr, and an empty stdout.
+- `tools_bundle_name_mode_prints_the_lab_cid` — in-process, on this capsule's
+  manifest and the 8-byte module: 010's pinned vector.
+- `bundle_arguments_are_refused_with_their_reason` — every argument rule's
+  exact reason.
+- `bundle_arguments_preserve_non_utf8_paths` — both modes keep every byte.
+- `an_existing_out_dir_is_refused_and_nothing_is_written` — a folder, a file
+  and a link to a sentinel folder; the sentinel stays byte-identical.
+- `a_link_planted_during_the_build_is_never_written_through` — a link at
+  `OUT_DIR/bundle` to a sentinel folder, and a link at `OUT_DIR/capsule.wasm` to
+  a sentinel file (the shared link reason); both sentinels stay unchanged.
+- `a_failed_build_is_refused_with_its_cause` — exit status 3 and a missing
+  script give two different reasons.
+- `bundle_io_refusals_keep_path_and_cause` — OUT_DIR, `bundle/`, the
+  manifest's creation and write, and the module's move each keep their path
+  and the system's cause.
+
+The verifier, in `tests/verify.rs`. "The fixture" is this capsule's manifest
+and the 8-byte module in a temp folder; every key is fresh in memory:
+
+- `signed_bundle_verifies_against_its_key` — the fixture, signed and verified
+  with its key's DID accepted, passes; `cid()` is `bundle_identity` of the
+  folder and `entries()` hold exactly the folder's two files (task 065 dropped
+  its empty `imports()` check with the accessor).
+- `unsigned_bundle_is_refused` — `None` gets the unsigned reason, in both
+  forms.
+- `bundle_signed_by_an_unlisted_key_is_refused` — key B signs, only key A is
+  accepted, and an empty list: the identity lane's accepted-list refusal.
+- `wasm_changed_after_signing_is_refused`,
+  `manifest_changed_after_signing_is_refused` (one `description` byte) and
+  `extra_file_after_signing_is_refused` — the identity lane's mismatch
+  refusal, naming both values.
+- `bundle_with_undeclared_import_is_refused_even_if_signed` — a module that
+  imports `env.f`, validly signed, no grants: `undeclared import env.f`.
+- `verifier_audits_the_checked_bytes` — a held `CheckedBundle` still passes
+  after `capsule.wasm` on disk becomes the importing module (an audit of the
+  disk would refuse `env.f`), and keeps the 8-byte module;
+  `verify_bundle` on the changed folder gets the mismatch refusal.
+- `the_real_capsule_passes_the_verifier` — the capsule `tools/build` makes,
+  bundled with this capsule's manifest, signed and verified, passes, and the
+  audit of its entrypoint lists no import; its sha256 is the receipt's `artifact_sha256` and
+  the pinned `e7f17f70…` (task 068). One `PINNED_ARTIFACT_SHA256`, in
+  `tests/common/mod.rs`, serves this test and the one above.
+- `missing_entrypoint_is_refused` — an entrypoint no entry has gets its own
+  reason; `capsule.wasm` beside it does not stand in.
+- `verifier_uses_manifest_entrypoint` — with the entrypoint `main.wasm` (the
+  importing module) beside the 8-byte `capsule.wasm`, the audit reads
+  `main.wasm`: `undeclared import env.f` (task 065 dropped its granted pass).
+- `verified_entrypoint_is_the_audited_module` — with the entrypoint
+  `main.wasm`, a type-section-only module with no import (task 065; it was the
+  granted importing module), beside the 8-byte `capsule.wasm`: `entrypoint()`
+  is the checked `main.wasm` entry itself (its path and its bytes), not
+  `capsule.wasm`.
+- `verifier_preserves_upstream_refusals` — the walk's (no manifest, a link),
+  the signature check's (a malformed DID, a name that is not a lab CID, a
+  signature that does not verify) and the audit's (a malformed module, code in
+  a custom section) refusals each come back equal to the owning lane's own,
+  with the same text.
+- `verifier_preserves_check_order` — inputs with two faults each: the walk
+  before unsigned, unsigned before the audit, the signature before the
+  entrypoint and the audit, the name before the audit.
+- `verified_bundle_is_sealed` — the source, comments stripped: no public
+  field, exactly eight public functions (`verify_checked`, `verify_bundle`,
+  `read_grants`, task 064's `bus_imports` and the four accessors, `cid()`,
+  `entries()`, `entrypoint()` and `memory_mb()`; task 065 removed `imports()`
+  and `unused_grants()`), no
+  `&mut self`, no `Deserialize`, `Default` or trait impl for the value, and one
+  literal that makes it, in `verify_checked`.
+- `verifier_has_one_check_path` — the tools crate calls
+  `verify_checked_signature` once and `audit` once, parses JSON twice (one
+  `from_slice` in `manifest_entrypoint`, one in `parse_grants`), calls
+  `manifest_entrypoint` once, reads one file with `fs::read` (in
+  `read_grants`), calls `parse_grants` once and `read_grants` never (the caller
+  does; since task 065 `run` reads no grants), does not use `verify_name_signature`, calls `audit_component` once
+  (task 064, in `bus_imports`; it held "never" before), `verify_checked`
+  reads no grants, `verify_bundle` only walks and delegates,
+  and `entrypoint()` reads no manifest.
+- `verifier_uses_audit_api_v1` — `wasm_capsule_audit::AUDIT_API` is 1.
+- `verifier_has_no_import_parser_of_its_own` — `tools/Cargo.toml` and
+  `tools/src`, comments stripped, name no `wasmparser`.
+- `verifier_reads_no_bundle_file_by_path` — the verifier, comments stripped,
+  has no `fs::read`, `File::open`, `OpenOptions`, `read_dir`, `metadata` or
+  `read_to_end` outside `read_grants`, and `read_grants` has exactly one
+  `fs::read` and none of the others.
+- `grants_file_names_resource_and_actions_as_capability_request` (task 065) —
+  `GRANTS_SCHEMA` and `GRANTS_LABEL` are exactly `wc-009.lab-grants/v3` and
+  `lab stand-in, not admission`; an empty list reads as none, and a file
+  `grants_file` wrote with two entries, `resource` and `actions` as written in
+  it, reads back as two `LabGrant`s in file order.
+- `grants_file_refusals_keep_their_reason` (wc-009a; v3 since task 065) — a
+  missing file keeps `NotFound` and its OS text; and 21 malformed files (not
+  JSON, a list or a string document, an unknown key and a v2 file's `imports`,
+  each missing key, a v2 or a number schema, another label and one with a
+  trailing space, `grants` as an object, eight bad entries: a string, no
+  actions, a third key `reason`, another key, a number or null resource,
+  actions as a string, a number action) each give their exact text.
+- Task 065, one test per new refusal, each its variant and exact text after
+  the path: `grant_with_an_empty_resource_is_refused`,
+  `grant_with_no_actions_is_refused`, `grant_with_an_empty_action_is_refused`,
+  `grant_naming_an_action_twice_is_refused`, `resource_granted_twice_is_refused`
+  (with other actions and its keys in another order) and
+  `grant_with_a_retired_right_or_module_key_is_refused` (`right` beside a v3
+  grant, a whole v2 grant refused at `module`, and `name`).
+- `retired_core_grant_names_are_gone_from_the_tools` (task 065) — no line of
+  any file under `tools/src/`, comments included, names `LAB_OPERATIONS`,
+  `lab-grants/v2`, `UntypedImport` or `RightNotNeeded` (each built from two
+  parts, so the test file does not match itself).
+- `no_key_material_is_tracked_in_the_lane` — every file `git ls-files
+  -z --cached --others --exclude-standard` lists in the lane, from the one
+  shared lister, `lane_paths` in `tests/common/build.rs` (task 056): no `.key` or
+  `.seed` name, no PEM private-key line, no 32-byte file that is not UTF-8.
+  The name is checked before any read, and a listed file that cannot be read
+  is a finding with its path and cause, never skipped: a key file still in
+  git's index but gone from the worktree fails the scan. Four planted items, in
+  memory, are each reported, and so is a listed file that is absent (a `.seed`
+  by name and as unreadable). If git cannot run, it fails.
+- `key_and_seed_files_are_ignored_by_git` — `git check-ignore` reports
+  `x.key`, `tools/x.key`, `x.seed` and `tools/x.seed`. `*.key` is the root
+  `.gitignore`'s rule; `*.seed` is this lane's (`.gitignore`). If git cannot
+  run, it fails.
+
+The runner, in `tests/run.rs`. Stand-in engines are shell scripts written into
+each test's own temp dir; work roots are the temp dir's canonical path (macOS
+puts it under the `/var` link):
+
+- `run_writes_only_the_verified_entrypoint_bytes` — the bundle's
+  `capsule.wasm` is changed on disk after verification; a stand-in that prints
+  the file it was given prints the verified bytes. Task 039: the stand-in
+  records its run folder during its run (`RECORD_RUN_FOLDER`, one shared shell
+  snippet beside `MODULE_ARGUMENT`, writing beside the stand-in's own `$0`,
+  outside the work root): the folder held exactly `module.wasm`, with the
+  verified bytes; after the run the work root holds only the bundle.
+- `engine_path_must_be_absolute` — `./wasmtime`, `wasmtime` and
+  `engines/wasmtime` are refused with their own reason; nothing is written.
+- `work_root_must_be_absolute_and_canonical` — `work`, `--env=X` and `./work`
+  (relative), and a root through a folder link, a link plus `.`, a `..` and a
+  trailing `/` (not canonical) are each refused with their own reason; nothing
+  is written and no engine starts.
+- `run_directory_is_private_and_new` — the run folder's mode, recorded by the
+  stand-in during its run, is `0o700`; task 039: a second run in the same root
+  finds no folder, makes a new one (`0o700` too) and runs, and each run leaves
+  the root empty; a planted folder at a run folder's name is refused, stays
+  unchanged and is not removed, and no engine starts.
+- `runner_io_refusals_keep_path_and_cause` — a missing root (`NotFound`), a
+  root that is a file, and a root the user may not write (`PermissionDenied`
+  on the run folder) each keep their path and cause; the shared writer's
+  create and write refusals become the runner's own two reasons with path and
+  cause kept, and another writer reason is carried unchanged.
+- `runner_passes_no_directory_env_or_network_flags` — an **argv proof**, not
+  behaviour: for each engine, a stand-in prints its argv, which is exactly
+  `run`, `--invoke`, `digest`, the absolute module path and `1592590337`
+  (`FIXED_INPUT`), with no `--dir`, `--mapdir`, `--env` or `--net`. From task
+  027 `wasmtime`'s argv also has `-W` and
+  `max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y` (this capsule's declared 64
+  MB) before the module path; `wasmer`'s is unchanged. Stand-ins that read the
+  module path take their second-to-last argument. Task 039: after each run the
+  work root is empty.
+- `engine_starts_with_an_empty_environment` — a stand-in sees no `HOME`,
+  which the test process has.
+- `engine_failures_keep_their_cause` — a stand-in that exits 3 with a stderr
+  line gives the engine, the status and that line; a missing program gives the
+  OS error. Two different reasons, for each engine, through `run_engine`.
+- `run_engine_removes_its_run_folder_after_every_outcome` (task 039) — for
+  each engine, a success (`CAT_MODULE`, which ran in its run folder), an engine
+  that fails (`FAILING`, the shell `FAILING_BODY`) and an absolute engine path
+  that does not exist (`EngineDidNotStart`; the folder is made before the
+  start): after each the work root is empty, and each outcome's own result or
+  reason is unchanged.
+- `run_folder_that_cannot_be_removed_is_refused` (task 039) — for each engine,
+  a stand-in that writes an extra file into its own run folder during a
+  successful run: the run is refused with `RunDirNotRemoved` (`Directory not
+  empty (os error 66)`, exact text) at the run folder's path, the module file
+  is gone and the extra file stays. A stand-in that puts a folder at the module
+  file's path: refused at that path (`os error 1`), and its folder stays. A
+  stand-in that writes the extra file and then fails: the failure stays the
+  answer, and the folder with the extra file stays (the known limit).
+- `each_engine_prints_the_fixed_output` — the capsule `tools/build` makes,
+  bundled, signed and verified, run on the real `wasmtime` and `wasmer` found
+  on PATH: each prints `230101071268130872` (`FIXED_OUTPUT`) for `1592590337`.
+  An engine not found prints `SKIPPED` and gives no result, never a PASS.
+- `runner_uses_only_explicit_inputs` — the runner's source, comments
+  stripped: no environment read, no file read, no manifest or module parse, no
+  walk or lower-level verify call, no grants read or parse, exactly one
+  `verify_bundle` call (task 015's `run`; since task 065 exactly
+  `verify_bundle(input.bundle, input.signature, input.accepted)`, with no
+  granted list), and `entrypoint()` is its one source of
+  module bytes. Task 033: `entrypoint()` is read twice, for the module write
+  and the memory check; the audit crate is named once, in the import of
+  `memories` and its `Refusal`; `memories(` is called once; and no `audit(` or
+  `audit_component` call is made.
+- `runner_reuses_shared_writer` — the runner writes through
+  `bundle::write_new_file` once and has no writer of its own (`OpenOptions`,
+  `fs::write`, `create_new` and the like).
+
+The two-engine runner (task 015), in `tests/run.rs`. Each test signs its bundle
+in memory with a fresh key; stand-in engines are shell scripts as above, and
+from task 016 each one `run` starts answers `--version` on its own branch,
+apart from its module run (a marking stand-in leaves one marker for a version
+query and another for a module run):
+
+- `same_name_same_output_on_wasmtime_and_wasmer` — the capsule `tools/build`
+  makes, bundled, signed and run through `run` on the real `wasmtime` and
+  `wasmer` found on PATH: both stdouts are exactly `230101071268130872\n`
+  (`FIXED_OUTPUT` for `FIXED_INPUT`), the returned `cid()` is the bundle's lab
+  CID, and (task 039) the work root is empty: both run folders were removed.
+  If either engine is not found it prints `SKIPPED` and gives no result, never
+  a PASS.
+- `runner_refuses_an_unverified_bundle` — an unsigned bundle and a bundle
+  signed by a key not on the accepted list: each is refused with exactly the
+  verifier's own refusal and text, the work root stays empty, and marking
+  stand-ins prove no engine started, not even for `--version` (task 016).
+- `differing_engine_outputs_are_reported_as_a_failure` — `1\n` against `2\n`,
+  and `7\n` against `7`: each is refused, naming both outputs, with both raw
+  outputs kept.
+- `matching_engine_failures_are_refused` — both stand-ins fail the same way
+  (exit 3, the same stderr, empty stdout): the run is refused with
+  `wasmtime`'s own failure, path and cause, and `wasmer` is not started.
+- `runner_preserves_engine_refusals` — `wasmtime`'s module run fails,
+  `wasmer`'s fails, and a folder planted at `wasmer`'s run folder name: each
+  comes back as `run_engine`'s refusal, unchanged, and nothing starts after it.
+  Task 039: each leaves no run folder; the planted one stays, unused.
+  A missing program is now refused at its version query, before any module
+  run (`version_query_failures_keep_their_cause`, task 016).
+- `runner_calls_engines_in_order` — recording stand-ins log their version
+  query, and their start (with the module path they were given), wait, and log
+  their end: the log is both version queries, `wasmtime` then `wasmer`, then
+  `wasmtime` start and end, then `wasmer` start and end, each with its own
+  `<work root>/<engine>/module.wasm`; each run folder held the verified bytes
+  (recorded by the stand-in during its run), and (task 039) the work root is
+  empty after the run.
+- `run_leaves_an_empty_work_root` (task 039) — a two-engine `run` on marking
+  stand-ins that passes, and one refused because `wasmer` fails after
+  `wasmtime` ran: both engines ran, and each run leaves the work root empty.
+- `run_returns_the_verified_name_and_both_outputs` — the `wasmtime` stand-in
+  changes the bundle's `capsule.wasm` while it runs; `run` still returns the
+  lab CID it verified, not the changed folder's, and both raw outputs.
+
+The run receipt (task 016), in `tests/run.rs`:
+
+- `receipt_records_observed_engine_versions` — two runs of one bundle by
+  stand-ins that print the pinned versions with made-up tails (task 038; each
+  with a second line): the run holds exactly those first lines, never this
+  Mac's installed lines, and `render` gives
+  the whole receipt exactly (schema, the verified lab CID, `digest`,
+  `1592590337`, both versions, both `exit status: 0` and both stdouts; task
+  028: the v2 schema and the four memory lines, 64 MB = 67108864 bytes). Both
+  runs have the same lab CID, which holds no version number.
+- `version_query_failures_keep_their_cause` — for each engine, a version
+  query that exits 4 with a stderr line, prints nothing, prints an empty first
+  line, or whose program is missing: each is refused with its own reason,
+  engine and cause (exact text), no module run starts, nothing is written,
+  `wasmtime` is asked first and `wasmer` is not asked after it is refused.
+- `version_queries_use_explicit_inputs` — each stand-in's version answer is
+  its pinned version line (task 038), then its `$0`, `HOME` and whether its
+  stdin is `/dev/null`: the run keeps `<pinned line> <absolute program> unset
+  null` for both. A relative program for either
+  engine is refused with the module run's own reason, and no module run starts.
+- `receipt_write_refuses_an_existing_path` — the receipt is written once,
+  byte for byte; then the same path, a planted file, a live link and a
+  dangling link are each refused with `write_new_file`'s own reason and cause
+  (equal to the writer's own refusal for that path), the bytes and links stay
+  unchanged, and nothing is written through the dangling link.
+- `real_receipt_names_both_installed_engines` — the real `wasmtime` and
+  `wasmer` found on PATH: the versions start with `wasmtime ` and `wasmer `,
+  each is the first line the engine prints for `--version`, both stdouts are
+  `FIXED_OUTPUT`, and the receipt written to a new file is `render`'s text
+  (task 028: its schema line is v2, and its last four lines are the memory
+  lines for 64 MB, `wasmtime` ENFORCED and `wasmer` SKIPPED). It prints the
+  receipt. If either engine is not found it prints `SKIPPED` and
+  gives no result, never a PASS.
+
+Task 019's two:
+
+- `run_engine_starts_its_engine_exactly_once` (`tests/run.rs`) — counting
+  stand-ins append one line per start to `<their own path>.starts` (found from
+  `$0`; the engine has no environment). One `run_engine` call per engine
+  records exactly one module run and no `--version`; one `run` call records
+  exactly one module run per engine (two in all) and, counted apart, one
+  `--version` query each.
+- `readme_falsifier_total_matches_falsifiers_json` (`tests/docs.rs`) — counts
+  the `"falsifiers"` entries with `serde_json`, finds the total sentence that
+  opens "## Falsifiers" exactly once, and fails naming both numbers when they
+  differ. Since task 052 it also finds the one "outside the N" in that
+  section and fails naming both numbers when N is not the total.
+
+wc-009a's run tests (task 020), in `tests/run.rs`, as task 065 left them. Each
+signs its bundle with a fresh key and runs `run` on task 019's counting
+stand-ins through `run_counting` (task 020's `run_with_grants`, which read a
+lab grants file, before task 065). "Each engine once" is exactly one
+`--version` query and one module run per engine; a refusal is zero of both:
+
+- `zero_grants_zero_imports_runs` — the capsule `tools/build` makes: it runs,
+  each engine once, and no run folder is left.
+- `zero_grants_zero_imports_runs_on_both_real_engines` — the same on the real
+  `wasmtime` and `wasmer` found on PATH: both print `FIXED_OUTPUT`. If either
+  is not found it prints `SKIPPED`, never a PASS.
+- `core_module_import_is_refused_before_any_engine_start` (task 065; task
+  020's `declared_not_granted_import_refuses_instantiation_by_name`, renamed) —
+  `IMPORTING_MODULE`, signed: refused as
+  `TwoEngineRefusal::Verify(VerifyRefusal::Audit(Undeclared { module: "env",
+  name: "f" }))`, text exactly `undeclared import env.f`; no run folder, and
+  zero starts of either kind.
+
+Task 065 removed `valid_signature_with_empty_grants_file_links_nothing`,
+`grant_for_an_import_the_module_does_not_have_links_nothing_and_is_reported`,
+`granted_import_is_linked` and `module_import_with_no_typed_operation_is_refused`
+with their rules (LOG.md, task 065).
+
+Task 026's two, in `tests/docs.rs`. Each holds one of Rong's two rulings
+(26 Oct) as one exact sentence, read through `lane_file`:
+
+- `engines_are_labelled_test_only_not_endorsed` — the label "not endorsed":
+  README and ADOPTION each hold the engine ruling exactly once; README's copy
+  sits in the first section that names wasmtime and wasmer ("Layout"); both
+  engine doc comments in `tools/src/run.rs` (the module doc and the one on
+  `pub enum Engine`) say "test-only, not endorsed"; and each line of README,
+  ADOPTION or `run.rs` that mentions endorsement also says "not endorsed". It
+  fails naming the file, and for the last check each `file:line` with its text.
+- `hosting_discovery_is_not_the_import_path` — README holds the discovery-only
+  ruling exactly once, inside "Granted import hosting discovery (wc-009b0)" and
+  before its first per-engine answer line (a line starting `### wasmtime`,
+  `### wasmer`, `- wasmtime:` or `- wasmer:`), and ADOPTION holds it exactly
+  once on one line. It fails naming what is missing or out of place.
+
+Task 031's README guard, in `tests/docs.rs`:
+
+- `readme_lists_each_typed_lab_operation` — README has the heading "### Typed
+  lab operations (M1 B4 lab half)" once, and its lines that start ``- ` `` are,
+  in order, exactly one line per `LAB_OPERATIONS` entry, rendered from the
+  table's own fields. It fails showing both lists.
+
+Task 046's gap guard, in `tests/docs.rs` (reusing `lane_file`, `sections`,
+`lines_at` and `OPERATIONS_SECTION`):
+
+- `import_type_gap_is_a_named_row_and_nothing_claims_a_type_check` — README
+  holds the import type gap sentence (`TYPE_GAP`) exactly once, inside "###
+  Typed lab operations (M1 B4 lab half)"; ADOPTION holds it exactly once, on
+  the numbered item of "## Gaps for Anders" whose first line starts
+  `**Import Wasm types are not checked.**`; and in README, ADOPTION and
+  `tools/src/verify.rs`, each line that names a check by type (the five
+  spellings in `TYPE_CHECK_WORDS`, ignoring case) also holds the word "not".
+  The last check fails naming each `file:line` with its text.
+
+wc-010b's run tests (task 027), in `tests/run.rs`. The grow modules are
+hand-written bytes: one memory of 1 page with (since task 033) a maximum of
+1024 pages, the declared 64 MB, no import, and one
+export `digest (i32) -> i32` that ignores its argument and runs `memory.grow`
+by a constant. Each bundle is signed with a fresh key and verified. A real
+engine not found prints SKIPPED and gives no result, never PASS:
+
+- `declared_memory_cap_comes_from_the_manifest` — stand-in argv: a bundle whose
+  `capsule.json` adds `"resources": {"memory_mb": 2}` gives `wasmtime`
+  `max-memory-size=2097152`, and one that declares `u32::MAX` gives
+  `max-memory-size=4503599626321920`; `memory_mb()` returns each as declared,
+  and `wasmer`'s argv has no cap.
+- `capsule_grows_within_the_declared_cap_on_wasmtime` — the real `wasmtime`:
+  a grow by 1023 pages, to exactly 64 MB, succeeds and prints `1`.
+- `memory_grow_past_the_declared_cap_traps_on_wasmtime` — the real `wasmtime`:
+  a grow by 1024 pages is refused with `EngineFailed`, and its stderr holds
+  `forcing trap when growing memory to 67174400 bytes`.
+- `built_capsule_runs_under_the_declared_cap_on_wasmtime` — the real
+  `tools/build` capsule through `run` on both real engines prints
+  `FIXED_OUTPUT` on both. A recording program at `wasmtime`'s path appends its
+  arguments to a file and then `exec`s the real `wasmtime` (one process, the
+  shell is replaced), so the test sees the cap on `wasmtime`'s module-run argv.
+- `memory_cap_on_wasmer_is_skipped` — `#[ignore = "SKIPPED: wasmer 7.5.0 has no
+  memory cap flag in wasmer run --help or wasmer --help (wc-010a); its cap is
+  the module's own memory maximum, checked by run (task 033)"]`, never run,
+  never counted as a PASS.
+
+Task 033 removed `second_memory_cannot_double_the_declared_cap_on_wasmtime`
+(the real `wasmtime` refused a two-memory module at start under
+`max-memories=1`): `run` now refuses that module before any engine starts, so
+it can no longer reach wasmtime; `run_refuses_a_second_memory_before_any_engine_start`
+replaces it.
+
+`runner_passes_no_directory_env_or_network_flags` and `verified_bundle_is_sealed`
+(the new private field and its accessor) were updated for the cap.
+
+Task 032's one, in `tests/run.rs`:
+
+- `built_capsule_declares_the_manifest_memory_as_its_maximum` — the
+  `tools/build` capsule, signed and verified: its module, from
+  `entrypoint()`, read through `wasm_capsule_audit::memories`, the lab's one
+  module reader (task 037; the shape reader reads no memory), imports nothing
+  (`audit`, so no memory either) and defines exactly one memory, with minimum
+  17 pages (task 068: `std` and the generated bindings put one page below the
+  stack; it was 16) and a maximum whose bytes (pages × 65536) equal `memory_mb()` × 2^20
+  from the verifier's one manifest read: 1024 pages for 64, 32-bit and not
+  shared.
+
+wc-010c's two (task 028), in `tests/run.rs`, on stand-in engines, with a
+bundle signed by `signed_bundle_declaring` (the signing half of 027's
+`verified_bundle_declaring`, which now calls it):
+
+- `receipt_records_the_declared_memory_cap` — a bundle declaring `memory_mb: 2`
+  run through `run`: the receipt was the v2 schema, 14 lines, ending in
+  `memory_mb: 2`, `memory_cap_bytes: 2097152`, `wasmtime_memory_cap: ENFORCED
+  max-memory-size=2097152,max-memories=1,trap-on-grow-failure=y` and the
+  `wasmer` SKIPPED line, exactly.
+- `receipt_cap_line_matches_the_argv_the_engine_got` — `recording` stand-ins
+  (which now also write each module run's whole argv to `<name>.argv`): the
+  receipt's `wasmtime_memory_cap` is ENFORCED with exactly the one argument
+  after `-W` in `wasmtime`'s logged argv; `wasmer`'s logged argv has no `-W`
+  and no `max-memory-size`, and its receipt line is the exact SKIPPED line.
+
+`receipt_records_observed_engine_versions` and
+`real_receipt_names_both_installed_engines` were updated to the v2 text.
+Task 034 updated all three to the v3 text.
+
+Task 038, pinned engine versions and a rejected cap argument (`tests/run.rs`).
+Every stand-in the two-engine runner starts (`marked`, `recording`,
+`counting`) now prints `<engine> <pinned version> (stand-in)`, from the tools
+crate's `WASMTIME_VERSION` and `WASMER_VERSION`; the ` (stand-in)` tail keeps
+it apart from the real lines.
+
+- `run_refuses_an_unpinned_engine_version_before_any_module_run` — through
+  `run`, each first line `wasmtime 46.0.0 (x)`, `wasmtime 45.0.10`,
+  `wasmtime-45.0.1`, `wasmer 7.6.0`, `wasmer` and `wasmer  7.5.0` (two spaces)
+  is refused with that engine's pin reason (exact text once); no module run
+  starts on either engine, no run folder is made, and after an unpinned
+  `wasmtime` the `wasmer` stand-in is not asked `--version`.
+- `run_accepts_the_pinned_version_with_any_tail` — `wasmtime 45.0.1
+  (83166ba31 2026-06-05)`, `wasmtime 45.0.1 (stand-in)` and `wasmer 7.5.0`
+  pass, both engines run, and the receipt records each line as printed.
+- `run_refuses_a_rejected_memory_cap_without_retrying_it` — a pinned
+  `wasmtime` stand-in that, when its argv holds `-W`, prints the measured
+  stderr line and exits 2: `run` is refused with the rejected-cap reason (exact
+  text) naming the `-W` argument `run` passed; `wasmtime` was started for a
+  module run exactly once, with `-W`; `wasmer` was never started. Other
+  failures stay `EngineFailed`: other stderr with exit 2, the measured line
+  with exit 3, an `error: ` line that does not name `-W`, and the measured
+  failure from `wasmer`, which is given no cap argument.
+
+`real_receipt_names_both_installed_engines` and
+`built_capsule_runs_under_the_declared_cap_on_wasmtime` pass on this Mac's
+pinned engines with no change to their assertions.
+
+Task 040, the cleanup census (`tests/run.rs`; README "Cleanup census (M1
+A12)"). Each run test needs both real engines; if either is not on PATH it
+prints `SKIPPED` and gives no result, never a PASS.
+
+- `census_reports_each_kind_of_leftover` — no engine: a left file, a live
+  `/bin/sleep` with a work-root path as its `argv[0]` and an open handle are
+  each reported once by kind (`entry: left.txt`, `process: <pid> <argv>`, an
+  `open file:` line naming this process and the file); after they are removed,
+  stopped and closed, the census is empty.
+- `normal_run_leaves_nothing_under_the_scratch_root` — one two-engine `run` of
+  the signed built capsule: both outputs equal `FIXED_OUTPUT`, then the census
+  is empty.
+- `trapped_run_leaves_nothing_under_the_scratch_root` — per engine, a `digest`
+  that runs `unreachable`: `EngineFailed` with a nonzero exit status and
+  `unreachable` on stderr, then the census is empty.
+- `killed_run_leaves_nothing_under_the_scratch_root` — per engine, a `digest`
+  that loops forever, killed with `SIGKILL` once `pgrep` sees it: its live argv
+  held no preopen, env or network flag and no work-root path but the module
+  file; `EngineFailed` stopped by signal 9; then the census is empty. Task
+  042: a failed wait or kill stops the run's engines and joins the thread
+  before the test fails.
+
+Task 041, host secrets denied (`tests/run.rs`; README "Host secrets denied
+(M1 A8 lab half)"):
+
+- `host_secret_fixture_never_reaches_either_real_engine` — the outer test:
+  both real engines behind recording shims, a fixture home with
+  `keys/host-secret`, and a child test process with that `HOME`; it passes
+  only when the child passes (SKIPPED, no result, when an engine is missing).
+- `host_secret_fixture_run_inside_the_child` — `#[ignore]`, run only as that
+  child: per engine, the module run's argv passes `argv_faults` and holds no
+  home-folder path; no recorded environment has `HOME`, the home folder, the
+  fixture path or the marker; both stdouts are `FIXED_OUTPUT` and a newline.
+- `host_secret_probe_imports_are_refused_before_any_engine_starts` — five
+  `wasi_snapshot_preview1` file and environment imports, each refused by
+  `run` as undeclared (exact text and variant; task 065 removed the `call`
+  grant case), with no run folder and no engine start.
+
+Task 043, the run budget (`tests/run.rs`; README "Run one engine (wc-005a)",
+"The run budget"). Every other test run passes one explicit control,
+`TEST_CONTROL` (30 s), far above any run here; the killed-run test passes
+120 s, so its own SIGKILL still reads `EngineFailed`. A test that waits on a
+looping engine has its own watchdog (`answer_within_watchdog`: at most the
+budget + 20 s, then `stop_run_engines`, a join, and a failure), since the
+canonical runner gives `cargo test` no time limit.
+
+- `looping_capsule_is_stopped_at_its_run_budget_on_both_engines` — per real
+  engine, `run_engine` on a `digest` that loops forever with a 500 ms budget:
+  `BudgetExceeded` for that engine and budget (exact text), after at least the
+  budget and under budget + 5 s; then the census is empty. SKIPPED, no result,
+  when either engine is missing.
+- `run_stops_wasmtime_at_its_budget_and_never_starts_wasmer` — `run` with a
+  looping `wasmtime` (the real one, or a pinned stand-in that `exec`s
+  `/bin/sleep 600` under the module path as its `argv[0]`) and a `counting`
+  `wasmer`: `TwoEngineRefusal::Engine` with `BudgetExceeded` for `wasmtime`;
+  `wasmer` is asked `--version` once and never started for a module run; the
+  census is empty.
+- `zero_run_budget_is_refused_before_any_engine_starts` — `run_engine` per
+  engine and then `run`, each with `counting` stand-ins and a zero budget: the
+  zero-budget reason (exact text, the work root as its path), no module run,
+  no `--version` query, and an empty work root.
+- `engine_output_past_a_pipe_buffer_never_blocks_it` — a stand-in that writes
+  128 KiB to stderr and then 128 KiB to stdout, with shell builtins only: its
+  whole stdout comes back when it exits 0, and its whole stderr in
+  `EngineFailed` when it exits 3, under a 5 s budget and the watchdog.
+
+Task 044, the refusal receipt (`tests/run.rs`; README "Run receipt
+(wc-005c)", "The refusal receipt"):
+
+- `budget_refusal_receipt_names_its_reason` — `run` with a pinned stand-in
+  `wasmtime` that `exec`s `/bin/sleep 600` and a `counting` `wasmer`, with a
+  200 ms budget, under the watchdog: the refusal receipt is exactly its five
+  lines, with `reason: budget_exceeded` and `engine: wasmtime`; `wasmer` ran
+  no module and the census is empty.
+- `refusal_receipt_ids_are_distinct_and_named` — one example value per
+  `Reason` and `TwoEngineRefusal` variant, made in the test: every id is
+  snake_case and distinct, `engine:` is the engine the reason names or
+  `none`, `detail:` is the Display through `escape_ascii`; a verifier refusal
+  and `OutputsDiffer` both render `engine: none`.
+- `refusal_receipt_write_refuses_an_existing_path` — a real `run` refusal
+  (zero budget) is written byte for byte; then the receipt just written, a
+  planted file, a live link and a dangling link are each refused with the
+  shared writer's own reason and cause, and nothing changes.
+
+Task 045, cancel (`tests/run.rs`; README "Cancel (M1 A10 lab half)" and
+"Cleanup census (M1 A12)"). A test that cancels a live run waits at most 10 s
+for its engine process (`live_processes`), then calls `cancel()`, then waits at
+most 5 s for the answer (`cancel_once_live`); on any failed wait it runs
+`stop_run_engines`, joins the thread, and only then fails (task 042's rule).
+
+- `cancelled_run_settles_as_cancelled_and_leaves_nothing_on_both_engines` —
+  per real engine, `run_engine` on a `digest` that loops forever, with a
+  120 s budget, on a thread, cancelled once its process is live: `Cancelled`
+  for that engine (exact text), within 5 s of `cancel()`; the refusal receipt
+  says `outcome: cancelled`, `reason: cancelled` and the engine; then the
+  census is empty. SKIPPED, no result, when either engine is missing.
+- `cancel_before_start_starts_no_engine` — a control cancelled before the
+  call: `run_engine` per engine and then `run`, each with `counting`
+  stand-ins, refuse `Cancelled` (`run` as `TwoEngineRefusal::Version` for
+  `wasmtime`, receipt `outcome: cancelled`); no module run, no `--version`
+  query, and an empty work root.
+- `run_cancelled_during_wasmtime_never_starts_wasmer` — `run` with a pinned
+  stand-in `wasmtime` that `exec`s `/bin/sleep 600` and a `counting`
+  `wasmer`, cancelled once the `wasmtime` process is live:
+  `TwoEngineRefusal::Engine` with `Cancelled` for `wasmtime` within 5 s;
+  `wasmer` was asked `--version` once and ran no module; the census is empty.
+- `refused_and_failed_runs_leave_nothing_under_the_scratch_root` — through
+  `run`: a verifier refusal (`env.f`, a core import), an unpinned `wasmtime
+  9.9.9` (stand-in), a failing `wasmtime` (stand-in, exit 3) and a 200 ms
+  budget stop (stand-in sleeper, under the watchdog), each its own expected
+  reason, each followed by an empty census.
+
+`refusal_receipt_ids_are_distinct_and_named` gains the `Cancelled` example
+(id `cancelled`, `engine: wasmer`) and now checks the `outcome:` line of
+every example: `cancelled` for the cancel, `refused` for every other one.
+
+Task 033, the module memory check (`tests/run.rs`; README "The runner checks
+the module's maximum (task 033)"). The stand-in tests use `marked` or
+`counting` stand-ins, each bundle signed with a fresh key and verified:
+
+- `run_refuses_a_module_memory_with_no_maximum_on_both_engines` — one memory,
+  minimum 1 page, no maximum: `run_engine` on `wasmtime` and on `wasmer`, and
+  `run` (as `TwoEngineRefusal::Memory`), each refuse it with
+  `MemoryMaximumMissing { minimum: 1 }` and its exact text at
+  `capsule.wasm`; no run folder in any work root, no module run start and no
+  `--version` query.
+- `run_refuses_a_memory_maximum_above_the_declared_size_on_both_engines` — the
+  same three refusals, `MemoryMaximumAboveDeclared`, for a maximum of 33 pages
+  under a declared 2 MB (32 pages) and of 1025 pages under this capsule's
+  default 64 MB (1024 pages).
+- `run_refuses_a_second_memory_before_any_engine_start` — `TWO_MEMORY_MODULE`,
+  each memory with a maximum of 32 pages, under a declared 2 MB: the same three
+  refusals, `MemoryCountAboveOne { count: 2 }`.
+- `run_starts_a_module_whose_maximum_fits_the_declared_size` — one memory with
+  a maximum of exactly 32 pages under a declared 2 MB, and the zero-memory
+  `MODULE`, each run through `run_engine` on both stand-ins and through `run`:
+  two module runs and one `--version` query per engine, as before.
+- `capsule_grows_within_its_module_maximum_on_wasmer` — the real `wasmer`,
+  through `run_engine`: `grow_module`'s grow to exactly its 1024-page maximum
+  prints `1`.
+- `memory_grow_past_the_module_maximum_returns_minus_one_on_wasmer` — the real
+  `wasmer`, through `run_engine`: a grow to 1025 pages prints `-1` and exits 0
+  (wasmer has no trap flag).
+
+The two wasmtime grow tests pass unchanged on the new `grow_module` (within:
+`1`; past: the run traps and stderr still holds `forcing trap when growing
+memory to 67174400 bytes`), and `refusal_receipt_ids_are_distinct_and_named`
+has one example per new `Reason` variant, each as `TwoEngineRefusal::Memory`,
+each with its own id and `engine: none`, plus a check that a memory reason
+from `run_engine` has the same id.
+
+Task 034, the receipt's module maximum lines (`tests/run.rs`; README "The
+module maximum lines"). Both new tests run a bundle signed by
+`signed_bundle_declaring` (one memory from `memory_module`) through `run` on
+`marked` stand-ins:
+
+- `receipt_memory_maximum_matches_the_bundle_manifest` — declared
+  `memory_mb: 2`, maximum 32 pages: the test reads the declared size from its
+  own `verify_bundle` call on the same bundle, not from the receipt or the run,
+  and requires `wasmtime_memory_maximum_bytes` and
+  `wasmer_memory_maximum_bytes` both present and equal to `memory_mb × 2^20`,
+  2097152.
+- `receipt_records_a_lower_module_maximum_as_it_is` — declared `memory_mb: 2`,
+  maximum 16 pages: both lines say `1048576`, not the declared 2097152.
+
+The v3 text in the three updated tests: the zero-memory `MODULE` gives the
+`none` line on both engines (`receipt_records_observed_engine_versions`,
+`receipt_records_the_declared_memory_cap`, now 18 lines, the v4 count since
+task 062), and the real capsule
+gives `67108864` on both (`real_receipt_names_both_installed_engines`).
+
+Task 063, the cap half of wc-010c (`tests/run.rs`; README "The runner checks
+the module's maximum (task 033)"):
+
+- `capsule_stays_under_declared_memory_cap` — Flint's one named test: (a) the
+  built capsule through `run` on both real engines, read through the v4
+  receipt; (b) one page past the declared 64 MB, refused through `run` because
+  wasmtime traps (read through the refusal receipt), and `-1` on wasmer
+  through `run_engine`; (c) a 1025-page maximum through `run` on `counting`
+  stand-ins, refused as `memory_maximum_above_declared` with no start. It adds
+  no rule and never compares RSS with the cap.
+
+Task 064, the Bus v1 import contract (README "Bus v1 import contract
+(wc-009b)"). In `tests/verify.rs`:
+
+- `bus_interfaces_are_the_runtime_admission_list` — calls
+  `runtime_bus_interfaces` (task 070), fails if that read fails, and fails if
+  `tools/src/verify.rs` holds `BUS_V1_INTERFACES` or any name the read
+  returned: the lab holds no second copy of the Runtime's list.
+- `runtime_bus_interfaces_refuses_unreadable_input`,
+  `runtime_bus_interfaces_refuses_an_absent_header`,
+  `runtime_bus_interfaces_refuses_a_duplicate_header`,
+  `runtime_bus_interfaces_refuses_an_invalid_body_line` and
+  `runtime_bus_interfaces_refuses_a_missing_terminator` — lab-local fixtures
+  through `runtime_bus_interfaces_at` give the one `BusListUnreadable`
+  refusal, whose reason names the path and the fault.
+- `runtime_bus_interfaces_preserves_file_order` — a fixture of three names
+  comes back in file order.
+- `runtime_bus_interfaces_ignores_cwd` — a child test process in another
+  directory reads the same list.
+- `bus_imports_lists_the_bus_interfaces_a_component_imports` — a component
+  importing `elastos:bus/providers@1.0.0` and then `elastos:bus/runtime@1.0.0`
+  gives both, in that order.
+- `bus_imports_refuses_an_interface_outside_bus_v1_by_name` —
+  `wasi:cli/environment@0.2.0`, `elastos:bus/runtime@2.0.0` and
+  `elastos:bus/lifecycle@1.0.0` are each refused as
+  `VerifyRefusal::Audit(UndeclaredInterface)` with exactly `undeclared
+  interface <name>`.
+- `bus_imports_refuses_a_core_module` — `IMPORTING_MODULE` (`env.f`) is refused
+  with exactly `not a component`.
+
+In `tests/run.rs`, through `componentize` (`tests/common/componentize.rs`,
+each input run at most once per test binary):
+
+- `componentized_capsule_is_a_product_capsule_v1_with_lifecycle_run` (task
+  068; replaces task 064's
+  `runtime_componentize_wraps_the_built_capsule_with_no_bus_import`): the
+  built `capsule.wasm` (a) has the required core shape, (b) passes
+  `audit(&capsule, &[])` with `Ok([])`, (c) is wrapped with exit 0, and (d)
+  `bus_imports` on the component returns exactly
+  `["elastos:bus/types@1.0.0"]`, each name `runtime_bus_interfaces()` returned.
+- `runtime_componentize_refuses_the_env_f_module` — wrapping `IMPORTING_MODULE`
+  exits non-zero, and stderr holds the measured line
+  `COMPONENTIZE_ENV_REFUSAL`.
+
+## Falsifiers
+
+`falsifiers.json` holds 199 planted bugs in the provider format (`command: "lab"`).
+By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
+20 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
+wc-005c (task 016), two task 019, 14 wc-009a (task 020), seven task 026,
+seven wc-010b (task 027), two wc-010c (task 028), one task 029, two task
+032, one task 035, three task 036, five task 038, three task
+039, one task 040, one task 041, two task 043, one task 044, one task
+033, two task 034, one task 045, two task 046, one task 050, three task
+052, one task 056, two task 062, one task 064, three task 065, nine task 070, one task
+063 and one task 068. Task 065 removed seven entries whose rule is gone (its section): one of
+wc-004's, three of wc-009a's, one of task 029's and both of task 031's.
+Each requires all its named tests to fail at an assertion.
+`readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
+This section is the one place for evidence labels and counts, and
+`falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
+`falsifiers.json` free of them.
+
+Two kinds of evidence, kept apart. Runner-caught: 137: F-WC1 (task 068 ran it)
+and the sections below marked runner-caught, less task 065's removals (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
+029, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045, 046, 050, 052, 056, 062, 064, 065, 070, 063 and 068: 1 + 1 + 23 + 11 + 20 + 2 + 14 + 7 + 7
++ 2 + 1 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2 + 1 + 3 + 1 + 2 + 1 + 3 + 1 + 9
++ 1), each run by the canonical runner with its summary
+line quoted.
+Hand-proven, pending R1: 68, each counted once: the 62 entries of the sections
+marked so (wc-001's other eight, tasks 010 and 009, wc-004 and wc-008: 8 + 7 + 23 + 20 + 4),
+and six proofs with no `falsifiers.json` entry, outside the 199 (task 036's
+`/bin/bash` 3.2 guard in `tests/reproducible.rs`, task 042's killed-run
+stop and task 049's two environment record proofs in `tests/run.rs`, task
+053's import-section refusal in `tests/common/wasm_shape.rs`, and task 068's
+lifecycle-signature plant in the same shape reader; none of these
+files is a recovery target, so a proof that edits one is a hand proof), each
+proved by the repo's break →
+named test fails → revert method with `cargo test` in this workspace. Their
+labels stay until each is run by the canonical runner and its summary line is
+quoted.
+
+R1 is done: the canonical runner `examples/agent-host/falsify.py` has a `lab`
+command (`cargo test --workspace` on this workspace). Its recovery targets
+(`PROVIDER_TARGETS`, the provider lane's) name every lane file a falsifier
+edits, so a killed run can restore each one. Ask **R2** is done: provider 026
+(PR #242) added `tools/src/run.rs`, `tools/src/receipt.rs` and
+`tests/lab_cid.rs` to `PROVIDER_TARGETS`.
+
+wc-001's nine: eight hand-proven, pending R1, and F-WC1 runner-caught since
+task 068 (README "Claim scope" has F-WC1):
+
+- F-WC1 — an embedded `CARGO_MANIFEST_DIR` breaks the byte-identical build.
+  Task 068 re-anchored it on the `digest` export block (the `no_std` panic
+  handler it was anchored on is gone), with the same planted `BUILD_DIR`
+  static, and the canonical runner reports it CAUGHT (LOG.md, task 068).
+- F-WC1-SPACED-PATH — whitespace-split `RUSTFLAGS` break the build when the
+  path has a space. Task 032 re-anchored it, the same bug as before: a second
+  edit turns the new link-argument line into the same `RUSTFLAGS` form. Without
+  it, the planted script stops at an unbound `CARGO_ENCODED_RUSTFLAGS`, and
+  `tools/build` then exited 0 with no capsule (LOG.md, task 032; since task
+  035 it exits 1), so the test would fail for another reason. By hand after the re-anchor, the named test
+  fails at its "tools/build failed" assertion with rustc's
+  `--remap-path-prefix must contain '=' between FROM and TO`. The canonical
+  runner reads it NOT RUN: the child cargo's `process didn't exit
+  successfully` line is a Cargo failure marker even inside the test's own
+  output, so it stays hand-proven.
+- F-WC1-DIGEST — the digest result changes, so the fixed value no longer holds.
+- F-WC1-IMPORT — the capsule keeps a host import.
+- F-WC1-SIG — the `digest` export takes a second parameter.
+- F-WC1-TOOLCHAIN and F-WC1-RUSTC-OVERRIDE — the receipt records a compiler
+  the build did not use, or queries a bare `rustc`.
+- F-WC1-ARTIFACT-HASH and F-WC1-LOCK-HASH — the receipt swaps the artifact
+  and lockfile hashes.
+
+- F-BUNDLE-REMAP-UNEVEN — the module names one bundle across paths only when
+  the build remaps one lane path in every run. In run 1 of this task the plant
+  was `pwd` -> `pwd -P` in `tools/build` (`LANE_DIR` resolved through a folder
+  link, `--remap-path-prefix` naming the physical path). The named test
+  `two_bundles_in_different_paths_have_one_lab_cid` goes red under it only
+  for a copy reached through a folder link, and such a copy changes more than
+  the remap: `tools/bundle`'s `cargo run` then builds a second `bundle`
+  binary, and the two bundles differ in module bytes and in lab CID. The
+  plant therefore runs against the test by hand, and stays out of
+  `falsifiers.json` until a plant exists that changes only the remap.
+
+Task 010's seven, each hand-proven, pending R1:
+
+- F-WC3-LABCID-SCHEMA — the manifest's `schema` becomes a lab schema; the
+  Runtime's `validate()` refuses it inside the lab CID.
+- F-WC3-LABCID-ENTRYPOINT — `entrypoint` becomes `module.wasm`.
+- F-WC3-LABCID-VERSION — `version` becomes `0.1.1`.
+- F-WC3-LABCID-PIN — one byte of the `description` changes the lab CID.
+- F-WC3-SECOND-RULE — a naming function of the lane's own comes back.
+- F-WC3-SECOND-IMPORT — the tools crate imports the shared function twice.
+- F-WC3-COPY-DEPS — the reproducibility copy stops reaching the out-of-lane
+  path dependencies, so the child `tools/build` fails with cargo's "failed to
+  load manifest" error and the named test fails at its assertion that the build
+  succeeded.
+
+Task 009's 23, each hand-proven, pending R1 (every named test failed at its
+assertion with the bug in, and passed again after the revert):
+
+- F-WC3-CMD-BYPASS — the command names `capsule.wasm` alone with the shared
+  encoder, not the bundle with `bundle_identity`.
+- F-WC3-REUSE-OUT — `create_dir_all` for OUT_DIR, so an existing one is used.
+- F-WC3-FOLLOW-WRITE — `create_dir_all` for `bundle/`, so a planted link is
+  followed.
+- F-WC3-MODULE-COPY — `fs::copy` instead of `rename`, so a linked file's bytes
+  enter the bundle.
+- F-WC3-ARGS-UNKNOWN, -ARGS-MISSING, -ARGS-NONE, -ARGS-EXTRA and -ARGS-EMPTY —
+  each argument rule falls back to the usage line only.
+- F-WC3-ARGS-UTF8 — a lossy UTF-8 conversion loses a path's bytes.
+- F-WC3-BUILD-CAUSE — both build failures give one shared reason.
+- F-WC3-BUILD-STDOUT — `tools/build`'s stdout reaches the command's stdout.
+- F-WC3-IO-PATH — a run refusal drops its path.
+- F-WC3-IO-MOVE-PATH — a failed move names the destination, not the module.
+- F-WC3-IO-CAUSE-OUT, -BUNDLE, -MANIFEST, -WRITE and -MOVE — each I/O refusal
+  drops the system's cause.
+- F-WC3-CMD-REASON — `bundle_identity`'s refusal is replaced by the command's
+  own text.
+- F-WC3-CMD-STATUS — a run refusal exits 2.
+- F-WC3-CMD-STDOUT — a run refusal goes to stdout.
+- F-WC3-ARTIFACT-PIN — the capsule source changes, so `tools/build` makes
+  another module with a matching receipt; only the pinned sha256 catches it.
+
+Task 012's one, runner-caught (the canonical runner run
+`python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC3-CREATE-NEW`
+reported `summary: 1 CAUGHT of 1` and restored `tools/src/bundle.rs`; by hand,
+the named test failed at its assertion with the bug in and passed after the
+revert). `tools/src/bundle.rs` was not a recovery target at that run; it is
+one now:
+
+- F-WC3-CREATE-NEW — `capsule.json` is opened with `create` and `truncate`
+  instead of `create_new`, so an existing file or a link at its path is written
+  over or through. `bundle_io_refusals_keep_path_and_cause` fails at its
+  `expect_err("an entry is there")`.
+
+Task 017's one, runner-caught (the canonical runner reported
+`summary: 3 CAUGHT of 3` for it, F-WC3-SECOND-RULE and F-WC3-SECOND-IMPORT):
+
+- F-WC3-RETIRED-LABEL-DOC — a line holding the retired name label is appended
+  to `LOG.md`. `the_lane_keeps_no_bundle_name_rule_of_its_own` fails at its
+  `found.is_empty()` assertion and names the line as `LOG.md:<line>`.
+
+wc-004's 21, each hand-proven, pending R1 (every named test failed at its
+assertion with the bug in, and passed again after the revert). Task 010's
+F-WC3-SECOND-IMPORT and F-WC3-SECOND-RULE were proved again against the
+updated `the_lane_keeps_no_bundle_name_rule_of_its_own`.
+
+- F-WC4a — the verifier skips `verify_checked_signature` and trusts the
+  signature's `name`: changed bytes, a changed manifest and an extra file pass
+  or reach the audit.
+- F-WC4b — a `None` signature passes.
+- F-WC4c — the verifier skips the `audit` call.
+- F-WC4d — the path form audits `capsule.wasm` read again by its path.
+- F-WC4e — the verifier passes an empty list to `audit`, not the caller's
+  grants.
+- F-WC4f — `*.seed` is removed from the lane's `.gitignore`.
+- F-WC4g — a PEM private-key header line is appended to this README.
+- F-WC4-SCAN-SKIP-MISSING — the key scan skips a listed file that is gone
+  from the worktree but still in git's index.
+- F-WC4-SCAN-NAME-AFTER-READ — the key scan checks a listed name only after
+  the file reads.
+- F-WC4-ENTRY-SUBSTITUTE — a missing entrypoint falls back to another bundled
+  module.
+- F-WC4-ENTRY-HARDCODED — the verifier audits `capsule.wasm`, not the
+  manifest's entrypoint.
+- F-WC4-WALK-REASON, -SIG-REASON and -AUDIT-REASON — the walk's, the signature
+  check's or the audit's refusal is replaced by another reason.
+- F-WC4-ORDER-AUDIT-FIRST — the audit runs before the signature check.
+- F-WC4-ORDER-UNSIGNED-FIRST — the path form refuses an unsigned bundle before
+  the walk.
+- F-WC4-SEALED-FIELD, -SEALED-NEW and -SEALED-MUT — a public field, a public
+  constructor, or mutable access to the verified value.
+- F-WC4-SECOND-SIG and F-WC4-SECOND-AUDIT — a second signature check or a
+  second audit call in the tools crate.
+
+wc-008's four, and one reused entry, each hand-proven, pending R1 (every named
+test failed at its assertion with the bug in, and passed again after the
+revert). They are not in the runner-caught count. A canonical runner run,
+`python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC8 F-WC3-LABCID-PIN`,
+reported `summary: 5 CAUGHT of 5`; it stays pending R1 (at that run the
+recovery targets named neither `capsule/capsule.json` nor `tools/src/lib.rs`;
+both are recovery targets now), not a PASS.
+
+- F-WC8-UNKNOWN-FIELD — hand-proven, pending R1. The committed manifest gains
+  `"lab_imports": []`: `lab_manifest_passes_runtime_validate` fails with the
+  Runtime's "unknown field `lab_imports`" error, and
+  `this_capsule_bundle_has_the_pinned_lab_cid` fails too.
+- F-WC8-NEAR-FIT — hand-proven, pending R1. The committed manifest declares
+  `runtime_abi` `elastos.component/v1`: the Runtime refuses a Component ABI
+  without Component metadata (`lab_manifest_passes_runtime_validate`), and
+  `no_runtime_abi_names_a_bare_core_module` sees the manifest is no longer bare.
+- F-WC8-INVALID-BASELINE — hand-proven, pending R1. The committed manifest
+  gains `execution` `component`, so six ABIs are refused for the manifest's
+  fault, not their own rule: `no_runtime_abi_names_a_bare_core_module` fails
+  at its exact-reason check, and `lab_manifest_passes_runtime_validate` fails.
+- F-WC8-NAME-WITHOUT-MANIFEST — hand-proven, pending R1. The tools crate's
+  `bundle_identity` names the two files with the shared encoder and skips the
+  Runtime's manifest check: `an_unknown_manifest_field_is_refused_by_name`
+  sees the `lab_imports` bundle named, not refused.
+- F-WC3-LABCID-PIN (task 010's, reused, counted once) — hand-proven, pending
+  R1. It is the proof of "changing one manifest byte changes the lab CID":
+  one `description` byte changes, and
+  `this_capsule_bundle_has_the_pinned_lab_cid` fails. wc-008 adds no second
+  entry for it (F-WC8-ONE-BYTE).
+
+wc-005a's 23 (task 014), runner-caught. The canonical runner run
+`python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC5 F-WC4`
+reported `summary: 44 CAUGHT of 44` (these 23 and wc-004's 21, re-run because
+`tools/src/verify.rs` changed), exit 0, and restored every file. Each named test
+passed unmutated first. `tools/src/run.rs` is not in the runner's recovery
+targets (`PROVIDER_TARGETS`, the provider lane's), so a killed run cannot
+restore it for the F-WC5 entries (ask R2):
+
+- F-WC5c — the runner adds `--dir .` to the argv
+  (`runner_passes_no_directory_env_or_network_flags`).
+- F-WC5d — the runner passes `--env WC5=1 --dir .` to `wasmer` only (the same
+  test, on its `wasmer` run).
+- F-WC5-DISK-REREAD — the runner writes the bundle's module read again from
+  disk, not `entrypoint()`'s bytes (`run_writes_only_the_verified_entrypoint_bytes`
+  sees the changed bytes; `runner_uses_only_explicit_inputs` sees the read).
+- F-WC5-RELATIVE-ENGINE — the absolute-path check is removed
+  (`engine_path_must_be_absolute`).
+- F-WC5-WORK-ROOT-LINK — the canonical check is removed
+  (`work_root_must_be_absolute_and_canonical`).
+- F-WC5-RUN-DIR-MODE and F-WC5-RUN-DIR-REUSE — the run folder is made `0o755`,
+  or an existing one is reused by a recursive create
+  (`run_directory_is_private_and_new`).
+- F-WC5-IO-ROOT-CAUSE, -IO-RUN-DIR-CAUSE, -IO-MODULE-CREATE, -IO-MODULE-WRITE
+  and -IO-MODULE-PATH — the work root's, the run folder's, or the module file's
+  refusal loses its cause or path (`runner_io_refusals_keep_path_and_cause`).
+- F-WC5-IO-ROOT-METADATA and -IO-ROOT-IS-DIR — a failed metadata read of the
+  work root is reported as "not a folder", in `work_root_folder` or by a
+  `Path::is_dir` check in its place (`runner_io_refusals_keep_path_and_cause`).
+- F-WC5-STDIN-PIPED — the engine's stdin is a pipe, not `/dev/null`
+  (`engine_stdin_is_null`).
+- F-WC5-ENV-READ — the engine program comes from an environment variable when
+  set (`runner_uses_only_explicit_inputs`).
+- F-WC5-LOCAL-WRITER — the module is written with `fs::write`, not the shared
+  writer (`runner_reuses_shared_writer`).
+- F-WC5-ENGINE-ENV — the engine inherits the test process's environment
+  (`engine_starts_with_an_empty_environment`; since task 049 also
+  `host_secret_fixture_never_reaches_either_real_engine`, at "the child ...
+  did not pass").
+- F-WC5-FAIL-STDERR, -START-CAUSE and -EXIT-IGNORED — a failed engine's
+  stderr is dropped, a start failure loses its OS error, or a nonzero exit is
+  accepted (`engine_failures_keep_their_cause`).
+- F-WC4-ENTRYPOINT-ACCESSOR — `entrypoint()` returns `capsule.wasm`, not the
+  manifest's entrypoint (`verified_entrypoint_is_the_audited_module`).
+- F-WC4-ENTRYPOINT-REPARSE — `entrypoint()` reads the manifest again
+  (`verifier_has_one_check_path`).
+
+Task 014 also re-anchored six wc-004 entries to the moved verifier code, each
+the same bug as before: F-WC4-ENTRY-SUBSTITUTE, -ENTRY-HARDCODED,
+-ORDER-AUDIT-FIRST, -SEALED-FIELD, -SEALED-NEW (now with the `entrypoint`
+field) and -SECOND-AUDIT. All six are in the 44 above.
+
+wc-005b's 11 (task 015), runner-caught. The canonical runner run
+`python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC5 F-WC4`
+reported `summary: 55 CAUGHT of 55` (these 11, wc-005a's 21 F-WC5 entries and
+the 23 F-WC4 entries), exit 0, with every named test passing unmutated first
+(its baseline line) and no backup left. Both engines were found on PATH, so
+F-WC5-BOTH-ARGS ran; on a machine without both, the real-engine test prints
+`SKIPPED` and passes, so leave F-WC5-BOTH-ARGS out of the run and report it
+NOT RUN. `tools/src/run.rs` is still not a recovery target (ask R2):
+
+- F-WC5a — `run` skips `verify_bundle` and starts both engines on the bundle's
+  `capsule.wasm` from disk (`runner_refuses_an_unverified_bundle` sees the
+  engines start; `runner_uses_only_explicit_inputs` sees no verify call).
+- F-WC5b — `run` compares only exit statuses, not stdout
+  (`differing_engine_outputs_are_reported_as_a_failure`).
+- F-WC5-EQUAL-FAILURES — a failed exit is taken as an empty stdout, so two
+  equal failures compare equal and pass (`matching_engine_failures_are_refused`).
+- F-WC5-BOTH-ARGS — the fixed argument becomes `1` for both engines: equal but
+  wrong output (`same_name_same_output_on_wasmtime_and_wasmer`, at its
+  `FIXED_OUTPUT` assertion).
+- F-WC5-VERIFY-TWICE — `run` calls `verify_bundle` a second time
+  (`runner_uses_only_explicit_inputs`).
+- F-WC5-WASMTIME-REFUSAL-DROPPED and -WASMER-REFUSAL-DROPPED — an engine's
+  refusal is discarded and its stdout taken as empty
+  (`runner_preserves_engine_refusals`).
+- F-WC5-ENGINES-REVERSED, -ENGINES-OVERLAP and -BYPASS-RUN-ENGINE — `wasmer`
+  runs first, both run at once on two threads, or `wasmer` is started on the
+  bundle's module path without `run_engine` (`runner_calls_engines_in_order`).
+- F-WC5-OTHER-CID — the returned name is the folder named again after the run,
+  not the verified value's (`run_returns_the_verified_name_and_both_outputs`).
+
+wc-005c's 20 (task 016), runner-caught. The canonical runner run
+`python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC5`
+reported `summary: 52 CAUGHT of 52` (these 20, wc-005a's 21 F-WC5 entries and
+wc-005b's 11, re-run because `tools/src/run.rs` changed), exit 0, with its
+baseline line `baseline: 22 named tests pass without an edit, 0 do not` and no
+backup left. Both engines were found on PATH, so F-WC5-BOTH-ARGS ran.
+Neither `tools/src/run.rs` nor `tools/src/receipt.rs` is a recovery target, so
+a killed run cannot restore them (ask R2):
+
+- F-WC5-HARDCODED-VERSIONS — the receipt prints this Mac's installed versions,
+  not what the engines printed (`receipt_records_observed_engine_versions`).
+- F-WC5-VERSION-CAUSE, -VERSION-START-CAUSE and -VERSION-STDERR — a nonzero
+  query becomes the generic empty-version reason, a start failure loses its OS
+  error, or the stderr is dropped (`version_query_failures_keep_their_cause`).
+- F-WC5-VERSION-EMPTY-ACCEPTED — an empty first line is taken as the version
+  (`version_query_failures_keep_their_cause`).
+- F-WC5-VERSION-WHOLE-STDOUT — the whole stdout is kept, not its first line
+  (`receipt_records_observed_engine_versions` and
+  `version_query_failures_keep_their_cause`).
+- F-WC5-QUERY-BEFORE-VERIFY — the queries run before `verify_bundle`
+  (`runner_refuses_an_unverified_bundle` sees a version marker).
+- F-WC5-VERSION-AFTER-RUN — the queries run after both module runs
+  (`version_query_failures_keep_their_cause` and `runner_calls_engines_in_order`).
+- F-WC5-VERSION-RELATIVE, -VERSION-ENV and -VERSION-STDIN — the query skips
+  the absolute-path check, is started without `engine_command` and inherits the
+  environment, or gets a piped stdin (`version_queries_use_explicit_inputs`).
+- F-WC5-RECEIPT-OVERWRITE — the receipt is written with `fs::write` (create +
+  truncate) (`receipt_write_refuses_an_existing_path`).
+- F-WC5-RECEIPT-CAUSE — the writer's refusal is replaced by another reason
+  (`receipt_write_refuses_an_existing_path`).
+- F-WC5-RECEIPT-SCHEMA, -CID, -FUNCTION, -ARGUMENT, -VERSION-SWAP, -STATUS and
+  -STDOUT — one receipt field is tampered with
+  (`receipt_records_observed_engine_versions`).
+
+Task 016 also re-anchored four entries, each the same bug as before, all in the
+52 above: F-WC5-ENGINE-ENV and F-WC5-STDIN-PIPED (the empty environment and
+null stdin moved into `engine_command`, shared by the module run and the
+version query), F-WC5a (the queries now sit between verification and the
+module runs, so its one edit became two) and F-WC5-EQUAL-FAILURES (`run_engine`
+returns an `EngineRun`, so the planted empty result is `EngineRun::default()`).
+No falsifier plants a fixed exit status: a passing run always exited 0, so a
+hard-coded 0 would print the same text and no test could tell them apart.
+
+Task 019's two, runner-caught (the canonical runner's summary line is in
+LOG.md, task 019). `tools/src/run.rs` is not a recovery target (ask R2), so a
+killed run cannot restore it for F-WC5-START-TWICE; `README.md` is one:
+
+- F-WC5-START-TWICE — `run_engine` starts the engine twice, drops the first
+  result and returns the second (`run_engine_starts_its_engine_exactly_once`,
+  at its count assertion).
+- F-WC-README-COUNT — the total in this section's first sentence becomes one
+  less than the file holds (`readme_falsifier_total_matches_falsifiers_json`,
+  at its comparison).
+
+wc-009a's 17 (task 020), runner-caught (the canonical runner's summary line is
+in LOG.md, task 020). Every anchor is in `tools/src/verify.rs`, a recovery
+target:
+
+- F-WC9-LINK-ALL — the verifier drops the audit's `Undeclared` refusal, so a
+  module with an import that is not granted reaches both engines
+  (`declared_not_granted_import_refuses_instantiation_by_name`).
+- F-WC9-GRANT-INJECT — the linked list is the grants list, not the audit's
+  result, so a grant for an import the module does not have is reported as
+  linked (`grant_for_an_import_the_module_does_not_have_links_nothing_and_is_reported`).
+- F-WC9-GRANTS-LABEL — the reader stops checking the label
+  (`grants_file_refusals_keep_their_reason`).
+- F-WC9-GRANTS-SCHEMA, -UNKNOWN-KEY, -IMPORTS-NOT-LIST, -ENTRY-EXTRA-KEY,
+  -ENTRY-NOT-STRING and -DUPLICATE — the reader drops one more check, so a
+  wrong schema, an unknown key, a non-list `imports` (read as empty), an entry
+  with a third key, a number name (taken as its JSON text) or a pair granted
+  twice is read (`grants_file_refusals_keep_their_reason`).
+- F-WC9-GRANTS-CAUSE, -NOT-JSON, -NOT-OBJECT and -MISSING-KEY — an unreadable
+  file loses its OS cause, a file that is not JSON is read as no grants, a
+  document that is not an object is refused as a missing key, or a missing key
+  is read as null and refused as a wrong value
+  (`grants_file_refusals_keep_their_reason`).
+- F-WC9-UNUSED-KEEPS-USED and -UNUSED-REORDER — the unused grants keep the
+  linked one, or come back in reverse file order
+  (`unused_grants_excludes_linked_and_preserves_file_order`).
+- F-WC9-GRANTS-READ-TWICE and -PARSE-TWICE — the reader reads the file, or
+  parses its bytes, a second time (`verifier_has_one_check_path`, and for the
+  read also `verifier_reads_no_bundle_file_by_path`).
+
+Task 020 also re-anchored four entries, each the same bug as before:
+F-WC5a, F-WC5-VERIFY-TWICE and F-WC5-QUERY-BEFORE-VERIFY (`run` now passes
+`input.granted`, not `&[]`, to `verify_bundle`; F-WC5a, which removes the
+verified value, gains a fourth edit that fills `linked` and `unused_grants`
+empty, so it still builds) and F-WC4-SEALED-NEW (the
+planted constructor fills the new `unused` field, so it still compiles and is
+caught by `verified_bundle_is_sealed`). That `run` forwards `input.granted` is
+held by `runner_uses_only_explicit_inputs` and `granted_import_is_linked`; its
+planted bug (`&[]` in place of `input.granted`, in `tools/src/run.rs`) was
+hand-proven when task 020 ran (LOG.md, task 020), and is now runner-caught as
+F-WC9-RUN-DROPS-GRANTS (task 029, below), counted in the totals above.
+
+Task 023's eight planted bugs in the `"about"` text, each hand-proven
+(`falsifiers.json` is the canonical runner's own input and not a recovery
+target, so they have no `falsifiers.json` entry and are outside every count
+above; LOG.md, task 023). Each makes
+`falsifiers_about_states_no_evidence_status` fail at its assertion: the base's
+evidence sentence put back, each of the five evidence words planted alone, and
+the pointer losing `README.md` or `## Falsifiers`.
+
+Task 026's seven, runner-caught (the canonical runner's summary line is in
+LOG.md, task 026). Every anchor is in `README.md`, a recovery target, and each
+entry's one named test fails at its assertion:
+
+- F-WC-ENGINE-ENDORSED — the engine ruling's "not endorsed" loses its "not"
+  (`engines_are_labelled_test_only_not_endorsed`, which says "not endorsed",
+  at its count assertion).
+- F-WC-ENGINE-MOVED — the engine ruling moves from "Layout" to the two-engine
+  section (that test, at its placement assertion).
+- F-WC-ENGINE-TWICE — a second copy of the engine ruling (that test, at its
+  count assertion).
+- F-WC-ENDORSE-LINE — the two-engine section's "not endorsed" line goes back to
+  the base's wording (that test, at its line assertion).
+- F-WC9B0-IMPORT-PATH — the discovery-only ruling is removed from the 022
+  section (`hosting_discovery_is_not_the_import_path`, at its count assertion).
+- F-WC9B0-AFTER-ANSWERS — the discovery-only ruling moves after the
+  per-engine answers (that test, at its placement assertion).
+- F-WC9B0-TWICE — a second copy of the discovery-only ruling (that test, at its
+  count assertion).
+
+Task 026 also re-anchored F-WC-README-COUNT to the new total, the same bug as
+before.
+
+Task 026's two planted bugs in `tools/src/run.rs` are runner-caught since task
+052; they are listed under "Task 052's three, runner-caught" below. Task 026's
+three planted bugs in `ADOPTION.md`, each hand-proven, pending R1
+(`ADOPTION.md` is not a recovery target, so they have no `falsifiers.json`
+entry and are outside every count above; LOG.md, task 026):
+
+- F-WC-ENGINE-ADOPTION — ADOPTION loses the engine ruling
+  (`engines_are_labelled_test_only_not_endorsed`, which says "not endorsed",
+  at its count assertion).
+- F-WC-ENDORSE-ADOPTION — ADOPTION's "not endorsed" claim-scope line goes back
+  to the base's wording (that test, at its line assertion).
+- F-WC9B0-ADOPTION — ADOPTION loses the discovery-only ruling
+  (`hosting_discovery_is_not_the_import_path`, at its ADOPTION assertion).
+
+wc-010b's seven (task 027), runner-caught (the canonical runner's summary line is
+in LOG.md, task 027). Every anchor is in `tools/src/run.rs` or
+`tools/src/verify.rs`, both recovery targets, and each named test fails at its
+assertion:
+
+- F-WC10-CAP-IGNORED — the runner drops the cap argument, so it ignores the
+  declared limit (Rong's falsifier)
+  (`runner_passes_no_directory_env_or_network_flags` and
+  `declared_memory_cap_comes_from_the_manifest` at their argv comparison;
+  `memory_grow_past_the_declared_cap_traps_on_wasmtime`, where wasmtime is
+  present, because the grow past 64 MB is not trapped and the run is not
+  refused; task 033 dropped
+  `second_memory_cannot_double_the_declared_cap_on_wasmtime`, which it
+  removed, from the named tests, the same bug and anchor).
+- F-WC10-CAP-FIXED — the runner caps at a fixed 64 MB, not the declared
+  `memory_mb` (`declared_memory_cap_comes_from_the_manifest`, at its 2 MB argv
+  comparison).
+- F-WC10-NO-TRAP — `trap-on-grow-failure=y` is dropped, so a grow past the cap
+  returns -1 and the run exits 0 (the argv test and
+  `declared_memory_cap_comes_from_the_manifest` at their argv comparison;
+  `memory_grow_past_the_declared_cap_traps_on_wasmtime`, not refused).
+- F-WC10-TWO-MEMORIES — `max-memories=1` is dropped, so the cap holds each
+  linear memory on its own and a module with a second memory gets twice its
+  declared size (round 2 of task 027, from the Codex review) (the argv test
+  and `declared_memory_cap_comes_from_the_manifest` at their argv comparison;
+  task 033 dropped `second_memory_cannot_double_the_declared_cap_on_wasmtime`,
+  which it removed, from the named tests, the same bug and anchor; since task
+  033 `run` refuses a second memory itself, before any start).
+- F-WC10-CAP-OVERFLOW — the MB to bytes product is taken in `u32`
+  (`wrapping_mul`), so `u32::MAX` MB wraps
+  (`declared_memory_cap_comes_from_the_manifest`, at its `u32::MAX` argv
+  comparison).
+- F-WC10-CAP-NOT-READ — the verifier keeps a fixed 64 in place of the
+  manifest's `resources.memory_mb` (`declared_memory_cap_comes_from_the_manifest`,
+  at its `memory_mb()` assertion).
+- F-WC10-WASMER-FLAG — `wasmer` is given a cap flag its CLI does not have (the
+  argv test and `declared_memory_cap_comes_from_the_manifest`, at `wasmer`'s
+  argv comparison).
+
+Task 027 also re-anchored seven entries, each the same bug as before:
+F-WC5-START-TWICE (`start_engine` now takes the declared `memory_mb`, so both
+of its anchors carry the new argument), F-WC5a (its direct engine starts pass
+the default 64, since it removes the verified value) and
+F-WC5-BYPASS-RUN-ENGINE (its direct start passes the verified `memory_mb`);
+F-WC4-ORDER-AUDIT-FIRST (the manifest read returns the entrypoint and
+`memory_mb` together) and F-WC4-ENTRYPOINT-REPARSE (its second manifest read
+keeps only the entrypoint); F-WC4-SEALED-NEW (the planted constructor fills
+the new `memory_mb` field, so it still compiles and is caught by
+`verified_bundle_is_sealed`); and F-WC-README-COUNT (the new total). Each
+re-anchored entry keeps its own evidence label above.
+
+wc-010c's two (task 028), runner-caught (the canonical runner's summary line is
+in LOG.md, task 028). Both anchors are in `tools/src/receipt.rs`, a recovery
+target, and each named test fails at its assertion:
+
+- F-WC10C-WASMER-ENFORCED — `render` prints every engine's cap line from
+  `wasmtime`'s recorded argument, so `wasmer`, started with none, reads ENFORCED
+  (`receipt_records_the_declared_memory_cap`, at its memory lines comparison;
+  `receipt_cap_line_matches_the_argv_the_engine_got`, at its exact `wasmer`
+  SKIPPED line).
+- F-WC10C-CAP-FIXED — `render` prints a fixed `67108864` in place of the
+  declared bytes (`receipt_records_the_declared_memory_cap`, at its 2 MB memory
+  lines comparison).
+
+Task 028 also adds `receipt_cap_line_matches_the_argv_the_engine_got` to
+027's F-WC10-CAP-IGNORED (anchor and mutation unchanged; with no `-W` in
+`wasmtime`'s argv the test fails at its one `-W` argument assertion) and
+re-anchors F-WC-README-COUNT to the new total, the same bug as before. Both
+keep their runner-caught label above.
+
+Task 029's two, runner-caught (the canonical runner's summary line is in
+LOG.md, task 029). Each bug was first planted by hand in an earlier task; it
+gets its entry now that its file is a recovery target (R2 done). Each named
+test fails at its assertion:
+
+- F-WC3-LANE-FILES-QUOTED — the lister drops `-z` and splits git's listing by
+  line, so a name git quotes (`review"note.md`) is read by `lane_files` under
+  its quoted form and skipped. Since task 056 both edits are in the one shared
+  lister, `lane_paths` in `tests/common/build.rs`; before, they were in
+  `lane_files` in `tests/lab_cid.rs` (task 018's bug;
+  `lane_files_reads_names_git_would_quote`, "lane_files did not list every file
+  under its real name").
+- F-WC9-RUN-DROPS-GRANTS — `run` in `tools/src/run.rs` passes `&[]` in place
+  of `input.granted` to `verify_bundle`, so a granted import is refused (task
+  020's bug; `runner_uses_only_explicit_inputs` and
+  `granted_import_is_linked`).
+
+Task 029 also re-anchors F-WC-README-COUNT to the new total, the same bug as
+before.
+
+Task 031's two, runner-caught (the canonical runner's summary line is in
+LOG.md, task 031). Both anchors are in `tools/src/verify.rs`, a recovery
+target, and each named test fails at its assertion:
+
+- F-WC-B4-UNTYPED-LINKED — `verify_checked` drops the typed-entry check, so a
+  granted import with no typed lab operation is linked and the module runs
+  (`module_import_with_no_typed_operation_is_refused`, at its refusal).
+- F-WC-B4-RIGHT-IGNORED — `parse_grants` drops the right comparison, so
+  `env.f` granted `write` is read
+  (`grant_naming_a_right_the_operation_does_not_need_is_refused`, at its
+  refusal).
+
+Task 031 also re-anchors F-WC-README-COUNT to the new total, the same bug as
+before.
+
+Task 032's two, runner-caught (the canonical runner's summary line is in
+LOG.md, task 032). Both anchors are on `tools/build`'s new link-argument line,
+and each named test fails at its assertion:
+
+- F-WC10D-NO-MODULE-MAX — the line is removed, so the capsule declares no
+  memory maximum (`built_capsule_declares_the_manifest_memory_as_its_maximum`,
+  "the capsule declares no memory maximum";
+  `tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid` and
+  `the_real_capsule_passes_the_verifier`, at `PINNED_ARTIFACT_SHA256`).
+- F-WC10D-MAX-WRONG — the line passes `--max-memory=134217728`, 2048 pages
+  (the same three tests: the maximum's bytes are not `memory_mb()` × 2^20, and
+  the sha256 is not the pin).
+
+Task 032 also re-anchors F-WC1-SPACED-PATH (above, still hand-proven) and
+F-WC-README-COUNT to the new total, each the same bug as before.
+
+Task 035's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 035). Its anchor is `tools/build`'s cleanup trap line, and its
+named test fails at its exit-status assertion:
+
+- F-WC1-TRAP-STATUS — the trap goes back to `trap 'rm -rf "$TARGET_DIR"'
+  EXIT`, so on `/bin/bash` 3.2.57 a `set -u` error after it exits 0
+  (`build_script_fails_closed_after_an_unbound_variable`, "tools/build exited
+  exit status: 0 after an unbound variable past its cleanup trap").
+
+The trap is armed to fail: `/bin/bash` 3.2.57 hands it `$?` 0 after a `set -u`
+error, the same as at the script's end (LOG.md, task 035, has the probes), so
+it turns 0 into 1 and keeps any other status. The script's last line re-arms
+a plain `rm -rf` trap, so a finished build exits 0. Task 035 also re-anchors
+F-WC-README-COUNT to the new total, the same bug as before.
+
+Task 036's three, runner-caught (the canonical runner's summary line is in
+LOG.md, task 036). `tools/build` now makes its target dir inside `$TMPDIR`, so
+each anchor is a `tools/build` line and each named test fails at its
+assertion:
+
+- F-WC1-TRAP-CLEANUP — the armed trap drops `rm -rf "$TARGET_DIR"; ` and
+  keeps its status rule, so a failed build leaves its target dir
+  (`build_script_fails_closed_after_an_unbound_variable`, "the cleanup trap
+  left [...] in the build's TMPDIR").
+- F-WC1-CLEANUP-ON-SUCCESS — the last line re-arms `trap ':' EXIT`, so a
+  finished build leaves its target dir (`finished_build_leaves_its_tmpdir_empty`,
+  "a finished build left [...] in its TMPDIR").
+- F-WC1-TARGET-OUTSIDE-TMPDIR — the target dir is made by a bare `mktemp -d`
+  again, which on macOS ignores `TMPDIR`
+  (`build_script_fails_closed_after_an_unbound_variable`, "tools/build made its
+  target dir [...] outside the TMPDIR it was given").
+
+Before task 036 the empty-TMPDIR check watched nothing: with `rm -rf
+"$TARGET_DIR"; ` taken out of the armed trap, the status test still passed
+(LOG.md, task 036, has the probe). Task 036 also re-runs F-WC1-TRAP-STATUS
+(still caught) and re-anchors F-WC-README-COUNT to the new total, the same bug
+as before.
+
+Task 036's `/bin/bash` 3.2 guard, hand-proven, pending R1 (no
+`falsifiers.json` entry: `tests/reproducible.rs` is not a recovery target; it
+is counted once in the hand-proven total above, never in the runner-caught
+one; LOG.md, tasks 036 and 042, has the runs): with ` version 5.3.` in place of `
+version 3.2.` in `require_system_bash_3_2`, the status test
+`build_script_fails_closed_after_an_unbound_variable` fails at its version
+assertion ("this test needs /bin/bash 3.2, ..."; found `GNU bash, version
+3.2.57(1)-release (arm64-apple-darwin25)`); restored.
+
+Task 038's five, runner-caught (the canonical runner's summary line is in
+LOG.md, task 038). Each anchor is a new line of `tools/src/run.rs`, a recovery
+target, and the named test fails at its assertion:
+
+- F-WC5-VERSION-UNPINNED — the pin check `check_pinned` returns success at its
+  first line, so an engine of any version runs a module
+  (`run_refuses_an_unpinned_engine_version_before_any_module_run`, at its
+  version refusal).
+- F-WC10-CAP-REJECTED-RETRY — on the rejected-cap refusal, `start_engine`
+  starts the engine again without the cap argument and returns that run's
+  result, so the module runs uncapped and `wasmer` runs after it
+  (`run_refuses_a_rejected_memory_cap_without_retrying_it`, at its refusal).
+- F-WC10-CAP-REJECTED-UNNAMED — `cap_rejected` is always false, so a rejected
+  cap reads as a plain engine failure that does not name the cap (the same
+  test, at the refusal text).
+- F-WC10-CAP-REJECTED-ANY-STATUS — `cap_rejected` drops the measured exit
+  status, so the measured line with exit 3 is called a rejected cap (the same
+  test, at its other-status case).
+- F-WC10-CAP-REJECTED-UNCAPPED — the rule applies to a start given no cap
+  argument, so `wasmer`'s failure is called a rejected cap (the same test, at
+  its uncapped case).
+
+Task 038 also re-runs F-WC5-HARDCODED-VERSIONS (still caught: the stand-ins'
+` (stand-in)` tail and the receipt test's made-up tails keep each line apart
+from this Mac's real lines) and re-anchors F-WC-README-COUNT to the new total,
+the same bug as before.
+
+Task 039's three, runner-caught (the canonical runner's summary line is in
+LOG.md, task 039). Each anchor is a new line of `tools/src/run.rs`, a recovery
+target, and each named test fails at its assertion:
+
+- F-WC5-RUN-DIR-KEPT — `remove_run_dir` returns at its first line, so every
+  run leaves its run folder and module file
+  (`run_engine_removes_its_run_folder_after_every_outcome`, at its success
+  case; `run_leaves_an_empty_work_root`, at its empty-root assertion).
+- F-WC5-RUN-DIR-KEPT-ON-FAILURE — `finish_run` calls the removal only after a
+  success, so a failed engine or one that did not start leaves its folder
+  (`run_engine_removes_its_run_folder_after_every_outcome`, at its
+  failed-engine case).
+- F-WC5-REMOVAL-ERROR-DROPPED — a failed removal after a success is ignored,
+  so the run passes and its folder stays
+  (`run_folder_that_cannot_be_removed_is_refused`, at its refusal).
+
+Task 039 also re-runs, in one canonical runner run with its three (LOG.md,
+task 039, has the summary line), the 60 existing entries that edit
+`tools/src/run.rs` or name a test whose body or stand-in helper (`CAT_MODULE`,
+`counting`, `recording`) it changed; each is still caught. It changes F-WC5-DISK-REREAD's planted line to find the bundle beside the run
+folder (`run_dir.with_file_name("bundle")`, since the write now sits in
+`write_and_start`, which has no work root), the same bug as before with its
+anchor unchanged, and re-anchors F-WC-README-COUNT to the new total, the same
+bug as before. Each keeps its own evidence label above.
+
+Task 040's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 040). Its anchor is `run_engine`'s `make_run_dir` line in
+`tools/src/run.rs`, a recovery target, on a line no other entry anchors; each
+named test fails at its census assertion:
+
+- F-WC-A12-TEMP-LEAK — `run_engine` makes one extra folder `<work
+  root>/<engine>.scratch` before its run folder and never removes it
+  (`normal_run_leaves_nothing_under_the_scratch_root`,
+  `trapped_run_leaves_nothing_under_the_scratch_root` and
+  `killed_run_leaves_nothing_under_the_scratch_root`, each at "the census
+  found leftovers", naming `entry: <engine>.scratch`).
+
+Task 040 also re-anchors F-WC-README-COUNT to the new total, the same bug as
+before, and keeps its runner-caught label above.
+
+Task 041's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 041). Its anchor is `start_engine`'s `memory_cap_args` line in
+`tools/src/run.rs`, a recovery target (F-WC10-CAP-IGNORED anchors the same
+line; each falsifier is applied alone), and its named test fails at its
+assertion:
+
+- F-WC-A8-HOME-PREOPEN — `start_engine` adds `--dir=<HOME>` after the memory
+  cap arguments, a preopen of the runner's home folder
+  (`host_secret_fixture_never_reaches_either_real_engine`, at "the child
+  host_secret_fixture_run_inside_the_child did not pass"; the child failed at
+  its `argv_faults` assertion, "a preopen, env or network flag:
+  --dir=<tmp>/home", on wasmtime's module run).
+
+Task 041 also re-anchors F-WC-README-COUNT to the new total, the same bug as
+before, and keeps its runner-caught label above.
+
+Task 042's killed-run stop, hand-proven, pending R1 (no `falsifiers.json`
+entry: `tests/run.rs` is not a recovery target; it is counted once in the
+hand-proven total above, never in the runner-caught one; LOG.md, task 042, has
+the runs). The planted fault is a census tool that fails during the wait, in
+`killed_run_leaves_nothing_under_the_scratch_root`, each restored byte for
+byte, each followed by `/usr/bin/pgrep -f run40-killed`:
+
+- `PGREP` pointed at `/nonexistent/pgrep`: the test fails with the `pgrep`
+  start error ("wasmtime: the census tool /nonexistent/pgrep did not start:
+  No such file or directory (os error 2); then stopped its engines ..."), and
+  `pgrep` then prints nothing and exits 1.
+- `PGREP` pointed at `/usr/bin/false` (exit 1, nothing printed, read as no
+  process yet): the test fails after 10 s ("wasmtime: no engine process showed
+  up within 10 s, or the run ended first; then stopped its engines ..."), and
+  `pgrep` then prints nothing and exits 1.
+
+Before task 042, the same `/usr/bin/false` run left a live `wasmtime run
+--invoke digest ... <tmp>/.../work-wasmtime/wasmtime/module.wasm 1592590337`
+looping after the test failed (killed by hand). The `/nonexistent/pgrep` run
+left none in ten tries there: the test binary exited, or its temp root was
+removed, before the detached thread started the engine, so that path leaked
+only by timing.
+
+Task 042 adds no `falsifiers.json` entry, so the total (175) and the
+runner-caught count (111) were unchanged; the hand-proven total (64 entries
+before) gains this proof and task 036's guard, 66.
+
+Task 043's two, runner-caught (the canonical runner's summary line is in
+LOG.md, task 043). Each anchor is a new line of `tools/src/run.rs`, a recovery
+target, and its named test fails at its assertion:
+
+- F-WC-A7-BUDGET-IGNORED — the wait loop's budget check is made `false`, so
+  the runner never treats the budget as passed and a looping capsule holds its
+  run (`looping_capsule_is_stopped_at_its_run_budget_on_both_engines`, at its
+  watchdog: no answer within the budget + 20 s, then its engines are stopped).
+- F-WC-A7-PIPE-BLOCKED — the runner reads the engine's stdout to its end
+  before it starts reading stderr, so an engine that fills its stderr pipe
+  first blocks (`engine_output_past_a_pipe_buffer_never_blocks_it`, at its
+  watchdog).
+
+`run_engine` and `start_engine` take the control as a new last argument. So
+that every existing anchor stays found exactly once, `run` and
+`write_and_start` each bind it into a local closure of the same name, and the
+anchored four-argument calls are unchanged. F-WC5a's and
+F-WC5-BYPASS-RUN-ENGINE's planted direct `start_engine` calls in `run` now pass
+`input.control`, so they still build; the same bug as before, anchors
+unchanged. Task 043 also re-anchors F-WC-README-COUNT to the new total, the
+same bug as before. In the same canonical runner run every other entry that
+edits `tools/src/run.rs` was re-run and is still caught (LOG.md, task 043).
+Each keeps its own evidence label above.
+
+Task 044's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 044). Its anchor is a new line of `tools/src/receipt.rs`, a
+recovery target, found exactly once, and both named tests fail at an
+assertion:
+
+- F-WC-A7-RECEIPT-REASON-GENERIC — `refusal_reason` gives the budget reason
+  the failed-run id, `engine_failed`, so a budget stop reads as a generic
+  engine failure (`budget_refusal_receipt_names_its_reason`, at its five-line
+  receipt; `refusal_receipt_ids_are_distinct_and_named`, at its distinct-id
+  check).
+
+Task 044 also re-anchors F-WC-README-COUNT to the new total, the same bug as
+before, and keeps its runner-caught label above.
+
+Task 033's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 033). Its anchor is a new line of `tools/src/run.rs`, a recovery
+target, found exactly once, and each named test fails at its assertion:
+
+- F-WC10E-CAP-CHECK-DROPPED — `check_module_memory` returns success at its
+  first line, so no module is checked and a module with no memory maximum, a
+  maximum above the declared size or a second memory reaches an engine
+  (`run_refuses_a_module_memory_with_no_maximum_on_both_engines`,
+  `run_refuses_a_memory_maximum_above_the_declared_size_on_both_engines` and
+  `run_refuses_a_second_memory_before_any_engine_start`, each at `refused`'s
+  panic, `the runner ran, stdout "same\n", not a refusal`, on `run_engine`'s
+  first call).
+
+Task 033 also drops `second_memory_cannot_double_the_declared_cap_on_wasmtime`,
+which it removes, from F-WC10-CAP-IGNORED's and F-WC10-TWO-MEMORIES's named
+tests (same bug, same anchor; each is still caught by its other tests),
+re-anchors F-WC5-QUERY-BEFORE-VERIFY (its anchor now holds the memory check
+line between `verify_bundle` and the queries, and its planted edit moves the
+two queries above both; the same bug as before) and re-anchors
+F-WC-README-COUNT to the new total, the same bug as before. All four were re-run
+by the canonical runner and keep their runner-caught label above.
+
+Task 034's two, runner-caught (the canonical runner's summary line is in
+LOG.md, task 034). Each anchor is a new line of `tools/src/receipt.rs`, a
+recovery target, found exactly once, and its named test fails at its
+assertion:
+
+- F-WC10F-WASMER-MAX-MISSING — `render` writes the module maximum line for
+  `wasmtime` only, so `wasmer`'s run has no recorded maximum
+  (`receipt_memory_maximum_matches_the_bundle_manifest`, at its `wasmer` line:
+  `None`, not the declared 2097152).
+- F-WC10F-MAX-FROM-MANIFEST — `render` prints the declared bytes
+  (`memory_cap_bytes`) as every engine's maximum in place of the recorded one
+  (`receipt_records_a_lower_module_maximum_as_it_is`, at its `wasmtime` line:
+  2097152, not the module's 1048576).
+
+Task 034 also re-anchors F-WC-README-COUNT to the new total, the same bug as
+before. F-WC10-CAP-REJECTED-RETRY's planted `EngineRun` now also sets the new
+`memory_maximum: None`, so it builds again; the same bug, anchor unchanged.
+Both were re-run by the canonical runner and keep their runner-caught label
+above, as does every other entry that edits `tools/src/run.rs` or
+`tools/src/receipt.rs` (LOG.md, task 034).
+
+Task 045's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 045). Its anchor is a new line of `tools/src/run.rs`, a recovery
+target, found exactly once, and its named test fails at its assertion:
+
+- F-WC-A10-CANCEL-CLEANUP-SKIPPED — on a cancel while the engine runs,
+  `run_engine` returns `Cancelled` before `finish_run`, so the run folder and
+  its module file are left
+  (`cancelled_run_settles_as_cancelled_and_leaves_nothing_on_both_engines`, at
+  its census assertion: `entry: wasmtime`).
+
+Task 045 also re-anchors F-WC-README-COUNT to the new total, the same bug as
+before, and keeps its runner-caught label above. `RunControl::new` is no
+longer a `const fn` (a control now holds its cancel flag), so the test file's
+two shared controls are made on first use (`LazyLock`); no anchor changed.
+
+Task 046's two, runner-caught (the canonical runner's summary line is in
+LOG.md, task 046). Both anchors are in `README.md`, a recovery target, each
+found exactly once, and the one named test fails at its assertion:
+
+- F-WC-B4-TYPE-GAP-HIDDEN — README's import type gap loses its word "not",
+  so the sentence claims what the lab does not do
+  (`import_type_gap_is_a_named_row_and_nothing_claims_a_type_check`, at its
+  README count assertion: 0 times, not once).
+- F-WC-B4-TYPE-CHECK-CLAIMED — a claim with no word "not" is appended to the
+  `env.f` line of "### Typed lab operations (M1 B4 lab half)", saying it is
+  checked by type (that test, at its line assertion, which names `README.md`,
+  the line number and the line). This README line holds the id, so it says
+  "not" too.
+
+Task 046 also re-anchors F-WC-README-COUNT to the new total, the same bug as
+before, and keeps its runner-caught label above.
+
+Task 049's two environment record proofs, hand-proven, pending R1 (no
+`falsifiers.json` entry: `tests/run.rs` is not a recovery target; each is
+counted once in the hand-proven total above, never in the runner-caught one;
+LOG.md, task 049, has the runs). Each planted change is in `host_secret_shim`,
+both lines at once, restored byte for byte, and
+`host_secret_fixture_never_reaches_either_real_engine` fails at "the child
+host_secret_fixture_run_inside_the_child did not pass":
+
+- Both `/usr/bin/env > ` lines changed to `: > ` with the same path: the child
+  fails at the new record check ("wasmtime version: the environment record
+  <tmp>/records/wasmtime.version.env is empty or was not written by
+  /usr/bin/env (no line _=/usr/bin/env): []"). The same plant on the base
+  before task 049 (`286b983b6`) passed: the empty record passed every absence
+  check, so the A8 environment claim was vacuous.
+- Both `/usr/bin/env` changed to `/usr/bin/false`: the shim exits 70 at the
+  version query and the child fails at the refused run ("the two-engine runner
+  refused: <tmp>/shims/wasmtime: wasmtime --version failed (exit status: 70):
+  shim: cannot write the record <tmp>/records/wasmtime.version.env").
+
+Task 049 also adds `host_secret_fixture_never_reaches_either_real_engine` to
+F-WC5-ENGINE-ENV's named tests (dropping `env_clear()` gives the child's fixture
+`HOME` to both shims' records). The canonical runner reports it CAUGHT with
+both named tests failing (LOG.md, task 049), and it keeps its runner-caught
+label above. No entry is added, so the total (184) and the runner-caught count
+(120) are unchanged; the hand-proven total (66 before) gains these two, 68.
+
+Task 050's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 050). Its anchor is the create reason's `write!` line in
+`tools/src/bundle.rs`, a recovery target, found exactly once, and both named
+tests fail at an assertion:
+
+- F-WC5-WRITER-NAMES-MANIFEST — the shared writer's create reason starts with
+  `capsule.json ` again, so a receipt the writer cannot create is refused under
+  the bundle manifest's name, not only its own path
+  (`receipt_write_refuses_an_existing_path` and
+  `refusal_receipt_write_refuses_an_existing_path`, each at its no-`capsule.json`
+  check).
+
+Task 050 also renames the shared writer's two reasons (`FileNotCreated`,
+`FileNotWritten`; their texts name no file) and so re-anchors five entries to
+the new names and texts, each the same bug as before: F-WC3-IO-CAUSE-MANIFEST,
+F-WC3-IO-CAUSE-WRITE, F-WC5-IO-MODULE-CREATE, F-WC5-IO-MODULE-WRITE and
+F-WC5-RECEIPT-OVERWRITE (its planted `fs::write` builds the renamed
+`FileNotCreated`, so it compiles). It also re-anchors F-WC-README-COUNT to the
+new total. The canonical runner reports all six CAUGHT (LOG.md, task 050). Each
+keeps its own evidence label above: F-WC3-IO-CAUSE-MANIFEST and -WRITE stay in
+task 009's hand-proven count, and this task changes no label.
+
+Task 052's three, runner-caught (the canonical runner's summary line is in
+LOG.md, task 052). Two were planted by hand in task 026 and get their entries
+now: `tools/src/run.rs` has been a recovery target since provider 026 (PR
+#242), which merged before task 026 did, so task 026's reason for leaving them
+out did not hold. Each anchor is found exactly once, and each named test fails
+at its assertion:
+
+- F-WC-ENGINE-RUN-MODULE-DOC — the module doc of `tools/src/run.rs` goes back
+  to the base's wording, so no module doc line says "test-only, not endorsed"
+  (`engines_are_labelled_test_only_not_endorsed`, which says "not endorsed",
+  at its module-doc assertion).
+- F-WC-ENGINE-RUN-ENUM-DOC — the doc on `pub enum Engine` goes back to the
+  base's wording, so it no longer says "test-only, not endorsed" (that test, at
+  its enum-doc assertion).
+- F-WC-README-OUTSIDE-COUNT — the hand-proven sentence's "outside the N"
+  becomes one less than the file holds, the stale figure task 050 left
+  (`readme_falsifier_total_matches_falsifiers_json`, at its "outside the N"
+  comparison).
+
+Task 052 also re-anchors F-WC-README-COUNT to the new total, the same bug as
+before, and keeps its runner-caught label above.
+
+Task 053's one, hand-proven, pending R1 (LOG.md, task 053). It has no
+`falsifiers.json` entry and is kept out of the runner-caught total:
+`tests/common/wasm_shape.rs` is not a recovery target. It is the fifth proof
+with no entry in the hand-proven sentence above (69):
+
+- The shape reader's section-2 arm goes back to skipping the section
+  (`2 => {}`), so a module with an import section is read, not refused
+  (`refuses_a_module_with_an_import_section`, at its exact-reason assertion).
+
+Task 053 also moves `built_capsule_has_the_required_wasm_shape`'s zero-import
+check onto `wasm_capsule_audit::audit`. The canonical runner reports
+F-WC1-IMPORT and F-WC1-SIG CAUGHT (LOG.md, task 053), and F-WC1-IMPORT is now
+caught by the audit assertion, which names `env.host_entropy`. No entry
+changes (both anchors are in `capsule/src/lib.rs`), and this task changes no
+label: both stay in wc-001's hand-proven count.
+
+Task 056's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 056). The lane tests now list git's files through one lister,
+`lane_paths` in `tests/common/build.rs` (P10): `lane_files` (the guards; it
+skips a gone file and the runner's backups) and the key scan (it reports a
+gone file) both call it. The anchor is found exactly once, and the named test
+fails at its assertion:
+
+- F-WC3-SECOND-LISTER — the key scan in `no_key_material_is_tracked_in_the_lane`
+  (`tests/verify.rs`) runs its own inline `git ls-files` lister again in place
+  of `lane_paths` (`the_lane_tests_list_files_in_one_place`, which names
+  `tests/verify.rs` and its line).
+
+Task 056 also moves F-WC3-LANE-FILES-QUOTED's two edits into
+`tests/common/build.rs` (the same bug, now in the shared lister; it keeps task
+029's runner-caught label), and re-anchors F-WC-README-COUNT and
+F-WC-README-OUTSIDE-COUNT to the new total, each the same bug as before. The
+canonical runner reports F-WC3-LANE-FILES-QUOTED, F-WC4-SCAN-SKIP-MISSING,
+F-WC4-SCAN-NAME-AFTER-READ, F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT
+CAUGHT (LOG.md, task 056). This task changes no other label.
+
+Task 062's two, runner-caught (the canonical runner's summary line is in
+LOG.md, task 062). The run receipt records each engine's measured peak, the
+module-run process's own `ru_maxrss` from `wait4`, labelled as engine process
+RSS, not linear memory ("The peak lines", in "Run receipt (wc-005c)"). Each
+anchor is found exactly once, and each named test fails at its assertion:
+
+- F-WC10H-PEAK-CITED — `start_engine` (`tools/src/run.rs`) records a cited
+  number, the declared cap `memory_cap_bytes(memory_mb)`, in place of the peak
+  its `wait4` measured (`process_peak_rss_follows_the_memory_the_engine_touched`:
+  the built capsule then reads 67108864 bytes, not under 48 MiB). It needs both
+  real engines; with either missing that test prints SKIPPED and passes, so the
+  runner reports it NOT RUN, never CAUGHT.
+- F-WC10H-PEAK-UNLABELLED — the receipt's peak line (`tools/src/receipt.rs`)
+  drops ` (engine process RSS, not linear memory)`
+  (`receipt_labels_each_engine_peak_as_process_rss_not_linear_memory`).
+
+Task 062 also re-anchors F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT to the
+new total, and F-WC10-CAP-REJECTED-RETRY (its planted uncapped retry fills the
+new `EngineRun::process_max_rss_bytes` with 0, since that retry is not reaped by
+`wait4`), each the same bug as before (LOG.md, task 062). This task changes no
+other label.
+
+Task 064's one and task 070's nine, runner-caught (the canonical runner's
+summary lines are in LOG.md). Task 070 re-anchored the one and added the nine.
+Each anchor is in `tools/src/verify.rs`, a recovery target, found exactly once:
+
+- F-WC9B-BUS-LIST-WIDENED — the read appends
+  `"wasi:cli/environment@0.2.0"` after the parse
+  (`bus_imports_refuses_an_interface_outside_bus_v1_by_name`: the `wasi:cli`
+  component is no longer refused).
+- F-WC9B-BUS-LIST-COPIED — a `BUS_V1_INTERFACES` literal of the five names
+  comes back and `bus_imports` passes it to the audit in place of the read
+  (`bus_interfaces_are_the_runtime_admission_list`: the file holds a second
+  copy).
+- F-WC9B-BUS-LIST-UNREADABLE-SKIPPED, F-WC9B-BUS-LIST-ABSENT-HEAD-ALLOWED,
+  F-WC9B-BUS-LIST-DUPLICATE-HEAD-ALLOWED,
+  F-WC9B-BUS-LIST-BAD-LINE-SKIPPED and
+  F-WC9B-BUS-LIST-MISSING-END-ALLOWED — each drops one parser refusal, so its
+  fixture test's expected path and fault do not come back.
+- F-WC9B-BUS-LIST-OMITS-FIRST and F-WC9B-BUS-LIST-REVERSED — the read drops
+  the first name or reverses the order
+  (`runtime_bus_interfaces_preserves_file_order`).
+- F-WC9B-BUS-LIST-CWD — the read resolves the Runtime source from the process
+  current directory (`runtime_bus_interfaces_ignores_cwd`).
+
+Task 070 also re-anchors F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT to the
+new total, each the same bug as before. This task changes no other label.
+
+Task 065's three, runner-caught (the canonical runner's summary line is in
+LOG.md, task 065). Rong's WC-1 and WC-2 ("Core imports retired, grants name
+resource and actions (task 065)", in "Bus v1 import contract (wc-009b)").
+Each anchor is in `tools/src/verify.rs`, a recovery target, found exactly
+once, and each named test fails at its assertion:
+
+- F-WC9B-CORE-IMPORT-GRANTED — the core audit gets `&[DeclaredImport { module:
+  "env".into(), name: "f".into() }]` (written as
+  `wasm_capsule_audit::DeclaredImport`, since `verify.rs` no longer imports the
+  type) in place of `&[]`, so the `env.f` module passes the verifier and both
+  engines start (`core_module_import_is_refused_before_any_engine_start`, at
+  its refusal).
+- F-WC9B-GRANT-ACTIONS-EMPTY — the reader skips the empty-actions refusal, so
+  a grant naming no action is read (`grant_with_no_actions_is_refused`).
+- F-WC9B-RETIRED-TABLE-BACK — a `LAB_OPERATIONS` table naming `env.f` comes
+  back in `tools/src/verify.rs`
+  (`retired_core_grant_names_are_gone_from_the_tools`, which names the file and
+  line).
+
+Task 065 removed seven entries, each because its rule is gone:
+
+- F-WC4e — the verifier passes `&[]` in place of the caller's grants: the
+  verifier takes no grants, and `&[]` is now the rule.
+- F-WC9-GRANT-INJECT — the linked list is the grants list: there is no linked
+  list (`imports()` and `linked()` are removed).
+- F-WC9-UNUSED-KEEPS-USED — the unused grants keep a linked one: there is no
+  unused-grant list (`unused_grants()` is removed).
+- F-WC9-UNUSED-REORDER — the unused grants come back reversed: the same.
+- F-WC9-RUN-DROPS-GRANTS — `run` passes `&[]` in place of `input.granted`:
+  `RunInput` has no granted list.
+- F-WC-B4-UNTYPED-LINKED — the typed-entry check is dropped: `LAB_OPERATIONS`
+  and `UntypedImport` are removed.
+- F-WC-B4-RIGHT-IGNORED — the right comparison is dropped: a grant names no
+  right, and `RightNotNeeded` is removed.
+
+Task 065 also re-anchors, each the same bug on the new code or text, and the
+canonical runner reports each CAUGHT (LOG.md, task 065):
+
+- on the one `audit(module, &[])` line: F-WC4c (the call is skipped),
+  F-WC4-AUDIT-REASON, F-WC4-ORDER-AUDIT-FIRST and F-WC9-LINK-ALL (now named
+  for `core_module_import_is_refused_before_any_engine_start`, task 020's
+  `declared_not_granted_import_refuses_instantiation_by_name` renamed);
+  F-WC4d and F-WC4-SECOND-AUDIT plant their second audit with `&[]`;
+- F-WC4-SEALED-NEW (its constructor fills the three fields left) and
+  F-WC4-SEALED-MUT (mutable access to `memory_mb`, since `imports()` is gone);
+- the v3 reader: F-WC9-GRANTS-IMPORTS-NOT-LIST (`grants` read as an empty list),
+  F-WC9-GRANTS-ENTRY-NOT-STRING (a number `resource` taken as its JSON text)
+  and F-WC9-GRANTS-DUPLICATE (now named for
+  `resource_granted_twice_is_refused`); the other nine F-WC9-GRANTS-* anchors
+  did not move and are re-run;
+- `tools/src/run.rs`: F-WC5a (three edits, no linked list to fill),
+  F-WC5-VERIFY-TWICE and F-WC5-QUERY-BEFORE-VERIFY (`verify_bundle` takes three
+  arguments), and F-WC-ENGINE-RUN-MODULE-DOC (the module doc after its label
+  line changed, so the plant now rewrites only the label line, in a wording
+  without the label, and no longer restores task 055's base wording);
+- `README.md`: F-WC-B4-TYPE-GAP-HIDDEN (the reworded gap sentence loses its
+  "not"), F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT (the new total).
+  F-WC-B4-TYPE-CHECK-CLAIMED's anchor did not move (this line says "not"): the
+  `env.f` line kept as history in "Typed lab operations (M1 B4 lab half)".
+
+No label changes: the re-anchored F-WC4 entries stay in wc-004's hand-proven
+count, the rest keep their runner-caught label.
+
+Task 063's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 063). Its anchor in `tools/src/run.rs`, a recovery target, is
+found exactly once (task 027's F-WC10-CAP-OVERFLOW plants on the same line,
+each run on its own), and its one named test fails at its assertion:
+
+- F-WC10G-CAP-RAISED — `memory_cap_bytes` returns twice the declared bytes, so
+  the cap is raised (`capsule_stays_under_declared_memory_cap`: part (c)'s
+  1025-page module now passes the memory check and both stand-ins run, so `run`
+  passes where it must refuse, at `tests/run.rs`'s `two_refused`; part (c)
+  runs first, so (a) and (b) are not reached). Part (c) needs no real engine,
+  so the plant is caught with either engine missing.
+
+Task 063 also re-anchors F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT to the
+new total, each the same bug as before (LOG.md, task 063). This task changes no
+other label.
+
+Task 068's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 068). Its anchor in `capsule/src/lib.rs`, a recovery target, is
+found exactly once, and its one named test fails at an assertion:
+
+- F-WC9B-LIFECYCLE-EXPORT-REMOVED — the world's `export!(Capsule);` line is
+  deleted, so the core module exports no `elastos:bus/lifecycle@1.0.0#run` and
+  the Runtime's componentize refuses it (exit 1). By hand, its stderr holds the
+  line ``    1: failed to find export of interface
+  `elastos:bus/lifecycle@1.0.0` function `run` `` (LOG.md, task 068).
+  `componentized_capsule_is_a_product_capsule_v1_with_lifecycle_run` fails at
+  its "componentize failed" assertion.
+
+One proof with no `falsifiers.json` entry, hand-proven, pending R1 (it is
+counted in the hand-proven total above, never in the runner-caught one):
+
+- F-WC9B-LIFECYCLE-SIGNATURE-IGNORED — `is_the_required_capsule_shape` stops
+  comparing the lifecycle signature, so the crafted wrong module passes.
+  `rejects_wrong_lifecycle_signature` fails at its "a wrong
+  `elastos:bus/lifecycle@1.0.0#run` signature must not pass the required
+  shape" assertion (`tests/wasm_shape.rs:183`); the file was restored byte for
+  byte (LOG.md, task 068). `tests/common/wasm_shape.rs` is not a runner
+  recovery target on this base, so this proof has no entry.
+
+Task 068 also re-anchors F-WC1 (wc-001's list, above), F-WC-README-COUNT and
+F-WC-README-OUTSIDE-COUNT to the new total, each the same bug as before. This
+task changes no other label.

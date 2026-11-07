@@ -231,7 +231,9 @@ pub fn load_nickname_with_device_key(
     device_key: &[u8; 32],
 ) -> anyhow::Result<Option<String>> {
     let path = nickname_path(data_dir);
-    if !path.exists() {
+    // `try_exists` propagates a denied metadata lookup; `exists` would read a
+    // permission failure as "no nickname" and hand the caller a fail-open answer.
+    if !path.try_exists()? {
         return Ok(None);
     }
 
@@ -1184,6 +1186,48 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         save_nickname(dir.path(), "alice").unwrap();
         assert_eq!(load_nickname(dir.path()).unwrap().as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn nickname_absent_file_returns_ok_none() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("did")).unwrap();
+        assert_eq!(
+            load_nickname_with_device_key(dir.path(), &[7; 32]).unwrap(),
+            None,
+            "a missing nickname file is normal absence, not a storage error"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nickname_metadata_change_reports_storage_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct RestoreParentPermissions(PathBuf);
+
+        impl Drop for RestoreParentPermissions {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let did_dir = dir.path().join("did");
+        std::fs::create_dir(&did_dir).unwrap();
+        let _restore = RestoreParentPermissions(did_dir.clone());
+        std::fs::set_permissions(&did_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let error = load_nickname_with_device_key(dir.path(), &[7; 32])
+            .expect_err("a denied nickname metadata lookup must be a storage error, not absence");
+        let io_error = error
+            .downcast_ref::<std::io::Error>()
+            .expect("a denied metadata lookup must surface as an I/O storage error");
+        assert_eq!(
+            io_error.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "the storage error must name the denial, got: {error:#}"
+        );
     }
 
     #[test]

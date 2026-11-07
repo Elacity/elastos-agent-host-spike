@@ -1909,22 +1909,13 @@ async fn serve_web_capsule(
     let _shell_child = if let Some(shell_path) = find_installed_provider_binary("shell") {
         verify_component_binary("shell", &shell_path)?;
         let api_url = format!("http://{}", addr);
-        let shell_mode = std::env::var("ELASTOS_SHELL_MODE").unwrap_or_else(|_| "auto".into());
-        let stdin_cfg = if shell_mode == "cli" {
-            std::process::Stdio::inherit()
-        } else {
-            std::process::Stdio::piped()
-        };
-        match tokio::process::Command::new(&shell_path)
-            .env("ELASTOS_API", &api_url)
-            .env("ELASTOS_TOKEN", &shell_session.token)
-            .env("ELASTOS_SHELL_MODE", &shell_mode)
-            .stdin(stdin_cfg)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-        {
+        let (mut command, shell_mode) = serve_cmd::shell_capsule_command(
+            &shell_path,
+            &api_url,
+            &shell_session.token,
+            std::env::var("ELASTOS_SHELL_MODE").ok(),
+        );
+        match command.spawn() {
             Ok(child) => {
                 tracing::info!(
                     "Spawned shell capsule (PID {}, mode={})",

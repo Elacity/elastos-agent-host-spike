@@ -4181,7 +4181,7 @@ pub(crate) async fn fetch_first_party_component_via_carrier(
         release_path,
         15,
         bind_addr,
-        crate::carrier::MAX_DOWNLOAD_BYTES,
+        elastos_common::MAX_WHOLE_CONTENT_BYTES,
     )
     .await?;
     verify_release_bytes(name, &bytes, info)?;

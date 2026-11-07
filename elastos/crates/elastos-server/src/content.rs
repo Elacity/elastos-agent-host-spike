@@ -226,6 +226,8 @@ struct ContentFetchTransfer {
     progress: Option<ProviderProgress>,
     bounded_read: bool,
     max_bytes: Option<u64>,
+    /// A local whole read's own limit, applied by the local backend.
+    whole_max_bytes: Option<u64>,
 }
 
 impl ContentFetchTransfer {
@@ -316,11 +318,31 @@ impl ContentFetchTransfer {
                 "complete metadata requires a local bounded whole index".into(),
             ));
         }
+        let whole_max_bytes = request
+            .get("whole_max_bytes")
+            .map(|value| {
+                value
+                    .as_u64()
+                    .filter(|n| (1..=elastos_common::MAX_WHOLE_CONTENT_BYTES as u64).contains(n))
+                    .ok_or_else(|| ProviderError::Provider("invalid whole read bound".into()))
+            })
+            .transpose()?;
+        if whole_max_bytes.is_some()
+            && (request.get("local_only") != Some(&Value::Bool(true))
+                || request.get("bounded_read").is_some()
+                || max_bytes.is_some()
+                || range.is_some())
+        {
+            return Err(ProviderError::Provider(
+                "a whole read bound requires a local whole read".into(),
+            ));
+        }
         Ok(Self {
             transfer,
             range,
             progress,
             max_bytes,
+            whole_max_bytes,
             bounded_read: match request.get("bounded_read") {
                 None | Some(Value::Bool(false)) => false,
                 Some(Value::Bool(true)) => true,
@@ -2747,6 +2769,7 @@ impl ModelPartReads {
             progress: None,
             bounded_read: true,
             max_bytes: index_read.then_some(limit),
+            whole_max_bytes: None,
         };
         let fetched = ContentProvider::fetch_from_availability_provider(
             registry,
@@ -2836,6 +2859,28 @@ pub async fn fetch_bytes_via_provider(
     cid: &str,
     path: Option<&str>,
 ) -> anyhow::Result<Vec<u8>> {
+    fetch_bytes_via_content(registry, cid, path, None).await
+}
+
+/// Read through the local backend only (Kubo, which checks every block it
+/// fetches against its CID), refused once the file passes `max_bytes`; a local
+/// miss never reaches availability holders.
+pub(crate) async fn fetch_verified_local_bytes_via_provider(
+    registry: &ProviderRegistry,
+    cid: &str,
+    path: Option<&str>,
+    max_bytes: usize,
+) -> anyhow::Result<Vec<u8>> {
+    fetch_bytes_via_content(registry, cid, path, Some(max_bytes)).await
+}
+
+/// `local_max_bytes` makes the read local-only and bounds it at the backend.
+async fn fetch_bytes_via_content(
+    registry: &ProviderRegistry,
+    cid: &str,
+    path: Option<&str>,
+    local_max_bytes: Option<usize>,
+) -> anyhow::Result<Vec<u8>> {
     let mut request = json!({
         "op": "fetch",
         "cid": cid,
@@ -2845,6 +2890,10 @@ pub async fn fetch_bytes_via_provider(
             "expected_bytes": Value::Null,
         },
     });
+    if let Some(max_bytes) = local_max_bytes {
+        request["local_only"] = Value::Bool(true);
+        request["whole_max_bytes"] = json!(max_bytes);
+    }
     if let Some(path) = path.filter(|path| !path.is_empty()) {
         request["path"] = Value::String(path.to_string());
     }
@@ -3301,6 +3350,9 @@ impl ContentProvider {
         }
         if let Some(max_bytes) = transfer.max_bytes {
             ipfs_request["max_bytes"] = json!(max_bytes);
+        }
+        if let Some(whole_max_bytes) = transfer.whole_max_bytes {
+            ipfs_request["whole_max_bytes"] = json!(whole_max_bytes);
         }
         if !path.is_empty() {
             ipfs_request["path"] = Value::String(path.to_string());
@@ -3775,7 +3827,9 @@ impl ContentProvider {
                     "op": "add_bytes",
                     "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
                     "filename": filename,
-                    "pin": true,
+                    // Pin only after the CID is checked, so a wrong
+                    // expected CID never changes an existing pin.
+                    "pin": false,
                 }),
                 ProviderTransfer::Bytes,
             )
@@ -3785,23 +3839,13 @@ impl ContentProvider {
             ProviderError::Provider(format!("content import_exact missing imported CID: {err}"))
         })?;
         if imported_cid != cid {
-            let _ = self
-                .invoke_provider(
-                    &registry,
-                    "ipfs",
-                    "unpin",
-                    json!({
-                        "op": "unpin",
-                        "cid": imported_cid,
-                    }),
-                    ProviderTransfer::Json,
-                )
-                .await;
             return Ok(provider_error(
                 "cid_mismatch",
                 "content import_exact produced a different CID; exact-CID import requires block-level compatible bytes",
             ));
         }
+        self.pin_imported_cid(&registry, cid, "content import_exact")
+            .await?;
 
         let outcome = AvailabilityOutcome {
             provider: "ipfs-provider".to_string(),
@@ -3885,18 +3929,6 @@ impl ContentProvider {
             .and_then(|value| value.as_str())
             .map(str::to_string);
         let publisher_did = Some(self.effective_publisher_did(publisher_did.as_deref())?);
-        let storage_quota = self.principal_storage_quota_for_request(
-            publisher_did.as_deref().unwrap_or_default(),
-            &requirements,
-            Some(total_bytes as u64),
-            Some(cid),
-        )?;
-        if storage_quota.get("status").and_then(|value| value.as_str()) == Some("quota_exceeded") {
-            return Ok(provider_error(
-                "storage_quota_exceeded",
-                "content import_object exceeds the principal storage quota",
-            ));
-        }
         let object_kind = request
             .get("object_kind")
             .or_else(|| request.get("kind"))
@@ -3911,6 +3943,21 @@ impl ContentProvider {
                 .and_then(|value| value.as_str()),
             request.get("links"),
         )?;
+        // The quota counts what this node keeps: the files and the generated
+        // manifest.
+        let retained_bytes = directory_files_decoded_bytes(&files);
+        let storage_quota = self.principal_storage_quota_for_request(
+            publisher_did.as_deref().unwrap_or_default(),
+            &requirements,
+            Some(retained_bytes),
+            Some(cid),
+        )?;
+        if storage_quota.get("status").and_then(|value| value.as_str()) == Some("quota_exceeded") {
+            return Ok(provider_error(
+                "storage_quota_exceeded",
+                "content import_object exceeds the principal storage quota",
+            ));
+        }
         let registry = self.registry()?;
         let ipfs_response = self
             .invoke_provider(
@@ -3920,7 +3967,7 @@ impl ContentProvider {
                 json!({
                     "op": "add_directory",
                     "files": files,
-                    "pin": true,
+                    "pin": false,
                 }),
                 ProviderTransfer::Json,
             )
@@ -3930,23 +3977,13 @@ impl ContentProvider {
             ProviderError::Provider(format!("content import_object missing imported CID: {err}"))
         })?;
         if imported_cid != cid {
-            let _ = self
-                .invoke_provider(
-                    &registry,
-                    "ipfs",
-                    "unpin",
-                    json!({
-                        "op": "unpin",
-                        "cid": imported_cid,
-                    }),
-                    ProviderTransfer::Json,
-                )
-                .await;
             return Ok(provider_error(
                 "cid_mismatch",
                 "content import_object produced a different CID; exact object import requires matching manifest and bytes",
             ));
         }
+        self.pin_imported_cid(&registry, cid, "content import_object")
+            .await?;
 
         let local_outcome = AvailabilityOutcome {
             provider: "ipfs-provider".to_string(),
@@ -3972,7 +4009,7 @@ impl ContentProvider {
                     publisher_did: publisher_did.as_deref(),
                     accounting_observation: ContentAccountingObservation {
                         files: Some(file_count as u64),
-                        bytes: Some(total_bytes as u64),
+                        bytes: Some(retained_bytes),
                     },
                 },
             )
@@ -4000,7 +4037,7 @@ impl ContentProvider {
                 "carrier_object_import",
                 ContentAccountingObservation {
                     files: Some(file_count as u64),
-                    bytes: Some(total_bytes as u64),
+                    bytes: Some(retained_bytes),
                 },
                 outcome.replicas,
                 storage_quota,
@@ -4022,6 +4059,26 @@ impl ContentProvider {
                 "verified_cid": true,
             }
         })))
+    }
+
+    /// Pins `cid` once an import has added its blocks unpinned and produced
+    /// exactly that CID.
+    async fn pin_imported_cid(
+        &self,
+        registry: &ProviderRegistry,
+        cid: &str,
+        label: &str,
+    ) -> Result<(), ProviderError> {
+        let response = self
+            .invoke_provider(
+                registry,
+                "ipfs",
+                "pin",
+                json!({ "op": "pin", "cid": cid }),
+                ProviderTransfer::Json,
+            )
+            .await?;
+        provider_response_ok(&response, label)
     }
 
     async fn unpublish(&self, request: &Value) -> Result<Value, ProviderError> {
@@ -4705,6 +4762,10 @@ impl ContentProvider {
                     "receipt": receipt,
                 })));
             }
+            return Ok(provider_error(
+                "missing",
+                "content status has no availability receipt for this CID",
+            ));
         }
 
         let emit_operator_alert = request
@@ -9276,15 +9337,37 @@ async fn write_materialized_file(base: &Path, rel_path: &str, bytes: &[u8]) -> a
     Ok(())
 }
 
+/// One lock for every ledger append in this process, and one write per line,
+/// so concurrent appends never interleave inside a JSON line.
+static JSONL_APPEND: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn append_jsonl<T: Serialize>(path: &Path, entry: &T) -> Result<(), ProviderError> {
+    let mut line = serde_json::to_vec(entry)
+        .map_err(|err| ProviderError::Provider(format!("content receipt write failed: {err}")))?;
+    line.push(b'\n');
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let _append = JSONL_APPEND
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    serde_json::to_writer(&mut file, entry)
-        .map_err(|err| ProviderError::Provider(format!("content receipt write failed: {err}")))?;
-    file.write_all(b"\n")?;
+    file.write_all(&line)?;
     Ok(())
+}
+
+/// Decoded bytes of a directory's files: what the node stores for them.
+fn directory_files_decoded_bytes(files: &Value) -> u64 {
+    files
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|file| file.get("data")?.as_str())
+        .map(|data| {
+            let padding = data.bytes().rev().take_while(|byte| *byte == b'=').count();
+            (data.len() / 4 * 3).saturating_sub(padding) as u64
+        })
+        .sum()
 }
 
 fn verify_signed_receipt(receipt: &SignedAvailabilityReceipt) -> Result<(), ProviderError> {
@@ -10200,24 +10283,78 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn content_import_exact_rejects_cid_mismatch_and_unpins_import() {
+    async fn content_import_with_a_wrong_expected_cid_leaves_existing_pins_untouched() {
         let (_data_dir, _registry, ipfs, content) = registry_with_content_and_ipfs().await;
-        let response = content
-            .send_raw(&json!({
+        // The bytes hash to TEST_CID, which this node already pins; the peer
+        // names a different CID.
+        let other_cid = "QmRSEtAyq7Xgr5YCFVWuYsBdqbR5X9fJDsdpNQuvm9yaic";
+        for request in [
+            json!({
                 "op": "import_exact",
-                "cid": "QmRSEtAyq7Xgr5YCFVWuYsBdqbR5X9fJDsdpNQuvm9yaic",
+                "cid": other_cid,
                 "stream": test_stream_payload(b"hello content"),
                 "_runtime_invocation": carrier_import_exact_invocation(),
-            }))
+            }),
+            json!({
+                "op": "import_object",
+                "cid": other_cid,
+                "files": [{ "path": "index.md", "data": "IyBUZXN0Cg==" }],
+                "_runtime_invocation": carrier_import_object_invocation(),
+            }),
+        ] {
+            let response = content.send_raw(&request).await.unwrap();
+            assert_eq!(response["status"], "error", "{response}");
+            assert_eq!(response["code"], "cid_mismatch");
+        }
+        assert!(ipfs.unpinned.lock().await.is_empty(), "no pin is removed");
+        assert!(ipfs.pinned.lock().await.is_empty(), "nothing is pinned");
+        for request in ipfs.requests.lock().await.iter() {
+            if matches!(request["op"].as_str(), Some("add_bytes" | "add_directory")) {
+                assert_eq!(request["pin"], false, "an import adds unpinned first");
+            }
+        }
+    }
+
+    #[test]
+    fn content_ledger_appends_stay_parseable_under_concurrency() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let path = data_dir.path().join("ledger.jsonl");
+        let threads = (0..16)
+            .map(|thread| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for index in 0..64 {
+                        let entry = json!({
+                            "thread": thread,
+                            "index": index,
+                            "padding": "x".repeat(16 * 1024),
+                        });
+                        append_jsonl(&path, &entry).unwrap();
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let ledger = std::fs::read_to_string(&path).unwrap();
+        let lines = ledger.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 16 * 64);
+        for line in lines {
+            serde_json::from_str::<Value>(line).expect("every ledger line is one JSON entry");
+        }
+    }
+
+    #[tokio::test]
+    async fn content_status_of_an_unknown_cid_is_missing_not_the_dashboard() {
+        let (_data_dir, _registry, _ipfs, content) = registry_with_content_and_ipfs().await;
+        let status = content
+            .send_raw(&json!({ "op": "status", "cid": TEST_CID }))
             .await
             .unwrap();
-
-        assert_eq!(response["status"], "error");
-        assert_eq!(response["code"], "cid_mismatch");
-        assert_eq!(
-            ipfs.unpinned.lock().await.as_slice(),
-            [TEST_CID.to_string()]
-        );
+        assert_eq!(status["status"], "error", "{status}");
+        assert_eq!(status["code"], "missing");
+        assert!(status.get("data").is_none());
     }
 
     #[tokio::test]
@@ -10274,10 +10411,6 @@ mod tests {
             response["data"]["receipt"]["payload"]["accounting"]["files"],
             1
         );
-        assert_eq!(
-            response["data"]["receipt"]["payload"]["accounting"]["content_bytes"],
-            7
-        );
 
         let directories = ipfs.added_directories.lock().await;
         assert_eq!(directories.len(), 1);
@@ -10289,6 +10422,11 @@ mod tests {
             .decode(manifest_entry["data"].as_str().unwrap())
             .unwrap();
         let manifest: ContentObjectManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+        // The ledger counts the files and the generated manifest.
+        assert_eq!(
+            response["data"]["receipt"]["payload"]["accounting"]["content_bytes"],
+            7 + manifest_bytes.len() as u64
+        );
         assert_eq!(manifest.kind, "document");
         assert_eq!(manifest.object_did.as_deref(), Some("did:key:zObject"));
         assert_eq!(

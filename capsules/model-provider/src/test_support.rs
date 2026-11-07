@@ -15,6 +15,32 @@ thread_local! {
     static TEST_REQUEST_IDS: RefCell<std::collections::BTreeMap<String, String>> = RefCell::default();
 }
 
+/// Adapter faults reach a run terminal as a public error without their detail.
+/// The detail stays a test-only observation, keyed by run id so one test's
+/// refusal cannot stand in for another's.
+#[allow(dead_code)]
+static ADAPTER_DETAILS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+#[allow(dead_code)]
+pub(crate) fn record_adapter_detail(run_id: &str, detail: Option<&str>) {
+    let Some(detail) = detail else { return };
+    ADAPTER_DETAILS
+        .lock()
+        .unwrap()
+        .push((run_id.to_string(), detail.to_string()));
+}
+
+#[allow(dead_code)]
+pub(crate) fn adapter_detail_for(run_id: &str) -> Option<String> {
+    ADAPTER_DETAILS
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(id, _)| id == run_id)
+        .map(|(_, detail)| detail.clone())
+}
+
 /// Each named creation keeps one time and nonce across retries and changed input.
 pub(crate) fn fixture_model_request_id(label: &str) -> String {
     if elastos_model_contract::model_request_issued_ms(label).is_some() {
@@ -169,47 +195,61 @@ pub(crate) fn write_fake_llama_server(root: &Path, mode: &str) -> (PathBuf, Path
     std::io::Write::write_all(
         &mut writer.stdin.take().unwrap(),
         br#"#!/usr/bin/python3
-import errno
-import http.server
-import json
-import os
-import pathlib
 import signal
-import subprocess
 import sys
-import threading
-import time
 
 def arg(name):
     return sys.argv[sys.argv.index(name) + 1]
 
-model_path = pathlib.Path(arg('-m'))
-port = int(arg('--port'))
-alias = arg('--alias')
-mode = model_path.with_suffix('.mode').read_text(encoding='utf-8').strip()
-events = model_path.with_suffix('.events')
-unresponsive = model_path.with_suffix('.unresponsive')
-wrong_alias = model_path.with_suffix('.wrong-alias')
+def sidecar(model, suffix):
+    return model.rsplit('.', 1)[0] + suffix
 
-if mode == 'mutable_readiness':
-    unresponsive.unlink(missing_ok=True)
-    wrong_alias.unlink(missing_ok=True)
+# The run deadline can fire during start-up. Install the SIGTERM handler
+# before the heavy imports so a slow start still records what the engine did.
+events = sidecar(arg('-m'), '.events')
+with open(sidecar(arg('-m'), '.mode'), encoding='utf-8') as stream:
+    mode = stream.read().strip()
 
 def record(value):
-    with events.open('a', encoding='utf-8') as stream:
+    with open(events, 'a', encoding='utf-8') as stream:
         stream.write(value + '\n')
 
 def terminate(_signum, _frame):
     record('term')
     raise SystemExit(0)
 
+term_ignored = False
+
 def ignore_termination(_signum, _frame):
+    global term_ignored
+    term_ignored = True
     record('term_ignored')
 
 if mode in ('ignore_term', 'timeout_ignore_term', 'stream_then_stall_ignore_term'):
     signal.signal(signal.SIGTERM, ignore_termination)
 else:
     signal.signal(signal.SIGTERM, terminate)
+
+import errno
+import http.server
+import json
+import os
+import pathlib
+import subprocess
+import threading
+import time
+
+model_path = pathlib.Path(arg('-m'))
+port = int(arg('--port'))
+alias = arg('--alias')
+unresponsive = model_path.with_suffix('.unresponsive')
+wrong_alias = model_path.with_suffix('.wrong-alias')
+release = model_path.with_suffix('.release')
+
+if mode == 'mutable_readiness':
+    unresponsive.unlink(missing_ok=True)
+    wrong_alias.unlink(missing_ok=True)
+
 record('start:' + str(os.getpid()))
 record('parent:' + str(os.getppid()))
 if mode == 'loader_failure':
@@ -224,8 +264,10 @@ if mode in ('healthy_with_subtree', 'stream_then_stall_with_subtree'):
     ])
     record('subtree:' + str(subtree.pid))
 if mode in ('timeout', 'timeout_ignore_term'):
-    while True:
-        time.sleep(1)
+    # Never healthy. An ignored termination lasts until the test releases it.
+    while not (term_ignored and release.exists()):
+        time.sleep(0.025)
+    raise SystemExit(0)
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, _format, *_args):
@@ -264,6 +306,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # A fixture tokenizer charges UTF-8 content and per-message template
             # markers. The pinned engine's endpoint owns exact production counts.
             count = sum(len(message['content'].encode('utf-8')) + 8 for message in body['messages'])
+            if mode == 'zero_count':
+                count = 0
             record('count:' + str(count))
             response = {'object': 'response.input_tokens', 'input_tokens': count}
             if mode == 'incomplete_count':
@@ -305,7 +349,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'text/event-stream')
         self.end_headers()
         if prompt == 'stall':
-            if mode in ('stream_then_stall_with_subtree', 'stream_then_stall_ignore_term'):
+            if mode in ('stream_then_stall', 'stream_then_stall_with_subtree', 'stream_then_stall_ignore_term'):
                 payload = json.dumps({'choices': [{'delta': {'content': 'first reply'}}]})
                 self.wfile.write(('data: ' + payload + '\n\n').encode('utf-8'))
                 self.wfile.flush()
@@ -317,7 +361,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 except (BrokenPipeError, ConnectionResetError):
                     if mode == 'active_after_disconnect':
                         record('disconnected:stall')
-                        release = model_path.with_suffix('.release')
                         while not release.exists():
                             time.sleep(0.025)
                         active.unlink()

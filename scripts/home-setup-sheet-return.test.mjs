@@ -133,3 +133,13 @@ test("Close or Later keeps the sheet closed, also from the card", async () => {
   const outside = gui.slice(gui.indexOf("assistantFaceActive() &&"), gui.indexOf("hideAssistantFace();", gui.indexOf("assistantFaceActive() &&")));
   assert(outside.includes('!event.target.closest("#setup-sheet")'), "using the card does not close the Assistant");
 });
+
+test("The Updates step opens System at About, where updates are installed", () => {
+  const f = fixture();
+  const html = read("capsules/home-gui/browser/home-gui-template.html");
+  assert.match(html, /data-setup-goal="system" data-setup-settings="about"[^]*?<h3 class="setup-sheet-step-title">Updates<\/h3>/);
+  assert(read("capsules/system/browser/index.html").includes('id="runtime-update"'), "System keeps the update row");
+  f.context.openGoal("system", "about");
+  assert.equal(JSON.stringify(f.opened), JSON.stringify([["system", { query: { settings: "about" } }]]));
+  assert(f.classes.has("is-yielded"), "the card stays as the way back");
+});

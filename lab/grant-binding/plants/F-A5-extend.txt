@@ -1,0 +1,8 @@
+id: F-A5-extend
+file: src/lib.rs
+test: model_extended_identity_is_refused
+--- old
+        if live.identity != record.identity {
+--- new
+        if !live.identity.starts_with(&record.identity) {
+--- end

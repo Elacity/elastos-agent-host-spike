@@ -1,0 +1,9 @@
+id: F-A7-nodeadline
+file: src/ledger.rs
+test: ledger::model_unset_deadline_timeout_is_refused
+--- old
+        if !deadline_set {
+            return Err(TimeoutRefuse::NoDeadline);
+        }
+--- new
+--- end

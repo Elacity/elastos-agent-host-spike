@@ -7,7 +7,8 @@ are the only place for work status, acceptance criteria and proof.
 ## Work Tracking And Acceptance
 
 - GitHub issues own the work queue. In each lane, take the lowest-numbered open
-  task in the current weekly milestone whose dependencies are satisfied and
+  task in the current release milestone (see Milestones under
+  [Releases](#releases)) whose dependencies are satisfied and
   which has no active blocker. Keep at most one task issue In progress per
   lane. Parent issues group the lane;
   they do not authorize a second active task. User messages approve, redirect

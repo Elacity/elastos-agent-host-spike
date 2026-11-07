@@ -418,8 +418,8 @@ pub(super) async fn gateway_library_upload(
         ProviderEffectAuditInput {
             capsule_id: LIBRARY_CAPSULE_ID,
             event_type: "object.provider.requested",
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id: &request_id,
             result: "requested",
             reason: "Library requested object provider operation upload",
@@ -439,7 +439,7 @@ pub(super) async fn gateway_library_upload(
     let mut response = match crate::library::handle_library_upload_bytes_runtime(
         &state.data_dir,
         registry,
-        &context.principal_id,
+        context.principal_id(),
         uri,
         mime,
         query.if_revision.as_deref(),
@@ -488,8 +488,8 @@ pub(super) async fn gateway_library_upload(
             } else {
                 "object.provider.failed"
             },
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id: &request_id,
             result: if completed { "completed" } else { "failed" },
             reason: if completed {
@@ -571,8 +571,8 @@ pub(super) async fn gateway_library_upload_start(
     let session = LibraryUploadSession {
         schema: LIBRARY_UPLOAD_SESSION_SCHEMA.to_string(),
         upload_id: upload_id.clone(),
-        principal_id: context.principal_id.clone(),
-        session_id: context.session_id.clone(),
+        principal_id: context.principal_id().to_string(),
+        session_id: context.session_id().to_string(),
         uri: uri.to_string(),
         mime: body
             .mime
@@ -604,8 +604,8 @@ pub(super) async fn gateway_library_upload_start(
         ProviderEffectAuditInput {
             capsule_id: LIBRARY_CAPSULE_ID,
             event_type: "object.provider.upload_session_started",
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id: &upload_id,
             result: "started",
             reason: "Library started chunked object provider upload session",
@@ -786,8 +786,8 @@ pub(super) async fn gateway_library_upload_finish(
         ProviderEffectAuditInput {
             capsule_id: LIBRARY_CAPSULE_ID,
             event_type: "object.provider.requested",
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id: &request_id,
             result: "requested",
             reason: "Library requested chunked object provider operation upload",
@@ -802,7 +802,7 @@ pub(super) async fn gateway_library_upload_finish(
     let mut response = match crate::library::handle_library_upload_bytes_runtime(
         &state.data_dir,
         registry,
-        &context.principal_id,
+        context.principal_id(),
         &session.uri,
         session.mime.as_deref(),
         session.if_revision.as_deref(),
@@ -852,8 +852,8 @@ pub(super) async fn gateway_library_upload_finish(
             } else {
                 "object.provider.failed"
             },
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id: &request_id,
             result: if completed { "completed" } else { "failed" },
             reason: if completed {
@@ -982,8 +982,8 @@ pub(super) async fn gateway_library_download(
         ProviderEffectAuditInput {
             capsule_id: LIBRARY_CAPSULE_ID,
             event_type: "object.provider.requested",
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id: &request_id,
             result: "requested",
             reason: "Library requested object provider operation download",
@@ -1004,7 +1004,7 @@ pub(super) async fn gateway_library_download(
         crate::library::handle_library_download_bytes_runtime(
             &state.data_dir,
             registry,
-            &context.principal_id,
+            context.principal_id(),
             &uris[0],
             archive_format,
         )
@@ -1012,7 +1012,7 @@ pub(super) async fn gateway_library_download(
     } else {
         crate::library::handle_library_download_selection_bytes_runtime(
             &state.data_dir,
-            &context.principal_id,
+            context.principal_id(),
             &uris,
             archive_format,
         )
@@ -1026,8 +1026,8 @@ pub(super) async fn gateway_library_download(
                 ProviderEffectAuditInput {
                     capsule_id: LIBRARY_CAPSULE_ID,
                     event_type: "object.provider.failed",
-                    principal_id: &context.principal_id,
-                    session_id: &context.session_id,
+                    principal_id: context.principal_id(),
+                    session_id: context.session_id(),
                     request_id: &request_id,
                     result: "failed",
                     reason: "Library failed object provider operation download",
@@ -1045,8 +1045,8 @@ pub(super) async fn gateway_library_download(
             ProviderEffectAuditInput {
                 capsule_id: LIBRARY_CAPSULE_ID,
                 event_type: "object.provider.failed",
-                principal_id: &context.principal_id,
-                session_id: &context.session_id,
+                principal_id: context.principal_id(),
+                session_id: context.session_id(),
                 request_id: &request_id,
                 result: "failed",
                 reason: "Library failed object provider operation download",
@@ -1060,8 +1060,8 @@ pub(super) async fn gateway_library_download(
         ProviderEffectAuditInput {
             capsule_id: LIBRARY_CAPSULE_ID,
             event_type: "object.provider.completed",
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id: &request_id,
             result: "completed",
             reason: "Library completed object provider operation download",
@@ -1393,7 +1393,8 @@ fn require_library_upload_session_context(
     session: &LibraryUploadSession,
     context: &HomeLaunchTokenContext,
 ) -> Result<(), String> {
-    if session.principal_id != context.principal_id || session.session_id != context.session_id {
+    if session.principal_id != context.principal_id() || session.session_id != context.session_id()
+    {
         return Err("upload session belongs to a different Runtime launch context".to_string());
     }
     Ok(())
@@ -1542,7 +1543,7 @@ pub(super) async fn gateway_library_events_stream(
 
     let stream_state = LibraryEventsStreamState {
         registry,
-        principal_id: context.principal_id,
+        principal_id: context.principal_id().to_string(),
         cursor: String::new(),
         initialized: false,
     };
@@ -1722,8 +1723,8 @@ pub(super) async fn gateway_provider_proxy(
             .into_response();
     }
     let context = required.context.clone();
-    let principal_id = context.principal_id.clone();
-    let session_id = context.session_id.clone();
+    let principal_id = context.principal_id().to_string();
+    let session_id = context.session_id().to_string();
     /* The verified capsule behind the launch token: model runs are bound and
     audited to it, never to a fixed name. */
     let launch_capsule_id = required.launch_context.executable_actor.clone();
@@ -1765,6 +1766,9 @@ pub(super) async fn gateway_provider_proxy(
                 Ok(value) => value,
                 Err((status, message)) => return (status, message).into_response(),
             };
+        if op == "runs_create" && !hosted_run_allowed(&state.data_dir, &context, &request) {
+            return (StatusCode::FORBIDDEN, HOSTED_RUN_ADMIN_ONLY).into_response();
+        }
         // Approved remote model grants route new runs to the granting Runtime.
         // A grant lookup failure keeps the local path; it cannot widen
         // authority. Runs already routed remotely settle through their stored
@@ -1847,8 +1851,7 @@ pub(super) async fn gateway_provider_proxy(
             object.remove("wallet_request_hex");
             object.remove("wallet_response_hex");
             if let Some(proof) = context
-                .proof_binding_id
-                .as_deref()
+                .proof_binding_id()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
             {
@@ -1857,16 +1860,16 @@ pub(super) async fn gateway_provider_proxy(
                     serde_json::Value::String(proof.to_string()),
                 );
             }
-            if !context.session_id.trim().is_empty() {
+            if !context.session_id().trim().is_empty() {
                 object.insert(
                     "session_id".to_string(),
-                    serde_json::Value::String(context.session_id.clone()),
+                    serde_json::Value::String(context.session_id().to_string()),
                 );
             }
-            if !context.grant_id.trim().is_empty() {
+            if !context.grant_id().trim().is_empty() {
                 object.insert(
                     "grant_id".to_string(),
-                    serde_json::Value::String(context.grant_id.clone()),
+                    serde_json::Value::String(context.grant_id().to_string()),
                 );
             }
             object.insert(
@@ -1883,7 +1886,7 @@ pub(super) async fn gateway_provider_proxy(
                 .and_then(serde_json::Value::as_str)
                 .map(str::trim)
                 == Some(principal_id.as_str())
-                && context.proof_binding_id.is_some()
+                && context.proof_binding_id().is_some()
             {
                 object.insert(
                     "recipient_proof".to_string(),
@@ -1892,7 +1895,7 @@ pub(super) async fn gateway_provider_proxy(
                         "source": "runtime-launch-grant",
                         "recipient": principal_id,
                         "principal_id": principal_id,
-                        "proof_binding_id": context.proof_binding_id.as_deref().unwrap_or_default(),
+                        "proof_binding_id": context.proof_binding_id().unwrap_or_default(),
                         "session_id": session_id,
                     }),
                 );
@@ -1987,7 +1990,7 @@ pub(super) async fn gateway_provider_proxy(
                             principal_id: &principal_id,
                             session_id: &session_id,
                             capsule_id: &launch_capsule_id,
-                            grant_id: &context.grant_id,
+                            grant_id: context.grant_id(),
                             offer_id,
                             hint,
                         },
@@ -2023,7 +2026,7 @@ pub(super) async fn gateway_provider_proxy(
     {
         let wallet_authority =
             if (op == "publish" && request.get("protection").is_some()) || op == "buy" {
-                match runtime_wallet_authority(&required) {
+                match runtime_wallet_authority(&state.data_dir, &required) {
                     Ok(authority) => Some(authority),
                     Err(err) => return gateway_provider_error_response(&scheme, err),
                 }
@@ -3992,6 +3995,30 @@ pub(super) fn provider_proxy_runtime_metadata_field(request: &serde_json::Value)
         .map(String::as_str)
 }
 
+const HOSTED_RUN_ADMIN_ONLY: &str =
+    "Hosted AI on this Home is for admins. Local models are still available.";
+
+/// Hosted AI spends this Home's paid connection, so in 0.8.0 only an admin's
+/// run may use a hosted offer. Other offers are not affected.
+fn hosted_run_allowed(
+    data_dir: &std::path::Path,
+    context: &HomeLaunchTokenContext,
+    request: &serde_json::Value,
+) -> bool {
+    let offer_id = request["offer_id"].as_str().unwrap_or_default();
+    if !crate::api::model_provider_config::is_hosted_offer_id(offer_id) {
+        return true;
+    }
+    context
+        .proof_binding_id()
+        .and_then(|proof| crate::auth::load_principal_for_proof_binding(data_dir, proof).ok())
+        .is_some_and(|principal| {
+            crate::auth::ensure_proof_binding_not_revoked(&principal).is_ok()
+                && principal.principal_id == context.principal_id()
+                && crate::auth::is_admin(&principal)
+        })
+}
+
 pub(super) fn normalize_model_provider_request(
     op: &str,
     request: &serde_json::Value,
@@ -4014,10 +4041,10 @@ pub(super) fn normalize_model_provider_request(
                 .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
             let runtime_binding = RuntimeCreateBinding {
                 schema: RUNTIME_CREATE_BINDING_SCHEMA.to_string(),
-                principal_id: context.principal_id.clone(),
-                session_id: context.session_id.clone(),
+                principal_id: context.principal_id().to_string(),
+                session_id: context.session_id().to_string(),
                 capsule_id: capsule_id.to_string(),
-                grant_id: context.grant_id.clone(),
+                grant_id: context.grant_id().to_string(),
                 request_id: parsed.request_id,
                 offer_id: parsed.offer_id.clone(),
                 operation: parsed.operation.clone(),
@@ -4044,10 +4071,10 @@ pub(super) fn normalize_model_provider_request(
                 .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
             let runtime_binding = RuntimeAccessBinding {
                 schema: RUNTIME_ACCESS_BINDING_SCHEMA.to_string(),
-                principal_id: context.principal_id.clone(),
-                session_id: context.session_id.clone(),
+                principal_id: context.principal_id().to_string(),
+                session_id: context.session_id().to_string(),
                 capsule_id: capsule_id.to_string(),
-                grant_id: context.grant_id.clone(),
+                grant_id: context.grant_id().to_string(),
                 request_id: parsed.request_id,
                 run_id: parsed.run_id.clone(),
             };
@@ -4065,10 +4092,10 @@ pub(super) fn normalize_model_provider_request(
                 .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
             let runtime_binding = RuntimeAccessBinding {
                 schema: RUNTIME_ACCESS_BINDING_SCHEMA.to_string(),
-                principal_id: context.principal_id.clone(),
-                session_id: context.session_id.clone(),
+                principal_id: context.principal_id().to_string(),
+                session_id: context.session_id().to_string(),
                 capsule_id: capsule_id.to_string(),
-                grant_id: context.grant_id.clone(),
+                grant_id: context.grant_id().to_string(),
                 request_id: parsed.request_id,
                 run_id: parsed.run_id.clone(),
             };

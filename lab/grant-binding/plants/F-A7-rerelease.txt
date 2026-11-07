@@ -1,0 +1,8 @@
+id: F-A7-rerelease
+file: src/ledger.rs
+test: ledger::model_release_twice_is_refused
+--- old
+            None => return Err(ReleaseRefuse::NotOutstanding),
+--- new
+            None => return Ok(()),
+--- end

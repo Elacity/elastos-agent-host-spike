@@ -330,6 +330,7 @@ for (const guest of [false, true]) for (const [name, reason] of [["NotAllowedErr
   create.checked = true; create.emit("change");
   assert.equal(home.element("#home-unlock-name").hidden, false);
   assert.doesNotMatch(home.element("#home-unlock-copy").textContent, /Recovery Kit/);
+  assert.match(home.element("#home-unlock-copy").textContent, /saved on this computer, a phone or a security key/);
 }
 for (const field of ["ceremony", "id", "rawId", "clientDataJson", "attestationObject", "name", "c1-start", "c1-end", "extra"]) {
   const f = fixture(), home = f.reload();

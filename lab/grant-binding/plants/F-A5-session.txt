@@ -1,0 +1,8 @@
+id: F-A5-session
+file: src/lib.rs
+test: model_new_session_is_refused
+--- old
+        if live.session != record.session {
+--- new
+        if live.session != live.session {
+--- end

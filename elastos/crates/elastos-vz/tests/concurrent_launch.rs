@@ -25,7 +25,7 @@
 //!    developer-facing escape hatch for validating multi-VM boot on
 //!    a real Apple Silicon Mac with a real kernel artefact.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -84,6 +84,7 @@ fn microvm_manifest(name: &str) -> CapsuleManifest {
         viewer: None,
         window_policy: None,
         model_content: None,
+        agent: None,
         signature: None,
     }
 }
@@ -666,4 +667,385 @@ async fn single_vm_boots_to_userspace() {
             captured.first()
         ),
     }
+}
+
+/// Boot one admitted command. `true` prints the hello line and exit 0.
+/// `false` prints a failure line and exit 1. Any other command is refused
+/// inside the guest.
+async fn boot_exec_command(
+    kernel: &Path,
+    rootfs: &Path,
+    initrd: &Path,
+    command: &str,
+    console_lines: &LineBuffer,
+) -> Result<elastos_compute::exec_vm::ExecBody, String> {
+    boot_exec_command_with(kernel, rootfs, initrd, command, console_lines, None).await
+}
+
+/// `kill_after`: stop the VM as soon as a console line contains this text,
+/// before init can report. The console line only times the kill; the result
+/// still comes from the exit port alone.
+async fn boot_exec_command_with(
+    kernel: &Path,
+    rootfs: &Path,
+    initrd: &Path,
+    command: &str,
+    console_lines: &LineBuffer,
+    kill_after: Option<&str>,
+) -> Result<elastos_compute::exec_vm::ExecBody, String> {
+    let baseline_len = console_lines.lock().unwrap().len();
+    let tmp = tempfile::tempdir().unwrap();
+    let provider = VzProvider::new(
+        VzConfig::new()
+            .with_state_dir(tmp.path().join("vz"))
+            .with_rootfs_cache_dir(tmp.path().join("rootfs-cache"))
+            .with_kernel_path(kernel)
+            .with_initramfs_path(initrd),
+    )
+    .unwrap();
+    provider.init().await.unwrap();
+    let vm_id = format!("exec-smoke-{command}");
+    let vm_config = VmConfig {
+        vm_id: vm_id.clone(),
+        kernel_path: kernel.to_path_buf(),
+        boot_args: format!("console=hvc0 reboot=k panic=1 init=/init elastos.exec={command}"),
+        rootfs_path: rootfs.to_path_buf(),
+        rootfs_readonly: true,
+        mem_size_mib: elastos_compute::exec_vm::EXEC_MEMORY_MIB,
+        vcpu_count: elastos_compute::exec_vm::EXEC_VCPU_COUNT,
+        http_port: None,
+        data_disk_path: None,
+        vsock_cid: 3,
+        network: None,
+        network_disabled: true,
+        interactive_stdio: false,
+        carrier_socket_path: None,
+        initramfs_path: Some(initrd.to_path_buf()),
+    };
+    let handle = match provider
+        .load_with_vm_config(vm_config, microvm_manifest(&vm_id))
+        .await
+    {
+        Ok(handle) => handle,
+        Err(err) if is_missing_virtualization_entitlement(&err) => {
+            return Err("missing virtualization entitlement".to_string());
+        }
+        Err(err) => panic!("exec image failed to load: {err}"),
+    };
+    provider
+        .start(&handle)
+        .await
+        .expect("exec image failed to start");
+
+    // The exit code comes only from init's exit port, which the command
+    // cannot write. Console lines are log; nothing here looks at them to
+    // decide whether the run ended or how.
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut exit_report = None;
+    if let Some(text) = kill_after {
+        while Instant::now() < deadline
+            && !console_lines
+                .lock()
+                .unwrap()
+                .iter()
+                .skip(baseline_len)
+                .any(|line| line.contains(text))
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let _ = provider.stop(&handle).await;
+    }
+    while kill_after.is_none() && Instant::now() < deadline {
+        match provider
+            .vsock_connect(&handle, elastos_compute::exec_vm::EXEC_EXIT_PORT)
+            .await
+        {
+            Ok(fd) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                exit_report = read_exit_report(fd, left).await;
+                break;
+            }
+            // init may not be listening yet.
+            Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+        }
+    }
+    let captured: Vec<String> = console_lines
+        .lock()
+        .unwrap()
+        .iter()
+        .skip(baseline_len)
+        .cloned()
+        .collect();
+    for line in &captured {
+        eprintln!("    {command}: {line}");
+    }
+    let _ = provider.stop(&handle).await;
+    elastos_compute::exec_vm::exec_result(&elastos_compute::exec_vm::ExecRun {
+        console: captured.join("\n"),
+        exit_report,
+    })
+    .map_err(|err| format!("{command} did not report an exit: {err}"))
+}
+
+/// Read init's exit report: at most 16 bytes, to the end of the stream,
+/// within `left`. Nothing read in time is no report.
+async fn read_exit_report(fd: std::os::fd::OwnedFd, left: Duration) -> Option<Vec<u8>> {
+    let read = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::from(fd)
+            .take(16)
+            .read_to_end(&mut bytes)
+            .ok()
+            .map(|_| bytes)
+    });
+    match tokio::time::timeout(left, read).await {
+        Ok(Ok(Some(bytes))) if !bytes.is_empty() => Some(bytes),
+        _ => None,
+    }
+}
+
+/// Boot the exec smoke disk through Apple Virtualization. Set
+/// `ELASTOS_EXEC_KERNEL`, `ELASTOS_EXEC_ROOTFS`, and `ELASTOS_EXEC_INITRD`.
+/// The rootfs must not live under `browser-vm`. Skips when those files
+/// are absent. A passing command returns exit 0. A failing command returns
+/// exit 1. Silence is not success.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exec_smoke_image_prints_hello() {
+    if !is_supported() {
+        eprintln!("exec_smoke_image_prints_hello: skipping — not an Apple Silicon Mac");
+        return;
+    }
+    let Some(kernel) = std::env::var("ELASTOS_EXEC_KERNEL").ok().map(PathBuf::from) else {
+        eprintln!("exec_smoke_image_prints_hello: skipping — ELASTOS_EXEC_KERNEL is unset");
+        return;
+    };
+    let Some(rootfs) = std::env::var("ELASTOS_EXEC_ROOTFS").ok().map(PathBuf::from) else {
+        eprintln!("exec_smoke_image_prints_hello: skipping — ELASTOS_EXEC_ROOTFS is unset");
+        return;
+    };
+    let Some(initrd) = std::env::var("ELASTOS_EXEC_INITRD").ok().map(PathBuf::from) else {
+        eprintln!("exec_smoke_image_prints_hello: skipping — ELASTOS_EXEC_INITRD is unset");
+        return;
+    };
+    elastos_compute::exec_vm::admit_boot_image(
+        elastos_compute::exec_vm::ExecHost::Macos,
+        &kernel,
+        &rootfs,
+    )
+    .expect("exec image must be an ELF or ARM64 kernel plus an ext4 disk outside browser-vm");
+
+    let console_lines = init_vm_console_capture();
+    let true_token = elastos_compute::exec_vm::admit_exec_argv(&["true"])
+        .expect("true is in the image")
+        .token();
+    let passed = match boot_exec_command(&kernel, &rootfs, &initrd, true_token, &console_lines)
+        .await
+    {
+        Err(err) if err == "missing virtualization entitlement" => {
+            eprintln!(
+                "exec_smoke_image_prints_hello: skipping — sign the test binary with scripts/dev/sign-elastos-vz/sign.sh"
+            );
+            return;
+        }
+        other => other.expect("passing command"),
+    };
+    assert_eq!(passed.exit_code, 0);
+    assert!(passed.log.contains("init: hello from vm smoke test"));
+    assert!(passed.log.len() <= 4_000);
+    assert!(passed.artifact.is_empty());
+
+    let false_token = elastos_compute::exec_vm::admit_exec_argv(&["false"])
+        .expect("false is in the image")
+        .token();
+    let failed = boot_exec_command(&kernel, &rootfs, &initrd, false_token, &console_lines)
+        .await
+        .expect("failing command");
+    assert_eq!(failed.exit_code, 1);
+    assert!(failed.log.contains("init: command failed"));
+    assert!(!failed.log.contains("elastos-exec-exit"));
+
+    let pass_token =
+        elastos_compute::exec_vm::admit_exec_argv(&["vm-smoke", "tests::project_is_ready"])
+            .expect("the passing test is in the image")
+            .token();
+    let tested = boot_exec_command(&kernel, &rootfs, &initrd, pass_token, &console_lines)
+        .await
+        .expect("passing rust test");
+    assert_eq!(tested.exit_code, 0);
+    assert!(tested.log.contains("test result: ok"));
+    assert!(tested
+        .log
+        .contains("project demo a1097f0d6ed225ad16b19f19d6a260816af54c74bfe82b11e4ce2020233497f1"));
+    assert!(tested.log.contains("project_is_ready"));
+    assert!(tested.log.len() <= 4_000);
+    assert!(!tested.log.contains("elastos-exec-exit"));
+
+    let fail_token =
+        elastos_compute::exec_vm::admit_exec_argv(&["vm-smoke", "tests::a_missing_piece_fails"])
+            .expect("the failing test is in the image")
+            .token();
+    let broken = boot_exec_command(&kernel, &rootfs, &initrd, fail_token, &console_lines)
+        .await
+        .expect("failing rust test");
+    assert_eq!(broken.exit_code, 101);
+    assert!(broken.log.contains("test result: FAILED"));
+    assert!(broken.log.contains("a_missing_piece_fails"));
+    assert!(broken.log.len() <= 4_000);
+
+    let edited_token =
+        elastos_compute::exec_vm::admit_exec_argv(&["vm-smoke", "tests::project_was_edited"])
+            .expect("the edited project is in the image")
+            .token();
+    let edited = boot_exec_command(&kernel, &rootfs, &initrd, edited_token, &console_lines)
+        .await
+        .expect("edited project");
+    assert_eq!(edited.exit_code, 0);
+    assert!(edited.log.contains("project note hello again"));
+    assert!(edited
+        .log
+        .contains("project demo 8256365b5a513111b73d3ee3b646a78d58c821c9f3cba1346f6f27c0f38dd36d"));
+    assert!(!edited
+        .log
+        .contains("project demo a1097f0d6ed225ad16b19f19d6a260816af54c74bfe82b11e4ce2020233497f1"));
+
+    let note_token = elastos_compute::exec_vm::admit_exec_argv(&["note"])
+        .expect("the note text is a diagnostic")
+        .token();
+    let note = boot_exec_command(&kernel, &rootfs, &initrd, note_token, &console_lines)
+        .await
+        .expect("project note");
+    assert_eq!(note.exit_code, 0);
+    assert!(note.log.contains("project note hello from the project"));
+    assert!(!note.log.contains("project note hello again"));
+    assert!(!note.log.contains("/tmp"));
+
+    let files_token = elastos_compute::exec_vm::admit_exec_argv(&["files"])
+        .expect("the file list is a diagnostic")
+        .token();
+    let files = boot_exec_command(&kernel, &rootfs, &initrd, files_token, &console_lines)
+        .await
+        .expect("project file list");
+    assert_eq!(files.exit_code, 0);
+    assert!(files.log.contains("project file index.html"));
+    assert!(files.log.contains("project file style.css"));
+    assert!(files.log.contains("project file notes.txt"));
+    assert!(!files.log.contains("/tmp"));
+    assert!(!files.log.contains("/Users"));
+    let mut names: Vec<&str> = files
+        .log
+        .lines()
+        .filter_map(|line| line.strip_prefix("project file "))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names, ["index.html", "notes.txt", "style.css"]);
+    for name in &names {
+        elastos_compute::exec_vm::admit_listed_file(name)
+            .unwrap_or_else(|err| panic!("listed file {name} was refused: {err}"));
+    }
+    assert_eq!(
+        elastos_compute::exec_vm::admit_listed_file("/tmp/secret"),
+        Err("host path")
+    );
+
+    assert_eq!(
+        elastos_compute::exec_vm::admit_exec_argv(&["cargo", "test"]),
+        Ok(elastos_compute::exec_vm::ExecCommand::CargoTest)
+    );
+    assert_eq!(
+        elastos_compute::exec_vm::ExecCommand::CargoTest.token(),
+        "cargo-test"
+    );
+    assert_eq!(
+        elastos_compute::exec_vm::admit_exec_argv(&["cargo", "build"]),
+        Err("cargo operation refused")
+    );
+    assert_eq!(
+        elastos_compute::exec_vm::admit_exec_argv(&["nope"]),
+        Err("command refused")
+    );
+    let refused = boot_exec_command(&kernel, &rootfs, &initrd, "nope", &console_lines)
+        .await
+        .expect("refused command");
+    assert_eq!(refused.exit_code, 1);
+    assert!(refused.log.contains("init: command refused"));
+    assert!(!refused.log.contains("test result:"));
+}
+
+/// The command cannot forge or take the exit report. Needs the exec image
+/// from scripts/build/build-exec-initrd.py, which has the fixture commands;
+/// set `ELASTOS_EXEC_FAKE_EXIT=1` with the same variables as the hello test.
+/// - `fake-exit` prints `elastos-exec-exit 0`, then `after the fake line`,
+///   sleeps and exits 1: the run reports 1 and keeps the later line, and a VM
+///   killed right after the forged line is `exit marker missing`;
+/// - `probe-bind` (as the command, uid 65534) gets EACCES on port 1022, and
+///   the supervisor confirms the port is held (a second bind is EADDRINUSE);
+/// - `probe-report` tries to write a forged `0` on the report channel and
+///   leaves a process behind that keeps trying, then exits 3: the report is 3;
+/// - `kill-self` is killed by SIGKILL: the report is 137, never 0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forged_exit_line_cannot_pass() {
+    if !is_supported() || std::env::var("ELASTOS_EXEC_FAKE_EXIT").as_deref() != Ok("1") {
+        eprintln!(
+            "a_forged_exit_line_cannot_pass: skipping — needs a Mac and ELASTOS_EXEC_FAKE_EXIT=1"
+        );
+        return;
+    }
+    let var = |name: &str| std::env::var(name).ok().map(PathBuf::from);
+    let (Some(kernel), Some(rootfs), Some(initrd)) = (
+        var("ELASTOS_EXEC_KERNEL"),
+        var("ELASTOS_EXEC_ROOTFS"),
+        var("ELASTOS_EXEC_INITRD"),
+    ) else {
+        eprintln!("a_forged_exit_line_cannot_pass: skipping — exec image variables are unset");
+        return;
+    };
+    let console_lines = init_vm_console_capture();
+    let finished = boot_exec_command(&kernel, &rootfs, &initrd, "fake-exit", &console_lines)
+        .await
+        .expect("the run reports through the exit port");
+    assert_eq!(finished.exit_code, 1, "the forged 0 decided the run");
+    assert!(
+        finished.log.contains("after the fake line"),
+        "the forged line ended the run early"
+    );
+    let killed = boot_exec_command_with(
+        &kernel,
+        &rootfs,
+        &initrd,
+        "fake-exit",
+        &console_lines,
+        Some("elastos-exec-exit 0"),
+    )
+    .await;
+    assert!(
+        killed
+            .as_ref()
+            .is_err_and(|err| err.contains("exit marker missing")),
+        "a killed VM after a forged line must fail: {killed:?}"
+    );
+
+    let bind = boot_exec_command(&kernel, &rootfs, &initrd, "probe-bind", &console_lines)
+        .await
+        .expect("probe-bind reports");
+    assert_eq!(bind.exit_code, 0, "the command could bind the exit port");
+    assert!(bind.log.contains("probe-bind: port 1022: EACCES"));
+    assert!(bind
+        .log
+        .contains("exec-supervisor: exit port 1022 held (a second bind gets EADDRINUSE)"));
+
+    let forged = boot_exec_command(&kernel, &rootfs, &initrd, "probe-report", &console_lines)
+        .await
+        .expect("probe-report reports");
+    assert_eq!(forged.exit_code, 3, "a forged report reached the host");
+    assert!(!forged.log.contains("wrote a forged report"));
+
+    let killed_self = boot_exec_command(&kernel, &rootfs, &initrd, "kill-self", &console_lines)
+        .await
+        .expect("kill-self reports");
+    assert_eq!(
+        killed_self.exit_code, 137,
+        "a killed command was not reported as killed"
+    );
 }

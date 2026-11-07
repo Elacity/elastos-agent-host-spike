@@ -26,6 +26,8 @@ const homeClipboardProtocolPath = path.resolve("capsules/home/browser/home-clipb
 
 const documents = new Map();
 const saveCalls = [];
+const publishedFixtureCid = "bafypublishedfixture";
+const publishedWebLink = "https://example.invalid/published-link";
 let delayNextSave = false;
 let delayedSaveStart = null;
 let delayedSaveRelease = null;
@@ -296,6 +298,40 @@ function createAppServer() {
       res.end();
       return;
     }
+    if (url.pathname === "/home-fixture") {
+      // Documents framed as Home frames it; the page records what it asks Home.
+      // ?without_origin drops home_origin, so Documents has no Home bridge;
+      // ?cid opens a published revision that is not in the local list.
+      const homeOrigin = `http://${req.headers.host}`;
+      const params = new URLSearchParams();
+      if (!url.searchParams.has("without_origin")) params.set("home_origin", homeOrigin);
+      if (url.searchParams.has("cid")) params.set("cid", url.searchParams.get("cid"));
+      const query = params.size ? `?${params}` : "";
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(`<!doctype html><script>window.homeMessages = [];
+addEventListener("message", (event) => window.homeMessages.push(event.data));</script>
+<iframe title="Documents" style="width:1200px;height:850px" src="/apps/documents/${query}#home_token=documents-link-token"></iframe>`);
+      return;
+    }
+    if (url.pathname.startsWith(`/s/${publishedFixtureCid}/`)) {
+      // A published two-file revision with links of every kind.
+      const file = url.pathname.slice(`/s/${publishedFixtureCid}/`.length);
+      const bodies = {
+        "_files.json": JSON.stringify(["first.md", "second.md"]),
+        "_share.json": JSON.stringify({ share_id: "share-fixture", version: 1 }),
+        "first.md": `# Published\n\n[Out](${publishedWebLink}) [Same](http://${req.headers.host}/s/${publishedFixtureCid}/_share.json) [Jump](#notes-2) [Rel](/apps/documents/)\n\n`
+          + Array.from({ length: 80 }, (_, index) => `Filler line ${index}`).join("\n\n") + "\n\n# Notes\n\nEnd.",
+        "second.md": `# Second file\n\n[Same second](http://${req.headers.host}/s/${publishedFixtureCid}/_share.json) [Top](#second-file-1)\n\nSecond body.`,
+      };
+      if (!Object.hasOwn(bodies, file)) {
+        res.writeHead(404);
+        res.end("Not found");
+        return;
+      }
+      res.writeHead(200, { "content-type": file.endsWith(".json") ? "application/json" : "text/markdown; charset=utf-8" });
+      res.end(bodies[file]);
+      return;
+    }
 
     let relative = url.pathname.replace(/^\/apps\/documents\/?/, "") || "index.html";
     relative = relative.replace(/^\/+/, "");
@@ -486,12 +522,10 @@ async function run() {
     await page.locator(".document-list-item").first().click();
     await page.waitForFunction(() => document.getElementById("title-input")?.value === "Alpha");
     const selected = await page.evaluate(() => ({
-      copyHidden: document.getElementById("copy-published-link")?.classList.contains("hidden") || false,
-      copyText: document.getElementById("copy-published-link")?.textContent?.trim() || "",
+      copyButton: !!document.getElementById("copy-published-link"),
       titleValue: document.getElementById("title-input")?.value || "",
     }));
-    assert(!selected.copyHidden, "Published documents must expose Copy Published Link.");
-    assert(selected.copyText === "", "Copy Published Link must stay icon-only.");
+    assert(!selected.copyButton, "Published documents must not offer Copy Published Link.");
     assert(selected.titleValue === "Alpha", "Documents layout fixture must load the selected document.");
 
     await page.locator(".document-list-item").first().click({ button: "right" });
@@ -500,7 +534,7 @@ async function run() {
       nodes.map((node) => node.textContent?.trim() || ""),
     );
     assert(
-      JSON.stringify(contextItems) === JSON.stringify(["Duplicate", "Unpublish", "Copy Published Link", "Delete"]),
+      JSON.stringify(contextItems) === JSON.stringify(["Duplicate", "Unpublish", "Delete"]),
       `Documents published row context menu must stay item-aware. Got ${JSON.stringify(contextItems)}`,
     );
     await page.evaluate(() => {
@@ -757,6 +791,147 @@ async function run() {
       );
     } finally {
       await parserPage.close();
+    }
+
+    // #436 invariant inside Home: after every step the Markdown views and
+    // the published file list hold no a[href], the frame address (hash
+    // included) is still the launch address, and no page opened.
+    const pageCount = () => browser.contexts().reduce((count, context) => count + context.pages().length, 0);
+    const assertHomeFrameInvariant = async (frame, launch, step) => {
+      const url = frame.url();
+      const pages = pageCount();
+      const hrefs = await frame.evaluate(() => [...document.querySelectorAll(
+        "#preview a[href], #share-preview a[href], #share-doc-list a[href]")].map((anchor) => anchor.getAttribute("href")));
+      assert(url === launch.url && pages === launch.pages && hrefs.length === 0,
+        `Inside Home after "${step}": frame ${url} (launch ${launch.url}), pages ${pages} (launch ${launch.pages}), hrefs ${JSON.stringify(hrefs)}`);
+    };
+    const scrollsTo = async (frame, id, activate) => {
+      const top = () => frame.evaluate((target) => document.getElementById(target).getBoundingClientRect().top, id);
+      const before = await top();
+      await activate();
+      await frame.page().waitForTimeout(200);
+      const after = await top();
+      const viewportHeight = await frame.evaluate(() => window.innerHeight);
+      assert(before > viewportHeight && after >= 0 && after < viewportHeight,
+        `The link to #${id} did not scroll to its heading (${before} -> ${after}).`);
+    };
+    const filler = "\n\n" + Array.from({ length: 80 }, (_, index) => `Filler line ${index}`).join("\n\n");
+
+    // Editor preview: web links (same origin included) ask Home with click,
+    // Enter and Space (middle-click does nothing); "#" links scroll; other
+    // links are text. Without the Home bridge a web link refuses with a
+    // message. Sequence: render, follow a fragment, edit, switch document,
+    // re-render, then a same-origin link.
+    for (const withoutOrigin of [false, true]) {
+      resetDocumentsFixture();
+      const linkPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+      trackPage(linkPage, consoleErrors, pageErrors, failedRequests, errorResponses);
+      try {
+        await linkPage.goto(`http://127.0.0.1:${port}/home-fixture${withoutOrigin ? "?without_origin" : ""}`);
+        const frame = await (await linkPage.locator('iframe[title="Documents"]').elementHandle()).contentFrame();
+        await frame.locator('.document-list-item[data-doc-did="doc-beta"]').click();
+        await frame.waitForFunction(() => document.getElementById("title-input")?.value === "Beta");
+        const launch = { url: frame.url(), pages: pageCount() };
+        const webLink = "https://example.invalid/documents-link?from=preview";
+        // A same-origin page that loads: a native href would replace the
+        // Documents frame, which then cannot answer Home's close request.
+        const sameOriginLink = `${new URL(frame.url()).origin}/s/${publishedFixtureCid}/_share.json`;
+        // Refused spellings ("\" reads as "/", tabs are dropped), relative,
+        // elastos:// and localhost:// links are text inside Home.
+        const textLinks = ["//example.invalid/a", "/\\example.invalid/b", "\\\\example.invalid/c", "/\t/example.invalid/d",
+          "/apps/documents/", "./other", "../other", "elastos://bafyexample", "localhost://ElastOS/Documents/x"];
+        const markdown = `[Example](${webLink}) [Same](${sameOriginLink}) [Section](#notes-1) `
+          + textLinks.map((href, index) => `[Text ${index}](${href})`).join(" ") + filler + "\n\n# Notes\n\nEnd.";
+        await frame.locator("#mode-split").click();
+        await frame.locator("#editor").fill(markdown);
+        await assertHomeFrameInvariant(frame, launch, "render");
+        const controls = frame.locator("#preview a[data-open-external]");
+        assert(JSON.stringify(await controls.evaluateAll((nodes) => nodes.map((node) => node.dataset.openExternal)))
+          === JSON.stringify([webLink, sameOriginLink]),
+          "Every preview web link inside Home, same origin included, must be a Home control.");
+        for (let index = 0; index < textLinks.length; index += 1) {
+          assert(await frame.getByText(`Text ${index}`, { exact: true }).evaluate((node) => !node.closest("a")),
+            `Inside Home ${JSON.stringify(textLinks[index])} must be plain text.`);
+          await frame.getByText(`Text ${index}`, { exact: true }).click();
+        }
+        const homeRequests = () => linkPage.evaluate(() => window.homeMessages
+          .filter((message) => message?.type === "home:open-external"));
+        const link = controls.first();
+        await link.click({ button: "middle" });
+        await link.click();
+        await link.focus();
+        await linkPage.keyboard.press("Enter");
+        await linkPage.keyboard.press("Space");
+        await linkPage.waitForTimeout(200);
+        await assertHomeFrameInvariant(frame, launch, "web link");
+        if (withoutOrigin) {
+          assert(await frame.locator("#status-text").textContent() === "Open Documents from Home to open web links.",
+            "Without the Home bridge a preview web link must say why it did not open.");
+        }
+        await scrollsTo(frame, "notes-1", () => frame.locator('#preview [data-scroll-to="notes-1"]').click());
+        await assertHomeFrameInvariant(frame, launch, "follow fragment");
+        await frame.locator("#editor").fill(markdown + "\n\nEdited.");
+        await assertHomeFrameInvariant(frame, launch, "edit");
+        await frame.locator('.document-list-item[data-doc-did="doc-alpha"]').click();
+        await frame.locator("#confirm-action").click();
+        await frame.waitForFunction(() => document.getElementById("title-input")?.value === "Alpha");
+        await assertHomeFrameInvariant(frame, launch, "switch document");
+        await frame.locator("#editor").fill(markdown);
+        await assertHomeFrameInvariant(frame, launch, "re-render");
+        await frame.getByText("Same", { exact: true }).click();
+        await linkPage.waitForTimeout(300);
+        await assertHomeFrameInvariant(frame, launch, "same-origin link");
+        const request = (url) => ({ type: "home:open-external", url, homeToken: "documents-link-token" });
+        const expected = withoutOrigin ? [] : [request(webLink), request(webLink), request(webLink), request(sameOriginLink)];
+        const requests = await homeRequests();
+        assert(JSON.stringify(requests) === JSON.stringify(expected),
+          `Documents preview links (click, Enter, Space, same-origin; middle-click and text send nothing) must send ${expected.length} exact Home requests. Got ${JSON.stringify(requests)}`);
+      } finally {
+        await linkPage.close();
+      }
+    }
+
+    // Published revision Home opens (not in the local list), with the
+    // sequence found in review: follow a fragment, switch file, then a
+    // same-origin link.
+    resetDocumentsFixture();
+    const publishedPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    trackPage(publishedPage, consoleErrors, pageErrors, failedRequests, errorResponses);
+    try {
+      await publishedPage.goto(`http://127.0.0.1:${port}/home-fixture?cid=${publishedFixtureCid}`);
+      const frame = await (await publishedPage.locator('iframe[title="Documents"]').elementHandle()).contentFrame();
+      await frame.locator("#share-preview h1").first().waitFor({ state: "visible" });
+      const origin = new URL(frame.url()).origin;
+      const launch = { url: frame.url(), pages: pageCount() };
+      await assertHomeFrameInvariant(frame, launch, "published render");
+      const controls = frame.locator("#share-preview a[data-open-external]");
+      assert(JSON.stringify(await controls.evaluateAll((nodes) => nodes.map((node) => node.dataset.openExternal)))
+        === JSON.stringify([publishedWebLink, `${origin}/s/${publishedFixtureCid}/_share.json`]),
+        "Published preview web links inside Home, same origin included, must be Home controls.");
+      assert(await frame.getByText("Rel", { exact: true }).evaluate((node) => !node.closest("a")),
+        "A relative link in the published preview inside Home must be plain text.");
+      await controls.nth(0).click();
+      await controls.nth(1).focus();
+      await publishedPage.keyboard.press("Enter");
+      await frame.getByText("Rel", { exact: true }).click();
+      await publishedPage.waitForTimeout(200);
+      await assertHomeFrameInvariant(frame, launch, "published web links");
+      await scrollsTo(frame, "notes-2", () => frame.getByText("Jump", { exact: true }).click());
+      await assertHomeFrameInvariant(frame, launch, "published follow fragment");
+      await frame.locator(".share-doc-link").nth(1).click();
+      await frame.waitForFunction(() => document.getElementById("share-title")?.textContent === "Second file");
+      await assertHomeFrameInvariant(frame, launch, "switch published file");
+      await frame.getByText("Same second", { exact: true }).click();
+      await publishedPage.waitForTimeout(300);
+      await assertHomeFrameInvariant(frame, launch, "published same-origin link");
+      const requests = await publishedPage.evaluate(() => window.homeMessages
+        .filter((message) => message?.type === "home:open-external"));
+      const request = (url) => ({ type: "home:open-external", url, homeToken: "documents-link-token" });
+      assert(JSON.stringify(requests) === JSON.stringify([request(publishedWebLink),
+        request(`${origin}/s/${publishedFixtureCid}/_share.json`), request(`${origin}/s/${publishedFixtureCid}/_share.json`)]),
+      `Published preview links must send exact Home requests. Got ${JSON.stringify(requests)}`);
+    } finally {
+      await publishedPage.close();
     }
 
     resetDocumentsFixture();

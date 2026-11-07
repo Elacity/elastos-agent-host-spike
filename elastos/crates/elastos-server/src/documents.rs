@@ -1400,6 +1400,22 @@ fn remove_file_if_exists(path: PathBuf) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    /// A5-S3c-0b, documents: a stored Agent's Documents root sits under its
+    /// own UsersAI root. Expected-fail: the id rule. Flipped by A5-S3c-3b.
+    #[test]
+    #[ignore = "expected-fail until A5-S3c-3b"]
+    fn a_stored_agents_documents_root_is_under_its_usersai_root() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let id = "person:local:s3c-agent-documents";
+        crate::auth::store_test_human_principal(data_dir.path(), id);
+        crate::auth::tests::mint_agent_record(data_dir.path(), id, None);
+        let root = crate::auth::principal_stored_localhost_root(Some(data_dir.path()), id).unwrap();
+        assert!(root.starts_with("localhost://UsersAI/"), "{root}");
+        let rooted = format!("{}/Documents", root.strip_prefix("localhost://").unwrap());
+        let want = rooted_localhost_fs_path(data_dir.path(), &rooted).unwrap();
+        assert_eq!(documents_root(data_dir.path(), id).unwrap(), want);
+    }
+
     const TEST_CID: &str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
     const TEST_PRINCIPAL: &str = "person:local:test-documents";
     const OTHER_PRINCIPAL: &str = "person:local:other-documents";

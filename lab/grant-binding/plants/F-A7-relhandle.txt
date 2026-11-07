@@ -1,0 +1,10 @@
+id: F-A7-relhandle
+file: src/ledger.rs
+test: ledger::model_release_on_another_handle_is_refused
+--- old
+        if !handles_match(bound, request.handle) {
+            return Err(ReleaseRefuse::OtherHandle);
+        }
+--- new
+        let _same = handles_match(bound, request.handle);
+--- end

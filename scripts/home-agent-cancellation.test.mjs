@@ -380,6 +380,38 @@ test("Agent selection pair roundtrips with drafts; invalid pair blocks hydration
   live.selectLiveOffer("");
 });
 
+test("default instruction is saved as empty; the alpha.24 default migrates and custom text is kept", async t => {
+  t.after(() => { workspace.bindAgentWorkspaceStore(null); live.selectLiveOffer(""); });
+  let hydrated = true, prompt = "", draft = { text: "", parts: [] };
+  workspace.bindAgentWorkspaceStore({ getSessions: () => [], setSessions() {}, getActiveSessionId: () => null,
+    getReasoningVisible: () => false, setReasoningVisible() {},
+    setActiveSessionId() {}, getSessionMode: () => "chat", setSessionMode() {},
+    getComposerDraft: () => draft, applyComposerDraft: value => { draft = value; },
+    getSystemPrompt: () => prompt, setSystemPrompt: value => { prompt = value; },
+    getWorkspaceHydrated: () => hydrated, setWorkspaceHydrated: value => { hydrated = value; } });
+  const savedBy = systemPrompt => ({ v: workspace.AGENT_WORKSPACE_V, sessions: [], projects: [], systemPrompt });
+  // Exactly as Homes up to 0.8.0-alpha.24 saved their default (#455).
+  const alpha24Default = "You are the ElastOS Home Agent, running privately on this machine. " +
+    "You have no tools and no capsule authority in this session; answer from " +
+    "knowledge only, and say so plainly when a task would need a tool or grant.";
+  assert.notEqual(live.DEFAULT_LIVE_SYSTEM_PROMPT, alpha24Default);
+  // Fresh workspace: the harness starts with "" and the panel fills in the default.
+  assert.equal(workspace.applyAgentWorkspaceSnapshot(null), true);
+  assert.equal(workspace.getAgentWorkspaceSnapshot().systemPrompt, "");
+  prompt = live.DEFAULT_LIVE_SYSTEM_PROMPT;
+  assert.equal(workspace.getAgentWorkspaceSnapshot().systemPrompt, "");
+  for (const saved of ["", alpha24Default]) {
+    prompt = "stale";
+    assert.equal(workspace.applyAgentWorkspaceSnapshot(savedBy(saved)), true);
+    assert.equal(prompt, live.DEFAULT_LIVE_SYSTEM_PROMPT);
+    assert.equal(workspace.getAgentWorkspaceSnapshot().systemPrompt, "");
+  }
+  const custom = "Answer in French.";
+  assert.equal(workspace.applyAgentWorkspaceSnapshot(savedBy(custom)), true);
+  assert.equal(prompt, custom);
+  assert.equal(workspace.getAgentWorkspaceSnapshot().systemPrompt, custom);
+});
+
 test("nested Agent Models intent registers top Home with exact origin and leaves draft alone", async () => {
   const { openModelsFromAgent } = await import("../capsules/assistant/browser/harness-host.js");
   const prior = { href: window.location.href, top: window.top };
@@ -1072,6 +1104,31 @@ test("saved model_busy lastTurn shows Busy after restore", () => {
   assert.doesNotMatch(status.textContent, /Model run failed/);
 });
 
+test("a reply cut off by End says so live and after restore", () => {
+  const message = "Hosted access ended during this reply. Approve the new request in Inbox to use it again.";
+  assert.equal(controller.formatStreamError({
+    code: "hosted_access_ended_during_reply",
+    message,
+  }), message);
+  const { ctx, status } = streamControllerFixture();
+  ctx.sessions[0] = recoverStalePersistedTurn({
+    id: "one",
+    title: "ended",
+    group: "Today",
+    messages: [{ role: "user", text: "Tell me a story", modelText: "Tell me a story" }],
+    lastTurn: {
+      state: "failed",
+      error: "hosted_access_ended_during_reply",
+      providerRunId: "run-ended",
+      completedAt: 1,
+    },
+  });
+  status.textContent = "";
+  controller.renderActiveSession();
+  assert.equal(status.textContent, message);
+  assert.doesNotMatch(status.textContent, /Model run failed/);
+});
+
 function renderedAgentText(stream) {
   const row = (stream.children || []).find((child) => child.dataset?.role === "agent");
   if (!row) return "";
@@ -1474,7 +1531,7 @@ test("with no model the empty Assistant names the one step and opens Marketplace
   shelf.syncAgentSendButton();
   assert.equal(send.disabled, true);
   assert.equal(send.title, "Get a model to start");
-  assert.match(controller.NO_MODEL_OFFER_STATUS, /Apps \(Marketplace\) → Models/);
+  assert.match(controller.NO_MODEL_OFFER_STATUS, /Open Marketplace → Models/);
   assert.doesNotMatch(controller.NO_MODEL_OFFER_STATUS, /Store|Services/);
 });
 

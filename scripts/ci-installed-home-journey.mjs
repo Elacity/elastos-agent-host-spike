@@ -316,15 +316,22 @@ async function repairJourney(assistant, offer) {
   const restarted = await resourceAction("restart_get");
   assert(restarted.home_restarted && restarted.weights_bytes > 0);
   modelRepair.interrupted_get = { kept_weights_bytes: restarted.weights_bytes, kept_weights_prefix_sha256: restarted.weights_prefix_sha256 };
-  subcheck = "restarted_home";
+  // Each wait after the restart has its own fixed label, so a failure names it.
+  subcheck = "restarted_page_load";
   assert((await page.goto(`${base}/home/`, { waitUntil: "domcontentloaded" })).ok());
+  subcheck = "restarted_home_ready";
   await page.waitForFunction(() => document.body.dataset.homeStatus === "ready" || document.querySelector("#home-unlock")?.hidden === false, null, { timeout: 60000 });
   if (await page.locator("#home-unlock").isVisible()) await page.locator("#home-unlock-primary").click();
+  subcheck = "restarted_signed_in";
   await page.waitForFunction(() => document.body.dataset.homeStatus === "ready" && document.body.dataset.homeAuthority === "signed", null, { timeout: 60000 });
   const shell = page.frameLocator("#active-shell-frame");
+  subcheck = "restarted_desktop";
   await shell.locator("#desktop").waitFor({ state: "visible", timeout: 60000 });
+  subcheck = "restarted_marketplace";
   marketplace = await app("marketplace");
+  subcheck = "restarted_model_detail";
   await showModelDetail(marketplace, other.cid);
+  subcheck = "restarted_retry_text";
   await marketplace.getByText("The download stopped before it finished. Retry.", { exact: true }).waitFor({ state: "visible", timeout: 60000 });
   await page.screenshot({ path: join(evidence, "repair-restart-retry.png"), fullPage: true });
   subcheck = "retry_retained_get";
@@ -341,11 +348,14 @@ async function repairJourney(assistant, offer) {
   results.model_interrupted_get_retry = "passed";
 }
 
+// The Marketplace detail reads the model each time it opens (Refresh shows only
+// after a failed read), so reopening it is the fresh read.
 async function showModelDetail(marketplace, modelCid) {
   const close = marketplace.locator('[data-action="close-detail"]').first();
   if (await close.isVisible()) await close.click();
   await marketplace.locator(`[data-action="model-detail"][data-app="model:${modelCid}"]`).click();
-  await marketplace.locator('[data-model-control="refresh"]').click();
+  await marketplace.locator('#detail-modal.active [data-model-management] li[role="status"]:not(:has-text("Loading models…"))')
+    .waitFor({ state: "attached", timeout: 60000 });
 }
 
 async function clickModelUse(marketplace, modelCid, label) {
@@ -523,8 +533,9 @@ try {
       assert.equal(terminal.status, "failed");
       assert.equal(terminal.error?.code, "model_memory_unavailable");
       assert.equal(terminal.error?.class, "context_rejected");
-      const message = "Not enough free memory for this model. Close other apps, then try again.";
-      assert.equal(terminal.error?.message, message);
+      // The refusal names the room it saw and the model's need (#98).
+      const message = terminal.error?.message ?? "";
+      assert.match(message, /^Not enough memory for this model: it needs \d+(?:\.\d)? GB and \d+(?:\.\d)? GB is available\. Close other apps, then try again\.$/);
       await visibleFailure(assistant, `Model run failed: ${message}`);
       await page.screenshot({ path: join(evidence, "finite-memory-refusal.png"), fullPage: true });
       resourceTurns.push({ stage: "memory_refusal", run_id: refused.run.run_id, status: terminal.status, code: terminal.error.code });

@@ -1,0 +1,8 @@
+id: F-A7-askoverwrite
+file: src/ask.rs
+test: ask::model_forged_overwrite_does_not_replace_the_admitted_amount
+--- old
+        self.store_admitted_ceiling(Some(&identity), ask.amount);
+--- new
+        self.admit(if !request.forged_overwrite { ask.amount } else { 0 });
+--- end

@@ -291,6 +291,7 @@ const localVideoFile = object(`${documentsUri}/Clip.mp4`, "Clip.mp4", "file", [
   "move",
   "copy",
   "publish",
+  "protect",
   "trash",
   "properties",
 ], {
@@ -1007,46 +1008,6 @@ function handleProvider(op, payload, res) {
         receipt: { status: "ok", provider: "smoke" },
         availability: { status: found.availability || "local_pinned" },
       } : null,
-    }));
-  }
-  if (op === "share") {
-    const found = findObject(payload.uri);
-    if (!found) return sendJson(res, 404, JSON.stringify({ status: "error", message: "not found" }));
-    found.shared = true;
-    touch(found);
-    const recipients = Array.isArray(payload.recipients) ? payload.recipients.filter(Boolean) : [];
-    const policy = recipients.length ? "recipient_scoped" : "public_link";
-    return sendJson(res, 200, ok({
-      schema: "elastos.library.share/v1",
-      object: found,
-      uri: `elastos://${found.published_cid || "share/smoke"}`,
-      cid: found.published_cid || "share/smoke",
-      policy,
-      recipients,
-      grants: recipients.map((recipient, index) => ({
-        schema: "elastos.library.share-grant/v1",
-        grant_id: `share:smoke:${index + 1}`,
-        recipient,
-        policy,
-        key_release: {
-          schema: "elastos.library.key-release/v1",
-          required: false,
-          status: "not_required_for_plain_published_content",
-        },
-      })),
-      key_release: {
-        schema: "elastos.library.key-release/v1",
-        required: false,
-        status: "not_required_for_plain_published_content",
-      },
-      content_security: {
-        schema: "elastos.library.published-content-security/v1",
-        published_payload: "plain_content",
-        status: "not_required_for_plain_published_content",
-      },
-      availability: { status: found.availability || "local_pinned" },
-      shared_at: 1780000003,
-      object_uri: found.uri,
     }));
   }
   if (op === "extract_archive") {
@@ -1813,6 +1774,161 @@ function excludesAll(actual, forbidden, context) {
   }
 }
 
+// #441: search hides items, so Delete, Shift+Delete and the item menu act only on what is visible.
+async function assertSearchKeepsDeleteTargetsVisible(page) {
+  const names = ["Alpha Clip.txt", "Beta Clip.txt", "Gamma Clip.txt", "Delta Clip.txt"];
+  const uri = (name) => childUri(videosUri, name);
+  for (const name of names) {
+    putObject(videosUri, createFileObject(uri(name), name, { capabilities: ["delete_permanently"] }));
+  }
+  const item = (name) => page.locator(".item").filter({ hasText: name }).first();
+  const itemCount = (count) => page.waitForFunction(
+    (expected) => document.querySelectorAll("#content .item[data-uri]").length === expected,
+    count,
+  );
+  const search = async (query, expectedCount) => {
+    await page.locator("#search").fill(query);
+    await itemCount(expectedCount);
+  };
+  const footer = () => page.locator("#footer-left").textContent();
+  const destructiveOps = (from) => ops.slice(from)
+    .filter((entry) => entry.op === "trash" || entry.op === "delete_permanently")
+    .map((entry) => `${entry.op}:${entry.payload.uri}`);
+
+  await page.locator(".place").filter({ hasText: "Videos" }).first().click();
+  await page.locator(".crumb-current").filter({ hasText: "Videos" }).first().waitFor();
+  await itemCount(names.length);
+  await page.locator("#search-toggle-button").click();
+
+  // Mixed selection: Alpha stays visible, Beta is hidden by search; Delete trashes only Alpha.
+  await item("Alpha Clip.txt").click();
+  await item("Beta Clip.txt").click({ modifiers: [multiSelectModifier] });
+  assert(await footer() === `2 selected · ${names.length} items`, "Alpha and Beta must start selected");
+  await search("Alpha", 1);
+  assert(await footer() === "1 selected · 1 item", `Search must drop hidden Beta from the selection; footer=${await footer()}`);
+  let mark = ops.length;
+  await item("Alpha Clip.txt").focus();
+  await page.keyboard.press("Delete");
+  await waitForOp((entry) => entry.op === "trash" && entry.payload.uri === uri("Alpha Clip.txt"), "Delete must trash visible Alpha");
+  await itemCount(0);
+  assert(
+    JSON.stringify(destructiveOps(mark)) === JSON.stringify([`trash:${uri("Alpha Clip.txt")}`]),
+    `Delete after search must trash only visible Alpha; ops=${JSON.stringify(destructiveOps(mark))}`,
+  );
+  await search("", 3);
+  assert(await page.locator(".item[data-selected='true']").count() === 0, "Clearing search must not bring hidden Beta back into the selection");
+
+  // Shift+Delete: Beta visible, Gamma hidden; the dialog names Beta and only Beta is removed.
+  await item("Beta Clip.txt").click();
+  await item("Gamma Clip.txt").click({ modifiers: [multiSelectModifier] });
+  await search("Beta", 1);
+  mark = ops.length;
+  await item("Beta Clip.txt").focus();
+  await page.keyboard.press("Shift+Delete");
+  const dialog = page.locator("#dialog").filter({ hasText: "Delete permanently?" }).first();
+  await dialog.waitFor();
+  const dialogText = await dialog.textContent();
+  assert(
+    dialogText.includes("1 item (Beta Clip.txt) will be permanently removed") && !dialogText.includes("Gamma"),
+    `Permanent delete dialog must name only visible Beta; text=${dialogText}`,
+  );
+  await page.locator("#dialog button").filter({ hasText: "Delete Permanently" }).first().click();
+  await waitForOp((entry) => entry.op === "delete_permanently" && entry.payload.uri === uri("Beta Clip.txt"), "Shift+Delete must remove visible Beta");
+  await itemCount(0);
+  assert(
+    JSON.stringify(destructiveOps(mark)) === JSON.stringify([`delete_permanently:${uri("Beta Clip.txt")}`]),
+    `Shift+Delete after search must remove only visible Beta; ops=${JSON.stringify(destructiveOps(mark))}`,
+  );
+
+  // Zero results: nothing visible, so Delete does nothing.
+  await search("", 2);
+  await item("Gamma Clip.txt").click();
+  await search("no such clip", 0);
+  assert(await footer() === "0 items", `Zero search results must leave nothing selected; footer=${await footer()}`);
+  mark = ops.length;
+  await page.locator("#content").focus();
+  await page.keyboard.press("Delete");
+  await page.keyboard.press("Shift+Delete");
+  await page.waitForTimeout(150);
+  assert(destructiveOps(mark).length === 0, `Delete with zero visible results must not act; ops=${JSON.stringify(destructiveOps(mark))}`);
+
+  // Item menu: Gamma visible, Delta hidden; menu Delete trashes only Gamma.
+  await search("", 2);
+  await item("Gamma Clip.txt").click();
+  await item("Delta Clip.txt").click({ modifiers: [multiSelectModifier] });
+  await search("Gamma", 1);
+  mark = ops.length;
+  await item("Gamma Clip.txt").click({ button: "right" });
+  await page.locator(".context-menu").waitFor();
+  await clickMenu(page, "Delete");
+  await waitForOp((entry) => entry.op === "trash" && entry.payload.uri === uri("Gamma Clip.txt"), "Menu Delete must trash visible Gamma");
+  await itemCount(0);
+  assert(
+    JSON.stringify(destructiveOps(mark)) === JSON.stringify([`trash:${uri("Gamma Clip.txt")}`]),
+    `Menu Delete after search must trash only visible Gamma; ops=${JSON.stringify(destructiveOps(mark))}`,
+  );
+
+  // A menu or confirmation opened before search stays bound to its item. A redraw that hides
+  // Delta closes it, and an action fired before that redraw does nothing.
+  const surfaceOpen = (selector) => page.evaluate((sel) => !document.querySelector(sel).classList.contains("hidden"), selector);
+  const pasteOffered = async () => {
+    const rows = await openBackgroundMenu(page);
+    await page.keyboard.press("Escape");
+    return rows.includes("Paste");
+  };
+  const openDeltaMenu = async () => {
+    await search("", 1);
+    await item("Delta Clip.txt").click({ button: "right" });
+    await page.locator("#context-menu:not(.hidden)").waitFor();
+  };
+  const hideDeltaThenClick = (buttonSelector) => page.evaluate((selector) => {
+    const input = document.querySelector("#search");
+    input.value = "no such clip";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector(selector).click();
+  }, buttonSelector);
+  assert(!(await pasteOffered()), "Clipboard must start empty for the open-menu checks");
+  mark = ops.length;
+
+  await openDeltaMenu();
+  await page.locator("#search").focus();
+  await page.keyboard.type("no such clip");
+  await itemCount(0);
+  assert(!(await surfaceOpen("#context-menu")), "A redraw that hides Delta must close the menu opened for it");
+  await page.evaluate(() => document.querySelector("#context-menu .menu-item[title='Delete']").click());
+
+  for (const label of ["Delete", "Cut", "Copy"]) {
+    await openDeltaMenu();
+    await hideDeltaThenClick(`#context-menu .menu-item[title='${label}']`);
+    await itemCount(0);
+  }
+
+  await openDeltaMenu();
+  await clickMenu(page, "Delete Permanently");
+  await page.locator("#dialog").filter({ hasText: "Delta Clip.txt will be permanently removed" }).first().waitFor();
+  await page.locator("#search").focus();
+  await page.keyboard.type("no such clip");
+  await itemCount(0);
+  assert(!(await surfaceOpen("#dialog")), "A redraw that hides Delta must close its delete confirmation");
+
+  await openDeltaMenu();
+  await clickMenu(page, "Delete Permanently");
+  await page.locator("#dialog [data-dialog-confirm]").waitFor();
+  await hideDeltaThenClick("#dialog [data-dialog-confirm]");
+  await itemCount(0);
+  await page.waitForTimeout(150);
+  assert(destructiveOps(mark).length === 0, `Actions bound to hidden Delta must not run; ops=${JSON.stringify(destructiveOps(mark))}`);
+  await search("", 1);
+  assert(!(await pasteOffered()), "Cut or Copy bound to hidden Delta must leave the clipboard empty");
+
+  await page.locator("#search-toggle-button").click();
+  await itemCount(1);
+  for (const name of names) {
+    removeObject(uri(name));
+    removeObject(childUri(`${principalRoot}/.Trash`, name));
+  }
+}
+
 async function run() {
   const server = createServer();
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -1882,6 +1998,7 @@ async function run() {
       await page.locator(".crumb-current").filter({ hasText: label }).first().waitFor();
       await assertOnlyActivePlace(page, label);
     }
+    await assertSearchKeepsDeleteTargetsVisible(page);
     await reorderSidebarPlace(page, "Public", "Desktop", "before");
     assert(
       (await sidebarLabels(page)).slice(0, 3).join("|") === "Home|Public|Desktop",
@@ -2200,13 +2317,11 @@ async function run() {
       "Compress to ZIP",
       "Status",
       "Repair",
-      "Share",
       "Unpublish",
       "Copy Content CID",
-      "Copy Published Link",
       "Properties",
     ], "published file menu");
-    excludesAll(publishedRows, ["Publish"], "published file menu");
+    excludesAll(publishedRows, ["Publish", "Share", "Copy Published Link"], "published file menu");
     await clickMenu(page, "Status");
     await page.locator(".dialog-card").filter({ hasText: "Availability" }).first().waitFor();
     await page.locator(".dialog-card details").filter({ hasText: "Technical details" }).first().locator("summary").click();
@@ -2487,54 +2602,8 @@ async function run() {
     await page.waitForFunction(() => document.querySelector("#footer-left")?.textContent?.includes("item"));
     assert(ops.some((entry) => entry.op === "publish" && entry.payload.uri.endsWith("/Guide.md")), "Publish must call publish");
     const guidePublishedRows = await openItemMenu(page, "Guide.md");
-    includesAll(guidePublishedRows, ["Status", "Repair", "Unpublish", "Share", "Copy Content CID", "Copy Published Link"], "published Guide menu");
-    await clickMenu(page, "Share");
-    await page.locator(".dialog-card").filter({ hasText: "Choose who can access this item" }).first().waitFor();
-    await page.locator(".dialog-card button").filter({ hasText: "Share" }).first().click();
-    assert(
-      ops.some((entry) => entry.op === "share" && entry.payload.uri.endsWith("/Guide.md") && entry.payload.policy === "public_link"),
-      "Share must call share with the public_link policy",
-    );
-    await page.locator(".dialog-card").filter({ hasText: "public_link" }).first().waitFor();
-    await page.locator(".dialog-card").filter({ hasText: "Recipients" }).first().waitFor();
-    assert(
-      await page.evaluate(() => window.__clipboardText) === `elastos://${SMOKE_PUBLISHED_CID}`,
-      "Share must copy the published elastos:// link",
-    );
-    await page.locator(".dialog-card button").filter({ hasText: "Copy Link" }).first().click();
-    assert(
-      await page.evaluate(() => window.__clipboardText) === `elastos://${SMOKE_PUBLISHED_CID}`,
-      "Share receipt Copy Link must copy the published elastos:// link",
-    );
-    assert(
-      await page.evaluate(() => window.__clipboardPurposes.at(-1)) ===
-        "resource.uri",
-      "Share receipt must use the resource URI Clipboard purpose",
-    );
-    await page.locator("[data-dialog-close]").click();
-
-    await openItemMenu(page, "Guide.md");
-    await clickMenu(page, "Share");
-    await page.locator(".dialog-card").filter({ hasText: "Choose who can access this item" }).first().waitFor();
-    await page.locator('input[name="sharePolicy"][value="recipient_scoped"]').check();
-    await page.locator('textarea[name="shareRecipients"]').fill("did:key:recipient-one\nperson:recipient-two");
-    await page.locator(".dialog-card button").filter({ hasText: "Share" }).first().click();
-    assert(
-      ops.some((entry) =>
-        entry.op === "share" &&
-        entry.payload.uri.endsWith("/Guide.md") &&
-        entry.payload.policy === "recipient_scoped" &&
-        entry.payload.recipients?.length === 2 &&
-        entry.payload.recipients.includes("did:key:recipient-one") &&
-        entry.payload.recipients.includes("person:recipient-two")),
-      "Recipient-scoped Share must call share with explicit recipients",
-    );
-    await page.locator(".dialog-card").filter({ hasText: "recipient_scoped" }).first().waitFor();
-    await page.locator(".dialog-card").filter({ hasText: "Grants" }).first().waitFor();
-    await page.locator(".dialog-card details").filter({ hasText: "Technical details" }).first().locator("summary").click();
-    await page.locator(".dialog-card").filter({ hasText: "Share Receipt Summary" }).first().waitFor();
-    await page.locator(".dialog-card").filter({ hasText: "not_required_for_plain_published_content" }).first().waitFor();
-    await page.locator("[data-dialog-close]").click();
+    includesAll(guidePublishedRows, ["Status", "Repair", "Unpublish", "Copy Content CID"], "published Guide menu");
+    excludesAll(guidePublishedRows, ["Share", "Copy Published Link"], "published Guide menu");
 
     await openItemMenu(page, "Guide.md");
     await clickMenu(page, "Copy Content CID");
@@ -2547,17 +2616,6 @@ async function run() {
       await page.evaluate(() => window.__clipboardPurposes.at(-1)) ===
         "resource.identifier",
       "Copy Content CID must use the identifier Clipboard purpose",
-    );
-    await openItemMenu(page, "Guide.md");
-    await clickMenu(page, "Copy Published Link");
-    assert(
-      await page.evaluate(() => window.__clipboardText) === `elastos://${SMOKE_PUBLISHED_CID}`,
-      "Copy Published Link must write the elastos:// link to clipboard",
-    );
-    assert(
-      await page.evaluate(() => window.__clipboardPurposes.at(-1)) ===
-        "resource.uri",
-      "Copy Published Link must use the resource URI Clipboard purpose",
     );
     await openItemMenu(page, "Guide.md");
     await clickMenu(page, "Unpublish");

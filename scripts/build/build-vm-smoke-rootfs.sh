@@ -115,8 +115,6 @@ for dev in /dev/console /dev/ttyAMA0 /dev/ttyS0 /dev/hvc0; do
     fi
 done
 
-echo "init: sleeping 30"
-sleep 30
 echo "init: exiting 0"
 exit 0
 EOF

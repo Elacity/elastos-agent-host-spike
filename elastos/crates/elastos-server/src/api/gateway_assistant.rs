@@ -134,7 +134,7 @@ pub(super) fn principal_root_protected_object_inventory(
 fn assistant_workspace_uri(context: &HomeLaunchTokenContext) -> String {
     format!(
         "{}/{ASSISTANT_WORKSPACE_RELATIVE_ROOT}/{ASSISTANT_WORKSPACE_FILE}",
-        crate::auth::principal_localhost_root(&context.principal_id)
+        crate::auth::principal_localhost_root(context.principal_id())
     )
 }
 
@@ -169,7 +169,7 @@ fn load_assistant_workspace(
         }
         Err(err) => return Err(err.into()),
     }
-    let principal_id = &context.principal_id;
+    let principal_id = context.principal_id();
     let localhost_root = crate::auth::principal_localhost_root(principal_id);
     let bytes = crate::auth::read_principal_root_object(
         data_dir,
@@ -213,7 +213,7 @@ fn save_assistant_workspace(
     let bytes = serde_json::to_vec_pretty(&next)?;
     validate_workspace_bytes(&bytes)?;
     let path = assistant_workspace_path(data_dir, context)?;
-    let principal_id = &context.principal_id;
+    let principal_id = context.principal_id();
     let localhost_root = crate::auth::principal_localhost_root(principal_id);
     crate::auth::write_protected_principal_root_object(
         data_dir,
@@ -378,4 +378,33 @@ pub(super) fn validate_legacy_workspace_bytes(bytes: &[u8]) -> anyhow::Result<se
     let workspace = serde_json::from_slice(bytes)?;
     validate_workspace(&workspace)?;
     Ok(serde_json::from_slice(bytes)?)
+}
+
+#[cfg(test)]
+mod s3c_rows {
+    use super::*;
+
+    /// The launch context a stored Agent's Home launch carries, built through
+    /// the test constructor. S3c-1a adds the root there, and only this helper
+    /// changes.
+    fn stored_agent_launch_context(data_dir: &std::path::Path, id: &str) -> HomeLaunchTokenContext {
+        crate::auth::store_test_human_principal(data_dir, id);
+        crate::auth::tests::mint_agent_record(data_dir, id, None);
+        HomeLaunchTokenContext::for_test(id, "session:s3c", None, "grant:s3c")
+    }
+
+    /// A5-S3c-0a, class G: a stored Agent's assistant workspace sits under
+    /// its own UsersAI root. Expected-fail: the launch context still gives
+    /// the id rule's Users root. Flipped by A5-S3c-1b.
+    #[test]
+    #[ignore = "expected-fail until A5-S3c-1b"]
+    fn a_stored_agents_assistant_workspace_is_under_its_usersai_root() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let id = "person:local:s3c-agent-g";
+        let context = stored_agent_launch_context(data_dir.path(), id);
+        let root = crate::auth::principal_stored_localhost_root(Some(data_dir.path()), id).unwrap();
+        assert!(root.starts_with("localhost://UsersAI/"), "{root}");
+        let uri = assistant_workspace_uri(&context);
+        assert!(uri.starts_with(&format!("{root}/")), "{uri}");
+    }
 }

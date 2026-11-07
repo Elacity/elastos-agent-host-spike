@@ -1,0 +1,10 @@
+id: F-A7-above
+file: src/ledger.rs
+test: ledger::model_settle_above_the_reservation_is_refused
+--- old
+        if measured > stored {
+            return Err(SettleRefuse::AboveReservation);
+        }
+--- new
+        let _above = measured > stored;
+--- end

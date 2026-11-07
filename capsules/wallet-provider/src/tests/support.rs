@@ -244,18 +244,18 @@ pub(super) fn sign_bip322_simple_p2wpkh(
     BASE64_STANDARD.encode(serialize(&witness))
 }
 
-pub(super) fn bip322_test_taproot_secret_key() -> bitcoin::secp256k1::SecretKey {
+pub(crate) fn bip322_test_taproot_secret_key() -> bitcoin::secp256k1::SecretKey {
     bitcoin::secp256k1::SecretKey::from_slice(&[8_u8; 32]).expect("deterministic test taproot key")
 }
 
-pub(super) fn bip322_test_taproot_address(secret_key: &bitcoin::secp256k1::SecretKey) -> String {
+pub(crate) fn bip322_test_taproot_address(secret_key: &bitcoin::secp256k1::SecretKey) -> String {
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, secret_key);
     let (xonly, _) = keypair.x_only_public_key();
     bitcoin::Address::p2tr(&secp, xonly, None, bitcoin::KnownHrp::Mainnet).to_string()
 }
 
-pub(super) fn sign_bip322_simple_p2tr(
+pub(crate) fn sign_bip322_simple_p2tr(
     secret_key: &bitcoin::secp256k1::SecretKey,
     address: &str,
     message: &str,

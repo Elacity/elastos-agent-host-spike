@@ -237,7 +237,7 @@ pub(super) async fn browser_app_summary(
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
     };
     let mut engine_adapter =
-        browser_engine_summary(state.provider_registry.as_ref(), &context.principal_id).await;
+        browser_engine_summary(state.provider_registry.as_ref(), context.principal_id()).await;
     engine_adapter["remote_services"] = if omit_remote_services {
         serde_json::json!({"state":"available","offers":[]})
     } else {
@@ -268,7 +268,7 @@ pub(super) async fn browser_app_summary(
     }
     // This flag describes Runtime's request parser, never a guest capability.
     engine_adapter["display_attach_supported"] = serde_json::json!(true);
-    let net = browser_net_summary(state.provider_registry.as_ref(), &context.principal_id).await;
+    let net = browser_net_summary(state.provider_registry.as_ref(), context.principal_id()).await;
     let wallet_accounts = system_wallet_accounts_summary(&state, &authority).await;
     let wallet_status = if wallet_accounts.linked_count > 0 {
         "configured"
@@ -283,12 +283,12 @@ pub(super) async fn browser_app_summary(
         },
         sessions: browser_gateway_session_status(
             &state.data_dir,
-            &context.principal_id,
+            context.principal_id(),
             Some(authority.verified_context().launch_id()),
             browser_instance.as_deref(),
         )
         .await,
-        principal_id: context.principal_id,
+        principal_id: context.principal_id().to_string(),
         engine_adapter,
         net,
         wallet_bridge: serde_json::json!({
@@ -313,13 +313,13 @@ pub(super) async fn browser_app_profile_reset(
         };
     if let Err(error) = gateway_browser_remote::require_profile_placement(
         &state.data_dir,
-        &context.principal_id,
+        context.principal_id(),
         None,
     ) {
         return (StatusCode::CONFLICT, error.to_string()).into_response();
     }
     let (disk_path, _) =
-        match browser_profile_launch_descriptor(&state.data_dir, &context.principal_id) {
+        match browser_profile_launch_descriptor(&state.data_dir, context.principal_id()) {
             Ok(profile) => profile,
             Err(err) => return gateway_provider_error_response("browser", err),
         };
@@ -332,7 +332,7 @@ pub(super) async fn browser_app_profile_reset(
         Ok(guard) => guard,
         Err(err) => return browser_profile_reset_error_response(err),
     };
-    if browser_principal_has_live_sessions(&state.data_dir, &context.principal_id).await {
+    if browser_principal_has_live_sessions(&state.data_dir, context.principal_id()).await {
         return (
             StatusCode::CONFLICT,
             "Browser profile reset requires all Browser pages for this account to be closed",
@@ -437,7 +437,7 @@ pub(super) async fn browser_app_open(
         let intent_hash = browser_open_intent_hash(&input);
         let reservation = match create_browser_open_job(
             &state.data_dir,
-            &context.principal_id,
+            context.principal_id(),
             owner_launch_id,
             browser_instance.as_deref(),
             &intent_hash,
@@ -511,7 +511,7 @@ pub(super) async fn browser_app_open_status(
     let Some(snapshot) = browser_open_job_for_owner(
         &state.data_dir,
         &open_id,
-        &context.principal_id,
+        context.principal_id(),
         owner_launch_id,
     )
     .await
@@ -668,7 +668,7 @@ async fn execute_browser_open(
         resolve_browser_engine_adapter(
             registry.as_ref(),
             &state.data_dir,
-            &context.principal_id,
+            context.principal_id(),
             requested_adapter_id.as_deref(),
             display_mode,
             guarantee_level,
@@ -693,7 +693,7 @@ async fn execute_browser_open(
         }
     };
     let (_, profile) =
-        match browser_profile_launch_descriptor(&state.data_dir, &context.principal_id) {
+        match browser_profile_launch_descriptor(&state.data_dir, context.principal_id()) {
             Ok(profile) => profile,
             Err(err) => return Err(BrowserOpenFailure::provider("browser", err)),
         };
@@ -723,7 +723,7 @@ async fn execute_browser_open(
         ]),
     };
     let launch_reservation =
-        match reserve_browser_launch(&state.data_dir, &context.principal_id, lifecycle).await {
+        match reserve_browser_launch(&state.data_dir, context.principal_id(), lifecycle).await {
             Ok(reservation) => reservation,
             Err((status, message)) => return Err(BrowserOpenFailure::text(status, message)),
         };
@@ -731,8 +731,8 @@ async fn execute_browser_open(
         &state.data_dir,
         BrowserEffectAuditInput {
             event_type: "browser.open.requested",
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id: &open_request_id,
             result: "requested",
             method: display_mode.as_str(),
@@ -749,7 +749,7 @@ async fn execute_browser_open(
     let stream_request = serde_json::json!({
         "op": "stream",
         "target": target,
-        "principal_id": context.principal_id.clone(),
+        "principal_id": context.principal_id().to_string(),
         "reason": reason.clone(),
         "stream_nonce": stream_nonce,
         "remote_exit_id": remote_exit_id,
@@ -804,7 +804,7 @@ async fn execute_browser_open(
     };
     let mut remote_viewer = None;
     let prepared_transport = if let Some(choice) = &remote_choice {
-        gateway_browser_remote::prepare_consumer(state, choice, &launch_reservation, &context.principal_id,
+        gateway_browser_remote::prepare_consumer(state, choice, &launch_reservation, context.principal_id(),
             &profile, &stream_session, &serde_json::json!({"url":url,"viewport":viewport,"display_mode":display_mode,"guarantee_level":guarantee_level,
                 "owner_launch_id":authority.verified_context().launch_id(),"browser_instance":browser_instance})).await
             .map(|(transport, viewer)| {remote_viewer = Some(viewer); Some(transport)})
@@ -816,7 +816,7 @@ async fn execute_browser_open(
                 generation: launch_reservation.generation(),
                 page_id: launch_reservation.page_id(),
                 vm_id: launch_reservation.vm_id(),
-                principal_id: &context.principal_id,
+                principal_id: context.principal_id(),
                 egress_stream_id: &engine_stream_id,
                 egress_target: &target,
                 egress_runtime_socket_path: stream_session
@@ -892,7 +892,7 @@ async fn execute_browser_open(
         "url": url.clone(),
         "stream_session": engine_stream_session,
         "lifecycle_generation": launch_reservation.generation(),
-        "principal_id": context.principal_id.clone(),
+        "principal_id": context.principal_id().to_string(),
         "reason": reason.clone(),
         "profile": profile,
         "wallet": wallet,
@@ -954,7 +954,7 @@ async fn execute_browser_open(
             let outcome = reconcile_dispatched_browser_launch_failure(
                 state,
                 &launch_reservation,
-                &context.principal_id,
+                context.principal_id(),
                 authority.verified_context().launch_id(),
                 &engine_stream_id,
                 stream_cleanup.clone(),
@@ -995,7 +995,7 @@ async fn execute_browser_open(
                     reconcile_dispatched_browser_launch_failure(
                         state,
                         &launch_reservation,
-                        &context.principal_id,
+                        context.principal_id(),
                         authority.verified_context().launch_id(),
                         &engine_stream_id,
                         stream_cleanup.clone(),
@@ -1020,7 +1020,7 @@ async fn execute_browser_open(
                     reconcile_dispatched_browser_launch_failure(
                         state,
                         &launch_reservation,
-                        &context.principal_id,
+                        context.principal_id(),
                         authority.verified_context().launch_id(),
                         &engine_stream_id,
                         stream_cleanup.clone(),
@@ -1046,7 +1046,7 @@ async fn execute_browser_open(
                 reconcile_dispatched_browser_launch_failure(
                     state,
                     &launch_reservation,
-                    &context.principal_id,
+                    context.principal_id(),
                     authority.verified_context().launch_id(),
                     &engine_stream_id,
                     stream_cleanup.clone(),
@@ -1065,7 +1065,7 @@ async fn execute_browser_open(
         let outcome = reconcile_dispatched_browser_launch_failure(
             state,
             &launch_reservation,
-            &context.principal_id,
+            context.principal_id(),
             authority.verified_context().launch_id(),
             &engine_stream_id,
             stream_cleanup.clone(),
@@ -1084,7 +1084,7 @@ async fn execute_browser_open(
             let outcome = reconcile_dispatched_browser_launch_failure(
                 state,
                 &launch_reservation,
-                &context.principal_id,
+                context.principal_id(),
                 authority.verified_context().launch_id(),
                 &engine_stream_id,
                 stream_cleanup.clone(),
@@ -1107,7 +1107,7 @@ async fn execute_browser_open(
             let outcome = reconcile_dispatched_browser_launch_failure(
                 state,
                 &launch_reservation,
-                &context.principal_id,
+                context.principal_id(),
                 authority.verified_context().launch_id(),
                 &engine_stream_id,
                 stream_cleanup.clone(),
@@ -1122,7 +1122,7 @@ async fn execute_browser_open(
         let outcome = reconcile_dispatched_browser_launch_failure(
             state,
             &launch_reservation,
-            &context.principal_id,
+            context.principal_id(),
             authority.verified_context().launch_id(),
             &engine_stream_id,
             stream_cleanup.clone(),
@@ -1139,7 +1139,7 @@ async fn execute_browser_open(
         let outcome = reconcile_dispatched_browser_launch_failure(
             state,
             &launch_reservation,
-            &context.principal_id,
+            context.principal_id(),
             authority.verified_context().launch_id(),
             &engine_stream_id,
             stream_cleanup.clone(),
@@ -1156,7 +1156,7 @@ async fn execute_browser_open(
         let outcome = reconcile_dispatched_browser_launch_failure(
             state,
             &launch_reservation,
-            &context.principal_id,
+            context.principal_id(),
             authority.verified_context().launch_id(),
             &engine_stream_id,
             stream_cleanup.clone(),
@@ -1173,7 +1173,7 @@ async fn execute_browser_open(
         let outcome = reconcile_dispatched_browser_launch_failure(
             state,
             &launch_reservation,
-            &context.principal_id,
+            context.principal_id(),
             authority.verified_context().launch_id(),
             &engine_stream_id,
             stream_cleanup.clone(),
@@ -1193,7 +1193,7 @@ async fn execute_browser_open(
         let outcome = reconcile_dispatched_browser_launch_failure(
             state,
             &launch_reservation,
-            &context.principal_id,
+            context.principal_id(),
             authority.verified_context().launch_id(),
             &engine_stream_id,
             stream_cleanup.clone(),
@@ -1218,7 +1218,7 @@ async fn execute_browser_open(
         let outcome = reconcile_dispatched_browser_launch_failure(
             state,
             &launch_reservation,
-            &context.principal_id,
+            context.principal_id(),
             authority.verified_context().launch_id(),
             &engine_stream_id,
             stream_cleanup.clone(),
@@ -1242,7 +1242,7 @@ async fn execute_browser_open(
                 let outcome = reconcile_dispatched_browser_launch_failure(
                     state,
                     &launch_reservation,
-                    &context.principal_id,
+                    context.principal_id(),
                     authority.verified_context().launch_id(),
                     &engine_stream_id,
                     stream_cleanup.clone(),
@@ -1277,7 +1277,7 @@ async fn execute_browser_open(
             let outcome = reconcile_dispatched_browser_launch_failure(
                 state,
                 &launch_reservation,
-                &context.principal_id,
+                context.principal_id(),
                 authority.verified_context().launch_id(),
                 &engine_stream_id,
                 stream_cleanup.clone(),
@@ -1308,7 +1308,7 @@ async fn execute_browser_open(
                 let outcome = reconcile_dispatched_browser_launch_failure(
                     state,
                     &launch_reservation,
-                    &context.principal_id,
+                    context.principal_id(),
                     authority.verified_context().launch_id(),
                     &engine_stream_id,
                     stream_cleanup.clone(),
@@ -1336,7 +1336,7 @@ async fn execute_browser_open(
                     let outcome = reconcile_dispatched_browser_launch_failure(
                         state,
                         &launch_reservation,
-                        &context.principal_id,
+                        context.principal_id(),
                         authority.verified_context().launch_id(),
                         &engine_stream_id,
                         stream_cleanup.clone(),
@@ -1377,7 +1377,7 @@ async fn execute_browser_open(
                 state,
                 &launch_reservation,
                 page_id,
-                &context.principal_id,
+                context.principal_id(),
                 authority.verified_context().launch_id(),
                 false,
             )
@@ -1392,8 +1392,8 @@ async fn execute_browser_open(
         &state.data_dir,
         BrowserEffectAuditInput {
             event_type: "browser.open.completed",
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id: &open_request_id,
             result: "allowed",
             method: display_mode.as_str(),
@@ -1407,7 +1407,7 @@ async fn execute_browser_open(
             state,
             &launch_reservation,
             page_id,
-            &context.principal_id,
+            context.principal_id(),
             authority.verified_context().launch_id(),
             true,
         )
@@ -3479,7 +3479,7 @@ pub(super) async fn browser_app_page_status(
     if !is_safe_runtime_id(&page_id) {
         return (StatusCode::BAD_REQUEST, "invalid browser page id").into_response();
     }
-    let principal_id = context.principal_id;
+    let principal_id = context.principal_id().to_string();
     if !touch_browser_page(&state.data_dir, &page_id, &principal_id, &owner_launch_id).await {
         forget_browser_page_status(&browser_page_status_cache_key(
             &state.data_dir,
@@ -3550,7 +3550,7 @@ pub(super) async fn browser_app_page_diagnostics(
     if !is_safe_runtime_id(&page_id) {
         return (StatusCode::BAD_REQUEST, "invalid browser page id").into_response();
     }
-    let principal_id = context.principal_id;
+    let principal_id = context.principal_id().to_string();
     if !touch_browser_page(&state.data_dir, &page_id, &principal_id, &owner_launch_id).await {
         return (StatusCode::NOT_FOUND, "browser session is not active").into_response();
     }
@@ -3630,7 +3630,7 @@ async fn browser_page_inspection(
     if !is_safe_runtime_id(&page_id) {
         return browser_inspection_error(BrowserInspectionError::Invalid);
     }
-    let principal = authority.home_launch_context().principal_id;
+    let principal = authority.home_launch_context().principal_id().to_string();
     let launch = authority.verified_context().launch_id();
     let Some(owner) =
         capture_browser_inspection_owner(&state.data_dir, &page_id, &principal, launch).await
@@ -3744,7 +3744,7 @@ pub(super) async fn browser_app_page_heartbeat(
     if !is_safe_runtime_id(&page_id) {
         return (StatusCode::BAD_REQUEST, "invalid browser page id").into_response();
     }
-    let principal_id = context.principal_id;
+    let principal_id = context.principal_id().to_string();
     if !touch_browser_page(&state.data_dir, &page_id, &principal_id, &owner_launch_id).await {
         return (StatusCode::NOT_FOUND, "browser session is not active").into_response();
     }
@@ -3794,7 +3794,7 @@ pub(super) async fn browser_app_page_input(
     if !is_safe_runtime_id(&page_id) {
         return (StatusCode::BAD_REQUEST, "invalid browser page id").into_response();
     }
-    let principal_id = context.principal_id;
+    let principal_id = context.principal_id().to_string();
     if !touch_browser_page(&state.data_dir, &page_id, &principal_id, &owner_launch_id).await {
         return (StatusCode::NOT_FOUND, "browser session is not active").into_response();
     }
@@ -3912,7 +3912,7 @@ pub(super) async fn browser_app_page_close(
     if !is_safe_runtime_id(&page_id) {
         return (StatusCode::BAD_REQUEST, "invalid browser page id").into_response();
     }
-    let principal_id = context.principal_id;
+    let principal_id = context.principal_id().to_string();
     let (cleanup_id, requested_browser_instance) = match close_request {
         Some(Json(request)) => {
             if request.schema != "elastos.browser.close-request/v2"
@@ -4369,7 +4369,7 @@ pub(super) async fn browser_app_page_webrtc(
     if !is_safe_runtime_id(&page_id) {
         return (StatusCode::BAD_REQUEST, "invalid browser page id").into_response();
     }
-    let principal_id = context.principal_id;
+    let principal_id = context.principal_id().to_string();
     let signal_type = input.signal_type.clone();
     let channel = match input.channel.as_deref() {
         Some("audio") => "audio",

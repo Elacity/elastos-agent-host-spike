@@ -216,8 +216,10 @@ pub(crate) use gateway_wallet::ensure_wallet_connector_configured;
 use gateway_wallet::*;
 pub(super) use gateway_wallet_adapter::RuntimeWalletAdapter;
 
-/// Maximum size for a single file fetched through the gateway (100 MB).
+/// Largest single file the gateway serves or Library accepts (100 MiB). Gateway
+/// reads ask the local store for at most this, below the transfer ceiling.
 const MAX_GATEWAY_FILE_SIZE: usize = 100 * 1024 * 1024;
+const _: () = assert!(MAX_GATEWAY_FILE_SIZE <= elastos_common::MAX_WHOLE_CONTENT_BYTES);
 const LIBRARY_UPLOAD_CHUNK_MAX_BYTES: usize = 768 * 1024;
 const BROWSER_FILE_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
 const BROWSER_INPUT_BODY_MAX_BYTES: usize = (BROWSER_FILE_UPLOAD_BYTES.div_ceil(3) * 4) + 64 * 1024;
@@ -400,8 +402,8 @@ fn home_launch_token_context_from_parts(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
+    let auth_data_dir = gateway_home_token::home_launch_auth_data_dir(data_dir);
     if let Some(proof_binding_id) = proof_binding_id.as_deref() {
-        let auth_data_dir = gateway_home_token::home_launch_auth_data_dir(data_dir);
         let grant = crate::auth::load_active_session_grant(&auth_data_dir, session_id, now_ts())?;
         if grant.principal_id != principal_id
             || grant.proof_binding_id != proof_binding_id
@@ -410,12 +412,14 @@ fn home_launch_token_context_from_parts(
             anyhow::bail!("home launch token authority context mismatch");
         }
     }
-    Ok(HomeLaunchTokenContext {
-        principal_id: principal_id.to_string(),
-        session_id: session_id.to_string(),
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, &auth_data_dir, principal_id)?;
+    Ok(HomeLaunchTokenContext::resolved(
+        root,
+        principal_id.to_string(),
+        session_id.to_string(),
         proof_binding_id,
-        grant_id: grant_id.to_string(),
-    })
+        grant_id.to_string(),
+    ))
 }
 const BROWSER_CAPSULE_ID: &str = "browser";
 const SERVICES_CAPSULE_ID: &str = "services";
@@ -1484,7 +1488,8 @@ fn gateway_provider_error_tuple(scheme: &str, err: anyhow::Error) -> (StatusCode
         StatusCode::SERVICE_UNAVAILABLE
     } else if text.contains("not found") {
         StatusCode::NOT_FOUND
-    } else if text.contains("invalid")
+    } else if err.is::<crate::library::LibraryArchiveTooLarge>()
+        || text.contains("invalid")
         || text.contains("empty")
         || text.contains("must not")
         || text.contains("missing")

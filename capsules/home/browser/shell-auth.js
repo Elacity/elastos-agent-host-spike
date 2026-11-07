@@ -619,7 +619,7 @@ function renderEnrollmentChoice() {
   if (unlockName && pendingRegistration) unlockName.disabled = true;
   if (enrolling && unlockCopy) unlockCopy.textContent = purpose === "recover"
     ? "Choose your Recovery Kit first. Home will then use a passkey to restore your signed Profile and its name."
-    : "Create a passkey and Profile with the name people will see.";
+    : "Create a passkey and Profile with the name people will see. The passkey can be saved on this computer, a phone or a security key.";
   const recoveringOwner = unlockMode === "recover_owner";
   if (recoveryKitPanel) recoveryKitPanel.hidden = !(enrolling && purpose === "recover" || recoveringOwner);
   if (recoveringOwner && unlockPrimary) unlockPrimary.textContent = recoveryKit ? "Continue with passkey" : "Choose Recovery Kit";

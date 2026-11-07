@@ -87,6 +87,13 @@ pub struct CapsuleManifest {
     #[serde(default)]
     pub authority: Option<ProviderAuthority>,
 
+    /// The signer's agent declaration (A5). Admission reads the agent kind only
+    /// from here, under the manifest signature, never from a launch request.
+    /// Skipped when absent so every existing signing message is unchanged; an
+    /// older Runtime refuses the field (`deny_unknown_fields`), failing closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentDeclaration>,
+
     /// Capabilities this capsule needs from other capsules (URI list)
     #[serde(default)]
     pub capabilities: Vec<String>,
@@ -442,6 +449,10 @@ impl CapsuleManifest {
 
         if self.version.trim().is_empty() {
             return Err("manifest version must not be empty".to_string());
+        }
+
+        if self.agent.is_some() && self.role != CapsuleRole::App {
+            return Err("an agent declaration requires role \"app\"".to_string());
         }
 
         if self.window_policy.is_some()
@@ -950,6 +961,20 @@ fn validate_json_schema(kind: &str, schema: Option<&Value>) -> Result<(), String
     Err(format!("{} schema must be a JSON object or boolean", kind))
 }
 
+/// What a capsule's signer declares about it as an agent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentDeclaration {
+    pub kind: AgentKind,
+}
+
+/// Declared agent kinds. An unknown kind fails to parse.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentKind {
+    Agent,
+}
+
 /// Provider-only authority metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -957,7 +982,29 @@ pub struct ProviderAuthority {
     pub reason: String,
     pub capabilities: Vec<ProviderCapabilitySchema>,
     pub audit_events: Vec<String>,
+    /// Approved confinement rights (I-B3-5), in the declared-rights contract
+    /// shape: an id, then the confinement rules that id grants.
+    ///
+    /// Absent means no rights, and a Runtime refuses a confined start that has
+    /// none. This is a schema change: `deny_unknown_fields` makes an older
+    /// Runtime refuse a manifest that carries this field, which fails closed.
+    #[serde(default)]
+    pub rights: Vec<ProviderRight>,
 }
+
+/// One approved confinement right in provider authority metadata.
+///
+/// The id comes from the Runtime's approved right list; the manifest never
+/// widens that list (`ProviderAuthority::validate` refuses an unknown id).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderRight {
+    pub id: String,
+    pub rules: Vec<String>,
+}
+
+/// The right ids the Runtime's confinement generator approves.
+const APPROVED_RIGHT_IDS: [&str; 2] = ["storage", "bound-executable"];
 
 impl ProviderAuthority {
     fn validate(&self) -> Result<(), String> {
@@ -978,6 +1025,42 @@ impl ProviderAuthority {
         for event in &self.audit_events {
             if event.trim().is_empty() {
                 return Err("provider authority audit event must not be empty".to_string());
+            }
+        }
+        let mut seen_ids: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for right in &self.rights {
+            if !APPROVED_RIGHT_IDS.contains(&right.id.as_str()) {
+                return Err(format!(
+                    "provider authority right \"{}\" is not an approved right id",
+                    right.id
+                ));
+            }
+            if !seen_ids.insert(right.id.as_str()) {
+                return Err(format!(
+                    "provider authority right \"{}\" is declared more than once",
+                    right.id
+                ));
+            }
+            if right.rules.is_empty() {
+                return Err(format!(
+                    "provider authority right \"{}\" must declare its rules",
+                    right.id
+                ));
+            }
+            if right.rules.iter().any(|rule| rule.trim().is_empty()) {
+                return Err(format!(
+                    "provider authority right \"{}\" must not declare an empty rule",
+                    right.id
+                ));
+            }
+            let mut rules: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+            for rule in &right.rules {
+                if !rules.insert(rule.trim()) {
+                    return Err(format!(
+                        "provider authority right \"{}\" declares the same rule more than once",
+                        right.id
+                    ));
+                }
             }
         }
         Ok(())
@@ -1259,6 +1342,51 @@ fn default_boot_args() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn agent_app_fixture() -> Value {
+        serde_json::json!({
+            "schema": "elastos.capsule/v1", "version": "0.1.0", "name": "agent-fixture",
+            "role": "app", "type": "wasm", "entrypoint": "main.wasm", "agent": {"kind": "agent"}
+        })
+    }
+
+    /// A5-S2: the declaration parses as a known kind on an app; an unknown kind,
+    /// an extra field or another role is refused.
+    #[test]
+    fn agent_declaration_parses_only_as_a_known_kind_on_an_app() {
+        let manifest: CapsuleManifest = serde_json::from_value(agent_app_fixture()).unwrap();
+        manifest.validate().unwrap();
+        let declared = Some(AgentDeclaration {
+            kind: AgentKind::Agent,
+        });
+        assert_eq!(manifest.agent, declared);
+        let mut unknown_kind = agent_app_fixture();
+        unknown_kind["agent"]["kind"] = serde_json::json!("human");
+        assert!(serde_json::from_value::<CapsuleManifest>(unknown_kind).is_err());
+        let mut extra = agent_app_fixture();
+        extra["agent"]["principal"] = serde_json::json!("localhost://UsersAI/other");
+        assert!(serde_json::from_value::<CapsuleManifest>(extra).is_err());
+        let mut viewer = agent_app_fixture();
+        viewer["role"] = serde_json::json!("viewer");
+        let manifest: CapsuleManifest = serde_json::from_value(viewer).unwrap();
+        assert!(manifest
+            .validate()
+            .unwrap_err()
+            .contains("agent declaration"));
+    }
+
+    /// An undeclared manifest serializes with no `agent` key, so existing
+    /// signatures still verify.
+    #[test]
+    fn undeclared_manifest_serializes_without_an_agent_key() {
+        let mut value = agent_app_fixture();
+        value.as_object_mut().unwrap().remove("agent");
+        let manifest: CapsuleManifest = serde_json::from_value(value).unwrap();
+        assert!(serde_json::to_value(&manifest)
+            .unwrap()
+            .get("agent")
+            .is_none());
+    }
 
     // ── Core parse/validation tests (strict v1 schema) ──────────────
 
@@ -1647,6 +1775,174 @@ mod tests {
             }
         }
         assert!(checked >= 40, "first-party manifest coverage was lost");
+    }
+
+    #[test]
+    fn committed_provider_manifests_hold_their_declared_rights() {
+        for (name, manifest_json, fixture_json) in [
+            (
+                "did-provider",
+                include_str!("../../../../capsules/did-provider/capsule.json"),
+                include_str!(
+                    "../../../../capsules/did-provider/tests/fixtures/confine/declared-rights.json"
+                ),
+            ),
+            (
+                "wallet-provider",
+                include_str!("../../../../capsules/wallet-provider/capsule.json"),
+                include_str!(
+                    "../../../../capsules/wallet-provider/tests/fixtures/confine/declared-rights.json"
+                ),
+            ),
+            (
+                "model-provider",
+                include_str!("../../../../capsules/model-provider/capsule.json"),
+                include_str!(
+                    "../../../../capsules/model-provider/tests/fixtures/confine/declared-rights.json"
+                ),
+            ),
+        ] {
+            let manifest: CapsuleManifest = serde_json::from_str(manifest_json)
+                .unwrap_or_else(|err| panic!("{name} capsule.json: {err}"));
+            manifest
+                .validate()
+                .unwrap_or_else(|err| panic!("{name} capsule.json: {err}"));
+            let authority = manifest
+                .authority
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} capsule.json: provider authority is missing"));
+            let fixture: Value = serde_json::from_str(fixture_json)
+                .unwrap_or_else(|err| panic!("{name} declared-rights.json: {err}"));
+            let fixture_rights: Vec<ProviderRight> =
+                serde_json::from_value(fixture["rights"].clone())
+                    .unwrap_or_else(|err| panic!("{name} declared-rights.json: {err}"));
+            assert_eq!(authority.rights, fixture_rights, "{name}");
+        }
+    }
+
+    #[test]
+    fn provider_authority_without_rights_parses_to_no_rights() {
+        let json = r#"{
+            "schema": "elastos.capsule/v1",
+            "name": "rights-less-provider",
+            "version": "0.1.0",
+            "role": "provider",
+            "type": "microvm",
+            "entrypoint": "rights-less-provider",
+            "provides": "elastos://rights-less/*",
+            "authority": {
+                "reason": "A provider that declares no confinement rights.",
+                "capabilities": [{
+                    "resource": "elastos://rights-less/*",
+                    "actions": ["read"],
+                    "operations": ["status"]
+                }],
+                "audit_events": ["rights-less.status"]
+            },
+            "capabilities": []
+        }"#;
+        let manifest: CapsuleManifest = serde_json::from_str(json).unwrap();
+        manifest.validate().unwrap();
+        let rights = &manifest.authority.as_ref().unwrap().rights;
+        assert!(rights.is_empty());
+        let with_empty: Value = serde_json::from_str(
+            &json.replace(r#""audit_events""#, r#""rights": [], "audit_events""#),
+        )
+        .unwrap();
+        let manifest: CapsuleManifest = serde_json::from_value(with_empty).unwrap();
+        manifest.validate().unwrap();
+        assert!(manifest.authority.as_ref().unwrap().rights.is_empty());
+    }
+
+    #[test]
+    fn provider_authority_rights_reject_unknown_fields() {
+        let mut value: Value = serde_json::from_str(include_str!(
+            "../../../../capsules/did-provider/capsule.json"
+        ))
+        .unwrap();
+        let authority = value["authority"].as_object_mut().unwrap();
+        authority.insert("rights_extra".to_string(), serde_json::json!([]));
+        assert!(serde_json::from_value::<CapsuleManifest>(value).is_err());
+
+        let mut value: Value = serde_json::from_str(include_str!(
+            "../../../../capsules/did-provider/capsule.json"
+        ))
+        .unwrap();
+        value["authority"]["rights"][0]["scope"] = serde_json::json!("home");
+        assert!(serde_json::from_value::<CapsuleManifest>(value).is_err());
+
+        let mut value: Value = serde_json::from_str(include_str!(
+            "../../../../capsules/did-provider/capsule.json"
+        ))
+        .unwrap();
+        value["authority"]["rights"][1]["id"] = serde_json::json!("network");
+        let err = serde_json::from_value::<CapsuleManifest>(value)
+            .unwrap()
+            .validate()
+            .unwrap_err();
+        assert!(
+            err.contains("\"network\" is not an approved right id"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn provider_authority_rights_reject_empty_rules() {
+        let mut value: Value = serde_json::from_str(include_str!(
+            "../../../../capsules/did-provider/capsule.json"
+        ))
+        .unwrap();
+        value["authority"]["rights"][0]["rules"] = serde_json::json!([]);
+        let manifest: CapsuleManifest = serde_json::from_value(value).unwrap();
+        let err = manifest.validate().unwrap_err();
+        assert!(err.contains("\"storage\" must declare its rules"), "{err}");
+
+        let mut value: Value = serde_json::from_str(include_str!(
+            "../../../../capsules/did-provider/capsule.json"
+        ))
+        .unwrap();
+        value["authority"]["rights"][0]["rules"] = serde_json::json!(["   "]);
+        let manifest: CapsuleManifest = serde_json::from_value(value).unwrap();
+        let err = manifest.validate().unwrap_err();
+        assert!(
+            err.contains("\"storage\" must not declare an empty rule"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn provider_authority_rights_reject_duplicates() {
+        let unmodified: CapsuleManifest = serde_json::from_str(include_str!(
+            "../../../../capsules/did-provider/capsule.json"
+        ))
+        .unwrap();
+        unmodified.validate().unwrap();
+
+        let mut value = serde_json::to_value(&unmodified).unwrap();
+        let rights = value["authority"]["rights"].as_array_mut().unwrap();
+        rights.push(rights[0].clone());
+        assert_eq!(rights[0], rights[2], "duplicate copy must be identical");
+        assert_eq!(rights[1]["id"], serde_json::json!("bound-executable"));
+        let manifest: CapsuleManifest = serde_json::from_value(value).unwrap();
+        let err = manifest.validate().unwrap_err();
+        assert!(err.contains("declared more than once"), "{err}");
+        assert!(err.contains("\"storage\""), "{err}");
+
+        let mut value = serde_json::to_value(&unmodified).unwrap();
+        let rules = value["authority"]["rights"][0]["rules"]
+            .as_array_mut()
+            .unwrap();
+        assert_eq!(rules.len(), 2);
+        let first = rules[0].as_str().unwrap().to_string();
+        rules.push(serde_json::json!(format!("  {}  ", first)));
+        assert!(rules[0].as_str().unwrap().trim() == rules[2].as_str().unwrap().trim());
+        let manifest: CapsuleManifest = serde_json::from_value(value).unwrap();
+        let err = manifest.validate().unwrap_err();
+        assert!(err.contains("same rule more than once"), "{err}");
+        assert!(err.contains("\"storage\""), "{err}");
+        assert!(!err.contains("\"bound-executable\""), "{err}");
+
+        unmodified.validate().unwrap();
     }
 
     #[test]

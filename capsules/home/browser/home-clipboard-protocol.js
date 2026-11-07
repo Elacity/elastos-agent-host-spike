@@ -89,15 +89,12 @@ const HOME_CLIPBOARD_TARGET_PURPOSE_POLICY = Object.freeze({
       kind: "resource-uri",
     }),
   }),
-  documents: Object.freeze({
-    "resource.uri": Object.freeze({
-      operations: Object.freeze(["write"]),
-      maxUtf8Bytes: 16_384,
-      kind: "resource-uri",
-    }),
-  }),
   assistant: Object.freeze({
     "transcript.markdown": Object.freeze({
+      operations: Object.freeze(["write"]),
+      maxUtf8Bytes: MAX_HOME_CLIPBOARD_TEXT_UTF8_BYTES,
+    }),
+    "message.text": Object.freeze({
       operations: Object.freeze(["write"]),
       maxUtf8Bytes: MAX_HOME_CLIPBOARD_TEXT_UTF8_BYTES,
     }),

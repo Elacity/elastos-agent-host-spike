@@ -1,0 +1,12 @@
+[package]
+name = "two-capsule-run"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# This crate is one workspace of its own; the repository root workspace stays
+# unchanged. It reads the tree and compares it to DISCOVERY.md.
+[workspace]
+
+[lib]
+path = "src/lib.rs"

@@ -1,0 +1,16 @@
+id: F-B2-imply
+file: src/ops.rs
+test: ops::model_child_journal_does_not_permit_append_or_overwrite
+--- old
+            Operation::Append if !grant.rights.append => Err(OperateRefuse::AppendNotGranted),
+            Operation::Overwrite if !grant.rights.overwrite => {
+                Err(OperateRefuse::OverwriteNotGranted)
+            }
+--- new
+            Operation::Append if !grant.rights.append && !grant.rights.child_journal => {
+                Err(OperateRefuse::AppendNotGranted)
+            }
+            Operation::Overwrite if !grant.rights.overwrite && !grant.rights.child_journal => {
+                Err(OperateRefuse::OverwriteNotGranted)
+            }
+--- end

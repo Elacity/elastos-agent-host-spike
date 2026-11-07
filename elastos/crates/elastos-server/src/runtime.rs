@@ -37,6 +37,18 @@ enum UnsignedCapsules {
     Refused,
 }
 
+/// The signer that admitted a capsule: the trusted key that verified it, the
+/// installed signed release, or dev_mode's unsigned admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Signer {
+    /// A trusted capsule-signing key, named by its `did:key`.
+    Key { did: String },
+    /// Admitted as a capsule of the installed signed release.
+    InstalledRelease,
+    /// Admitted unsigned because `dev_mode = true`.
+    UnsignedDev,
+}
+
 /// The main ElastOS runtime
 pub struct Runtime {
     // Keep the storage provider alive for runtime/lifecycle ownership even
@@ -200,7 +212,7 @@ impl Runtime {
         for did in installed.iter().flat_map(|source| &source.publisher_dids) {
             let key = crate::crypto::decode_did_key(did)
                 .map_err(|e| ElastosError::InvalidManifest(e.to_string()))?;
-            verifier.add_trusted_key(key);
+            verifier.add_trusted_key(key)?;
         }
         let trusted_key_count = verifier.trusted_key_count();
         let unsigned = match (installed, dev_mode) {
@@ -279,7 +291,7 @@ impl Runtime {
         self.check_provider_dependencies(&manifest).await?;
 
         // Verify signature if verifier is configured
-        self.verify_capsule_signature(&manifest, path).await?;
+        let _signer = self.verify_capsule_signature(&manifest, path).await?;
         crate::component::validate_component_capsule(path, &manifest).await?;
 
         // Find a compute provider that supports this capsule type
@@ -352,7 +364,7 @@ impl Runtime {
         &self,
         manifest: &CapsuleManifest,
         path: &Path,
-    ) -> Result<()> {
+    ) -> Result<Signer> {
         if manifest.signature.is_none() {
             return match &*self.unsigned_capsules.read().await {
                 UnsignedCapsules::Allowed => {
@@ -360,7 +372,16 @@ impl Runtime {
                         "Unsigned capsule '{}' allowed because dev_mode=true",
                         manifest.name
                     );
-                    Ok(())
+                    Ok(Signer::UnsignedDev)
+                }
+                // An agent is named by the key that signed it. The installed
+                // release has no signer DID yet (rong-ruling-a5-measure-1945 Q3,
+                // gated), so an agent declared there is refused, failing closed.
+                UnsignedCapsules::InstalledRelease(_) if manifest.agent.is_some() => {
+                    Err(ElastosError::InvalidManifest(format!(
+                        "Capsule '{}' declares an agent but no trusted key signed it",
+                        manifest.name
+                    )))
                 }
                 UnsignedCapsules::InstalledRelease(data_dir) => {
                     crate::setup::verify_installed_release_capsule(data_dir, &manifest.name, path)
@@ -370,6 +391,7 @@ impl Runtime {
                                 manifest.name
                             ))
                         })
+                        .map(|()| Signer::InstalledRelease)
                 }
                 UnsignedCapsules::Refused => Err(ElastosError::InvalidManifest(format!(
                     "Capsule '{}' is unsigned; only a source or development Home with dev_mode = true runs unsigned capsules",
@@ -396,15 +418,17 @@ impl Runtime {
         })?;
         let content_hash = hash_content(&content);
 
-        // Verify signature
-        if !verifier.verify_capsule(manifest, &content_hash)? {
+        // Verify signature; the matched trusted key names the signer.
+        let Some(key) = verifier.verify_capsule(manifest, &content_hash)? else {
             return Err(ElastosError::InvalidManifest(
                 "Capsule signature verification failed".into(),
             ));
-        }
+        };
+        let did = crate::crypto::encode_did_key(&key)
+            .map_err(|e| ElastosError::InvalidManifest(e.to_string()))?;
 
-        tracing::info!("Capsule signature verified successfully");
-        Ok(())
+        tracing::info!("Capsule signature verified successfully by {}", did);
+        Ok(Signer::Key { did })
     }
 
     /// Stop a running capsule
@@ -680,6 +704,7 @@ mod tests {
             viewer: None,
             window_policy: None,
             model_content: None,
+            agent: None,
             signature: None,
         }
     }
@@ -762,10 +787,14 @@ mod tests {
             .configure_capsule_admission(&home.data, &[], true)
             .await
             .unwrap();
-        runtime
-            .verify_capsule_signature(&manifest, &release_dir)
-            .await
-            .unwrap();
+        // The installed signed release is named as such, not as a key or dev.
+        assert_eq!(
+            runtime
+                .verify_capsule_signature(&manifest, &release_dir)
+                .await
+                .unwrap(),
+            Signer::InstalledRelease
+        );
         let error = runtime
             .verify_capsule_signature(&manifest, &local_dir)
             .await
@@ -776,6 +805,20 @@ mod tests {
                 .contains("not from the installed signed release"),
             "{error}"
         );
+        // A5-S2b: an agent declared on the installed release is refused.
+        let mut declared = manifest.clone();
+        declared.agent = Some(elastos_common::AgentDeclaration {
+            kind: elastos_common::AgentKind::Agent,
+        });
+        let error = runtime
+            .verify_capsule_signature(&declared, &release_dir)
+            .await
+            .unwrap_err();
+        let expected = format!(
+            "Capsule '{}' declares an agent but no trusted key signed it",
+            declared.name
+        );
+        assert!(error.to_string().contains(&expected), "{error}");
 
         let signed_by = |key: u8| {
             let mut signed = manifest.clone();
@@ -804,6 +847,136 @@ mod tests {
             .verify_capsule_signature(&manifest, &release_dir)
             .await
             .is_err());
+    }
+
+    /// A signed capsule names its signer by the matched key's DID; dev_mode's
+    /// unsigned admission is named as such.
+    #[tokio::test]
+    async fn verify_capsule_signature_names_the_matched_signer() {
+        let (runtime, temp_dir) = test_runtime().await;
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[71; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp_dir.path(),
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let dir = temp_dir.path().join("signed-capsule");
+        std::fs::create_dir_all(&dir).unwrap();
+        let entrypoint = b"entrypoint bytes";
+        std::fs::write(dir.join("main.wasm"), entrypoint).unwrap();
+        let mut manifest = unsigned_manifest();
+        manifest.entrypoint = "main.wasm".to_string();
+        manifest.agent = Some(elastos_common::AgentDeclaration {
+            kind: elastos_common::AgentKind::Agent,
+        });
+        elastos_runtime::signature::sign_capsule(&key, &mut manifest, &hash_content(entrypoint))
+            .unwrap();
+
+        let expected_did = elastos_identity::encode_did_key(&key.verifying_key()).unwrap();
+        let signer = runtime
+            .verify_capsule_signature(&manifest, &dir)
+            .await
+            .unwrap();
+        assert_eq!(signer, Signer::Key { did: expected_did });
+
+        // The unsigned capsule is named unsigned by dev_mode's admission, and
+        // dev_mode admits a declared agent unsigned.
+        runtime
+            .configure_capsule_admission(temp_dir.path(), &[], true)
+            .await
+            .unwrap();
+        manifest.signature = None;
+        for capsule in [unsigned_manifest(), manifest] {
+            assert_eq!(
+                runtime
+                    .verify_capsule_signature(&capsule, &dir)
+                    .await
+                    .unwrap(),
+                Signer::UnsignedDev
+            );
+        }
+    }
+
+    /// A Home with no signed release, dev_mode off and one trusted key refuses
+    /// an unsigned capsule, a capsule signed by another key, and a signed
+    /// capsule whose entrypoint changed. The refusal happens at launch, before
+    /// a compute provider loads it. The trusted key's capsule is loaded.
+    #[tokio::test]
+    async fn launch_refuses_untrusted_signers_before_the_provider_loads() {
+        async fn launch(
+            runtime: &Runtime,
+            dir: &Path,
+            manifest: &CapsuleManifest,
+            entrypoint: &[u8],
+        ) -> Result<CapsuleHandle> {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(
+                dir.join("capsule.json"),
+                serde_json::to_vec(manifest).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(dir.join(&manifest.entrypoint), entrypoint).unwrap();
+            runtime.run_local(dir, Vec::new()).await
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let loads = Arc::new(AtomicUsize::new(0));
+        let runtime = Runtime::new(
+            storage,
+            Arc::new(CountingComputeProvider {
+                loads: loads.clone(),
+            }),
+        );
+        let trusted = elastos_runtime::signature::SigningKey::from_bytes(&[42; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp_dir.path(),
+                &[hex::encode(trusted.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+
+        let entrypoint = b"vm image bytes";
+        let mut manifest = unsigned_manifest();
+        manifest.name = "foreign-vm".to_string();
+        manifest.capsule_type = CapsuleType::MicroVM;
+        manifest.entrypoint = "rootfs.ext4".to_string();
+        let signed_by = |key: &elastos_runtime::signature::SigningKey| {
+            let mut signed = manifest.clone();
+            elastos_runtime::signature::sign_capsule(key, &mut signed, &hash_content(entrypoint))
+                .unwrap();
+            signed
+        };
+        let dir = temp_dir.path().join("foreign-vm");
+
+        let error = launch(&runtime, &dir, &manifest, entrypoint)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("is unsigned"), "{error}");
+        let foreign = elastos_runtime::signature::SigningKey::from_bytes(&[9; 32]);
+        let error = launch(&runtime, &dir, &signed_by(&foreign), entrypoint)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("verification failed"), "{error}");
+        let error = launch(&runtime, &dir, &signed_by(&trusted), b"changed image")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("verification failed"), "{error}");
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+
+        launch(&runtime, &dir, &signed_by(&trusted), entrypoint)
+            .await
+            .unwrap();
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -911,6 +1084,299 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("component import"));
         assert_eq!(loads.load(Ordering::SeqCst), 0);
+    }
+
+    /// A Runtime with the component provider, the real resource bridge, and a
+    /// person whose root has principal-root protection, as on a Home.
+    struct AgentHostRuntime {
+        runtime: Arc<Runtime>,
+        capability_manager: Arc<CapabilityManager>,
+        pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+        audit_log: Arc<AuditLog>,
+        data_dir: std::path::PathBuf,
+        _temp: tempfile::TempDir,
+    }
+
+    const AGENT_HOST_PERSON: &str = "person:local:agent-host-e2e";
+
+    async fn agent_host_runtime() -> AgentHostRuntime {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let component_provider = Arc::new(ComponentProvider::new());
+        let runtime = Arc::new(Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            Some(component_provider),
+        ));
+        runtime
+            .configure_capsule_admission(temp.path(), &[], true)
+            .await
+            .unwrap();
+        let audit_log = Arc::new(AuditLog::new());
+        let capability_manager = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            audit_log.clone(),
+            Arc::new(MetricsManager::new()),
+        ));
+        let pending_store = Arc::new(
+            elastos_runtime::capability::pending::PendingRequestStore::new(audit_log.clone()),
+        );
+        let data_dir = temp.path().join("runtime-data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        crate::auth::store_test_principal_root_protection(&data_dir, AGENT_HOST_PERSON);
+        runtime
+            .set_provider_registry(
+                Arc::new(ProviderRegistry::new()),
+                capability_manager.clone(),
+                pending_store.clone(),
+                data_dir.clone(),
+            )
+            .await;
+        AgentHostRuntime {
+            runtime,
+            capability_manager,
+            pending_store,
+            audit_log,
+            data_dir,
+            _temp: temp,
+        }
+    }
+
+    fn agent_host_journal() -> (String, String) {
+        let root = crate::auth::principal_localhost_root(AGENT_HOST_PERSON);
+        let journal = format!("{root}/.AppData/Agents/agent-host/tasks/demo/journal");
+        (root, journal)
+    }
+
+    fn launch_agent_host(
+        fx: &AgentHostRuntime,
+    ) -> tokio::task::JoinHandle<elastos_common::Result<elastos_compute::CapsuleHandle>> {
+        let runtime = fx.runtime.clone();
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples/agent-host");
+        tokio::spawn(async move {
+            runtime
+                .run_local_with_principal(&dir, Vec::new(), Some(AGENT_HOST_PERSON.to_string()))
+                .await
+        })
+    }
+
+    async fn next_pending(
+        store: &elastos_runtime::capability::pending::PendingRequestStore,
+    ) -> elastos_runtime::capability::pending::PendingCapabilityRequest {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(request) = store.list_pending().await.into_iter().next() {
+                    break request;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the agent host must ask for a journal grant")
+    }
+
+    fn component_invoke_outcomes(audit_log: &AuditLog) -> Vec<(String, String)> {
+        audit_log
+            .recent_events(100)
+            .iter()
+            .filter_map(|event| match event {
+                AuditEvent::Custom {
+                    event_type,
+                    details,
+                } if event_type == "component.invoke.completed" => Some((
+                    details["operation"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                    details["outcome"].as_str().unwrap_or_default().to_string(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The whole S3 route in one process: the guest asks for its two grants,
+    /// the shell (this test) grants them, the guest writes its journal through
+    /// the real bridge with a revision precondition, and reads it back.
+    #[tokio::test]
+    #[ignore = "loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh"]
+    async fn the_agent_host_writes_and_reads_its_journal_through_the_real_bridge() {
+        let fx = agent_host_runtime().await;
+        let (root, journal) = agent_host_journal();
+        let launch = launch_agent_host(&fx);
+        let mut asked = Vec::new();
+        for _ in 0..2 {
+            let pending = next_pending(&fx.pending_store).await;
+            asked.push((pending.resource.as_str().to_string(), pending.action));
+            let token = fx.capability_manager.grant(
+                pending.session_id.as_str(),
+                pending.resource.clone(),
+                pending.action,
+                TokenConstraints::default(),
+                None,
+            );
+            fx.pending_store
+                .grant_request(pending.id.as_str(), token, GrantDuration::Session)
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(10), launch)
+            .await
+            .expect("the agent host must finish after its grants")
+            .expect("the launch task must not panic")
+            .expect("the agent host must write and read back its journal");
+        assert_eq!(
+            asked,
+            vec![
+                (journal.clone(), elastos_runtime::capability::Action::Write),
+                (journal.clone(), elastos_runtime::capability::Action::Read),
+            ]
+        );
+        assert!(fx.pending_store.list_pending().await.is_empty());
+
+        let path =
+            elastos_common::localhost::rooted_localhost_fs_path(&fx.data_dir, &journal).unwrap();
+        let raw = std::fs::read(&path).unwrap();
+        assert!(
+            !raw.windows(4).any(|window| window == b"EAHJ"),
+            "stored encrypted"
+        );
+        let plain = crate::auth::read_principal_root_object(
+            &fx.data_dir,
+            AGENT_HOST_PERSON,
+            &root,
+            &journal,
+            &path,
+        )
+        .unwrap();
+        assert_eq!(&plain[..4], b"EAHJ");
+        assert_eq!(plain[4..6], 2u16.to_le_bytes());
+        let outcomes = component_invoke_outcomes(&fx.audit_log);
+        assert!(
+            outcomes.contains(&("write".to_string(), "ok".to_string())),
+            "{outcomes:?}"
+        );
+        assert!(
+            outcomes.contains(&("read".to_string(), "ok".to_string())),
+            "{outcomes:?}"
+        );
+    }
+
+    /// A journal written by the agent host's format 1 encoder (examples/
+    /// agent-host at f873957): two turns, a person's "goal\nship it", a goal
+    /// record and a read.
+    const AGENT_HOST_FORMAT_1_JOURNAL: &[&str] = &[
+        "4541484a010001000000000000000000000000000000000000000000000000000000000000000000",
+        "000000000000000000000000000000000008000000012500000001011f000000596f752061726520",
+        "74686520456c6173744f53206167656e7420686f73742ea02b08ad6c00bb31f647037293207751f5",
+        "3c2263c8327d802d0366362842eae0010b00000002030500000068656c6c6fe95bec7ef4c055b5ac",
+        "9bd4132a121f4b80fee6f9e9ab1840c2b9987db191557d012300000001021d0000005265706c7920",
+        "696e206f6e652073686f7274207061726167726170682ee0d8f303b4006e394934144da53d29f29f",
+        "d5b7af273f5049ee9adfb35ee3e16a011100000002030b0000007365636f6e64207475726e3c58cd",
+        "0c1acd922f79f72b8863e82f6e5b17bc062114e1c3424e3361521380e7012b000000010225000000",
+        "4b656570207468652066697273742073797374656d206c696e6520756e6368616e6765642e1f2116",
+        "24b9d75a3b0e9be6368b55c6910e9e32513e8604c8ebb90c2df05e969d011200000002030c000000",
+        "676f616c0a73686970206974989306519e8b7d7906f58012c704d5e9235617efa2bf2a905644396e",
+        "a975da40011a000000020314000000676f616c0a66696e69736820746865206e6f7465afa8d8a679",
+        "d52cb425643fc8d448d7edea3d8eb3ec9ab24c3b77063190a654b1017a0000000209740000003120",
+        "62366139386439636539613264393134393238386661336466343264333737633365343237333761",
+        "666463646166373134653333633061313030623531303630206c6f63616c686f73743a2f2f557365",
+        "72732f73656c662f446f63756d656e74732f6e6f7465732e7478740a616c7068610a488b95a013ae",
+        "a1d802a5c30e7d04ecfa818ba6e06b0c028fa53f8383a013674a488b95a013aea1d802a5c30e7d04",
+        "ecfa818ba6e06b0c028fa53f8383a013674a",
+    ];
+
+    /// A task whose stored journal is format 1: the guest's run fails with
+    /// exactly the text the person sees, and the stored object is not touched.
+    #[tokio::test]
+    #[ignore = "loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh"]
+    async fn the_agent_host_refuses_a_format_1_journal_with_its_reason() {
+        let fx = agent_host_runtime().await;
+        let (root, journal) = agent_host_journal();
+        let hex: String = AGENT_HOST_FORMAT_1_JOURNAL.concat();
+        let old: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect();
+        assert_eq!(old[4..6], 1u16.to_le_bytes());
+        let path =
+            elastos_common::localhost::rooted_localhost_fs_path(&fx.data_dir, &journal).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        crate::auth::write_principal_root_object(
+            &fx.data_dir,
+            AGENT_HOST_PERSON,
+            &root,
+            &journal,
+            &path,
+            &old,
+        )
+        .unwrap();
+        let launch = launch_agent_host(&fx);
+        for _ in 0..2 {
+            let pending = next_pending(&fx.pending_store).await;
+            let token = fx.capability_manager.grant(
+                pending.session_id.as_str(),
+                pending.resource.clone(),
+                pending.action,
+                TokenConstraints::default(),
+                None,
+            );
+            fx.pending_store
+                .grant_request(pending.id.as_str(), token, GrantDuration::Session)
+                .await
+                .unwrap();
+        }
+        let error = tokio::time::timeout(std::time::Duration::from_secs(10), launch)
+            .await
+            .expect("the agent host must finish")
+            .expect("the launch task must not panic")
+            .expect_err("a format 1 journal must stop the task");
+        assert!(
+            error
+                .to_string()
+                .contains("journal format 1 not supported; start a new task"),
+            "{error}"
+        );
+        let stored = crate::auth::read_principal_root_object(
+            &fx.data_dir,
+            AGENT_HOST_PERSON,
+            &root,
+            &journal,
+            &path,
+        )
+        .unwrap();
+        assert_eq!(stored, old, "the old object is not touched");
+    }
+
+    /// The shell denies both requests: the guest finishes, sends no resource
+    /// call, and nothing is stored.
+    #[tokio::test]
+    #[ignore = "loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh"]
+    async fn the_agent_host_stores_nothing_when_its_journal_grants_are_denied() {
+        let fx = agent_host_runtime().await;
+        let (_root, journal) = agent_host_journal();
+        let launch = launch_agent_host(&fx);
+        for _ in 0..2 {
+            let pending = next_pending(&fx.pending_store).await;
+            assert_eq!(pending.resource.as_str(), journal);
+            fx.pending_store
+                .deny_request(pending.id.as_str(), "not now")
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(10), launch)
+            .await
+            .expect("the agent host must finish after the denials")
+            .expect("the launch task must not panic")
+            .expect("a denied agent host still finishes cleanly");
+        let path =
+            elastos_common::localhost::rooted_localhost_fs_path(&fx.data_dir, &journal).unwrap();
+        assert!(!path.exists());
+        assert!(component_invoke_outcomes(&fx.audit_log).is_empty());
     }
 
     #[tokio::test]

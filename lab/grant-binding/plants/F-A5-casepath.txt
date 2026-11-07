@@ -1,0 +1,22 @@
+id: F-A5-casepath
+file: src/lib.rs
+test: model_case_different_use_path_is_refused
+--- old
+    if let Some(root) = owned_root {
+        let inside = name
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'));
+        if !inside {
+            return Err(Refuse::OutsideRoot);
+        }
+    }
+--- new
+    if let Some(root) = owned_root {
+        let inside = name.len() >= root.len()
+            && name[..root.len()].eq_ignore_ascii_case(root)
+            && (name.len() == root.len() || name[root.len()..].starts_with('/'));
+        if !inside {
+            return Err(Refuse::OutsideRoot);
+        }
+    }
+--- end

@@ -1,0 +1,8 @@
+id: F-A7-preadmit
+file: src/ledger.rs
+test: ledger::model_reserve_before_admit_is_refused
+--- old
+            Some(total) if total <= ledger.ceiling => total,
+--- new
+            Some(total) if ledger.ceiling == 0 || total <= ledger.ceiling => total,
+--- end

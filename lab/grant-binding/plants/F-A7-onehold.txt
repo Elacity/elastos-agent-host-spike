@@ -1,0 +1,8 @@
+id: F-A7-onehold
+file: src/ledger.rs
+test: ledger::model_one_release_returns_only_that_hold
+--- old
+        ledger.held -= amount;
+--- new
+        ledger.held = 0;
+--- end

@@ -1,0 +1,7 @@
+{
+  "instances": [
+    {"address": "UsersAI/agent-a", "principal": "agent-a"},
+    {"address": "UsersAI/agent-b", "principal": "agent-b"}
+  ],
+  "cross_agent_grants": []
+}

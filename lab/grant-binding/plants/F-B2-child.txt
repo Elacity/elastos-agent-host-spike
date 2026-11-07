@@ -1,0 +1,12 @@
+id: F-B2-child
+file: src/ops.rs
+test: ops::model_append_and_overwrite_do_not_permit_child_journal
+--- old
+            Operation::ChildJournal if !grant.rights.child_journal => {
+                Err(OperateRefuse::ChildJournalNotGranted)
+            }
+--- new
+            Operation::ChildJournal if false => {
+                Err(OperateRefuse::ChildJournalNotGranted)
+            }
+--- end

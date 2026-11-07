@@ -1,0 +1,7 @@
+# Pin the toolchain for the lane, so a copy of this folder built on its own
+# (adoption, or the reproducibility test's temp copies) uses the same compiler
+# the receipt records. Matches the repo root's pin.
+[toolchain]
+channel = "1.91.0"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

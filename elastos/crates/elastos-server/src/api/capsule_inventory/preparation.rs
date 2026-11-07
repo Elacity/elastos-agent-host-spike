@@ -369,12 +369,11 @@ fn bounded_id(value: &str, max: usize) -> bool {
 }
 
 fn context_is_bounded(context: &HomeLaunchTokenContext) -> bool {
-    bounded_id(&context.principal_id, 160)
-        && bounded_id(&context.session_id, 160)
-        && bounded_id(&context.grant_id, 160)
+    bounded_id(context.principal_id(), 160)
+        && bounded_id(context.session_id(), 160)
+        && bounded_id(context.grant_id(), 160)
         && context
-            .proof_binding_id
-            .as_ref()
+            .proof_binding_id()
             .is_none_or(|id| bounded_id(id, 160))
 }
 
@@ -693,6 +692,7 @@ fn reserve_at(
     read_memory: MemoryReader,
 ) -> anyhow::Result<PreparationRecord> {
     authorize(caller, "use")?;
+    let caller_principal = caller.context.principal_id();
     ensure!(
         bounded_id(request_id, 160) && canonical_cid(cid, 0x70),
         "invalid preparation request identity"
@@ -715,7 +715,7 @@ fn reserve_at(
                         owner.operation_id == r.admission_id
                             && owner.state == PreparationState::Reclaimed
                     })))
-                    && r.request_binding.principal == caller.context.principal_id
+                    && r.request_binding.principal == caller_principal
                     && r.request_binding.capsule == caller.capsule
                     && r.request_binding.request_id == request_id
             }) {
@@ -724,7 +724,7 @@ fn reserve_at(
                         && record.request_binding
                             == esp_request_binding(
                                 request_id,
-                                &caller.context.principal_id,
+                                caller_principal,
                                 caller.capsule,
                                 Some(caller.interface),
                                 &caller.method.id,
@@ -763,7 +763,7 @@ fn reserve_at(
         .context("model is not in the verified catalog")?;
     let request_binding = esp_request_binding(
         request_id,
-        &caller.context.principal_id,
+        caller.context.principal_id(),
         caller.capsule,
         Some(caller.interface),
         &caller.method.id,
@@ -801,7 +801,7 @@ fn reserve_at(
             let mut state = inventory.load()?;
             pruned_issued_floor_ms = state.pruned_issued_floor_ms;
             if let Some(existing) = state.records.iter().find(|record| {
-                record.request_binding.principal == caller.context.principal_id
+                record.request_binding.principal == caller_principal
                     && record.request_binding.capsule == caller.capsule
                     && record.request_binding.request_id == request_id
             }) {
@@ -860,7 +860,7 @@ fn reserve_at(
         inventory.save(&state)?;
     }
     if let Some(existing) = state.records.iter().find(|record| {
-        record.request_binding.principal == caller.context.principal_id
+        record.request_binding.principal == caller_principal
             && record.request_binding.capsule == caller.capsule
             && record.request_binding.request_id == request_id
     }) {
@@ -988,9 +988,9 @@ fn reserve_at(
     // Explicit Use owns both preparation and desired retention. Save them in
     // one inventory write before a worker can start. Request replay above keeps
     // its original result, including a later explicit release or terminal state.
-    if !state.kept(&caller.context.principal_id, cid) {
+    if !state.kept(caller.context.principal_id(), cid) {
         state.retention_claims.push(RetentionClaim {
-            principal: caller.context.principal_id.clone(),
+            principal: caller.context.principal_id().to_string(),
             cid: cid.into(),
         });
     }
@@ -1047,13 +1047,14 @@ fn set_retention(
     revalidate: &Revalidate,
 ) -> anyhow::Result<serde_json::Value> {
     authorize(caller, "retention")?;
+    let caller_principal = caller.context.principal_id();
     ensure!(
         bounded_id(request_id, 160) && canonical_cid(cid, 0x70),
         "invalid retention input"
     );
     let inventory = Inventory::open(data_dir, false)?;
     let mut state = inventory.load()?;
-    let principal = &caller.context.principal_id;
+    let principal = caller_principal.to_string();
     let record = state
         .records
         .iter()
@@ -1067,7 +1068,7 @@ fn set_retention(
     let admitted = record.state == PreparationState::Admitted;
     if admitted {
         inventory.admitted(&record.admission_id)?.check()?;
-    } else if keep && !state.kept(principal, cid) {
+    } else if keep && !state.kept(&principal, cid) {
         ensure!(
             !record.cancel_requested && now()? < record.expires_at,
             "retention preparation is settling"
@@ -1084,7 +1085,7 @@ fn set_retention(
     // intent survives reconciliation and admission, but ends when its last
     // operation settles without admission. It does not pin or fetch content.
     // Aliases share one principal/CID claim; release does not evict bytes/offers.
-    if state.kept(principal, cid) != keep {
+    if state.kept(&principal, cid) != keep {
         if keep {
             ensure!(
                 state.retention_claims.len() < MAX_RECORDS,
@@ -1128,6 +1129,7 @@ fn manage(
     cancel: bool,
     now: u64,
 ) -> anyhow::Result<PreparationRecord> {
+    let caller_principal = caller.context.principal_id();
     authorize(caller, if cancel { "cancel" } else { "status" })?;
     ensure!(
         operation_id.len() == 64
@@ -1142,7 +1144,7 @@ fn manage(
             .iter()
             .position(|record| {
                 record.operation_id == operation_id
-                    && record.request_binding.principal == caller.context.principal_id
+                    && record.request_binding.principal == caller_principal
             })
             .context("preparation operation unavailable")
     };
@@ -1365,7 +1367,7 @@ impl PreparationOwner {
             _ => anyhow::bail!("preparation method unavailable"),
         };
         let kept = storage::saved_inventory(data_dir)?
-            .kept(&caller.context.principal_id, &record.package_cid);
+            .kept(caller.context.principal_id(), &record.package_cid);
         let project = |record: &PreparationRecord| {
             let mut value = record.projection();
             value["kept"] = serde_json::json!(kept);
@@ -2047,7 +2049,7 @@ async fn start_owner_reclaim(
             "another retirement owns worker"
         );
         ensure!(
-            existing.reclaim_principal.as_deref() == Some(caller.context.principal_id.as_str()),
+            existing.reclaim_principal.as_deref() == Some(caller.context.principal_id()),
             "model reclaim principal changed"
         );
         if existing.phase == RetirementPhase::Withdrawn {
@@ -2057,7 +2059,12 @@ async fn start_owner_reclaim(
         }
     }
     ensure!(
-        !retirement_protected(data_dir, &state, &owner, Some(&caller.context.principal_id))?,
+        !retirement_protected(
+            data_dir,
+            &state,
+            &owner,
+            Some(caller.context.principal_id())
+        )?,
         "retirement owner is protected"
     );
     if state.retirement.is_none() {
@@ -2065,7 +2072,7 @@ async fn start_owner_reclaim(
             operation_id: owner.operation_id.clone(),
             admission_id: owner.operation_id.clone(),
             phase: RetirementPhase::WithdrawalPending,
-            reclaim_principal: Some(caller.context.principal_id.clone()),
+            reclaim_principal: Some(caller.context.principal_id().to_string()),
         });
         inventory.save(&state)?;
     }
@@ -3616,7 +3623,7 @@ pub(in crate::api) async fn model_runtime_projection(
                 .records
                 .iter()
                 .filter(|r| {
-                    r.request_binding.principal == context.principal_id
+                    r.request_binding.principal == context.principal_id()
                         && r.package_cid == cid
                         && operation.is_none_or(|id| r.operation_id == id)
                 })
@@ -3644,7 +3651,7 @@ pub(in crate::api) async fn model_runtime_projection(
         };
         let record = &record;
         let mut projection = unavailable();
-        projection["kept"] = serde_json::json!(state.kept(&context.principal_id, cid));
+        projection["kept"] = serde_json::json!(state.kept(context.principal_id(), cid));
         projection["preparation"] = record.projection();
         if record.state != PreparationState::Admitted {
             return Ok((projection, None));
@@ -4287,7 +4294,7 @@ mod tests {
         Ok(elastos_common::host_memory::HostMemory {
             total: 16 * 1024 * 1024 * 1024,
             available: 16 * 1024 * 1024 * 1024,
-            pressure_normal: false,
+            pressure: elastos_common::host_memory::MemoryPressure::NotReported,
         })
     }
     fn test_owner() -> PreparationOwner {
@@ -4362,7 +4369,7 @@ mod tests {
             Ok(elastos_common::host_memory::HostMemory {
                 total: 4 * 1024 * 1024 * 1024,
                 available: 4 * 1024 * 1024 * 1024,
-                pressure_normal: false,
+                pressure: elastos_common::host_memory::MemoryPressure::NotReported,
             })
         }
         fn unavailable() -> std::io::Result<elastos_common::host_memory::HostMemory> {
@@ -4529,7 +4536,7 @@ mod tests {
             Ok(elastos_common::host_memory::HostMemory {
                 total: 4 * 1024 * 1024 * 1024,
                 available: 4 * 1024 * 1024 * 1024,
-                pressure_normal: false,
+                pressure: elastos_common::host_memory::MemoryPressure::NotReported,
             })
         }
         fn unavailable() -> std::io::Result<elastos_common::host_memory::HostMemory> {
@@ -4572,12 +4579,12 @@ mod tests {
     }
 
     fn context() -> HomeLaunchTokenContext {
-        HomeLaunchTokenContext {
-            principal_id: "person:reservation-fixture".into(),
-            session_id: "session-1".into(),
-            proof_binding_id: Some("proof-1".into()),
-            grant_id: "grant-1".into(),
-        }
+        HomeLaunchTokenContext::for_test(
+            "person:reservation-fixture",
+            "session-1",
+            Some("proof-1".into()),
+            "grant-1",
+        )
     }
 
     fn fixture() -> (tempfile::TempDir, String) {
@@ -14121,10 +14128,12 @@ server.serve_forever()
             .is_err());
         }
         for identity in [String::new(), "x".repeat(161), "principal\nother".into()] {
-            let context = HomeLaunchTokenContext {
-                principal_id: identity,
-                ..context.clone()
-            };
+            let context = HomeLaunchTokenContext::for_test(
+                identity,
+                context.session_id(),
+                context.proof_binding_id().map(|value| value.to_string()),
+                context.grant_id(),
+            );
             assert!(reserve(root.path(), &caller(&context, &method("use")), "req", &cid).is_err());
         }
         for operation in ["status", "cancel", "install"] {
@@ -14156,11 +14165,12 @@ server.serve_forever()
         let use_method = method("use");
         let caller = caller(&initial, &use_method);
         let record = reserve(root.path(), &caller, "request-1", &cid).unwrap();
-        let newer = HomeLaunchTokenContext {
-            session_id: "session-2".into(),
-            grant_id: "grant-2".into(),
-            ..initial.clone()
-        };
+        let newer = HomeLaunchTokenContext::for_test(
+            initial.principal_id(),
+            "session-2",
+            initial.proof_binding_id().map(|value| value.to_string()),
+            "grant-2",
+        );
         assert_eq!(
             reserve(
                 root.path(),
@@ -14199,10 +14209,12 @@ server.serve_forever()
             record
         );
         let bytes = std::fs::read(root.path().join("model-preparation/state.json")).unwrap();
-        let foreign = HomeLaunchTokenContext {
-            principal_id: "person:other".into(),
-            ..newer.clone()
-        };
+        let foreign = HomeLaunchTokenContext::for_test(
+            "person:other",
+            newer.session_id(),
+            newer.proof_binding_id().map(|value| value.to_string()),
+            newer.grant_id(),
+        );
         assert!(status(
             root.path(),
             &PreparationCaller {
@@ -15418,12 +15430,12 @@ server.serve_forever()
             .unwrap()
             .unwrap();
         let entry = &entries[0];
-        let context = HomeLaunchTokenContext {
-            principal_id: "person:preparation-fixture".into(),
-            session_id: "preparation-session".into(),
-            proof_binding_id: Some("preparation-proof".into()),
-            grant_id: "preparation-grant".into(),
-        };
+        let context = HomeLaunchTokenContext::for_test(
+            "person:preparation-fixture",
+            "preparation-session",
+            Some("preparation-proof".into()),
+            "preparation-grant",
+        );
         let capsule = "marketplace";
         let request_id = fixture_request_id(root.path(), "prepare-fixture-1", now().unwrap());
         let request_id = request_id.as_str();

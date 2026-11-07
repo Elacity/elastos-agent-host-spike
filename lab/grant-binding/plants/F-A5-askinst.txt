@@ -1,0 +1,14 @@
+id: F-A5-askinst
+file: src/ask.rs
+test: ask::model_admit_ask_on_a_sibling_instance_is_refused
+--- old
+        self.resolve(*call, request.handle).map_err(AdmitRefuse::Binding)?;
+--- new
+        self.resolve(
+            Call {
+                instance: request.forged_instance.unwrap_or(call.instance),
+            },
+            request.handle,
+        )
+        .map_err(AdmitRefuse::Binding)?;
+--- end

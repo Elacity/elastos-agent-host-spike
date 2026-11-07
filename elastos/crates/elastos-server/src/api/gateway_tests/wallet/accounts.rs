@@ -1213,3 +1213,122 @@ async fn test_managed_recovery_key_routes_fail_closed_on_provider_errors() {
         .unwrap()
         .contains("invalid Wallet provider v2 response"));
 }
+
+async fn p1j_t1_request(app: Router, method: &str, uri: &str, token: &str, body: &str) -> Response {
+    app.oneshot(
+        test_browser_request("localhost:61180", "null")
+            .method(method)
+            .uri(uri)
+            .header("x-elastos-home-token", token)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+fn p1j_t1_token(dir: &std::path::Path, app: &str) -> (String, (String, String)) {
+    let ids = passkey_authority(dir);
+    assert_ne!(ids.principal_id, ids.session_id);
+    let now = crate::auth::now_ts();
+    let mut grant = crate::auth::load_active_session_grant(dir, &ids.session_id, now).unwrap();
+    grant.apps = vec![app.to_string()];
+    crate::auth::store_session_grant(dir, grant.clone()).unwrap();
+    let context = HomeLaunchTokenContext::for_test(
+        grant.principal_id,
+        grant.session_id.clone(),
+        Some(grant.proof_binding_id),
+        grant.grant_id,
+    );
+    let token = issue_home_launch_token_with_context(dir, app, &context).unwrap();
+    (token, (ids.principal_id, ids.session_id))
+}
+fn p1j_t1_binds_value(value: &serde_json::Value, ids: &(String, String)) {
+    assert_eq!(value["principal_id"].as_str(), Some(ids.0.as_str()));
+    assert_eq!(value["session_id"].as_str(), Some(ids.1.as_str()));
+}
+fn p1j_t1_assert_audit(dir: &std::path::Path, event_type: &str, ids: &(String, String)) {
+    let auth = crate::auth::load_auth_state(dir).unwrap();
+    let event = auth
+        .audit
+        .iter()
+        .find(|event| event.event_type == event_type)
+        .expect(event_type);
+    assert_eq!(event.principal_id.as_deref(), Some(ids.0.as_str()));
+    assert_eq!(event.session_id.as_deref(), Some(ids.1.as_str()));
+}
+
+#[tokio::test]
+async fn p1j_t1_gateway_browser_wallet_binds_principal_not_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let (token, ids) = p1j_t1_token(dir.path(), BROWSER_CAPSULE_ID);
+    let p = MockWalletProvider::default();
+    p.seed_managed_evm_account_for_principal(&ids.0).await;
+    let (state, wallet) = wallet_test_state_with_recording_provider(dir.path(), p).await;
+    p1j_t1_request(
+        gateway_router(state),
+        "POST",
+        "/api/apps/browser/wallet/request-accounts",
+        &token,
+        r#"{"chain_namespace":"eip155:8453","page_url":"https://app.p1j.example/","origin":"https://app.p1j.example"}"#,
+    )
+    .await;
+    let approvals = wallet.provider.approvals.lock().await;
+    p1j_t1_binds_value(&approvals.last().expect("account access")["payload"], &ids);
+}
+
+#[tokio::test]
+async fn p1j_t1_gateway_browser_wallet_reads_binds_principal_not_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let (token, ids) = p1j_t1_token(dir.path(), BROWSER_CAPSULE_ID);
+    p1j_t1_request(
+        gateway_router(wallet_test_state(dir.path()).await),
+        "POST",
+        "/api/apps/browser/wallet/read",
+        &token,
+        r#"{"method":"eth_chainId","params":[],"chain_namespace":"eip155:8453","page_url":"https://app.p1j.example/"}"#,
+    )
+    .await;
+    p1j_t1_assert_audit(dir.path(), "browser.chain_read.requested", &ids);
+}
+
+#[tokio::test]
+async fn p1j_t1_gateway_wallet_accounts_binds_principal_not_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let (token, ids) = p1j_t1_token(dir.path(), SYSTEM_CAPSULE_ID);
+    let authority = runtime_wallet_authority_for_app_token(dir.path(), SYSTEM_CAPSULE_ID, &token);
+    let context = authority.home_launch_context();
+    let p = MockWalletProvider::default();
+    let account_id = p.seed_managed_evm_account_for_principal(&ids.0).await;
+    let state = wallet_test_state_with_provider(dir.path(), p).await;
+    let managed = serde_json::from_value(json!({})).unwrap();
+    create_managed_wallet_accounts(&state, &context, &authority, managed, SYSTEM_CAPSULE_ID).await;
+    let dflt = serde_json::from_value(json!({
+        "account_id": account_id,
+        "chain_namespace": "eip155:8453",
+        "intent": "transaction_intent",
+    }))
+    .unwrap();
+    update_default_wallet_account(&state, &context, &authority, dflt, SYSTEM_CAPSULE_ID).await;
+    p1j_t1_assert_audit(dir.path(), "wallet.managed.created", &ids);
+    p1j_t1_assert_audit(dir.path(), "wallet.default.updated", &ids);
+}
+
+#[tokio::test]
+async fn p1j_t1_gateway_browser_wallet_bridge_binds_principal_not_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let (token, ids) = p1j_t1_token(dir.path(), BROWSER_CAPSULE_ID);
+    let response = p1j_t1_request(
+        gateway_router(wallet_test_state(dir.path()).await),
+        "GET",
+        "/api/apps/browser/wallet/bridge",
+        &token,
+        "",
+    )
+    .await;
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    p1j_t1_binds_value(&json, &ids);
+}

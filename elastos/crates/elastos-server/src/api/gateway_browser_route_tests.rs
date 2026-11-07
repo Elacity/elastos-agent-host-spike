@@ -8258,7 +8258,7 @@ async fn test_browser_account_access_status_returns_only_exact_origin_bound_gran
     );
     let launch =
         require_home_launch_token_binding(dir.path(), &headers, &[BROWSER_CAPSULE_ID]).unwrap();
-    let runtime_authority = runtime_wallet_authority(&launch).unwrap();
+    let runtime_authority = runtime_wallet_authority(dir.path(), &launch).unwrap();
     let request_id = "wallet-approval:browser-consent-completed";
     let tampered_request_id = "wallet-approval:browser-consent-tampered";
     let grant_expires_at = crate::auth::now_ts().saturating_add(600);

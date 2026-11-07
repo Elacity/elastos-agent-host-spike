@@ -1,0 +1,4 @@
+lab stand-in recipe for the provider variants (task 015)
+not a build recipe: the lab never runs it, and it builds nothing
+provider-variant-a: fixtures/provider-variant-a/capsule.json and fixtures/provider-variant-a/ipfs-provider
+provider-variant-b: fixtures/provider-variant-b/capsule.json and fixtures/provider-variant-b/ipfs-provider

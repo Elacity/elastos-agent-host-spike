@@ -1135,8 +1135,7 @@ struct GatewayParticipantCard {
 #[derive(Debug, Default)]
 pub(super) struct ParticipantCardDirectory {
     pub(super) local_profile_did: Option<String>,
-    /// Profile DID to (`contact` | `requested` | `pending`, direct conversation).
-    pub(super) relationships: std::collections::HashMap<String, (&'static str, Option<String>)>,
+    pub(super) relationships: gateway_home_system::ContactRelationships,
     /// Profile DIDs visible in Discovery right now, so a request can bind to
     /// their signed advertisement.
     pub(super) discoverable: std::collections::HashSet<String>,

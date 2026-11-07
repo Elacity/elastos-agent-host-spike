@@ -19,6 +19,13 @@ const sharedRenderMarker = "Shared message before metadata";
 const communityDeliveryMarker = "Own Community message awaiting delivery";
 const interveningPeerMarker = "Peer message before my send response";
 const cursorOwnMarker = "Own message after the unseen peer row";
+const stalledPollMarker = "Message after a stalled poll";
+const attachmentRetryMarker = "Message after a failed attachment";
+// 1x1 PNG served once Home answers the attachment again.
+const attachmentRetryPng = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+  "base64",
+);
 const externalLinkUrl = "https://example.invalid/chat-link?from=chat";
 const textLinkUrl = "https://example.invalid/chat-text-link?from=text";
 const directLinkUrl = "https://example.invalid/chat-direct-link?from=direct";
@@ -159,6 +166,8 @@ function startServer(scenario) {
   const historyScenario = scenario === "history-status-order-calendar";
   const unreadScenario = scenario === "direct-unread" || scenario === "visible-read";
   const retryScenario = scenario.startsWith("direct-retry");
+  const stalledPollScenario = scenario === "shared-poll-stalled";
+  const attachmentRetryScenario = scenario === "shared-attachment-retry";
   const holdBoundary = holdBoundaryForScenario(scenario);
   const holds = {
     "initial-conversations": holdBoundary === "initial-conversations"
@@ -183,6 +192,8 @@ function startServer(scenario) {
     "community-expired": communityResponseOrdering ? createHold("community-expired") : null,
     "community-background": communityEventOrdering ? createHold("community-background") : null,
     "community-nonterminal": communityNonterminalOrdering ? createHold("community-nonterminal") : null,
+    // Never answered while Chat runs: Chat must abandon it and poll again.
+    "stalled-poll": stalledPollScenario ? createHold("stalled-poll") : null,
   };
   const trace = {
     cycles: [],
@@ -220,6 +231,12 @@ function startServer(scenario) {
     retryMode: "pending",
     retryPosts: [],
     sentAgain: null,
+    stallPoll: false,
+    stalledMarkerReady: false,
+    attachmentRequests: [],
+    attachmentMarkerReady: false,
+    attachmentMarkerPolled: false,
+    lastPollSince: null,
   };
   function pollView() {
     const poll = configuredPoll();
@@ -242,6 +259,21 @@ function startServer(scenario) {
       // the real generated UI has rendered its own send response at N+2.
       poll.latest_seq = 10;
       poll.objects = [historyMessage(10, "Initial Community row", "2026-03-09T12:00:00Z")];
+    }
+    if (stalledPollScenario && trace.stalledMarkerReady) {
+      poll.latest_seq = 1;
+      poll.objects = [historyMessage(1, stalledPollMarker, "2026-03-09T12:00:00Z")];
+    }
+    if (attachmentRetryScenario) {
+      // The attachment arrives with the session start; the marker only in a
+      // later poll, so the cursor moves past the attachment's row.
+      poll.latest_seq = trace.attachmentMarkerReady ? 2 : 1;
+      poll.objects = [
+        { ...historyMessage(1, "", "2026-03-09T12:00:00Z"), kind: "attachment", body: null,
+          attachment: { attachment_id: "att-retry", file_name: "photo.png", mime_type: "image/png",
+            size_bytes: attachmentRetryPng.length, is_image: true, is_audio: false, is_video: false } },
+        ...(trace.attachmentMarkerReady ? [historyMessage(2, attachmentRetryMarker, "2026-03-09T12:00:01Z")] : []),
+      ];
     }
     if (scenario === "external-link-via-home") {
       // A Link object (local mode) and a Community Text message that holds a
@@ -415,6 +447,20 @@ function startServer(scenario) {
           { "set-cookie": "room-session=fixture-session; Max-Age=300; Path=/; HttpOnly; SameSite=Lax" },
         );
       }
+      if (attachmentRetryScenario && url.pathname === "/api/apps/chat-room/attachments/att-retry") {
+        // Home fails this download until Chat has polled past its row: Chat
+        // must retry it from what it shows, not from the latest poll.
+        trace.attachmentRequests.push({ since: trace.lastPollSince, markerPolled: trace.attachmentMarkerPolled });
+        if (!trace.attachmentMarkerPolled) {
+          return json(response, { error: "Home is busy." }, 503);
+        }
+        response.writeHead(200, {
+          "access-control-allow-origin": "null",
+          "content-length": attachmentRetryPng.length,
+          "content-type": "image/png",
+        });
+        return response.end(attachmentRetryPng);
+      }
       if (url.pathname === "/api/apps/chat-room/poll") {
         let body = "";
         for await (const chunk of request) body += chunk;
@@ -430,6 +476,18 @@ function startServer(scenario) {
           homeToken: request.headers["x-elastos-home-token"] || null,
           origin: request.headers.origin || null,
         });
+        trace.lastPollSince = input.since;
+        if (attachmentRetryScenario) {
+          const poll = pollView();
+          poll.objects = poll.objects.filter((object) => object.seq > input.since);
+          trace.attachmentMarkerPolled ||= poll.objects.some((object) => object.seq === 2);
+          return json(response, poll);
+        }
+        if (stalledPollScenario && trace.stallPoll && !holds["stalled-poll"].reached) {
+          holds["stalled-poll"].reached = true;
+          await holds["stalled-poll"].promise;
+          return json(response, pollView());
+        }
         if (sharedRecovery && trace.rejectSharedPoll) {
           trace.pollErrors += 1;
           return json(response, { error: "invalid or expired session" }, 401);
@@ -1122,6 +1180,43 @@ async function runScenario(scenario) {
       assert(await frame.locator("#message-input").inputValue() === draft
         && await frame.locator("#message-input").isEnabled() && await frame.locator("#send-button").isEnabled(),
         "own expiry changed the draft or live Community controls");
+      return;
+    }
+
+    if (scenario === "shared-poll-stalled") {
+      await waitForConfiguredChatWithoutLegacyFlash(frame, "stalled poll");
+      trace.stallPoll = true;
+      const hold = holds["stalled-poll"];
+      await waitFor(() => hold.reached);
+      const stalledPolls = trace.current.polls;
+      trace.stalledMarkerReady = true;
+      const marker = frame.locator('#message-list [data-seq="1"] .message-body');
+      // The request deadline is 10 s; the next tick then delivers the message.
+      await marker.waitFor({ state: "visible", timeout: 20_000 });
+      assert(!hold.released && trace.current.polls > stalledPolls
+        && await marker.innerText() === stalledPollMarker,
+        "Chat did not recover from a poll request that never answered", { polls: trace.current.polls, stalledPolls });
+      await frame.locator("#error-text").waitFor({ state: "hidden", timeout: 5_000 });
+      return;
+    }
+
+    if (scenario === "shared-attachment-retry") {
+      await waitFor(() => trace.attachmentRequests.length >= 1);
+      const card = frame.locator('#message-list [data-seq="1"] .attachment-card');
+      await card.waitFor({ state: "visible" });
+      assert((await card.innerText()).includes("Loading attachment..."),
+        "a failed attachment download did not keep its loading state");
+      // The poll loop runs although the first download failed.
+      trace.attachmentMarkerReady = true;
+      const marker = frame.locator('#message-list [data-seq="2"] .message-body');
+      await marker.waitFor({ state: "visible", timeout: 10_000 });
+      assert(await marker.innerText() === attachmentRetryMarker, "Chat stopped polling after an attachment failed");
+      // Home answers again: Chat retries after its cursor passed the row.
+      await card.locator("img.attachment-preview").waitFor({ state: "visible", timeout: 20_000 });
+      await card.locator('[data-open-attachment="att-retry"]').waitFor({ state: "visible", timeout: 5_000 });
+      const served = trace.attachmentRequests.at(-1);
+      assert(served.markerPolled && served.since >= 2 && !(await card.innerText()).includes("Loading attachment..."),
+        "a failed attachment was not retried after the poll cursor moved past it", trace.attachmentRequests);
       return;
     }
 
@@ -1887,6 +1982,8 @@ async function main() {
     "direct-initial-401",
     "direct-initial-401-user-selection",
     "shared-poll-401",
+    "shared-poll-stalled",
+    "shared-attachment-retry",
     "contact-acceptance",
     "contact-acceptance-held-request",
     "history-status-order-calendar",

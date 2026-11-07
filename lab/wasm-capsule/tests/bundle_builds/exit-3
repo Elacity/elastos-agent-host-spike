@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# A stand-in tools/build that fails with exit status 3 and writes nothing.
+set -euo pipefail
+exit 3

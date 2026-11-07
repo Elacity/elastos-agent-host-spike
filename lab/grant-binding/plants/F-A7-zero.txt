@@ -1,0 +1,11 @@
+id: F-A7-zero
+file: src/ledger.rs
+test: ledger::model_known_zero_settle_frees_the_hold
+--- old
+            SettleOutcome::Known(measured) => measured,
+--- new
+            SettleOutcome::Known(0) => {
+                return Err(SettleRefuse::UnknownOutcome);
+            }
+            SettleOutcome::Known(measured) => measured,
+--- end

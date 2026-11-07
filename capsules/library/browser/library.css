@@ -1404,39 +1404,11 @@
       word-break: break-word;
     }
 
-    .share-options {
-      display: grid;
-      gap: 8px;
-    }
-
-    .share-option {
-      display: grid;
-      grid-template-columns: 18px minmax(0, 1fr);
-      gap: 10px;
-      align-items: start;
-      border: 1px solid var(--line);
-      border-radius: var(--radius-md);
-      background: rgba(255, 255, 255, 0.72);
-      padding: 10px;
-      cursor: pointer;
-    }
-
-    .share-option input {
-      margin-top: 2px;
-    }
-
-    .share-option:has(input:disabled) {
-      cursor: not-allowed;
-      opacity: 0.62;
-    }
-
-    .share-option span,
     .dialog-field {
       display: grid;
       gap: 4px;
     }
 
-    .share-option small,
     .dialog-hint,
     .dialog-error {
       color: var(--muted);

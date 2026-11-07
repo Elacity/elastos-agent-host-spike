@@ -1,0 +1,34 @@
+;; Seatbelt profile for wallet-provider; this file is the test oracle the
+;; Runtime-generated profile must match.
+;; The generated profile binds resolved paths as parameters, and the tests pass
+;; them with /usr/bin/sandbox-exec -f confine.sb -D:
+;;   PROVIDER_EXECUTABLE  - the provider binary the launch starts
+;;   STORAGE_ROOT         - Init.base_path/ElastOS/SystemServices/Wallet
+;;   STORAGE_PARENT       - the existing parent of STORAGE_ROOT
+;; did-provider binds the same three parameter names, so one generator covers
+;; both file-profile providers.
+;; Everything else is denied, including every network operation.
+(version 1)
+
+;; Deny by default: a file, device, socket or process operation that no rule
+;; below grants is refused, so an unexpected request fails closed.
+(deny default)
+(deny network*)
+
+;; Startup: exec is pinned to the one binary the launch named, so the provider
+;; cannot start any other program.
+(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))
+
+;; Startup: the kernel resolves every absolute path through the root directory,
+;; so the loader can reach the binary it was given.
+(allow file-read* (literal "/"))
+
+;; Startup: the loader and the allocator read kernel facts before the
+;; stdin/stdout protocol starts.
+(allow sysctl-read)
+
+;; Startup: inspect and synchronize the existing parent when creating Wallet.
+(allow file-read* (literal (param "STORAGE_PARENT")))
+
+;; Wallet state: one grant covers account, key, challenge and approval files.
+(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))

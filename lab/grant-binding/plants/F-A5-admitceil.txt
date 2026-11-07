@@ -1,0 +1,24 @@
+id: F-A5-admitceil
+file: src/ask.rs
+test: ask::model_forged_ceiling_does_not_move_the_admit_call
+--- old
+        self.resolve(*call, request.handle).map_err(AdmitRefuse::Binding)?;
+--- new
+        let mut instance = call.instance;
+        if request.forged_ceiling > 0 {
+            let own_identity = self
+                .registry
+                .get(&call.instance)
+                .map(|record| record.identity.clone());
+            if let Some(own_identity) = own_identity {
+                for (id, record) in &self.registry {
+                    if *id != call.instance && record.identity == own_identity {
+                        instance = *id;
+                        break;
+                    }
+                }
+            }
+        }
+        self.resolve(Call { instance }, request.handle)
+            .map_err(AdmitRefuse::Binding)?;
+--- end

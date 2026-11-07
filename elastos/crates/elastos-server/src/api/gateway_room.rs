@@ -412,9 +412,9 @@ pub(super) async fn chat_direct_message_send(
             crate::collaboration_direct_messages::DirectSendAuthority {
                 contact_store: authority.store.clone(),
                 profile: authority.profile.clone(),
-                session_id: &context.session_id,
-                proof_binding_id: context.proof_binding_id.as_deref(),
-                grant_id: &context.grant_id,
+                session_id: context.session_id(),
+                proof_binding_id: context.proof_binding_id(),
+                grant_id: context.grant_id(),
                 authority_app: &authority_app,
             },
             crate::collaboration_direct_messages::DirectSendIntent {
@@ -541,12 +541,18 @@ pub(super) async fn chat_room_summary(
     State(state): State<GatewayState>,
     headers: HeaderMap,
 ) -> Response {
+    let chat_launch =
+        require_home_launch_token_context(&state.data_dir, &headers, CHAT_ROOM_CAPSULE_ID);
     if state.collaboration_chat_product_port.is_none() {
+        // The legacy summary lists guest requests and sessions: Chat or Home only.
+        if let Err(err) = chat_launch {
+            if require_home_token(&state.data_dir, &headers).is_err() {
+                return room_service_error_response(err);
+            }
+        }
         return room_service_summary(State(state)).await;
     }
-    if let Err(err) =
-        require_home_launch_token_context(&state.data_dir, &headers, CHAT_ROOM_CAPSULE_ID)
-    {
+    if let Err(err) = chat_launch {
         return room_service_error_response(err);
     }
     Json(serde_json::json!({
@@ -1280,7 +1286,7 @@ fn start_chat_room_session(
     let session = crate::room_service::start_local_principal_runtime_session(
         data_dir,
         &did,
-        &context.principal_id,
+        context.principal_id(),
         &handle,
         "ElastOS shell",
     )?;
@@ -1295,7 +1301,7 @@ fn start_configured_chat_room_session(
     let session = crate::room_service::start_configured_collaboration_principal_session(
         data_dir,
         &did,
-        &context.principal_id,
+        context.principal_id(),
         &handle,
         "ElastOS shell",
     )?;
@@ -1328,10 +1334,10 @@ pub(super) fn trusted_chat_room_profile_authority(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<crate::collaboration_profile_authority::VerifiedCollaborationProfileDocument> {
-    let localhost_root = crate::auth::principal_localhost_root(&context.principal_id);
+    let localhost_root = crate::auth::principal_localhost_root(context.principal_id());
     crate::collaboration_profile_authority::load_profile_authority(
         data_dir,
-        &context.principal_id,
+        context.principal_id(),
         &localhost_root,
     )?
     .ok_or_else(|| anyhow::anyhow!("signed Profile is unavailable"))
@@ -1593,29 +1599,7 @@ fn participant_card_directory(
     let Some(store) = read_snapshot else {
         return directory;
     };
-    if let Ok(requests) = store.pending_incoming_requests() {
-        for request in requests {
-            directory.relationships.insert(
-                request.requester_profile_did().to_string(),
-                ("pending", None),
-            );
-        }
-    }
-    if let Ok(requests) = store.outgoing_pending_requests(now) {
-        for request in requests {
-            directory
-                .relationships
-                .insert(request.remote_profile_did.clone(), ("requested", None));
-        }
-    }
-    if let Ok(snapshot) = store.snapshot() {
-        for contact in snapshot.contacts() {
-            directory.relationships.insert(
-                contact.remote_profile_did().to_string(),
-                ("contact", Some(contact.conversation_id().to_string())),
-            );
-        }
-    }
+    directory.relationships = gateway_home_system::contact_relationships(store, now);
     if let Some(service) = discovery_service {
         if let Ok(status) = service.read_only_status_from_snapshot(store, &authority.profile, now) {
             directory.discoverable = status
@@ -1802,7 +1786,7 @@ pub(super) async fn room_service_session_leave(
             Ok(principal) => principal,
             Err(err) => return room_service_error_response(err),
         };
-        let principal_id = context.principal_id;
+        let principal_id = context.principal_id().to_string();
         let result = tokio::task::spawn_blocking(move || {
             crate::room_service::leave_configured_collaboration_principal_session(
                 &data_dir,
@@ -1897,7 +1881,7 @@ pub(super) async fn room_service_poll(
                 match crate::room_service::resolve_configured_collaboration_principal_session(
                     &data_dir,
                     &did,
-                    &context.principal_id,
+                    context.principal_id(),
                 ) {
                     Ok(session) => session,
                     Err(err) => return room_service_error_response(err),
@@ -2047,7 +2031,7 @@ pub(super) async fn room_service_objects_send(
         (Some(port), Some(context), Some(profile)) => {
             let operation = crate::collaboration_product::chat_message_request_binding(
                 &body.request_id,
-                &context.principal_id,
+                context.principal_id(),
                 &body.body,
                 &profile,
             )?;

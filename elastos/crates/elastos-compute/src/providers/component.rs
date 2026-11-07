@@ -212,12 +212,12 @@ impl ComputeProvider for ComponentProvider {
         let result = tokio::task::spawn_blocking(move || {
             Self::instantiate_component(&engine, &component, hostcall, capsule_id, principal_id)
         })
-        .await
-        .map_err(|err| ElastosError::Compute(format!("Component task join error: {err}")))?;
+        .await;
 
+        // Drop the activation entry when it finishes, including a failed or panicked host call.
         self.instances.write().await.remove(&handle.id);
 
-        result
+        result.map_err(|err| ElastosError::Compute(format!("Component task join error: {err}")))?
     }
 
     async fn stop(&self, handle: &CapsuleHandle) -> Result<()> {
@@ -287,9 +287,18 @@ fn bus_error(code: &str, message: impl Into<String>) -> elastos::bus::types::Bus
         "not_found" => elastos::bus::types::BusError::NotFound(message),
         "timeout" => elastos::bus::types::BusError::Timeout(message),
         "unavailable" => elastos::bus::types::BusError::Unavailable(message),
-        "invalid" | "invalid_action" | "invalid_resource_invoke" => {
-            elastos::bus::types::BusError::Invalid(message)
-        }
+        // The bridge refuses these before storage, so nothing was written: the
+        // guest may treat them as a refusal, not an unknown result.
+        "invalid"
+        | "invalid_action"
+        | "invalid_resource_invoke"
+        | "revision_required"
+        | "revision_conflict"
+        | "principal_root_protection_required"
+        | "invalid_localhost_path"
+        | "append_not_allowed"
+        | "operation_not_allowed"
+        | "invalid_content" => elastos::bus::types::BusError::Invalid(message),
         _ => elastos::bus::types::BusError::Internal(message),
     }
 }
@@ -399,12 +408,17 @@ impl elastos::bus::providers::Host for ComponentState {
         request: elastos::bus::types::InvokeRequest,
     ) -> std::result::Result<elastos::bus::types::InvokeResponse, elastos::bus::types::BusError>
     {
+        let Some(grant) = request.grant.filter(|grant| !grant.is_empty()) else {
+            return Err(elastos::bus::types::BusError::Denied(
+                "resource invoke requires a capability grant".into(),
+            ));
+        };
         let body = json_body(&request.body)?;
         let response = self.call_bridge(guest_bus::invoke_request(guest_bus::InvokeRequest {
             resource: request.resource,
             operation: request.operation,
             body,
-            grant: request.grant,
+            grant: Some(grant),
         }))?;
         let (result, audit) = match response {
             RuntimeResponse::ResourceResult { result, audit } => (result, audit),
@@ -608,6 +622,108 @@ mod tests {
     }
 
     #[test]
+    fn bridge_refusals_made_before_storage_are_invalid() {
+        let invoke_with = |code: &'static str| {
+            let mut state = ComponentState {
+                hostcall: Some(Arc::new(move |_line, _capsule, _principal| {
+                    Ok(serde_json::json!({
+                        "id": 1,
+                        "response": { "type": "error", "code": code, "message": "refused" }
+                    })
+                    .to_string())
+                })),
+                capsule_id: "capsule-1".into(),
+                principal_id: Some("person:local:test".into()),
+                limits: ComponentProvider::store_limits(),
+            };
+            elastos::bus::providers::Host::invoke(
+                &mut state,
+                elastos::bus::types::InvokeRequest {
+                    resource: "localhost://Users/self/.AppData/Agents/demo/tasks/t/journal".into(),
+                    operation: "write".into(),
+                    body: br#"{"content":[1]}"#.to_vec(),
+                    grant: Some("grant-token".into()),
+                },
+            )
+            .unwrap_err()
+        };
+        for code in [
+            "revision_required",
+            "revision_conflict",
+            "principal_root_protection_required",
+            "invalid_localhost_path",
+            "append_not_allowed",
+            "operation_not_allowed",
+            "invalid_content",
+        ] {
+            assert!(
+                matches!(invoke_with(code), elastos::bus::types::BusError::Invalid(_)),
+                "{code}"
+            );
+        }
+        // A failure that may come after storage stays Internal, and a token
+        // refusal stays Denied.
+        for code in [
+            "write_failed",
+            "read_failed",
+            "provider_error",
+            "something_new",
+        ] {
+            assert!(
+                matches!(
+                    invoke_with(code),
+                    elastos::bus::types::BusError::Internal(_)
+                ),
+                "{code}"
+            );
+        }
+        assert!(matches!(
+            invoke_with("capability_denied"),
+            elastos::bus::types::BusError::Denied(_)
+        ));
+    }
+
+    #[test]
+    fn provider_invoke_without_a_grant_is_denied_before_the_bridge() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_host = captured.clone();
+        let mut state = ComponentState {
+            hostcall: Some(Arc::new(move |line, _capsule, _principal| {
+                captured_host.lock().unwrap().push(line.to_string());
+                Ok(serde_json::json!({
+                    "id": 1,
+                    "response": {
+                        "type": "resource_result",
+                        "result": { "status": "ok" }
+                    }
+                })
+                .to_string())
+            })),
+            capsule_id: "capsule-1".into(),
+            principal_id: Some("person:local:test".into()),
+            limits: ComponentProvider::store_limits(),
+        };
+
+        for grant in [None, Some(String::new())] {
+            let err = elastos::bus::providers::Host::invoke(
+                &mut state,
+                elastos::bus::types::InvokeRequest {
+                    resource: "localhost://Users/self/Documents/note.txt".into(),
+                    operation: "read".into(),
+                    body: b"{}".to_vec(),
+                    grant,
+                },
+            )
+            .unwrap_err();
+            assert!(matches!(err, elastos::bus::types::BusError::Denied(_)));
+        }
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "a read with no grant must not reach the bridge"
+        );
+    }
+
+    #[test]
     fn capability_request_preserves_requested_resource() {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let captured_host = captured.clone();
@@ -653,5 +769,104 @@ mod tests {
         )
         .unwrap();
         assert_eq!(json_line(&line), json_line(&expected));
+    }
+
+    /// Loads the local agent-host guest in this process. It does not start
+    /// `elastos serve` and it does not open the Home data directory.
+    #[tokio::test]
+    #[ignore = "loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-local.sh"]
+    async fn agent_host_example_keeps_the_head_across_a_compaction() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../examples/agent-host");
+        let manifest: CapsuleManifest = serde_json::from_str(
+            &std::fs::read_to_string(root.join("capsule.json")).expect("agent-host capsule.json"),
+        )
+        .expect("agent-host manifest");
+        let engine = ComponentProvider::engine().expect("component engine");
+        let component = Component::from_file(&engine, root.join("agent-host.component.wasm"))
+            .expect("compile agent-host component");
+        let ty = component.component_type();
+        let mut imports: Vec<String> = ty
+            .imports(&engine)
+            .map(|(name, _item)| name.to_string())
+            .collect();
+        imports.sort();
+        // `capabilities` asks for the two journal grants; `providers` writes
+        // and reads the guest's own task journal with them.
+        let mut expected = vec![
+            "elastos:bus/capabilities@1.0.0".to_string(),
+            "elastos:bus/identity@1.0.0".to_string(),
+            "elastos:bus/providers@1.0.0".to_string(),
+            "elastos:bus/runtime@1.0.0".to_string(),
+            "elastos:bus/types@1.0.0".to_string(),
+        ];
+        expected.sort();
+        assert_eq!(
+            imports, expected,
+            "agent-host may import only the Bus calls it uses"
+        );
+        let exports: Vec<String> = ty
+            .exports(&engine)
+            .map(|(name, _item)| name.to_string())
+            .collect();
+        assert!(
+            exports
+                .iter()
+                .any(|name| name.starts_with("elastos:bus/") && name.contains("lifecycle")),
+            "agent-host exports were {exports:?}"
+        );
+
+        let provider = ComponentProvider::new();
+        let bridge_lines = Arc::new(Mutex::new(Vec::new()));
+        let bridge_seen = bridge_lines.clone();
+        provider.set_bus_hostcall(Arc::new(move |line, _capsule, _principal| {
+            bridge_seen.lock().unwrap().push(line.to_string());
+            Err("this test gives the guest no bridge".to_string())
+        }));
+        let parent = provider
+            .load(&root, manifest.clone())
+            .await
+            .expect("load agent-host component");
+        let child = provider
+            .load(&root, manifest)
+            .await
+            .expect("load a second agent-host component");
+        assert_ne!(
+            parent.id, child.id,
+            "two loads must not share one component id"
+        );
+        provider
+            .start(&parent)
+            .await
+            .expect("agent-host lifecycle run");
+        provider
+            .start(&child)
+            .await
+            .expect("the second component lifecycle run");
+        // With no Runtime to answer, each guest asks for exactly two grants on
+        // its own journal and, refused, sends no resource call.
+        let lines: Vec<serde_json::Value> = bridge_lines
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|line| json_line(line))
+            .collect();
+        let journal = "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal";
+        let asked: Vec<(String, String)> = lines
+            .iter()
+            .map(|line| {
+                assert_eq!(line["request"]["type"], "request_capability", "{line}");
+                assert_eq!(line["request"]["resource"], journal, "{line}");
+                (
+                    line["request"]["resource"].as_str().unwrap().to_string(),
+                    line["request"]["action"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        let pair = [
+            (journal.to_string(), "write".to_string()),
+            (journal.to_string(), "read".to_string()),
+        ];
+        assert_eq!(asked, [pair.clone(), pair].concat());
     }
 }

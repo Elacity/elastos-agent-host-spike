@@ -1,0 +1,12 @@
+id: F-B2-keepoverwrite
+file: src/ops.rs
+test: ops::model_forged_overwrite_does_not_remove_the_right
+--- old
+            Operation::Overwrite if !grant.rights.overwrite => {
+                Err(OperateRefuse::OverwriteNotGranted)
+            }
+--- new
+            Operation::Overwrite if !grant.rights.overwrite || request.forged_overwrite => {
+                Err(OperateRefuse::OverwriteNotGranted)
+            }
+--- end

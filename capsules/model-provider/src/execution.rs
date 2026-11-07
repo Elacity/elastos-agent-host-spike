@@ -827,11 +827,20 @@ mod tests {
 
     #[cfg(unix)]
     fn wait_for_fake_llama_event(path: &Path, expected: &str) {
-        let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
-        while !fake_llama_events(path).iter().any(|line| line == expected) {
+        wait_for_fake_llama_event_with_timeout(path, expected, FIXTURE_EVENT_TIMEOUT);
+    }
+
+    #[cfg(unix)]
+    fn wait_for_fake_llama_event_with_timeout(path: &Path, expected: &str, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let events = fake_llama_events(path);
+            if events.iter().any(|line| line == expected) {
+                return;
+            }
             assert!(
                 Instant::now() < deadline,
-                "missing fake llama event {expected}"
+                "missing fake llama event {expected}; events: {events:?}"
             );
             thread::sleep(Duration::from_millis(10));
         }
@@ -3453,6 +3462,81 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn local_llama_refuses_input_and_output_that_reach_the_context_window() {
+        let root = temp_root("local-llama-context-window-full");
+        let (offer, events, root) = local_llama_offer(&root, "healthy");
+        let limits = offer.summary().context.unwrap();
+        assert_eq!(limits.context_window_tokens, 256);
+        let mut provider = ProviderCoordinatorHandle::start();
+        init_provider(&provider, &root, vec![offer.clone()]);
+
+        // The fixture counts one user message as its UTF-8 length plus 8
+        // template tokens: 216 + 8 = 224; 224 + 32 = 256, the whole window.
+        let input = json!({
+            "schema": elastos_model_contract::TEXT_INPUT_V2_SCHEMA,
+            "messages": [{"role":"user","content":"x".repeat(216)}],
+            "max_output_tokens": 32,
+        });
+        let binding = create_binding("request:budget-at-window", &offer, &input);
+        let created = create_run(&provider, &offer, &binding, &input);
+        let run_id = created["data"]["run_id"].as_str().unwrap();
+        let terminal = wait_for_terminal(&provider, run_id, &access_binding(&binding));
+        assert_eq!(terminal["data"]["status"], "failed", "{terminal:#}");
+        assert_eq!(
+            terminal["data"]["terminal"]["error"]["code"], "context_rejected",
+            "{terminal:#}"
+        );
+        assert_eq!(
+            terminal["data"]["terminal"]["error"]["message"], "model context is full",
+            "{terminal:#}"
+        );
+        let lines = fake_llama_events(&events);
+        assert!(lines.iter().any(|line| line == "count:224"), "{lines:?}");
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.starts_with("request:"))
+                .count(),
+            0,
+            "a full context must not reach generation: {lines:?}"
+        );
+        provider.shutdown_on_eof();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_llama_generates_when_input_and_output_stay_under_the_context_window() {
+        let root = temp_root("local-llama-context-window-under");
+        let (offer, events, root) = local_llama_offer(&root, "healthy");
+        let mut provider = ProviderCoordinatorHandle::start();
+        init_provider(&provider, &root, vec![offer.clone()]);
+
+        // One token under the window: 215 + 8 = 223; 223 + 32 = 255.
+        let input = json!({
+            "schema": elastos_model_contract::TEXT_INPUT_V2_SCHEMA,
+            "messages": [{"role":"user","content":"x".repeat(215)}],
+            "max_output_tokens": 32,
+        });
+        let binding = create_binding("request:budget-under-window", &offer, &input);
+        let created = create_run(&provider, &offer, &binding, &input);
+        let run_id = created["data"]["run_id"].as_str().unwrap();
+        let terminal = wait_for_terminal(&provider, run_id, &access_binding(&binding));
+        assert_eq!(terminal["data"]["status"], "completed", "{terminal:#}");
+        let lines = fake_llama_events(&events);
+        assert!(lines.iter().any(|line| line == "count:223"), "{lines:?}");
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.starts_with("request:"))
+                .count(),
+            1,
+            "one token under the window must reach generation: {lines:?}"
+        );
+        provider.shutdown_on_eof();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn local_llama_missing_count_fails_before_generation() {
         let root = temp_root("local-llama-missing-count");
         let (offer, events, root) = local_llama_offer(&root, "incomplete_count");
@@ -3464,6 +3548,53 @@ mod tests {
         let run_id = created["data"]["run_id"].as_str().unwrap();
         let terminal = wait_for_terminal(&provider, run_id, &access_binding(&binding));
         assert_eq!(terminal["data"]["status"], "failed");
+        assert_eq!(
+            terminal["data"]["terminal"]["error"]["code"],
+            "response_malformed"
+        );
+        assert_eq!(
+            terminal["data"]["terminal"]["error"]["message"],
+            "model backend returned invalid data"
+        );
+        assert_eq!(
+            crate::test_support::adapter_detail_for(run_id).as_deref(),
+            Some("missing chat input token count")
+        );
+        assert_eq!(
+            fake_llama_events(&events)
+                .iter()
+                .filter(|line| line.starts_with("request:"))
+                .count(),
+            0
+        );
+        provider.shutdown_on_eof();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_llama_zero_count_fails_before_generation() {
+        let root = temp_root("local-llama-zero-count");
+        let (offer, events, root) = local_llama_offer(&root, "zero_count");
+        let mut provider = ProviderCoordinatorHandle::start();
+        init_provider(&provider, &root, vec![offer.clone()]);
+        let input = text_input("hello");
+        let binding = create_binding("request:zero-count", &offer, &input);
+        let created = create_run(&provider, &offer, &binding, &input);
+        let run_id = created["data"]["run_id"].as_str().unwrap();
+        let terminal = wait_for_terminal(&provider, run_id, &access_binding(&binding));
+        assert_eq!(terminal["data"]["status"], "failed");
+        assert_eq!(
+            terminal["data"]["terminal"]["error"]["code"],
+            "response_malformed"
+        );
+        assert_eq!(
+            terminal["data"]["terminal"]["error"]["message"],
+            "model backend returned invalid data"
+        );
+        assert_eq!(
+            crate::test_support::adapter_detail_for(run_id).as_deref(),
+            Some("missing chat input token count")
+        );
         assert_eq!(
             fake_llama_events(&events)
                 .iter()
@@ -4077,11 +4208,21 @@ mod tests {
         let root = temp_root("local-llama-timeout-capacity");
         let (mut offer, events, root) = local_llama_offer(&root, "timeout_ignore_term");
         offer.policy.concurrency_limit = 1;
-        offer.policy.runtime_ms_limit = 2_000;
+        // The deadline must find the engine already ignoring termination. Its
+        // start is load-bound like every fixture event, so it gets the same
+        // bound; health keeps that bound too, so the run deadline comes first.
+        // The fake engine installs that handler before its heavy imports, so a
+        // deadline that lands during start-up still records term_ignored.
+        // A 1 s shutdown would reap the engine before this test writes the
+        // release file, so the shutdown wait uses the same load bound.
+        let runtime = FIXTURE_EVENT_TIMEOUT;
+        offer.policy.runtime_ms_limit = runtime.as_millis() as u64;
         let AdapterConfig::LocalLlamaCppText { settings, .. } = &mut offer.adapter else {
             unreachable!();
         };
-        settings.health_timeout_ms = 5_000;
+        settings.health_timeout_ms = FIXTURE_EVENT_TIMEOUT.as_millis() as u64;
+        // No forced reap races the checks below: the engine leaves on release.
+        settings.shutdown_timeout_ms = FIXTURE_EVENT_TIMEOUT.as_millis() as u64;
         let mut provider = ProviderCoordinatorHandle::start();
         init_provider(&provider, &root, vec![offer.clone()]);
 
@@ -4089,7 +4230,11 @@ mod tests {
         let first_binding = create_binding("request:local-timeout-first", &offer, &first_input);
         let first = create_run(&provider, &offer, &first_binding, &first_input);
         let first_run_id = first["data"]["run_id"].as_str().unwrap();
-        wait_for_fake_llama_event(&events, "term_ignored");
+        wait_for_fake_llama_event_with_timeout(
+            &events,
+            "term_ignored",
+            runtime + FIXTURE_EVENT_TIMEOUT,
+        );
         assert_eq!(
             get_run(&provider, first_run_id, &access_binding(&first_binding))["data"]["status"],
             "running"
@@ -4101,6 +4246,8 @@ mod tests {
         let blocked = create_run(&provider, &offer, &blocked_binding, &blocked_input);
         assert_eq!(blocked["data"]["terminal"]["error"]["code"], "model_busy");
 
+        // The worker stops only once the engine that ignored termination exits.
+        std::fs::write(events.with_extension("release"), b"release").unwrap();
         assert_eq!(
             wait_for_terminal(&provider, first_run_id, &access_binding(&first_binding))["data"]
                 ["terminal"]["error"]["code"],

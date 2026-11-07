@@ -25,6 +25,13 @@ const DID_RECOVERY_PROOF_SCHEMA: &str = "elastos.did.recovery-proof/v1";
 const DID_RECOVERY_MAX_TTL_SECS: u64 = 15 * 60;
 const PROVIDER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Refusal reason when `Init` carries no storage root.
+const STORAGE_PATH_NOT_SET: &str = "did-provider: storage path is not set";
+/// Refusal reason when the storage root is not absolute.
+const STORAGE_PATH_NOT_ABSOLUTE: &str = "did-provider: storage path is not absolute";
+/// Error code for every storage-root refusal.
+const STORAGE_ERROR_CODE: &str = "storage_error";
+
 // === Wire protocol types ===
 
 #[derive(Debug, Deserialize)]
@@ -180,8 +187,17 @@ impl DidProvider {
     }
 
     fn init(&mut self, config: serde_json::Value) -> Response {
-        if let Some(bp) = config.get("base_path").and_then(|v| v.as_str()) {
-            self.storage_path = bp.to_string();
+        // Every Init must name its own root. A confined provider can only write
+        // under that root, so it never guesses one and never inherits an older
+        // one. A refused Init leaves no usable root behind.
+        self.storage_path = config
+            .get("base_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if let Err(reason) = self.base_dir() {
+            self.storage_path.clear();
+            return Response::error(STORAGE_ERROR_CODE, &reason);
         }
 
         if let Some(key_hex) = config.get("encryption_key").and_then(|v| v.as_str()) {
@@ -201,7 +217,9 @@ impl DidProvider {
             }
         }
 
-        self.try_load_nickname();
+        if let Err(reason) = self.try_load_nickname() {
+            return Response::error(STORAGE_ERROR_CODE, &reason);
+        }
 
         Response::ok(serde_json::json!({
             "protocol_version": "1.0",
@@ -258,13 +276,21 @@ impl DidProvider {
         }
         let payload_hex =
             elastos_common::chat_protocol::signing_payload_hex(sender_id, ts, content);
-        let payload = match hex::decode(payload_hex) {
+        let payload = match hex::decode(&payload_hex) {
             Ok(payload) => payload,
             Err(e) => {
                 return Response::error("invalid_intent", &format!("Invalid chat payload: {}", e))
             }
         };
-        self.sign_bytes(&payload)
+        // The signature travels with the payload the provider actually signed,
+        // so a caller can verify it without re-rendering the chat payload.
+        match self.sign_bytes(&payload) {
+            Response::Ok { data: Some(signed) } => Response::ok(serde_json::json!({
+                "payload": payload_hex,
+                "signature": signed["signature"],
+            })),
+            refusal => refusal,
+        }
     }
 
     fn verify(&self, did: &str, data_hex: &str, sig_hex: &str) -> Response {
@@ -367,8 +393,10 @@ impl DidProvider {
         if self.device_key.is_none() {
             return Response::error("not_init", "No device key provided");
         }
+        if let Err(reason) = self.save_nickname(nickname) {
+            return Response::error(STORAGE_ERROR_CODE, &reason);
+        }
         self.nickname = Some(nickname.to_string());
-        self.save_nickname(nickname);
         Response::ok(serde_json::json!({"nickname": nickname}))
     }
 
@@ -396,7 +424,10 @@ impl DidProvider {
         }
 
         let normalized = name.to_ascii_lowercase();
-        let dir = self.did_dir().join("personas");
+        let dir = match self.did_dir() {
+            Ok(dir) => dir.join("personas"),
+            Err(reason) => return Response::error(STORAGE_ERROR_CODE, &reason),
+        };
         let key_path = dir.join(format!("{}.enc", normalized));
         let storage_key = derive_storage_key(dk);
 
@@ -458,33 +489,47 @@ impl DidProvider {
 
     // === Storage helpers ===
 
-    fn base_dir(&self) -> std::path::PathBuf {
-        if self.storage_path.is_empty() {
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
-        } else {
-            std::path::PathBuf::from(&self.storage_path)
+    /// Resolve the storage root the provider was given, or refuse.
+    ///
+    /// This is the single rule for root validity: `Init`, nickname persistence
+    /// and persona storage all reach the filesystem through it. A missing,
+    /// empty or relative root is refused with a named reason; the provider
+    /// never falls back to the current directory or `/tmp`.
+    fn base_dir(&self) -> Result<std::path::PathBuf, String> {
+        if self.storage_path.trim().is_empty() {
+            return Err(STORAGE_PATH_NOT_SET.to_string());
         }
-    }
-
-    fn did_dir(&self) -> std::path::PathBuf {
-        self.base_dir().join("did")
-    }
-
-    fn try_load_nickname(&mut self) {
-        if let Some(ref dk) = self.device_key {
-            if let Ok(Some(nick)) =
-                elastos_identity::load_nickname_with_device_key(&self.base_dir(), dk)
-            {
-                self.nickname = Some(nick);
-            }
+        let base = std::path::PathBuf::from(&self.storage_path);
+        if !base.is_absolute() {
+            return Err(STORAGE_PATH_NOT_ABSOLUTE.to_string());
         }
+        Ok(base)
     }
 
-    fn save_nickname(&self, nickname: &str) {
-        let Some(ref dk) = self.device_key else {
-            return;
+    fn did_dir(&self) -> Result<std::path::PathBuf, String> {
+        Ok(self.base_dir()?.join("did"))
+    }
+
+    fn try_load_nickname(&mut self) -> Result<(), String> {
+        let Some(dk) = self.device_key else {
+            return Ok(());
         };
-        let _ = elastos_identity::save_nickname_with_device_key(&self.base_dir(), dk, nickname);
+        let base_dir = self.base_dir()?;
+        // The shared loader is the single nickname decoder. A denied or corrupt
+        // read is a refusal and reaches `Init` as `storage_error`; it is never
+        // reported as "no nickname set".
+        self.nickname = elastos_identity::load_nickname_with_device_key(&base_dir, &dk)
+            .map_err(|e| format!("did-provider: failed to read nickname: {e}"))?;
+        Ok(())
+    }
+
+    fn save_nickname(&self, nickname: &str) -> Result<(), String> {
+        let Some(dk) = self.device_key else {
+            return Ok(());
+        };
+        let base_dir = self.base_dir()?;
+        elastos_identity::save_nickname_with_device_key(&base_dir, &dk, nickname)
+            .map_err(|e| format!("did-provider: failed to save nickname: {e}"))
     }
 }
 
@@ -695,8 +740,485 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
 
     const NONCANONICAL_ALIAS_DID: &str = "did:key:z2DQYePVrytqCLfdq5VSDGtksAZC9NAt75iCed5WwSKKVXt";
+
+    /// The committed list records these falsifiers, including DID20, which
+    /// makes a missing `sandbox-exec` on macOS skip instead of failing, DID21,
+    /// which starts the provider directly when its profile file is missing,
+    /// and DID22, which returns `false` from the error arm of
+    /// `sandbox_available`, so a missing `sandbox-exec` on macOS returns
+    /// instead of failing the test. Task 052 adds DID23, DID24 and DID25 for
+    /// the drainer that starts only after the wait, a fixed denial in the
+    /// shared failure message, and the invalid-JSON branch reporting that
+    /// shared message. Task 056 adds DID26 for the second, unpinned exec rule,
+    /// task 057 adds DID27 and DID28 for the widened parent read and the
+    /// appended parent write grant, task 065 adds DID29 for the shutdown
+    /// arm that writes into the provider's own executable while it lies
+    /// beneath its storage root, and task 071 adds DID30 for the appended
+    /// parent read that adopts a planted persona key. Task 115 adds DID31,
+    /// which reads `/etc/hosts`, outside every grant, in `get_did`'s ok arm and
+    /// answers `storage_error` when that read is denied, so `get_did` stops
+    /// answering ok and
+    /// `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged`
+    /// fails. Task 118 adds DID32, which writes one file into the provider's
+    /// own storage root in the `Request::Shutdown` arm of `fn handle` before
+    /// it answers, so that same test fails on its final compare after
+    /// `shutdown`.
+    const EXPECTED_FALSIFIER_IDS: [&str; 32] = [
+        "DID01", "DID02", "DID03", "DID04", "DID05", "DID06", "DID07", "DID08", "DID09", "DID10",
+        "DID11", "DID12", "DID13", "DID14", "DID15", "DID16", "DID17", "DID18", "DID19", "DID20",
+        "DID21", "DID22", "DID23", "DID24", "DID25", "DID26", "DID27", "DID28", "DID29", "DID30",
+        "DID31", "DID32",
+    ];
+
+    /// The repository root; this crate, its test targets and the one runner's
+    /// `examples/agent-host` folder all sit below it.
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("did-provider must sit two levels below the repository root")
+            .to_path_buf()
+    }
+
+    /// Whether `source` declares `name` under a `#[test]` attribute.
+    fn declares_test(source: &str, name: &str) -> bool {
+        let declaration = format!("fn {name}(");
+        let mut is_test = false;
+        for line in source.lines() {
+            let trimmed = line.trim();
+            if trimmed == "#[test]" {
+                is_test = true;
+            } else if trimmed.is_empty() || trimmed.starts_with("#[") || trimmed.starts_with("//") {
+                // Attributes and comments can sit between `#[test]` and the item.
+            } else if is_test && trimmed.starts_with(&declaration) {
+                return true;
+            } else {
+                is_test = false;
+            }
+        }
+        false
+    }
+
+    struct HarnessTests {
+        registered: HashSet<String>,
+        ignored: HashSet<String>,
+    }
+
+    /// The compiled target owns registration and ignore status, including
+    /// attributes applied through `cfg_attr`, for each full selector.
+    fn harness_tests(executable: &Path) -> HarnessTests {
+        let list = |ignored| {
+            let mut command = Command::new(executable);
+            command.args(["--list", "--format", "terse"]);
+            if ignored {
+                command.arg("--ignored");
+            }
+            let output = command.output().unwrap_or_else(|err| {
+                panic!(
+                    "test executable {} must list its tests: {err}",
+                    executable.display()
+                )
+            });
+            assert!(
+                output.status.success(),
+                "test executable {} --list must succeed: {}",
+                executable.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("test executable --list output must be UTF-8")
+                .lines()
+                .filter_map(|line| line.strip_suffix(": test").map(str::to_owned))
+                .collect()
+        };
+        HarnessTests {
+            registered: list(false),
+            ignored: list(true),
+        }
+    }
+
+    /// The compiled integration target that matches the current source.
+    ///
+    /// A candidate counts only when it sits in the current test executable's
+    /// deps directory, names this crate's manifest in cargo's dep-info, and is
+    /// no older than `tests/confine.rs`. A stale executable would otherwise
+    /// report tests that the current source disables as active.
+    fn source_bound_target(deps: &Path, manifest: &str, source: &Path) -> Result<PathBuf, String> {
+        let source_modified = fs::metadata(source)
+            .and_then(|meta| meta.modified())
+            .map_err(|err| format!("{} must carry a time: {err}", source.display()))?;
+        let mut candidates: Vec<PathBuf> = fs::read_dir(deps)
+            .map_err(|err| format!("{} must be readable: {err}", deps.display()))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default();
+                if !name.starts_with("confine-") || name.contains('.') {
+                    return false;
+                }
+                fs::read_to_string(path.with_extension("d"))
+                    .map(|info| info.contains(&format!("CARGO_MANIFEST_DIR={manifest}")))
+                    .unwrap_or(false)
+            })
+            .collect();
+        candidates.sort_by_key(|path| path.metadata().and_then(|meta| meta.modified()).ok());
+        let newest = candidates.pop().ok_or_else(|| {
+            format!(
+                "the compiled confine integration test target for {manifest} must sit in {}",
+                deps.display()
+            )
+        })?;
+        let target_modified = fs::metadata(&newest)
+            .and_then(|meta| meta.modified())
+            .map_err(|err| format!("{} must carry a time: {err}", newest.display()))?;
+        if target_modified < source_modified {
+            return Err(format!(
+                "{} is older than {}; rebuild the integration test target before this check",
+                newest.display(),
+                source.display()
+            ));
+        }
+        Ok(newest)
+    }
+
+    /// The compiled `tests/confine.rs` target sits beside the unit test target.
+    ///
+    /// The shared build directory also holds other crates' `confine` targets, so
+    /// `source_bound_target` keeps only this crate's current executable.
+    fn integration_harness() -> HarnessTests {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let unit =
+            std::env::current_exe().expect("the unit test executable path must be available");
+        let deps = unit
+            .parent()
+            .expect("the unit test executable sits in the deps directory");
+        let source = Path::new(manifest).join("tests/confine.rs");
+        let target = source_bound_target(deps, manifest, &source)
+            .unwrap_or_else(|reason| panic!("{reason}"));
+        harness_tests(&target)
+    }
+
+    fn read_falsifiers_list() -> serde_json::Value {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("falsifiers.json");
+        let text = fs::read_to_string(&path).unwrap_or_else(|err| {
+            panic!("falsifier list {} must be readable: {err}", path.display())
+        });
+        serde_json::from_str(&text)
+            .unwrap_or_else(|err| panic!("falsifier list {} must be JSON: {err}", path.display()))
+    }
+
+    fn assert_falsifiers_list_is_honest(doc: &serde_json::Value) {
+        assert!(
+            doc["about"]
+                .as_str()
+                .is_some_and(|about| !about.trim().is_empty()),
+            "the falsifier list must carry a nonempty about string"
+        );
+        let entries = doc["falsifiers"]
+            .as_array()
+            .unwrap_or_else(|| panic!("the falsifier list must carry a falsifiers array"));
+
+        let unit = harness_tests(
+            &std::env::current_exe().expect("the unit test executable path must be available"),
+        );
+        let integration = integration_harness();
+        let root = repo_root();
+        assert!(
+            root.join("capsules/did-provider/src/main.rs").is_file(),
+            "the repository root must own capsules/did-provider"
+        );
+        // The one runner applies every edit relative to examples/agent-host, so
+        // the list names files by that rule and this test resolves them by the
+        // same rule (P10).
+        let edit_base = root.join("examples/agent-host");
+
+        let mut ids: Vec<&str> = Vec::new();
+        for entry in entries {
+            let id = entry["id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("every falsifier needs an id"));
+            assert!(!id.trim().is_empty(), "every falsifier needs an id");
+            assert!(!ids.contains(&id), "falsifier id {id} is used twice");
+            ids.push(id);
+            for field in ["title", "command"] {
+                let value = entry[field]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id}: {field} must be a string"));
+                assert!(!value.trim().is_empty(), "{id}: {field} must not be empty");
+            }
+            assert_eq!(
+                entry["command"].as_str(),
+                Some("did"),
+                "{id}: command must be did"
+            );
+            assert_eq!(
+                entry["expect"].as_str(),
+                Some("caught"),
+                "{id}: expect must be caught"
+            );
+
+            let edits = entry["edits"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{id}: edits must be a list"));
+            assert!(!edits.is_empty(), "{id}: edits must not be empty");
+            for edit in edits {
+                let file = edit["file"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id}: every edit needs a file"));
+                let old = edit["old"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id}: every edit needs an old snippet"));
+                let new = edit["new"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id}: every edit needs a new snippet"));
+                assert!(!old.is_empty(), "{id}: old must not be empty");
+                assert!(!new.is_empty(), "{id}: new must not be empty");
+                assert_ne!(old, new, "{id}: new must differ from old");
+                assert!(
+                    !Path::new(file).is_absolute(),
+                    "{id}: {file} must not be absolute; \
+                     edit paths are relative to examples/agent-host"
+                );
+                let source_path = edit_base.join(file);
+                let source = fs::read_to_string(&source_path).unwrap_or_else(|err| {
+                    panic!(
+                        "{id}: {file}: edit paths are relative to examples/agent-host; \
+                         the edit file must exist and be readable: {err}"
+                    )
+                });
+                let occurrences = source.matches(old).count();
+                assert_eq!(
+                    occurrences, 1,
+                    "{id}: old snippet must occur verbatim exactly once in {file}, found {occurrences}"
+                );
+            }
+
+            let tests = entry["tests"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{id}: tests must be a list"));
+            assert!(!tests.is_empty(), "{id}: tests must not be empty");
+            for test in tests {
+                let name = test
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id}: every test name must be a string"));
+                assert!(!name.is_empty(), "{id}: test names must not be empty");
+                let (source_path, registered) = if name.starts_with("tests::") {
+                    (
+                        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+                        &unit,
+                    )
+                } else if name.contains("::") {
+                    panic!("{id}: {name} must be a unit test under tests:: or a bare integration test name");
+                } else {
+                    (
+                        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/confine.rs"),
+                        &integration,
+                    )
+                };
+                let source = fs::read_to_string(&source_path).unwrap_or_else(|err| {
+                    panic!(
+                        "{id}: test source {} must be readable: {err}",
+                        source_path.display()
+                    )
+                });
+                let function = name
+                    .rsplit_once("::")
+                    .map_or(name, |(_, function)| function);
+                assert!(
+                    declares_test(&source, function),
+                    "{id}: {name} must be a #[test] function in {}",
+                    source_path.display()
+                );
+                assert!(
+                    registered.registered.contains(name),
+                    "{id}: {name} must be registered in the test executable"
+                );
+                assert!(
+                    !registered.ignored.contains(name),
+                    "{id}: {name} must not be ignored in the test executable"
+                );
+            }
+        }
+
+        for expected in EXPECTED_FALSIFIER_IDS {
+            assert!(ids.contains(&expected), "the list must record {expected}");
+        }
+        let recovery = entries
+            .iter()
+            .find(|entry| entry["id"] == "DID06")
+            .expect("the list must record DID06");
+        assert!(
+            recovery["tests"]
+                .as_array()
+                .expect("DID06 tests must be a list")
+                .iter()
+                .any(|test| test == "verify_did_recovery_under_profile"),
+            "DID06 must name verify_did_recovery_under_profile"
+        );
+    }
+
+    /// The committed falsifier list describes the current source and test harness.
+    ///
+    /// Falsifier: replace one `old` snippet with text that is not in the source,
+    /// delete the DID06 record, empty an `edits`/`tests` array, change a test
+    /// name's prefix, remove its `#[test]`, or mark it ignored; this test fails
+    /// on each.
+    #[test]
+    fn falsifiers_list_is_honest() {
+        assert_falsifiers_list_is_honest(&read_falsifiers_list());
+    }
+
+    #[test]
+    #[cfg_attr(test, ignore = "fixture for the falsifier list's ignored-test check")]
+    fn ignored_falsifier_fixture() {
+        panic!("the ignored fixture must be refused by the falsifier list");
+    }
+
+    #[test]
+    fn falsifiers_list_rejects_ignored_tests() {
+        for (index, selector) in [
+            (0, "tests::ignored_falsifier_fixture"),
+            (3, "ignored_falsifier_fixture"),
+        ] {
+            let mut doc = read_falsifiers_list();
+            let id = doc["falsifiers"][index]["id"].as_str().unwrap().to_owned();
+            doc["falsifiers"][index]["tests"][0] = selector.into();
+            let refusal = std::panic::catch_unwind(|| assert_falsifiers_list_is_honest(&doc))
+                .expect_err("the falsifier list must refuse an ignored test");
+            let expected = format!("{id}: {selector} must not be ignored in the test executable");
+            assert_eq!(refusal.downcast_ref::<String>(), Some(&expected));
+        }
+    }
+
+    /// The list names edit files by the runner's rule, not the repository root.
+    ///
+    /// Regression: writing every edit path from the repository root must be
+    /// refused for DID01, the first entry, in the runner's own words.
+    ///
+    /// Falsifier: resolve edits from `repo_root()` again (DID19); this test
+    /// fails because the DID01 refusal does not come.
+    #[test]
+    fn falsifiers_list_rejects_a_repository_relative_path() {
+        let mut doc = read_falsifiers_list();
+        let entries = doc["falsifiers"]
+            .as_array_mut()
+            .unwrap_or_else(|| panic!("the falsifier list must carry a falsifiers array"));
+        for entry in entries {
+            let id = entry["id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("every falsifier needs an id"))
+                .to_owned();
+            let edits = entry["edits"]
+                .as_array_mut()
+                .unwrap_or_else(|| panic!("{id}: edits must be a list"));
+            for edit in edits {
+                let file = edit["file"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id}: every edit needs a file"));
+                let repository_relative = file.strip_prefix("../../").unwrap_or_else(|| {
+                    panic!("{id}: {file} must start with ../../ (relative to examples/agent-host)")
+                });
+                edit["file"] = serde_json::Value::String(repository_relative.to_owned());
+            }
+        }
+        let refusal = std::panic::catch_unwind(|| assert_falsifiers_list_is_honest(&doc))
+            .expect_err("the list must refuse paths written from the repository root");
+        let message = refusal
+            .downcast_ref::<String>()
+            .unwrap_or_else(|| panic!("the refusal must be a formatted reason"));
+        let expected = "DID01: capsules/did-provider/src/main.rs: \
+                        edit paths are relative to examples/agent-host";
+        assert!(
+            message.contains(expected),
+            "the refusal must name DID01, its file and the runner's path rule; got: {message}"
+        );
+    }
+
+    // Keep the test declaration in source while removing it from the harness.
+    #[cfg(any())]
+    #[test]
+    fn excluded_from_harness() {
+        panic!("this fixture must remain excluded from the test harness");
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "DID01: tests::excluded_from_harness must be registered in the test executable"
+    )]
+    fn falsifiers_list_rejects_a_test_removed_from_harness() {
+        let mut doc = read_falsifiers_list();
+        doc["falsifiers"][0]["tests"][0] =
+            serde_json::Value::String("tests::excluded_from_harness".into());
+        assert_falsifiers_list_is_honest(&doc);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "DID01: tests::missing::init_requires_storage_without_key must be registered in the test executable"
+    )]
+    fn falsifiers_list_rejects_a_wrong_prefix() {
+        let mut doc = read_falsifiers_list();
+        doc["falsifiers"][0]["tests"][0] =
+            serde_json::Value::String("tests::missing::init_requires_storage_without_key".into());
+        assert_falsifiers_list_is_honest(&doc);
+    }
+
+    /// A stale integration executable must not stand in for the current source.
+    ///
+    /// Regression: `#[ignore]` added to `verify_did_recovery_under_profile` was
+    /// concealed because `--bin did-provider` left the earlier integration
+    /// executable in place and it reported the test as active.
+    #[test]
+    fn falsifiers_list_rejects_stale_integration_evidence() {
+        let dir = tempfile::tempdir().expect("temporary deps directory");
+        let source = dir.path().join("confine.rs");
+        let target = dir.path().join("confine-deadbeef");
+        fs::write(&source, "").expect("source fixture");
+        fs::write(&target, "").expect("target fixture");
+        fs::write(
+            target.with_extension("d"),
+            format!("CARGO_MANIFEST_DIR={}\n", env!("CARGO_MANIFEST_DIR")),
+        )
+        .expect("dep-info fixture");
+
+        let set_modified =
+            |path: &Path, seconds: u64| {
+                fs::File::options()
+                    .write(true)
+                    .open(path)
+                    .expect("fixture must open for its time")
+                    .set_times(fs::FileTimes::new().set_modified(
+                        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
+                    ))
+                    .expect("fixture time must be set");
+            };
+        set_modified(&source, 2_000_000);
+        set_modified(&target, 1_000_000);
+
+        let stale = source_bound_target(dir.path(), env!("CARGO_MANIFEST_DIR"), &source)
+            .expect_err("a target older than its source must be refused");
+        assert!(
+            stale.contains("is older than"),
+            "the refusal must state the staleness: {stale}"
+        );
+
+        set_modified(&target, 2_000_000);
+        assert_eq!(
+            source_bound_target(dir.path(), env!("CARGO_MANIFEST_DIR"), &source)
+                .expect("a current target must be selected"),
+            target,
+            "the current integration target"
+        );
+    }
 
     fn make_device_key() -> [u8; 32] {
         [42u8; 32]
@@ -748,6 +1270,261 @@ mod tests {
         match response {
             Response::Error { code, .. } => assert_eq!(code, "invalid_recovery_proof"),
             other => panic!("Expected invalid_recovery_proof error, got {:?}", other),
+        }
+    }
+
+    fn assert_storage_error(response: Response, expected_reason: &str) {
+        match response {
+            Response::Error { code, message } => {
+                assert_eq!(code, STORAGE_ERROR_CODE);
+                assert_eq!(message, expected_reason);
+            }
+            other => panic!(
+                "Expected storage refusal {expected_reason:?}, got {:?}",
+                other
+            ),
+        }
+    }
+
+    fn current_dir_entries() -> Vec<String> {
+        let cwd = std::env::current_dir().unwrap();
+        let mut entries: Vec<String> = std::fs::read_dir(&cwd)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        entries
+    }
+
+    /// A storage root is required even when Init carries no encryption key.
+    ///
+    /// Falsifier: move the root validation inside `if self.device_key.is_some()`
+    /// in `init`; this Init then succeeds and the test fails.
+    #[test]
+    fn init_requires_storage_without_key() {
+        let before = current_dir_entries();
+        let mut provider = DidProvider::new();
+        let response = provider.handle(Request::Init {
+            config: serde_json::json!({}),
+        });
+        assert_storage_error(response, STORAGE_PATH_NOT_SET);
+        assert_eq!(
+            before,
+            current_dir_entries(),
+            "refused Init must not create files in the current directory"
+        );
+    }
+
+    /// An empty or blank root is the same refusal as a missing one.
+    ///
+    /// Falsifier: restore the old empty-path fallback in `base_dir`; Init then
+    /// succeeds by guessing the current directory and the test fails.
+    #[test]
+    fn empty_storage_path_is_refused() {
+        let before = current_dir_entries();
+        for base_path in ["", "   "] {
+            let mut provider = DidProvider::new();
+            let response = provider.handle(Request::Init {
+                config: serde_json::json!({
+                    "base_path": base_path,
+                    "encryption_key": hex::encode(make_device_key()),
+                }),
+            });
+            assert_storage_error(response, STORAGE_PATH_NOT_SET);
+        }
+        assert_eq!(
+            before,
+            current_dir_entries(),
+            "an empty root must not create files in the current directory"
+        );
+    }
+
+    /// A relative root is refused with its own reason, before any write.
+    ///
+    /// Falsifier: remove only the `is_absolute` check in `base_dir`; this Init
+    /// then accepts the relative root and the test fails. Restoring the
+    /// empty-path fallback alone does not make this test pass.
+    #[test]
+    fn relative_storage_is_refused() {
+        let relative = "did-provider-relative-root";
+        let before = current_dir_entries();
+        let mut provider = DidProvider::new();
+        let response = provider.handle(Request::Init {
+            config: serde_json::json!({
+                "base_path": relative,
+                "encryption_key": hex::encode(make_device_key()),
+            }),
+        });
+        assert_storage_error(response, STORAGE_PATH_NOT_ABSOLUTE);
+        assert!(!std::path::Path::new(relative).exists());
+        assert_eq!(
+            before,
+            current_dir_entries(),
+            "a relative root must not create files in the current directory"
+        );
+    }
+
+    /// Each Init must name its own root; a later Init never inherits the old one.
+    ///
+    /// Falsifier: restore the old `if let Some(bp) = config.get("base_path")`
+    /// assignment in `init`, so a second Init without `base_path` quietly keeps
+    /// the first root and returns ok.
+    #[test]
+    fn reinit_requires_explicit_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let bp = dir.path().to_str().unwrap().to_string();
+        let mut provider = init_provider(Some(&bp));
+        assert!(provider.signing_key.is_some());
+
+        let response = provider.handle(Request::Init {
+            config: serde_json::json!({
+                "encryption_key": hex::encode(make_device_key()),
+            }),
+        });
+        assert_storage_error(response, STORAGE_PATH_NOT_SET);
+
+        let before = current_dir_entries();
+        let response = provider.handle(Request::SetNickname {
+            nickname: "alice".to_string(),
+        });
+        assert_storage_error(response, STORAGE_PATH_NOT_SET);
+        assert!(
+            provider.nickname.is_none(),
+            "refused re-init must not leave a writable nickname path"
+        );
+        assert!(
+            !dir.path().join("did").join("nickname.enc").exists(),
+            "refused re-init must not write through the previous root"
+        );
+        assert_eq!(before, current_dir_entries());
+    }
+
+    /// Storage refusals reach the callers of every storage helper.
+    ///
+    /// Falsifier: swallow the `base_dir` error in `save_nickname` (the old
+    /// `let _ =` behaviour) or in the persona path; the operation then reports
+    /// success and the state assertions fail.
+    #[test]
+    fn storage_refusals_reach_callers() {
+        let mut provider = DidProvider::new();
+        // Test seam: a device key without any storage root, which a refused
+        // Init also produces.
+        provider.device_key = Some(make_device_key());
+
+        let before = current_dir_entries();
+        assert_storage_error(
+            provider.handle(Request::SetNickname {
+                nickname: "alice".to_string(),
+            }),
+            STORAGE_PATH_NOT_SET,
+        );
+        assert!(
+            provider.nickname.is_none(),
+            "refused nickname write must not change provider state"
+        );
+        assert_storage_error(
+            provider.handle(Request::GetPersonaDid {
+                name: "bot".to_string(),
+            }),
+            STORAGE_PATH_NOT_SET,
+        );
+        assert_eq!(
+            before,
+            current_dir_entries(),
+            "refused storage operations must not write in the current directory"
+        );
+    }
+
+    /// A refused root neither reads, overwrites nor changes existing state.
+    ///
+    /// Falsifier: restore any fallback root (the old `base_dir` fallback) or
+    /// retain the previous root on a later Init; the nickname file, persona key
+    /// or loaded nickname then changes before the refusal.
+    #[test]
+    fn invalid_storage_preserves_files_and_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let bp = dir.path().to_str().unwrap().to_string();
+        let nickname_path = dir.path().join("did").join("nickname.enc");
+        let persona_path = dir.path().join("did").join("personas").join("bot.enc");
+
+        let persona_did = {
+            let mut provider = init_provider(Some(&bp));
+            match provider.handle(Request::SetNickname {
+                nickname: "alice".to_string(),
+            }) {
+                Response::Ok { .. } => {}
+                other => panic!("Expected nickname write to succeed, got {:?}", other),
+            }
+            match provider.get_persona_did("bot") {
+                Response::Ok { data: Some(d) } => d["did"].as_str().unwrap().to_string(),
+                other => panic!("Expected persona DID, got {:?}", other),
+            }
+        };
+        let nickname_bytes = std::fs::read(&nickname_path).unwrap();
+        let persona_bytes = std::fs::read(&persona_path).unwrap();
+
+        let mut provider = init_provider(Some(&bp));
+        match provider.get_nickname() {
+            Response::Ok { data: Some(d) } => assert_eq!(d["nickname"], "alice"),
+            other => panic!("Expected loaded nickname alice, got {:?}", other),
+        }
+
+        let before = current_dir_entries();
+        for bad_base_path in ["", "relative-root"] {
+            let response = provider.handle(Request::Init {
+                config: serde_json::json!({
+                    "base_path": bad_base_path,
+                    "encryption_key": hex::encode(make_device_key()),
+                }),
+            });
+            match response {
+                Response::Error { .. } => {}
+                other => panic!("Expected Init to refuse {bad_base_path:?}, got {:?}", other),
+            }
+
+            assert_storage_error(
+                provider.handle(Request::SetNickname {
+                    nickname: "bob".to_string(),
+                }),
+                STORAGE_PATH_NOT_SET,
+            );
+            match provider.get_nickname() {
+                Response::Ok { data: Some(d) } => assert_eq!(
+                    d["nickname"], "alice",
+                    "refused storage must not change nickname state"
+                ),
+                other => panic!(
+                    "Expected nickname alice to survive refusal, got {:?}",
+                    other
+                ),
+            }
+            assert_storage_error(
+                provider.handle(Request::GetPersonaDid {
+                    name: "bot".to_string(),
+                }),
+                STORAGE_PATH_NOT_SET,
+            );
+            assert_eq!(
+                std::fs::read(&nickname_path).unwrap(),
+                nickname_bytes,
+                "refused storage must not overwrite the nickname"
+            );
+            assert_eq!(
+                std::fs::read(&persona_path).unwrap(),
+                persona_bytes,
+                "refused storage must not overwrite the persona key"
+            );
+        }
+        assert_eq!(
+            before,
+            current_dir_entries(),
+            "refused storage must not write in the current directory"
+        );
+
+        let mut provider = init_provider(Some(&bp));
+        match provider.get_persona_did("bot") {
+            Response::Ok { data: Some(d) } => assert_eq!(d["did"].as_str().unwrap(), persona_did),
+            other => panic!("Expected the original persona DID, got {:?}", other),
         }
     }
 
@@ -844,10 +1621,13 @@ mod tests {
 
         let ts = 1_714_000_000;
         let content = "hello world";
-        let data_hex = elastos_common::chat_protocol::signing_payload_hex(&did, ts, content);
-        let sig_hex = match provider.sign_chat_message(&did, ts, content) {
-            Response::Ok { data: Some(d) } => d["signature"].as_str().unwrap().to_string(),
-            _ => panic!("Expected signature"),
+        // The provider returns the payload it signed; the test renders none.
+        let (data_hex, sig_hex) = match provider.sign_chat_message(&did, ts, content) {
+            Response::Ok { data: Some(d) } => (
+                d["payload"].as_str().unwrap().to_string(),
+                d["signature"].as_str().unwrap().to_string(),
+            ),
+            other => panic!("Expected payload and signature, got {:?}", other),
         };
 
         match provider.verify(&did, &data_hex, &sig_hex) {
@@ -989,27 +1769,42 @@ mod tests {
         }
     }
 
+    /// Pins the principal-root mismatch refusal with another principal and a
+    /// suffix of the requested principal. Removing the comparison lets both
+    /// reach signature validation; replacing equality with `starts_with` lets
+    /// the suffix through. Either change loses the exact refusal below.
     #[test]
     fn test_verify_did_recovery_rejects_noncanonical_root_binding() {
         let signing_key = SigningKey::generate(&mut OsRng);
         let did = encode_signing_key_did(&signing_key);
         let provider = DidProvider::new();
 
-        let err = match provider.verify_did_recovery(
-            &did,
-            "person:local:abc123",
-            "localhost://Users/person:local:other",
-            "protector:did:abc123",
-            "pdek:abc123",
-            "nonce:abc123",
-            now_ts(),
-            now_ts() + 300,
-            "00",
-        ) {
-            Response::Error { message, .. } => message,
-            other => panic!("Expected noncanonical root to fail closed, got {:?}", other),
-        };
-        assert!(err.contains("must match"));
+        for (case, root) in [
+            ("another principal", "localhost://Users/person:local:other"),
+            (
+                "principal plus a suffix",
+                "localhost://Users/person:local:abc123x",
+            ),
+        ] {
+            let err = match provider.verify_did_recovery(
+                &did,
+                "person:local:abc123",
+                root,
+                "protector:did:abc123",
+                "pdek:abc123",
+                "nonce:abc123",
+                now_ts(),
+                now_ts() + 300,
+                "00",
+            ) {
+                Response::Error { message, .. } => message,
+                other => panic!("Expected noncanonical root to fail closed, got {:?}", other),
+            };
+            assert_eq!(
+                err, "localhost_root must match the DID recovery principal",
+                "case {case}: root {root:?}"
+            );
+        }
     }
 
     #[test]
@@ -1052,6 +1847,9 @@ mod tests {
         }
     }
 
+    /// Pins the request validator's subject refusal. Removing its codec call
+    /// reaches the later DID decode, whose error lacks the recovery prefix,
+    /// so the exact assertion fails.
     #[test]
     fn test_verify_did_recovery_rejects_did_elastos_until_resolver_exists() {
         let provider = DidProvider::new();
@@ -1069,7 +1867,10 @@ mod tests {
             Response::Error { message, .. } => message,
             other => panic!("Expected did:elastos to fail closed, got {:?}", other),
         };
-        assert!(err.contains("did:key"));
+        assert_eq!(
+            err,
+            "invalid DID recovery subject: DID must be one canonical Ed25519 did:key"
+        );
     }
 
     #[test]
@@ -1106,25 +1907,27 @@ mod tests {
         ));
     }
 
+    /// Pins the expired refusal for a signed past proof and at `expires_at == now`.
+    /// Both intervals stay ordered and within the maximum TTL. Removing the
+    /// expired guard accepts them; changing `<=` to `<` accepts the boundary.
     #[test]
     fn test_verify_did_recovery_rejects_expired_proof() {
         let signing_key = SigningKey::generate(&mut OsRng);
         let did = encode_signing_key_did(&signing_key);
-        let issued_at = now_ts().saturating_sub(600);
+        let now = now_ts();
+        let issued_at = now.saturating_sub(600);
         let expires_at = issued_at + 300;
-        let signature = did_recovery_test_signature(
-            &signing_key,
-            DidRecoveryPayload {
-                did: &did,
-                principal_id: "person:local:abc123",
-                localhost_root: "localhost://Users/person:local:abc123",
-                protector_id: "protector:did:abc123",
-                data_key_id: "pdek:abc123",
-                nonce: "nonce:abc123",
-                issued_at,
-                expires_at,
-            },
-        );
+        let recovery = DidRecoveryPayload {
+            did: &did,
+            principal_id: "person:local:abc123",
+            localhost_root: "localhost://Users/person:local:abc123",
+            protector_id: "protector:did:abc123",
+            data_key_id: "pdek:abc123",
+            nonce: "nonce:abc123",
+            issued_at,
+            expires_at,
+        };
+        let signature = did_recovery_test_signature(&signing_key, recovery);
         let provider = DidProvider::new();
         let err = match provider.verify_did_recovery(
             &did,
@@ -1140,7 +1943,26 @@ mod tests {
             Response::Error { message, .. } => message,
             other => panic!("Expected expired proof to fail closed, got {:?}", other),
         };
-        assert!(err.contains("expired"));
+        for (case, result) in [
+            ("signed past proof", Err(err)),
+            (
+                "expiry equals now",
+                validate_did_recovery_request(
+                    &DidRecoveryPayload {
+                        issued_at: now - 60,
+                        expires_at: now,
+                        ..recovery
+                    },
+                    now,
+                ),
+            ),
+        ] {
+            assert_eq!(
+                result,
+                Err("DID recovery proof expired".to_string()),
+                "{case}"
+            );
+        }
     }
 
     #[test]
@@ -1226,6 +2048,37 @@ mod tests {
             did1, did2,
             "changing the device key must change the main DID"
         );
+    }
+
+    /// A nickname read error reaches `Init` as a storage refusal.
+    ///
+    /// Falsifier: replace the nickname read error with `.ok().flatten()` in
+    /// `try_load_nickname` (DID03); the failed read becomes "no nickname" and
+    /// this test fails because `Init` returns ok.
+    #[test]
+    fn init_reports_nickname_read_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let bp = dir.path().to_str().unwrap().to_string();
+        let mut provider = init_provider(Some(&bp));
+        // A directory where the shared loader expects its encrypted nickname
+        // file makes the read fail without a sandbox.
+        std::fs::create_dir_all(dir.path().join("did").join("nickname.enc")).unwrap();
+        let response = provider.handle(Request::Init {
+            config: serde_json::json!({
+                "base_path": bp,
+                "encryption_key": hex::encode(make_device_key()),
+            }),
+        });
+        match response {
+            Response::Error { code, message } => {
+                assert_eq!(code, STORAGE_ERROR_CODE);
+                assert!(
+                    message.starts_with("did-provider: failed to read nickname:"),
+                    "unexpected reason: {message}"
+                );
+            }
+            other => panic!("Expected nickname read refusal, got {:?}", other),
+        }
     }
 
     #[test]
@@ -1387,5 +2240,521 @@ mod tests {
             Response::Error { code, .. } => assert_eq!(code, "invalid_name"),
             _ => panic!("Expected error for traversal attempt"),
         }
+    }
+
+    /// The serialized form of a response, so a refusal is asserted whole: its
+    /// code, its message and the absence of a `data` field in one comparison.
+    fn refusal_wire(response: &Response) -> serde_json::Value {
+        serde_json::to_value(response).expect("a response serializes")
+    }
+
+    /// Pins `DID key not available`, the one string `get_did` (:244) and
+    /// `sign_bytes` (:261) raise. The chat call passes the sender and timestamp
+    /// check first, so it pins the `sign_bytes` site rather than :274.
+    ///
+    /// Falsifier: answer ok from either `None` arm; the matching assertion
+    /// fails.
+    #[test]
+    fn handler_refuses_a_missing_did_key() {
+        let provider = DidProvider::new();
+        assert_eq!(
+            refusal_wire(&provider.get_did()),
+            serde_json::json!({
+                "status": "error",
+                "code": "not_init",
+                "message": "DID key not available",
+            })
+        );
+        assert_eq!(
+            refusal_wire(&provider.sign_chat_message("did:key:zMissing", 1_714_000_000, "hello")),
+            serde_json::json!({
+                "status": "error",
+                "code": "not_init",
+                "message": "DID key not available",
+            })
+        );
+    }
+
+    /// Pins `No device key provided`, the one string `set_nickname` (:394) and
+    /// `get_persona_did` (:409) raise before any storage work.
+    ///
+    /// Falsifier: remove either `device_key.is_none()`/`None` guard; that call
+    /// then writes or answers ok instead of refusing.
+    #[test]
+    fn handler_refuses_a_missing_device_key() {
+        let mut provider = DidProvider::new();
+        let nickname = provider.set_nickname("alice");
+        let persona = provider.get_persona_did("bot");
+        for response in [&nickname, &persona] {
+            assert_eq!(
+                refusal_wire(response),
+                serde_json::json!({
+                    "status": "error",
+                    "code": "not_init",
+                    "message": "No device key provided",
+                })
+            );
+        }
+    }
+
+    /// Pins `No nickname set` (:388). The provider initialised without a stored
+    /// nickname, so the read that loads one answers "absent".
+    ///
+    /// Falsifier: answer ok from `get_nickname`'s `None` arm; this test fails.
+    #[test]
+    fn handler_refuses_a_missing_nickname() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = init_provider(Some(dir.path().to_str().unwrap()));
+        assert_eq!(
+            refusal_wire(&provider.get_nickname()),
+            serde_json::json!({
+                "status": "error",
+                "code": "not_set",
+                "message": "No nickname set",
+            })
+        );
+    }
+
+    /// Pins `Persona name must be 1-64 characters` (:414). Both ends of the
+    /// range are refused: an empty name and one of 65 characters, so removing
+    /// either term of the length condition fails this test.
+    ///
+    /// Falsifier: remove `name.is_empty() || name.len() > 64`; the empty case
+    /// then reaches the character rule and the 65-character case answers ok.
+    #[test]
+    fn handler_refuses_a_persona_name_of_wrong_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = init_provider(Some(dir.path().to_str().unwrap()));
+        let overlong = "a".repeat(65);
+        for name in ["", overlong.as_str()] {
+            assert_eq!(
+                refusal_wire(&provider.get_persona_did(name)),
+                serde_json::json!({
+                    "status": "error",
+                    "code": "invalid_name",
+                    "message": "Persona name must be 1-64 characters",
+                })
+            );
+        }
+    }
+
+    /// Pins `Persona name must be alphanumeric, hyphens, or underscores`
+    /// (:422). The name is eight characters, so the length check above it
+    /// passes and only the character rule refuses it.
+    ///
+    /// Falsifier: remove the character loop; the name then becomes a path
+    /// segment and the call answers ok.
+    #[test]
+    fn handler_refuses_a_persona_name_with_reserved_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = init_provider(Some(dir.path().to_str().unwrap()));
+        assert_eq!(
+            refusal_wire(&provider.get_persona_did("bad/name")),
+            serde_json::json!({
+                "status": "error",
+                "code": "invalid_name",
+                "message": "Persona name must be alphanumeric, hyphens, or underscores",
+            })
+        );
+    }
+
+    /// Pins `Invalid persona key length` (:440). The stored payload decrypts,
+    /// so the read and decrypt checks pass and only the 32-byte rule refuses.
+    ///
+    /// Falsifier: remove the length check; `copy_from_slice` then panics on the
+    /// short slice instead of the handler refusing it.
+    #[test]
+    fn handler_refuses_a_stored_persona_key_of_wrong_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = init_provider(Some(dir.path().to_str().unwrap()));
+        let storage_key = derive_storage_key(&provider.device_key.expect("init sets a key"));
+        let personas = dir.path().join("did").join("personas");
+        fs::create_dir_all(&personas).unwrap();
+        fs::write(
+            personas.join("bot.enc"),
+            encrypt_data(&storage_key, b"short").expect("short payload seals"),
+        )
+        .unwrap();
+        assert_eq!(
+            refusal_wire(&provider.get_persona_did("bot")),
+            serde_json::json!({
+                "status": "error",
+                "code": "key_error",
+                "message": "Invalid persona key length",
+            })
+        );
+    }
+
+    /// Pins `chat message signing requires sender_id and timestamp` (:274).
+    /// Three cases reach the one condition: an empty sender and a
+    /// whitespace-only sender each carry a valid timestamp, and a valid sender
+    /// carries timestamp zero. The whitespace case catches a lost `trim`.
+    ///
+    /// Falsifier: remove `sender_id.trim().is_empty()`; the first two cases
+    /// reach signing and answer ok. Remove `ts == 0`; the third case answers ok.
+    #[test]
+    fn handler_refuses_missing_chat_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = init_provider(Some(dir.path().to_str().unwrap()));
+        for (sender_id, ts) in [
+            ("", 1_714_000_000),
+            ("  \t ", 1_714_000_000),
+            ("did:key:zMissing", 0),
+        ] {
+            assert_eq!(
+                refusal_wire(&provider.sign_chat_message(sender_id, ts, "hello")),
+                serde_json::json!({
+                    "status": "error",
+                    "code": "invalid_intent",
+                    "message": "chat message signing requires sender_id and timestamp",
+                }),
+                "sender_id {sender_id:?}, ts {ts}"
+            );
+        }
+    }
+
+    /// Pins `Invalid hex data: {e}` (:304), with the text `hex`'s own `Display`
+    /// gives for the first character it refuses on `"zz"`.
+    ///
+    /// Falsifier: replace the format argument or let the decode error through;
+    /// this test fails on the changed or missing refusal.
+    #[test]
+    fn handler_refuses_invalid_hex_data() {
+        let provider = DidProvider::new();
+        let did = encode_signing_key_did(&SigningKey::from_bytes(&[9u8; 32]));
+        assert_eq!(
+            refusal_wire(&provider.verify(&did, "zz", "00")),
+            serde_json::json!({
+                "status": "error",
+                "code": "invalid_data",
+                "message": "Invalid hex data: Invalid character 'z' at position 0",
+            })
+        );
+    }
+
+    /// Pins `Invalid signature: {e}`, raised at two sites: `verify` (:317) and
+    /// `verify_did_recovery` (:366). The signature `"00"` decodes as one byte,
+    /// so it passes the hex check and reaches `Signature::from_slice`, whose
+    /// `Display` is `signature error`. The recovery call carries a request that
+    /// passes `validate_did_recovery_request` and a canonical subject DID.
+    ///
+    /// Falsifier: let a wrong-length signature through either site; that call
+    /// then answers ok with `valid: false` instead of refusing.
+    #[test]
+    fn handler_refuses_an_invalid_signature() {
+        let provider = DidProvider::new();
+        let did = encode_signing_key_did(&SigningKey::from_bytes(&[9u8; 32]));
+        let expected = serde_json::json!({
+            "status": "error",
+            "code": "invalid_signature",
+            "message": "Invalid signature: signature error",
+        });
+        assert_eq!(refusal_wire(&provider.verify(&did, "00", "00")), expected);
+
+        let issued_at = now_ts();
+        let recovery = provider.verify_did_recovery(
+            &did,
+            "person:local:abc123",
+            "localhost://Users/person:local:abc123",
+            "protector:did:abc123",
+            "pdek:abc123",
+            "nonce:abc123",
+            issued_at,
+            issued_at + 300,
+            "00",
+        );
+        assert_eq!(refusal_wire(&recovery), expected);
+    }
+
+    /// Pins `Read failed: {e}` (:454). `did/personas/bot.enc` exists as a
+    /// directory, so the existence check passes and the read is what fails.
+    ///
+    /// Falsifier: replace the read error with a generated key or a decrypt
+    /// attempt; the call no longer answers this reason.
+    #[test]
+    fn handler_refuses_an_unreadable_persona_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = init_provider(Some(dir.path().to_str().unwrap()));
+        let key_path = dir.path().join("did").join("personas").join("bot.enc");
+        fs::create_dir_all(&key_path).unwrap();
+        assert_eq!(
+            refusal_wire(&provider.get_persona_did("bot")),
+            serde_json::json!({
+                "status": "error",
+                "code": "key_error",
+                "message": "Read failed: Is a directory (os error 21)",
+            })
+        );
+    }
+
+    /// Pins `Decrypt failed: {e}` (:451). The stored payload is long enough
+    /// for a nonce and fails authentication, so only the decrypt refuses it.
+    ///
+    /// Falsifier: let the decrypt error fall through to the key length check;
+    /// this test then fails on the changed reason.
+    #[test]
+    fn handler_refuses_a_persona_key_that_fails_decryption() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = init_provider(Some(dir.path().to_str().unwrap()));
+        let personas = dir.path().join("did").join("personas");
+        fs::create_dir_all(&personas).unwrap();
+        fs::write(personas.join("bot.enc"), [0u8; NONCE_LEN + 4]).unwrap();
+        assert_eq!(
+            refusal_wire(&provider.get_persona_did("bot")),
+            serde_json::json!({
+                "status": "error",
+                "code": "key_error",
+                "message": "Decrypt failed: Decryption failed: aead::Error",
+            })
+        );
+    }
+
+    /// Pins `Failed to create dir: {e}` (:459). `did/personas` is a regular
+    /// file, so the persona key path does not exist and `create_dir_all`
+    /// refuses the fresh name.
+    ///
+    /// Falsifier: ignore the `create_dir_all` error and generate the key; this
+    /// test then fails on the changed answer.
+    #[test]
+    fn handler_refuses_a_persona_directory_that_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = init_provider(Some(dir.path().to_str().unwrap()));
+        fs::create_dir_all(dir.path().join("did")).unwrap();
+        fs::write(dir.path().join("did").join("personas"), b"not a directory").unwrap();
+        assert_eq!(
+            refusal_wire(&provider.get_persona_did("bot")),
+            serde_json::json!({
+                "status": "error",
+                "code": "key_error",
+                "message": "Failed to create dir: File exists (os error 17)",
+            })
+        );
+    }
+}
+
+/// The remaining refusal strings of the DID recovery request validator, the
+/// localhost-root check and the storage cipher, one test per string. The
+/// existing `tests` module owns subject, expired-proof and root-mismatch refusals.
+///
+/// These tests pin behaviour the production lines already have: they add no
+/// rule and change no answer. Each asserts the whole `Err` value, so a dropped
+/// check, a changed message or a reordered check fails the named test.
+#[cfg(test)]
+mod uf_did_refusal_tests {
+    use super::*;
+
+    /// The moment every case below reads as "now".
+    const NOW: u64 = 1_800_000_000;
+
+    const PRINCIPAL_ID: &str = "person:local:abc123";
+    const LOCALHOST_ROOT: &str = "localhost://Users/person:local:abc123";
+    const PROTECTOR_ID: &str = "protector:did:abc123";
+    const DATA_KEY_ID: &str = "pdek:abc123";
+    const NONCE: &str = "nonce:abc123";
+
+    /// A key of the length `encrypt_data` and `decrypt_data` take.
+    const CIPHER_KEY: [u8; 32] = [7u8; 32];
+
+    /// The canonical `did:key` every request case starts from, produced by the
+    /// crate's own encoder so the test pastes no literal.
+    fn subject_did() -> String {
+        encode_signing_key_did(&SigningKey::from_bytes(&[3u8; 32]))
+    }
+
+    /// A recovery request that passes every check in
+    /// `validate_did_recovery_request`, so a case changes one field and pins
+    /// the check it names.
+    fn valid_request<'a>(did: &'a str) -> DidRecoveryPayload<'a> {
+        DidRecoveryPayload {
+            did,
+            principal_id: PRINCIPAL_ID,
+            localhost_root: LOCALHOST_ROOT,
+            protector_id: PROTECTOR_ID,
+            data_key_id: DATA_KEY_ID,
+            nonce: NONCE,
+            issued_at: NOW - 60,
+            expires_at: NOW + 240,
+        }
+    }
+
+    fn refuse(payload: &DidRecoveryPayload<'_>) -> String {
+        validate_did_recovery_request(payload, NOW).unwrap_err()
+    }
+
+    /// Pins `Data too short` (`decrypt_data` :566).
+    ///
+    /// Falsifier: drop the length check, so `split_at` panics; this test fails
+    /// on the panic instead of the refusal.
+    #[test]
+    fn decrypt_data_refuses_input_shorter_than_its_nonce() {
+        assert_eq!(
+            decrypt_data(&CIPHER_KEY, &[0u8; NONCE_LEN - 1]).unwrap_err(),
+            "Data too short"
+        );
+    }
+
+    /// Pins `Decryption failed: {e}` (`decrypt_data` :575), with the text
+    /// `aead`'s own `Display` gives for its single error value.
+    ///
+    /// Falsifier: replace the format argument with an empty string, or let the
+    /// authentication error pass, and this test fails.
+    #[test]
+    fn decrypt_data_refuses_a_ciphertext_that_fails_authentication() {
+        let mut sealed =
+            encrypt_data(&CIPHER_KEY, b"elastos did recovery").expect("sealing succeeds");
+        *sealed
+            .last_mut()
+            .expect("a sealed payload is longer than its nonce") ^= 0x01;
+        assert_eq!(
+            decrypt_data(&CIPHER_KEY, &sealed).unwrap_err(),
+            "Decryption failed: aead::Error"
+        );
+    }
+
+    /// Pins `data_key_id must start with pdek:` (:625). The subject, the
+    /// principal, the root, the protector and the id itself all pass their
+    /// earlier checks first, so only the prefix rule fires.
+    ///
+    /// Falsifier: remove the prefix check at :625; this request then answers
+    /// `Ok`.
+    #[test]
+    fn did_recovery_refuses_a_data_key_id_without_its_prefix() {
+        let did = subject_did();
+        let mut payload = valid_request(&did);
+        payload.data_key_id = "xkey:abc123";
+        assert_eq!(refuse(&payload), "data_key_id must start with pdek:");
+    }
+
+    /// Pins `DID recovery proof issued_at is in the future` (:629), one second
+    /// past the 300-second allowance. Every other check passes.
+    ///
+    /// Falsifier: remove the issued_at check at :629; this request then answers
+    /// `Ok`.
+    #[test]
+    fn did_recovery_refuses_an_issued_at_in_the_future() {
+        let did = subject_did();
+        let mut payload = valid_request(&did);
+        payload.issued_at = NOW + 301;
+        payload.expires_at = NOW + 361;
+        assert_eq!(
+            refuse(&payload),
+            "DID recovery proof issued_at is in the future"
+        );
+    }
+
+    /// Pins `DID recovery proof expiry is invalid` (:637), which one string
+    /// carries for two rules, from two cases that each catch one rule's
+    /// removal on its own.
+    ///
+    /// Falsifier, first case: remove the `expires_at <= issued_at` comparison
+    /// at :634; the ends are ordered backwards yet both lie after now, so the
+    /// request answers `Ok` and the first assertion fails.
+    ///
+    /// Falsifier, second case: remove the `DID_RECOVERY_MAX_TTL_SECS`
+    /// comparison at :635; the ends are ordered and after now, so the request
+    /// answers `Ok` and the second assertion fails.
+    #[test]
+    fn did_recovery_refuses_an_invalid_expiry() {
+        let did = subject_did();
+        let mut payload = valid_request(&did);
+
+        payload.issued_at = NOW + 300;
+        payload.expires_at = NOW + 200;
+        assert_eq!(refuse(&payload), "DID recovery proof expiry is invalid");
+
+        payload.issued_at = NOW;
+        payload.expires_at = NOW + DID_RECOVERY_MAX_TTL_SECS + 1;
+        assert_eq!(refuse(&payload), "DID recovery proof expiry is invalid");
+    }
+
+    /// Pins `localhost_root must be a principal-owned localhost user root`,
+    /// raised at two sites: :647 for a value without the `localhost://Users/`
+    /// prefix, and :658 for a segment that is empty, `self`, `.`, `..`, over
+    /// 256 characters, or carries a slash, backslash, control or whitespace.
+    /// The request reaches the check through its call at :621.
+    ///
+    /// The prefix case is the bare principal id: it carries no slash, is not
+    /// reserved, fits 256 characters and equals `principal_id`, so only the
+    /// missing prefix refuses it.
+    ///
+    /// Falsifier, prefix case: accept the bare principal as an unprefixed root
+    /// at :647; the request then answers `Ok`, so the assertion fails.
+    /// Falsifier, segment cases: remove the matching term of the :649 to :656
+    /// condition; that request then reaches the principal match and answers
+    /// `localhost_root must match the DID recovery principal`, so the assertion
+    /// fails. Removing the call at :621 makes every case answer `Ok`.
+    #[test]
+    fn did_recovery_refuses_a_root_that_is_not_a_principal_owned_user_root() {
+        let did = subject_did();
+        let overlong = format!("localhost://Users/{}", "a".repeat(257));
+        for (case, root) in [
+            ("no prefix", PRINCIPAL_ID),
+            ("empty segment", "localhost://Users/"),
+            ("self", "localhost://Users/self"),
+            ("dot", "localhost://Users/."),
+            ("dot dot", "localhost://Users/.."),
+            ("over 256 characters", overlong.as_str()),
+            ("slash", "localhost://Users/person/local"),
+            ("backslash", "localhost://Users/person\\local"),
+            ("control", "localhost://Users/person\u{7f}local"),
+            ("whitespace", "localhost://Users/person local"),
+        ] {
+            let mut payload = valid_request(&did);
+            payload.localhost_root = root;
+            assert_eq!(
+                refuse(&payload),
+                "localhost_root must be a principal-owned localhost user root",
+                "case {case}: root {root:?}"
+            );
+        }
+    }
+
+    /// Pins `{field} is invalid` (:675), the one string four call sites raise:
+    /// `principal_id` (:620), `protector_id` (:622), `data_key_id` (:623) and
+    /// `nonce` (:627). Every case changes one field of a request that passes
+    /// the checks ahead of that field, and each predicate of
+    /// `validate_token_like_id` has a case only that predicate refuses: the
+    /// blank case is a non-ASCII space, which `trim` removes but the ASCII
+    /// whitespace term leaves alone, and the whitespace case is an ASCII space.
+    ///
+    /// Falsifier, per case: remove the guard that case names (the matching term
+    /// of the :667 to :673 condition for a predicate case, or the call at :620,
+    /// :622, :623 or :627 for a site case); that request then passes the token
+    /// check and answers whatever the next check says, so the assertion fails.
+    #[test]
+    fn did_recovery_refuses_an_invalid_token_like_id() {
+        let did = subject_did();
+        let overlong = "a".repeat(513);
+
+        for (case, principal_id) in [
+            ("blank", "\u{a0}"),
+            ("over 512 bytes", overlong.as_str()),
+            ("dot", "."),
+            ("dot dot", ".."),
+            ("slash", "person/local"),
+            ("backslash", "person\\local"),
+            ("control", "person\u{7f}local"),
+            ("whitespace", "person local"),
+        ] {
+            let mut payload = valid_request(&did);
+            payload.principal_id = principal_id;
+            assert_eq!(
+                refuse(&payload),
+                "principal_id is invalid",
+                "case {case}: principal_id {principal_id:?}"
+            );
+        }
+
+        let mut payload = valid_request(&did);
+        payload.protector_id = "protector/local";
+        assert_eq!(refuse(&payload), "protector_id is invalid");
+
+        let mut payload = valid_request(&did);
+        payload.data_key_id = "pdek/local";
+        assert_eq!(refuse(&payload), "data_key_id is invalid");
+
+        let mut payload = valid_request(&did);
+        payload.nonce = "nonce local";
+        assert_eq!(refuse(&payload), "nonce is invalid");
     }
 }

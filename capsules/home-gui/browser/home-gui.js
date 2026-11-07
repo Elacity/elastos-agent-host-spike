@@ -45,7 +45,7 @@ import {
   hideDesktopContextMenu,
   hideLauncher,
   moveLauncherSelection,
-  maybeShowWalletApprovalToast,
+  maybeShowInboxRequestToast,
   openDesktopContextMenu,
   openSelectedDesktopEntry,
   openSelectedLauncherTarget,
@@ -153,6 +153,8 @@ import {
   retireConnectorSheet,
   showConnectorSheet,
 } from "./shell-connector-sheet.js?v=home-20260813a";
+import { bindVersionList, fileVersionsFromSummary } from "./shell-version-list.js?v=home-20260813a";
+import { bindApproval } from "./shell-approval.js?v=home-20260813a";
 import { bindFormFactor, FORM_FACTOR_EVENT, isPhone } from "./shell-form-factor.js?v=home-20260813a";
 import { bindPhoneDock } from "./shell-phone-dock.js?v=home-20260813a";
 import { bindPhoneStage, resetPhoneStage } from "./shell-phone-stage.js?v=home-20260813a";
@@ -178,6 +180,10 @@ bindControlCentre();
 bindWalletRail();
 bindInboxRail();
 bindConnectorSheet();
+bindVersionList({
+  readModel: () => fileVersionsFromSummary(shellState.currentSummary),
+});
+bindApproval();
 
 let homeGuiInteractionsBound = false;
 
@@ -795,7 +801,7 @@ export function syncHomeGuiChrome(previous, summary) {
   syncIdentity(summary);
   renderInboxBadge(summary);
   syncWalletRailAvailability(summary);
-  maybeShowWalletApprovalToast(previous, summary);
+  maybeShowInboxRequestToast(previous, summary);
   recordNotifications(summary);
   syncSetupSheet(previous, summary);
   syncControlCentre(summary);

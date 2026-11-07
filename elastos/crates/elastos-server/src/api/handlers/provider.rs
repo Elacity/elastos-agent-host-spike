@@ -13,7 +13,8 @@ use axum::{
 use serde_json::Value;
 
 use crate::provider_resource::{
-    build_capability_resource, ensure_generic_wallet_capability, provider_operation_action,
+    agents_area_refusal, build_capability_resource, ensure_generic_wallet_capability,
+    in_agents_area, provider_operation_action,
 };
 use elastos_runtime::capability::{Action, CapabilityManager, CapabilityToken, ResourceId};
 use elastos_runtime::provider::ProviderRegistry;
@@ -57,6 +58,23 @@ pub async fn provider_proxy(
     })?;
     ensure_generic_wallet_capability(&resource, required_action)
         .map_err(|msg| (StatusCode::BAD_REQUEST, msg))?;
+    // The one Agents rule, for every session, before any token is looked at:
+    // the localhost resource is the rooted path the provider will use.
+    if scheme == "localhost" {
+        if let Some((code, message)) = agents_area_refusal(&resource, &op) {
+            return Err((StatusCode::FORBIDDEN, format!("{code}: {message}")));
+        }
+        // This route reaches the plain localhost provider, without principal-root
+        // protection or the revision check, so no Agents path may use it at all.
+        if in_agents_area(&resource) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "principal_context_required: Agent journals are reachable only through the in-Runtime protected storage bridge".to_string(),
+            ));
+        }
+        // Forward the path the rule checked, not the raw text.
+        request["path"] = Value::String(resource.clone());
+    }
     if scheme == "wallet" {
         request = serde_json::json!({"op": "status"});
     }
@@ -284,10 +302,15 @@ mod tests {
     ) {
         let registry = Arc::new(ProviderRegistry::new());
         let provider = Arc::new(CapturingSchemeProvider::new(scheme));
-        registry
-            .register_sub_provider(scheme, provider.clone())
-            .await
-            .unwrap();
+        if scheme == "localhost" {
+            // localhost is a full provider, not a reserved sub-provider name.
+            registry.register(provider.clone()).await;
+        } else {
+            registry
+                .register_sub_provider(scheme, provider.clone())
+                .await
+                .unwrap();
+        }
         let state = ProviderProxyState {
             registry,
             capability_manager: None,
@@ -301,6 +324,80 @@ mod tests {
         )
         .await;
         (provider, result)
+    }
+
+    /// The provider proxy is the route every attached caller uses to reach the
+    /// localhost provider. The Agents rule runs for every session, even the
+    /// shell with no token, and nothing refused reaches the provider.
+    #[tokio::test]
+    async fn the_provider_proxy_applies_the_agents_rule_for_every_session() {
+        let journal = "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal";
+        for (op, path, refused) in [
+            ("delete", journal, "operation_not_allowed"),
+            ("mkdir", journal, "operation_not_allowed"),
+            (
+                "list",
+                "localhost://Users/self/.AppData/Agents/agent-host",
+                "operation_not_allowed",
+            ),
+            ("stat", journal, "operation_not_allowed"),
+            ("exists", journal, "operation_not_allowed"),
+            (
+                "delete",
+                "Users/self/.appdata/AGENTS/agent-host",
+                "operation_not_allowed",
+            ),
+            (
+                "write",
+                "localhost://Users/self/.AppData/Agent\u{17f}/agent-host/tasks/demo/journal",
+                "invalid_localhost_path",
+            ),
+            (
+                "read",
+                "localhost://Users/self/./.AppData/Agents/agent-host/tasks/demo/journal",
+                "invalid_localhost_path",
+            ),
+        ] {
+            let body = serde_json::json!({ "path": path }).to_string();
+            let (provider, result) = proxy_as_shell("localhost", op, HeaderMap::new(), &body).await;
+            let (status, message) = result.expect_err(op);
+            assert_eq!(status, StatusCode::FORBIDDEN, "{op} {path}");
+            assert!(message.starts_with(refused), "{op} {path}: {message}");
+            assert!(provider.requests.lock().await.is_empty(), "{op} {path}");
+        }
+        // This route reaches the plain localhost provider, so even the exact
+        // journal read or write is refused here, with any trailing whitespace.
+        for (op, path) in [
+            ("read", journal.to_string()),
+            ("write", journal.to_string()),
+            ("write", format!("{journal} ")),
+            (
+                "write",
+                "Users/self/.AppData/Agents/agent-host/tasks/demo/journal\u{a0}".to_string(),
+            ),
+        ] {
+            let body = serde_json::json!({ "path": path }).to_string();
+            let (provider, result) = proxy_as_shell("localhost", op, HeaderMap::new(), &body).await;
+            let (status, message) = result.expect_err(op);
+            assert_eq!(status, StatusCode::FORBIDDEN, "{op} {path:?}");
+            assert!(
+                message.starts_with("principal_context_required"),
+                "{op} {path:?}: {message}"
+            );
+            assert!(provider.requests.lock().await.is_empty(), "{op} {path:?}");
+        }
+        // Outside the area the request still reaches the provider, with the
+        // path the rule checked (rooted, trimmed), not the raw text.
+        let body = serde_json::json!({ "path": " Users/self/Documents/old.txt " }).to_string();
+        let (provider, result) =
+            proxy_as_shell("localhost", "delete", HeaderMap::new(), &body).await;
+        assert!(result.is_ok());
+        let requests = provider.requests.lock().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]["path"],
+            "localhost://Users/self/Documents/old.txt"
+        );
     }
 
     #[test]

@@ -18,6 +18,7 @@ import {
   postToHome,
   openModelsFromAgent,
   openAiProviderSettingsFromAgent,
+  copyFromButton,
 } from "./harness-host.js";
 import {
   agentStageId,
@@ -77,6 +78,7 @@ import {
   setStreamStatus,
   openCodeArtifact,
   refreshEmptyModelHint,
+  messageCopyText,
 } from "./agent-stream.js";
 import {
   getLiveInferenceState,
@@ -1592,11 +1594,13 @@ export function bindAgentHarness() {
     const copyCode = event.target.closest?.(".agent-md-copy");
     if (copyCode) {
       event.preventDefault();
+      void copyFromButton(copyCode, copyCode.closest(".agent-md-code")?.querySelector("code")?.textContent || "");
       return;
     }
     const copyMsg = event.target.closest?.("[data-copy-message]");
     if (copyMsg) {
       event.preventDefault();
+      void copyFromButton(copyMsg, messageCopyText(copyMsg.closest(".agent-msg")));
       return;
     }
     if (event.target.closest?.("[data-agent-jump-latest]")) {

@@ -67,12 +67,24 @@ pub async fn run_identity(cmd: crate::IdentityCommand) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The one place a nickname storage failure is worded for people. The reason
+/// names the nickname file, and the prefix appears exactly once so every caller
+/// (Identity, Chat, Home) shows the same sentence.
+pub(crate) fn unreadable_nickname_reason(data_dir: &Path) -> String {
+    format!(
+        "nickname unreadable: {}",
+        data_dir.join("did").join("nickname.enc").display()
+    )
+}
+
 pub(crate) async fn load_identity_profile(data_dir: &Path) -> anyhow::Result<IdentityProfile> {
     let did = elastos_identity::load_or_create_did(data_dir)
         .ok()
         .map(|(_, did)| did)
         .filter(|did| !did.trim().is_empty());
-    let nickname = elastos_identity::load_nickname(data_dir).ok().flatten();
+    // A storage error is not absence: report it instead of showing "not set".
+    let nickname = elastos_identity::load_nickname(data_dir)
+        .with_context(|| unreadable_nickname_reason(data_dir))?;
     Ok(IdentityProfile { did, nickname })
 }
 
@@ -80,7 +92,9 @@ pub(crate) async fn set_local_nickname(
     data_dir: &Path,
     value: Option<String>,
 ) -> anyhow::Result<String> {
-    let current = load_identity_profile(data_dir).await.unwrap_or_default();
+    // Setting a nickname on an unreadable store is refused with the reason: an
+    // empty profile here would overwrite a file the user cannot read.
+    let current = load_identity_profile(data_dir).await?;
     let value = resolve_nickname_input(value, current.nickname.as_deref())?;
     let value = elastos_identity::validate_nickname(&value)?;
     elastos_identity::save_nickname(data_dir, &value)?;
@@ -149,8 +163,106 @@ fn prompt_for_nickname(current: Option<&str>) -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::prompt_for_nickname;
+    use super::{load_identity_profile, prompt_for_nickname, set_local_nickname};
     use std::io::IsTerminal;
+
+    #[test]
+    fn identity_profile_reports_three_nickname_path_states() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let did_dir = dir.path().join("did");
+        std::fs::create_dir_all(&did_dir).unwrap();
+        let nickname_path = did_dir.join("nickname.enc");
+
+        // Absent: no nickname file means no nickname and no error.
+        let absent = rt.block_on(load_identity_profile(dir.path())).unwrap();
+        assert_eq!(absent.nickname, None);
+
+        // Stored but unreadable: the check must report it, not read absence.
+        std::fs::write(&nickname_path, b"permission-denied").unwrap();
+
+        std::fs::set_permissions(&did_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = std::fs::read(&nickname_path).err();
+        let unreadable = rt.block_on(load_identity_profile(dir.path()));
+        std::fs::set_permissions(&did_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let Some(_denied) = denied else {
+            eprintln!("skipping: running with permission override (root)");
+            return;
+        };
+
+        let err = unreadable.expect_err("storage error must not be read as absence");
+        let message = format!("{err:#}");
+        // One prefix, the file path, then the operating-system reason.
+        assert!(
+            message.starts_with(&format!(
+                "nickname unreadable: {}: ",
+                nickname_path.display()
+            )),
+            "{message}"
+        );
+        assert_eq!(
+            message.matches("nickname unreadable").count(),
+            1,
+            "{message}"
+        );
+
+        // Present: the nickname is returned with no error.
+        let data_dir = tempfile::tempdir().unwrap();
+        let (signing_key, _did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        drop(signing_key);
+        elastos_identity::save_nickname(data_dir.path(), "owner").unwrap();
+        let present = rt.block_on(load_identity_profile(data_dir.path())).unwrap();
+        assert_eq!(present.nickname.as_deref(), Some("owner"));
+    }
+
+    #[test]
+    fn set_nickname_refuses_an_unreadable_store_and_keeps_the_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (signing_key, _did) = elastos_identity::load_or_create_did(dir.path()).unwrap();
+        drop(signing_key);
+        elastos_identity::save_nickname(dir.path(), "owner").unwrap();
+        let nickname_path = dir.path().join("did").join("nickname.enc");
+        let did_dir = nickname_path.parent().unwrap().to_path_buf();
+        let before = std::fs::read(&nickname_path).unwrap();
+
+        // The file exists and holds a real value; only reading it is denied.
+        std::fs::set_permissions(&did_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = std::fs::read(&nickname_path).err();
+        let set = rt.block_on(set_local_nickname(dir.path(), Some("intruder".to_string())));
+        std::fs::set_permissions(&did_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let Some(_denied) = denied else {
+            eprintln!("skipping: running with permission override (root)");
+            return;
+        };
+
+        let err = set.expect_err("a set on an unreadable nickname must be refused");
+        let message = format!("{err:#}");
+        assert!(
+            message.starts_with(&format!(
+                "nickname unreadable: {}: ",
+                nickname_path.display()
+            )),
+            "{message}"
+        );
+        assert_eq!(
+            message.matches("nickname unreadable").count(),
+            1,
+            "{message}"
+        );
+        assert_eq!(
+            std::fs::read(&nickname_path).unwrap(),
+            before,
+            "the refusal must leave the stored nickname untouched"
+        );
+        // The stored value still reads back, so the file was not rewritten.
+        let after = rt.block_on(load_identity_profile(dir.path())).unwrap();
+        assert_eq!(after.nickname.as_deref(), Some("owner"));
+    }
 
     #[test]
     fn nickname_validation_rejects_empty() {

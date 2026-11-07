@@ -18,8 +18,8 @@ pub(super) async fn browser_wallet_read(
         &state.data_dir,
         BrowserEffectAuditInput {
             event_type: "browser.chain_read.requested",
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id: &request_id,
             result: "requested",
             method: input.method.trim(),
@@ -52,8 +52,8 @@ pub(super) async fn browser_wallet_read(
         &state.data_dir,
         BrowserEffectAuditInput {
             event_type,
-            principal_id: &context.principal_id,
-            session_id: &context.session_id,
+            principal_id: context.principal_id(),
+            session_id: context.session_id(),
             request_id: &request_id,
             result: result_label,
             method: input.method.trim(),

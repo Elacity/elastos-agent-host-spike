@@ -1,0 +1,12 @@
+id: F-A7-ownsess
+file: src/ledger.rs
+test: ledger::model_same_identity_shares_one_ceiling
+--- old
+        if grant.record.identity != identity {
+            continue;
+        }
+--- new
+        if grant.record.identity != identity || grant.record.session != "session-a" {
+            continue;
+        }
+--- end

@@ -1,0 +1,8 @@
+id: F-A5-symlink
+file: src/lib.rs
+test: model_symlink_shaped_use_path_is_refused
+--- old
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+--- new
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '>'))
+--- end

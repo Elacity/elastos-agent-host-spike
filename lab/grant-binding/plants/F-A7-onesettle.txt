@@ -1,0 +1,8 @@
+id: F-A7-onesettle
+file: src/ledger.rs
+test: ledger::model_one_settle_drops_only_that_hold
+--- old
+        ledger.held -= stored;
+--- new
+        ledger.held = 0;
+--- end

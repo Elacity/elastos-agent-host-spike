@@ -1,0 +1,15 @@
+id: F-A5-spend
+file: src/ops.rs
+test: ops::model_effect_limit_stops_the_next_effect
+--- old
+                    if let Some(limit) = grant.effect_limit {
+                        if grant.effects >= limit {
+                            return Err(OperateRefuse::Binding(Refuse::EffectLimit));
+                        }
+                    }
+--- new
+                    if let Some(limit) = grant.effect_limit {
+                        let _ = limit;
+                        let _ = grant.effects;
+                    }
+--- end

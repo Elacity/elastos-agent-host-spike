@@ -1,0 +1,13 @@
+id: F-A5-useinst
+file: src/lib.rs
+test: model_forged_instance_does_not_move_the_use_path
+--- old
+        let record = self.resolve(*call, request.handle)?;
+--- new
+        let record = self.resolve(
+            Call {
+                instance: request.forged_instance.unwrap_or(call.instance),
+            },
+            request.handle,
+        )?;
+--- end

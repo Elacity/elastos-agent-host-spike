@@ -1,0 +1,9 @@
+id: F-A7-tearly
+file: src/ledger.rs
+test: ledger::model_early_timeout_is_refused
+--- old
+        if now < deadline {
+            return Err(TimeoutRefuse::Early);
+        }
+--- new
+--- end

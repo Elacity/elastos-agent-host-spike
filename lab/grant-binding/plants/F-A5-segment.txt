@@ -1,0 +1,12 @@
+id: F-A5-segment
+file: src/lib.rs
+test: ops::model_owned_root_needs_a_resource_segment
+--- old
+    if parts.len() < 3 || parts[0] != "UsersAI" || parts[1] != agent {
+        return Err(Refuse::OutsidePrincipal);
+    }
+--- new
+    if parts.len() < 2 || parts[0] != "UsersAI" || parts[1] != agent {
+        return Err(Refuse::OutsidePrincipal);
+    }
+--- end

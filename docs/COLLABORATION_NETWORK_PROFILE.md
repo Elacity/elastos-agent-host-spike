@@ -89,11 +89,12 @@ person chooses isolation.
 
 The release network lists one bootstrap peer: the Community node on the seed
 host. This node runs its own Runtime with its own account, data root, Carrier
-port and resource limits, apart from the release and update service. The release
-connection contract uses a direct Carrier path when possible and the seed relay
-otherwise. Carrier owns connection policy and peer resolution through one
-connect-by-DID entry point. Relay implementation and cross-network acceptance
-are tracked in [#345](https://github.com/Elacity/elastos-runtime/issues/345).
+port and resource limits, apart from the release and update service. In 0.8.0
+Carrier is direct-only: a Home reaches this node over a direct Carrier path,
+with no relay. Carrier owns connection policy and peer resolution through one
+connect-by-DID entry point. Relay support and cross-network acceptance are
+planned in [#345](https://github.com/Elacity/elastos-runtime/issues/345) and
+[#354](https://github.com/Elacity/elastos-runtime/issues/354).
 
 The release availability contract while this node is unreachable is:
 
@@ -105,7 +106,8 @@ The release availability contract while this node is unreachable is:
 - Homes keep all messages they already received.
 
 Chat states **Community unreachable** when its Community connection is
-unavailable.
+unavailable, or **Community can't connect. Restart Home to reconnect.** after
+Home has used up its repairs (#451).
 
 An address change requires the next signed network revision in a release.
 More bootstrap peers and participant Homes acting as bootstrap are tracked in

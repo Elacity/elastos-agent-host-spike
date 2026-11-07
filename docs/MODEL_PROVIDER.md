@@ -64,7 +64,7 @@ owning boundaries.
 
 Marketplace compares each signed model's declared minimum memory with the
 device's effective physical or cgroup memory capacity before Get. This check
-describes the minimum requirement. Runtime checks current free memory again
+describes the minimum requirement. Runtime checks the device's memory again
 before starting the engine for a reply.
 
 On Linux, Runtime verifies the visible cgroup v2 hierarchy and reads every
@@ -74,16 +74,25 @@ usage; an unreadable cache statistic gives zero credit. An unavailable memory
 observation returns `model_memory_observation_unavailable` and asks the Home
 owner to check the memory limits before trying again.
 
-A local engine is admitted right before it starts: free memory must cover the
-model weights, its KV cache at the configured context, batch scratch and
+A local engine is admitted right before it starts: the device's room must cover
+the model weights, its KV cache at the configured context, batch scratch and
 headroom of max(10% of effective memory capacity, 1 GiB); otherwise the run fails with
-`model_memory_unavailable` before anything is spawned. Each model-provider
+`model_memory_unavailable` before anything is spawned, and its message names the
+room Runtime saw and the model's need in GB. On Linux the room is `MemAvailable`
+capped by the cgroup limits above. On macOS it is a ceiling, not free memory:
+total memory less wired and compressor-occupied pages, which macOS fills by
+compressing other apps' memory or dropping file cache. A macOS critical memory
+pressure level, or an unreadable one, also refuses with `model_memory_unavailable`;
+warning pressure does not. While a model loads or generates, the provider reads
+the macOS pressure level about once a second; at critical it stops the run and
+its engine, which releases the weights Metal keeps wired, and the run fails with
+`model_memory_critical`. Each model-provider
 process runs one local engine at a time, stops it after 60 s without requests
 and starts it again on the next request. Runtime's host lock protects its Home
 data root. Distinct data roots use separate locks and providers, including
 under the same OS account. For supported Local AI operation, run one active
-Home per device. Each provider checks the memory that is free when it starts
-its engine.
+Home per device. Each provider checks the device's memory when it starts its
+engine.
 
 The owning Runtime DID signs the service offer, which names the admitted
 provider capability and contains only bounded capability and policy facts. The
@@ -100,10 +109,10 @@ A hosted web API is a Runtime-owned HTTPS interoperability edge on the Home
 that stores the credential. Runtime checks the exact owner route and sends the
 selected destination and credential through its broker. The installed Mac path
 confines the provider's direct external sockets; Linux product confinement
-still needs proof. The temporary Mac operator route
-bypasses normal Inbox decision and grant checks when enabled. Runtime still
-selects its permitted destination and credential, and the owner can End that
-route. Permanent SEC1 acceptance remains open.
+still needs proof. Runtime requires the owner's exact Inbox decision for each
+hosted connection, including saved operator connections. End saves the owner's
+decision before Runtime cancels admitted sends. Saved connections and their
+credentials remain available for owner management.
 
 Mac Runtime to Carrier to a Jetson or seed Runtime, then
 to that Runtime's model provider and backend, is service use. Ordinary capsules
@@ -333,8 +342,9 @@ reports it. The UI never shows the secret.
 
 Runtime validates the credential separately from a consented paid test.
 Validate requires Runtime-owned HTTPS authority to the pinned public host.
-The temporary Mac operator route has the bypass and End behavior described
-above. The Home can also use an owner-scoped
+Validation needs the same exact owner Inbox approval as every other hosted
+request, including saved operator connections; End stops its sends. The Home
+can also use an owner-scoped
 `providers/model-provider/validate-fixtures.json`. That file, when present,
 may bind validate HTTP only to `http://127.0.0.1` with an explicit port.
 Save stays private and publishes no service offer. A later Share action uses

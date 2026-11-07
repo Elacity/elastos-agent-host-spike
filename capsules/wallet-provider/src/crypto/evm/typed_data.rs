@@ -339,3 +339,378 @@ pub(crate) fn add_u256_small(value: &mut [u8; 32], add: u8) -> Result<(), String
     }
     Err("uint256 value overflow".to_string())
 }
+
+/// One test per refusal this hasher raises, each asserting the whole `Err`
+/// value. They pin answers the hasher already gives: they add no rule and
+/// register no falsifier. They prove the provider's EIP-712 hasher, not
+/// confinement: the Runtime decides whether the provider runs at all.
+///
+/// Where the text carries a format argument, the test names the text this
+/// input makes the code produce, not the template.
+///
+/// Three strings stand at two sites each, and one test covers the string.
+/// `typed data fixed bytes size is invalid` and `uint256 value overflow` are
+/// reachable at both of their sites, so those tests assert both. `typed data
+/// missing types` and `typed data missing primaryType` are not: the hasher's
+/// copies (`:48`, `:52`) sit behind `validate_eip712_typed_data_shape` on the
+/// only production path, so those tests pin the copy a caller meets and record
+/// the dead one here.
+#[cfg(test)]
+mod uf_typed_data_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn hash_of(typed_data: Value) -> Result<[u8; 32], String> {
+        eip712_payload_hash(&json!({ "typed_data": typed_data }))
+    }
+
+    /// A message whose single field is declared as `field_type`, so only that
+    /// type decides the answer. `EIP712Domain` is declared empty, so the
+    /// domain hashes without asking for a field.
+    fn message_with(field_type: &str, value: Value) -> Value {
+        json!({
+            "types": {
+                "EIP712Domain": [],
+                "Message": [{ "name": "field", "type": field_type }]
+            },
+            "primaryType": "Message",
+            "domain": {},
+            "message": { "field": value }
+        })
+    }
+
+    /// Falsifier: keep the payload's own text instead of the parsed value, so
+    /// malformed canonical JSON reaches the hasher and the reason is lost.
+    #[test]
+    fn invalid_canonical_typed_data_is_refused() {
+        assert_eq!(
+            eip712_payload_hash(&json!({ "typed_data_canonical": "{" })).unwrap_err(),
+            "invalid typed data: EOF while parsing an object at line 1 column 1"
+        );
+    }
+
+    /// Falsifier: answer `Ok` on a payload with neither form, so a request
+    /// that carries no typed data signs the empty hash.
+    #[test]
+    fn payload_missing_typed_data_is_refused() {
+        assert_eq!(
+            eip712_payload_hash(&json!({})).unwrap_err(),
+            "Browser typed-data payload missing typed_data"
+        );
+    }
+
+    /// The shape check refuses first on this path; the hasher holds a second
+    /// copy of the same refusal (`:48`) that `eip712_payload_hash` never
+    /// reaches, because the shape check runs before it and is the hasher's
+    /// only production caller. This test pins the copy a caller meets.
+    ///
+    /// Falsifier: default `types` to an empty object, so a declaration-less
+    /// payload hashes as a bare domain.
+    #[test]
+    fn missing_types_is_refused() {
+        assert_eq!(
+            hash_of(json!({ "primaryType": "Message" })).unwrap_err(),
+            "typed data missing types"
+        );
+    }
+
+    /// As with `typed data missing types`, the hasher's copy of this refusal
+    /// (`:52`) sits behind the shape check and is never reached from a caller.
+    ///
+    /// Falsifier: default `primaryType` to the only declared type, so a
+    /// payload that names no primary type still hashes.
+    #[test]
+    fn missing_primary_type_is_refused() {
+        assert_eq!(
+            hash_of(json!({ "types": {} })).unwrap_err(),
+            "typed data missing primaryType"
+        );
+    }
+
+    /// Falsifier: hash the primary type without checking it is declared, so a
+    /// payload naming a type it never declares hashes from a field list the
+    /// hasher invents.
+    #[test]
+    fn undeclared_primary_type_is_refused() {
+        assert_eq!(
+            hash_of(json!({ "types": { "Other": [] }, "primaryType": "Message" })).unwrap_err(),
+            "typed data primaryType is not declared"
+        );
+    }
+
+    /// Falsifier: default `domain` to an empty object, so a payload that
+    /// leaves the domain out hashes against a domain no page asked for.
+    #[test]
+    fn missing_domain_is_refused() {
+        assert_eq!(
+            hash_of(json!({ "types": { "Message": [] }, "primaryType": "Message" })).unwrap_err(),
+            "typed data missing domain"
+        );
+    }
+
+    /// Falsifier: default `message` to an empty object, so a payload that
+    /// leaves the message out hashes as a message with every field null.
+    #[test]
+    fn missing_message_is_refused() {
+        assert_eq!(
+            hash_of(json!({
+                "types": { "Message": [] },
+                "primaryType": "Message",
+                "domain": {}
+            }))
+            .unwrap_err(),
+            "typed data missing message"
+        );
+    }
+
+    /// Falsifier: hash a struct value that is not an object as if every field
+    /// were null, so a nested type declared with fields hashes from nothing.
+    #[test]
+    fn struct_value_not_an_object_is_refused() {
+        assert_eq!(
+            hash_of(json!({
+                "types": {
+                    "EIP712Domain": [],
+                    "Message": [{ "name": "nested", "type": "Nested" }],
+                    "Nested": [{ "name": "n", "type": "string" }]
+                },
+                "primaryType": "Message",
+                "domain": {},
+                "message": { "nested": "oops" }
+            }))
+            .unwrap_err(),
+            "typed data Nested value must be an object"
+        );
+    }
+
+    /// `EIP712Domain` is the one type the hasher names without the payload
+    /// declaring it, so a payload that declares only its message type reaches
+    /// this arm through the shape check's blind spot.
+    ///
+    /// Falsifier: default an undeclared type to an empty field list, so a
+    /// domain with no declaration hashes as `EIP712Domain()`.
+    #[test]
+    fn undeclared_type_is_refused() {
+        assert_eq!(
+            hash_of(json!({
+                "types": { "Message": [] },
+                "primaryType": "Message",
+                "domain": {},
+                "message": {}
+            }))
+            .unwrap_err(),
+            "typed data type EIP712Domain is not declared"
+        );
+    }
+
+    /// Falsifier: skip a field that names no name, so a declared type encodes
+    /// a field the page never described.
+    #[test]
+    fn field_missing_name_is_refused() {
+        assert_eq!(
+            hash_of(json!({
+                "types": { "EIP712Domain": [], "Message": [{ "type": "string" }] },
+                "primaryType": "Message",
+                "domain": {},
+                "message": {}
+            }))
+            .unwrap_err(),
+            "typed data field missing name"
+        );
+    }
+
+    /// Falsifier: treat a field with no type as `string`, so the type string
+    /// the page omitted is replaced by a guess.
+    #[test]
+    fn field_missing_type_is_refused() {
+        assert_eq!(
+            hash_of(json!({
+                "types": { "EIP712Domain": [], "Message": [{ "name": "field" }] },
+                "primaryType": "Message",
+                "domain": {},
+                "message": {}
+            }))
+            .unwrap_err(),
+            "typed data field missing type"
+        );
+    }
+
+    /// Falsifier: hash a scalar as a one-item array, so an array field accepts
+    /// a value the page wrote without brackets.
+    #[test]
+    fn array_value_not_an_array_is_refused() {
+        assert_eq!(
+            hash_of(message_with("uint256[]", json!(5))).unwrap_err(),
+            "typed data uint256[] value must be an array"
+        );
+    }
+
+    /// Falsifier: accept any JSON as `string` through its serialized form, so
+    /// a number signs as text.
+    #[test]
+    fn string_value_not_a_string_is_refused() {
+        assert_eq!(
+            hash_of(message_with("string", json!(1))).unwrap_err(),
+            "typed data string value must be a string"
+        );
+    }
+
+    /// Falsifier: treat a non-string `bytes` value as empty bytes, so the
+    /// field hashes without the value the page gave.
+    #[test]
+    fn bytes_value_not_hex_is_refused() {
+        assert_eq!(
+            hash_of(message_with("bytes", json!(1))).unwrap_err(),
+            "typed data bytes value must be hex"
+        );
+    }
+
+    /// Falsifier: read any non-empty string as `true`, so `"yes"` signs as 1.
+    #[test]
+    fn bool_value_not_boolean_is_refused() {
+        assert_eq!(
+            hash_of(message_with("bool", json!("yes"))).unwrap_err(),
+            "typed data bool value must be boolean"
+        );
+    }
+
+    /// Falsifier: read a non-string `address` through its serialized form, so
+    /// a number reaches the address validator as text.
+    #[test]
+    fn address_value_not_a_string_is_refused() {
+        assert_eq!(
+            hash_of(message_with("address", json!(1))).unwrap_err(),
+            "typed data address value must be a string"
+        );
+    }
+
+    /// Both arms of this branch raise the string: a width that does not parse
+    /// (`bytesx`) and a width outside `1..=32` (`bytes33`). One string, one
+    /// test, both sites.
+    ///
+    /// Falsifier: accept any fixed-bytes width, so `bytes33` encodes 33 bytes
+    /// into a 32-byte word.
+    #[test]
+    fn fixed_bytes_size_is_refused() {
+        let reason = "typed data fixed bytes size is invalid";
+        assert_eq!(
+            hash_of(message_with("bytesx", json!("0x"))).unwrap_err(),
+            reason
+        );
+        assert_eq!(
+            hash_of(message_with("bytes33", json!("0x"))).unwrap_err(),
+            reason
+        );
+    }
+
+    /// Falsifier: treat a non-string `bytesN` value as empty bytes, so the
+    /// field hashes as thirty-two zero bytes.
+    #[test]
+    fn fixed_bytes_value_not_hex_is_refused() {
+        assert_eq!(
+            hash_of(message_with("bytes4", json!(1))).unwrap_err(),
+            "typed data fixed bytes value must be hex"
+        );
+    }
+
+    /// Falsifier: read an unknown field type as `bytes`, so a type the hasher
+    /// does not implement signs as raw hex.
+    #[test]
+    fn unsupported_field_type_is_refused() {
+        assert_eq!(
+            hash_of(message_with("tuple", json!({}))).unwrap_err(),
+            "unsupported EIP-712 field type tuple"
+        );
+    }
+
+    /// Falsifier: read a boolean as `0` or `1`, so a JSON `true` signs as the
+    /// number one.
+    #[test]
+    fn uint_value_not_an_integer_is_refused() {
+        assert_eq!(
+            hash_of(message_with("uint256", json!(true))).unwrap_err(),
+            "typed data uint value must be a string or unsigned integer"
+        );
+    }
+
+    /// Falsifier: read a boolean as `1`, so a JSON `true` signs as the number
+    /// one in a signed field.
+    #[test]
+    fn int_value_not_an_integer_is_refused() {
+        assert_eq!(
+            hash_of(message_with("int256", json!(true))).unwrap_err(),
+            "typed data int value must be a string or integer"
+        );
+    }
+
+    /// Falsifier: read an empty text as zero, so a field the page left blank
+    /// signs as `0`.
+    #[test]
+    fn uint_value_empty_is_refused() {
+        assert_eq!(
+            hash_of(message_with("uint256", json!(""))).unwrap_err(),
+            "typed data uint value is empty"
+        );
+    }
+
+    /// Falsifier: strip the `0x` from empty hex and read it as zero, so a
+    /// truncated value signs as `0`.
+    #[test]
+    fn uint_hex_value_invalid_is_refused() {
+        assert_eq!(
+            hash_of(message_with("uint256", json!("0x"))).unwrap_err(),
+            "typed data uint hex value is invalid"
+        );
+    }
+
+    /// Falsifier: stop reading decimal text at the first non-digit, so `12a`
+    /// signs as `12`.
+    #[test]
+    fn uint_decimal_value_invalid_is_refused() {
+        assert_eq!(
+            hash_of(message_with("uint256", json!("12a"))).unwrap_err(),
+            "typed data uint decimal value is invalid"
+        );
+    }
+
+    /// `parse_json_int256` hands this arm an `i64` widened to `i128`, so the
+    /// only value that fails `checked_abs` is `i128::MIN`, which no JSON number
+    /// reaches. The refusal is reached through the function that raises it.
+    ///
+    /// Falsifier: keep the wrapping magnitude of `i128::MIN`, so the most
+    /// negative value signs as a positive one.
+    #[test]
+    fn int_value_out_of_range_is_refused() {
+        assert_eq!(
+            parse_negative_i128(i128::MIN).unwrap_err(),
+            "typed data int value is out of range"
+        );
+    }
+
+    /// Two functions raise this string, so this one test holds both. `2^256`
+    /// reaches the sum that carries past the top byte, and `2^256 - 1`
+    /// followed by a digit reaches the multiply that carries out of it.
+    ///
+    /// Falsifier: drop either carry check, and an over-long decimal signs as
+    /// its low 256 bits.
+    #[test]
+    fn uint256_overflow_is_refused() {
+        let reason = "uint256 value overflow";
+        assert_eq!(
+            hash_of(message_with(
+                "uint256",
+                json!("115792089237316195423570985008687907853269984665640564039457584007913129639936")
+            ))
+            .unwrap_err(),
+            reason
+        );
+        assert_eq!(
+            hash_of(message_with(
+                "uint256",
+                json!("1157920892373161954235709850086879078532699846656405640394575840079131296399350")
+            ))
+            .unwrap_err(),
+            reason
+        );
+    }
+}

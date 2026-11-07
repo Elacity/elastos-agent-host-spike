@@ -1,0 +1,85 @@
+# wc-001 lab capsule. Its own workspace and Cargo.lock, kept out of the root
+# ElastOS workspace so the Runtime core never grows for lab tooling. Three
+# members. The root package `capsule`: the guest lives in capsule/src, the
+# host-side build and verification tooling lives in tests/ (never compiled into
+# the capsule). `audit/`: the cx-wasm-audit lane's `wasm-capsule-audit` crate,
+# the one import-audit path (PRINCIPLES P10), which wc-004's verifier calls.
+# And `tools/`: `wasm-capsule-tools`, the lab's host-side library, which names
+# a lab bundle only through cc-capsule-identity's lab CID (`bundle_identity`,
+# one re-export), holds this capsule's manifest bytes and holds wc-004's one
+# verify path (`wasm_capsule_tools::verify`).
+#
+# `cargo fmt`/`cargo test --manifest-path .../Cargo.toml` (the lane gates) both
+# act on the root package `capsule` only (there is no `default-members`), so
+# every named test lives in tests/. Test the audit from this directory with
+# `cargo test -p wasm-capsule-audit --locked`, and check the tools crate's
+# format with `cargo fmt -p wasm-capsule-tools -- --check`.
+[package]
+name = "capsule"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "capsule/src/lib.rs"
+# cdylib is the Wasm artifact; rlib lets the host test harness link the shared
+# `digest_impl`. It brings its own logic and a minimal surface (Rong's
+# DigitCapsule; PRINCIPLES P18).
+crate-type = ["cdylib", "rlib"]
+
+# Task 068 (carry of 067): `wit-bindgen` is the capsule's one dependency, and
+# the only one: the Runtime's own component-app template
+# (`templates/capsules/component-app/Cargo.toml`) generates its
+# `product-capsule-v1` bindings with the same line, and the task says not to
+# vendor, copy or patch it. It is a build-time proc-macro crate only: the
+# capsule's behaviour stays in `capsule/src/lib.rs` and the generated guest
+# calls no import (P18, minimal surface; P10, one way to write a capsule).
+# The bindings are behind `cfg(target_arch = "wasm32")`, so the host test
+# build gets none.
+[dependencies]
+wit-bindgen = "0.57.1"
+
+# The named tests in tests/ name bundles through the tools crate's
+# `bundle_identity`, and read this capsule's manifest with the Runtime's own
+# `CapsuleManifest` (a read-only path dependency on `elastos-common`, parsed
+# with `serde_json`, the crate that type is read with). wc-004's tests also
+# call cc-capsule-identity's `checked_bundle` and `sign_bundle` and the
+# Runtime's `encode_signing_key_did` directly (read-only path dependencies),
+# name `wasm_capsule_audit`'s types and API version, and make each test key
+# fresh in memory with `ed25519-dalek` and `rand`'s `OsRng`, as
+# cc-capsule-identity's own tests do. All of them are the versions the
+# lockfile already held. Cargo builds a dev-dependency only for tests, never
+# for the capsule, and `capsule`'s one `[dependencies]` entry is `wit-bindgen`
+# above, built only for the Wasm guest (P18).
+[dev-dependencies]
+capsule-identity = { path = "../capsule-identity" }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+elastos-common = { path = "../../elastos/crates/elastos-common" }
+elastos-identity = { path = "../../elastos/crates/elastos-identity" }
+rand = "0.8"
+serde_json = "1.0"
+wasm-capsule-audit = { path = "audit" }
+wasm-capsule-tools = { path = "tools" }
+# Task 064: the Bus tests write their component fixtures in WAT text, as the
+# audit's own tests do, at the audit's exact pin, so no new crate enters the
+# lockfile.
+wat = "=1.258.0"
+
+# The reproducible-build knobs the capsule is compiled with (Cargo honours
+# `[profile.*]` only in the workspace root): one codegen unit, LTO, a stripped
+# binary, and `panic = "abort"` (a capsule traps down, it does not unwind a
+# host).
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Stay out of the root ElastOS workspace. The root package `capsule` is always
+# a member; `audit` and `tools` declare no `[workspace]` of their own and share
+# Cargo.lock. The path dependencies outside this folder (`../capsule-identity`
+# and, through it and the dev-dependency above, `elastos/`) are not members,
+# but Cargo loads their manifests to resolve this one lockfile.
+[workspace]
+members = ["audit", "tools"]

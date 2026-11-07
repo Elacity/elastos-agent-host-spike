@@ -69,6 +69,11 @@ for (const gone of ["mock-agent-provider.js", "agent-grants.js", "agent-studio.j
   assert.ok(!capsuleFiles.includes(gone), `${gone} is out of the capsule`);
 }
 
+assert.ok(
+  agentLive.includes("This chat has no tools ") &&
+    agentLive.includes("and no capsule authority"),
+  "the live prompt still has no tools and no capsule authority",
+);
 assert.ok(agentLive.includes('from "./model-contract.js"'), "agent-live speaks the typed contract module");
 assert.ok(
   readFileSync(new URL("assistant.js", capsuleDir), "utf8").includes('from "./model-contract.js"'),

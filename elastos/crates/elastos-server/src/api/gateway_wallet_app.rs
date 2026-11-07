@@ -37,7 +37,7 @@ pub(in crate::api::gateway) async fn wallet_app_account_delete(
             Ok(launch) => launch,
             Err(err) => return system_error_response(err),
         };
-    let authority = match runtime_wallet_authority(&launch) {
+    let authority = match runtime_wallet_authority(&state.data_dir, &launch) {
         Ok(authority) => authority,
         Err(err) => return system_error_response(err),
     };
@@ -65,8 +65,8 @@ pub(in crate::api::gateway) async fn wallet_app_account_delete(
                 WalletApprovalAuditInput {
                     capsule_id: WALLET_CAPSULE_ID,
                     event_type: "wallet.account.deleted",
-                    principal_id: &context.principal_id,
-                    session_id: &context.session_id,
+                    principal_id: context.principal_id(),
+                    session_id: context.session_id(),
                     request_id: "wallet-account-delete",
                     result: "ok",
                     reason:
@@ -106,8 +106,8 @@ pub(in crate::api::gateway) async fn wallet_app_account_rename(
                 WalletApprovalAuditInput {
                     capsule_id: WALLET_CAPSULE_ID,
                     event_type: "wallet.account.renamed",
-                    principal_id: &context.principal_id,
-                    session_id: &context.session_id,
+                    principal_id: context.principal_id(),
+                    session_id: context.session_id(),
                     request_id: "wallet-account-rename",
                     result: "ok",
                     reason: "Wallet account renamed through Wallet",
@@ -130,7 +130,7 @@ pub(in crate::api::gateway) async fn wallet_app_account_recovery_key(
             Ok(launch) => launch,
             Err(err) => return system_error_response(err),
         };
-    let authority = match runtime_wallet_authority(&launch) {
+    let authority = match runtime_wallet_authority(&state.data_dir, &launch) {
         Ok(authority) => authority,
         Err(err) => return system_error_response(err),
     };
@@ -158,8 +158,8 @@ pub(in crate::api::gateway) async fn wallet_app_account_recovery_key(
                 WalletApprovalAuditInput {
                     capsule_id: WALLET_CAPSULE_ID,
                     event_type: "wallet.recovery_key.viewed",
-                    principal_id: &context.principal_id,
-                    session_id: &context.session_id,
+                    principal_id: context.principal_id(),
+                    session_id: context.session_id(),
                     request_id: "wallet-recovery-key",
                     result: "ok",
                     reason: "Wallet recovery key viewed after fresh passkey verification",
@@ -181,7 +181,7 @@ pub(in crate::api::gateway) async fn wallet_app_account_import_recovery_key(
             Ok(launch) => launch,
             Err(err) => return system_error_response(err),
         };
-    let authority = match runtime_wallet_authority(&launch) {
+    let authority = match runtime_wallet_authority(&state.data_dir, &launch) {
         Ok(authority) => authority,
         Err(err) => return system_error_response(err),
     };
@@ -215,8 +215,8 @@ pub(in crate::api::gateway) async fn wallet_app_account_import_recovery_key(
                 WalletApprovalAuditInput {
                     capsule_id: WALLET_CAPSULE_ID,
                     event_type: "wallet.recovery_key.imported",
-                    principal_id: &context.principal_id,
-                    session_id: &context.session_id,
+                    principal_id: context.principal_id(),
+                    session_id: context.session_id(),
                     request_id: "wallet-recovery-key-import",
                     result: "ok",
                     reason: "Wallet recovery key imported after fresh passkey verification",
@@ -261,7 +261,7 @@ pub(in crate::api::gateway) async fn wallet_app_managed_approval_approve(
             Ok(launch) => launch,
             Err(err) => return system_error_response(err),
         };
-    let authority = match runtime_wallet_authority(&launch) {
+    let authority = match runtime_wallet_authority(&state.data_dir, &launch) {
         Ok(authority) => authority,
         Err(err) => return system_error_response(err),
     };

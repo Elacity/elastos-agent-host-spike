@@ -1,0 +1,12 @@
+id: F-A7-lowceil
+file: src/ledger.rs
+test: ledger::model_lower_ceiling_does_not_refuse_the_settle
+--- old
+        if measured > stored {
+            return Err(SettleRefuse::AboveReservation);
+        }
+--- new
+        if measured > stored || measured > ledger.ceiling {
+            return Err(SettleRefuse::AboveReservation);
+        }
+--- end

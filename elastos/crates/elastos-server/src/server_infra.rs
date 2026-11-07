@@ -151,6 +151,19 @@ fn media_provider_bridge_config(
     elastos_server::protected_content_runtime::load_runtime_media_provider_bridge_config(data_dir)
 }
 
+/// The model provider starts only under an OS confinement backend. The launcher
+/// refuses startup on any other OS instead of running the model unconfined.
+const MODEL_PROVIDER_CONFINEMENT_UNAVAILABLE: &str = "provider confinement unavailable on this OS";
+
+fn model_provider_confinement(os: &str) -> Result<(), provider::bridge::BridgeError> {
+    match os {
+        "macos" | "linux" => Ok(()),
+        _ => Err(provider::bridge::BridgeError::InitFailed(
+            MODEL_PROVIDER_CONFINEMENT_UNAVAILABLE.to_owned(),
+        )),
+    }
+}
+
 async fn request_browser_engine_provider_status(
     bridge: &provider::ProviderBridge,
     status_timeout: Duration,
@@ -1028,41 +1041,54 @@ async fn setup_server_infrastructure_impl(
         Ok(Some(path)) => {
             match model_provider_startup_config(&data_dir, &provider_registry).await {
                 Ok((mut model_config, worker)) => {
+                    // Refuse before any spawn when this OS has no confinement backend.
+                    let confinement = model_provider_confinement(std::env::consts::OS);
+                    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                    let bridge_result: Result<
+                        (provider::ProviderBridge, Option<()>, _, Option<()>),
+                        provider::bridge::BridgeError,
+                    > = match confinement {
+                        Ok(()) => unreachable!(
+                            "model_provider_confinement refuses every OS without a confinement backend"
+                        ),
+                        Err(refusal) => Err(refusal),
+                    };
                     #[cfg(target_os = "macos")]
-                    let bridge_result = async {
-                        let root = Path::new(&model_config.base_path);
-                        let bundle = api::model_provider_engine_bundle(root).map_err(|_| {
-                            provider::bridge::BridgeError::InitFailed(
-                                "model engine confinement unavailable".into(),
-                            )
-                        })?;
-                        provider::ProviderBridge::spawn_confined_model_with_engine_bundle(
+                    let bridge_result = match confinement {
+                        Ok(()) => {
+                            let root = Path::new(&model_config.base_path);
+                            let bundle = api::model_provider_engine_bundle(root).map_err(|_| {
+                                provider::bridge::BridgeError::InitFailed(
+                                    "model engine confinement unavailable".into(),
+                                )
+                            });
+                            match bundle {
+                                Ok(bundle) => provider::ProviderBridge::spawn_confined_model_with_engine_bundle(
+                                    &path,
+                                    model_config.clone(),
+                                    bundle.as_deref(),
+                                )
+                                .await
+                                .map(|(bridge, sockets, vacant, config, listener)| {
+                                    (bridge, Some((sockets, vacant)), config, Some(listener))
+                                }),
+                                Err(refusal) => Err(refusal),
+                            }
+                        }
+                        Err(refusal) => Err(refusal),
+                    };
+                    #[cfg(target_os = "linux")]
+                    let bridge_result = match confinement {
+                        Ok(()) => provider::ProviderBridge::spawn_confined_model_linux(
                             &path,
                             model_config.clone(),
-                            bundle.as_deref(),
                         )
                         .await
-                        .map(
-                            |(bridge, sockets, vacant, config, listener)| {
-                                (bridge, Some((sockets, vacant)), config, Some(listener))
-                            },
-                        )
-                    }
-                    .await;
-                    #[cfg(target_os = "linux")]
-                    let bridge_result = provider::ProviderBridge::spawn_confined_model_linux(
-                        &path,
-                        model_config.clone(),
-                    )
-                    .await
-                    .map(|(bridge, sockets, vacant, config)| {
-                        (bridge, Some((sockets, vacant)), config, None::<()>)
-                    });
-                    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-                    let bridge_result =
-                        provider::ProviderBridge::spawn(&path, model_config.clone())
-                            .await
-                            .map(|bridge| (bridge, None, model_config.clone(), None::<()>));
+                        .map(|(bridge, sockets, vacant, config)| {
+                            (bridge, Some((sockets, vacant)), config, None::<()>)
+                        }),
+                        Err(refusal) => Err(refusal),
+                    };
                     match bridge_result {
                         Ok((bridge, local_sockets, confined_config, hosted_listener)) => {
                             model_config = confined_config;
@@ -1131,6 +1157,9 @@ async fn setup_server_infrastructure_impl(
                                     tracing::warn!("Skipping model-provider because startup failed")
                                 }
                             }
+                        }
+                        Err(provider::bridge::BridgeError::InitFailed(reason)) => {
+                            tracing::warn!("Skipping model-provider: {}", reason)
                         }
                         Err(_) => tracing::warn!("Skipping model-provider because startup failed"),
                     }
@@ -2172,6 +2201,7 @@ mod tests {
     use std::ffi::CString;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStrExt;
+    use std::process::Output;
     use std::sync::Mutex;
     use tempfile::TempDir;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -4287,6 +4317,244 @@ mod tests {
                 Err(capability::manager::ValidationError::TokenRevoked)
             ),
             "revoked token must stay revoked after restart: {result:?}"
+        );
+    }
+
+    #[test]
+    fn model_provider_confinement_refuses_unsupported_os() {
+        for os in ["macos", "linux"] {
+            assert!(
+                super::model_provider_confinement(os).is_ok(),
+                "{os} must start the model provider behind its egress filter"
+            );
+        }
+        for os in ["freebsd", "windows", ""] {
+            match super::model_provider_confinement(os) {
+                Err(elastos_runtime::provider::bridge::BridgeError::InitFailed(reason)) => {
+                    assert_eq!(
+                        reason, "provider confinement unavailable on this OS",
+                        "{os} reason"
+                    )
+                }
+                other => panic!("{os} must refuse model startup, got {other:?}"),
+            }
+        }
+    }
+
+    /// Fix one scratch directory's mode so it does not follow the operator umask.
+    #[cfg(target_os = "linux")]
+    fn set_scratch_mode(directory: &Path, mode: u32) {
+        fs::set_permissions(directory, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// Install the probe as the model provider below one scratch data root. The
+    /// startup path verifies the binary against that root's manifest and reads
+    /// the operator model config below it, so it reaches only scratch files.
+    #[cfg(target_os = "linux")]
+    fn staged_model_probe() -> StagedModelProbe {
+        let scratch = TempDir::new().unwrap();
+        // Startup refuses an identity root writable by others, so the probe's
+        // own scratch roots are 0700 whatever the operator umask is.
+        set_scratch_mode(scratch.path(), 0o700);
+        let root = scratch.path().join("data/elastos");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        for directory in [&root, &scratch.path().join("data")] {
+            set_scratch_mode(directory, 0o700);
+        }
+        let probe = bin.join("model-provider");
+        let source = scratch.path().join("probe.rs");
+        fs::write(
+            &source,
+            include_str!("../../elastos-runtime/tests/fixtures/linux_model_seccomp_probe.rs"),
+        )
+        .unwrap();
+        let built = Command::new("rustc")
+            .args(["--edition", "2021", "-o"])
+            .arg(&probe)
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(built.status.success(), "probe build failed");
+        fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).unwrap();
+        use sha2::Digest as _;
+        let checksum = format!(
+            "sha256:{}",
+            hex::encode(sha2::Sha256::digest(fs::read(&probe).unwrap()))
+        );
+        // The startup path verifies this manifest entry before it spawns.
+        let manifest = serde_json::json!({"external": {"model-provider": {
+            "version": "test",
+            "install_path": "bin/model-provider",
+            "provider_runtime": {
+                "role": "provider",
+                "substrate": "native",
+                "runtime_abi": "elastos.provider-stdio/v1",
+                "execution": "native-provider",
+                "provides": "elastos://model",
+            },
+            "platforms": {&elastos_server::setup::detect_platform(): {
+                "checksum": checksum,
+                "source": probe.to_string_lossy(),
+                "strategy": "local-copy",
+            }},
+        }}, "capsules": {}, "profiles": {}});
+        fs::write(
+            root.join("components.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        // One hosted offer answers status without a local model slot.
+        let config_root = root.join("providers/model-provider");
+        fs::create_dir_all(&config_root).unwrap();
+        fs::set_permissions(root.join("providers"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&config_root, fs::Permissions::from_mode(0o700)).unwrap();
+        let config = config_root.join("config.json");
+        fs::write(
+            &config,
+            br#"{"offers":[{"id":"offer:test","adapter":{"kind":"open_ai_compatible_text"}}]}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        StagedModelProbe { scratch, root }
+    }
+
+    #[cfg(target_os = "linux")]
+    struct StagedModelProbe {
+        scratch: TempDir,
+        root: PathBuf,
+    }
+
+    /// Prove the real Linux startup path starts the model provider through the
+    /// egress-filtered spawn: the child it starts reports NO_NEW_PRIVS=1, SECCOMP
+    /// mode 2, and an AF_INET socket refused with EPERM. Falsifier B swaps the
+    /// call at server_infra.rs:1082 for the plain `spawn`, which installs no
+    /// filter, and this test then fails at its `no_new_privs` assertion.
+    ///
+    /// The child half is the `linux_model_startup_probe` test below: this test
+    /// starts one real startup composition in a child process against the
+    /// scratch Home that `staged_model_probe` writes.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn linux_model_startup_starts_provider_through_the_egress_filtered_spawn() {
+        let probe = staged_model_probe();
+        let root = probe.root.clone();
+        let Output {
+            status,
+            stdout,
+            stderr,
+        } = Command::new(std::env::current_exe().unwrap())
+            // The child half is `#[ignore]`d so a plain suite run skips it;
+            // this parent names it with `--ignored`.
+            .args([
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "server_infra::tests::linux_model_startup_probe",
+            ])
+            .env("ELASTOS_LINUX_MODEL_PROBE_ROOT", &root)
+            .current_dir(probe.scratch.path())
+            .env("HOME", probe.scratch.path())
+            .env("XDG_DATA_HOME", probe.scratch.path().join("data"))
+            .env("TMPDIR", probe.scratch.path())
+            .env("ELASTOS_CAPSULE_BIN_DIR", root.join("bin"))
+            .env_remove("ELASTOS_MODEL_PROVIDER_CONFIG")
+            .env_remove("ELASTOS_MODEL_PROVIDER_CONFIG_PATH")
+            // Keep startup warnings: a refused model startup names its cause.
+            .env("RUST_LOG", "elastos=warn")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&stderr);
+        assert!(
+            status.success() && !stderr.contains("panicked") && !stderr.contains("FAILED"),
+            "startup probe process failed ({status}): {stderr}"
+        );
+        let stdout = String::from_utf8(stdout).unwrap();
+        // --nocapture puts the child test's own verdict on its stdout.
+        assert!(!stdout.contains("FAILED"), "startup probe test failed");
+        let facts: serde_json::Value = serde_json::from_str(
+            stdout
+                .lines()
+                .find(|line| line.starts_with('{'))
+                .unwrap_or_else(|| panic!("startup probe reported no facts: {stdout}\n{stderr}")),
+        )
+        .unwrap();
+        assert_eq!(facts["data_root"], serde_json::json!(&root));
+        // Absent here means startup never registered `elastos://model`.
+        assert_eq!(
+            facts["registered_route"],
+            serde_json::json!("model"),
+            "startup did not register the model target\n{stderr}"
+        );
+        // The child writes one `name=value` line per kernel observation.
+        let report = fs::read_to_string(root.join("bin/model-provider.observed"))
+            .expect("model provider wrote no observations from the startup route");
+        let inherited = report
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            inherited.get("no_new_privs"),
+            Some(&"1"),
+            "startup child did not inherit NO_NEW_PRIVS: {report}"
+        );
+        assert_eq!(
+            inherited.get("seccomp"),
+            Some(&"2"),
+            "startup child did not inherit a seccomp filter: {report}"
+        );
+        assert_eq!(
+            inherited.get("inet_socket"),
+            Some(&"EPERM"),
+            "startup child could open an Internet socket: {report}"
+        );
+    }
+
+    /// model provider here, so the probe's own file records what that route
+    /// bound.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "child half of linux_model_startup_starts_provider_through_the_egress_filtered_spawn; run by the parent"]
+    async fn linux_model_startup_probe() {
+        // `main` installs these before startup; the test process starts there.
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .unwrap();
+        drop(
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .try_init(),
+        );
+        // The parent passes the exact scratch root, so this process cannot fall
+        // back to the real Home.
+        let data_dir = PathBuf::from(
+            std::env::var_os("ELASTOS_LINUX_MODEL_PROBE_ROOT")
+                .expect("probe needs ELASTOS_LINUX_MODEL_PROBE_ROOT"),
+        );
+        // The gateway profile runs the same startup function and the same model
+        // block, without the Home-only host provider this fixture does not stage.
+        let mut infrastructure = match setup_gateway_infrastructure().await {
+            Ok(infrastructure) => infrastructure,
+            Err(error) => panic!("startup failed in {}: {error:#}", data_dir.display()),
+        };
+        let registration = infrastructure
+            .provider_registry
+            .registration_for_uri("elastos://model/offers")
+            .await
+            .map(|registration| registration.route);
+        // Stopping the model target shuts the recorded child down.
+        infrastructure
+            .provider_registry
+            .unregister_sub_provider("model")
+            .await
+            .unwrap();
+        if let Some(carrier) = infrastructure.carrier_service.as_mut() {
+            carrier.shutdown().await.unwrap();
+        }
+        drop(infrastructure);
+        println!(
+            "{}",
+            serde_json::json!({"data_root": data_dir, "registered_route": registration})
         );
     }
 }

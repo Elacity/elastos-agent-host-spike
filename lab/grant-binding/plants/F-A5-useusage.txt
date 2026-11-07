@@ -1,0 +1,16 @@
+id: F-A5-useusage
+file: src/lib.rs
+test: model_reported_usage_does_not_widen_the_use_path
+--- old
+        resource_name(&record.identity, path, Some(&record.owned_root))?;
+--- new
+        resource_name(
+            &record.identity,
+            path,
+            if request.reported_usage == 0 {
+                Some(&record.owned_root)
+            } else {
+                None
+            },
+        )?;
+--- end

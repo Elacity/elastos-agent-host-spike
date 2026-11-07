@@ -1,0 +1,12 @@
+id: F-A7-trecord
+file: src/ledger.rs
+test: ledger::model_timeout_ends_an_uncertain_hold
+--- old
+        if let Some(open) = ledger.open.get_mut(&reservation.id) {
+            open.timed_out = true;
+        }
+        Ok(TimeoutRecord)
+--- new
+        Self::return_unused_hold(&mut ledger, reservation, amount, request);
+        Ok(TimeoutRecord)
+--- end

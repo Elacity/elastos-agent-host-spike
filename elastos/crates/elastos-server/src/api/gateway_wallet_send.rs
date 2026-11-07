@@ -12,7 +12,7 @@ pub(in crate::api::gateway) async fn wallet_app_send_transaction(
             Ok(launch) => launch,
             Err(err) => return system_error_response(err),
         };
-    let authority = match runtime_wallet_authority(&launch) {
+    let authority = match runtime_wallet_authority(&state.data_dir, &launch) {
         Ok(authority) => authority,
         Err(err) => return system_error_response(err),
     };

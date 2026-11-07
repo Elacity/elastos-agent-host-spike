@@ -1,0 +1,12 @@
+[package]
+name = "vm-smoke"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+sha2 = "0.10"
+
+# Separate from the agent-host workspace and from the Runtime workspace.
+[workspace]

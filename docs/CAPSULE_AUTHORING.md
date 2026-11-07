@@ -271,6 +271,10 @@ The second command fails if the operator runtime is absent. Data capsules are
 different: their `run` path starts its own in-process preview. The complete
 classification lives in [Command runtime matrix](COMMAND_MATRIX.md).
 
+The operator runtime grants the capsule only what its policy file allows (see
+[Capability policy](INSTALL.md#capability-policy)). To grant every request
+while you develop, start Terminal 1 with `ELASTOS_SHELL_MODE=auto`.
+
 ## Publish with the right gate
 
 The two publish commands enforce different checks:

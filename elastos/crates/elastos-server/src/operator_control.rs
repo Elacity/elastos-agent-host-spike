@@ -36,6 +36,9 @@ pub const OPERATOR_ACTION_ROOM_READ: &str = "room.read";
 pub const OPERATOR_ACTION_ROOM_APPROVE: &str = "room.approve";
 pub const OPERATOR_ACTION_ROOM_DENY: &str = "room.deny";
 pub const OPERATOR_ACTION_ROOM_OPEN: &str = "room.open";
+/// Lets a Carrier peer place content replicas on this node. It is a
+/// storage permission for the peer, not a remote operator command.
+pub const OPERATOR_ACTION_CONTENT_REPLICA: &str = "content.replica";
 
 const OPERATOR_CONFIG_SCHEMA: &str = "elastos.operator-control/v1";
 const OPERATOR_REQUEST_DOMAIN: &str = "elastos.operator.request.v1";
@@ -369,6 +372,7 @@ pub fn supported_actions() -> &'static [&'static str] {
         OPERATOR_ACTION_ROOM_APPROVE,
         OPERATOR_ACTION_ROOM_DENY,
         OPERATOR_ACTION_ROOM_OPEN,
+        OPERATOR_ACTION_CONTENT_REPLICA,
     ]
 }
 
@@ -426,6 +430,17 @@ pub fn upsert_peer(data_dir: &Path, mut peer: OperatorPeer) -> Result<OperatorPe
     config.peers.sort_by(|a, b| a.did.cmp(&b.did));
     save_operator_control(data_dir, &config)?;
     Ok(peer)
+}
+
+/// The actions the owner granted to `did` in the operator peer store, or
+/// `None` when the peer is not registered (or the store cannot be read).
+pub fn granted_peer_actions(data_dir: &Path, did: &str) -> Option<Vec<String>> {
+    load_operator_control(data_dir)
+        .ok()?
+        .peers
+        .into_iter()
+        .find(|peer| peer.did == did)
+        .map(|peer| peer.allow)
 }
 
 pub fn remove_peer(data_dir: &Path, did: &str) -> Result<Option<OperatorPeer>> {
@@ -2276,8 +2291,9 @@ mod tests {
     }
 
     #[test]
-    fn supported_actions_include_update_apply() {
+    fn supported_actions_include_update_apply_and_content_replica() {
         assert!(supported_actions().contains(&OPERATOR_ACTION_UPDATE_APPLY));
+        assert!(supported_actions().contains(&"content.replica"));
     }
 
     #[test]

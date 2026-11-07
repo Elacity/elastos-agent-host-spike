@@ -1,0 +1,12 @@
+id: F-A7-dlusage
+file: src/ledger.rs
+test: ledger::model_reported_usage_does_not_set_the_timeout_deadline
+--- old
+                            open.deadline = ledger.verifier_deadline;
+--- new
+                            open.deadline = if request.reported_usage > 0 {
+                                request.reported_usage
+                            } else {
+                                ledger.verifier_deadline
+                            };
+--- end
