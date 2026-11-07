@@ -1,0 +1,7 @@
+{
+  "id": "F-B4-BASELINE-NETWORK-ALLOW",
+  "about": "Planted deviation of the committed baseline: network proposed allow. The checker must CATCH this as MUST CHANGE on every platform that denies sockets.",
+  "right": "network",
+  "proposed": "allow",
+  "open_decision": false
+}

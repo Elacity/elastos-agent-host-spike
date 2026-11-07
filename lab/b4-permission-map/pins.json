@@ -1,0 +1,24 @@
+{
+  "about": "Pinned Linux lab sources for the B4 static map. The checker reads these trees with git show. It does not copy the folders into this lab.",
+  "linux_confine": {
+    "pr": 296,
+    "branch": "cursor/linux-confine-e156",
+    "sha": "2dc3c565c6649d668f1e50efefeea7d964330f9c",
+    "files": [
+      "lab/linux-confine/helper/setup.c",
+      "lab/linux-confine/src/policy.rs",
+      "lab/linux-confine/src/profile.rs",
+      "lab/linux-confine/README.md"
+    ]
+  },
+  "fail_closed_linux": {
+    "pr": 307,
+    "branch": "cursor/fail-closed-linux-0b95",
+    "sha": "2c70a0d845f9acc15144a2afec889370612cca66",
+    "files": [
+      "lab/fail-closed-linux/src/lib.rs",
+      "lab/fail-closed-linux/src/seccomp.rs",
+      "lab/fail-closed-linux/src/real.rs"
+    ]
+  }
+}
