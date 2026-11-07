@@ -1,0 +1,39 @@
+test_count_inflation_matching_marks_fails (__main__.CheckGuestResults.test_count_inflation_matching_marks_fails) ... ok
+test_count_inflation_no_marks_fails (__main__.CheckGuestResults.test_count_inflation_no_marks_fails) ... ok
+test_duplicate_lc_mark_last_wins_fails (__main__.CheckGuestResults.test_duplicate_lc_mark_last_wins_fails) ... ok
+test_forged_9p_only_missing_marks_fails (__main__.CheckGuestResults.test_forged_9p_only_missing_marks_fails) ... ok
+test_full_pass (__main__.CheckGuestResults.test_full_pass) ... ok
+test_guest_exit_must_be_one_canonical_line (__main__.CheckGuestResults.test_guest_exit_must_be_one_canonical_line) ... ok
+test_m1_missing_plant_fails (__main__.CheckGuestResults.test_m1_missing_plant_fails) ... ok
+test_m2_short_suite_fails (__main__.CheckGuestResults.test_m2_short_suite_fails) ... ok
+test_m3_status_fail_exit_1_fails (__main__.CheckGuestResults.test_m3_status_fail_exit_1_fails) ... ok
+test_m4_wrong_nonce_fails (__main__.CheckGuestResults.test_m4_wrong_nonce_fails) ... ok
+test_m5_guest_exit_nonzero_fails (__main__.CheckGuestResults.test_m5_guest_exit_nonzero_fails) ... ok
+test_m6_first_ok_last_fail_fails (__main__.CheckGuestResults.test_m6_first_ok_last_fail_fails) ... ok
+test_m7_failed_count_nonzero_fails (__main__.CheckGuestResults.test_m7_failed_count_nonzero_fails) ... ok
+test_m8_missing_status_fails (__main__.CheckGuestResults.test_m8_missing_status_fails) ... ok
+test_missing_isolation_proof_fails (__main__.CheckGuestResults.test_missing_isolation_proof_fails) ... ok
+test_missing_qemu_exit_fails (__main__.CheckGuestResults.test_missing_qemu_exit_fails) ... ok
+test_qemu_exit_137_fails (__main__.CheckGuestResults.test_qemu_exit_137_fails) ... ok
+test_qemu_timeout_fails (__main__.CheckGuestResults.test_qemu_timeout_fails) ... ok
+test_replay_old_tree_old_nonce_fails (__main__.CheckGuestResults.test_replay_old_tree_old_nonce_fails) ... ok
+test_serial_9p_mismatch_fails (__main__.CheckGuestResults.test_serial_9p_mismatch_fails) ... ok
+test_tester_can_read_nonce_fails (__main__.CheckGuestResults.test_tester_can_read_nonce_fails) ... ok
+test_init_reads_root_only_nonce_and_emits_marks (__main__.HostScriptNonceIsolation.test_init_reads_root_only_nonce_and_emits_marks) ... ok
+test_wrapper_keeps_nonce_off_guest_paths_until_after_qemu (__main__.HostScriptNonceIsolation.test_wrapper_keeps_nonce_off_guest_paths_until_after_qemu) ... ok
+test_m10_substring_guest_exit (__main__.MutantsAreCaught.test_m10_substring_guest_exit) ... ok
+test_m11_skip_preboot_record (__main__.MutantsAreCaught.test_m11_skip_preboot_record) ... ok
+test_m1_skip_plant_caught (__main__.MutantsAreCaught.test_m1_skip_plant_caught) ... ok
+test_m2_skip_passed_exact (__main__.MutantsAreCaught.test_m2_skip_passed_exact) ... ok
+test_m3_skip_status_exit (__main__.MutantsAreCaught.test_m3_skip_status_exit) ... ok
+test_m4_skip_nonce_presence (__main__.MutantsAreCaught.test_m4_skip_nonce_presence) ... ok
+test_m5_skip_guest_exit (__main__.MutantsAreCaught.test_m5_skip_guest_exit) ... ok
+test_m6_first_result_line (__main__.MutantsAreCaught.test_m6_first_result_line) ... ok
+test_m7_skip_failed_exact (__main__.MutantsAreCaught.test_m7_skip_failed_exact) ... ok
+test_m8_missing_status_is_pass (__main__.MutantsAreCaught.test_m8_missing_status_is_pass) ... ok
+test_m9_last_wins_duplicate_marks (__main__.MutantsAreCaught.test_m9_last_wins_duplicate_marks) ... ok
+
+----------------------------------------------------------------------
+Ran 34 tests in 1.175s
+
+OK

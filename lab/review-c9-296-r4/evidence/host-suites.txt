@@ -1,0 +1,6 @@
+host elf: 6 passed; 0 failed
+host aarch64: 2 passed; 0 failed; 1 ignored
+host confine: 25 passed; 0 failed
+host providers: 4 passed; 0 failed (after building shipping binaries)
+host falsify: F-LC-SOCKET CAPBND BLOCK STORAGE PROVIDER-SOCKET ANY-ERRNO WRONG-ARCH-CC CAUGHT
+host F-LC-QEMU-USER-LANDLOCK NOT RUN (qemu-aarch64 absent)
