@@ -1,0 +1,43 @@
+
+running 1 test
+a8 runtime: elastos sha256 d185ab44586171595d639dd1bdb0aea0cf4bf1abc7dca2c4986f6f0d7fca2be9
+a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+a8 injected agent-host: sha256 7d81d0cb5a34064b4e8df7ca17eb75255b5973af89836e9493bf9c375f174acf imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+a8 receipt cursor: size:0 inode:None path:/tmp/a8-home.MliI7h/home/.local/share/elastos/runtime/capability-requests.jsonl
+a8 host key read: exit:Some(1) assigned:None guest_hash:7d81d0cb5a34064b4e8df7ca17eb75255b5973af89836e9493bf9c375f174acf host_records:[CapabilityRequestRecord { action: "write", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied", capsule_id: Some("component-00000000-0000-0000-0000-000000000000"), principal_id: None, session_id: None, module_hash: None }, CapabilityRequestRecord { action: "read", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied", capsule_id: Some("component-00000000-0000-0000-0000-000000000000"), principal_id: None, session_id: None, module_hash: None }] marker_absent:true unchanged:true
+a8 authorship: needs runtime: capability-requests.jsonl omits component id from Runtime [run] output or API, session id, guest module hash
+test agent_host_host_key_read_is_refused ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 21.29s
+
+   Compiling a1-a8-hardening v0.1.0 (/tmp/pr-301-a8-r3/lab/a1-a8-hardening)
+warning: constant `HOST_PATH_OLD` is never used
+  --> tests/a8_agent_host_host_key.rs:22:7
+   |
+22 | const HOST_PATH_OLD: &str = "fn host_path(text: &str) -> bool {\n    text.starts_with('/') || text.contains('\\\\') || text.split('/').an...
+   |       ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `JOURNAL_OLD` is never used
+  --> tests/a8_agent_host_host_key.rs:24:7
+   |
+24 | const JOURNAL_OLD: &str = "    Ok(format!(\"{JOURNAL_ROOT}{agent_id}/tasks/{task_id}/journal\"))";
+   |       ^^^^^^^^^^^
+
+warning: constant `REQUEST_GUARD_OLD` is never used
+  --> tests/a8_agent_host_host_key.rs:25:7
+   |
+25 | const REQUEST_GUARD_OLD: &str = "fn request_journal_grants(bus: &mut impl ResourceBus, cursor: &JournalCursor) -> JournalGrants {\n    if...
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `REQUEST_GUARD_NEW` is never used
+  --> tests/a8_agent_host_host_key.rs:26:7
+   |
+26 | const REQUEST_GUARD_NEW: &str = "fn request_journal_grants(bus: &mut impl ResourceBus, cursor: &JournalCursor) -> JournalGrants {\n";
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: `a1-a8-hardening` (test "a8_agent_host_host_key") generated 4 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+     Running tests/a8_agent_host_host_key.rs (lab/a1-a8-hardening/target/host-build/debug/deps/a8_agent_host_host_key-a923056801d94aa1)

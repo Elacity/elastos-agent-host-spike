@@ -1,0 +1,4 @@
+H-guest-follow-sentence: LIVE-PASS exit=0 a8 authorship: needs runtime: capability-requests.jsonl omits component id from Runtime [run] output or API, session id, guest module hash
+H-race-after-snapshot: LIVE-PASS exit=0 a8 authorship: needs runtime: capability-requests.jsonl omits component id from Runtime [run] output or API, session id, guest module hash
+H-skip-journal-grants-replant: CAUGHT exit=101 
+H-piece-forge-replant: CAUGHT exit=101 

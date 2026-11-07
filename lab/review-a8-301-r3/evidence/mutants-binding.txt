@@ -1,0 +1,41 @@
+## Baseline (code as shipped at 10316585)
+{'case': 'honest-runtime-today', 'cargo_ok': True, 'runsh': 'NEEDS RUNTIME', 'missing': ['component id from Runtime [run] output or API', 'session id', 'guest module hash'], 'actions': ['write', 'read'], 'note': 'Runtime writes capsule_id only. No [run] id, session, or hash.'}
+{'case': 'foreign-capsule-id', 'cargo_ok': True, 'runsh': 'NEEDS RUNTIME', 'missing': ['component id from Runtime [run] output or API', 'session id', 'guest module hash'], 'actions': ['write', 'read'], 'note': 'Planted lines use another component uuid. assigned is None.'}
+{'case': 'empty-session-equals-empty', 'cargo_ok': True, 'runsh': 'NEEDS RUNTIME', 'missing': ['component id from Runtime [run] output or API', 'session id', 'guest module hash'], 'actions': ['write', 'read'], 'note': 'Empty session and hash become None via optional_string.'}
+{'case': 'wasm-hash-alias', 'cargo_ok': True, 'runsh': 'PASS', 'missing': [], 'actions': ['write', 'read'], 'note': 'module_hash alias wasm_hash plus a printed component id.'}
+{'case': 'empty-records-vacuous', 'cargo_ok': False, 'runsh': 'FAIL', 'missing': [], 'actions': [], 'note': 'No rows: session/hash any() is false, so those fields look present.'}
+{'case': 'guest-prints-follow-sentence', 'cargo_ok': True, 'runsh': 'NEEDS RUNTIME', 'missing': ['component id from Runtime [run] output or API', 'session id', 'guest module hash'], 'actions': ['write', 'read'], 'note': 'follow sentence is a stderr substring, not a Runtime field.'}
+
+## M1: assigned=None matches any capsule_id (today's unwrap_or(true))
+Finding: FOREIGN_ID cargo_ok=True. Binding does not need the launch id.
+{'case': 'foreign-capsule-id', 'cargo_ok': True, 'runsh': 'NEEDS RUNTIME', 'missing': ['component id from Runtime [run] output or API', 'session id', 'guest module hash'], 'actions': ['write', 'read'], 'note': 'Planted lines use another component uuid. assigned is None.'}
+
+## M2: authorship missing is println, not assert
+{'case': 'honest-runtime-today', 'cargo_ok': True, 'runsh': 'NEEDS RUNTIME', 'missing': ['component id from Runtime [run] output or API', 'session id', 'guest module hash'], 'actions': ['write', 'read'], 'note': 'Runtime writes capsule_id only. No [run] id, session, or hash.'}
+Finding: cargo_ok True while missing has all three Runtime-ask fields.
+
+## M3: empty session == empty session
+{'case': 'empty-session-equals-empty', 'cargo_ok': True, 'runsh': 'NEEDS RUNTIME', 'missing': ['component id from Runtime [run] output or API', 'session id', 'guest module hash'], 'actions': ['write', 'read'], 'note': 'Empty session and hash become None via optional_string.'}
+Finding: empty strings become None, so they stay unmet, not a match.
+
+## M4: vacuous any() on empty records
+{'case': 'empty-records-vacuous', 'cargo_ok': False, 'runsh': 'FAIL', 'missing': [], 'actions': [], 'note': 'No rows: session/hash any() is false, so those fields look present.'}
+Finding: with a printed component id and no rows, missing is empty.
+The write-then-read assert still fails, so cargo is not ok.
+
+## M5: wasm_hash / guest_hash aliases count as module_hash
+{'case': 'wasm-hash-alias', 'cargo_ok': True, 'runsh': 'PASS', 'missing': [], 'actions': ['write', 'read'], 'note': 'module_hash alias wasm_hash plus a printed component id.'}
+Finding: a planted wasm_hash plus a [run] id would make run.sh PASS.
+
+## M6: session check is presence, not equality
+{'case': 'other-session', 'cargo_ok': True, 'runsh': 'PASS', 'missing': [], 'actions': ['write', 'read'], 'note': 'any non-empty session'}
+Finding: any non-empty session_id clears the field. No expected session.
+
+## M7: require assigned (stronger mutant) would fail today's honest run
+{'case': 'honest-runtime-today', 'cargo_ok': False, 'runsh': 'FAIL', 'actions': [], 'missing': ['component id from Runtime [run] output or API', 'session id', 'guest module hash']}
+Finding: if the test required a [run] id before matching rows,
+today's honest Runtime run would FAIL, not NEEDS RUNTIME.
+
+## M8: guest-controlled follow sentence
+{'case': 'guest-prints-follow-sentence', 'cargo_ok': True, 'runsh': 'NEEDS RUNTIME', 'missing': ['component id from Runtime [run] output or API', 'session id', 'guest module hash'], 'actions': ['write', 'read'], 'note': 'follow sentence is a stderr substring, not a Runtime field.'}
+Finding: cargo_ok depends on stderr text, not a receipt field.
