@@ -200,7 +200,7 @@ Home's own model writes the compaction summary. Same reason. Cursor does this on
 
 ### Later, not now
 
-Phase C real writes through the object provider; `exec-cargo-in-image` (Mac); phase E create-in-Home; a full adversarial review before anything goes to Elacity. Phase F (selling, second Home, `sell-second-home`) is Anders' scope: do not start it.
+Phase C real writes through the object provider; `exec-cargo-in-image` (Mac); phase E create-in-Home; a full adversarial review before anything is offered upstream to `Elacity/elastos-runtime`. Phase F (selling, second Home, `sell-second-home`) is Anders' scope: do not start it.
 
 ## 9. Cloud setup
 
@@ -241,6 +241,6 @@ node scripts/home-version-list-smoke.mjs                                        
 
 Stop and write the report with `Questions:` filled in. A clear "blocked because X" is a good result. Guessing past a security question is not.
 
-## 12. Before this ever goes to Elacity
+## 12. Before this is ever offered upstream to `Elacity/elastos-runtime`
 
-Not your job, recorded so it is not forgotten: the `handoff/` folder and the root `CLAUDE.md` exist only in this spike repo. They are removed before any branch is offered to the team, and the work is split into one-concern PRs on Elacity `develop` after Sasha and Anders agree.
+Not your job, recorded so it is not forgotten: the `handoff/` folder and the root `CLAUDE.md` exist only in this spike repo. They are removed before any branch is offered upstream, and the work is split into one-concern PRs on `Elacity/elastos-runtime` `develop` after Sasha and Anders agree.
