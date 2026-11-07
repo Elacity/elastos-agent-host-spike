@@ -1,0 +1,19 @@
+H-guest-write-preopen: CAUGHT ComponentProvider links only elastos:bus; no WASI preopen, FIFO, or dir
+H-session-from-env-argv: CAUGHT Home::spawn clears env; elastos run passes no capsule argv; guest has no WASI environ
+H-session-from-identity: SURVIVED identity::context().session equals capsule_id; guest can read this launch's id
+H-session-predictable: SURVIVED is_session_id accepts session-1; complete bind with that id is PASS []
+H-session-equals-capsule: SURVIVED lab accepts session_id == capsule_id, which identity already returns
+H-toctou-hash-vs-load: SURVIVED test hashes injected.bytes; Runtime loads path.join(entrypoint) later; no re-hash of staged file
+H-seq-out-of-order-actions: CAUGHT isolation_denied_actions keeps file order; read then write is ['read', 'write'], not [write, read]
+H-seq-duplicate-pairs: CAUGHT four actions ['write', 'read', 'write', 'read'] fail the exact write-then-read list
+H-seq-numbers-ignored: SURVIVED receipt seq/sequence fields are not parsed; out-of-order numbers still PASS a complete bind
+H-log-truncate-same-inode: SURVIVED lock_launch_receipts records size 0; same-inode truncate+rewrite is read from the start
+H-log-rotate-new-inode: CAUGHT a replaced inode after a known file is refused
+H-log-shrink-dead: SURVIVED shrink check exists but launch cursor size is always 0, so it never fires
+H-json-duplicate-keys: SURVIVED last key wins (capsule_id=component-341af27a-6b9c-4892-a618-808f0b687a9d); complete bind is PASS; first foreign id is dropped
+H-capsule-whitespace: SURVIVED optional_string trims capsule_id / session_id / module_hash / guest_function
+H-capsule-case: CAUGHT uppercase capsule_id is FAIL foreign capsule_id
+H-guest-write-receipts: CAUGHT exit=101 ok=False failed=True timeout=False
+H-forged-session-from-identity: CAUGHT exit=101 ok=False minted_session=False
+H-toctou-swap-staged: CAUGHT exit=101 ok=False failed=True; guest_hash still injected.bytes, file is shipped
+H-log-rewrite-same-inode: SURVIVED exit=101 ok=False saw_foreign=True

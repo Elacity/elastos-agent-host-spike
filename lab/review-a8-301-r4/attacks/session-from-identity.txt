@@ -1,0 +1,20 @@
+        if core::hint::black_box(true) {
+            use elastos::bus::capabilities;
+            use elastos::bus::identity;
+            use elastos::bus::types::CapabilityRequest;
+            let context = identity::context();
+            let _ = capabilities::request(&CapabilityRequest {
+                resource: "@RESOURCE@".into(),
+                actions: vec!["write".into()],
+                reason: "Agent Host task journal".into(),
+            });
+            let _ = capabilities::request(&CapabilityRequest {
+                resource: "@RESOURCE@".into(),
+                actions: vec!["read".into()],
+                reason: "Agent Host task journal".into(),
+            });
+            return Err(elastos::bus::types::BusError::Invalid(format!(
+                "[run] session_id={}",
+                context.session
+            )));
+        }

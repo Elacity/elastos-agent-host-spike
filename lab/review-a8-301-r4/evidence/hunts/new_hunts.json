@@ -1,0 +1,116 @@
+[
+  {
+    "name": "H-guest-write-preopen",
+    "verdict": "CAUGHT",
+    "detail": "ComponentProvider links only elastos:bus; no WASI preopen, FIFO, or dir",
+    "patch": "elastos/crates/elastos-compute/src/providers/component.rs:47-49 and instantiate_component linker (read-only)"
+  },
+  {
+    "name": "H-session-from-env-argv",
+    "verdict": "CAUGHT",
+    "detail": "Home::spawn clears env; elastos run passes no capsule argv; guest has no WASI environ",
+    "patch": "lab/a1-a8-hardening/src/lib.rs Home::spawn env_clear; run_cmd.rs capsule_args unused by bus v1"
+  },
+  {
+    "name": "H-session-from-identity",
+    "verdict": "SURVIVED",
+    "detail": "identity::context().session equals capsule_id; guest can read this launch's id",
+    "patch": "elastos/crates/elastos-compute/src/providers/component.rs identity::Host::context session: self.capsule_id.clone()"
+  },
+  {
+    "name": "H-session-predictable",
+    "verdict": "SURVIVED",
+    "detail": "is_session_id accepts session-1; complete bind with that id is PASS []",
+    "patch": "lab/a1-a8-hardening/src/lib.rs is_session_id; authorship_gaps equality only"
+  },
+  {
+    "name": "H-session-equals-capsule",
+    "verdict": "SURVIVED",
+    "detail": "lab accepts session_id == capsule_id, which identity already returns",
+    "patch": "ComponentState.session = capsule_id; authorship_gaps does not refuse that alias"
+  },
+  {
+    "name": "H-toctou-hash-vs-load",
+    "verdict": "SURVIVED",
+    "detail": "test hashes injected.bytes; Runtime loads path.join(entrypoint) later; no re-hash of staged file",
+    "patch": "tests/a8_agent_host_host_key.rs guest_hash = sha256(&injected.bytes); ComponentProvider::load from_file"
+  },
+  {
+    "name": "H-seq-out-of-order-actions",
+    "verdict": "CAUGHT",
+    "detail": "isolation_denied_actions keeps file order; read then write is ['read', 'write'], not [write, read]",
+    "patch": "isolation_denied_actions maps records in file order; assert_eq! [write, read]"
+  },
+  {
+    "name": "H-seq-duplicate-pairs",
+    "verdict": "CAUGHT",
+    "detail": "four actions ['write', 'read', 'write', 'read'] fail the exact write-then-read list",
+    "patch": "assert_eq!(actions, [write, read])"
+  },
+  {
+    "name": "H-seq-numbers-ignored",
+    "verdict": "SURVIVED",
+    "detail": "receipt seq/sequence fields are not parsed; out-of-order numbers still PASS a complete bind",
+    "patch": "parse_capability_record has no seq field; authorship_gaps ignores unknown keys"
+  },
+  {
+    "name": "H-log-truncate-same-inode",
+    "verdict": "SURVIVED",
+    "detail": "lock_launch_receipts records size 0; same-inode truncate+rewrite is read from the start",
+    "patch": "Home::lock_launch_receipts size: 0; read_capability_requests_since shrink check is dead for that cursor"
+  },
+  {
+    "name": "H-log-rotate-new-inode",
+    "verdict": "CAUGHT",
+    "detail": "a replaced inode after a known file is refused",
+    "patch": "read_capability_requests_since inode != cursor.inode -> panic"
+  },
+  {
+    "name": "H-log-shrink-dead",
+    "verdict": "SURVIVED",
+    "detail": "shrink check exists but launch cursor size is always 0, so it never fires",
+    "patch": "lock_launch_receipts size: 0 vs capability_requests_since meta.len() < cursor.size"
+  },
+  {
+    "name": "H-json-duplicate-keys",
+    "verdict": "SURVIVED",
+    "detail": "last key wins (capsule_id=component-341af27a-6b9c-4892-a618-808f0b687a9d); complete bind is PASS; first foreign id is dropped",
+    "patch": "parse_capability_record uses serde_json Value.get; no reject of duplicate keys"
+  },
+  {
+    "name": "H-capsule-whitespace",
+    "verdict": "SURVIVED",
+    "detail": "optional_string trims capsule_id / session_id / module_hash / guest_function",
+    "patch": "src/lib.rs optional_string map(str::trim)"
+  },
+  {
+    "name": "H-capsule-case",
+    "verdict": "CAUGHT",
+    "detail": "uppercase capsule_id is FAIL foreign capsule_id",
+    "patch": "authorship_gaps compares capsule_id with == after trim; no case fold"
+  },
+  {
+    "name": "H-guest-write-receipts",
+    "verdict": "CAUGHT",
+    "detail": "exit=101 ok=False failed=True timeout=False",
+    "patch": "attacks/guest-write-receipts.txt + Public symlink to receipts_path"
+  },
+  {
+    "name": "H-forged-session-from-identity",
+    "verdict": "CAUGHT",
+    "detail": "exit=101 ok=False minted_session=False",
+    "patch": "attacks/session-from-identity.txt guest returns [run] session_id=<identity.session>"
+  },
+  {
+    "name": "H-toctou-swap-staged",
+    "verdict": "CAUGHT",
+    "detail": "exit=101 ok=False failed=True; guest_hash still injected.bytes, file is shipped",
+    "patch": "after home.stage, overwrite entrypoint with shipped.bytes"
+  },
+  {
+    "name": "H-log-rewrite-same-inode",
+    "verdict": "SURVIVED",
+    "detail": "exit=101 ok=False saw_foreign=True",
+    "patch": "after run_until, truncate+rewrite capability-requests.jsonl on the same inode"
+  }
+]
