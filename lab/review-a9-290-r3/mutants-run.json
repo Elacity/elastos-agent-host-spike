@@ -1,0 +1,20 @@
+{
+  "official_mutants": 8,
+  "official_caught": 8,
+  "official_surviving": 0,
+  "extra_surviving_on_named_official_tests": [
+    {
+      "id": "M-walk-nofollow",
+      "note": "Drop O_NOFOLLOW from walk.rs. openat2 RESOLVE_NO_SYMLINKS still on. Official symlink, last-component, and 5000-iter race still pass."
+    },
+    {
+      "id": "M-force-fallback",
+      "note": "open_one always uses openat. O_NOFOLLOW kept. Official symlink and race still pass."
+    },
+    {
+      "id": "M-walk-nofollow-and-fallback",
+      "symlink_test": "survives (string-path resolve() refuses via-b before the walk)",
+      "toctou_test": "caught: 320 files in B in 5000 iters (denied=4463)"
+    }
+  ]
+}
