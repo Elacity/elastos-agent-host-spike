@@ -1,0 +1,10 @@
+command: python3 -I -m unittest discover -s lab/review-a6-a12-343/py -v
+result: Ran 17 tests in 2.706s / FAILED (failures=8)
+holds/weak passed: 9
+falsified failed: 8
+F-A6-NO-TOKEN-CHECK: CAUGHT
+F-A12-DROP-ROOTS: CAUGHT
+M-A6-GENERIC-DENIED: CAUGHT
+M-A6-PREFIX-BIND: SURVIVED
+M-A6-EMPTY-TOKEN: SURVIVED
+M-A12-HARDCODE-FAIL: SURVIVED
