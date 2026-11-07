@@ -618,10 +618,10 @@ function that file names
 `install_seccomp_with`, `install_seccomp`). On a real Linux host the wallet
 provider starts under that filter and the four denied calls answer the filter's
 own marker there, as `CONFINEMENT-LINUX.md` records with its host, kernel and
-per-call answers. That is the whole Linux claim: namespaces, Landlock,
-capability dropping and every file row of the contract remain unbuilt, so
-`linux` stays out of `DECLARED_CONFINED_OS` and every operations-table cell
-reads `designed, not enforced`.
+per-call answers. The Landlock file row has a recorded run there too. That is the
+whole Linux claim: namespaces, capability dropping and every other row of the
+contract remain unbuilt, so `linux` stays out of `DECLARED_CONFINED_OS` and every
+operations-table cell reads `designed, not enforced`.
 `both_file_profiles_bind_one_storage_parameter_contract` reads the three oracles
 and supplies contract evidence, not Linux execution evidence.
 
@@ -724,8 +724,8 @@ and supplies contract evidence, not Linux execution evidence.
   `linux_did_journey_runs_under_the_seccomp_allow_list` is the second caller of
   the same journey body, with did's own binary, declared rights and permitted
   operations. It compares the full program with wallet's and leaves the
-  four-call probe to wallet. Did acceptance awaits the shared policy decision
-  recorded in `CONFINEMENT-LINUX.md`;
+  four-call probe to wallet. It passes with no wider policy, as
+  `CONFINEMENT-LINUX.md` records;
   `linux_seccomp_launch_refuses_each_failed_install` requires each install
   failure and an architecture refusal to start nothing;
   `linux_seccomp_launcher_runs_the_requested_program` requires the child's own

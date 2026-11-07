@@ -6959,8 +6959,9 @@ const LANDLOCK_ACCESS_FS_IOCTL_DEV: u64 = 1 << 15;
 ///   remove-file, remove-dir, make-dir and make-reg, because `init` creates the
 ///   wallet directory and its key file inside the root, and a path rule on that
 ///   directory covers the tree `subpath` names;
-/// - the `bound-executable` exec form carries only `EXECUTE` on that file,
-///   which is what the declared `process-exec` permission authorizes;
+/// - the `bound-executable` exec form carries `EXECUTE` and `READ_FILE` on that
+///   file: `process-exec` authorizes the execution, and Landlock checks `execve`'s
+///   open of the program as a read;
 /// - the `STORAGE_PARENT` read form carries no right: a Landlock path rule on a
 ///   directory covers the whole tree beneath it, so a read rule on the parent
 ///   would grant every sibling of `STORAGE_ROOT`;
@@ -7962,7 +7963,7 @@ fn landlock_install_record_decodes_each_failed_step() {
 }
 
 /// Wallet's ruleset names each measured loader entry with `EXECUTE | READ_FILE`,
-/// and the storage-root rule keeps the seven rights the declared row carries.
+/// and the storage-root rule keeps the eight rights the declared row carries.
 /// The test builds the ruleset from wallet's committed declared-rights file
 /// through `landlock_path_rules` and `LANDLOCK_LOADER_PATHS`. It starts no
 /// process and calls no kernel, so it runs on every OS.

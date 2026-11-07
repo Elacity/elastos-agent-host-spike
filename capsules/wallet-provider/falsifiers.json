@@ -3631,8 +3631,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/src/storage.rs",
-          "old": "            if let Err(remove) = fs::remove_dir(directory) {\n",
-          "new": "            if let Err(remove) = fs::remove_dir(directory.join(\"never-created\")) {\n"
+          "old": "        if let Err(remove) = fs::remove_dir(directory) {\n",
+          "new": "        if let Err(remove) = fs::remove_dir(directory.join(\"never-created\")) {\n"
         }
       ],
       "tests": [
