@@ -1,0 +1,14 @@
+label=emulated 5.15 kernel under qemu-system TCG (not Jetson)
+native=0
+jetson=0
+emulated_cpu=1
+qemu_accel=tcg
+kernel=Linux (none) 5.15.208-0-virt aarch64
+landlock_abi=1
+vmlinuz_sha256=b439cfd5003d74d851da95efd0f8befe17ff3943d8bed079d531701a1b61c242
+
+did-provider    exit 71  names truncate (ABI 3) and ioctl_dev (ABI 5)
+wallet-provider exit 71  names truncate (ABI 3) and ioctl_dev (ABI 5)
+model-provider  exit 71  names truncate (ABI 3) and ioctl_dev (ABI 5)
+
+This is an Alpine virt 5.15 guest. It is not a Jetson board.

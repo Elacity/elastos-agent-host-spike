@@ -1,0 +1,59 @@
+source=/tmp/wt-307-r5/candidate/lab/fail-closed-linux
+head=747cda4f0f2dfb5953baad1c62c44be1a0d84e71
+==== F36-memfd-execveat real_kernel::real_memfd_second_image_is_refused ====
+exit=101 caught=True
+
+running 1 test
+test real_memfd_second_image_is_refused ... FAILED
+
+failures:
+
+---- real_memfd_second_image_is_refused stdout ----
+thread 'real_memfd_second_image_is_refused' panicked at tests/real_kernel.rs:465:37:
+did-provider: no started line in []
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    real_memfd_second_image_is_refused
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 27 filtered out; finished in 0.00s
+
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded libc v0.2.189
+   Compiling libc v0.2.189
+   Compiling fail-closed-linux v0.0.0 (/tmp/review-307-r5-replant/F36-memfd-execveat/crate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.82s
+     Running tests/real_kernel.rs (target/debug/deps/real_kernel-fcb5fe080d96224c)
+error: test failed, to rerun pass `--test real_kernel`
+
+==== F37-stdio-pty real_kernel::real_stdin_pty_is_not_a_terminal ====
+exit=101 caught=True
+
+running 1 test
+test real_stdin_pty_is_not_a_terminal ... FAILED
+
+failures:
+
+---- real_stdin_pty_is_not_a_terminal stdout ----
+thread 'real_stdin_pty_is_not_a_terminal' panicked at tests/real_kernel.rs:1172:9:
+did-provider: confined stdin must not be a tty, got ["started did-provider pid=12009", "fds=0,1,2", "stdin_tty=1", "stdin_ioctl ok", "stdin_tiocsti errno=1", "probe-ran provider=did-provider", "marker ok", "socket_inet errno=1", "socket_unix errno=1", "read_outside errno=13", "write_outside errno=13", "read_etc_passwd errno=13", "storage_write ok", "storage_read ok", "truncate_storage ok", "truncate_outside errno=13", "o_trunc_outside errno=13", "ioctl_dev errno=13", "nspid=2", "ready"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    real_stdin_pty_is_not_a_terminal
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 27 filtered out; finished in 0.00s
+
+
+   Compiling libc v0.2.189
+   Compiling fail-closed-linux v0.0.0 (/tmp/review-307-r5-replant/F37-stdio-pty/crate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.58s
+     Running tests/real_kernel.rs (target/debug/deps/real_kernel-fcb5fe080d96224c)
+error: test failed, to rerun pass `--test real_kernel`
+
+ALL_CAUGHT=True
+
