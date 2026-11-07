@@ -179,6 +179,16 @@ evidence for the file row only: no seccomp, namespaces, capability drop or
 network rule, and not the Runtime, so `linux` stays out of `DECLARED_CONFINED_OS`
 and every Linux cell above stays `designed, not enforced`.
 
+It departs from the Linux design in three named ways, so it is not confinement:
+
+- This dynamic build gets its libraries (`READ_FILE`) and its interpreter
+  (`READ_FILE`, `EXECUTE`). Landlock does not gate mapping, so with no seccomp
+  rule the provider could run the interpreter on a readable file in its root.
+  Only a build that needs no loader, or a filter refusing `execve`, closes this.
+- It accepts ABI 3 and 4, where `IOCTL_DEV` is not restricted. No row lets the
+  provider open a device, but the design refuses these ABIs.
+- `STORE` is the subset the nickname journey needs, not all of `file-write*`.
+
 ## What the profile allows
 
 - `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))`: start only the

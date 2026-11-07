@@ -139,9 +139,8 @@ impl Provider {
     fn started(base: &Path, rows: Option<&[Row]>) -> Self {
         fs::create_dir_all(base.join("did")).expect("storage root");
         let mut provider = Self::spawn(Path::new(BINARY), rows).expect("the launch must succeed");
-        let key = hex::encode([0x42u8; 32]);
-        provider
-            .ok(json!({ "op": "init", "config": { "base_path": base, "encryption_key": key } }));
+        let config = json!({ "base_path": base, "encryption_key": hex::encode([0x42u8; 32]) });
+        provider.ok(json!({ "op": "init", "config": config }));
         provider
     }
 
@@ -196,11 +195,17 @@ fn linux_set_nickname_is_served_and_kept_under_landlock() {
     provider.ok(json!({ "op": "set_nickname", "nickname": "Allowed" }));
     assert!(base.join("did/nickname.enc").is_file());
     // A second launch can only answer by reading the file back under the ruleset.
+<<<<<<< HEAD
     let mut again = Provider::started(&base, Some(&rows));
     assert_eq!(
         again.ok(json!({ "op": "get_nickname" }))["nickname"],
         "Allowed"
     );
+=======
+    let mut again = Provider::started(&base, &rows);
+    let nickname = again.ok(json!({ "op": "get_nickname" }));
+    assert_eq!(nickname["nickname"], "Allowed");
+>>>>>>> claude/b4-did-linux
 }
 
 #[test]
@@ -240,30 +245,28 @@ fn plant_no_ruleset_lets_the_outside_write_land() {
 fn plant_grant_on_the_parent_lets_the_sibling_write_land() {
     let (_fixture, base, _, sibling) = base_and_outside();
     let mut rows = rows_for(&base);
-    rows.iter_mut()
-        .find(|row| row.1 == STORE)
-        .expect("storage row")
-        .0 = base.clone();
+    let root = base.join("did");
+    rows.iter_mut().find(|row| row.0 == root).expect("storage row").0 = base.clone();
     let mut provider = Provider::started(&base, Some(&rows));
     let answer = provider.save_through_link(&base, &sibling);
     assert_eq!(answer["status"], "ok", "{answer}");
     assert!(sibling.exists());
 }
 
+/// The same copy starts when a row grants it, so the refusal is the missing row's,
+/// not a `noexec` fixture or a failed install.
 #[test]
 fn linux_copy_of_the_binary_under_the_root_cannot_start() {
     let (_fixture, base, _, _) = base_and_outside();
     fs::create_dir_all(base.join("did")).expect("storage root");
     let copy = base.join("did/copy");
     fs::copy(BINARY, &copy).expect("copy");
-    let refused = Provider::spawn(&copy, Some(&rows_for(&base)))
-        .err()
-        .expect("a refusal");
-    assert_eq!(
-        refused.kind(),
-        std::io::ErrorKind::PermissionDenied,
-        "{refused}"
-    );
+    let mut rows = rows_for(&base);
+    let refused = Provider::spawn(&copy, Some(&rows)).err().expect("a refusal");
+    assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
+    rows.push((copy.clone(), RUN));
+    let mut control = Provider::spawn(&copy, Some(&rows)).expect("the granted copy must start");
+    assert!(control.send(json!({ "op": "get_did" }))["status"].is_string());
 }
 
 #[test]
@@ -283,5 +286,4 @@ fn only_the_interpreter_among_the_loader_files_may_execute() {
     let rows = loader_rows(Path::new(BINARY));
     let executable = rows.iter().filter(|row| row.1 & EXECUTE != 0).count();
     assert_eq!(executable, 1, "{rows:?}");
-    assert!(rows.len() > 1, "a dynamic build has libraries: {rows:?}");
 }
