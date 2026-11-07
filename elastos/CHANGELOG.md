@@ -10,7 +10,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 - Advisory fixes on the photo branch, carried from spike/agent-host: wasmtime
   36.0.20 and 48.0.8, rustls-webpki 0.103.16, webpki-roots and webpki-root-certs
-  1.0.10, crypto-bigint 0.7.6, ctutils 0.4.5, tokio 1.54.1 for the Bus2 proofs.
+  1.0.10, crypto-bigint 0.7.6, ctutils 0.4.5 or newer, tokio 1.54.1 for the Bus2 proofs.
   wasmtime is built without its `cache` feature, which nothing here turns on, so
   zstd leaves the locks (RUSTSEC-2026-0391/0398/0403/0410). Reviewed exceptions
   added for crypto-bigint 0.5.5 and zip's `ZipArchive::extract`.

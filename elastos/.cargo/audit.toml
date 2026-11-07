@@ -1,5 +1,6 @@
 # Reviewed cargo-audit exceptions. The CI job `cargo-audit` runs from elastos/ and reads this file
-# for every tracked Cargo.lock. Each entry says why it does not apply and which issue removes it.
+# for every tracked Cargo.lock. Each entry says why it does not apply or which part is an accepted
+# risk, and what removes it.
 [advisories]
 ignore = [
   # zip 2.4.2 (elastos-server): the zip crate's own ZipArchive::extract and
