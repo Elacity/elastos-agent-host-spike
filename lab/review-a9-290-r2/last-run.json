@@ -1,0 +1,158 @@
+{
+  "reviewed_sha": "2e5c37293279996fcb98ee2623381264f2d92e3f",
+  "worktree": "/tmp/pr-290-r2",
+  "shared_temp_before": false,
+  "shared_temp_after": false,
+  "hashes_before": {
+    "lib.rs": "6082614420f0f603fd8b5fd6cbcc088642bc2ba5d24fdaaf5fb80f170e03b61f",
+    "launch.rs": "d3ed87a9acfe22eab892fa13083a9ea6dabbdbbc37ac9501610f027a6c2c267c"
+  },
+  "hashes_after": {
+    "lib.rs": "6082614420f0f603fd8b5fd6cbcc088642bc2ba5d24fdaaf5fb80f170e03b61f",
+    "launch.rs": "d3ed87a9acfe22eab892fa13083a9ea6dabbdbbc37ac9501610f027a6c2c267c"
+  },
+  "worktree_dirty": "",
+  "fmt_exit": 0,
+  "test_exit": 0,
+  "clippy_exit": 0,
+  "probe_exit": 0,
+  "test_names": [
+    "launch::tests::real_runtime_rows_match_the_launcher",
+    "tests::agent_a_is_denied_b_directly",
+    "tests::agent_a_is_denied_b_list_and_rename",
+    "tests::agent_a_is_denied_b_through_a_parent_path",
+    "tests::agent_a_is_denied_b_through_a_symlink",
+    "tests::agent_a_is_denied_b_when_root_is_swapped_for_a_symlink",
+    "tests::agent_a_lists_and_renames_its_own_storage",
+    "tests::agent_a_reads_and_writes_its_own_storage",
+    "tests::agent_b_is_denied_a_hard_linked_inode",
+    "tests::cleanup_leaves_nothing_behind",
+    "tests::host_same_uid_walk_needs_confinement_or_runtime",
+    "tests::owned_root_uses_a5_usersai_agent_rest_shape",
+    "tests::planted_shared_root_is_caught",
+    "tests::shared_temp_directory_is_refused"
+  ],
+  "ignored_list_lines": [],
+  "findings": [
+    {
+      "id": "api-read-write",
+      "verdict": "HOLDS",
+      "title": "Store read of B's host path is CrossAgent",
+      "detail": "Err(CrossAgent)"
+    },
+    {
+      "id": "api-traversal",
+      "verdict": "HOLDS",
+      "title": "A .. path is Traversal",
+      "detail": "Err(Traversal)"
+    },
+    {
+      "id": "api-symlink",
+      "verdict": "HOLDS",
+      "title": "Outbound file symlink is Symlink",
+      "detail": "Err(Symlink)"
+    },
+    {
+      "id": "root-swap",
+      "verdict": "HOLDS",
+      "title": "Root replaced by a symlink to B",
+      "detail": "read=Err(\"Symlink: symlink leaves the owned root\") write=Err(\"Symlink: symlink leaves the owned root\") b_bytes=b-secret leak=false"
+    },
+    {
+      "id": "hardlink-live",
+      "verdict": "HOLDS",
+      "title": "Live second link (nlink>1) is HardLink",
+      "detail": "read=Err(HardLink)"
+    },
+    {
+      "id": "hardlink-unlink",
+      "verdict": "FALSIFIED",
+      "title": "Hard link then unlink A's name; B reads through the Store",
+      "detail": "nlink=1 read=Ok(\"hello-a\") write=Ok(()) leaked=true"
+    },
+    {
+      "id": "intermediate-symlink",
+      "verdict": "HOLDS",
+      "title": "Intermediate directory is a symlink to B",
+      "detail": "read=Err(Symlink) write=Err(Symlink) list=Err(Symlink) rename=Err(Symlink) planted=false"
+    },
+    {
+      "id": "last-component-symlink-write",
+      "verdict": "HOLDS",
+      "title": "Write through an existing last-component symlink to B",
+      "detail": "write=Err(Symlink) b_bytes=b-secret"
+    },
+    {
+      "id": "toctou-write-intermediate",
+      "verdict": "FALSIFIED",
+      "title": "TOCTOU: swap sub to a symlink to B between check and open(create)",
+      "detail": "iters=400 denied=395 writes_ok_into_b=4 files_left_in_b=4 swaps=129 b_secret_ok=true"
+    },
+    {
+      "id": "toctou-rename-intermediate",
+      "verdict": "WEAK",
+      "title": "TOCTOU: rename into sub after sub is swapped for a symlink to B",
+      "detail": "iters=400 rename_ok=1 moved_into_b=0"
+    },
+    {
+      "id": "toctou-last-component",
+      "verdict": "WEAK",
+      "title": "TOCTOU: last component becomes a symlink to B's file before open(create|truncate)",
+      "detail": "iters=400 wrote=3 truncated=0 b_bytes=b-secret"
+    },
+    {
+      "id": "path-variants",
+      "verdict": "HOLDS",
+      "title": "Case, Unicode, encoded, and dotted path variants do not read B",
+      "detail": "leaks=[] samples=[\"nested/../../secret.txt => Traversal\", \"note.txt/../secret.txt => Traversal\", \"./note.txt => HostPath\", \"note.txt/. => HostPath\", \"note.txt/ => own-or-other 7 bytes\", \"UsersAI/agent-b/session-b/2/secret.txt => NotFound\", \"..\\\\..\\\\agent-b\\\\session-b\\\\2\\\\secret.txt => HostPath\", \"note.txt\\0secret.txt => HostPath\", \"NOTE.TXT => NotFound\", \"note.tx\\u{301}t => NotFound\", \"\uff0e\uff0e/secret.txt => NotFound\", \"sub//note.txt => NotFound\", \"%2e%2e/secret.txt => NotFound\", \"note.txt  => NotFound\"] bind_Agent-A=Ok(\"UsersAI/Agent-A/session-a/1\") bind_unicode=Some(HostPath)"
+    },
+    {
+      "id": "empty-relative-roots",
+      "verdict": "HOLDS",
+      "title": "Empty, missing, and relative Store::open / bind inputs",
+      "detail": "open_empty=Err(OutsideRoot) open_missing=Err(OutsideRoot) open_dot=yard=/tmp/review-a9-290-r2-relcwd-4791-9-1793055061461226410/yard-4791-9-1793055061461262209 bind_empty_id=Err(HostPath) bind_empty_session=Err(HostPath) bind_slash=Err(HostPath)"
+    },
+    {
+      "id": "two-agent-race",
+      "verdict": "HOLDS",
+      "title": "Concurrent B Store::read of A's host path",
+      "detail": "leaks=0 iters=400"
+    },
+    {
+      "id": "proc-fd-prefix",
+      "verdict": "HOLDS",
+      "title": "/proc/self/fd and lexical prefix paths",
+      "detail": "proc=Err(CrossAgent) prefix=Err(OutsideRoot)"
+    },
+    {
+      "id": "host-same-uid",
+      "verdict": "HOLDS",
+      "title": "Same-uid host walk still reads A's bytes; row stays NeedsConfinement",
+      "detail": "host_read=Some([104, 101, 108, 108, 111, 45, 97]) state=NeedsConfinement reason=NEEDS CONFINEMENT/RUNTIME: both agents run as the same uid; sibling roots are mode 0755; B's process can read, write, list and rename A's files on the host. The Store does not close this. C3/C9 per-instance roots or the Runtime must confine the process."
+    },
+    {
+      "id": "runtime-rows",
+      "verdict": "HOLDS",
+      "title": "Lab Ready, Runtime Blocked, host NeedsConfinement, no elastos binary",
+      "detail": "lab=Ready runtime_states=[(\"real_runtime_each_instance_has_its_own_storage_root\", Blocked), (\"real_runtime_agent_a_read_of_b_is_refused\", Blocked)] executed=false read_refusal=None elastos=None"
+    },
+    {
+      "id": "fourth-tmp-site",
+      "verdict": "HOLDS",
+      "title": "Four create_runtime shared-temp sites plus serve default; lab did not create it",
+      "detail": "run_cmd=3 share_cmd=1 main_literal=1 shared_temp_exists=false"
+    },
+    {
+      "id": "plant-child-env",
+      "verdict": "HOLDS",
+      "title": "OWNED_STORAGE_PLANT_CHILD is unset in the probe process",
+      "detail": "set=false"
+    },
+    {
+      "id": "o-nofollow-kernel",
+      "verdict": "HOLDS",
+      "title": "Linux O_NOFOLLOW rejects a last-component symlink",
+      "detail": "open=Err(Os { code: 40, kind: FilesystemLoop, message: \"Too many levels of symbolic links\" })"
+    }
+  ]
+}
