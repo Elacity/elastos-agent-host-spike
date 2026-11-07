@@ -15,6 +15,15 @@ use elastos_compute::providers::ComponentProvider;
 use elastos_compute::ComputeProvider;
 use serde_json::{json, Value};
 
+// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+pub mod stand_in;
+use stand_in::record_loaded_instance;
+pub use stand_in::StandInBinding;
+pub use stand_in::{dispatch, STAND_IN_TEST_PRINCIPAL};
+
+#[cfg(test)]
+mod stand_in_tests;
+
 /// The imports `elastos-server/src/component.rs:6-12` allows.
 pub const ALLOWED_BUS_IMPORTS: &[&str] = &[
     "elastos:bus/types@1.0.0",
@@ -35,6 +44,7 @@ pub struct Bridge {
     pub lines: Vec<Value>,
     pub bytes_served: BTreeMap<String, usize>,
     pub provider_errors: BTreeMap<String, String>,
+    pub stand_in: Option<StandInBinding>,
 }
 
 impl Bridge {
@@ -201,8 +211,9 @@ pub async fn run(
     let bridge = Arc::new(Mutex::new(bridge));
     let provider = ComponentProvider::new();
     let host = bridge.clone();
-    provider.set_bus_hostcall(Arc::new(move |line, _capsule, _principal| {
-        let response = host.lock().unwrap().answer(line);
+    provider.set_bus_hostcall(Arc::new(move |line, capsule, principal| {
+        let principal = principal.unwrap_or_default();
+        let response = dispatch(&mut *host.lock().unwrap(), line, capsule, principal);
         Ok(response.to_string())
     }));
     let handle = provider
@@ -210,8 +221,9 @@ pub async fn run(
         .await
         .expect("ComponentProvider loads the capsule");
     provider
-        .set_bridge_principal(&handle.id, Some("person:local:test".into()))
+        .set_bridge_principal(&handle.id, Some(STAND_IN_TEST_PRINCIPAL.into()))
         .await;
+    record_loaded_instance(&mut bridge.lock().unwrap(), &handle.id.0);
     let result = provider.start(&handle).await.map_err(|err| err.to_string());
     // The provider keeps the hostcall, so take the state out through the lock.
     let bridge = std::mem::take(&mut *bridge.lock().unwrap());

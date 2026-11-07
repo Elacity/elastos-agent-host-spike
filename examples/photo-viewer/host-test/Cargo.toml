@@ -11,8 +11,11 @@ publish = false
 [dev-dependencies]
 # The shared harness: bridge, ComponentProvider run, admission check, fuel runner.
 capsule-v1-host-test = { path = "../../capsule-kit/v1-host-test" }
+# This test code stands in for the Runtime's launch by CID, which does not exist yet.
+capsule-bundle = { path = "../bundle" }
 elastos-common = { path = "../../../elastos/crates/elastos-common" }
 serde_json = "1"
+tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 # Keep this harness outside the main ElastOS Cargo workspace.

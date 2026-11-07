@@ -1523,7 +1523,10 @@ fn load_takes_only_a_cid() {
             "{name:?}"
         );
     }
-    assert_eq!(refused(load(&world.store(), "bafkreimissing")), "io");
+    assert_eq!(
+        refused(load(&world.store(), "bafkreimissing")),
+        "staged_missing"
+    );
 }
 
 // ---- The surface names its core by CID ----

@@ -1,6 +1,7 @@
 //! Admission: verify, then stage a read-only copy under its CID, verify the
 //! copy, and load only from it.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -8,7 +9,7 @@ use std::path::{Path, PathBuf};
 use semver::Version;
 use serde_json::{json, Value};
 
-use crate::listing::{cid_of, read_closure, Entry};
+use crate::listing::{cid_of, read_closure, ClosureRead, Entry};
 use crate::{io, Refusal, SignedClaim, TrustPolicy};
 
 /// A capsule already in the person's inventory.
@@ -37,6 +38,9 @@ pub struct Loaded {
     pub path: PathBuf,
     pub entries: Vec<Entry>,
     pub manifest: Value,
+    /// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    /// The same bytes that were hashed, keyed by closure entry path.
+    pub bytes: BTreeMap<String, Vec<u8>>,
 }
 
 pub fn admit(
@@ -48,7 +52,9 @@ pub fn admit(
     now: u64,
 ) -> Result<Admitted, Refusal> {
     // 1. The closure, and its CID.
-    let (entries, manifest) = read_closure(source)?;
+    let ClosureRead {
+        entries, manifest, ..
+    } = read_closure(source)?;
     let computed = cid_of(&entries);
     let claimed = &claim.claim;
     if computed != claimed.cid {
@@ -162,8 +168,21 @@ pub fn admit(
 pub fn load(store: &Path, cid: &str) -> Result<Loaded, Refusal> {
     check_cid_form(cid)?;
     let path = store.join(cid);
+    // This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    if let Err(err) = std::fs::symlink_metadata(&path) {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            return Err(Refusal::StagedMissing {
+                cid: cid.to_string(),
+            });
+        }
+        return Err(io(err, &path));
+    }
     check_read_only(&path, &path)?;
-    let (entries, manifest) = read_closure(&path)?;
+    let ClosureRead {
+        entries,
+        manifest,
+        bytes,
+    } = read_closure(&path)?;
     let computed = cid_of(&entries);
     if computed != cid {
         return Err(Refusal::StagedMismatch {
@@ -177,13 +196,154 @@ pub fn load(store: &Path, cid: &str) -> Result<Loaded, Refusal> {
         path,
         entries,
         manifest,
+        bytes,
     })
+}
+
+/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// Re-admit staged content with its detached claim and the current policy.
+pub fn admit_staged_for_stand_in(
+    loaded: &Loaded,
+    claims: &BTreeMap<String, SignedClaim>,
+    policy: &TrustPolicy,
+    installed: &[Installed],
+    store: &Path,
+    now: u64,
+) -> Result<Admitted, Refusal> {
+    let Some(claim) = claims.get(&loaded.cid) else {
+        return Err(Refusal::ClaimMissing {
+            cid: loaded.cid.clone(),
+        });
+    };
+    admit(&loaded.path, claim, policy, installed, store, now)
+}
+
+/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StandInDependencies {
+    pub viewer: Admitted,
+    pub core: Admitted,
+}
+
+/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// Resolve and re-admit the pinned viewer and core before any launch.
+#[allow(clippy::too_many_arguments)]
+pub fn select_stand_in_dependencies(
+    content: &Loaded,
+    selected_viewer: &str,
+    selected_core: &str,
+    claims: &BTreeMap<String, SignedClaim>,
+    policy: &TrustPolicy,
+    installed: &[Installed],
+    store: &Path,
+    now: u64,
+) -> Result<StandInDependencies, Refusal> {
+    let viewers = resolve_requires((&content.manifest, content.cid.as_str()), installed)?;
+    if viewers.len() != 1 {
+        return Err(Refusal::LaunchBindingInvalid {
+            cid: content.cid.clone(),
+            role: "viewer".to_string(),
+        });
+    }
+    let resolved_viewer = &viewers[0];
+    if resolved_viewer.cid != selected_viewer {
+        return Err(Refusal::ViewerMismatch {
+            cid: content.cid.clone(),
+            actual: resolved_viewer.cid.clone(),
+            expected: selected_viewer.to_string(),
+        });
+    }
+    let viewer_loaded = load(store, &resolved_viewer.cid)?;
+    let viewer = admit_staged_for_stand_in(&viewer_loaded, claims, policy, installed, store, now)?;
+    stand_in_selection_holds(
+        &resolved_viewer.cid,
+        &resolved_viewer.cid,
+        "viewer",
+        &viewer.role,
+        viewer_loaded.manifest["execution"]
+            .as_str()
+            .unwrap_or_default(),
+    )?;
+
+    let cores = resolve_requires(&viewer_loaded.manifest, installed)?;
+    if cores.len() != 1 {
+        return Err(Refusal::LaunchBindingInvalid {
+            cid: resolved_viewer.cid.clone(),
+            role: "app".to_string(),
+        });
+    }
+    let resolved_core = &cores[0];
+    let core_loaded = load(store, &resolved_core.cid)?;
+    let core = admit_staged_for_stand_in(&core_loaded, claims, policy, installed, store, now)?;
+    stand_in_selection_holds(
+        &resolved_core.cid,
+        selected_core,
+        "app",
+        &core.role,
+        core_loaded.manifest["execution"]
+            .as_str()
+            .unwrap_or_default(),
+    )?;
+    Ok(StandInDependencies { viewer, core })
+}
+
+// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+fn stand_in_selection_holds(
+    resolved_cid: &str,
+    selected_cid: &str,
+    role: &str,
+    admitted_role: &str,
+    execution: &str,
+) -> Result<(), Refusal> {
+    let required_execution = if role == "viewer" {
+        "web-projection"
+    } else {
+        "component"
+    };
+    if resolved_cid != selected_cid || admitted_role != role || execution != required_execution {
+        return Err(Refusal::LaunchBindingInvalid {
+            cid: resolved_cid.to_string(),
+            role: role.to_string(),
+        });
+    }
+    Ok(())
 }
 
 // This test code stands in for the Runtime's launch by CID, which does not exist yet.
 // Compile the kit's URI owner directly: this slice adds no dependency or copied rule.
 #[path = "../../../capsule-kit/guest/src/uri.rs"]
 mod stand_in_uri;
+
+/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// Bind image members to the bytes already checked by `load`. Admission and
+/// execution remain separate steps for the caller.
+pub fn bind_content_stand_in(loaded: &Loaded) -> Result<BTreeMap<String, Vec<u8>>, Refusal> {
+    let binding_invalid = |detail| Refusal::ContentBindingInvalid {
+        cid: loaded.cid.clone(),
+        detail,
+    };
+    let mut objects = BTreeMap::new();
+    for entry in &loaded.entries {
+        let path = entry.path.as_str();
+        if !path.starts_with("images/") {
+            continue;
+        }
+        let uri = format!(
+            "localhost://Users/self/Pictures/Capsules/{}/{path}",
+            loaded.cid
+        );
+        if let Err(reason) =
+            stand_in_uri::check_object_uri(&uri, "localhost://Users/self/Pictures/")
+        {
+            return Err(binding_invalid(format!("{path}: {reason}")));
+        }
+        let bytes = loaded.bytes.get(path).cloned().ok_or_else(|| {
+            binding_invalid(format!("{path}: loaded bytes have no entry for this path"))
+        })?;
+        objects.insert(uri, bytes);
+    }
+    Ok(objects)
+}
 
 /// This test code stands in for the Runtime's launch by CID, which does not exist yet.
 /// Optional closure identity for diagnostics. A bare manifest has no closure
@@ -420,7 +580,7 @@ fn copy_and_seal(
     }
     // The copy, not the source, is what must hash to the CID: a source that
     // changed after it was verified is caught here.
-    let (copied, _) = read_closure(staging)?;
+    let copied = read_closure(staging)?.entries;
     let computed = cid_of(&copied);
     if computed != cid {
         return Err(Refusal::StagedMismatch {
@@ -508,7 +668,7 @@ mod tests {
         std::fs::create_dir(&source).unwrap();
         std::fs::write(source.join("capsule.json"), b"{}").unwrap();
         std::fs::write(source.join("a.wasm"), b"verified").unwrap();
-        let (entries, _) = read_closure(&source).unwrap();
+        let entries = read_closure(&source).unwrap().entries;
         let cid = cid_of(&entries);
 
         std::fs::write(source.join("a.wasm"), b"swapped!").unwrap();

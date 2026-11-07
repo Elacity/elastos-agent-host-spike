@@ -94,6 +94,10 @@ test("the shipped renderer matches the kit owner", () => {
   assert.deepEqual(bytes("./browser/docs-render.js"), bytes("../../capsule-kit/surface/docs-render.js"));
 });
 
+test("the shipped client matches the kit owner", () => {
+  assert.deepEqual(bytes("./browser/page-client.js"), bytes("../../capsule-kit/surface/page-client.js"));
+});
+
 test("the page keeps the renderer in one place", () => {
   const page = source("./browser/reader.js");
   const importLine = page.match(/^import .*from "\.\/docs-render\.js";$/m);
@@ -425,7 +429,9 @@ test("a refused archive without a reason still says why", async () => {
 });
 
 test("the page has no way to hold or reach anything else", () => {
-  const shipped = ["./browser/reader.js", "./browser/docs-render.js", "./browser/main.js", "./browser/reader.css"];
+  const shipped = [
+    "./browser/reader.js", "./browser/docs-render.js", "./browser/page-client.js", "./browser/main.js", "./browser/reader.css",
+  ];
   for (const path of shipped) {
     const code = source(path);
     for (const forbidden of [
@@ -438,9 +444,11 @@ test("the page has no way to hold or reach anything else", () => {
     }
   }
   const page = source("./browser/reader.js");
+  const client = source("./browser/page-client.js");
   // One fetch call site, inside the client.
-  assert.equal(page.match(/fetchFn\(/g).length, 1);
-  assert.ok(!/[^.]\bfetch\(/.test(page), "no other fetch");
+  assert.equal((client.match(/fetchFn\(/g) || []).length, 1);
+  assert.ok(!page.includes("fetchFn("), "the request is the client's");
+  assert.ok(!/[^.]\bfetch\(/.test(page + client), "no other fetch");
   assert.equal(source("./browser/main.js").trim(), 'import { mountReader } from "./reader.js";\n\nmountReader(window);');
 
   const html = source("./browser/index.html");

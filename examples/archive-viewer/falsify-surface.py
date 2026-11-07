@@ -3,11 +3,13 @@
 
 Usage: python3 -I falsify-surface.py [--check]
 
-The page's own rules live in surface/browser/reader.js; the documents model's
-block rules are the capsule kit's one owner (examples/capsule-kit/surface/
-docs-render.js), drawn here through the page's shipped copy, so those rules
-are tested by the documents viewer and by the drift case. The drift case edits
-only the shipped copy, and only its own test must fail.
+The page's own rules live in surface/browser/reader.js. The launch client has
+one owner in examples/capsule-kit/surface/page-client.js; each client mutant
+is copied from that owner to the shipped file, as the build does. The client
+group requires the whole node file's failing set to be exactly the declared
+set. The documents model's block rules have one kit owner, docs-render.js,
+tested by the documents viewer. Each drift case edits only a shipped copy,
+and only its own test must fail.
 
 Each falsifier replaces exact text (it must occur once), runs the named node
 tests, and requires them to FAIL. The file is restored from its saved bytes
@@ -24,13 +26,17 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "capsule-kit" / "falsify"))
 import falsify_kit as kit  # noqa: E402
 
+REPO = pathlib.Path(__file__).resolve().parent.parent
 SURFACE = pathlib.Path(__file__).resolve().parent / "surface"
 PAGE = SURFACE / "browser" / "reader.js"
+CLIENT = REPO / "capsule-kit" / "surface" / "page-client.js"
+CLIENT_COPY = SURFACE / "browser" / "page-client.js"
 COPY = SURFACE / "browser" / "docs-render.js"
 TESTS = SURFACE / "reader.test.mjs"
 
 FORBIDDEN = "the page has no way to hold or reach anything else"
 DRIFT = "the shipped renderer matches the kit owner"
+CLIENT_DRIFT = "the shipped client matches the kit owner"
 
 # (name, exact old text, new text, tests that must fail[, appends])
 CASES = [
@@ -73,12 +79,6 @@ CASES = [
         "const MAX_PATH_CHARS = 20000;",
         ["the page keeps the renderer in one place"],
         [(PAGE, "\n\nfunction styleTag(style) {\n  return style;\n}\n")],
-    ),
-    (
-        "a blank refusal reason is kept",
-        "cut(reason.trim() || null, MAX_MESSAGE_CHARS,",
-        "cut(reason || null, MAX_MESSAGE_CHARS,",
-        ["a blank refusal reason is not shown as blank"],
     ),
     (
         "a blank skip message stays blank",
@@ -179,18 +179,6 @@ CASES = [
         ["an unreadable entry or preview is not shown, and the rest are"],
     ),
     (
-        "an unreadable refusal shows no text",
-        "cut(reason.trim() || null, MAX_MESSAGE_CHARS,",
-        "cut(reason, MAX_MESSAGE_CHARS,",
-        ["a refusal is shown as its text"],
-    ),
-    (
-        "requests carry cookies",
-        '        credentials: "omit",',
-        '        credentials: "include",',
-        ["it makes one request"],
-    ),
-    (
         "requests are made without a launch token",
         "  if (!token) {\n",
         "  if (false) {\n",
@@ -204,13 +192,43 @@ CASES = [
     ),
 ]
 
+# Launch-client rules: kit-owner anchors, only the page's node tests.
+CLIENT_CASES = [
+    (
+        "a blank refusal reason is kept",
+        "body.error.trim()",
+        "body.error",
+        ["a blank refusal reason is not shown as blank"],
+    ),
+    (
+        "an unreadable refusal shows no text",
+        "cut(trimmed || null, maxChars,",
+        "cut(trimmed, maxChars,",
+        ["a refusal is shown as its text", "a blank refusal reason is not shown as blank"],
+    ),
+    (
+        "requests carry cookies",
+        'credentials: "omit",',
+        'credentials: "include",',
+        ["it makes one request, a GET with the launch token and nothing else"],
+    ),
+]
+
 # The one-owner rule: one byte of the shipped copy differs from the owner.
 DRIFT_CASES = [
     (
         DRIFT,
+        COPY,
         "export const MAX_BLOCKS = 512;",
         "export const MAX_BLOCKS = 512 ;",
         [DRIFT],
+    ),
+    (
+        CLIENT_DRIFT,
+        CLIENT_COPY,
+        'export const TOKEN_HEADER = "x-elastos-home-token";',
+        'export const TOKEN_HEADER = "x-elastos-home-token" ;',
+        [CLIENT_DRIFT],
     ),
 ]
 
@@ -219,15 +237,29 @@ def test_fails(name):
     return kit.node_test_fails(TESTS, name)
 
 
+def sync_client():
+    """The build's client copy step: ship the kit owner's bytes."""
+    CLIENT_COPY.write_bytes(CLIENT.read_bytes())
+
+
 def main():
     page = [
         (case[0], PAGE, [(case[1], case[2])], case[3]) + ((case[4],) if len(case) > 4 else ())
         for case in CASES
     ]
-    drift = [(name, COPY, [(old, new)], tests) for name, old, new, tests in DRIFT_CASES]
+    client = [
+        (name, CLIENT, [(old, new)], tests, [(CLIENT_COPY, "")])
+        for name, old, new, tests in CLIENT_CASES
+    ]
+    drift = [(name, path, [(old, new)], tests) for name, path, old, new, tests in DRIFT_CASES]
+    every_failure = lambda: kit.node_test_failures(TESTS)  # noqa: E731
     kit.main(
-        [(page, None, test_fails, None, True), (drift, None, test_fails, None, True)],
-        done=f"all {len(page) + len(drift)} surface falsifiers caught",
+        [
+            (page, None, test_fails, None, True),
+            (client, sync_client, test_fails, None, True, every_failure),
+            (drift, None, test_fails, None, True, every_failure),
+        ],
+        done=f"all {len(page) + len(client) + len(drift)} surface falsifiers caught",
     )
 
 

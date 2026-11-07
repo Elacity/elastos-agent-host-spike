@@ -1,3 +1,5 @@
+// The one owner of the launch client. The docs build ships a byte-identical copy.
+
 import { cut } from "./docs-render.js";
 
 export const TOKEN_HEADER = "x-elastos-home-token";

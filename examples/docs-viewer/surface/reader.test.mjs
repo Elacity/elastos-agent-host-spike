@@ -249,6 +249,10 @@ test("the shipped renderer matches the kit owner", () => {
   assert.deepEqual(bytes("./browser/docs-render.js"), bytes("../../capsule-kit/surface/docs-render.js"));
 });
 
+test("the shipped client matches the kit owner", () => {
+  assert.deepEqual(bytes("./browser/page-client.js"), bytes("../../capsule-kit/surface/page-client.js"));
+});
+
 test("the page has no way to hold or reach anything else", () => {
   const page = source("./browser/reader.js");
   const client = source("./browser/page-client.js");

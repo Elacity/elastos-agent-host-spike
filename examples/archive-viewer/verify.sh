@@ -21,6 +21,24 @@ REPO_ROOT="$(cd "${VIEWER_DIR}/../.." && pwd)"
 WIT="${REPO_ROOT}/elastos/wit/elastos-bus-v1.wit"
 export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
 
+snapshot_keep=0
+host_log=""
+runtime_log=""
+
+snapshot_cleanup() {
+    if [[ $snapshot_keep -eq 0 ]]; then
+        rm -rf "${VIEWER_DIR}/.verify-snapshot"
+    fi
+    rm -f "$host_log" "$runtime_log"
+}
+
+install_snapshot_traps() {
+    trap snapshot_cleanup EXIT
+    trap 'snapshot_keep=1; exit 143' TERM
+    trap 'snapshot_keep=1; exit 130' INT
+    trap 'snapshot_keep=1; exit 129' HUP
+}
+
 RUNTIME=0
 GATE=0
 case "${GATE_LIST:-}" in
@@ -50,6 +68,25 @@ if [[ $GATE -eq 1 && $RUNTIME -ne 1 ]]; then
     echo "verify.sh: the lane gate requires the runtime step; drop --guest-only" >&2
     exit 1
 fi
+
+python3 -I "${VIEWER_DIR}/falsify_restore_test.py"
+python3 -I "${VIEWER_DIR}/falsify_restore_test.py" --falsify
+python3 -I - "$VIEWER_DIR" <<'PY'
+import shutil
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from falsify import HERE, SNAPSHOT_FILES, restore_interrupted_plants
+
+restore_interrupted_plants()
+snapshot = HERE / ".verify-snapshot"
+for name in SNAPSHOT_FILES:
+    saved = snapshot / name
+    saved.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(HERE / name, saved)
+(snapshot / "INCOMPLETE").write_text("verification in progress\n")
+PY
+install_snapshot_traps
 
 python3 -I "${REPO_ROOT}/examples/capsule-kit/scripts/check-manifest.py" \
     "${VIEWER_DIR}/capsule.json" "${WIT}" archive-viewer
@@ -84,7 +121,6 @@ fi
 if [[ $RUNTIME -eq 1 ]]; then
     host_log="$(mktemp)"
     runtime_log="$(mktemp)"
-    trap 'rm -f "$host_log" "$runtime_log"' EXIT
 
     # Component: built with the repository builder.
     "${VIEWER_DIR}/build.sh"
