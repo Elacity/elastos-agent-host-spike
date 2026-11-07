@@ -1,0 +1,9 @@
+exit: 3
+seconds: 0.206
+started: 2026-10-26T23:24:45Z
+
+A14 installed demo: /home/ubuntu/.local/share/elastos-demo-a14/current
+REFUSED: the demo is not installed. No journey was run.
+  - no installed demo at /home/ubuntu/.local/share/elastos-demo-a14/current; run lab/demo-a14/install.sh first
+Next: read /home/ubuntu/.local/share/elastos-demo-a14/runs/20261026T232445Z-d36tw9q0/summary.txt, then run `bash lab/demo-a14/install.sh`, then run this command again.
+Saved: /home/ubuntu/.local/share/elastos-demo-a14/runs/20261026T232445Z-d36tw9q0
