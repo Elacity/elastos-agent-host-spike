@@ -1,0 +1,79 @@
+   Compiling a6-a12-evidence-fix v0.0.0 (/tmp/pr343-r3/lab/a6-a12-evidence-fix)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.19s
+     Running unittests src/lib.rs (target-build/debug/deps/a6_a12_evidence_fix-ab259f76ee3c1e62)
+
+running 14 tests
+HUNT guard-dotdot: SURVIVED | accepted /tmp/a6-a12-pack.JP3OC6/.. (lexical child of isolation, filesystem parent)
+HUNT guard-dotdot-nested: SURVIVED | accepted /tmp/a6-a12-pack.JP3OC6/hold/../..
+test review_probes::r3_guard_dotdot ... ok
+HUNT guard-home-symlink-env: SURVIVED | ELASTOS_TMP_ROOT may be a symlink to $HOME if the link sits under isolation
+test review_probes::r3_guard_home_via_symlink_env ... ok
+HUNT guard-relative: CAUGHT | ELASTOS_TMP_ROOT must be an absolute path under the pack mktemp
+test review_probes::r3_guard_relative ... ok
+HUNT child-process: CAUGHT | leftovers=["/tmp/a6-a12-pack.JP3OC6/r3-child-16892-1793055076652097320-0/from-child.txt"]
+test review_probes::r3_child_process_leftover_under_watch ... ok
+HUNT guard-live-home-symlink: SURVIVED | check_tmp_root accepted symlink under isolation; write=Ok("/tmp/a6-a12-pack.JP3OC6/live-via-symlink-16892/storage/escaped.txt") escaped=/tmp/r3-fake-live-16892/storage/escaped.txt
+HUNT guard-trailing-slash: CAUGHT | trailing slash under isolation is accepted as the isolated folder
+HUNT guard-slash-dot: CAUGHT | ELASTOS_TMP_ROOT refuses /
+HUNT guard-slash-slash: CAUGHT | ELASTOS_TMP_ROOT refuses /
+test review_probes::r3_guard_symlinked_mktemp_and_live_home ... HUNT guard-slash-dotdot: CAUGHT | ELASTOS_TMP_ROOT /.. is not under isolated mktemp /tmp/a6-a12-pack.JP3OC6
+ok
+test review_probes::r3_guard_trailing_slash ... ok
+HUNT hardlink-created-after: CAUGHT | saw_orig=true saw_link=true leftovers=["/tmp/a6-a12-pack.JP3OC6/r3-hard-after-16892-1793055076653868517-1/link.txt", "/tmp/a6-a12-pack.JP3OC6/r3-hard-after-16892-1793055076653868517-1/orig.txt"]
+test review_probes::r3_hardlink_new_path_after_snapshot ... ok
+HUNT hardlink-preexisting: CAUGHT | same inode, new path after snapshot; leftovers=["/tmp/a6-a12-pack.JP3OC6/r3-hard-pre-16892-1793055076653872607-2/link.txt"]
+test review_probes::r3_hardlink_of_preexisting_file ... ok
+HUNT inode-reuse-same-path: SURVIVED | reused=true before_ino=675874 last_ino=675874 found=false
+test review_probes::r3_inode_reuse_same_path ... ok
+HUNT after-census-first-call: SURVIVED | a leftover written after leftovers_created returns is absent from that result
+HUNT after-census-rescan: CAUGHT | re-running leftovers_created with the same before snapshot
+HUNT default-census-api: NOTE | runtime_temp_census lists present paths; created-set is runtime_temp_census_since only
+test review_probes::r3_leftover_after_census_call ... ok
+test review_probes::r3_presence_census_is_not_created_set ... ok
+HUNT sibling-outside-watch: SURVIVED | watch leftovers=[]; planted in TMPDIR, fake XDG, fake Library/Caches
+test review_probes::r3_sibling_outside_watch_is_invisible ... ok
+HUNT snapshot-after-write: SURVIVED | created-set hides leftovers that were already present when snapshot() ran
+test review_probes::r3_snapshot_after_runtime_already_wrote ... ok
+HUNT ra6-current: BLOCKED | ask=RA-6 reason=RA-6: Runtime does not host two resident capsule instances in one process. Bus v2 / RT4 still owns resident lifecycle. Owner A6 rows use fixture deny across Homes, not validate step 4. See lab/a6-a12-evidence-fix/RA-6.md.
+test review_probes::r3_ra6_journey_is_blocked_today ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 0.01s
+
+new-hunts cargo exit=0
+
+== RA-6 hosting stub flipped to Ok ==
+   Compiling a6-a12-evidence-fix v0.0.0 (/tmp/pr343-r3/lab/a6-a12-evidence-fix)
+warning: unreachable expression
+   --> src/a6.rs:311:5
+    |
+310 |       return Ok(ResidentPair);
+    |       ----------------------- any code following this expression is unreachable
+311 | /     Err(format!(
+312 | |         "{RA_6}: Runtime does not host two resident capsule instances in one process. \
+313 | |          Bus v2 / RT4 still owns resident lifecycle. Owner A6 rows use fixture deny \
+314 | |          across Homes, not validate step 4. See lab/a6-a12-evidence-fix/RA-6.md."
+315 | |     ))
+    | |______^ unreachable expression
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `a6-a12-evidence-fix` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.13s
+     Running unittests src/lib.rs (target-build/debug/deps/a6_a12_evidence_fix-ab259f76ee3c1e62)
+
+running 1 test
+
+thread 'tests::a6_resident_two_instances_is_blocked' (16948) panicked at src/lib.rs:107:17:
+resident two-instance journey must not PASS until RA-6: A6 resident: instance-2 presenting instance-1 token refused WrongCapsule { expected:instance-1 got:instance-2 }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test tests::a6_resident_two_instances_is_blocked ... FAILED
+
+failures:
+
+failures:
+    tests::a6_resident_two_instances_is_blocked
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 49 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--lib`
+HUNT ra6-stub-ok: SURVIVED journey returned PASS with empty ResidentPair (no Runtime host)
