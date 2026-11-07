@@ -1,0 +1,86 @@
+original ebad194d6d99143bf717a081645c2b7370e90a0d20bb774a6b83a5edb4a77ff0
+===== A-skip-guards =====
+A-skip-guards: cargo_exit=101 passed=False failed=True timed_out=False
+  a8 runtime: elastos sha256 16993259a77cd1300101036e922841436c5ca66d54dff0d3cfa6982429a8e275
+  a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 injected agent-host: sha256 c0745cec6df2e1b707162cab706cfc02bdbccce7ae77d15a5788b6cd373f329c imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+  a8 host key read: exit:Some(1) host_records:[] marker_absent:true unchanged:true
+  test agent_host_host_key_read_is_refused ... FAILED
+  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 22.23s
+  thread 'agent_host_host_key_read_is_refused' (21727) panicked at tests/a8_agent_host_host_key.rs:170:5:
+  assertion `left == right` failed: Runtime must record manifest_capability_denied for write and read on localhost://Public/../../../../.ssh/id_ed25519 (request_journal_grants called the bus); host records: []
+  error: test failed, to rerun pass `--test a8_agent_host_host_key`
+===== B-piece-forge =====
+B-piece-forge: cargo_exit=101 passed=False failed=True timed_out=False
+  a8 runtime: elastos sha256 16993259a77cd1300101036e922841436c5ca66d54dff0d3cfa6982429a8e275
+  a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 injected agent-host: sha256 92d42c030a295c221c98c8e13fb0f5fa774a6da7beb43e6dcc9b87d4c4ccb274 imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+  a8 host key read: exit:Some(1) host_records:[] marker_absent:true unchanged:true
+  test agent_host_host_key_read_is_refused ... FAILED
+  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 20.21s
+  thread 'agent_host_host_key_read_is_refused' (22144) panicked at tests/a8_agent_host_host_key.rs:172:5:
+  assertion `left == right` failed: Runtime must record manifest_capability_denied for write and read on localhost://Public/../../../../.ssh/id_ed25519 (request_journal_grants called the bus); host records: []
+  error: test failed, to rerun pass `--test a8_agent_host_host_key`
+===== C-wasm-bus-only =====
+C-wasm-bus-only: cargo_exit=101 passed=False failed=True timed_out=False
+  a8 runtime: elastos sha256 16993259a77cd1300101036e922841436c5ca66d54dff0d3cfa6982429a8e275
+  a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 injected agent-host: sha256 f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737 imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+  a8 host key read: exit:Some(1) host_records:[CapabilityRequestRecord { action: "write", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied" }, CapabilityRequestRecord { action: "read", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied" }] marker_absent:true unchanged:true
+  test agent_host_host_key_read_is_refused ... FAILED
+  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 21.63s
+  thread 'agent_host_host_key_read_is_refused' (22561) panicked at tests/a8_agent_host_host_key.rs:183:5:
+  error: test failed, to rerun pass `--test a8_agent_host_host_key`
+===== D-direct-request =====
+D-direct-request: cargo_exit=101 passed=False failed=True timed_out=False
+  a8 runtime: elastos sha256 16993259a77cd1300101036e922841436c5ca66d54dff0d3cfa6982429a8e275
+  a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 injected agent-host: sha256 8441f14ecf43a77cb4897d2c3c2e5fce93606f8087ae368fc6d8b22fb362fc5f imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+  a8 host key read: exit:Some(1) host_records:[CapabilityRequestRecord { action: "read", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied" }] marker_absent:true unchanged:true
+  test agent_host_host_key_read_is_refused ... FAILED
+  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 21.88s
+  thread 'agent_host_host_key_read_is_refused' (22979) panicked at tests/a8_agent_host_host_key.rs:172:5:
+  assertion `left == right` failed: Runtime must record manifest_capability_denied for write and read on localhost://Public/../../../../.ssh/id_ed25519 (request_journal_grants called the bus); host records: [CapabilityRequestRecord { action: "read", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied" }]
+  error: test failed, to rerun pass `--test a8_agent_host_host_key`
+===== H-write-then-read-direct =====
+H-write-then-read-direct: cargo_exit=101 passed=False failed=True timed_out=False
+  a8 runtime: elastos sha256 16993259a77cd1300101036e922841436c5ca66d54dff0d3cfa6982429a8e275
+  a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 injected agent-host: sha256 fc3aa2f5aab51e621a7e3eb82441f0e12550c82340aec1f5686a586a658ab3b6 imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+  a8 host key read: exit:Some(1) host_records:[CapabilityRequestRecord { action: "write", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied" }] marker_absent:true unchanged:true
+  test agent_host_host_key_read_is_refused ... FAILED
+  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 21.96s
+  thread 'agent_host_host_key_read_is_refused' (23396) panicked at tests/a8_agent_host_host_key.rs:172:5:
+  assertion `left == right` failed: Runtime must record manifest_capability_denied for write and read on localhost://Public/../../../../.ssh/id_ed25519 (request_journal_grants called the bus); host records: [CapabilityRequestRecord { action: "write", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied" }]
+  error: test failed, to rerun pass `--test a8_agent_host_host_key`
+===== I-jsonl-path =====
+I-jsonl-path: cargo_exit=101 passed=False failed=True timed_out=False
+  a8 runtime: elastos sha256 16993259a77cd1300101036e922841436c5ca66d54dff0d3cfa6982429a8e275
+  a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 injected agent-host: sha256 0fb564eadddb81532fa27654834faae0843fcdea15c0788f6021d5d84a06e92b imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:false
+  test agent_host_host_key_read_is_refused ... FAILED
+  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 10.84s
+  thread 'agent_host_host_key_read_is_refused' (23834) panicked at tests/a8_agent_host_host_key.rs:91:5:
+  error: test failed, to rerun pass `--test a8_agent_host_host_key`
+===== J-preseed-jsonl =====
+J-preseed-jsonl: cargo_exit=0 passed=True failed=False timed_out=False
+  a8 runtime: elastos sha256 16993259a77cd1300101036e922841436c5ca66d54dff0d3cfa6982429a8e275
+  a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 injected agent-host: sha256 92d42c030a295c221c98c8e13fb0f5fa774a6da7beb43e6dcc9b87d4c4ccb274 imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+  a8 host key read: exit:Some(1) host_records:[CapabilityRequestRecord { action: "write", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied" }, CapabilityRequestRecord { action: "read", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied" }] marker_absent:true unchanged:true
+  test agent_host_host_key_read_is_refused ... ok
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 19.94s
+===== E-ignored-blocked =====
+E-ignored-blocked: cargo_exit=1 passed=False failed=False timed_out=False
+  error: unexpected argument '--ignored' found
+===== E-ignored-needs-runtime =====
+E-ignored-needs-runtime: cargo_exit=1 passed=False failed=False timed_out=False
+  error: unexpected argument '--ignored' found
+final ebad194d6d99143bf717a081645c2b7370e90a0d20bb774a6b83a5edb4a77ff0 status clean

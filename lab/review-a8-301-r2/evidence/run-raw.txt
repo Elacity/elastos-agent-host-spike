@@ -1,0 +1,63 @@
+   Compiling serde_core v1.0.229
+   Compiling version_check v0.9.5
+   Compiling typenum v1.20.1
+   Compiling serde v1.0.229
+   Compiling generic-array v0.14.7
+   Compiling foldhash v0.2.0
+   Compiling zmij v1.0.23
+   Compiling equivalent v1.0.3
+   Compiling serde_json v1.0.154
+   Compiling bitflags v2.13.2
+   Compiling itoa v1.0.18
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling semver v1.0.28
+   Compiling memchr v2.8.3
+   Compiling digest v0.10.7
+   Compiling cpufeatures v0.2.17
+   Compiling cfg-if v1.0.5
+   Compiling sha2 v0.10.9
+   Compiling hashbrown v0.17.1
+   Compiling indexmap v2.14.2
+   Compiling wasmparser v0.247.0
+   Compiling a1-a8-hardening v0.1.0 (/tmp/pr-301-a8-r2/lab/a1-a8-hardening)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.87s
+     Running unittests src/lib.rs (lab/a1-a8-hardening/target/host-build/debug/deps/a1_a8_hardening-8a8885523e61edb9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/a1_wasi_import.rs (lab/a1-a8-hardening/target/host-build/debug/deps/a1_wasi_import-91e1e06c7b035eea)
+
+running 1 test
+test wasi_import_is_refused_at_admission has been running for over 60 seconds
+a1 runtime: elastos sha256 16993259a77cd1300101036e922841436c5ca66d54dff0d3cfa6982429a8e275
+a1 wasi build: sha256 a6aa5328127a6c08cd2aee4aae4ef58cf5bb0ca0047e9e3089dedd0b4a33d884 imports ["wasi:cli/environment@0.2.0", "elastos:bus/types@1.0.0"]
+a1 control build: sha256 b2eaaf6f054837ca0880218909766100214706fbaa9a098aba4fca72e06f6c4f imports ["elastos:bus/types@1.0.0"]
+a1 refused run: exit:Some(1) refusal_line:Some("Error: Component capsule failed: Invalid manifest: component import \"wasi:cli/environment@0.2.0\" is not allowed; allowed imports: elastos:bus/types@1.0.0, elastos:bus/runtime@1.0.0, elastos:bus/identity@1.0.0, elastos:bus/capabilities@1.0.0, elastos:bus/providers@1.0.0")
+a1 control run: exit:Some(0) admitted_line:Some("[run] Component capsule 'a1-wasi-guest' exited")
+test wasi_import_is_refused_at_admission ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 387.05s
+
+     Running tests/a8_agent_host_host_key.rs (lab/a1-a8-hardening/target/host-build/debug/deps/a8_agent_host_host_key-a923056801d94aa1)
+
+running 3 tests
+test shipped_agent_host_bytes_read_host_key ... ignored, blocked: AC-002-ARGS; the shipped agent-host names only its own journal
+test shipped_wasm_bus_prints_internal_sentence ... ignored, needs runtime: WasmBus maps BusError::Internal to BusFailure::Other, so the path-specific Internal sentence is not visible
+a8 runtime: elastos sha256 16993259a77cd1300101036e922841436c5ca66d54dff0d3cfa6982429a8e275
+a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+a8 injected agent-host: sha256 f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737 imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+a8 host key read: exit:Some(1) host_records:[CapabilityRequestRecord { action: "write", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied" }, CapabilityRequestRecord { action: "read", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied" }] marker_absent:true unchanged:true
+test agent_host_host_key_read_is_refused ... ok
+
+test result: ok. 1 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 39.42s
+
+   Doc-tests a1_a8_hardening
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

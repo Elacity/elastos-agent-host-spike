@@ -1,0 +1,41 @@
+
+running 1 test
+a8 runtime: elastos sha256 16993259a77cd1300101036e922841436c5ca66d54dff0d3cfa6982429a8e275
+a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+a8 injected agent-host: sha256 92d42c030a295c221c98c8e13fb0f5fa774a6da7beb43e6dcc9b87d4c4ccb274 imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+a8 host key read: exit:Some(1) host_records:[CapabilityRequestRecord { action: "write", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied" }, CapabilityRequestRecord { action: "read", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied" }] marker_absent:true unchanged:true
+test agent_host_host_key_read_is_refused ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 19.94s
+
+   Compiling a1-a8-hardening v0.1.0 (/tmp/pr-301-a8-r2/lab/a1-a8-hardening)
+warning: constant `HOST_PATH_OLD` is never used
+  --> tests/a8_agent_host_host_key.rs:19:7
+   |
+19 | const HOST_PATH_OLD: &str = "fn host_path(text: &str) -> bool {\n    text.starts_with('/') || text.contains('\\\\') || text.split('/').an...
+   |       ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `JOURNAL_OLD` is never used
+  --> tests/a8_agent_host_host_key.rs:21:7
+   |
+21 | const JOURNAL_OLD: &str = "    Ok(format!(\"{JOURNAL_ROOT}{agent_id}/tasks/{task_id}/journal\"))";
+   |       ^^^^^^^^^^^
+
+warning: constant `REQUEST_GUARD_OLD` is never used
+  --> tests/a8_agent_host_host_key.rs:22:7
+   |
+22 | const REQUEST_GUARD_OLD: &str = "fn request_journal_grants(bus: &mut impl ResourceBus, cursor: &JournalCursor) -> JournalGrants {\n    if...
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `REQUEST_GUARD_NEW` is never used
+  --> tests/a8_agent_host_host_key.rs:23:7
+   |
+23 | const REQUEST_GUARD_NEW: &str = "fn request_journal_grants(bus: &mut impl ResourceBus, cursor: &JournalCursor) -> JournalGrants {\n";
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: `a1-a8-hardening` (test "a8_agent_host_host_key") generated 4 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.20s
+     Running tests/a8_agent_host_host_key.rs (lab/a1-a8-hardening/target/host-build/debug/deps/a8_agent_host_host_key-a923056801d94aa1)
