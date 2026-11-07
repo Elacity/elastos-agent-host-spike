@@ -1,0 +1,90 @@
+[
+  {
+    "id": "F-LC-SOCKET",
+    "file": "lab/linux-confine/src/policy.rs",
+    "old": "pub const DENY_SOCKET: bool = true;",
+    "new": "pub const DENY_SOCKET: bool = false;",
+    "test": "did_profile_permits_its_operations_and_refuses_the_rest",
+    "caught": "socket denial did not hold"
+  },
+  {
+    "id": "F-LC-CAPBND",
+    "file": "lab/linux-confine/helper/setup.c",
+    "old": "    drop_bounding_set();",
+    "new": "    if (0) drop_bounding_set();",
+    "test": "confined_process_cap_bnd_is_zero",
+    "caught": "capability bounding set did not drop"
+  },
+  {
+    "id": "F-LC-BLOCK",
+    "file": "lab/linux-confine/build.rs",
+    "old": "let production_flags: &[&str] = &[\"-O2\", \"-Wall\", \"-Wextra\", \"-Werror\"];",
+    "new": "let production_flags: &[&str] = &[\"-DLC_TEST_HOOKS\", \"-O2\", \"-Wall\", \"-Wextra\", \"-Werror\"];",
+    "test": "production_launcher_rejects_block_switches",
+    "caught": "the production launcher accepted a block switch"
+  },
+  {
+    "id": "F-LC-STORAGE",
+    "file": "lab/linux-confine/helper/setup.c",
+    "old": "LC_STORAGE_RIGHTS eight-right mask",
+    "new": "the same mask with LANDLOCK_ACCESS_FS_IOCTL_DEV added",
+    "test": "did_profile_permits_its_operations_and_refuses_the_rest",
+    "caught": "storage root rights drifted"
+  },
+  {
+    "id": "F-LC-PROVIDER-SOCKET",
+    "file": "lab/linux-confine/helper/setup.c",
+    "old": "int provider_deny_socket = deny_network && 1",
+    "new": "int provider_deny_socket = deny_network && 0",
+    "test": "provider_filter_refuses_socket",
+    "caught": "provider filter socket denial did not hold"
+  },
+  {
+    "id": "F-LC-ANY-ERRNO",
+    "file": "lab/linux-confine/tests/confine.rs and lab/linux-confine/helper/setup.c",
+    "old": "expect() asserts errno; clone denial returns EPERM",
+    "new": "expect() ignores errno; clone denial returns ENOSYS",
+    "test": "provider_filter_refuses_clone_process",
+    "caught": "not any failure"
+  },
+  {
+    "id": "F-LC-WRONG-ARCH-CC",
+    "file": "lab/linux-confine/build.rs",
+    "old": "assert_target_elf(out, target)",
+    "new": "skip the ELF e_machine check",
+    "test": "cargo check --target aarch64-unknown-linux-gnu with TARGET_CC=cc",
+    "caught": "wrong architecture"
+  },
+  {
+    "id": "F-LC-QEMU-USER-LANDLOCK",
+    "file": "lab/linux-confine/tests/aarch64.rs",
+    "old": "landlock_* under qemu-user must be ENOSYS",
+    "new": "expect errno 0",
+    "test": "aarch64_qemu_user_host_kernel --ignored",
+    "caught": "ENOSYS"
+  },
+  {
+    "id": "F-LC-SKIP-NETNS",
+    "file": "lab/linux-confine/helper/setup.c",
+    "old": "unshare(CLONE_NEWNET)",
+    "new": "if (0 && unshare(CLONE_NEWNET))",
+    "test": "did_profile_permits_its_operations_and_refuses_the_rest",
+    "caught": "netns=host"
+  },
+  {
+    "id": "F-LC-DROP-SECCOMP",
+    "file": "lab/linux-confine/helper/setup.c",
+    "old": "install_provider_filter / install_allow_list",
+    "new": "if (0) skip both seccomp installs",
+    "test": "did_profile_permits_its_operations_and_refuses_the_rest",
+    "caught": "op=socket result=ok"
+  },
+  {
+    "id": "F-LC-WIDE-ROOT",
+    "file": "lab/linux-confine/helper/setup.c",
+    "old": "add_rule(storage_root, LC_STORAGE_RIGHTS)",
+    "new": "add_rule(\"/\", handled_fs()) before STORAGE_ROOT",
+    "test": "did_profile_permits_its_operations_and_refuses_the_rest",
+    "caught": "op=outside-read result=ok"
+  }
+]
