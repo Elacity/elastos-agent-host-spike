@@ -1,0 +1,3 @@
+r3-run.sh pin=87b974a1631efcf48e103f84d028eb5b1a2a3c7f
+subject HEAD=19becdd74c3f96d5900487051d2e175fd5c06747
+REFUSE: subject HEAD is not pin

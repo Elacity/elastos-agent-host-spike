@@ -1,0 +1,52 @@
+r3 hunts:
+HUNT guard-dotdot: CAUGHT | ELASTOS_TMP_ROOT refuses '..' component in /tmp/a6-a12-pack.XA8VXT/..
+HUNT guard-dotdot-nested: CAUGHT | ELASTOS_TMP_ROOT refuses '..' component in /tmp/a6-a12-pack.XA8VXT/hold/../..
+HUNT guard-home-symlink-env: CAUGHT | ELASTOS_TMP_ROOT refuses symlink /tmp/a6-a12-pack.XA8VXT/home-link-10532 in /tmp/a6-a12-pack.XA8VXT/home-link-10532
+HUNT guard-relative: CAUGHT | ELASTOS_TMP_ROOT must be an absolute path under the pack mktemp
+HUNT guard-live-home-symlink: CAUGHT | ELASTOS_TMP_ROOT refuses symlink /tmp/a6-a12-pack.XA8VXT/live-via-symlink-10532 in /tmp/a6-a12-pack.XA8VXT/live-via-symlink-10532
+HUNT guard-trailing-slash: CAUGHT | trailing slash under isolation is accepted as the isolated folder
+HUNT guard-slash-dot: CAUGHT | ELASTOS_TMP_ROOT refuses /
+HUNT guard-slash-slash: CAUGHT | ELASTOS_TMP_ROOT refuses /
+HUNT guard-slash-dotdot: CAUGHT | ELASTOS_TMP_ROOT refuses '..' component in /..
+HUNT child-process: CAUGHT | leftovers=["/tmp/a6-a12-pack.XA8VXT/r3-child-10532-1793057771613359118-0/from-child.txt"]
+HUNT hardlink-created-after: CAUGHT | saw_orig=true saw_link=true leftovers=["/tmp/a6-a12-pack.XA8VXT/r3-hard-after-10532-1793057771615367826-1/link.txt", "/tmp/a6-a12-pack.XA8VXT/r3-hard-after-10532-1793057771615367826-1/orig.txt"]
+HUNT hardlink-preexisting: CAUGHT | same inode, new path after snapshot; leftovers=["/tmp/a6-a12-pack.XA8VXT/r3-hard-pre-10532-1793057771615495889-2/link.txt"]
+HUNT inode-reuse-same-path: CAUGHT | reused=true before_ino=675846 last_ino=675846 found=true
+HUNT after-census-first-call: SURVIVED | a leftover written after leftovers_created returns is absent from that result
+HUNT after-census-rescan: CAUGHT | re-running leftovers_created with the same before snapshot
+HUNT default-census-api: NOTE | runtime_temp_census lists present paths; created-set is runtime_temp_census_since only
+HUNT sibling-outside-watch: SURVIVED | watch leftovers=[]; planted in TMPDIR, fake XDG, fake Library/Caches
+HUNT snapshot-after-write: SURVIVED | leftovers_created hides leftovers that were already present when snapshot() ran
+HUNT ra6-current: BLOCKED | ask=RA-6 reason=RA-6: Runtime does not host two resident capsule instances in one process. Bus v2 / RT4 still owns resident lifecycle. Owner A6 rows use fixture deny across Homes, not validate step 4. See lab/a6-a12-evidence-fix/RA-6.md.
+HUNT bind-mount-into-census: INCONCLUSIVE | this host refuses mount --bind and unshare -m (Operation not permitted). The guard looks for symlinks and lexical ..; a bind mount is neither.
+HUNT ctime-same-content-reuse: SURVIVED | reused=true found=false; touch -r cannot restore ctime on this host
+HUNT empty-resident-pair: CAUGHT | Ok from stub with empty ResidentPair: FAIL (Runtime does not report two distinct live resident instance ids/pids, each holding its own grant)
+HUNT guard-var-tmp: CAUGHT | ELASTOS_TMP_ROOT /var/tmp is not under isolated mktemp /tmp/a6-a12-pack.QVtErD
+HUNT hardlink-escape-delete: SURVIVED | linked=true found_inside=false outside_lives=true leftovers=[]
+HUNT hardlink-from-outside: CAUGHT | linked=true found=true leftovers=["/tmp/a6-a12-pack.QVtErD/r4-hard-in-10555-1793057771866283799-3/from-outside.txt"]
+HUNT large-file-mtime-restore: SURVIVED | 65KiB rewrite, same size, mtime restored; identity should still move via ctime
+HUNT r4-snapshot-before-runtime: CAUGHT | leftover=/tmp/a6-a12-pack.QVtErD/r4-late-snap-10555-1793057771869008362-5/storage/already.txt reason=snapshot must be taken before the Runtime starts; Runtime already wrote
+HUNT r4-run-window-siblings: CAUGHT | leftovers=["/tmp/a6-a12-pack.QVtErD/r4-window-home-10555-1793057771869292546/Library/Caches/outside.txt", "/tmp/a6-a12-pack.QVtErD/r4-window-home-10555-1793057771869292546/xdg-cache/outside.txt", "/tmp/r4-window-tmp-10555-1793057771869292546.txt"]
+HUNT toctou-check-then-swap: SURVIVED | first=Ok(()) second=Err("ELASTOS_TMP_ROOT refuses symlink /tmp/a6-a12-pack.QVtErD/r4-toctou-10555 in /tmp/a6-a12-pack.QVtErD/r4-toctou-10555") write=Ok("/tmp/a6-a12-pack.QVtErD/r4-toctou-10555/storage/escaped.txt") wrote_outside=true. Guard re-checks on the next call. A caller that keeps the first Ok path can still write after the swap.
+HUNT toctou-missing-then-symlink: SURVIVED | first=Ok(()) second=Err("ELASTOS_TMP_ROOT refuses symlink /tmp/a6-a12-pack.QVtErD/r4-missing-10555 in /tmp/a6-a12-pack.QVtErD/r4-missing-10555") write=Ok("/tmp/a6-a12-pack.QVtErD/r4-missing-10555/storage/escaped.txt") wrote_outside=true
+HUNT write-then-delete: SURVIVED | snapshot census only sees what still exists at the after-snapshot
+HUNT detached-child-at-exit: SURVIVED | census taken after the parent exits, before the detached child writes
+HUNT detached-child-later-rescan: CAUGHT | same snapshot, census after the child wrote
+HUNT writes-var-tmp: SURVIVED | /var/tmp leftover visible in run-window: false
+HUNT writes-dev-shm: SURVIVED | /dev/shm leftover visible in run-window: false
+HUNT writes-dot-cache-when-xdg-set: CAUGHT | XDG_CACHE_HOME was set, so ~/.cache is not in extra_watch_roots
+HUNT ra6-stub-ok: CAUGHT named test FAILED because journey returned FAIL on empty ResidentPair, not PASS
+HUNT ra6-stub-ok-r3-script: SURVIVED named test FAILED (r3 script would print this regardless of FAIL vs PASS)
+HUNT a6-same-pid: CAUGHT same pid from one process is FAIL, not PASS
+HUNT a6-reused-live-pids: SURVIVED PASS with this process pid plus pid 1 (not resident capsules)
+
+mutants:
+MUTANT M-R4-GUARD-NO-ISOLATION SURVIVED against tests::a12_slash_tmp_root_is_refused
+MUTANT M-R4-GUARD-NO-ISOLATION-HOME SURVIVED against tests::a12_home_and_live_home_tmp_root_are_refused
+MUTANT M-R4-GUARD-NO-ISOLATION-DOTDOT SURVIVED against tests::a12_isolation_parent_tmp_root_is_refused
+MUTANT M-R4-GUARD-SKIP-CHECK CAUGHT by tests::a12_slash_tmp_root_is_refused
+MUTANT M-R4-GUARD-LEAF-SYMLINK SURVIVED against tests::a12_symlink_to_live_home_tmp_root_is_refused
+MUTANT M-R4-CENSUS-NO-HASH SURVIVED against tests::a12_inode_reuse_same_path_is_found
+MUTANT M-R4-CENSUS-NO-CTIME SURVIVED against tests::a12_inode_reuse_same_path_is_found
+MUTANT M-R4-CENSUS-INO-ONLY CAUGHT by tests::a12_inode_reuse_same_path_is_found
+MUTANT M-R4-SNAP-IGNORE-LIVE SURVIVED against tests::a12_snapshot_before_runtime_fails_if_already_wrote
