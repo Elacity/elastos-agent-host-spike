@@ -1,0 +1,135 @@
+{
+  "reviewed_sha": "c0b16491076c30366a3504066499c9f5ad831ef2",
+  "worktree": "/tmp/pr-290-readonly",
+  "shared_temp_before": false,
+  "shared_temp_after": false,
+  "hashes_before": {
+    "lib.rs": "a3a1f9207e4c73ddb6e4150194a17d727f6c54002e92cb16cf49c663e1d6481b",
+    "launch.rs": "79b5a46dc7535490d9657ecb5adf3bb8b638c226f108a1a227aba8f7bca19864"
+  },
+  "hashes_after": {
+    "lib.rs": "a3a1f9207e4c73ddb6e4150194a17d727f6c54002e92cb16cf49c663e1d6481b",
+    "launch.rs": "79b5a46dc7535490d9657ecb5adf3bb8b638c226f108a1a227aba8f7bca19864"
+  },
+  "worktree_dirty": "",
+  "fmt_exit": 0,
+  "test_exit": 0,
+  "probe_exit": 0,
+  "ignored_list_lines": [],
+  "findings": [
+    {
+      "id": "api-read-write",
+      "verdict": "HOLDS",
+      "title": "Store API denies A's read and write of B's host path",
+      "detail": "read=Err(CrossAgent) write=Err(CrossAgent) after=b-secret"
+    },
+    {
+      "id": "api-traversal",
+      "verdict": "HOLDS",
+      "title": "Store API denies a .. path toward B",
+      "detail": "read=Err(Traversal)"
+    },
+    {
+      "id": "api-list-absent",
+      "verdict": "WEAK",
+      "title": "Store has no list operation, so it cannot deny a listing",
+      "detail": "owned-storage public API is open, bind, read, write, host_root, cleanup, yard. No list."
+    },
+    {
+      "id": "api-rename-absent",
+      "verdict": "WEAK",
+      "title": "Store has no rename operation, so it cannot deny a rename-into",
+      "detail": "owned-storage public API has no rename, link, or symlink method."
+    },
+    {
+      "id": "host-list",
+      "verdict": "FALSIFIED",
+      "title": "From B's host root, a sibling walk lists A's files",
+      "detail": "via_b=/tmp/review-a9-290-3447-1793046824569583049/yard-3447-1-1793046824569615709/agent-b/session-b/2/../../../agent-a/session-a/1 names=[\"note.txt\"]"
+    },
+    {
+      "id": "host-read",
+      "verdict": "FALSIFIED",
+      "title": "From B's host root, a sibling walk reads A's bytes",
+      "detail": "leaked=hello-a"
+    },
+    {
+      "id": "host-write",
+      "verdict": "FALSIFIED",
+      "title": "From B's host root, a sibling walk writes into A's root",
+      "detail": "store_read=Ok([102, 114, 111, 109, 45, 98]) a_root=/tmp/review-a9-290-3447-1793046824569583049/yard-3447-1-1793046824569615709/agent-a/session-a/1"
+    },
+    {
+      "id": "host-rename-into",
+      "verdict": "FALSIFIED",
+      "title": "Host rename moves A's file into B's root; Store then serves it to B",
+      "detail": "rename=Ok(()) b_read=Ok([104, 101, 108, 108, 111, 45, 97]) a_read=Err(NotFound)"
+    },
+    {
+      "id": "host-hardlink",
+      "verdict": "FALSIFIED",
+      "title": "A host hard link in B's root is a Store read of A's inode",
+      "detail": "store_read=Ok([104, 101, 108, 108, 111, 45, 97]) host=hello-a after_a_write=Ok([99, 104, 97, 110, 103, 101, 100, 45, 98, 121, 45, 97])"
+    },
+    {
+      "id": "api-symlink",
+      "verdict": "HOLDS",
+      "title": "Store API refuses a symlink that leaves B's root",
+      "detail": "store_read=Err(Symlink)"
+    },
+    {
+      "id": "host-symlink",
+      "verdict": "FALSIFIED",
+      "title": "The same symlink is readable on the host",
+      "detail": "host=hello-a"
+    },
+    {
+      "id": "root-symlink-swap",
+      "verdict": "FALSIFIED",
+      "title": "Replacing A's host root with a symlink to B's root bypasses Store checks",
+      "detail": "read=Ok([98, 45, 115, 101, 99, 114, 101, 116]) write=Ok(()) b_read=Ok([102, 114, 111, 109, 45, 97])"
+    },
+    {
+      "id": "specific-reason",
+      "verdict": "HOLDS",
+      "title": "Lab refusals carry a distinct reason string per class",
+      "detail": "cross=cross-agent storage is refused trav=path traversal is refused shared=shared temp directory is not agent storage"
+    },
+    {
+      "id": "lab-shared-temp",
+      "verdict": "HOLDS",
+      "title": "Lab Store::open refuses /tmp/elastos/storage and does not create it",
+      "detail": "denied=Err(SharedTemp) existed=false created=false"
+    },
+    {
+      "id": "runtime-shared-temp",
+      "verdict": "FALSIFIED",
+      "title": "Runtime still constructs /tmp/elastos/storage (run_cmd plus share_cmd)",
+      "detail": "run_cmd=3 share_cmd=1 unused_for_reads=true"
+    },
+    {
+      "id": "runtime-enforced",
+      "verdict": "FALSIFIED",
+      "title": "Denial is not enforced by the Runtime; both real-Runtime rows stay BLOCKED",
+      "detail": "state=Blocked executed=false refusal=None"
+    },
+    {
+      "id": "blocked-not-skip-pass",
+      "verdict": "HOLDS",
+      "title": "#290's Runtime rows are BLOCKED, not cargo-ignored ok",
+      "detail": "real_runtime_rows_match_the_launcher passes only while state is Blocked and three run_cmd literals remain."
+    },
+    {
+      "id": "grant-shape-a5",
+      "verdict": "WEAK",
+      "title": "A9 owned_root is UsersAI/<id>/<session>/<instance>; A5 Decision uses UsersAI/<agent>/<rest>",
+      "detail": "grant owned_root=UsersAI/agent-a/session-a/1 identity=agent-a session=session-a instance=1"
+    },
+    {
+      "id": "host-root-api",
+      "verdict": "WEAK",
+      "title": "host_root() hands the caller a live host directory under the same uid",
+      "detail": "owned_root=UsersAI/agent-a/session-a/1 host=/tmp/review-a9-290-3447-1793046824572094135/yard-3447-8-1793046824572110387/agent-a/session-a/1 mode=755"
+    }
+  ]
+}
