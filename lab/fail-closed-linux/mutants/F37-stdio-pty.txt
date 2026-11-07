@@ -1,0 +1,12 @@
+id: F37-stdio-pty
+file: src/lib.rs
+test: real_kernel::real_stdin_pty_is_not_a_terminal
+--- old
+    kernel.sanitize_stdio().map_err(|errno| Fault {
+        step: Step::SanitizeStdio,
+        errno,
+        found: kernel.named_fault_found(),
+    })?;
+--- new
+    let _ = Step::SanitizeStdio;
+--- end

@@ -1,0 +1,11 @@
+id: F34-enforcement-self-test-skipped
+file: src/lib.rs
+test: simulated::sim_lying_kernel_enforcement_refuses
+test: real_kernel::real_lying_enforcement_self_test_refuses
+--- old
+    kernel
+        .enforcement_self_test(plan)
+        .map_err(|errno| Fault::os(Step::EnforceSelf, errno))?;
+--- new
+    let _ = (plan, Step::EnforceSelf);
+--- end

@@ -1,0 +1,11 @@
+id: F29-init-does-not-reap-all
+file: src/real.rs
+test: real_kernel::real_init_reaps_orphaned_grandchild
+--- old
+        let ret = unsafe { libc::waitpid(-1, &mut status, 0) };
+--- new
+        let ret = unsafe {
+            libc::pause();
+            -1
+        };
+--- end

@@ -1,0 +1,11 @@
+id: F06-capset-error-ignored
+file: src/lib.rs
+test: simulated::sim_capability_drop_failure_refuses
+test: real_kernel::real_capability_drop_failure_refuses
+--- old
+    kernel
+        .clear_capability_sets()
+        .map_err(os(Step::CapabilitySets))?;
+--- new
+    let _ = kernel.clear_capability_sets();
+--- end

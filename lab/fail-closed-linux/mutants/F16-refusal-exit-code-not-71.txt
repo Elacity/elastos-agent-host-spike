@@ -1,0 +1,8 @@
+id: F16-refusal-exit-code-not-71
+file: src/lib.rs
+test: real_kernel::real_landlock_abi_below_required_refuses
+--- old
+pub const REFUSAL_EXIT_CODE: i32 = 71;
+--- new
+pub const REFUSAL_EXIT_CODE: i32 = 1;
+--- end

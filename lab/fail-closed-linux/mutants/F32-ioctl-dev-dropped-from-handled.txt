@@ -1,0 +1,10 @@
+id: F32-ioctl-dev-dropped-from-handled
+file: src/lib.rs
+test: real_kernel::real_confined_provider_has_every_layer
+--- old
+    if abi >= 5 {
+        fs |= landlock::ACCESS_FS_IOCTL_DEV;
+    }
+--- new
+    let _ = abi;
+--- end

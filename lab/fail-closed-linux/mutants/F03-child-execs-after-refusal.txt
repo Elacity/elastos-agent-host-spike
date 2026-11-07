@@ -1,0 +1,30 @@
+id: F03-child-execs-after-refusal
+file: src/lib.rs
+test: simulated::sim_every_guard_step_failure_stops_before_exec
+test: simulated::sim_capability_drop_failure_refuses
+test: real_kernel::real_capability_drop_failure_refuses
+test: real_kernel::real_landlock_ruleset_unappliable_refuses
+--- old
+    confine(kernel, plan)?;
+    kernel
+        .detach_into_pid_namespace()
+        .map_err(|errno| Fault::os(Step::PidFork, errno))?;
+    kernel
+        .install_no_exec_filter(plan)
+        .map_err(|errno| Fault::os(Step::InstallNoExec, errno))?;
+    kernel
+        .enforcement_self_test(plan)
+        .map_err(|errno| Fault::os(Step::EnforceSelf, errno))?;
+    kernel
+        .exec(plan)
+        .map_err(|errno| Fault::os(Step::Execve, errno))
+--- new
+    let confined = confine(kernel, plan);
+    let _ = kernel.detach_into_pid_namespace();
+    let _ = kernel.install_no_exec_filter(plan);
+    let _ = kernel.enforcement_self_test(plan);
+    kernel
+        .exec(plan)
+        .map_err(|errno| Fault::os(Step::Execve, errno))?;
+    confined
+--- end
