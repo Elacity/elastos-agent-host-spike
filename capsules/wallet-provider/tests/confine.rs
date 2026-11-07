@@ -73,6 +73,7 @@ const WALLET_DIR: [&str; 3] = ["ElastOS", "SystemServices", "Wallet"];
 /// provider's storage-root layout from its name.
 const DID_PROVIDER: &str = "did-provider";
 const WALLET_PROVIDER: &str = "wallet-provider";
+const MODEL_PROVIDER: &str = "model-provider";
 /// The isolated fixture device key, the same input did's own confinement test
 /// uses, so a started did provider derives the same DID there and here.
 const DID_DEVICE_KEY: [u8; 32] = [0x42; 32];
@@ -408,13 +409,13 @@ fn repository_root() -> &'static Path {
     ROOT.as_path()
 }
 
-/// The did-provider crate's directory, the source of its binary, profile and
+/// The named provider crate's directory, the source of its binary, profile and
 /// declared-rights fixture.
-fn did_provider_dir() -> PathBuf {
+fn provider_dir(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("capsules/wallet-provider must sit under capsules/")
-        .join(DID_PROVIDER)
+        .join(name)
 }
 
 /// The declared-rights fixture of the named provider, the stand-in's input.
@@ -436,27 +437,36 @@ fn confine_oracle_path(name: &str) -> PathBuf {
         .join("confine.sb")
 }
 
-/// The did-provider binary this test crate starts.
+/// The named provider's binary this test crate starts.
 ///
-/// One `cargo build` for did's manifest, run once per test process by the
-/// `LazyLock` below, reads the `did-provider` bin artifact's `executable`. The
+/// One `cargo build` for each provider's manifest, run once per test process by
+/// the `LazyLock`s below, reads that provider's bin artifact's `executable`. The
 /// build uses the `CARGO` environment variable when set, `--locked` and
 /// `--offline`, and creates nothing outside cargo's own target directories. A
 /// failed build, or an artifact that names no executable, fails with the
 /// command's output; there is no skip and no fallback to another binary.
-fn did_provider_binary() -> &'static Path {
-    static BINARY: LazyLock<PathBuf> = LazyLock::new(build_did_provider_binary);
-    BINARY.as_path()
+fn provider_binary(name: &'static str) -> &'static Path {
+    static DID_BINARY: LazyLock<PathBuf> = LazyLock::new(|| build_provider_binary(DID_PROVIDER));
+    static MODEL_BINARY: LazyLock<PathBuf> =
+        LazyLock::new(|| build_provider_binary(MODEL_PROVIDER));
+    match name {
+        DID_PROVIDER => DID_BINARY.as_path(),
+        MODEL_PROVIDER => MODEL_BINARY.as_path(),
+        other => panic!(
+            "the stand-in builds only the {DID_PROVIDER} and {MODEL_PROVIDER} binaries, \
+             so {other} has none"
+        ),
+    }
 }
 
-/// The `did-provider` bin artifact's `executable` that cargo's JSON output
-/// reports, or a refusal that names `did-provider` and `executable`.
+/// The named provider's bin artifact's `executable` that cargo's JSON output
+/// reports, or a refusal that names that provider and `executable`.
 ///
-/// `build_did_provider_binary` feeds this function did's build output, and
-/// `did_binary_is_the_executable_the_build_reports` feeds it fixture lines.
-/// One reader serves both, so the output has one parser and no other place
-/// reads a path from the build (P10).
-fn did_binary_executable(build_output: &str) -> Result<PathBuf, String> {
+/// `build_provider_binary` feeds this function the build output of the provider
+/// it builds, and `did_binary_is_the_executable_the_build_reports` feeds it
+/// fixture lines. One reader serves both, so the output has one parser and no
+/// other place reads a path from the build (P10).
+fn binary_executable(name: &str, build_output: &str) -> Result<PathBuf, String> {
     for line in build_output.lines() {
         let Ok(message) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -464,7 +474,7 @@ fn did_binary_executable(build_output: &str) -> Result<PathBuf, String> {
         if message["reason"].as_str() != Some("compiler-artifact") {
             continue;
         }
-        if message["target"]["name"].as_str() != Some(DID_PROVIDER) {
+        if message["target"]["name"].as_str() != Some(name) {
             continue;
         }
         let is_bin = message["target"]["kind"]
@@ -478,12 +488,12 @@ fn did_binary_executable(build_output: &str) -> Result<PathBuf, String> {
         }
     }
     Err(format!(
-        "cargo's JSON output carries no {DID_PROVIDER} bin artifact that names an executable"
+        "cargo's JSON output carries no {name} bin artifact that names an executable"
     ))
 }
 
-fn build_did_provider_binary() -> PathBuf {
-    let manifest = did_provider_dir().join("Cargo.toml");
+fn build_provider_binary(name: &'static str) -> PathBuf {
+    let manifest = provider_dir(name).join("Cargo.toml");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let output = Command::new(&cargo)
         .arg("build")
@@ -492,46 +502,44 @@ fn build_did_provider_binary() -> PathBuf {
         .arg("--manifest-path")
         .arg(&manifest)
         .arg("--bin")
-        .arg(DID_PROVIDER)
+        .arg(name)
         .arg("--message-format=json")
-        .current_dir(did_provider_dir())
+        .current_dir(provider_dir(name))
         .output()
-        .unwrap_or_else(|err| {
-            panic!(
-                "did-provider build {} must start: {err}",
-                manifest.display()
-            )
-        });
+        .unwrap_or_else(|err| panic!("{name} build {} must start: {err}", manifest.display()));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "did-provider build {} must succeed: {stderr}",
+        "{name} build {} must succeed: {stderr}",
         manifest.display()
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    did_binary_executable(&stdout)
+    binary_executable(name, &stdout)
         .unwrap_or_else(|reason| panic!("{reason}; standard output: {stdout}"))
 }
 
 /// The storage root a provider name keeps under `base`. did-provider keeps
 /// its identity state at `<base>/did`; wallet-provider keeps its state under
-/// `wallet_dir(base)`. The launcher and the oracle both read this one
+/// `wallet_dir(base)`; model-provider keeps its run journal at
+/// `<base>/providers/model-provider`, the root its own `journal_root` derives
+/// from `base_path`. The launcher and the oracle both read this one
 /// derivation, so a did start cannot drift into wallet's layout. Any other
-/// name is refused, because the stand-in serves these two and a guessed layout
-/// would be a fallback (P11).
+/// name is refused, because the stand-in serves these three and a guessed
+/// layout would be a fallback (P11).
 fn provider_storage_root(name: &str, base: &Path) -> PathBuf {
     match name {
         DID_PROVIDER => base.join("did"),
         WALLET_PROVIDER => wallet_dir(base),
+        MODEL_PROVIDER => base.join("providers").join(MODEL_PROVIDER),
         other => panic!(
-            "the stand-in serves only {DID_PROVIDER} and {WALLET_PROVIDER}, \
+            "the stand-in serves only {DID_PROVIDER}, {WALLET_PROVIDER} and {MODEL_PROVIDER}, \
              so {other} has no storage root layout"
         ),
     }
 }
 
 /// The layout derivation refuses a provider name it does not serve, and the
-/// refusal names the name and both served names.
+/// refusal names the name and all three served names.
 ///
 /// The test calls the derivation only and starts nothing.
 ///
@@ -540,16 +548,16 @@ fn provider_storage_root(name: &str, base: &Path) -> PathBuf {
 #[test]
 fn provider_storage_root_refuses_an_unknown_provider_name() {
     let base = Path::new("/fixture/base");
-    let refusal = std::panic::catch_unwind(|| provider_storage_root("model-provider", base))
+    let refusal = std::panic::catch_unwind(|| provider_storage_root("engine-provider", base))
         .expect_err("an unknown provider name must be refused");
     let message = refusal
         .downcast_ref::<String>()
         .unwrap_or_else(|| panic!("the refusal must be a formatted reason"));
     assert_eq!(
         message.as_str(),
-        "the stand-in serves only did-provider and wallet-provider, \
-         so model-provider has no storage root layout",
-        "the refusal must name the unknown provider and both served names"
+        "the stand-in serves only did-provider, wallet-provider and model-provider, \
+         so engine-provider has no storage root layout",
+        "the refusal must name the unknown provider and all three served names"
     );
 }
 
@@ -598,13 +606,13 @@ struct ProviderRulesetInputs {
 /// `read_declared_rights`, which refuses a file that names another provider
 /// (P11).
 fn provider_ruleset_inputs(name: &str, base: &Path) -> Result<ProviderRulesetInputs, String> {
-    // did's binary is the one this crate builds; every other served name uses
+    // did's and model's binaries are the ones this crate builds; wallet uses
     // this crate's own binary. An unknown name never reaches a returned value,
     // because `canonical_bindings` refuses it through `provider_storage_root`.
-    let binary = if name == DID_PROVIDER {
-        did_provider_binary()
-    } else {
-        Path::new(PROVIDER_BINARY)
+    let binary = match name {
+        DID_PROVIDER => provider_binary(DID_PROVIDER),
+        MODEL_PROVIDER => provider_binary(MODEL_PROVIDER),
+        _ => Path::new(PROVIDER_BINARY),
     };
     let bindings = canonical_bindings(name, base, binary);
     let declared = read_declared_rights(name, &declared_rights_path(name))?;
@@ -616,15 +624,73 @@ fn provider_ruleset_inputs(name: &str, base: &Path) -> Result<ProviderRulesetInp
 }
 
 /// The `init` config the stand-in sends for `name` at `base`. The stand-in
-/// sends `base_path` to both providers, and did also receives the isolated
-/// fixture device key so its `get_did` answers. It builds this one config for
-/// both providers.
+/// sends `base_path` to every provider. did also receives the isolated fixture
+/// device key so its `get_did` answers. model receives its own real config: the
+/// provider id, a hosted text offer that touches no file and contacts no
+/// endpoint at init, and a journal directory under the storage root this
+/// derivation names. It builds this one config for every provider.
 fn provider_init_config(name: &str, base: &Path) -> Value {
     let mut config = json!({ "base_path": base.display().to_string() });
-    if name == DID_PROVIDER {
-        config["encryption_key"] = json!(hex::encode(DID_DEVICE_KEY));
+    match name {
+        DID_PROVIDER => {
+            config["encryption_key"] = json!(hex::encode(DID_DEVICE_KEY));
+        }
+        MODEL_PROVIDER => {
+            config["extra"] = json!({
+                "provider_id": MODEL_PROVIDER,
+                "journal_dir": provider_storage_root(MODEL_PROVIDER, base).display().to_string(),
+                "offers": [model_hosted_offer()],
+            });
+        }
+        _ => {}
     }
     config
+}
+
+/// The hosted text offer the model init declares. Its endpoint is never
+/// contacted by `init`, `status` or `offers_list`, and it reads no file, so a
+/// confined model start needs no network.
+fn model_hosted_offer() -> Value {
+    json!({
+        "id": "confine-hosted-text",
+        "title": "Confined Hosted Text",
+        "operation": "text.generate",
+        "input_modalities": ["text/plain"],
+        "output_modalities": ["text/plain"],
+        "policy": {
+            "concurrency_limit": 1,
+            "input_bytes_limit": 4096,
+            "inline_output_bytes_limit": 4096,
+            "event_bytes_limit": 4096,
+            "runtime_ms_limit": 10000,
+            "retention_secs": 60,
+            "cancel_settlement_timeout_ms": 100
+        },
+        "adapter": {
+            "kind": "open_ai_compatible_text",
+            "api_url": "https://hosted.invalid/v1/chat/completions",
+            "model": "confine/text",
+            "hosted": {
+                "backend_provider_label": "Confine Fixture",
+                "selection_mode": "pinned",
+                "privacy_policy_ref": "fixture:privacy:confine",
+                "terms_ref": "fixture:terms:confine",
+                "upstream_routing_fallback_assertion": "operator_asserted_disabled"
+            }
+        },
+        "enabled": true
+    })
+}
+
+/// One `init` request for `name` at `base`, built from the one config above.
+fn provider_init_request(name: &str, base: &Path) -> Value {
+    json!({ "op": "init", "config": provider_init_config(name, base) })
+}
+
+/// `init` and `status` report the model provider with its one offer ready.
+fn assert_serving(data: &Value) {
+    assert_eq!(data["provider"], MODEL_PROVIDER, "{data}");
+    assert_eq!(data["offers_ready"], 1, "{data}");
 }
 
 /// The test creates the directory `STORAGE_PARENT` names before the launch,
@@ -4132,8 +4198,8 @@ fn generator_refuses_an_unnamed_right_and_the_start_is_refused() {
 /// starts no process and needs no sandbox.
 ///
 /// Falsifier: WP128 returns
-/// `did_provider_dir().join("target/debug/did-provider")` instead of the
-/// reported `executable`, so this test fails on the fixture path.
+/// `provider_dir(DID_PROVIDER).join("target/debug/did-provider")` instead of
+/// the reported `executable`, so this test fails on the fixture path.
 /// `standin_launcher_finds_the_built_did_binary` alone still passes under
 /// WP128, because the guessed file exists after did's build. WP130 disables
 /// the kind check, so this test fails because the non-bin artifact's
@@ -4159,14 +4225,15 @@ fn did_binary_is_the_executable_the_build_reports() {
         .map(|line| line.to_string())
         .join("\n");
     assert_eq!(
-        did_binary_executable(&output).expect("the did-provider bin artifact must be read"),
+        binary_executable(DID_PROVIDER, &output)
+            .expect("the did-provider bin artifact must be read"),
         PathBuf::from("/fixture/out/did-provider"),
         "the reader must return the executable the build reports"
     );
     let without_did_bin = [did_test, other_bin]
         .map(|line| line.to_string())
         .join("\n");
-    let reason = did_binary_executable(&without_did_bin)
+    let reason = binary_executable(DID_PROVIDER, &without_did_bin)
         .expect_err("output without a did-provider bin artifact must be refused");
     assert!(
         reason.contains(DID_PROVIDER) && reason.contains("executable"),
@@ -4176,15 +4243,16 @@ fn did_binary_is_the_executable_the_build_reports() {
 
 /// The stand-in finds the did binary through one build of did's manifest.
 ///
-/// `did_provider_binary` runs `cargo build --locked --offline --manifest-path
-/// capsules/did-provider/Cargo.toml --bin did-provider --message-format=json`
-/// once and reads the bin artifact's `executable`. The path must be an existing
-/// file named `did-provider` under did's own `target` directory, or under the
-/// target directory cargo reported. A failed build fails this test with the
-/// build's output; there is no skip and no fallback to another binary.
+/// `provider_binary(DID_PROVIDER)` runs `cargo build --locked --offline
+/// --manifest-path capsules/did-provider/Cargo.toml --bin did-provider
+/// --message-format=json` once and reads the bin artifact's `executable`. The
+/// path must be an existing file named `did-provider` under did's own `target`
+/// directory, or under the target directory cargo reported. A failed build
+/// fails this test with the build's output; there is no skip and no fallback to
+/// another binary.
 #[test]
 fn standin_launcher_finds_the_built_did_binary() {
-    let binary = did_provider_binary();
+    let binary = provider_binary(DID_PROVIDER);
     assert!(
         binary.is_file(),
         "the did-provider binary must exist: {}",
@@ -4196,13 +4264,13 @@ fn standin_launcher_finds_the_built_did_binary() {
         "the binary must be named {DID_PROVIDER}: {}",
         binary.display()
     );
-    let did_target = did_provider_dir().join("target");
+    let did_target = provider_dir(DID_PROVIDER).join("target");
     let cargo_target = std::env::var_os("CARGO_TARGET_DIR").map(|dir| {
         let dir = PathBuf::from(dir);
         if dir.is_absolute() {
             dir
         } else {
-            did_provider_dir().join(dir)
+            provider_dir(DID_PROVIDER).join(dir)
         }
     });
     assert!(
@@ -4756,7 +4824,7 @@ fn standin_confined_journey(name: &str, provider: &Path, declared: &Value) {
 /// Linux host that reports nothing missing; a reported missing primitive is
 /// refused whatever its OS. Every refused case returns no provider, writes no
 /// profile and creates no storage root. The did
-/// binary comes from `did_provider_binary`; the wallet binary comes from
+/// binary comes from `provider_binary(DID_PROVIDER)`; the wallet binary comes from
 /// `CARGO_BIN_EXE_wallet-provider`. Linux stays a design plus a simulated
 /// refusal: nothing here probes a real kernel or claims Linux enforcement. The
 /// stand-in is test code and not the Runtime.
@@ -4787,7 +4855,7 @@ fn standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host() {
     let providers: [(&str, &Path, Value); 2] = [
         (
             DID_PROVIDER,
-            did_provider_binary(),
+            provider_binary(DID_PROVIDER),
             read_declared_rights(DID_PROVIDER, &declared_rights_path(DID_PROVIDER))
                 .unwrap_or_else(|err| panic!("{err}")),
         ),
@@ -5551,7 +5619,7 @@ fn standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite() {
     let providers = [
         B3Provider {
             name: DID_PROVIDER,
-            binary: did_provider_binary(),
+            binary: provider_binary(DID_PROVIDER),
             suite: did_standin_suite,
             cases: &DID_SUITE_CASES,
         },
@@ -12056,7 +12124,7 @@ fn linux_landlock_requires_no_new_privs() {
 /// `bindings` the three paths its launch carries and `base` the temporary root
 /// both the launch and the probe use. The permitted calls are the caller's own:
 /// `permitted` drives them on the started provider and returns the number of
-/// answers the caller then judges, so this one body serves both providers
+/// answers the caller then judges, so this one body serves every provider
 /// without a per-provider launcher, list builder or probe (P10).
 ///
 /// The positive control uses the same uid and the same fixtures and no ruleset,
@@ -12066,10 +12134,12 @@ fn linux_landlock_requires_no_new_privs() {
 /// listings of `STORAGE_PARENT`, `sibling` and `sibling/private`. The inside
 /// read and write succeed. The caller drives its own permitted calls through
 /// `permitted`, because `status` is wallet's and did's `handle` has no such
-/// arm. An `Init` for a base outside `STORAGE_ROOT` is refused `storage_error`
-/// with `Permission denied` and creates nothing. The truncate fixture keeps its
-/// bytes. A start on a non-Linux host, and a start on a host that reports
-/// Landlock missing, are refused.
+/// arm. An `Init` for a base outside `STORAGE_ROOT` is refused with the
+/// caller's own `outside_code` and `outside_reason` and creates nothing:
+/// wallet's and did's answer `storage_error` with `Permission denied`, and
+/// model's answers `journal_access_denied` with `model run journal is not
+/// writable`. The truncate fixture keeps its bytes. A start on a non-Linux
+/// host, and a start on a host that reports Landlock missing, are refused.
 ///
 /// The two Linux-only plants are recorded in `CONFINEMENT-LINUX.md` and are not
 /// registered: a launcher that skips only its own Landlock install fails the
@@ -12083,6 +12153,8 @@ fn landlock_file_row_journey(
     base: &Path,
     bindings: &[(&'static str, PathBuf)],
     ruleset: &LandlockRuleset,
+    outside_code: &str,
+    outside_reason: &str,
     permitted: impl FnOnce(&mut ConfinedProvider),
     first_effect_outside: impl FnOnce(&mut ConfinedProvider, &Path) -> Value,
 ) {
@@ -12171,15 +12243,16 @@ fn landlock_file_row_journey(
         "the first effect for a base outside STORAGE_ROOT must be refused under the launch: {outside}"
     );
     assert_eq!(
-        outside["code"], "storage_error",
-        "the outside effect must be a storage refusal: {outside}"
+        outside["code"], outside_code,
+        "the outside effect must answer the caller's own code `{outside_code}`: {outside}"
     );
     let reason = outside["message"]
         .as_str()
         .unwrap_or_else(|| panic!("the outside effect must carry a reason: {outside}"));
     assert!(
-        reason.contains("Permission denied"),
-        "the outside effect must be refused by the kernel's own denial, and it answered: {reason}"
+        reason.contains(outside_reason),
+        "the outside effect must answer the caller's own reason `{outside_reason}` under the \
+         kernel's denial, and it answered: {reason}"
     );
     assert!(
         !outside_base.exists() && !provider_storage_root(name, &outside_base).exists(),
@@ -12286,6 +12359,8 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
         &fixture.base,
         &fixture.bindings,
         &fixture.ruleset,
+        "storage_error",
+        "Permission denied",
         |provider| {
             let status = provider.send(&json!({ "op": "status" }));
             assert_eq!(status["status"], "ok", "status must answer: {status}");
@@ -12327,7 +12402,7 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_did_file_row_is_refused_outside_storage_root() {
-    let binary = did_provider_binary();
+    let binary = provider_binary(DID_PROVIDER);
     let fixture = landlock_file_fixture(DID_PROVIDER, binary, LANDLOCK_LOADER_PATHS);
     let label = "did-provider landlock file row";
     landlock_file_row_journey(
@@ -12337,6 +12412,8 @@ fn linux_did_file_row_is_refused_outside_storage_root() {
         &fixture.base,
         &fixture.bindings,
         &fixture.ruleset,
+        "storage_error",
+        "Permission denied",
         |provider| {
             let record = did_standin_permitted_operations(provider, &fixture.base, label);
             assert_suite_outcomes(label, &record, &DID_SUITE_CASES[..DID_PERMITTED_CASES]);
@@ -12348,6 +12425,48 @@ fn linux_did_file_row_is_refused_outside_storage_root() {
             assert_eq!(init["status"], "ok", "did's Init writes nothing: {init}");
             provider.send(&json!({ "op": "set_nickname", "nickname": "Outside" }))
         },
+    );
+}
+
+/// The model caller of the one file row. The same body, installer, policy and
+/// `pre_exec` start run the model's own binary, with model's own committed
+/// declared-rights file and its own `canonical_bindings` for its `STORAGE_ROOT`
+/// (`<base>/providers/model-provider`) and `STORAGE_PARENT`
+/// (`<base>/providers`).
+///
+/// The permitted calls are the model's own `init` with its real config, which
+/// names the provider id, the one hosted offer and a journal directory under
+/// its root, and then `status`, which answers `ok` with the offer ready. No
+/// model request needs a network.
+///
+/// The outside effect is an `init` whose base lies under the granted
+/// `STORAGE_PARENT` but outside `STORAGE_ROOT`, so the model derives its
+/// journal there and the kernel refuses the journal's own directory creation.
+/// The model reports that as `journal_access_denied` with `model run journal is
+/// not writable`, not as `storage_error`, and nothing is created.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_model_file_row_is_refused_outside_storage_root() {
+    let binary = provider_binary(MODEL_PROVIDER);
+    let fixture = landlock_file_fixture(MODEL_PROVIDER, binary, LANDLOCK_LOADER_PATHS);
+    landlock_file_row_journey(
+        MODEL_PROVIDER,
+        binary,
+        &fixture.declared,
+        &fixture.base,
+        &fixture.bindings,
+        &fixture.ruleset,
+        "journal_access_denied",
+        "model run journal is not writable",
+        |provider| {
+            let init = provider.send(&provider_init_request(MODEL_PROVIDER, &fixture.base));
+            assert_eq!(init["status"], "ok", "the model init must answer: {init}");
+            assert_serving(&init["data"]);
+            let status = provider.send(&json!({ "op": "status" }));
+            assert_eq!(status["status"], "ok", "status must answer: {status}");
+            assert_serving(&status["data"]);
+        },
+        |provider, outside| provider.send(&provider_init_request(MODEL_PROVIDER, outside)),
     );
 }
 
@@ -12404,59 +12523,78 @@ fn seccomp_journey_runs_beneath_an_inherited_filter(name: &str, test_name: &str)
     false
 }
 
-/// One provider's named seccomp journey paths, so both journeys compare the same
+/// One provider's named seccomp journey paths, so every journey compares the same
 /// three named fixtures instead of restating them per caller.
 ///
-/// `inside` is the file the run writes under `STORAGE_ROOT`, `inside_fixture` is
-/// a fixed-byte file beside it that the read-only calls must not change, and
-/// `outside` is a sibling path outside `STORAGE_ROOT` that must stay absent. The
-/// sibling is derived from `storage_parent` for both providers, so a path that
-/// drifts out of the grant shows as a present file. `expected_fixture` is the
-/// provider's own known bytes, so a run that wrote the wrong file fails.
+/// `inside` is the file the run writes under `STORAGE_ROOT`, for a provider whose
+/// permitted call writes one. The model's `init` creates its journal directories
+/// and no file, so its journey names none. `inside_fixture` is a fixed-byte file
+/// beside it that the read-only calls must not change, and `outside` is a sibling
+/// path outside `STORAGE_ROOT` that must stay absent. The sibling is derived from
+/// `storage_parent` for every provider, so a path that drifts out of the grant
+/// shows as a present file. `expected_fixture` is the provider's own known bytes,
+/// so a run that wrote the wrong file fails.
 struct SeccompJourneyFiles {
-    inside: PathBuf,
+    inside: Option<PathBuf>,
     inside_fixture: PathBuf,
     outside: PathBuf,
     expected_fixture: &'static [u8],
 }
 
 /// The named journey fixtures of `name` under `base`, or a panic naming the
-/// provider whose layout this function does not know. The lab serves two
+/// provider whose layout this function does not know. The lab serves three
 /// providers and a guessed layout would be a fallback (P11).
 fn seccomp_journey_files(name: &str, base: &Path) -> SeccompJourneyFiles {
     let root = provider_storage_root(name, base);
-    let (inside_name, expected_fixture): (&str, &[u8]) = match name {
-        WALLET_PROVIDER => (WALLET_KEY_FILE, b"wallet seccomp journey fixture\n"),
-        DID_PROVIDER => ("nickname.enc", b"did seccomp journey fixture\n"),
+    let (inside_name, expected_fixture): (Option<&str>, &[u8]) = match name {
+        WALLET_PROVIDER => (Some(WALLET_KEY_FILE), b"wallet seccomp journey fixture\n"),
+        DID_PROVIDER => (Some("nickname.enc"), b"did seccomp journey fixture\n"),
+        MODEL_PROVIDER => (None, b"model seccomp journey fixture\n"),
         other => panic!("the journey names no provider whose fixtures it knows: {other}"),
     };
     SeccompJourneyFiles {
-        inside: root.join(inside_name),
+        inside: inside_name.map(|name| root.join(name)),
         inside_fixture: root.join("seccomp-inside-write"),
         outside: storage_parent(name, base).join("seccomp-outside-write"),
         expected_fixture,
     }
 }
 
-/// Both callers use these same comparisons after shutdown. Wallet's key-format
-/// assertions then inspect the returned bytes separately.
+/// Every caller uses these same comparisons after shutdown. Wallet's key-format
+/// assertions then inspect the returned bytes separately. A caller whose
+/// permitted calls write no file passes `None` for `expected_inside` and gets
+/// `None` back; the fixed-byte fixture and the absent outside sibling are
+/// compared for every caller.
 fn assert_seccomp_journey_files(
     name: &str,
     files: &SeccompJourneyFiles,
-    expected_inside: &[u8],
-) -> Vec<u8> {
-    let inside_reason = match name {
-        WALLET_PROVIDER => {
-            "the read-only journey must keep the exact key bytes from init".to_owned()
+    expected_inside: Option<&[u8]>,
+) -> Option<Vec<u8>> {
+    let written = match (&files.inside, expected_inside) {
+        (Some(path), Some(expected_inside)) => {
+            let inside_reason = match name {
+                WALLET_PROVIDER => {
+                    "the read-only journey must keep the exact key bytes from init".to_owned()
+                }
+                DID_PROVIDER => format!(
+                    "the {name} journey must keep the exact bytes set_nickname wrote under STORAGE_ROOT"
+                ),
+                other => panic!("the journey names no provider whose file evidence it knows: {other}"),
+            };
+            let written = fs::read(path)
+                .unwrap_or_else(|err| panic!("the launch must write {}: {err}", path.display()));
+            assert_eq!(written, expected_inside, "{inside_reason}");
+            Some(written)
         }
-        DID_PROVIDER => format!(
-            "the {name} journey must keep the exact bytes set_nickname wrote under STORAGE_ROOT"
+        (Some(path), None) => panic!(
+            "{name}: the inside file {} needs the bytes its run writes",
+            path.display()
         ),
-        other => panic!("the journey names no provider whose file evidence it knows: {other}"),
+        (None, Some(_)) => {
+            panic!("{name}: the journey names no inside file for the bytes its run writes")
+        }
+        (None, None) => None,
     };
-    let written = fs::read(&files.inside)
-        .unwrap_or_else(|err| panic!("the launch must write {}: {err}", files.inside.display()));
-    assert_eq!(written, expected_inside, "{inside_reason}");
     assert_eq!(
         fs::read(&files.inside_fixture).expect("the named inside fixture must remain readable"),
         files.expected_fixture,
@@ -12481,13 +12619,17 @@ fn seccomp_journey_file_comparison_catches_corruption_for_each_provider() {
             fs::create_dir_all(provider_storage_root(name, base.path()))
                 .expect("the provider fixture root must exist");
             let expected_inside = b"bytes written by the provider";
-            fs::write(&files.inside, expected_inside).expect("the provider file must be writable");
+            let inside = files
+                .inside
+                .as_ref()
+                .expect("wallet and did name an inside file for this comparison");
+            fs::write(inside, expected_inside).expect("the provider file must be writable");
             fs::write(&files.inside_fixture, files.expected_fixture)
                 .expect("the named inside fixture must be writable");
-            assert_seccomp_journey_files(name, &files, expected_inside);
+            assert_seccomp_journey_files(name, &files, Some(expected_inside.as_slice()));
 
             let changed_path = match changed {
-                "inside" => &files.inside,
+                "inside" => inside,
                 "inside_fixture" => &files.inside_fixture,
                 "outside" => &files.outside,
                 _ => unreachable!(),
@@ -12495,7 +12637,7 @@ fn seccomp_journey_file_comparison_catches_corruption_for_each_provider() {
             fs::write(changed_path, b"corrupt journey bytes")
                 .expect("the plant must write its file");
             let failure = std::panic::catch_unwind(|| {
-                assert_seccomp_journey_files(name, &files, expected_inside)
+                assert_seccomp_journey_files(name, &files, Some(expected_inside.as_slice()))
             })
             .expect_err("each changed file must fail the shared journey comparison");
             let reason = failure
@@ -12631,13 +12773,19 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
         .expect("the named inside fixture must be writable");
     // The bytes of the file the run wrote under STORAGE_ROOT, read at the point
     // the provider wrote it: wallet's `init` writes the random key, and did's
-    // `set_nickname` writes the encrypted nickname.
-    let expected_inside = match name {
+    // `set_nickname` writes the encrypted nickname. The model's `init` creates
+    // its journal directories and no file, so its permitted calls, `init` and
+    // `status`, carry no inside file to compare.
+    let expected_inside: Option<Vec<u8>> = match name {
         WALLET_PROVIDER => {
             // Init creates the random key. Keep those exact bytes as the expected
             // value across the read-only calls, and also compare a fixed byte
             // fixture.
-            let expected_key = fs::read(&files.inside).expect("init must create the storage key");
+            let key_file = files
+                .inside
+                .as_ref()
+                .expect("wallet names its storage key file");
+            let expected_key = fs::read(key_file).expect("init must create the storage key");
             let status = provider.send(&json!({ "op": "status" }));
             assert_eq!(status["status"], "ok", "status must answer: {status}");
             let accounts = provider.wallet(WalletProviderOperationV2::ListAccounts {
@@ -12648,17 +12796,27 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
                 json!([]),
                 "a fresh wallet lists no account"
             );
-            expected_key
+            Some(expected_key)
         }
         DID_PROVIDER => {
             let record = did_standin_permitted_operations(&mut provider, &base, &label);
             assert_suite_outcomes(&label, &record, &DID_SUITE_CASES[..DID_PERMITTED_CASES]);
-            fs::read(&files.inside).unwrap_or_else(|err| {
+            let nickname = files.inside.as_ref().expect("did names its nickname file");
+            Some(fs::read(nickname).unwrap_or_else(|err| {
                 panic!(
                     "{label}: set_nickname must write {}: {err}",
-                    files.inside.display()
+                    nickname.display()
                 )
-            })
+            }))
+        }
+        MODEL_PROVIDER => {
+            let init = provider.send(&provider_init_request(MODEL_PROVIDER, &base));
+            assert_eq!(init["status"], "ok", "the model init must answer: {init}");
+            assert_serving(&init["data"]);
+            let status = provider.send(&json!({ "op": "status" }));
+            assert_eq!(status["status"], "ok", "status must answer: {status}");
+            assert_serving(&status["data"]);
+            None
         }
         other => panic!("the journey names no provider whose permitted calls it knows: {other}"),
     };
@@ -12688,9 +12846,14 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
     );
     provider.shutdown();
 
-    let written = assert_seccomp_journey_files(name, &files, &expected_inside);
+    let written = assert_seccomp_journey_files(name, &files, expected_inside.as_deref());
     if name == WALLET_PROVIDER {
-        let text = String::from_utf8(written).expect("the storage key must be hex text");
+        let key_file = files
+            .inside
+            .as_ref()
+            .expect("wallet names its storage key file");
+        let text = String::from_utf8(written.expect("wallet's init must write its storage key"))
+            .expect("the storage key must be hex text");
         let digits = text
             .strip_suffix('\n')
             .expect("the storage key must end with a newline");
@@ -12699,12 +12862,12 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
             2 * WALLET_KEY_BYTES,
             "the storage key must hold its {} hex digits and a newline: {}",
             2 * WALLET_KEY_BYTES,
-            files.inside.display()
+            key_file.display()
         );
         assert!(
             digits.bytes().all(|byte| byte.is_ascii_hexdigit()),
             "the storage key must be hex: {}",
-            files.inside.display()
+            key_file.display()
         );
     }
 
@@ -12804,9 +12967,40 @@ fn linux_did_journey_runs_under_the_seccomp_allow_list() {
         .unwrap_or_else(|err| panic!("{err}"));
     seccomp_confined_journey(
         DID_PROVIDER,
-        did_provider_binary(),
+        provider_binary(DID_PROVIDER),
         &declared,
         "linux_did_journey_runs_under_the_seccomp_allow_list",
+    );
+}
+
+/// The model half of the Linux journey: the same body, the same installer and
+/// the same program as wallet, with the model's own binary, the model's own
+/// committed declared-rights file and the model's own permitted calls. Wallet
+/// owns the four-call probe run.
+///
+/// The permitted calls are the model's own `init` with its real config, which
+/// names the provider id, the one hosted offer and a journal directory under
+/// its root, and then `status`, which answers `ok` with the offer ready. The
+/// model's `init` creates journal directories and no file, so its journey names
+/// no inside file, while the fixed-byte inside fixture and the absent outside
+/// sibling are compared as for every caller. No model request needs a network.
+///
+/// Falsifier: a model launcher that skips only its `pre_exec` install is the
+/// same plant as WP176 on this caller, caught by the `SECCOMP_MODE_FILTER` mode
+/// plus the inherited-fixture before/after comparison; and a model provider that
+/// writes the named outside sibling is WP177's plant on this caller, caught by
+/// the absent sibling. Both reach a Linux-only test, so neither is registered in
+/// `falsifiers.json`.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_model_journey_runs_under_the_seccomp_allow_list() {
+    let declared = read_declared_rights(MODEL_PROVIDER, &declared_rights_path(MODEL_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    seccomp_confined_journey(
+        MODEL_PROVIDER,
+        provider_binary(MODEL_PROVIDER),
+        &declared,
+        "linux_model_journey_runs_under_the_seccomp_allow_list",
     );
 }
 
