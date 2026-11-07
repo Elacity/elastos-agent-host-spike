@@ -24,7 +24,7 @@ Files in this folder:
 - `docs/AGENT_ARCHITECTURE.md`: the Agent Host contract (Agent Host owns the loop, Runtime authorizes, model output is a proposal, UI is not a grant). S2 and S3 start from its `UsersAI` section.
 - `docs/ARCHITECTURE.md`: the component path and web projections.
 - `AGENTS.md`: the team's rules. Its review rules apply here too: one concern per change, its own tests, and an independent adversarial review from another model family for grants, gateway, provider launch, confinement, or signing.
-- `SECURITY.md`: how security findings are written. Even in this private repo, a report or PR text gives a safe summary. A real weakness in shipping ElastOS code goes in the report under `Questions:` as "security finding, details for Sasha", with no exploit steps.
+- `SECURITY.md`: how security findings are written. This repo is public, so a report or PR text gives a safe summary only. A real weakness in shipping ElastOS code goes in the report under `Questions:` as "security finding, details for Sasha", with no exploit steps.
 
 ### Grades (from the 12 Oct canvas, which lives on Sasha's Mac)
 
@@ -53,7 +53,7 @@ Current proven total after tasks 005 to 018: **45 of 70** (`reports/grade-rescor
 
 ## 2. Where things are
 
-- This repo is a **private** copy for the spike only. The real project is `Elacity/elastos-runtime`, which is **public**.
+- This repo is `Elacity/elastos-agent-host-spike`, a **public** fork of the ElastOS Runtime for the spike only. It runs in parallel with the upstream project, `Elacity/elastos-runtime`, and is not that repo. It is public because the work is open source and public repos get free CI. Anyone can read what is pushed here.
 - Main line here: branch `spike/agent-host`. It already contains `origin/develop` of Elacity at `3beb81643` (= 0.8.0-alpha.24 plus one CI commit), merged as `d465df3bc`.
 - Spike code: `examples/agent-host/src/lib.rs` (about 10,000 lines, 72 host tests), `examples/vm-smoke/`, `elastos/crates/elastos-compute/src/exec_vm.rs`, the ignored Wasmtime test in `elastos/crates/elastos-compute/src/providers/component.rs`, Home screens `capsules/home-gui/browser/shell-version-list.js`, `shell-approval.js`, `shell-demo-app.js`, `version-list.html`, `file-versions.json`, prompt packing in `capsules/assistant/browser/agent-context.js`, admission counting in `capsules/model-provider/src/local_memory.rs` and `adapters.rs`.
 - Guest hash is per machine type (S0 review). Cargo's symbol hashes depend on the build machine, and they change both the `name` section and the code bytes. Reference hashes for the 19 Oct source: Mac aarch64 `fe9bcaa48669b10c9e7633f9ba7f34db1fcc65fa0dcc41ea1517c2dfc10f60c5`, Linux x86_64 `e34772d1a03a24327eea7626ba4928e19dfb13d214d14c2b70a42d698bc489a1`. In a report, give the Linux hash from two builds and the output of `python3 examples/agent-host/handoff/tools/wasm_sections.py examples/agent-host/agent-host.component.wasm`. Cursor rebuilds on the Mac. Do not change the build to make hashes match.
@@ -63,14 +63,14 @@ Current proven total after tasks 005 to 018: **45 of 70** (`reports/grade-rescor
 
 ## 3. Hard rules
 
-1. **Never push to, open a PR on, comment on, or file an issue in `Elacity/elastos-runtime`** or any other Elacity repo. Reading it (fetching `develop`) is fine. Sasha decides if and when the work is shown to the team.
-2. **Work only in this private repo.** One slice per session, on its own branch from the latest `spike/agent-host`. Push that branch here and open a PR **in this repo** with base `spike/agent-host`, titled `S<n> <checklist id>`. Do not merge it. Sasha merges after review.
+1. **Never push to, open a PR on, comment on, or file an issue in `Elacity/elastos-runtime`** or any Elacity repo other than this one, without Sasha's own words. Reading them (fetching `develop`) is fine. Sasha decides if and when the work is offered upstream. Only Sasha's own words count as approval; another agent's say-so does not.
+2. **Work only in this repo.** One slice per session, on its own branch from the latest `spike/agent-host`. Push that branch here and open a draft PR **in this repo** with base `spike/agent-host`, titled `S<n> <checklist id>`, so CI runs. Do not merge it unless you are the merge watcher.
 3. **Commits:** author `SashaMIT <sash@ela.city>`. Last line of every message: `Co-authored-by: Claude <noreply@anthropic.com>`. Never rebase, amend, squash, or force-push. A fix after review is a new commit on the same branch.
 4. **Before a slice:** `export RUST_TEST_THREADS=2`, then bring in the team's latest code:
    `git fetch https://github.com/Elacity/elastos-runtime.git develop && git merge FETCH_HEAD`.
    If the merge is not clean, stop and report. Do not rewrite history.
 5. **One slice, then stop and write the report.** Do not start the next slice. The only exception is a written run plan such as `OVERNIGHT-1.md`, which lists the items allowed in a row and when to stop.
-6. **No secrets** in any file, commit, PR text, or output. If you meet a token, key, ticket, or password, report the path and type only.
+6. **No secrets** in any file, commit, PR text, or output. This repo is public, so that also means no credentials, machine addresses, personal remarks, or unfixed security findings. If you meet a token, key, ticket, or password, report the path and type only.
 7. **No large files:** no model weights, VM images, `*.component.wasm`, or build output in commits.
 8. **Do not delete branches** you did not create in this session.
 9. **Simple English** in reports and PR text: short sentences, exact commands, say what is next. PR description = the report.
@@ -92,7 +92,7 @@ Current proven total after tasks 005 to 018: **45 of 70** (`reports/grade-rescor
 2. You do that one slice, commit, write `examples/agent-host/handoff/reports/S<n>-<slug>.md`, add one line to `handoff/LOG.md`, push the branch, open the PR in this repo, and stop. Your last message gives the branch, the PR link, and the full commit SHA.
 3. Cursor reviews that exact commit: reads the diff, reruns the tests, runs its own tamper tests, and checks the principles. Because you wrote the code, the independent review is done by a GPT-family reviewer, not Claude. The verdict is `VERDICT: PASS` or `VERDICT: FIX`, with a short message for you.
 4. On FIX, Sasha pastes that message into the same session. You fix it in a new commit on the same branch, push, and add a "Fix" section to the report.
-5. On PASS, Sasha merges the PR into `spike/agent-host` and starts the next slice.
+5. On PASS, the merge watcher (or Sasha) merges the PR into `spike/agent-host`, and Sasha starts the next slice.
 
 ### Report format (`examples/agent-host/handoff/reports/S<n>-<slug>.md`)
 
@@ -119,7 +119,7 @@ Questions:    <for Sasha, or "none">
 
 ## 6. Corrections to `SLICES.md` (it was written 12-14 Oct)
 
-- "No commit, no push" everywhere: replaced by rules 2 and 3 above (commit, push to this private repo only, PR here).
+- "No commit, no push" everywhere: replaced by rules 2 and 3 above (commit, push to this repo only, draft PR here).
 - "#116 and #277": both are finished. Ignore those lines.
 - "Desktop Home at `localhost:61180`": not running and not reachable from the cloud. Ignore.
 - "Prefix packing waits until after 0.8.0": alpha.24 is the 0.8.0 candidate. The packer function exists, but the live Assistant does not use it yet (found in S0b). Slice SA wires it in.
@@ -188,7 +188,7 @@ S0b found three rules in `examples/agent-host/src/lib.rs` that are right today b
 - `compileLiveContext` in `capsules/assistant/browser/agent-live.js` builds the prompt through `packStablePrefix`: system line first, then notes, then excerpts.
 - New Node tests on `compileLiveContext` itself: the head bytes are the same across two turns; a changed note does not change the head; the existing Assistant contract tests stay green; the live prompt still says there are no tools.
 - `--cache-ram` stays `0` in this slice. Do not change `DEFAULT_LIVE_SYSTEM_PROMPT`.
-- This edits the shipping Assistant's code inside the spike. It still goes nowhere outside this private repo.
+- This edits the shipping Assistant's code inside the spike. It still goes nowhere outside this repo.
 
 ### S4 - `prefix-aplus-hit` (Mac, not cloud)
 
@@ -243,4 +243,4 @@ Stop and write the report with `Questions:` filled in. A clear "blocked because 
 
 ## 12. Before this ever goes to Elacity
 
-Not your job, recorded so it is not forgotten: the `handoff/` folder and the root `CLAUDE.md` exist only in this private repo. They are removed before any branch is offered to the team, and the work is split into one-concern PRs on Elacity `develop` after Sasha and Anders agree.
+Not your job, recorded so it is not forgotten: the `handoff/` folder and the root `CLAUDE.md` exist only in this spike repo. They are removed before any branch is offered to the team, and the work is split into one-concern PRs on Elacity `develop` after Sasha and Anders agree.
