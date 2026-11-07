@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "./system-uiux-fixture.mjs";
@@ -191,20 +191,50 @@ function newestClearance(selector) {
   };
 }
 
-let browser, page, frame, stage = "launch";
+let browser, page, frame, cdp, stage = "launch";
 let beforeClamp;
+const paintedFrames = [];
 const pageErrors = [];
 try {
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   browser = await chromium.launch({ headless: true, ...(process.env.BRAVE_BIN ? { executablePath: process.env.BRAVE_BIN } : {}) });
   page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-  const cdp = await page.context().newCDPSession(page);
+  cdp = await page.context().newCDPSession(page);
+  if (process.env.ASSISTANT_LAYOUT_PAINT) {
+    cdp.on("Page.screencastFrame", ({ data, metadata, sessionId }) => {
+      paintedFrames.push({ data, timestamp: metadata.timestamp });
+      void cdp.send("Page.screencastFrameAck", { sessionId });
+    });
+    await cdp.send("Page.startScreencast", { format: "png", everyNthFrame: 1 });
+  }
   await cdp.send("Emulation.setCPUThrottlingRate", { rate: cpuRate ?? 4 });
   page.on("pageerror", error => pageErrors.push(`${stage}: ${error}`));
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   const room = page.frameLocator("iframe").frameLocator("iframe");
   await room.locator(".agent-msg").nth(history.length - 1).waitFor({ state: "attached" });
   frame = page.frames().find(candidate => candidate.url().includes("/apps/assistant/"));
+  if (process.env.ASSISTANT_LAYOUT_TRACE) {
+    await frame.evaluate(() => {
+      window.__layoutTrace = [];
+      const hidden = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "hidden");
+      Object.defineProperty(HTMLElement.prototype, "hidden", {
+        ...hidden,
+        set(value) {
+          const changed = this.hidden !== value;
+          hidden.set.call(this, value);
+          if (changed && this.matches("[data-agent-jump-latest]")) {
+            const scroller = document.querySelector("#agent-harness-stream");
+            const rect = this.getBoundingClientRect();
+            const covering = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+            window.__layoutTrace.push({ t: performance.now(), hidden: value, stack: new Error().stack,
+              scrollTop: scroller.scrollTop, scrollHeight: scroller.scrollHeight, clientHeight: scroller.clientHeight,
+              buttonRect: rect.toJSON(), covering: covering?.className,
+              following: scroller.classList.contains("is-follow-bottom") });
+          }
+        },
+      });
+    });
+  }
 
   const input = room.locator("#agent-composer-input");
   // Polls until the newest block is at the end and fully above the composer,
@@ -300,11 +330,19 @@ try {
   await frame.evaluate(() => {
     const scroller = document.querySelector("#agent-harness-stream");
     window.__follow = { on: true, samples: [] };
+    const measure = () => {
+      const jump = document.querySelector("[data-agent-jump-latest]");
+      return { t: performance.now(), jump: Boolean(jump && !jump.hidden),
+        scrollTop: scroller.scrollTop, scrollHeight: scroller.scrollHeight, clientHeight: scroller.clientHeight,
+        following: scroller.classList.contains("is-follow-bottom"),
+        buttonHeight: jump?.getBoundingClientRect().height || 0,
+        phase: document.querySelector(".agent-msg-agent:last-of-type")?.dataset.streamPhase,
+        fromEnd: Math.round(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight) };
+    };
     const sample = () => {
       if (!window.__follow.on) return;
-      const jump = document.querySelector("[data-agent-jump-latest]");
-      window.__follow.samples.push({ t: performance.now(), jump: Boolean(jump && !jump.hidden),
-        fromEnd: Math.round(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight) });
+      const observed = measure();
+      window.__follow.samples.push(observed);
       requestAnimationFrame(sample);
     };
     requestAnimationFrame(sample);
@@ -465,6 +503,28 @@ try {
   console.error(JSON.stringify({ errors, pageErrors }, null, 1));
   throw error;
 } finally {
-  await browser?.close();
-  server.close();
+  try {
+    if (cdp && process.env.ASSISTANT_LAYOUT_PAINT) {
+      await cdp.send("Page.stopScreencast");
+    }
+    if (frame && process.env.ASSISTANT_LAYOUT_TRACE) {
+      const trace = await frame.evaluate(() => ({ timeOrigin: performance.timeOrigin,
+        writes: window.__layoutTrace, samples: window.__follow?.samples })).catch(error => ({ error: String(error) }));
+      trace.targets = (await cdp.send("Target.getTargets")).targetInfos;
+      const flashes = trace.samples?.filter(sample => sample.jump) || [];
+      const paints = paintedFrames.filter(paint => flashes.some(sample =>
+        Math.abs(paint.timestamp * 1000 - trace.timeOrigin - sample.t) < 100));
+      for (const [index, paint] of paints.entries()) {
+        const path = `${process.env.ASSISTANT_LAYOUT_TRACE}.paint-${index}.png`;
+        await writeFile(path, Buffer.from(paint.data, "base64"));
+        paint.path = path;
+        delete paint.data;
+      }
+      trace.paints = paints;
+      await writeFile(process.env.ASSISTANT_LAYOUT_TRACE, JSON.stringify({ cpuRate, stage, ...trace }));
+    }
+  } finally {
+    await browser?.close();
+    server.close();
+  }
 }

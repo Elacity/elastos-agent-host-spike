@@ -41,6 +41,8 @@ import { renderToString as renderMathToString } from "./vendor/katex/katex.mjs";
 let ctx = null;
 /** @type {null | Record<string, Function>} */
 let host = null;
+/* The current turn owns follow through its final presentation. */
+let streamFollowCleanup = null;
 
 /** Canonical live-turn buffers. The DOM is never the source of truth. */
 const liveTurnCanonical = {
@@ -1011,6 +1013,7 @@ export function showEmptyState() {
 }
 
 function clearVisibleTranscript() {
+  streamFollowCleanup?.();
   host.clearEmptyState?.();
   const column = host.streamEl?.();
   const scroll = host.streamScrollEl?.();
@@ -1675,6 +1678,7 @@ export function regenerateLastAgentTurn() {
 
 /** Request cancellation; keep the stream attached until Runtime settles it. */
 export function abortAgentStreamNow() {
+  if (!ctx?.turnBusy) streamFollowCleanup?.();
   return abortLiveChatStream();
 }
 
@@ -1682,8 +1686,10 @@ export function stopAgentStream({ keepPartial = true, drainQueue = false, cancel
   /* cancelRun=false = navigation detach: leave the server-side run alive, just stop
      consuming its events. Explicit Stop (default) still fires runs_cancel. */
   if (cancelRun) {
+    if (!ctx.turnBusy) streamFollowCleanup?.();
     return abortLiveChatStream();
   }
+  streamFollowCleanup?.();
   const detachedSession = ctx.sessions.find((s) => s.id === ctx.activeSessionId);
   const canon = getLiveTurnCanonical();
   detachLiveChatStream();
@@ -1978,6 +1984,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     showRunSettlement(resumeTurn);
     return;
   }
+  streamFollowCleanup?.();
   detachLiveChatStream();
   clearStreamTimer();
   const generation = (ctx.streamGeneration += 1);
@@ -2063,6 +2070,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
   let lastFlushAt = 0;
   let sawFirstToken = false;
   let stickToBottom = true;
+  let presentationPending = false;
   /* scrollTop the stream left a following reader at; null if not following. */
   let endScrollTop = null;
   /* Where the transcript was last seen (scroll event or the follow's own
@@ -2081,10 +2089,12 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
      moved up in between or another turn took the transcript. */
   const pinToEnd = () => {
     scroller.scrollTop = scroller.scrollHeight;
+    noteScrollPosition();
     const top = scroller.scrollTop;
     window.requestAnimationFrame(() => {
-      if (generation === ctx.streamGeneration && stayedAtPin(top)) {
+      if (stickToBottom && generation === ctx.streamGeneration && stayedAtPin(top)) {
         scroller.scrollTop = scroller.scrollHeight;
+        noteScrollPosition();
         if (endScrollTop === top) {
           endScrollTop = scroller.scrollTop;
         }
@@ -2229,6 +2239,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
          floating composer; scrollIntoView on an anchor left it underneath. */
       scroller.scrollTop = scroller.scrollHeight;
       noteScrollPosition();
+      if (presentationPending) endScrollTop = scroller.scrollTop;
       const took = performance.now() - t0;
       perf.followMs += took;
       const last = perf.traces[perf.traces.length - 1];
@@ -2240,6 +2251,8 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
 
   const setFollowBottom = (on) => {
     stickToBottom = on;
+    if (!on) endScrollTop = null;
+    else if (presentationPending) endScrollTop = scroller.scrollTop;
     scroller?.classList.toggle("is-follow-bottom", on);
     const btn = document.querySelector("[data-agent-jump-latest]");
     if (btn) {
@@ -2371,6 +2384,35 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     }
   };
   window.addEventListener("resize", onResizeFollow, { passive: true });
+
+  const releaseFollow = () => {
+    if (streamFollowCleanup === releaseFollow) streamFollowCleanup = null;
+    stickToBottom = false;
+    endScrollTop = null;
+    if (followRaf) {
+      window.cancelAnimationFrame(followRaf);
+      followRaf = 0;
+    }
+    window.removeEventListener("resize", onResizeFollow);
+    document.removeEventListener("keydown", onKeyNav);
+    scroller?.removeEventListener("scroll", onUserScroll);
+    scroller?.removeEventListener("wheel", onUserScrollUp);
+    scroller?.removeEventListener("pointerdown", onReaderHold);
+    scroller?.removeEventListener("touchstart", onReaderHold);
+    for (const type of ["pointerup", "pointercancel", "touchend", "touchcancel"]) {
+      window.removeEventListener(type, onReaderRelease);
+    }
+    jumpBtn?.removeEventListener("click", onJumpLatest);
+    streamRoot?.removeEventListener("selectstart", onSelectStart);
+    streamRoot?.removeEventListener("pointerdown", onStreamPointer);
+    streamRoot?.removeEventListener("contextmenu", onContextMenu);
+    document.removeEventListener("visibilitychange", onVisibility);
+    if (generation === ctx.streamGeneration) {
+      scroller?.classList.remove("is-live-streaming", "is-follow-bottom");
+      updateJumpToLatestVisibility();
+    }
+  };
+  streamFollowCleanup = releaseFollow;
 
   const ensureAnswerShell = () => {
     if (answerRow) {
@@ -2927,12 +2969,13 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     const answerTextRef = answer;
     const finalize = () => {
       if (generation !== ctx.streamGeneration || !answerBodyRef?.isConnected) {
+        releaseFollow();
         return;
       }
       /* The last flush and the rich render below make the reply taller; keep
-         a reader who was following at the end. One who scrolled up since the
-         stream ended (its listeners are gone) stays where they are. */
-      const pinned = endScrollTop !== null && !!scroller && stayedAtPin(endScrollTop);
+         a reader who was following at the end. Reader controls stay attached
+         through presentation, so moving up still stops the follow. */
+      const pinned = stickToBottom && endScrollTop !== null && !!scroller && stayedAtPin(endScrollTop);
       /* Streaming painted plain text (live tokens never run Markdown, see
          adaptQuality). The finished reply, stopped early or not, now gets the
          render a reopened chat gives it: the whole text through the history
@@ -2946,11 +2989,15 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
         /* keep streamed prefix — canonical survives presentation failure */
       }
       if (pinned) {
-        pinToEnd();
+        endScrollTop = pinToEnd();
       }
+      updateJumpToLatestVisibility();
       timings.t6 = Date.now();
       setPhase("presentation_done");
-      window.requestAnimationFrame(() => drainFollowUpQueue());
+      window.requestAnimationFrame(() => {
+        releaseFollow();
+        if (generation === ctx.streamGeneration) drainFollowUpQueue();
+      });
       if (host.debug === true && perf.renders) {
         const ms = (a, b) => (a && b ? a - b : 0);
         const durs = perf.traces.map((row) => row.dur);
@@ -3013,6 +3060,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       }
     };
     scheduleIdleWork(finalize);
+    presentationPending = true;
 
     const turnUsage = noteLiveTurnUsage({
       usage: result.usage || null,
@@ -3149,21 +3197,14 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     if (stickToBottom && scroller && generation === ctx.streamGeneration) {
       endScrollTop = pinToEnd();
     }
-    window.removeEventListener("resize", onResizeFollow);
-    document.removeEventListener("keydown", onKeyNav);
-    scroller?.classList.remove("is-live-streaming", "is-follow-bottom");
-    scroller?.removeEventListener("scroll", onUserScroll);
-    scroller?.removeEventListener("wheel", onUserScrollUp);
-    scroller?.removeEventListener("pointerdown", onReaderHold);
-    scroller?.removeEventListener("touchstart", onReaderHold);
-    for (const type of ["pointerup", "pointercancel", "touchend", "touchcancel"]) {
-      window.removeEventListener(type, onReaderRelease);
+    if (generation === ctx.streamGeneration) scroller?.classList.remove("is-live-streaming");
+    if (!presentationPending) {
+      if (stickToBottom && scroller && generation === ctx.streamGeneration) {
+        window.requestAnimationFrame(releaseFollow);
+      } else {
+        releaseFollow();
+      }
     }
-    jumpBtn?.removeEventListener("click", onJumpLatest);
-    streamRoot?.removeEventListener("selectstart", onSelectStart);
-    streamRoot?.removeEventListener("pointerdown", onStreamPointer);
-    streamRoot?.removeEventListener("contextmenu", onContextMenu);
-    document.removeEventListener("visibilitychange", onVisibility);
     if (revealTimer) {
       window.clearTimeout(revealTimer);
     }
