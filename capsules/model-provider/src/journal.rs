@@ -2392,13 +2392,29 @@ fn create_missing_journal_directory(path: &Path) -> Result<(), ProviderFault> {
 /// Owner-only from its first moment, so the directory never exists under wider
 /// bits. A restrictive umask can leave it narrower than 0700, so the bits are then
 /// set through the open directory: a confined provider needs `fchmod` on its own
-/// directory, not a path-based `fchmodat`.
+/// directory, not a path-based `fchmodat`. The open refuses a symlink, so a
+/// directory swapped for a link after creation changes nothing else. If it cannot
+/// be opened, as under a umask that removes the owner's own access, the directory
+/// just made is removed and the creation refused, instead of leaving one that
+/// every later check rejects.
 fn create_owner_only_directory(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
         fs::DirBuilder::new().mode(0o700).create(path)?;
-        fs::File::open(path)?.set_permissions(fs::Permissions::from_mode(0o700))
+        let secured = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+            .and_then(|directory| directory.set_permissions(fs::Permissions::from_mode(0o700)));
+        if let Err(err) = secured {
+            let _ = fs::remove_dir(path);
+            return Err(std::io::Error::new(
+                err.kind(),
+                format!("created without owner access; check the umask: {err}"),
+            ));
+        }
+        Ok(())
     }
     #[cfg(not(unix))]
     {

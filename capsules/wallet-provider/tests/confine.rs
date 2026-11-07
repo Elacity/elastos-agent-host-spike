@@ -6761,7 +6761,6 @@ const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[
     "eventfd2",
     "exit",
     "flock",
-    "futex",
     "geteuid",
     "madvise",
     "munmap",
@@ -6781,7 +6780,15 @@ const SECCOMP_ARG2_LOW: u32 = 32;
 const SECCOMP_ARG2_HIGH: u32 = 36;
 const SECCOMP_BPF_JSET_K: u16 = 0x45;
 /// The calls `seccomp_program_with_thread_rules` admits only with checked arguments.
-const THREAD_RULE_CALLS: [&str; 5] = ["clone3", "clone", "socketpair", "fcntl", "prlimit64"];
+const THREAD_RULE_CALLS: [&str; 6] = [
+    "clone3",
+    "clone",
+    "socketpair",
+    "fcntl",
+    "prlimit64",
+    "futex",
+];
+const SECCOMP_BPF_AND_K: u16 = 0x54;
 /// Linux ABI values, written out because this builder compiles on macOS too, where
 /// libc has different numbers or none. `linux_abi_constants_match_libc` checks them.
 const LINUX_ENOSYS: u32 = 38;
@@ -6789,6 +6796,13 @@ const LINUX_CLONE_THREAD: u32 = 0x1_0000;
 const LINUX_AF_UNIX: u32 = 1;
 const LINUX_F_GETFD: u32 = 1;
 const LINUX_F_DUPFD_CLOEXEC: u32 = 1030;
+/// The kernel's `FUTEX_CMD_MASK`: every bit except `FUTEX_PRIVATE_FLAG` (0x80) and
+/// `FUTEX_CLOCK_REALTIME` (0x100).
+const LINUX_FUTEX_CMD_MASK: u32 = 0xffff_fe7f;
+const LINUX_FUTEX_WAIT: u32 = 0;
+const LINUX_FUTEX_WAKE: u32 = 1;
+const LINUX_FUTEX_WAIT_BITSET: u32 = 9;
+const LINUX_FUTEX_WAKE_BITSET: u32 = 10;
 /// `SECCOMP_RET_ERRNO` with `ENOSYS`, so glibc falls back from `clone3` to `clone`.
 const SECCOMP_RET_ENOSYS: u32 = 0x0005_0000 | LINUX_ENOSYS;
 
@@ -6988,7 +7002,10 @@ fn seccomp_program(syscalls: &[&'static str], audit_arch: u32) -> Vec<SeccompIns
 /// - `fcntl` only for `F_GETFD` and `F_DUPFD_CLOEXEC`, so no `F_SETOWN` can aim a
 ///   signal at another process;
 /// - `prlimit64` only for pid 0 with no new limit, so it reads its own limits and
-///   changes nobody's.
+///   changes nobody's;
+/// - `futex` only for wait and wake, plain or bitset, so the priority-inheritance
+///   and requeue operations, which can reach another task named in shared memory,
+///   are refused.
 ///
 /// Each rule returns on both arms, so the number stays loaded for the next one.
 /// None of these five calls may also sit in the unconditional list, or its
@@ -7040,6 +7057,15 @@ fn seccomp_program_with_thread_rules(
         SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, 0, 0, 3),
         SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG2_HIGH),
         SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, 0, 0, 1),
+        allow,
+        deny,
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("futex"), 0, 8),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG1_LOW),
+        SeccompInstruction::stmt(SECCOMP_BPF_AND_K, LINUX_FUTEX_CMD_MASK),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_FUTEX_WAIT, 3, 0),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_FUTEX_WAKE, 2, 0),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_FUTEX_WAIT_BITSET, 1, 0),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_FUTEX_WAKE_BITSET, 0, 1),
         allow,
         deny,
         deny,
@@ -13309,6 +13335,33 @@ fn linux_model_filter_admits_threads_and_refuses_new_processes() {
             "setting a limit must be refused"
         );
         assert_eq!(*libc::__errno_location(), SECCOMP_DENY_ERRNO);
+
+        // futex: wait and wake run the thread above; a priority-inheritance lock,
+        // which can reach another task through shared memory, is refused.
+        let word = 0u32;
+        assert_eq!(
+            libc::syscall(
+                libc::SYS_futex,
+                &word,
+                libc::FUTEX_LOCK_PI | libc::FUTEX_PRIVATE_FLAG,
+                0,
+                0
+            ),
+            -1,
+            "FUTEX_LOCK_PI must be refused"
+        );
+        assert_eq!(*libc::__errno_location(), SECCOMP_DENY_ERRNO);
+        assert_eq!(
+            libc::syscall(
+                libc::SYS_futex,
+                &word,
+                libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
+                1,
+                0
+            ),
+            0,
+            "FUTEX_WAKE must work"
+        );
     }
 }
 
@@ -13321,6 +13374,14 @@ fn linux_abi_constants_match_libc() {
     assert_eq!(LINUX_AF_UNIX, libc::AF_UNIX as u32);
     assert_eq!(LINUX_F_GETFD, libc::F_GETFD as u32);
     assert_eq!(LINUX_F_DUPFD_CLOEXEC, libc::F_DUPFD_CLOEXEC as u32);
+    assert_eq!(
+        LINUX_FUTEX_CMD_MASK,
+        !(libc::FUTEX_PRIVATE_FLAG | libc::FUTEX_CLOCK_REALTIME) as u32
+    );
+    assert_eq!(LINUX_FUTEX_WAIT, libc::FUTEX_WAIT as u32);
+    assert_eq!(LINUX_FUTEX_WAKE, libc::FUTEX_WAKE as u32);
+    assert_eq!(LINUX_FUTEX_WAIT_BITSET, libc::FUTEX_WAIT_BITSET as u32);
+    assert_eq!(LINUX_FUTEX_WAKE_BITSET, libc::FUTEX_WAKE_BITSET as u32);
 }
 
 /// A call with an argument-checked rule placed in the unconditional list would be
