@@ -1,0 +1,59 @@
+independent replants at 9d55f8fbd670bbaef9cd329fd795b5fb5cb9c04e
+manager.rs before cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a
+CAUGHT F-A12-DROP-ROOTS by tests::a12_census_lists_runtime_storage
+CAUGHT F-A12-DROP-ROOTS by tests::a12_planted_storage_file_is_caught
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351
+CAUGHT F-A6-NO-TOKEN-CHECK by tests::a6_sibling_presenting_owner_token_is_refused
+restored /tmp/pr343-r5/elastos/crates/elastos-runtime/src/capability/manager.rs sha256=cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a
+CAUGHT M-A12-HARDCODE-FAIL by tests::a12_clean_isolated_root_passes
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351
+CAUGHT M-A12-HASH-MTIME by tests::a12_large_file_inplace_rewrite_mtime_restored_is_found
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351
+CAUGHT M-A12-INODE-REUSE by tests::a12_inode_reuse_same_path_is_found
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351
+CAUGHT M-A12-NO-HANDLE by tests::a12_same_bytes_inode_reuse_is_found
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351
+CAUGHT M-A12-NO-ISOLATION by tests::a12_outside_isolation_tmp_root_is_refused
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351
+CAUGHT M-A12-NO-MARKER by tests::a12_leftover_without_marker_is_found
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351
+CAUGHT M-A12-RENAME-ROOT by tests::a12_renamed_root_is_found_by_created_set
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351
+CAUGHT M-A12-RENAME-UNRELATED by tests::a12_renamed_to_unrelated_name_is_found
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351
+CAUGHT M-A12-SIBLING-WATCH by tests::a12_run_window_watches_tmpdir_xdg_library
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351
+CAUGHT M-A12-SNAP-AFTER-WRITE by tests::a12_snapshot_before_runtime_fails_if_already_wrote
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351
+CAUGHT M-A12-SNAP-IGNORE-LIVE by tests::a12_snapshot_before_runtime_fails_if_live_tmp_elastos_wrote
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351
+CAUGHT M-A12-SYMLINK-ROOT by tests::a12_symlink_root_is_scanned_through
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351
+CAUGHT M-A12-TMP-DOTDOT by tests::a12_isolation_parent_tmp_root_is_refused
+CAUGHT M-A12-TMP-DOTDOT by tests::a12_nested_dotdot_tmp_root_is_refused
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351
+CAUGHT M-A12-TMP-LIVE-SYMLINK by tests::a12_symlink_to_live_home_tmp_root_is_refused
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351
+CAUGHT M-A12-TMP-SLASH by tests::a12_slash_tmp_root_is_refused
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351
+CAUGHT M-A12-TMP-UNSET by tests::a12_unset_tmp_root_is_refused
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351
+CAUGHT M-A12-TOCTOU-FOLLOW by tests::a12_tmp_root_symlink_swap_after_check_cannot_write_outside
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351
+CAUGHT M-A6-CLAIM-RESIDENT by tests::a6_resident_two_instances_is_blocked
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a6.rs sha256=8ffd8dca62fee8a40fe9e24ea61d9e9a45ab67440d3e7751d59f6cf4ec86aef6
+CAUGHT M-A6-COMMENT-STEP4 by tests::a6_sibling_presenting_owner_token_is_refused
+CAUGHT M-A6-COMMENT-STEP4 by tests::a6_resident_two_instances_is_blocked
+restored /tmp/pr343-r5/elastos/crates/elastos-runtime/src/capability/manager.rs sha256=cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a
+CAUGHT M-A6-EMPTY-TOKEN by tests::a6_empty_token_capsule_is_refused
+restored /tmp/pr343-r5/elastos/crates/elastos-runtime/src/capability/manager.rs sha256=cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a
+CAUGHT M-A6-LIVE-PIDS by tests::a6_this_process_and_pid1_cannot_pass
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a6.rs sha256=8ffd8dca62fee8a40fe9e24ea61d9e9a45ab67440d3e7751d59f6cf4ec86aef6
+CAUGHT M-A6-PREFIX-BIND by tests::a6_prefix_capsule_id_is_refused
+restored /tmp/pr343-r5/elastos/crates/elastos-runtime/src/capability/manager.rs sha256=cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a
+CAUGHT M-A6-STUB-OK by tests::a6_resident_two_instances_is_blocked
+restored /tmp/pr343-r5/lab/a6-a12-evidence-fix/src/a6.rs sha256=8ffd8dca62fee8a40fe9e24ea61d9e9a45ab67440d3e7751d59f6cf4ec86aef6
+replant summary: 25 plants, 28 CAUGHT lines
+replants finished; manager.rs sha256=cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a
+a12.rs sha256=025bb63aa9984304958209d4c9d67de7839b288cefa7087c173ca3b746c61351
+a6.rs sha256=8ffd8dca62fee8a40fe9e24ea61d9e9a45ab67440d3e7751d59f6cf4ec86aef6
