@@ -17,9 +17,9 @@ use serde_json::{json, Value};
 
 // This test code stands in for the Runtime's launch by CID, which does not exist yet.
 pub mod stand_in;
-use stand_in::record_loaded_instance;
+use stand_in::dispatch_principal;
 pub use stand_in::StandInBinding;
-pub use stand_in::{dispatch, STAND_IN_TEST_PRINCIPAL};
+pub use stand_in::{dispatch, record_loaded_instance, STAND_IN_TEST_PRINCIPAL};
 
 #[cfg(test)]
 mod stand_in_tests;
@@ -212,8 +212,7 @@ pub async fn run(
     let provider = ComponentProvider::new();
     let host = bridge.clone();
     provider.set_bus_hostcall(Arc::new(move |line, capsule, principal| {
-        let principal = principal.unwrap_or_default();
-        let response = dispatch(&mut *host.lock().unwrap(), line, capsule, principal);
+        let response = dispatch_principal(&mut host.lock().unwrap(), line, capsule, principal);
         Ok(response.to_string())
     }));
     let handle = provider

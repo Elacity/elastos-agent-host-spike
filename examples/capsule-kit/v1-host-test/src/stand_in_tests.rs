@@ -1,7 +1,7 @@
 //! This test code stands in for the Runtime's launch by CID, which does not exist yet.
 
 use super::{
-    dispatch, error, stand_in::record_loaded_instance, Bridge, StandInBinding,
+    dispatch, dispatch_principal, error, stand_in::record_loaded_instance, Bridge, StandInBinding,
     STAND_IN_TEST_PRINCIPAL,
 };
 use serde_json::{json, Value};
@@ -16,12 +16,22 @@ fn binding(id: &str) -> StandInBinding {
     StandInBinding {
         binding_id: id.into(),
         content_cid: CONTENT.into(),
-        instance_id: INSTANCE.into(),
+        instance_id: String::new(),
         principal: PRINCIPAL.into(),
         members: [MEMBER.into()].into(),
         active: false,
         readmit: Box::new(|| Ok(())),
     }
+}
+
+fn arm(bridge: &mut Bridge, id: &str) {
+    bridge.arm_stand_in(binding(id)).unwrap();
+    record_loaded_instance(bridge, INSTANCE);
+}
+
+fn arm_with(bridge: &mut Bridge, binding: StandInBinding) {
+    bridge.arm_stand_in(binding).unwrap();
+    record_loaded_instance(bridge, INSTANCE);
 }
 
 fn bridge() -> Bridge {
@@ -32,8 +42,12 @@ fn bridge() -> Bridge {
 }
 
 fn grant(resource: &str) -> String {
+    grant_action(resource, "read")
+}
+
+fn grant_action(resource: &str, action: &str) -> String {
     json!({ "id": 17, "request": {
-        "type": "request_capability", "resource": resource, "action": "read"
+        "type": "request_capability", "resource": resource, "action": action
     } })
     .to_string()
 }
@@ -42,6 +56,14 @@ fn invoke(resource: &str, token: &str) -> String {
     json!({ "id": 23, "request": {
         "type": "resource_invoke", "uri": resource, "operation": "read", "token": token,
         "body": { "path": resource, "offset": 0, "length": BYTES.len() }
+    } })
+    .to_string()
+}
+
+fn write(resource: &str, token: &str) -> String {
+    json!({ "id": 23, "request": {
+        "type": "resource_invoke", "uri": resource, "operation": "write", "token": token,
+        "body": { "path": resource, "content": b"{}".to_vec(), "append": false },
     } })
     .to_string()
 }
@@ -90,7 +112,7 @@ fn ungarded_bridge_still_issues_local_tokens() {
 #[test]
 fn guard_allows_a_member_read() {
     let mut bridge = bridge();
-    bridge.arm_stand_in(binding("stand-in-1"));
+    arm(&mut bridge, "stand-in-1");
     assert!(bridge.stand_in.as_ref().unwrap().active);
     let token = issue(&mut bridge, MEMBER);
     assert_eq!(token, "stand-in-1/token-1");
@@ -154,7 +176,7 @@ fn guard_denies_a_read_outside_the_binding() {
         bridge.put(outside, BYTES.into());
         bridge.allow(outside, "read");
         let token = issue(&mut bridge, outside);
-        bridge.arm_stand_in(binding("stand-in-1"));
+        arm(&mut bridge, "stand-in-1");
         let message =
             format!("Read {outside} is outside content {CONTENT} bound to this stand-in launch.");
         assert_refused(
@@ -189,6 +211,87 @@ fn guard_denies_a_read_outside_the_binding() {
 
 /// This test code stands in for the Runtime's launch by CID, which does not exist yet.
 #[test]
+fn guard_denies_a_write_on_a_content_member() {
+    let member = format!("localhost://Users/self/Pictures/Capsules/{CONTENT}/images/input.png");
+    let output = "localhost://Users/self/AppData/stand-in/output.txt";
+    let mut bridge = Bridge::default();
+    bridge.put(&member, BYTES.into());
+    bridge.allow(&member, "read");
+    // Plant the write grant and an issued token so a missing guard would serve
+    // the write rather than fail downstream.
+    bridge.allow(&member, "write");
+    bridge.allow(output, "write");
+    let member_write = dispatch(
+        &mut bridge,
+        &grant_action(&member, "write"),
+        INSTANCE,
+        PRINCIPAL,
+    );
+    let member_write = member_write["response"]["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut binding = binding("stand-in-1");
+    binding.members = [member.clone(), output.into()].into();
+    arm_with(&mut bridge, binding);
+    let message =
+        format!("Content {CONTENT} is read-only; this stand-in launch cannot write {member}.");
+    assert_refused(
+        dispatch(
+            &mut bridge,
+            &grant_action(&member, "write"),
+            INSTANCE,
+            PRINCIPAL,
+        ),
+        17,
+        "denied",
+        &message,
+    );
+    assert_refused(
+        dispatch(
+            &mut bridge,
+            &write(&member, &format!("stand-in-1/{member_write}")),
+            INSTANCE,
+            PRINCIPAL,
+        ),
+        23,
+        "denied",
+        &message,
+    );
+    assert_eq!(bridge.written.len(), 0);
+
+    // The playlist-equivalent AppData write still works through its own path.
+    let response = dispatch(
+        &mut bridge,
+        &grant_action(output, "write"),
+        INSTANCE,
+        PRINCIPAL,
+    );
+    assert_eq!(response["response"]["type"], "capability_token");
+    let output_token = response["response"]["token"].as_str().unwrap();
+    assert_eq!(
+        dispatch(
+            &mut bridge,
+            &write(output, output_token),
+            INSTANCE,
+            PRINCIPAL
+        )["response"]["result"]["status"],
+        "ok"
+    );
+    assert_eq!(bridge.written[output], "{}");
+
+    // A content member read is still allowed.
+    let token = issue(&mut bridge, &member);
+    assert_read(dispatch(
+        &mut bridge,
+        &invoke(&member, &token),
+        INSTANCE,
+        PRINCIPAL,
+    ));
+}
+
+/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+#[test]
 fn guard_denies_a_closed_or_foreign_call() {
     for (close, instance, principal) in [
         (true, INSTANCE, PRINCIPAL),
@@ -197,7 +300,7 @@ fn guard_denies_a_closed_or_foreign_call() {
         (false, "other-instance", PRINCIPAL),
     ] {
         let mut bridge = bridge();
-        bridge.arm_stand_in(binding("stand-in-1"));
+        arm(&mut bridge, "stand-in-1");
         let token = issue(&mut bridge, MEMBER);
         if close {
             bridge.close_stand_in();
@@ -227,8 +330,10 @@ fn guard_denies_a_closed_or_foreign_call() {
 fn guard_rejects_a_grant_from_another_binding() {
     let mut first = bridge();
     let mut second = bridge();
-    first.arm_stand_in(binding("stand-in-1"));
-    second.arm_stand_in(binding("stand-in-2"));
+    first.arm_stand_in(binding("stand-in-1")).unwrap();
+    second.arm_stand_in(binding("stand-in-2")).unwrap();
+    record_loaded_instance(&mut first, INSTANCE);
+    record_loaded_instance(&mut second, INSTANCE);
     let token = issue(&mut first, MEMBER);
     let second_token = issue(&mut second, MEMBER);
     assert_ne!(token, second_token);
@@ -265,7 +370,7 @@ fn admits_once() -> StandInBinding {
 fn guard_calls_readmit_before_each_effect() {
     let mut reading = bridge();
     let local_token = issue(&mut reading, MEMBER);
-    reading.arm_stand_in(admits_once());
+    arm_with(&mut reading, admits_once());
     let line = invoke(MEMBER, &format!("stand-in-1/{local_token}"));
     assert_read(dispatch(&mut reading, &line, INSTANCE, PRINCIPAL));
     let served = reading.bytes_served[MEMBER];
@@ -280,7 +385,7 @@ fn guard_calls_readmit_before_each_effect() {
     assert_eq!(reading.lines.len(), 2);
 
     let mut granting = bridge();
-    granting.arm_stand_in(admits_once());
+    arm_with(&mut granting, admits_once());
     assert_eq!(issue(&mut granting, MEMBER), "stand-in-1/token-1");
     assert_refused(
         dispatch(&mut granting, &grant(MEMBER), INSTANCE, PRINCIPAL),
@@ -294,15 +399,57 @@ fn guard_calls_readmit_before_each_effect() {
 
 /// This test code stands in for the Runtime's launch by CID, which does not exist yet.
 #[test]
+fn arming_refuses_an_empty_principal() {
+    let mut bridge = bridge();
+    let mut binding = binding("stand-in-1");
+    binding.principal = String::new();
+    assert_eq!(
+        bridge.arm_stand_in(binding),
+        Err("A stand-in launch needs a caller principal.".into())
+    );
+    assert!(bridge.stand_in.is_none());
+}
+
+/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+#[test]
+fn guard_denies_a_call_without_a_principal() {
+    let mut bridge = bridge();
+    // Build the empty-principal binding that arming refuses: a call with no
+    // principal must be refused even against it.
+    let mut binding = binding("stand-in-1");
+    binding.principal = String::new();
+    binding.active = true;
+    bridge.stand_in = Some(binding);
+    record_loaded_instance(&mut bridge, INSTANCE);
+    let response = dispatch_principal(&mut bridge, &grant(MEMBER), INSTANCE, Some(""));
+    assert_eq!(response["response"]["type"], "capability_token");
+    let token = format!(
+        "stand-in-1/{}",
+        response["response"]["token"].as_str().unwrap()
+    );
+    let served = bridge.bytes_served.get(MEMBER).copied().unwrap_or(0);
+    assert_refused(
+        dispatch_principal(&mut bridge, &invoke(MEMBER, &token), INSTANCE, None),
+        23,
+        "denied",
+        super::stand_in::NO_PRINCIPAL,
+    );
+    assert_eq!(
+        bridge.bytes_served.get(MEMBER).copied().unwrap_or(0),
+        served
+    );
+}
+
+/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+#[test]
 fn run_calls_dispatch_with_the_bus_caller() {
     let source = include_str!("lib.rs");
     let dispatch =
-        "        let response = dispatch(&mut *host.lock().unwrap(), line, capsule, principal);";
-    assert_eq!(source.lines().filter(|line| *line == dispatch).count(), 1);
+        "        let response = dispatch_principal(&mut host.lock().unwrap(), line, capsule, principal);";
+    assert_eq!(source.matches(dispatch).count(), 1);
     assert!(source.contains("move |line, capsule, principal| {\n"));
-    assert!(source.contains(&format!(
-        "move |line, capsule, principal| {{\n        let principal = principal.unwrap_or_default();\n{dispatch}"
-    )));
+    assert!(source.contains(dispatch));
+    assert!(!source.contains("let principal = principal.unwrap_or_default();"));
     assert!(!source.contains("_capsule, _principal"));
 }
 
@@ -319,7 +466,7 @@ fn record_loaded_instance_sets_only_the_instance_id() {
             calls += 1;
             Err(format!("readmit-{calls}"))
         });
-        bridge.arm_stand_in(binding);
+        bridge.arm_stand_in(binding).unwrap();
         if !active {
             bridge.close_stand_in();
         }

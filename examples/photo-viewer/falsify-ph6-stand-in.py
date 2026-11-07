@@ -12,6 +12,7 @@ sys.path.insert(0, str(HERE.parent / "capsule-kit" / "falsify"))
 import falsify_kit as kit  # noqa: E402
 
 SUPPORT = HERE / "host-test/tests/support/ph6_stand_in.rs"
+STAND_IN = HERE.parent / "capsule-kit" / "v1-host-test" / "src" / "stand_in.rs"
 CASES = [
     (
         "F19 stand-in success without running the core",
@@ -35,24 +36,50 @@ CASES = [
         ["stand_in_preserves_content_skip_and_authority_stop"],
     ),
     (
-        "F6/F14 photo launch omits the kit guard",
-        SUPPORT,
-        [("bridge.arm_stand_in(binding);", "let _ = (bridge, binding);")],
-        [
-            "stand_in_opens_content_cid_and_writes_checked_playlist",
-            "stand_in_denies_a_read_outside_bound_content",
-            "stand_in_grants_are_specific_to_one_run",
-        ],
+        "F6 guard bypasses the exact member check",
+        STAND_IN,
+        [(
+            "if !binding.members.contains(resource) {",
+            "if false && !binding.members.contains(resource) {",
+        )],
+        ["stand_in_denies_a_read_outside_bound_content"],
     ),
     (
-        "F13/F23 photo launch leaves the guard active",
-        SUPPORT,
-        [("bridge.close_stand_in();", "let _ = &bridge;")],
+        "F13 guard skips the active/instance/principal check",
+        STAND_IN,
+        [(
+            "if !binding.active || capsule != binding.instance_id || principal != binding.principal {",
+            "if false {",
+        )],
+        ["stand_in_denies_closed_or_foreign_launches"],
+    ),
+    (
+        "F14 guard uses local-counter-only handles",
+        STAND_IN,
         [
-            "stand_in_opens_content_cid_and_writes_checked_playlist",
-            "stand_in_denies_closed_or_foreign_launches",
-            "stand_in_rechecks_authority_on_each_invoke",
+            (
+                "if !token.is_empty() && !token.starts_with(&prefix) {",
+                "if false && !token.is_empty() && !token.starts_with(&prefix) {",
+            ),
+            (
+                "        if !token.is_empty() {\n            envelope[\"request\"][\"token\"] = json!(&token[prefix.len()..]);\n            return bridge.answer(&envelope.to_string());\n        }\n        return bridge.answer(line);",
+                "        return bridge.answer(line);",
+            ),
+            (
+                "response[\"response\"][\"token\"] = json!(format!(\"{prefix}{token}\"));",
+                "response[\"response\"][\"token\"] = json!(token);",
+            ),
         ],
+        ["stand_in_grants_are_specific_to_one_run"],
+    ),
+    (
+        "F23 guard removes only the invoke check",
+        STAND_IN,
+        [(
+            "if !binding.active || capsule != binding.instance_id || principal != binding.principal {",
+            "if request[\"type\"] == \"request_capability\" && (!binding.active || capsule != binding.instance_id || principal != binding.principal) {",
+        )],
+        ["stand_in_rechecks_authority_on_each_invoke"],
     ),
     (
         "F7 bundle admission accepts a revoked CID",
@@ -65,6 +92,18 @@ CASES = [
             "stand_in_refuses_revoked_content_at_open",
             "stand_in_stops_when_content_is_revoked_after_grant",
         ],
+    ),
+    (
+        "F24 launch drops the shared policy",
+        SUPPORT,
+        [
+            (
+                "            Arc::clone(&policy),",
+                "            Arc::new(Mutex::new(policy.lock().unwrap().clone())),",
+            ),
+            ("            on_admit,\n", "            None,\n"),
+        ],
+        ["stand_in_stops_when_policy_changes_mid_run"],
     ),
 ]
 
@@ -80,5 +119,5 @@ def stand_in_test_fails(name):
 if __name__ == "__main__":
     kit.main(
         [(CASES, compile_stand_in, stand_in_test_fails, None, True)],
-        done="all 6 stand-in launch falsifiers caught",
+        done="all 9 stand-in launch falsifiers caught",
     )

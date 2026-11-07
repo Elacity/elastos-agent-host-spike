@@ -10,14 +10,14 @@ use capsule_bundle::{
     PolicyFloor, PublisherEntry, Refusal, ReleasePolicy, SignedClaim, SignedReleasePolicy,
     TrustPolicy,
 };
-use capsule_v1_host_test::{dispatch, Bridge, STAND_IN_TEST_PRINCIPAL};
+use capsule_v1_host_test::{dispatch, record_loaded_instance, Bridge, STAND_IN_TEST_PRINCIPAL};
 use serde_json::{json, Value};
 
 #[path = "support/ph6_stand_in.rs"]
 mod stand_in;
 use stand_in::{
     arm_content_stand_in, close_content_stand_in, content_readmit, launch_members,
-    open_content_stand_in, StandInEvidence, StandInLaunchError, ALBUM, PLAYLIST,
+    open_content_stand_in, OnAdmit, StandInEvidence, StandInLaunchError, ALBUM, PLAYLIST,
 };
 
 const NOW: u64 = 1_800_000_000;
@@ -231,10 +231,11 @@ async fn stand_in_opens_content_cid_and_writes_checked_playlist() {
         &fixture.viewer.cid,
         &fixture.core.cid,
         &fixture.claims,
-        &fixture.policy,
+        Arc::new(Mutex::new(fixture.policy.clone())),
         &fixture.installed,
         NOW,
         &fixture.source_core,
+        None,
         None,
     )
     .await
@@ -271,10 +272,11 @@ async fn stand_in_runs_the_staged_core() {
         &fixture.viewer.cid,
         &fixture.core.cid,
         &fixture.claims,
-        &fixture.policy,
+        Arc::new(Mutex::new(fixture.policy.clone())),
         &fixture.installed,
         NOW,
         &fixture.source_core,
+        None,
         None,
     )
     .await
@@ -303,10 +305,11 @@ async fn stand_in_preserves_content_skip_and_authority_stop() {
         &fixture.viewer.cid,
         &fixture.core.cid,
         &fixture.claims,
-        &fixture.policy,
+        Arc::new(Mutex::new(fixture.policy.clone())),
         &fixture.installed,
         NOW,
         &fixture.source_core,
+        None,
         None,
     )
     .await
@@ -340,11 +343,12 @@ async fn stand_in_preserves_content_skip_and_authority_stop() {
         &fixture.viewer.cid,
         &fixture.core.cid,
         &fixture.claims,
-        &fixture.policy,
+        Arc::new(Mutex::new(fixture.policy.clone())),
         &fixture.installed,
         NOW,
         &fixture.source_core,
         Some(&denied_uri),
+        None,
     )
     .await
     .expect_err("a missing read grant stops the core");
@@ -387,10 +391,8 @@ fn arm(bridge: &mut Bridge, id: &str, images: &BTreeMap<String, Vec<u8>>) {
         launch_members(ALBUM, PLAYLIST, images),
         Box::new(|| Ok(())),
     );
-    // Dispatch-only tests supply the caller that run records after loading.
-    if let Some(binding) = bridge.stand_in.as_mut() {
-        binding.instance_id = INSTANCE.into();
-    }
+    // The caller that run records after loading the instance.
+    record_loaded_instance(bridge, INSTANCE);
 }
 
 fn grant(bridge: &mut Bridge, uri: &str, action: &str, instance: &str) -> String {
@@ -445,17 +447,19 @@ fn stand_in_denies_a_read_outside_bound_content() {
         "localhost://Users/self/Pictures/other.png".into(),
         format!("localhost://Users/self/Pictures/Capsules/{CONTENT}/images/../secret.png"),
     ];
-    let mut reads = Vec::new();
+    let mut grants = Vec::new();
     for uri in &outside {
         bridge.put(uri, b"outside bytes".to_vec());
         bridge.allow(uri, "read");
         // Valid ordinary grants ensure downstream absence cannot mask a missing guard.
-        let token = grant(&mut bridge, uri, "read", INSTANCE);
-        reads.push(read(uri, &token));
+        grants.push(grant(&mut bridge, uri, "read", INSTANCE));
     }
     bridge.lines.clear();
     arm(&mut bridge, "stand-in-outside", &images);
-    for (uri, line) in outside.iter().zip(reads) {
+    for (uri, local) in outside.iter().zip(grants) {
+        // Handles carry the binding namespace, so the member check is the only
+        // thing that can stop this read.
+        let line = read(uri, &format!("stand-in-outside/{local}"));
         assert_refused(
             dispatch(&mut bridge, &line, INSTANCE, STAND_IN_TEST_PRINCIPAL),
             "denied",
@@ -478,10 +482,11 @@ async fn stand_in_refuses_revoked_content_at_open() {
         &fixture.viewer.cid,
         &fixture.core.cid,
         &fixture.claims,
-        &policy,
+        Arc::new(Mutex::new(policy)),
         &fixture.installed,
         NOW,
         &fixture.source_core,
+        None,
         None,
     )
     .await
@@ -517,6 +522,7 @@ fn stand_in_stops_when_content_is_revoked_after_grant() {
             fixture.installed.clone(),
             fixture.store.clone(),
             NOW,
+            None,
         ),
     );
     let uri = fixture.uri("images/01.png");
@@ -545,6 +551,53 @@ fn stand_in_stops_when_content_is_revoked_after_grant() {
 
 /// This test code stands in for the Runtime's launch by CID, which does not exist yet.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stand_in_stops_when_policy_changes_mid_run() {
+    let fixture = Fixture::new(&fixture_images());
+    let policy = Arc::new(Mutex::new(fixture.policy.clone()));
+    let content_cid = fixture.content.cid.clone();
+    let on_admit: Option<OnAdmit> = Some(Box::new(move |calls, current| {
+        // The album grant, the album read, then the first image grant.
+        if calls == 3 {
+            current.revoked_cids.push(content_cid.clone());
+        }
+    }));
+    let error = open_content_stand_in(
+        &fixture.store,
+        &fixture.content.cid,
+        &fixture.viewer.cid,
+        &fixture.core.cid,
+        &fixture.claims,
+        policy,
+        &fixture.installed,
+        NOW,
+        &fixture.source_core,
+        None,
+        on_admit,
+    )
+    .await
+    .expect_err("the next effect after the policy change is refused");
+    let StandInLaunchError::Launch {
+        stage,
+        reason,
+        wrote_playlist,
+    } = error
+    else {
+        panic!("expected a launch failure, got {error}");
+    };
+    assert_eq!(stage, "run");
+    assert!(!wrote_playlist);
+    assert!(
+        reason.contains(&format!(
+            "Content CID {} is revoked by the current policy; this launch is stopped.",
+            fixture.content.cid
+        )),
+        "{reason}"
+    );
+    assert!(!fixture.source_core.exists());
+}
+
+/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stand_in_refuses_a_policy_held_before_revocation() {
     let fixture = Fixture::new(&fixture_images());
     let mut release = fixture.release.clone();
@@ -566,10 +619,11 @@ async fn stand_in_refuses_a_policy_held_before_revocation() {
         &fixture.viewer.cid,
         &fixture.core.cid,
         &fixture.claims,
-        &fixture.policy,
+        Arc::new(Mutex::new(fixture.policy.clone())),
         &fixture.installed,
         NOW,
         &fixture.source_core,
+        None,
         None,
     )
     .await

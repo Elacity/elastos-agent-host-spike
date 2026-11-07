@@ -15,6 +15,9 @@ use serde_json::Value;
 pub const ALBUM: &str = "localhost://Users/self/.AppData/App/photo-viewer/album.json";
 pub const PLAYLIST: &str = "localhost://Users/self/.AppData/App/photo-viewer/playlist.json";
 
+/// A test hook that runs after an admission, with the call count and the held policy.
+pub type OnAdmit = Box<dyn FnMut(usize, &mut TrustPolicy) + Send>;
+
 pub fn launch_members(
     album: &str,
     playlist: &str,
@@ -42,7 +45,9 @@ pub fn arm_content_stand_in(
         active: false,
         readmit,
     };
-    bridge.arm_stand_in(binding);
+    bridge
+        .arm_stand_in(binding)
+        .expect("the stand-in test principal is non-empty");
 }
 
 pub fn close_content_stand_in(bridge: &mut Bridge) {
@@ -56,9 +61,11 @@ pub fn content_readmit(
     installed: Vec<Installed>,
     store: PathBuf,
     now: u64,
+    mut on_admit: Option<OnAdmit>,
 ) -> Box<dyn FnMut() -> Result<(), String> + Send> {
+    let mut calls = 0;
     Box::new(move || {
-        let policy = policy.lock().unwrap().clone();
+        let mut policy = policy.lock().unwrap();
         for package in &packages {
             admit_staged_for_stand_in(package, &claims, &policy, &installed, &store, now)
                 .map_err(|refusal| match refusal {
@@ -70,6 +77,10 @@ pub fn content_readmit(
                             .into(),
                     refusal => refusal.to_string(),
                 })?;
+        }
+        calls += 1;
+        if let Some(on_admit) = on_admit.as_mut() {
+            on_admit(calls, &mut policy);
         }
         Ok(())
     })
@@ -131,20 +142,22 @@ pub async fn open_content_stand_in(
     selected_viewer: &str,
     selected_core: &str,
     claims: &BTreeMap<String, SignedClaim>,
-    policy: &TrustPolicy,
+    policy: Arc<Mutex<TrustPolicy>>,
     installed: &[Installed],
     now: u64,
     source_core: &Path,
     denied_read: Option<&str>,
+    on_admit: Option<OnAdmit>,
 ) -> Result<StandInEvidence, StandInLaunchError> {
+    let held_policy = policy.lock().unwrap().clone();
     let content = load(store, content_cid)?;
-    admit_staged_for_stand_in(&content, claims, policy, installed, store, now)?;
+    admit_staged_for_stand_in(&content, claims, &held_policy, installed, store, now)?;
     let dependencies = select_stand_in_dependencies(
         &content,
         selected_viewer,
         selected_core,
         claims,
-        policy,
+        &held_policy,
         installed,
         store,
         now,
@@ -181,10 +194,11 @@ pub async fn open_content_stand_in(
         content_readmit(
             [content.clone(), viewer, core],
             claims.clone(),
-            Arc::new(Mutex::new(policy.clone())),
+            Arc::clone(&policy),
             installed.to_vec(),
             store.into(),
             now,
+            on_admit,
         ),
     );
     #[rustfmt::skip]

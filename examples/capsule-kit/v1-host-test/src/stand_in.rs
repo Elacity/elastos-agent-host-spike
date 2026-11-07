@@ -18,10 +18,16 @@ pub struct StandInBinding {
     pub readmit: Box<dyn FnMut() -> Result<(), String> + Send>,
 }
 
+pub const NO_PRINCIPAL: &str = "This stand-in launch has no caller principal.";
+
 impl Bridge {
-    pub fn arm_stand_in(&mut self, mut binding: StandInBinding) {
+    pub fn arm_stand_in(&mut self, mut binding: StandInBinding) -> Result<(), String> {
+        if binding.principal.is_empty() {
+            return Err("A stand-in launch needs a caller principal.".into());
+        }
         binding.active = true;
         self.stand_in = Some(binding);
+        Ok(())
     }
 
     pub fn close_stand_in(&mut self) {
@@ -31,14 +37,31 @@ impl Bridge {
     }
 }
 
-pub(crate) fn record_loaded_instance(bridge: &mut Bridge, instance_id: &str) {
+pub fn record_loaded_instance(bridge: &mut Bridge, instance_id: &str) {
     let Some(binding) = bridge.stand_in.as_mut() else {
         return;
     };
     binding.instance_id = instance_id.into();
 }
 
+/// A member under the bound content CID is the content itself: read-only.
+fn is_content_member(binding: &StandInBinding, resource: &str) -> bool {
+    resource.starts_with(&format!(
+        "localhost://Users/self/Pictures/Capsules/{}/",
+        binding.content_cid
+    ))
+}
+
 pub fn dispatch(bridge: &mut Bridge, line: &str, capsule: &str, principal: &str) -> Value {
+    dispatch_principal(bridge, line, capsule, Some(principal))
+}
+
+pub fn dispatch_principal(
+    bridge: &mut Bridge,
+    line: &str,
+    capsule: &str,
+    principal: Option<&str>,
+) -> Value {
     let Some(binding) = bridge.stand_in.as_mut() else {
         return bridge.answer(line);
     };
@@ -49,12 +72,29 @@ pub fn dispatch(bridge: &mut Bridge, line: &str, capsule: &str, principal: &str)
         Some("resource_invoke") => request["uri"].as_str().unwrap_or_default(),
         _ => return bridge.answer(line),
     };
+    let action = match request["type"].as_str() {
+        Some("request_capability") => request["action"].as_str().unwrap_or_default(),
+        Some("resource_invoke") => request["operation"].as_str().unwrap_or_default(),
+        _ => return bridge.answer(line),
+    };
     let refuse = |code: &str, message: &str| json!({ "id": envelope["id"], "response": error(code, message) });
+    let Some(principal) = principal else {
+        return refuse("denied", NO_PRINCIPAL);
+    };
     if !binding.members.contains(resource) {
         return refuse(
             "denied",
             &format!(
                 "Read {resource} is outside content {} bound to this stand-in launch.",
+                binding.content_cid
+            ),
+        );
+    }
+    if is_content_member(binding, resource) && action != "read" {
+        return refuse(
+            "denied",
+            &format!(
+                "Content {} is read-only; this stand-in launch cannot {action} {resource}.",
                 binding.content_cid
             ),
         );

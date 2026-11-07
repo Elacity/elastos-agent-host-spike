@@ -31,8 +31,20 @@ CASES = [
      "if let Err(reason) = (binding.readmit)() {",
      "if let Err(reason) = Ok(()) {",
      "guard_calls_readmit_before_each_effect"),
+    ("stand-in arming accepts an empty principal", "stand_in.rs",
+     "if binding.principal.is_empty() {",
+     "if false && binding.principal.is_empty() {",
+     "arming_refuses_an_empty_principal"),
+    ("stand-in guard accepts a call with no principal", "stand_in.rs",
+     "    let Some(principal) = principal else {\n        return refuse(\"denied\", NO_PRINCIPAL);\n    };",
+     "    let principal = principal.unwrap_or_default();",
+     "guard_denies_a_call_without_a_principal"),
+    ("stand-in content member write bypassed", "stand_in.rs",
+     "if is_content_member(binding, resource) && action != \"read\" {",
+     "if false && is_content_member(binding, resource) && action != \"read\" {",
+     "guard_denies_a_write_on_a_content_member"),
     ("stand-in dispatch bypassed in run", "lib.rs",
-     "        let response = dispatch(&mut *host.lock().unwrap(), line, capsule, principal);",
+     "        let response = dispatch_principal(&mut host.lock().unwrap(), line, capsule, principal);",
      "        let response = host.lock().unwrap().answer(line);",
      "run_calls_dispatch_with_the_bus_caller"),
     # This test code stands in for the Runtime's launch by CID, which does not exist yet.
@@ -69,7 +81,7 @@ def main():
     ]
     kit.main(
         [(cases, build, test_fails, None, True, test_failures)],
-        done="all 6 stand-in guard falsifiers caught",
+        done="all 9 stand-in guard falsifiers caught",
     )
 
 
