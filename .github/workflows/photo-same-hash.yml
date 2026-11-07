@@ -27,6 +27,11 @@ jobs:
           uname -m
       - name: Build in the pinned container
         run: examples/photo-viewer/repro/build-in-container.sh examples/photo-viewer
+      - name: Show the source is unchanged after the build
+        run: |
+          test "$(git rev-parse HEAD)" = d047a069aa3ff6bae70ef95ac182bab6388b43bf
+          git status --porcelain
+          test -z "$(git status --porcelain)"
       - name: Hash the artifact
         run: |
           sudo chown -R "$(id -u)" examples/photo-viewer
