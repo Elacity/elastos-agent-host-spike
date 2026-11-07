@@ -1215,7 +1215,10 @@ mod tests {
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
-        assert_eq!(load_nickname(dir.path()).unwrap().as_deref(), Some("Private"));
+        assert_eq!(
+            load_nickname(dir.path()).unwrap().as_deref(),
+            Some("Private")
+        );
     }
 
     #[test]
