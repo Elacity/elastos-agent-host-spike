@@ -1,0 +1,18 @@
+# First run, against the live checker at 440354e and the committed
+# complete evidence tree (before smoke timeout reused that directory).
+checker=/tmp/review-c9-296-r3-src/lab/linux-confine/guest/check-guest-results.py
+CAUGHT	N1-early-forged-mark-last-wins-honest	rc=0	forged elf 99 passed first; honest last mark kept.
+SURVIVED	N1b-late-duplicate-mark-matching-9p	rc=0	duplicate last mark same as 9p.
+CAUGHT	N1c-late-forged-mark-and-inflated-9p	rc=1	elf: passed 7 != expected 6
+SURVIVED	N2-replay-committed-evidence-old-nonce	rc=0	old complete 9p+serial+nonce replayed as a new checker run.
+CAUGHT	N2b-replay-old-files-new-nonce	rc=1	serial nonce eacadb6e... != fresh host nonce
+SURVIVED	N3-missing-env-and-9p-isolation-lines	rc=0	only tester_nonce_readable=0 present.
+CAUGHT	N4-extra-passes-matching-marks	rc=1	elf passed 7 vs expected 6
+SURVIVED	N5-duplicate-marks-last-honest	rc=0	first mark nonce=other/99; last honest accepted.
+CAUGHT	N6-qemu-timeout-124	rc=1	qemu timed out; qemu_exit=124
+CAUGHT	N6b-timeout-flag-qemu-exit-0	rc=1	qemu_timeout=1 but qemu_exit=0 still fails
+CAUGHT	N7-guest-exit-10-substring	rc=1	guest_exit.txt did not report 0: 'guest_exit=10'
+SURVIVED	N8-guest-exit-comment-contains-zero	rc=0	guest_exit=1 plus later guest_exit=0
+SURVIVED	N9-guest-exit-01	rc=0	"guest_exit=0" is a substring of "guest_exit=01"
+CAUGHT	N10-last-qemu-exit-137-after-0	rc=1	qemu_exit=137 is non-zero
+SUMMARY	CAUGHT=8	SURVIVED=6	total=14

@@ -1,0 +1,56 @@
+# GENERATED from this guest run. Not a hand write-up.
+# nonce=2b022bbc73bd61733fc9db2b111a51e7
+# source=/tmp/review-c9-296-r3-src/lab/linux-confine/evidence/aarch64-qemu-system-6.18-fail-closed
+# mode=fail-closed
+
+C9 linux-confine on aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+
+Never native aarch64. Never Jetson.
+
+## Standing suites (live rust output)
+
+| suite | status | exit | passed | failed | ignored | expected passed |
+| --- | --- | --- | --- | --- | --- | --- |
+| elf | SHORT | 0 | 0 | 0 | 0 | 6 |
+| aarch64 | MISSING | MISSING | 0 | 0 | 0 | 2 |
+| confine | MISSING | MISSING | 0 | 0 | 0 | 25 |
+| providers | MISSING | MISSING | 0 | 0 | 0 | 4 |
+
+## In-guest plants (live status files)
+
+| id | result |
+| --- | --- |
+
+## Guest markers
+
+nonce=2b022bbc73bd61733fc9db2b111a51e7
+guest_exit=1
+qemu_exit=0
+
+Host-only plants F-LC-WRONG-ARCH-CC and F-LC-QEMU-USER-LANDLOCK stay NOT RUN.
+make-char / make-block stay NOT PROVEN (no CAP_MKNOD).
+socketpair(AF_UNIX) stays the named C9 departure.
+
+This is an emulated CPU (qemu-system TCG) with a real aarch64 kernel.
+It is not a Jetson and not any other aarch64 board.
+
+## Host check FAILED
+
+- elf: passed 0 != expected 6
+- elf: status=SHORT exit=0
+- aarch64: missing status file
+- aarch64: missing exit file
+- aarch64: passed 0 != expected 2
+- aarch64: ignored 0 != expected 1
+- aarch64: status=MISSING exit=MISSING
+- confine: missing status file
+- confine: missing exit file
+- confine: passed 0 != expected 25
+- confine: status=MISSING exit=MISSING
+- providers: missing status file
+- providers: missing exit file
+- providers: passed 0 != expected 4
+- providers: status=MISSING exit=MISSING
+fail-closed: host exited non-zero as required (check_rc=1)
+wrote /tmp/review-c9-296-r3-src/lab/linux-confine/evidence/aarch64-qemu-system-6.18-fail-closed
+FAIL_CLOSED_HOST_EXIT=1

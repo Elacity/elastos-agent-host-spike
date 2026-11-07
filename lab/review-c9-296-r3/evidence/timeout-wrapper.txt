@@ -1,0 +1,4 @@
+qemu_timeout_sec=2
+qemu_exit=137
+guest did not print the required TCG label
+TIMEOUT_HOST_EXIT=1
