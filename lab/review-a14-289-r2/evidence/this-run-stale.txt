@@ -1,0 +1,3 @@
+this-run points at: /workspace/lab/review-a14-289-r2/scratch/probes/stale-home/Library/Application Support/elastos-demo-a14/runs/old
+summary first line: OLD SUMMARY
+step 5 would open that path if open existed

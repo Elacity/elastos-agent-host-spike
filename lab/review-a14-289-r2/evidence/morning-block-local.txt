@@ -1,0 +1,10 @@
+walk2: local A14_REMOTE so clone does not need GitHub auth
+A14_REMOTE=/tmp/a14-289-head
+A14_CLONE=/workspace/lab/review-a14-289-r2/scratch/morning2/clone
+HOME=/workspace/lab/review-a14-289-r2/scratch/morning2/home
+bash+local-remote exit: 1
+clone HEAD: e6651b29becaca6db12065413169e2fafce6cd64
+clone branch: cursor/demo-a14-installed-demo-83e1
+Library this-run: absent
+XDG this-run: absent
+summary count under HOME: 0

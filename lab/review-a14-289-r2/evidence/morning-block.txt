@@ -1,0 +1,10 @@
+HEAD claimed e6651b29; worktree e6651b29becaca6db12065413169e2fafce6cd64
+HOME=/workspace/lab/review-a14-289-r2/scratch/morning/home
+A14_CLONE=/workspace/lab/review-a14-289-r2/scratch/morning/clone
+A14_REMOTE unset
+--- begin exact morning block under bash ---
+bash block exit: 128
+clone dest exists: no
+Library this-run: absent
+XDG this-run: absent
+any summary.txt under HOME: 0

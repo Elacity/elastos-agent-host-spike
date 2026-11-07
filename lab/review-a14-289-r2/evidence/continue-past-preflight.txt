@@ -1,0 +1,40 @@
+cwd=/workspace/lab/review-a14-289-r2/scratch/morning/clone
+HEAD=e6651b29becaca6db12065413169e2fafce6cd64
+/workspace/lab/review-a14-289-r2/tools/probe-breakers.sh: 153: printf: Illegal option --
+Installing the A14 demo into /workspace/lab/review-a14-289-r2/scratch/probes/demo-home/current
+REFUSED: this machine is not ready.
+  - operating system is Linux; A14's VERSIONS.json is produced on macOS
+  - architecture is x86_64; A14 needs native Apple Silicon (arm64)
+  - wasm32-unknown-unknown is not installed for 1.91.0; the guest build needs it, and the five morning steps do not add it
+  - /usr/bin/sandbox-exec is missing; the C1-C7 steps run provider profiles with this macOS program
+  - /usr/sbin/lsof is missing; the conformance run checks earlier homes with this path
+Next: read /workspace/lab/review-a14-289-r2/scratch/probes/demo-home/runs/20261026T221513Z-wxuzt4dj/summary.txt, then fix the item above, then run `bash lab/demo-a14/install.sh` again.
+Saved: /workspace/lab/review-a14-289-r2/scratch/probes/demo-home/runs/20261026T221513Z-wxuzt4dj
+install exit: 3
+signing key: absent
+current/: absent
+this-run: present
+this-run value: /workspace/lab/review-a14-289-r2/scratch/probes/demo-home/runs/20261026T221513Z-wxuzt4dj
+summary exists: yes
+/workspace/lab/review-a14-289-r2/tools/probe-breakers.sh: 167: printf: Illegal option --
+Installing the A14 demo into /workspace/lab/review-a14-289-r2/scratch/probes/demo-home/current
+REFUSED: this machine is not ready.
+  - operating system is Linux; A14's VERSIONS.json is produced on macOS
+  - architecture is x86_64; A14 needs native Apple Silicon (arm64)
+  - wasm32-unknown-unknown is not installed for 1.91.0; the guest build needs it, and the five morning steps do not add it
+  - /usr/bin/sandbox-exec is missing; the C1-C7 steps run provider profiles with this macOS program
+  - /usr/sbin/lsof is missing; the conformance run checks earlier homes with this path
+Next: read /workspace/lab/review-a14-289-r2/scratch/probes/demo-home/runs/20261026T221513Z-wxuzt4dj/summary.txt, then fix the item above, then run `bash lab/demo-a14/install.sh` again.
+Saved: /workspace/lab/review-a14-289-r2/scratch/probes/demo-home/runs/20261026T221513Z-wxuzt4dj
+/workspace/lab/review-a14-289-r2/tools/probe-breakers.sh: 171: printf: Illegal option --
+A14 installed demo: /workspace/lab/review-a14-289-r2/scratch/probes/demo-home/current
+REFUSED: the demo is not installed. No journey was run.
+  - no installed demo at /workspace/lab/review-a14-289-r2/scratch/probes/demo-home/current; run lab/demo-a14/install.sh first
+Next: read /workspace/lab/review-a14-289-r2/scratch/probes/demo-home/runs/20261026T221513Z-w5m6spzt/summary.txt, then run `bash lab/demo-a14/install.sh`, then run this command again.
+Saved: /workspace/lab/review-a14-289-r2/scratch/probes/demo-home/runs/20261026T221513Z-w5m6spzt
+run exit: 3
+this-run after run.sh: /workspace/lab/review-a14-289-r2/scratch/probes/demo-home/runs/20261026T221513Z-w5m6spzt
+summary exists: yes
+/workspace/lab/review-a14-289-r2/tools/probe-breakers.sh: 182: printf: Illegal option --
+Library this-run=EMPTY
+open not invoked (Library this-run missing or stale)

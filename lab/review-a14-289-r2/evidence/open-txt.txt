@@ -1,0 +1,3 @@
+open: present
+xdg-open: present
+macOS open on a .txt opens the default editor. The block calls open, not open -t or open -e.

@@ -1,0 +1,3 @@
+PR #289 body fence and RUNBOOK.md fence were compared by eye and by extracting RUNBOOK bytes (1188).
+Both start with set -euo pipefail and use the same dest/url/this-run/open lines.
+tools/morning-block.sh equals the RUNBOOK fence (python equal True, 1188 bytes).

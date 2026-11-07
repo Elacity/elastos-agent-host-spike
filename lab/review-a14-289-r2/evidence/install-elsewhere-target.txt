@@ -1,0 +1,17 @@
+CARGO_TARGET_DIR=../elsewhere on install.sh --sign
+Installing the A14 demo into /workspace/lab/review-a14-289-r2/scratch/clean/demo-elsewhere/current
+REFUSED: this machine is not ready.
+  - operating system is Linux; A14's VERSIONS.json is produced on macOS
+  - architecture is x86_64; A14 needs native Apple Silicon (arm64)
+  - wasm32-unknown-unknown is not installed for 1.91.0; the guest build needs it, and the five morning steps do not add it
+  - CARGO_TARGET_DIR=../elsewhere is outside the repository; install records test executables only from inside the checkout and refuses these
+  - /usr/bin/sandbox-exec is missing; the C1-C7 steps run provider profiles with this macOS program
+  - /usr/sbin/lsof is missing; the conformance run checks earlier homes with this path
+Next: read /workspace/lab/review-a14-289-r2/scratch/clean/demo-elsewhere/runs/20261026T221756Z-rj3q5djv/summary.txt, then fix the item above, then run `bash lab/demo-a14/install.sh` again.
+Saved: /workspace/lab/review-a14-289-r2/scratch/clean/demo-elsewhere/runs/20261026T221756Z-rj3q5djv
+exit 3
+key: absent
+this-run: present
+points at: /workspace/lab/review-a14-289-r2/scratch/clean/demo-elsewhere/runs/20261026T221756Z-rj3q5djv
+2:REFUSED: this machine is not ready.
+6:  - CARGO_TARGET_DIR=../elsewhere is outside the repository; install records test executables only from inside the checkout and refuses these

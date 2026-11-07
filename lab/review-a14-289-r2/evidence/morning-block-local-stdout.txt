@@ -1,0 +1,6 @@
+missing: operating system is Linux; A14's VERSIONS.json is produced on macOS
+missing: architecture is x86_64; A14 needs native Apple Silicon (arm64)
+missing: wasm32-unknown-unknown is not installed for 1.91.0; the guest build needs it, and the five morning steps do not add it
+missing: /usr/bin/sandbox-exec is missing; the C1-C7 steps run provider profiles with this macOS program
+missing: /usr/sbin/lsof is missing; the conformance run checks earlier homes with this path
+preflight: FAIL

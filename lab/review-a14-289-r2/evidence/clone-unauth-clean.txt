@@ -1,0 +1,5 @@
+unauth clone of default runbook URL, empty gitconfig, GIT_TERMINAL_PROMPT=0
+exit: 128
+Cloning into '/workspace/lab/review-a14-289-r2/scratch/clean/unauth-clone'...
+fatal: could not read Username for 'https://github.com': terminal prompts disabled
+dest exists: no

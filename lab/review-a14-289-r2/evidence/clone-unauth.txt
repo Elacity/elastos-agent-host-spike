@@ -1,0 +1,7 @@
+Default runbook URL is https://github.com/Elacity/elastos-agent-host-spike.git
+Repo is private. This VM rewrites github.com via insteadOf (token). Sash Mac may not.
+unauth clone exit: 128
+Cloning into '/workspace/lab/review-a14-289-r2/scratch/probes/unauth-clone'...
+remote: Not Found
+fatal: repository 'https://github.com/https://github.com/Elacity/elastos-agent-host-spike.git/' not found
+dest exists: no
