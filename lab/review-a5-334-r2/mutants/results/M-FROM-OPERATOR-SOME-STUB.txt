@@ -1,0 +1,31 @@
+from_operator() Some(all) + measured stub
+check | test | grade
+A5-ID-POS | acceptance_a5_identity_grant_used_by_bound_agent | FAIL
+A5-ID-REPLAY | acceptance_a5_identity_grant_replayed_by_other_agent | FAIL
+A5-SESS-POS | acceptance_a5_session_grant_used_in_bound_session | FAIL
+A5-SESS-END | acceptance_a5_session_grant_reused_after_session_end | FAIL
+A5-INST-POS | acceptance_a5_instance_grant_used_by_bound_instance | FAIL
+A5-INST-SIB | acceptance_a5_instance_grant_used_by_sibling | FAIL
+A5-STOR-POS | acceptance_a5_owned_storage_grant_used_on_bound_root | FAIL
+A5-STOR-OTHER | acceptance_a5_owned_storage_grant_pointed_at_other_root | FAIL
+A5-PUB | acceptance_a5_public_storage_read_is_not_binding | FAIL
+
+A5-ID-POS FAIL: no host-record-for-handle route on develop; guest presents a handle (RA-1 / #463)
+
+A5-ID-REPLAY FAIL: no host-record-for-handle route on develop; guest presents a handle (RA-1 / #463)
+
+A5-SESS-POS FAIL: no host-record-for-handle route on develop; guest presents a handle (RA-1 / #463)
+
+A5-SESS-END FAIL: no host-record-for-handle route on develop; guest presents a handle (RA-1 / #463)
+
+A5-INST-POS FAIL: no host-record-for-handle route on develop; guest presents a handle (RA-1 / #463)
+
+A5-INST-SIB FAIL: no host-record-for-handle route on develop; guest presents a handle (RA-1 / #463)
+
+A5-STOR-POS FAIL: no host-record-for-handle route on develop; guest presents a handle (RA-1 / #463)
+
+A5-STOR-OTHER FAIL: no host-record-for-handle route on develop; guest presents a handle (RA-1 / #463)
+
+A5-PUB FAIL: no host-record-for-handle route on develop; guest presents a handle (RA-1 / #463)
+
+A5 binding: accepted 0 of 9; failed 9; blocked 0; skipped 0

@@ -1,0 +1,20 @@
+#372 attack: gap() None + forged coords + theatre stub
+check | test | grade
+A5-ID-POS | acceptance_a5_identity_grant_used_by_bound_agent | BLOCKED (RA-1; RA-5; RA-6)
+A5-ID-REPLAY | acceptance_a5_identity_grant_replayed_by_other_agent | BLOCKED (RA-1; RA-5; RA-6)
+A5-SESS-POS | acceptance_a5_session_grant_used_in_bound_session | BLOCKED (RA-1; RA-6)
+A5-SESS-END | acceptance_a5_session_grant_reused_after_session_end | BLOCKED (RA-1; RA-2; RA-6)
+A5-INST-POS | acceptance_a5_instance_grant_used_by_bound_instance | BLOCKED (RA-1; RA-6)
+A5-INST-SIB | acceptance_a5_instance_grant_used_by_sibling | BLOCKED (RA-1; RA-6)
+A5-STOR-POS | acceptance_a5_owned_storage_grant_used_on_bound_root | BLOCKED (RA-1; RA-3; RA-5; RA-6)
+A5-STOR-OTHER | acceptance_a5_owned_storage_grant_pointed_at_other_root | BLOCKED (RA-1; RA-3; RA-5; RA-6)
+A5-PUB | acceptance_a5_public_storage_read_is_not_binding | BLOCKED (RA-6)
+
+missing Runtime capabilities RA-1; RA-2; RA-3; RA-5; RA-6
+RA-1 a shell view of every session's live grants
+RA-2 the Runtime settles an ended requester's pending requests, and the shell reads who settled
+RA-3 the run launcher takes its storage directory from the selected Home
+RA-5 a UsersAI alias that resolves to the verified agent principal's root
+RA-6 resident component instances: world, launch, list, stop
+
+A5 binding: accepted 0 of 9; failed 0; blocked 9; skipped 0

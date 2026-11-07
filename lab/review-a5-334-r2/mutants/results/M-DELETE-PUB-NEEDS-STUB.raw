@@ -1,0 +1,36 @@
+check | test | grade
+A5-ID-POS | acceptance_a5_identity_grant_used_by_bound_agent | BLOCKED (RA-1; RA-5; RA-6)
+A5-ID-REPLAY | acceptance_a5_identity_grant_replayed_by_other_agent | BLOCKED (RA-1; RA-5; RA-6)
+A5-SESS-POS | acceptance_a5_session_grant_used_in_bound_session | BLOCKED (RA-1; RA-6)
+A5-SESS-END | acceptance_a5_session_grant_reused_after_session_end | BLOCKED (RA-1; RA-2; RA-6)
+A5-INST-POS | acceptance_a5_instance_grant_used_by_bound_instance | BLOCKED (RA-1; RA-6)
+A5-INST-SIB | acceptance_a5_instance_grant_used_by_sibling | BLOCKED (RA-1; RA-6)
+A5-STOR-POS | acceptance_a5_owned_storage_grant_used_on_bound_root | BLOCKED (RA-1; RA-3; RA-5; RA-6)
+A5-STOR-OTHER | acceptance_a5_owned_storage_grant_pointed_at_other_root | BLOCKED (RA-1; RA-3; RA-5; RA-6)
+A5-PUB | acceptance_a5_public_storage_read_is_not_binding | FAIL
+
+missing Runtime capabilities RA-1; RA-2; RA-3; RA-5; RA-6
+RA-1 a shell view of every session's live grants
+  evidence elastos/crates/elastos-server/src/api/handlers/capability.rs [holds]: no shell view of every session's live grants
+  evidence elastos/crates/elastos-server/src/api/handlers/capability.rs:434 [holds]: GET /api/capability/list returns the caller's own session grants
+  evidence elastos/crates/elastos-runtime/src/capability/token.rs:203 [holds]: a capability token names a capsule id and holds no agent identity
+RA-2 the Runtime settles an ended requester's pending requests, and the shell reads who settled
+  evidence elastos/crates/elastos-server/src/api/server.rs [holds]: no shell route reads a session's settled requests
+  evidence elastos/crates/elastos-runtime/src/session/registry.rs:131 [holds]: ending a session emits invalidated and revokes no grant
+  evidence elastos/crates/elastos-server/src/api/handlers/capability.rs:182 [holds]: a request's status is readable only by the session that asked
+RA-3 the run launcher takes its storage directory from the selected Home
+  evidence elastos/crates/elastos-server/src/run_cmd.rs:62 [holds]: elastos run still builds storage at /tmp/elastos/storage
+RA-5 a UsersAI alias that resolves to the verified agent principal's root
+  evidence elastos/crates/elastos-server/src/resource_bridge.rs:835 [holds]: scope_current_user_alias leaves UsersAI unchanged after the Users/self rule
+  evidence elastos/crates/elastos-server/src/auth.rs:7039 [holds]: the only principal-to-root map is localhost://Users/<hash>
+RA-6 resident component instances: world, launch, list, stop
+  evidence elastos/crates/elastos-compute/src/providers/component.rs:25 [holds]: the component provider binds only the run-once world
+  evidence elastos/crates/elastos-compute/src/providers/component.rs:232 [holds]: the component provider refuses to stop a running component
+  evidence elastos/crates/elastos-server/src/api/routes.rs:100 [holds]: POST /api/capsules answers a component launch after lifecycle.run returned, with status completed
+  evidence elastos/crates/elastos-server/src/api/routes.rs [holds]: the launch response names no Bus session
+
+A5-PUB FAIL: no host-record-for-handle route on develop; guest presents a handle (RA-1 / #463)
+
+A5 binding: accepted 0 of 9; failed 1; blocked 8; skipped 0
+
+exit=1
