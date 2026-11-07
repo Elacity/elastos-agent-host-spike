@@ -2387,6 +2387,8 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
 
   const releaseFollow = () => {
     if (streamFollowCleanup === releaseFollow) streamFollowCleanup = null;
+    /* The pin's frame must finish with the full reply still laid out. */
+    window.requestAnimationFrame(() => answerRow?.classList.remove("is-finalizing"));
     stickToBottom = false;
     endScrollTop = null;
     if (followRaf) {
@@ -2846,6 +2848,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     if (result.detached || result.settlementUnknown) {
       const partial = materializeCanonical();
       commitAgentReply(session, partial.answer, partial.reasoning, { partial: true, turn: result.turnManifest });
+      answerRow?.classList.add("is-finalizing");
       answerRow?.classList.remove("is-streaming");
       paintAgentMessageBody(answerBody, String(partial.answer || "").trim());
       settleStreamedReply(answerRow, session);
@@ -2875,6 +2878,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       const answer = String(partial.answer || "").trim();
       const reasoning = String(partial.reasoning || "").trim();
       commitAgentReply(session, answer, reasoning, { turn: result.turnManifest });
+      answerRow?.classList.add("is-finalizing");
       answerRow?.classList.remove("is-streaming");
       paintAgentMessageBody(answerBody, answer);
       if (!answer) {
@@ -2961,6 +2965,8 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       answerRow = appendMessage("agent", answer, { streaming: true });
       answerBody = answerRow?.querySelector(".agent-msg-body") || null;
     }
+    /* Keep the full reply measurable through the final pin's frame. */
+    answerRow?.classList.add("is-finalizing");
     answerRow?.classList.remove("is-streaming");
     if (answerBody) {
       answerBody.dataset.mdSource = answer;
@@ -3141,6 +3147,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     if (partialAnswer) {
       persistPartialAgentReply(partialAnswer, partialThinking);
       settleStreamedReply(answerRow, session);
+      answerRow?.classList.add("is-finalizing");
       answerRow?.classList.remove("is-streaming");
       paintAgentMessageBody(answerBody, partialAnswer, { streaming: false });
       if (answerRow && !answerRow.querySelector(".agent-msg-stopped")) {

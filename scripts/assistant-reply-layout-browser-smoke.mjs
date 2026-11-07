@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "./system-uiux-fixture.mjs";
@@ -193,48 +193,18 @@ function newestClearance(selector) {
 
 let browser, page, frame, cdp, stage = "launch";
 let beforeClamp;
-const paintedFrames = [];
 const pageErrors = [];
 try {
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   browser = await chromium.launch({ headless: true, ...(process.env.BRAVE_BIN ? { executablePath: process.env.BRAVE_BIN } : {}) });
   page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   cdp = await page.context().newCDPSession(page);
-  if (process.env.ASSISTANT_LAYOUT_PAINT) {
-    cdp.on("Page.screencastFrame", ({ data, metadata, sessionId }) => {
-      paintedFrames.push({ data, timestamp: metadata.timestamp });
-      void cdp.send("Page.screencastFrameAck", { sessionId });
-    });
-    await cdp.send("Page.startScreencast", { format: "png", everyNthFrame: 1 });
-  }
   await cdp.send("Emulation.setCPUThrottlingRate", { rate: cpuRate ?? 4 });
   page.on("pageerror", error => pageErrors.push(`${stage}: ${error}`));
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   const room = page.frameLocator("iframe").frameLocator("iframe");
   await room.locator(".agent-msg").nth(history.length - 1).waitFor({ state: "attached" });
   frame = page.frames().find(candidate => candidate.url().includes("/apps/assistant/"));
-  if (process.env.ASSISTANT_LAYOUT_TRACE) {
-    await frame.evaluate(() => {
-      window.__layoutTrace = [];
-      const hidden = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "hidden");
-      Object.defineProperty(HTMLElement.prototype, "hidden", {
-        ...hidden,
-        set(value) {
-          const changed = this.hidden !== value;
-          hidden.set.call(this, value);
-          if (changed && this.matches("[data-agent-jump-latest]")) {
-            const scroller = document.querySelector("#agent-harness-stream");
-            const rect = this.getBoundingClientRect();
-            const covering = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
-            window.__layoutTrace.push({ t: performance.now(), hidden: value, stack: new Error().stack,
-              scrollTop: scroller.scrollTop, scrollHeight: scroller.scrollHeight, clientHeight: scroller.clientHeight,
-              buttonRect: rect.toJSON(), covering: covering?.className,
-              following: scroller.classList.contains("is-follow-bottom") });
-          }
-        },
-      });
-    });
-  }
 
   const input = room.locator("#agent-composer-input");
   // Polls until the newest block is at the end and fully above the composer,
@@ -329,15 +299,17 @@ try {
   await input.fill("");
   await frame.evaluate(() => {
     const scroller = document.querySelector("#agent-harness-stream");
+    const previousReply = [...scroller.querySelectorAll(".agent-msg-agent")].at(-1);
     window.__follow = { on: true, samples: [] };
     const measure = () => {
       const jump = document.querySelector("[data-agent-jump-latest]");
+      const newestReply = [...scroller.querySelectorAll(".agent-msg-agent")].at(-1);
       return { t: performance.now(), jump: Boolean(jump && !jump.hidden),
         scrollTop: scroller.scrollTop, scrollHeight: scroller.scrollHeight, clientHeight: scroller.clientHeight,
         following: scroller.classList.contains("is-follow-bottom"),
         buttonHeight: jump?.getBoundingClientRect().height || 0,
-        phase: document.querySelector(".agent-msg-agent:last-of-type")?.dataset.streamPhase,
-        fromEnd: Math.round(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight) };
+        phase: newestReply !== previousReply ? newestReply?.dataset.streamPhase : null,
+        fromEnd: scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight };
     };
     const sample = () => {
       if (!window.__follow.on) return;
@@ -365,6 +337,7 @@ try {
   sent.push({ sequence: replyChunks.length + 1, kind: "completed", data: {} });
   await room.locator('.agent-msg-agent[data-stream-phase="presentation_done"]').filter({ hasText: "the last line of the reply" })
     .waitFor({ state: "attached", timeout: 10000 });
+  await frame.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
   seen.sentReply = await expectNewestAboveComposer(".agent-msg-agent", "a sent message's long reply, once settled");
   const follow = await frame.evaluate(() => {
     window.__follow.on = false;
@@ -372,12 +345,19 @@ try {
     for (const { t, fromEnd } of window.__follow.samples) {
       if (fromEnd > 8) { since ??= t; behindMs = Math.max(behindMs, t - since); } else since = null;
     }
-    return { behindMs: Math.round(behindMs), jumpFrames: window.__follow.samples.filter(sample => sample.jump).length };
+    const completed = window.__follow.samples.filter(sample =>
+      sample.phase === "finalizing" || sample.phase === "presentation_done");
+    return { behindMs: Math.round(behindMs), jumpFrames: window.__follow.samples.filter(sample => sample.jump).length,
+      completedFrames: completed.length, completionGaps: completed.filter(sample => sample.fromEnd > 8) };
   });
-  // A flush paints a frame before the follow lands; never longer than that.
+  assert.ok(follow.completedFrames > 0, "completion frames were sampled");
+  assert.deepEqual(follow.completionGaps, [],
+    `a reader at the end stays within 8 px on every completion frame: ${JSON.stringify(follow)}`);
+  // Streaming flushes can precede their follow frame.
   assert.ok(follow.behindMs < 250, `the room follows the streaming reply: ${JSON.stringify(follow)}`);
   assert.equal(follow.jumpFrames, 0, `a reader who never left the end is not offered Jump to latest: ${JSON.stringify(follow)}`);
   seen.sentReplyBehindMs = follow.behindMs;
+  seen.sentReplyCompletionFrames = follow.completedFrames;
 
   // A reader who moves up while a reply streams keeps their place, by any
   // amount and however they moved, while more of the reply keeps arriving:
@@ -503,28 +483,6 @@ try {
   console.error(JSON.stringify({ errors, pageErrors }, null, 1));
   throw error;
 } finally {
-  try {
-    if (cdp && process.env.ASSISTANT_LAYOUT_PAINT) {
-      await cdp.send("Page.stopScreencast");
-    }
-    if (frame && process.env.ASSISTANT_LAYOUT_TRACE) {
-      const trace = await frame.evaluate(() => ({ timeOrigin: performance.timeOrigin,
-        writes: window.__layoutTrace, samples: window.__follow?.samples })).catch(error => ({ error: String(error) }));
-      trace.targets = (await cdp.send("Target.getTargets")).targetInfos;
-      const flashes = trace.samples?.filter(sample => sample.jump) || [];
-      const paints = paintedFrames.filter(paint => flashes.some(sample =>
-        Math.abs(paint.timestamp * 1000 - trace.timeOrigin - sample.t) < 100));
-      for (const [index, paint] of paints.entries()) {
-        const path = `${process.env.ASSISTANT_LAYOUT_TRACE}.paint-${index}.png`;
-        await writeFile(path, Buffer.from(paint.data, "base64"));
-        paint.path = path;
-        delete paint.data;
-      }
-      trace.paints = paints;
-      await writeFile(process.env.ASSISTANT_LAYOUT_TRACE, JSON.stringify({ cpuRate, stage, ...trace }));
-    }
-  } finally {
-    await browser?.close();
-    server.close();
-  }
+  await browser?.close();
+  server.close();
 }
