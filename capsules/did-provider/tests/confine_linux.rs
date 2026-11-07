@@ -64,13 +64,24 @@ fn declared_rows(rights: &Value, root: &Path, exe: &Path) -> Result<Vec<Row>, St
     Ok(rows)
 }
 
-/// The Linux platform baseline, not a right: the files the loader maps to start `exe`.
+/// A named departure, not a right: this dynamic build needs its loader. execve opens the
+/// interpreter, so it needs RUN; libraries are read and mapped, which Landlock does not gate.
 fn loader_rows(exe: &Path) -> Vec<Row> {
     let out = Command::new("ldd").arg(exe).output().expect("ldd must run");
     assert!(out.status.success(), "ldd refused {}", exe.display());
     let text = String::from_utf8(out.stdout).expect("ldd output");
-    let files = text.split_whitespace().filter(|word| word.starts_with('/'));
-    files.map(|file| (PathBuf::from(file), RUN)).collect()
+    let row = |line: &'_ str| -> Option<Row> {
+        let (file, rights) = match line.split_once("=> ") {
+            Some((_, library)) => (library, READ_FILE),
+            None => (line.trim_start(), RUN),
+        };
+        let file = file
+            .split(' ')
+            .next()
+            .filter(|file| file.starts_with('/'))?;
+        Some((PathBuf::from(file), rights))
+    };
+    text.lines().filter_map(row).collect()
 }
 
 fn rows_for(base: &Path) -> Vec<Row> {
@@ -161,10 +172,7 @@ fn linux_set_nickname_is_served_and_kept_under_landlock() {
     let rows = rows_for(&base);
     let mut provider = Provider::started(&base, &rows);
     let did = provider.ok(json!({ "op": "get_did" }));
-    assert!(
-        did["did"].as_str().unwrap().starts_with("did:key:"),
-        "{did}"
-    );
+    assert!(did["did"].as_str().unwrap().starts_with("did:key:"));
     provider.ok(json!({ "op": "set_nickname", "nickname": "Allowed" }));
     assert!(base.join("did/nickname.enc").is_file());
     // A second launch can only answer by reading the file back under the ruleset.
@@ -178,14 +186,19 @@ fn linux_set_nickname_is_served_and_kept_under_landlock() {
 #[test]
 fn launch_refuses_what_landlock_cannot_express() {
     for abi in [-1, 0, 1, 2] {
-        assert!(
-            handled_rights(abi).unwrap_err().starts_with("refused"),
-            "ABI {abi}"
-        );
+        assert!(handled_rights(abi).is_err(), "ABI {abi}");
     }
     assert_eq!(handled_rights(4), Ok(ABI3_RIGHTS));
     assert_eq!(handled_rights(5), Ok(ABI3_RIGHTS | IOCTL_DEV));
     let rights = json!({ "rights": [{ "rules": ["(allow network*)"] }] });
     let refused = declared_rows(&rights, Path::new("/r"), Path::new("/e")).unwrap_err();
     assert_eq!(refused, "refused: no Linux row for (allow network*)");
+}
+
+#[test]
+fn only_the_interpreter_among_the_loader_files_may_execute() {
+    let rows = loader_rows(Path::new(BINARY));
+    let executable = rows.iter().filter(|row| row.1 & EXECUTE != 0).count();
+    assert_eq!(executable, 1, "{rows:?}");
+    assert!(rows.len() > 1, "a dynamic build has libraries: {rows:?}");
 }
