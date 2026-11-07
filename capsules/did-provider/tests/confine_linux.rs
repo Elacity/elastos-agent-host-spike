@@ -195,17 +195,9 @@ fn linux_set_nickname_is_served_and_kept_under_landlock() {
     provider.ok(json!({ "op": "set_nickname", "nickname": "Allowed" }));
     assert!(base.join("did/nickname.enc").is_file());
     // A second launch can only answer by reading the file back under the ruleset.
-<<<<<<< HEAD
     let mut again = Provider::started(&base, Some(&rows));
-    assert_eq!(
-        again.ok(json!({ "op": "get_nickname" }))["nickname"],
-        "Allowed"
-    );
-=======
-    let mut again = Provider::started(&base, &rows);
     let nickname = again.ok(json!({ "op": "get_nickname" }));
     assert_eq!(nickname["nickname"], "Allowed");
->>>>>>> claude/b4-did-linux
 }
 
 #[test]
@@ -246,7 +238,10 @@ fn plant_grant_on_the_parent_lets_the_sibling_write_land() {
     let (_fixture, base, _, sibling) = base_and_outside();
     let mut rows = rows_for(&base);
     let root = base.join("did");
-    rows.iter_mut().find(|row| row.0 == root).expect("storage row").0 = base.clone();
+    rows.iter_mut()
+        .find(|row| row.0 == root)
+        .expect("storage row")
+        .0 = base.clone();
     let mut provider = Provider::started(&base, Some(&rows));
     let answer = provider.save_through_link(&base, &sibling);
     assert_eq!(answer["status"], "ok", "{answer}");
@@ -262,7 +257,9 @@ fn linux_copy_of_the_binary_under_the_root_cannot_start() {
     let copy = base.join("did/copy");
     fs::copy(BINARY, &copy).expect("copy");
     let mut rows = rows_for(&base);
-    let refused = Provider::spawn(&copy, Some(&rows)).err().expect("a refusal");
+    let refused = Provider::spawn(&copy, Some(&rows))
+        .err()
+        .expect("a refusal");
     assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
     rows.push((copy.clone(), RUN));
     let mut control = Provider::spawn(&copy, Some(&rows)).expect("the granted copy must start");
