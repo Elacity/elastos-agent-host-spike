@@ -609,7 +609,8 @@ document records `did-provider` or `wallet-provider` as confined on Linux (P10,
 P11). The status change lands when the Runtime side does.
 
 Most Linux enforcement rows are designed in `CONFINEMENT-LINUX.md` and remain
-unbuilt. One row exists today as source with a real Linux run behind it: a
+unbuilt. Two exist today as source with a real Linux run behind them, both lab
+stand-in evidence: the Landlock file row "The file row" records there, and a
 seccomp allow list generated from this provider's declared rights, with the one
 builder, the one mapping table, the one step sequencer and the one install
 function that file names
@@ -1656,6 +1657,7 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - WP243: The citation rule accepts a wallet test named only in did's document,
   so the cross-crate read passes.
   `every_declared_test_is_cited_in_its_own_documents` checks this rule.
+- WP244: A failed publish keeps the directories it created, so a retry answers ok without the parent's sync. Caught by `wallet_init_publishes_only_the_entries_it_creates`.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

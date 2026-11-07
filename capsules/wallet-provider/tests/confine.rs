@@ -6983,7 +6983,8 @@ const LANDLOCK_RULE_RIGHTS: &[(&str, u64)] = &[
             | LANDLOCK_ACCESS_FS_REMOVE_FILE
             | LANDLOCK_ACCESS_FS_REMOVE_DIR
             | LANDLOCK_ACCESS_FS_MAKE_DIR
-            | LANDLOCK_ACCESS_FS_MAKE_REG,
+            | LANDLOCK_ACCESS_FS_MAKE_REG
+            | LANDLOCK_ACCESS_FS_TRUNCATE,
     ),
     // READ_FILE as well: Landlock checks execve's open of the program as a read,
     // so EXECUTE alone answers EACCES before the provider's first instruction
@@ -7484,8 +7485,9 @@ fn landlock_ruleset_follows_the_declared_rights() {
                 | LANDLOCK_ACCESS_FS_REMOVE_FILE
                 | LANDLOCK_ACCESS_FS_REMOVE_DIR
                 | LANDLOCK_ACCESS_FS_MAKE_DIR
-                | LANDLOCK_ACCESS_FS_MAKE_REG,
-            "{name}: the storage subpath row must carry the seven rights init needs"
+                | LANDLOCK_ACCESS_FS_MAKE_REG
+                | LANDLOCK_ACCESS_FS_TRUNCATE,
+            "{name}: the storage subpath row must carry the eight rights its writes need"
         );
         assert_eq!(rule("STORAGE_ROOT").path, bound("STORAGE_ROOT"));
         // The expected root is written from the layout this provider keeps, not
@@ -7705,7 +7707,22 @@ fn landlock_ruleset_refuses_an_abi_that_cannot_express_a_row() {
         "a right with no ABI table entry is its own refusal"
     );
 
-    for (too_low, needed) in [(1, 5), (2, 5), (4, 5)] {
+    // The storage row needs ABI 3 for its truncation right, so ABIs 1 and 2 are
+    // refused on that row before the default denial is reached.
+    for too_low in [1, 2] {
+        let refusal = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, too_low, &[])
+            .expect_err("an ABI below the storage row's rights must be refused");
+        assert_eq!(
+            refusal,
+            format!(
+                "linux confinement refused: the Landlock ABI cannot express the {} row, \
+                 which needs ABI 3 and this kernel reports ABI {too_low}",
+                SHARED_RULES[2]
+            ),
+            "an ABI that cannot carry the storage row must be refused in these words"
+        );
+    }
+    for (too_low, needed) in [(4, 5)] {
         let refusal = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, too_low, &[])
             .expect_err("an ABI below the default denial's rights must be refused");
         assert_eq!(
@@ -7998,8 +8015,9 @@ fn landlock_ruleset_names_each_measured_loader_entry() {
             | LANDLOCK_ACCESS_FS_REMOVE_FILE
             | LANDLOCK_ACCESS_FS_REMOVE_DIR
             | LANDLOCK_ACCESS_FS_MAKE_DIR
-            | LANDLOCK_ACCESS_FS_MAKE_REG,
-        "the storage-root rule must keep the seven rights the declared row carries"
+            | LANDLOCK_ACCESS_FS_MAKE_REG
+            | LANDLOCK_ACCESS_FS_TRUNCATE,
+        "the storage-root rule must keep the eight rights the declared row carries"
     );
 }
 
@@ -12061,12 +12079,13 @@ fn linux_landlock_requires_no_new_privs() {
 ///
 /// The positive control uses the same uid and the same fixtures and no ruleset,
 /// and every control call must succeed. The confined run requires `EACCES` (13),
-/// never `EPERM`, for the read of the bound executable, the read beneath
+/// never `EPERM`, for the read beneath
 /// `STORAGE_PARENT`, the write beside it, the truncation beside it, and the
 /// listings of `STORAGE_PARENT`, `sibling` and `sibling/private`. The inside
-/// read and write succeed. The caller drives its own permitted calls through
+/// read and write succeed, and so does the read of the bound executable, because
+/// `execve` needs it. The caller drives its own permitted calls through
 /// `permitted`, because `status` is wallet's and did's `handle` has no such
-/// arm. An `Init` for a base outside `STORAGE_ROOT` is refused `storage_error`
+/// arm. The caller's first effect outside `STORAGE_ROOT` is refused `storage_error`
 /// with `Permission denied` and creates nothing. The truncate fixture keeps its
 /// bytes. A start on a non-Linux host, and a start on a host that reports
 /// Landlock missing, are refused.
@@ -12340,6 +12359,16 @@ fn linux_did_file_row_is_refused_outside_storage_root() {
         |provider| {
             let record = did_standin_permitted_operations(provider, &fixture.base, label);
             assert_suite_outcomes(label, &record, &DID_SUITE_CASES[..DID_PERMITTED_CASES]);
+            // A second write replaces the file, which Landlock checks as a
+            // truncation the oracle's `file-write*` grants. A fresh file does not.
+            let replaced =
+                provider.send(&json!({ "op": "set_nickname", "nickname": "ConfinedAgain" }));
+            assert_eq!(replaced["status"], "ok", "{label}: {replaced}");
+            let nickname = provider.send(&json!({ "op": "get_nickname" }));
+            assert_eq!(
+                nickname["data"]["nickname"], "ConfinedAgain",
+                "{label}: the replaced nickname must read back: {nickname}"
+            );
         },
         // did's Init records the root and writes nothing, so the kernel's refusal
         // comes at its first write there.

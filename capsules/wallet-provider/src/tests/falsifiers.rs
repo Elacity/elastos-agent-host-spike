@@ -329,7 +329,8 @@ use std::process::Command;
 /// so an uncited test passes; and WP243, which accepts a wallet test named only
 /// in did's document, so the cross-crate read passes. Both are CAUGHT on the
 /// Mac by `every_declared_test_is_cited_in_its_own_documents`.
-const EXPECTED_FALSIFIERS: usize = 223;
+/// WP244 keeps the directories a failed publish created, so a retry answers ok.
+const EXPECTED_FALSIFIERS: usize = 224;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
