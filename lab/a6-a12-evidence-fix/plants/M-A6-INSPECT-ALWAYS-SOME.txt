@@ -1,0 +1,12 @@
+id: M-A6-INSPECT-ALWAYS-SOME
+file: src/a6.rs
+test: tests::a6_sleep_child_is_not_proven_resident
+--- old
+fn inspect_runtime_hosted_resident(_pid: u32, _instance_id: &str) -> Option<()> {
+    None
+}
+--- new
+fn inspect_runtime_hosted_resident(_pid: u32, _instance_id: &str) -> Option<()> {
+    Some(())
+}
+--- end

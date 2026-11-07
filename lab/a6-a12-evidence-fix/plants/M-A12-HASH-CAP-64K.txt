@@ -1,0 +1,19 @@
+id: M-A12-HASH-CAP-64K
+file: src/a12.rs
+test: tests::a12_large_file_inplace_rewrite_mtime_restored_is_found
+--- old
+    hash_whole_file_sparse(path, meta, &mut hasher);
+    hasher.finish()
+--- new
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return 0,
+    };
+    let mut buf = vec![0u8; 64 * 1024];
+    let n = {
+        use std::io::Read;
+        file.read(&mut buf).unwrap_or(0)
+    };
+    hasher.write(&buf[..n]);
+    hasher.finish()
+--- end

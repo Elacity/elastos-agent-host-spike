@@ -1,0 +1,12 @@
+id: M-A12-NO-LIVE-WATCH
+file: src/a12.rs
+test: tests::a12_create_then_delete_between_snapshots_is_found
+--- old
+    for path in drain_live_watch()? {
+        if !found.iter().any(|seen| seen == &path) {
+            found.push(path);
+        }
+    }
+--- new
+    let _ = drain_live_watch();
+--- end

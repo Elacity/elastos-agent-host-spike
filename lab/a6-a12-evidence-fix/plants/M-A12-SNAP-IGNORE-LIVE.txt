@@ -1,0 +1,16 @@
+id: M-A12-SNAP-IGNORE-LIVE
+file: src/a12.rs
+test: tests::a12_snapshot_before_runtime_fails_if_live_tmp_elastos_wrote
+--- old
+    if runtime_wrote_under(watch) || live_runtime_tmp_has_files() {
+        return Err(
+            "snapshot must be taken before the Runtime starts; Runtime already wrote".into(),
+        );
+    }
+--- new
+    if runtime_wrote_under(watch) {
+        return Err(
+            "snapshot must be taken before the Runtime starts; Runtime already wrote".into(),
+        );
+    }
+--- end

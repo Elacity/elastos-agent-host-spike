@@ -1,0 +1,22 @@
+id: M-A12-TMP-LIVE-SYMLINK
+file: src/a12.rs
+test: tests::a12_symlink_to_live_home_tmp_root_is_refused
+--- old
+    if let Some(link) = first_symlink_at_or_under(path, &isolation) {
+        return Err(format!(
+            "ELASTOS_TMP_ROOT refuses symlink {} in {}",
+            link.display(),
+            path.display()
+        ));
+    }
+--- new
+    if false {
+        if let Some(link) = first_symlink_at_or_under(path, &isolation) {
+            return Err(format!(
+                "ELASTOS_TMP_ROOT refuses symlink {} in {}",
+                link.display(),
+                path.display()
+            ));
+        }
+    }
+--- end
