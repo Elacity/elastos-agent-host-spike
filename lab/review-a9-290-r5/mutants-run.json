@@ -1,0 +1,208 @@
+{
+  "official": [
+    {
+      "id": "M-root-swap",
+      "group": "official",
+      "test": "tests::agent_a_is_denied_b_when_root_is_swapped_for_a_symlink",
+      "exit": 101,
+      "caught": true
+    },
+    {
+      "id": "M-hardlink-nlink",
+      "group": "official",
+      "test": "tests::agent_b_is_denied_a_hard_linked_inode",
+      "exit": 101,
+      "caught": true
+    },
+    {
+      "id": "M-list-no-resolve",
+      "group": "official",
+      "test": "tests::agent_a_is_denied_b_list_and_rename",
+      "exit": 101,
+      "caught": true
+    },
+    {
+      "id": "M-a5-users",
+      "group": "official",
+      "test": "tests::owned_root_uses_a5_usersai_agent_rest_shape",
+      "exit": 101,
+      "caught": true
+    },
+    {
+      "id": "M-inode-noop",
+      "group": "official",
+      "test": "tests::agent_b_is_denied_a_hard_linked_inode",
+      "exit": 101,
+      "caught": true
+    },
+    {
+      "id": "M-unowned-allow",
+      "group": "official",
+      "test": "tests::host_rename_into_b_is_refused",
+      "exit": 101,
+      "caught": true
+    },
+    {
+      "id": "M-stamp-skip",
+      "group": "official",
+      "test": "tests::inode_reuse_after_unlink_is_refused",
+      "exit": 101,
+      "caught": true
+    },
+    {
+      "id": "M-unlink-keep",
+      "group": "official",
+      "test": "tests::inode_reuse_after_unlink_is_refused",
+      "exit": 101,
+      "caught": true
+    },
+    {
+      "id": "M-no-nofollow",
+      "group": "official",
+      "test": "tests::live_walk_flags_are_pinned",
+      "exit": 101,
+      "caught": true
+    },
+    {
+      "id": "M-walk-no-symlinks",
+      "group": "official",
+      "test": "tests::live_walk_flags_are_pinned",
+      "exit": 101,
+      "caught": true
+    },
+    {
+      "id": "M-walk-force-openat",
+      "group": "official",
+      "test": "tests::live_walk_flags_are_pinned",
+      "exit": 101,
+      "caught": true
+    },
+    {
+      "id": "M-walk-no-xdev",
+      "group": "official",
+      "test": "tests::live_walk_flags_are_pinned",
+      "exit": 101,
+      "caught": true
+    },
+    {
+      "id": "M-share-count-zero",
+      "group": "official",
+      "test": "launch::tests::real_runtime_rows_match_the_launcher",
+      "exit": 101,
+      "caught": true
+    },
+    {
+      "id": "M-fake-runtime-read",
+      "group": "official",
+      "test": "launch::tests::real_runtime_rows_match_the_launcher",
+      "exit": 101,
+      "caught": true
+    }
+  ],
+  "extra": [
+    {
+      "id": "M-r5-owned-inside",
+      "group": "extra",
+      "test": "tests::ownership_record_is_on_disk_and_shared",
+      "exit": 0,
+      "caught": false
+    },
+    {
+      "id": "M-r5-owned-inside",
+      "group": "extra",
+      "test": "tests::host_rename_into_b_is_refused",
+      "exit": 0,
+      "caught": false
+    },
+    {
+      "id": "M-r5-owned-inside",
+      "group": "extra",
+      "test": "tests::inode_reuse_after_unlink_is_refused",
+      "exit": 0,
+      "caught": false
+    },
+    {
+      "id": "M-r5-parse-skip",
+      "group": "extra",
+      "test": "tests::ownership_record_is_on_disk_and_shared",
+      "exit": 0,
+      "caught": false
+    },
+    {
+      "id": "M-r5-parse-skip",
+      "group": "extra",
+      "test": "tests::host_rename_into_b_is_refused",
+      "exit": 0,
+      "caught": false
+    },
+    {
+      "id": "M-r5-xattr-skip",
+      "group": "extra",
+      "test": "tests::inode_reuse_after_unlink_is_refused",
+      "exit": 0,
+      "caught": false
+    },
+    {
+      "id": "M-r5-xattr-skip",
+      "group": "extra",
+      "test": "tests::agent_a_reads_and_writes_its_own_storage",
+      "exit": 0,
+      "caught": false
+    },
+    {
+      "id": "M-r5-dir-full-stamp",
+      "group": "extra",
+      "test": "tests::agent_a_lists_and_renames_its_own_storage",
+      "exit": 0,
+      "caught": false
+    },
+    {
+      "id": "M-r5-dir-full-stamp",
+      "group": "extra",
+      "test": "tests::inode_reuse_after_unlink_is_refused",
+      "exit": 0,
+      "caught": false
+    },
+    {
+      "id": "M-r5-no-lock",
+      "group": "extra",
+      "test": "tests::ownership_record_is_on_disk_and_shared",
+      "exit": 0,
+      "caught": false
+    },
+    {
+      "id": "M-r5-no-lock",
+      "group": "extra",
+      "test": "tests::intermediate_dir_swap_write_leaves_nothing_in_b",
+      "exit": 0,
+      "caught": false
+    },
+    {
+      "id": "M-r5-save-append",
+      "group": "extra",
+      "test": "tests::ownership_record_is_on_disk_and_shared",
+      "exit": 0,
+      "caught": false
+    },
+    {
+      "id": "M-r5-save-append",
+      "group": "extra",
+      "test": "tests::host_rename_into_b_is_refused",
+      "exit": 0,
+      "caught": false
+    },
+    {
+      "id": "M-r5-save-append",
+      "group": "extra",
+      "test": "tests::agent_a_reads_and_writes_its_own_storage",
+      "exit": 0,
+      "caught": false
+    }
+  ],
+  "official_count": 14,
+  "official_caught": 14,
+  "extra_count": 14,
+  "extra_caught": 0,
+  "extra_surviving": 14,
+  "worktree_dirty": ""
+}

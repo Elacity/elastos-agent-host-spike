@@ -1,0 +1,58 @@
+{
+  "reviewed_sha": "78bc82bfb38047f9b8c367213bd06604e85a98cd",
+  "worktree_head": "78bc82bfb38047f9b8c367213bd06604e85a98cd",
+  "fmt_exit": 0,
+  "test_exit": 0,
+  "clippy_exit": 0,
+  "probe_exit": 0,
+  "test_list_count": 25,
+  "test_summary": [
+    "NOT RUN: APFS case/Unicode (not a Mac)",
+    "inode-reuse journey CAUGHT",
+    "bind-mount unshare child: CAUGHT",
+    "race two-store iters=5000 denied=4933 escaped=0",
+    "test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.06s"
+  ],
+  "sha_before": {
+    "lib.rs": "76b4458f3f1fabeb632cbe85f66a9a991ecebf66104186c3e86ace464c00109a",
+    "walk.rs": "4af2844f495a591606f801c740757ba95e06f3728d4351b109fa541a7b3a0b92",
+    "launch.rs": "d3ed87a9acfe22eab892fa13083a9ea6dabbdbbc37ac9501610f027a6c2c267c"
+  },
+  "sha_after": {
+    "lib.rs": "76b4458f3f1fabeb632cbe85f66a9a991ecebf66104186c3e86ace464c00109a",
+    "walk.rs": "4af2844f495a591606f801c740757ba95e06f3728d4351b109fa541a7b3a0b92",
+    "launch.rs": "d3ed87a9acfe22eab892fa13083a9ea6dabbdbbc37ac9501610f027a6c2c267c"
+  },
+  "worktree_dirty": "",
+  "shared_temp_before": false,
+  "shared_temp_after": false,
+  "probe_findings": [
+    "FINDING\tr1-api\tCAUGHT\tStore API denies foreign host path, .., symlink, list, and rename\tholds=true",
+    "FINDING\tr2-hardlink-unlink\tCAUGHT\tHard link, then unlink A's name, still refuses B's Store read\tlive=Err(HardLink) after=Err(HardLink) nlink=1",
+    "FINDING\tr3-host-rename\tCAUGHT\tHost rename of a host-created A file into B is refused\tread=Err(HardLink)",
+    "FINDING\tr4-inode-reuse\tCAUGHT\tr4 journey: A unlink, B reuses (dev,ino), host rename into A\treused=Some(\"new-0.txt\") read=Some(Err(HardLink)) granted=false",
+    "FINDING\tr4-host-rename-own\tCAUGHT\tHost rename inside A's tree is refused by path bind\tmoved=Err(HardLink) old=Err(NotFound) names=[]",
+    "FINDING\txattr-copy-reuse\tCAUGHT\tB copies A's leftover user.owned-storage.nonce onto a reused inode, host-renames into A\tgranted=false",
+    "FINDING\txattr-set-own-inode\tCAUGHT\tB can set user.owned-storage.nonce on its own inode; that does not grant A's Store a read of B\tgranted=false",
+    "FINDING\txattr-copy-host-plant\tSURVIVED\tHost replaces A's file, copies the old nonce onto the new inode\tread=Ok([112, 108, 97, 110, 116, 101, 100]) granted=true",
+    "FINDING\tnewline-inject-owned\tSURVIVED\tStore::write of a newline name injects a second .owned line for B's inode\tread=Ok([102, 114, 111, 109, 45, 98]) granted=true owned_has_stolen=true owned_lines=5",
+    "FINDING\tspace-path-parse\tCAUGHT\tA path with a space must not grant another agent's bytes\tgranted=false keep=Err(OutsideRoot)",
+    "FINDING\tpartial-owned-file\tCAUGHT\tTruncated {root}.owned must fail closed, not grant\tfail_closed=true",
+    "FINDING\tcrash-orphan\tCAUGHT\tA file that exists but is missing from the record is refused\tgranted=false",
+    "FINDING\tconcurrent-create-unlink\tCAUGHT\tHost rewrite of .owned during create/unlink must not grant foreign bytes\tgranted_foreign=0",
+    "FINDING\trename-across-agents\tCAUGHT\tStore rename across agents, and host rename of A's file into B, stay refused\tgranted=false",
+    "FINDING\thost-hardlink-then-unlink\tCAUGHT\tHost hard link inside A; Store unlink of the recorded name forgets the inode\tgranted=false",
+    "FINDING\tdir-nonce-only\tNOT RUN\tDirectory stamp checks only the nonce\treused=false",
+    "FINDING\thost-rewrite-owned\tSURVIVED\tSame-uid host rewrite of A's .owned plus host rename of B's file into A\tread=Ok([102, 114, 111, 109, 45, 98]) granted=true",
+    "FINDING\tctime-collision\tCAUGHT\tTwo Store creates must not share a nonce even if ctime/btime collide\tsame_time=true same_nonce=false",
+    "FINDING\towned-symlink-follow\tCAUGHT\tHost replaces A's .owned with a symlink to B's record\tgranted=false",
+    "FINDING\ttmpfs-xattr\tCAUGHT\tStore create/read on tmpfs\twrite=Ok read=Ok nonce=Some(Ok)",
+    "FINDING\tramfs-no-xattr\tCAUGHT\tramfs typically has no user xattr; create must fail closed\tgranted=false",
+    "FINDING\toverlay-xattr\tCAUGHT\toverlayfs Store create/read; lower-layer file stays unowned\tpre=Err(NotFound)",
+    "FINDING\tfat-xattr\tNOT RUN\tvfat/FAT user xattr: mkfs.vfat is not on this machine",
+    "FINDING\tr3-bind-mount\tCAUGHT\tBind-mount of A's tree at B/sub refuses list/write\tplanted_in_a=false",
+    "FINDING\truntime-rows\tCAUGHT\tRuntime rows stay Blocked; lab Ready; host NeedsConfinement; A9 not booked\texecuted=false",
+    "FINDING\ta9-not-booked\tCAUGHT\towned-storage source does not claim A9 is booked\tbooked=false",
+    "FINDING\thost-same-uid\tCAUGHT\tDocumented same-uid host walk still reads A's bytes\tshared_temp_exists=false"
+  ]
+}

@@ -1,0 +1,6 @@
+id: host-rewrite-owned
+must: CAUGHT as a Store API hunt, or named as same-uid confinement
+journey: same-uid host writes A's {root}.owned with B's (dev,ino,stamp)
+  and host-renames B's file to A/stolen.txt. If Store::read(&a) returns
+  B's bytes, that is the documented NEEDS CONFINEMENT/RUNTIME hole, not a
+  new Store path. Report it honestly.
