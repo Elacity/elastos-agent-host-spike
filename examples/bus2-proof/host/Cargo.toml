@@ -13,7 +13,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
-wasmtime = { version = "=48.0.7", default-features = false, features = ["anyhow", "async", "component-model", "component-model-async", "cranelift", "runtime", "wat"] }
+wasmtime = { version = "=48.0.8", default-features = false, features = ["anyhow", "async", "component-model", "component-model-async", "cranelift", "runtime", "wat"] }
 wasmparser = { version = "=0.254.2", default-features = false, features = ["std", "component-model"] }
 wit-component = "=0.254.2"
 

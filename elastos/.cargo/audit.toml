@@ -12,4 +12,20 @@ ignore = [
   "RUSTSEC-2026-0367",
   "RUSTSEC-2026-0368",
   "RUSTSEC-2026-0369",
+  # Reviewed 2026-11-08. Same reason as the three above: RUSTSEC-2026-0429 is the abort in
+  # ZipArchive::extract on a symlink entry, which ElastOS never calls. spike/agent-host has
+  # zip 9.0.4 and needs none of these four; remove them when that upgrade reaches this branch.
+  "RUSTSEC-2026-0429",
+  # Reviewed 2026-10-23 on spike/agent-host, carried here 2026-11-08. crypto-bigint 0.5.5 comes
+  # only through elliptic-curve 0.13.8 (k256 0.13, p256 0.13, hpke 0.13) in elastos, the chain,
+  # custody, did, media, object, protected-content and wallet provider capsules, and the photo
+  # and docs bundles. The fix exists only as 0.7.6 and the 0.5 line has no patch; every lock
+  # already uses 0.7.6 for its 0.7 copy, so this entry covers only 0.5.5. Not in 0.5.5: the
+  # subtraction branch (added by crypto-bigint PR 1029, December 2025; 0.5.5 is from November
+  # 2023 and subtracts through WideWord casts) and the UintRef, BoxedMontyForm and ctutils items.
+  # Accepted risk: the zero-counting, division and Montgomery-multiplication fixes have 0.5.5
+  # counterparts that are not proven constant-time.
+  # Remove when elliptic-curve 0.14 (k256 and p256 0.14) replaces 0.13 in these locks;
+  # re-review by 2026-11-20 at the latest.
+  "RUSTSEC-2026-0387",
 ]
