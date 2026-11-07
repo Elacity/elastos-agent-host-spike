@@ -1,0 +1,38 @@
+   Compiling review-c0-307-pidns v0.0.0 (/workspace/lab/review-c0-307-pidns)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+     Running unittests src/lib.rs (build/debug/deps/review_c0_307_pidns-3844dce2856b6e05)
+
+running 5 tests
+test tests::honest_abi1_refuses_on_both ... ok
+test tests::honest_abi5_still_launches_after_the_probe ... ok
+test tests::honest_abi_table_matches_307 ... ok
+test tests::current_code_launches_on_a_lying_abi5_kernel ... ok
+test tests::patched_code_refuses_a_lying_abi5_kernel ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/lying_abi.rs (build/debug/deps/lying_abi-746d1c1c289f1e38)
+
+running 1 test
+test current_launches_patched_refuses_on_the_same_liar ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/source_order.rs (build/debug/deps/source_order-424abb4e0e6c3c8c)
+
+running 6 tests
+test helper_and_init_close_the_fault_pipe_then_never_return ... ok
+test launch_returns_the_first_child_pid ... ok
+test reaper_forks_run_after_confine_returns ... ok
+test seccomp_denies_ptrace_and_allows_kill ... ok
+test signal_forwarder_omits_sigkill_and_uses_libc_signal ... ok
+test unshare_pid_is_inside_confine_before_capability_drop ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests review_c0_307_pidns
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

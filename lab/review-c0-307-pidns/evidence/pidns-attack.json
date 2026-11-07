@@ -1,0 +1,121 @@
+{
+  "launch": "/tmp/fcl-637345ac/target/debug/fcl-launch",
+  "probe": "/tmp/fcl-637345ac/build/debug/build/fail-closed-linux-1d11d7b03d991c2d/out/fcl-probe",
+  "tree": {
+    "host_pid": 7071,
+    "host_ns_pid": "pid:[4026532343]",
+    "host_ns_user": "user:[4026531837]",
+    "helper_pid": 7088,
+    "helper_children": [
+      7089
+    ],
+    "helper_ns_pid": "pid:[4026532343]",
+    "helper_ns_user": "user:[4026532200]",
+    "helper_nspid": "7088",
+    "helper_status": {
+      "NoNewPrivs": "1",
+      "Seccomp": "2",
+      "CapInh": "0000000000000000",
+      "CapPrm": "0000000000000000",
+      "CapEff": "0000000000000000",
+      "CapBnd": "0000000000000000",
+      "CapAmb": "0000000000000000",
+      "NSpid": "7088",
+      "Uid": "1000\t1000\t1000\t1000"
+    },
+    "init_pid": 7089,
+    "init_ns_pid": "pid:[4026532201]",
+    "init_nspid": "7089\t1",
+    "init_status": {
+      "NoNewPrivs": "1",
+      "Seccomp": "2",
+      "CapEff": "0000000000000000",
+      "CapBnd": "0000000000000000",
+      "NSpid": "7089\t1"
+    },
+    "provider_pid": 7090,
+    "provider_ns_pid": "pid:[4026532201]",
+    "provider_nspid": "7090\t2",
+    "helper_shares_host_pid_ns": true,
+    "init_shares_host_pid_ns": false,
+    "provider_shares_host_pid_ns": false,
+    "started_line_pid": 7088,
+    "probe_lines": [
+      "started did-provider pid=7088",
+      "probe-ran provider=did-provider",
+      "marker ok",
+      "socket_inet errno=1",
+      "socket_unix errno=1",
+      "read_outside errno=13",
+      "write_outside errno=13",
+      "read_etc_passwd errno=13",
+      "storage_write ok",
+      "storage_read ok",
+      "nspid=2",
+      "ready"
+    ],
+    "probe_getpid": 2
+  },
+  "sigkill_helper": {
+    "started_line_pid": 7092,
+    "init_pid": 7093,
+    "provider_pid": 7094,
+    "probe_lines": [
+      "started did-provider pid=7092",
+      "probe-ran provider=did-provider",
+      "marker ok",
+      "socket_inet errno=1",
+      "socket_unix errno=1",
+      "read_outside errno=13",
+      "write_outside errno=13",
+      "read_etc_passwd errno=13",
+      "storage_write ok",
+      "storage_read ok",
+      "nspid=2",
+      "ready"
+    ],
+    "after_sigkill_helper": {
+      "helper_alive": false,
+      "init_alive": true,
+      "provider_alive": true,
+      "fcl_launch_still_running": false,
+      "fcl_launch_exit": 137
+    },
+    "finding": "SIGKILL of the pid launch() returned left the provider alive"
+  },
+  "zombie": {
+    "probe_lines": [
+      "started did-provider pid=7096",
+      "zombie-child-nspid=3",
+      "ready"
+    ],
+    "tree": {
+      "helper_pid": 7096,
+      "init_pid": 7097,
+      "init_nspid": "7097\t1",
+      "provider_pid": 7098,
+      "provider_nspid": "7098\t2"
+    },
+    "zombies_reparented_to_init": [
+      {
+        "pid": 7099,
+        "ppid": 7098,
+        "state": "Z",
+        "parent_role": "provider"
+      }
+    ],
+    "finding": "unreaped child is a zombie under the provider; init only waitpids the provider"
+  },
+  "daemonize": {
+    "fcl_launch_exit": 0,
+    "stdout": "started did-provider pid=7101\nparent-exit-nspid=2\ngrandchild-nspid=3\nready\n",
+    "stderr": "",
+    "finding": "fcl-launch returned after the provider parent exited; a daemon grandchild does not keep the launcher alive"
+  },
+  "fault_pipe": {
+    "exit": 0,
+    "stdout": "empty_pipe_reported_as_start pid=7106",
+    "stderr": "",
+    "empty_pipe_is_start": true
+  }
+}

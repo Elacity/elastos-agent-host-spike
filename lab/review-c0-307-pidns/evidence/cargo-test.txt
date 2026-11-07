@@ -1,0 +1,67 @@
+   Compiling fail-closed-linux v0.0.0 (/tmp/fcl-637345ac/lab/fail-closed-linux)
+   Compiling libc v0.2.189
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.30s
+     Running unittests src/lib.rs (/tmp/fcl-637345ac/build/debug/deps/fail_closed_linux-29acae6f82350d15)
+
+running 6 tests
+test tests::fault_decode_rejects_a_short_record_and_an_unknown_step ... ok
+test tests::fault_round_trips_through_the_pipe_encoding ... ok
+test tests::handled_bits_follow_the_abi_and_never_invent_a_right ... ok
+test tests::per_right_floor_for_abi_1_through_6 ... ok
+test tests::pid_namespace_is_a_required_guard_step ... ok
+test tests::file_profile_needs_truncate_and_ioctl_dev_not_refer ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/fcl-launch.rs (/tmp/fcl-637345ac/build/debug/deps/fcl_launch-c942ee48a2074873)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/real_kernel.rs (/tmp/fcl-637345ac/build/debug/deps/real_kernel-8238c5902470650f)
+
+running 13 tests
+test real_confined_child_cannot_signal_host ... ok
+test real_capability_drop_failure_refuses ... ok
+test real_confined_provider_has_every_layer ... ok
+test real_landlock_abi_below_required_refuses ... ok
+test real_id_map_unwritable_refuses ... ok
+test real_landlock_missing_refuses ... ok
+test real_landlock_ruleset_unappliable_refuses ... ok
+test real_no_new_privs_failure_refuses ... ok
+test real_pid_namespace_unavailable_refuses ... ok
+test real_reaper_propagates_exit_status ... ok
+test real_seccomp_install_failure_refuses ... ok
+test real_user_namespaces_off_refuses ... ok
+test real_reaper_forwards_signal ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/simulated.rs (/tmp/fcl-637345ac/build/debug/deps/simulated-282503272b303f90)
+
+running 14 tests
+test sim_confined_provider_starts_after_every_layer ... ok
+test sim_capability_drop_failure_refuses ... ok
+test sim_id_maps_unwritable_refuses ... ok
+test sim_every_guard_step_failure_stops_before_exec ... ok
+test sim_landlock_abi_floor_cannot_be_lowered ... ok
+test sim_landlock_missing_refuses ... ok
+test sim_landlock_abi_too_old_refuses ... ok
+test sim_missing_right_is_never_silently_dropped ... ok
+test sim_landlock_ruleset_unappliable_refuses ... ok
+test sim_no_new_privs_failure_refuses ... ok
+test sim_per_right_floor_for_each_abi ... ok
+test sim_seccomp_install_failure_refuses ... ok
+test sim_user_namespaces_off_refuses ... ok
+test sim_pid_namespace_unavailable_refuses ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests fail_closed_linux
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+TEST_EXIT:0

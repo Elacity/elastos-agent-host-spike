@@ -1,0 +1,1 @@
+proposal.patch vs 1894f432: 2 hunks FAILED in src/lib.rs (enum already has ConfineReady). Other hunks applied. Patch is written for 637345ac.

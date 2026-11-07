@@ -1,0 +1,4 @@
+patching file src/lib.rs
+patching file src/real.rs
+patching file src/sim.rs
+patching file tests/simulated.rs
