@@ -1,0 +1,113 @@
+{
+  "official": [
+    {
+      "id": "F25-empty-pipe-reported-as-start",
+      "verdict": "CAUGHT",
+      "results": {
+        "lib::tests::execve_eof_is_a_start_and_confine_ready_is_a_refusal": "FAILED",
+        "real_kernel::real_confine_ready_without_exec_is_not_a_start": "FAILED"
+      }
+    },
+    {
+      "id": "F27-helper-survives-as-returned-pid",
+      "verdict": "CAUGHT",
+      "results": {
+        "real_kernel::real_sigkill_returned_pid_tears_down_namespace": "FAILED",
+        "real_kernel::real_confined_provider_has_every_layer": "FAILED"
+      }
+    },
+    {
+      "id": "F28-first-child-exit-tears-down",
+      "verdict": "CAUGHT",
+      "results": {
+        "real_kernel::real_daemonize_keeps_namespace_until_init_dies": "FAILED"
+      }
+    },
+    {
+      "id": "F29-init-does-not-reap-all",
+      "verdict": "CAUGHT",
+      "results": {
+        "real_kernel::real_init_reaps_orphaned_grandchild": "FAILED"
+      }
+    },
+    {
+      "id": "F31-lying-abi-probe-skipped",
+      "verdict": "CAUGHT",
+      "results": {
+        "simulated::sim_lying_abi_5_with_abi_1_rights_refuses": "FAILED",
+        "real_kernel::real_lying_rights_probe_refuses": "FAILED"
+      }
+    },
+    {
+      "id": "F32-ioctl-dev-dropped-from-handled",
+      "verdict": "CAUGHT",
+      "results": {
+        "real_kernel::real_confined_provider_has_every_layer": "FAILED"
+      }
+    }
+  ],
+  "new": [
+    {
+      "id": "R3-close-without-execve",
+      "verdict": "BUILT",
+      "kind": "live-start-without-execve",
+      "launch": "/tmp/review-c0-307-r3-rebreak/R3-close-without-execve/target/debug/fcl-launch",
+      "live": {
+        "started": true,
+        "returned_pid": 9261,
+        "init_comm": "fcl-launch",
+        "marker_written": false,
+        "children": [
+          "9262"
+        ],
+        "stdout": "started did-provider pid=9261\n",
+        "fake_start_without_execve": true
+      }
+    },
+    {
+      "id": "R3-close-pipe-before-confine",
+      "verdict": "BUILT",
+      "kind": "live-early-eof",
+      "launch": "/tmp/review-c0-307-r3-rebreak/R3-close-pipe-before-confine/target/debug/fcl-launch",
+      "live": {
+        "started": true,
+        "returned_pid": 9347,
+        "init_comm": "fcl-launch",
+        "marker_written": true,
+        "children": [
+          "9348"
+        ],
+        "stdout": "probe-ran provider=did-provider\nmarker ok\nsocket_inet errno=1\nsocket_unix errno=1\nread_outside errno=2\nwrite_outside errno=13\nread_etc_passwd errno=13\nstorage_write ok\nstorage_read ok\ntruncate_storage ok\ntruncate_outside errno=2\no_trunc_outside errno=2\nnspid=2\nready\nstarted did-provider pid=9347\n",
+        "fake_start_without_execve": false
+      }
+    },
+    {
+      "id": "R3-grandchild-holds-pipe",
+      "verdict": "BUILT",
+      "kind": "live-held-write-end",
+      "launch": "/tmp/review-c0-307-r3-rebreak/R3-grandchild-holds-pipe/target/debug/fcl-launch",
+      "live_hold": {
+        "launch_blocked": true,
+        "started_already": false,
+        "stdout": "probe-ran provider=did-provider\nmarker ok\nsocket_inet errno=1\nsocket_unix errno=1\nread_outside errno=2\nwrite_outside errno=13\nread_etc_passwd errno=13\nstorage_write ok\nstorage_read ok\ntruncate_storage ok\ntruncate_outside errno=2\no_trunc_outside errno=2\nnspid=2\nready\n",
+        "children": [
+          "9433"
+        ]
+      },
+      "live_kill_init": {
+        "launch_blocked_before_kill": true,
+        "init": 9438,
+        "launcher_exit": 137,
+        "hanging_after_kill": false,
+        "stdout": "probe-ran provider=did-provider\nmarker ok\nsocket_inet errno=1\nsocket_unix errno=1\nread_outside errno=2\nwrite_outside errno=13\nread_etc_passwd errno=13\nstorage_write ok\nstorage_read ok\ntruncate_storage ok\ntruncate_outside errno=2\no_trunc_outside errno=2\nnspid=2\nready\n",
+        "stderr": "",
+        "refused_after_init_kill": false
+      }
+    }
+  ],
+  "silent_ignore": {
+    "note": "landlock_can_handle_fs is create_ruleset-only. SimKernel never checks ioctl after a successful probe. A kernel that accepts the bit and does not enforce it launches.",
+    "positive_sim_still_passes": true,
+    "probe_cannot_see_silent_ignore": true
+  }
+}

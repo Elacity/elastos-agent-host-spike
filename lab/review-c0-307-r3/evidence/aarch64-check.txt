@@ -1,0 +1,3 @@
+   Compiling libc v0.2.189
+   Compiling fail-closed-linux v0.0.0 (/tmp/review-c0-307-r3-src/lab/fail-closed-linux)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.98s
