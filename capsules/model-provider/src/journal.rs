@@ -2401,6 +2401,10 @@ fn create_owner_only_directory(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+        // Without a trailing `/`, which would make the kernel follow a final
+        // symlink despite O_NOFOLLOW.
+        let path: std::path::PathBuf = path.components().collect();
+        let path = path.as_path();
         fs::DirBuilder::new().mode(0o700).create(path)?;
         let secured = fs::OpenOptions::new()
             .read(true)
