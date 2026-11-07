@@ -1,0 +1,382 @@
+[
+  {
+    "id": "F-A14ad",
+    "claim": "3 machine check before fetch",
+    "kind": "claimed",
+    "applied": "applied",
+    "tests": [
+      "test_install_refuses_before_fetch_when_the_machine_is_not_ready"
+    ],
+    "note": null,
+    "planted": {
+      "exit": 1,
+      "failed": true,
+      "tail": "test_install_refuses_before_fetch_when_the_machine_is_not_ready (test_version_binding.InstallBinding.test_install_refuses_before_fetch_when_the_machine_is_not_ready) ... FAIL\n\n======================================================================\nFAIL: test_install_refuses_before_fetch_when_the_machine_is_not_ready (test_version_binding.InstallBinding.test_install_refuses_before_fetch_when_the_machine_is_not_ready)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/workspace/lab/review-a14-289/checkout/lab/demo-a14/tests/test_version_binding.py\", line 700, in test_install_refuses_before_fetch_when_the_machine_is_not_ready\n    self.assertEqual(code, demo.EXIT_REFUSED)\nAssertionError: 0 != 3\n\n----------------------------------------------------------------------\nRan 1 test in 0.023s\n\nFAILED (failures=1)"
+    },
+    "restored": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_install_refuses_before_fetch_when_the_machine_is_not_ready (test_version_binding.InstallBinding.test_install_refuses_before_fetch_when_the_machine_is_not_ready) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.002s\n\nOK"
+    },
+    "verdict": "CAUGHT",
+    "expect_fail": true
+  },
+  {
+    "id": "F-A14ae",
+    "claim": "4 key not written before install can finish",
+    "kind": "claimed",
+    "applied": "applied",
+    "tests": [
+      "test_install_sign_on_linux_without_receipt_does_not_write_the_key",
+      "test_install_refuses_before_fetch_when_the_machine_is_not_ready"
+    ],
+    "note": null,
+    "planted": {
+      "exit": 1,
+      "failed": true,
+      "tail": "======================================================================\nFAIL: test_install_refuses_before_fetch_when_the_machine_is_not_ready (test_version_binding.InstallBinding.test_install_refuses_before_fetch_when_the_machine_is_not_ready)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/workspace/lab/review-a14-289/checkout/lab/demo-a14/tests/test_version_binding.py\", line 703, in test_install_refuses_before_fetch_when_the_machine_is_not_ready\n    self.assertFalse(self.fx.layout.signing_key.exists())\nAssertionError: True is not false\n\n======================================================================\nFAIL: test_install_sign_on_linux_without_receipt_does_not_write_the_key (test_version_binding.InstallBinding.test_install_sign_on_linux_without_receipt_does_not_write_the_key)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/workspace/lab/review-a14-289/checkout/lab/demo-a14/tests/test_version_binding.py\", line 690, in test_install_sign_on_linux_without_receipt_does_not_write_the_key\n    self.assertFalse(self.fx.layout.signing_key.exists())\nAssertionError: True is not false\n\n----------------------------------------------------------------------\nRan 2 tests in 0.011s\n\nFAILED (failures=2)"
+    },
+    "restored": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_install_refuses_before_fetch_when_the_machine_is_not_ready (test_version_binding.InstallBinding.test_install_refuses_before_fetch_when_the_machine_is_not_ready) ... ok\ntest_install_sign_on_linux_without_receipt_does_not_write_the_key (test_version_binding.InstallBinding.test_install_sign_on_linux_without_receipt_does_not_write_the_key) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.004s\n\nOK"
+    },
+    "verdict": "CAUGHT",
+    "expect_fail": true
+  },
+  {
+    "id": "F-A14af",
+    "claim": "5 refused run writes summary",
+    "kind": "claimed",
+    "applied": "applied",
+    "tests": [
+      "test_refused_run_starts_no_journey",
+      "test_run_without_install_names_it"
+    ],
+    "note": null,
+    "planted": {
+      "exit": 1,
+      "failed": true,
+      "tail": "======================================================================\nFAIL: test_refused_run_starts_no_journey (test_version_binding.RunBinding.test_refused_run_starts_no_journey)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/workspace/lab/review-a14-289/checkout/lab/demo-a14/tests/test_version_binding.py\", line 389, in test_refused_run_starts_no_journey\n    self.assertEqual(len(summaries), 1, summaries)\nAssertionError: 0 != 1 : []\n\n======================================================================\nFAIL: test_run_without_install_names_it (test_version_binding.RunBinding.test_run_without_install_names_it)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/workspace/lab/review-a14-289/checkout/lab/demo-a14/tests/test_version_binding.py\", line 400, in test_run_without_install_names_it\n    self.assertEqual(len(summaries), 1, summaries)\nAssertionError: 0 != 1 : []\n\n----------------------------------------------------------------------\nRan 2 tests in 0.008s\n\nFAILED (failures=2)"
+    },
+    "restored": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_refused_run_starts_no_journey (test_version_binding.RunBinding.test_refused_run_starts_no_journey) ... ok\ntest_run_without_install_names_it (test_version_binding.RunBinding.test_run_without_install_names_it) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.008s\n\nOK"
+    },
+    "verdict": "CAUGHT",
+    "expect_fail": true
+  },
+  {
+    "id": "F-A14ag",
+    "claim": "6 CARGO_TERM_COLOR forced never",
+    "kind": "claimed",
+    "applied": "applied",
+    "tests": [
+      "test_suite_env_forces_cargo_term_color_never"
+    ],
+    "note": null,
+    "planted": {
+      "exit": 1,
+      "failed": true,
+      "tail": "test_suite_env_forces_cargo_term_color_never (test_version_binding.SuiteEnvironment.test_suite_env_forces_cargo_term_color_never) ... FAIL\n\n======================================================================\nFAIL: test_suite_env_forces_cargo_term_color_never (test_version_binding.SuiteEnvironment.test_suite_env_forces_cargo_term_color_never)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/workspace/lab/review-a14-289/checkout/lab/demo-a14/tests/test_version_binding.py\", line 881, in test_suite_env_forces_cargo_term_color_never\n    self.assertEqual(env[\"CARGO_TERM_COLOR\"], \"never\")\nAssertionError: 'always' != 'never'\n- always\n+ never\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.001s\n\nFAILED (failures=1)"
+    },
+    "restored": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_suite_env_forces_cargo_term_color_never (test_version_binding.SuiteEnvironment.test_suite_env_forces_cargo_term_color_never) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nOK"
+    },
+    "verdict": "CAUGHT",
+    "expect_fail": true
+  },
+  {
+    "id": "F-A14ah",
+    "claim": "7 Rosetta refused",
+    "kind": "claimed",
+    "applied": "applied",
+    "tests": [
+      "test_rosetta_is_refused"
+    ],
+    "note": null,
+    "planted": {
+      "exit": 1,
+      "failed": true,
+      "tail": "test_rosetta_is_refused (test_version_binding.MachineReady.test_rosetta_is_refused) ... FAIL\n\n======================================================================\nFAIL: test_rosetta_is_refused (test_version_binding.MachineReady.test_rosetta_is_refused)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/workspace/lab/review-a14-289/checkout/lab/demo-a14/tests/test_version_binding.py\", line 817, in test_rosetta_is_refused\n    self.assertNamed(\n  File \"/workspace/lab/review-a14-289/checkout/lab/demo-a14/tests/test_version_binding.py\", line 179, in assertNamed\n    self.assertTrue(\nAssertionError: False is not true : no problem names ('this shell is Rosetta (sysctl.proc_translated=1); open a native arm64 Terminal',): []\n\n----------------------------------------------------------------------\nRan 1 test in 0.003s\n\nFAILED (failures=1)"
+    },
+    "restored": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_rosetta_is_refused (test_version_binding.MachineReady.test_rosetta_is_refused) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.003s\n\nOK"
+    },
+    "verdict": "CAUGHT",
+    "expect_fail": true
+  },
+  {
+    "id": "F-A14ai",
+    "claim": "8 space in HOME refused",
+    "kind": "claimed",
+    "applied": "applied",
+    "tests": [
+      "test_space_in_home_is_refused"
+    ],
+    "note": null,
+    "planted": {
+      "exit": 1,
+      "failed": true,
+      "tail": "test_space_in_home_is_refused (test_version_binding.MachineReady.test_space_in_home_is_refused) ... FAIL\n\n======================================================================\nFAIL: test_space_in_home_is_refused (test_version_binding.MachineReady.test_space_in_home_is_refused)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/workspace/lab/review-a14-289/checkout/lab/demo-a14/tests/test_version_binding.py\", line 842, in test_space_in_home_is_refused\n    self.assertNamed(self.problems(home=self.tmp / \"User Name\"), \"HOME contains a space\")\n  File \"/workspace/lab/review-a14-289/checkout/lab/demo-a14/tests/test_version_binding.py\", line 179, in assertNamed\n    self.assertTrue(\nAssertionError: False is not true : no problem names ('HOME contains a space',): []\n\n----------------------------------------------------------------------\nRan 1 test in 0.003s\n\nFAILED (failures=1)"
+    },
+    "restored": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_space_in_home_is_refused (test_version_binding.MachineReady.test_space_in_home_is_refused) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.003s\n\nOK"
+    },
+    "verdict": "CAUGHT",
+    "expect_fail": true
+  },
+  {
+    "id": "F-A14aj",
+    "claim": "6 outside CARGO_TARGET_DIR refused",
+    "kind": "claimed",
+    "applied": "applied",
+    "tests": [
+      "test_outside_cargo_target_dir_is_refused"
+    ],
+    "note": null,
+    "planted": {
+      "exit": 1,
+      "failed": true,
+      "tail": "test_outside_cargo_target_dir_is_refused (test_version_binding.MachineReady.test_outside_cargo_target_dir_is_refused) ... FAIL\n\n======================================================================\nFAIL: test_outside_cargo_target_dir_is_refused (test_version_binding.MachineReady.test_outside_cargo_target_dir_is_refused)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/workspace/lab/review-a14-289/checkout/lab/demo-a14/tests/test_version_binding.py\", line 833, in test_outside_cargo_target_dir_is_refused\n    self.assertNamed(self.problems(env=env), \"CARGO_TARGET_DIR=\", \"outside the repository\")\n  File \"/workspace/lab/review-a14-289/checkout/lab/demo-a14/tests/test_version_binding.py\", line 179, in assertNamed\n    self.assertTrue(\nAssertionError: False is not true : no problem names ('CARGO_TARGET_DIR=', 'outside the repository'): []\n\n----------------------------------------------------------------------\nRan 1 test in 0.003s\n\nFAILED (failures=1)"
+    },
+    "restored": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_outside_cargo_target_dir_is_refused (test_version_binding.MachineReady.test_outside_cargo_target_dir_is_refused) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.003s\n\nOK"
+    },
+    "verdict": "CAUGHT",
+    "expect_fail": true
+  },
+  {
+    "id": "F-A14ak",
+    "claim": "3 missing wasm refused",
+    "kind": "claimed",
+    "applied": "applied",
+    "tests": [
+      "test_missing_wasm_target_is_refused"
+    ],
+    "note": null,
+    "planted": {
+      "exit": 1,
+      "failed": true,
+      "tail": "test_missing_wasm_target_is_refused (test_version_binding.MachineReady.test_missing_wasm_target_is_refused) ... FAIL\n\n======================================================================\nFAIL: test_missing_wasm_target_is_refused (test_version_binding.MachineReady.test_missing_wasm_target_is_refused)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/workspace/lab/review-a14-289/checkout/lab/demo-a14/tests/test_version_binding.py\", line 846, in test_missing_wasm_target_is_refused\n    self.assertNamed(self.problems(), \"wasm32-unknown-unknown is not installed for 1.91.0\")\n  File \"/workspace/lab/review-a14-289/checkout/lab/demo-a14/tests/test_version_binding.py\", line 179, in assertNamed\n    self.assertTrue(\nAssertionError: False is not true : no problem names ('wasm32-unknown-unknown is not installed for 1.91.0',): []\n\n----------------------------------------------------------------------\nRan 1 test in 0.003s\n\nFAILED (failures=1)"
+    },
+    "restored": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_missing_wasm_target_is_refused (test_version_binding.MachineReady.test_missing_wasm_target_is_refused) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.002s\n\nOK"
+    },
+    "verdict": "CAUGHT",
+    "expect_fail": true
+  },
+  {
+    "id": "F-A14al",
+    "claim": "1 runbook stays on demo branch",
+    "kind": "claimed",
+    "applied": "applied",
+    "tests": [
+      "test_runbook_stays_on_the_demo_branch"
+    ],
+    "note": null,
+    "planted": {
+      "exit": 1,
+      "failed": true,
+      "tail": "test_runbook_stays_on_the_demo_branch (test_version_binding.RunbookMorningSteps.test_runbook_stays_on_the_demo_branch) ... FAIL\n\n======================================================================\nFAIL: test_runbook_stays_on_the_demo_branch (test_version_binding.RunbookMorningSteps.test_runbook_stays_on_the_demo_branch)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/workspace/lab/review-a14-289/checkout/lab/demo-a14/tests/test_version_binding.py\", line 890, in test_runbook_stays_on_the_demo_branch\n    self.assertNotIn(\"git checkout spike/agent-host\", self.text)\nAssertionError: 'git checkout spike/agent-host' unexpectedly found in '# A14 installed demo\\n\\n## Sash\\'s morning steps\\n\\n```bash\\n# 1. Go to the clone you already have. Stop if lab/demo-a14/install.sh is missing.\\n#    Examples: /Users/sash/code/wt-agent-host  or  ~/code/elastos-agent-host-spike\\ncd /path/to/your/clone\\ngit fetch origin cursor/demo-a14-installed-demo-83e1\\ngit checkout spike/agent-host\\ngit pull --ff-only\\ngit status --porcelain=v1          # must print nothing\\ntest -f lab/demo-a14/install.sh\\n\\n# 2. Read-only check of this Mac. Stop on \"preflight: FAIL\".\\nsh lab/demo-a14/preflight.sh\\n\\n# 3. Install and sign (30 minutes or more the first time)\\nbash lab/demo-a14/install.sh --sign\\n\\n# 4. Run every step against the installed versions\\nbash lab/demo-a14/run.sh\\n\\n# 5. Open the newest run folder and send its summary.txt. Book A14 only on \"A14: PASS.\"\\nrun=$(ls -dt \"$HOME/Library/Application Support/elastos-demo-a14/runs/\"*/ | head -1)\\ntest -n \"$run\" && test -d \"$run\" && open \"$run\"\\n```\\n\\nUntil this demo is on `spike/agent-host`, stay on\\n`cursor/demo-a14-installed-demo-83e1`. That branch is the one that contains\\n`lab/demo-a14`. `spike/agent-host` does not have these files yet.\\n\\nThe rest of this file explains each line, and what to do if a line says\\n`REFUSED`.\\n\\n## What this is\\n\\nM1 check A14 says: Sash runs the installed demo, and its versions are bound.\\n\\nThis folder gives you two commands. `install.sh` installs the demo once. `run.sh`\\nruns it. The run shows each agent journey, one step at a time, and says if the\\nstep passed or was refused, and why. Before it runs anything, it compares every\\ninstalled part with two receipt files: `VERSIONS.json`, which the conformance\\ncheck writes, and `INSTALL.json`, which the install writes. If one part is\\ndifferent, the demo stops and runs nothing.\\n\\n## What you need, one time\\n\\n- A Mac with at least 40 GB of free disk space.\\n- The Terminal app (in Applications, then Utilities).\\n- Apple\\'s command line tools. In Terminal, type `xcode-select --install` and\\n  follow the window. If it says they are already installed, that is fine. They\\n  include `git`, `python3` and `ssh-keygen`, which signs the receipts.\\n- Rust. Go to <https://rustup.rs> and run the one command it shows. Then close\\n  Terminal and open it again.\\n- A copy of this repository on your Mac, made with `git clone` or\\n  `git checkout`. A zip from a browser can make macOS refuse to run the built\\n  programs.\\n\\nThe first time only, in the repository folder, add the Rust target the demo\\nbuilds for:\\n\\n```bash\\nrustup target add wasm32-unknown-unknown\\n```\\n\\n## Lines 1 and 2: the version to test\\n\\nLine 1 uses the clone you already have. The two paths above are examples only.\\nAfter the checkout, `git status --porcelain=v1` must print nothing, and\\n`lab/demo-a14/install.sh` must be present. If either check fails, stop and ask\\nan engineer. The demo refuses to install from a copy with local changes.\\n\\nLine 2 is `preflight.sh`. It writes nothing. It names each gap on its own\\n`missing:` line, then prints `preflight: OK` or `preflight: FAIL`. Stop on\\nFAIL. The same checks run again at the start of `install.sh`, before any\\ndownload or signing key.\\n\\n## Line 3: install\\n\\nThe install first checks this Mac (the same list as preflight). A failure\\nprints `REFUSED: this machine is not ready.` and writes no signing key. Then\\nit does five things and prints each one:\\n\\n1. It downloads the Rust packages that the builds need. This needs the internet.\\n2. It runs the full agent conformance check (`lab/agent-conformance/run.sh`).\\n   That check writes a new `VERSIONS.json`, which records the exact Runtime,\\n   provider and test capsules it used.\\n3. It builds the agent-host guest from the same version of the code.\\n4. It builds the journey tests and records the fingerprint (SHA-256) of every\\n   test program and provider program that the run will start.\\n5. It copies the Runtime, the provider, the guest and `VERSIONS.json` into\\n   `~/Library/Application Support/elastos-demo-a14/current`, and writes\\n   `INSTALL.json` with every fingerprint.\\n\\nWith `--sign`, the install makes the signing key only when the builds have\\nfinished and it is about to write the receipts (see \"The signature\" below). A\\nfailed conformance run or a missing `VERSIONS.json` leaves no new key. Keep the\\nMac awake and plugged in, and do not start other builds at the same time.\\n\\nA good install ends like this:\\n\\n```text\\nInstalled. VERSIONS.json SHA-256 <64 letters and digits>.\\nReceipt: <path to VERSIONS.json>\\nNext: bash lab/demo-a14/run.sh\\n```\\n\\nIf you see `REFUSED:`, read the lines under it. Each line names one problem.\\nThe last line says what to do next.\\n\\n## Line 4: run\\n\\nFirst the run checks the versions and prints them, the program fingerprints and\\nthe signature. Then it runs each step and prints a block like this:\\n\\n```text\\n  A8         REFUSED  A capsule cannot read a host SSH key\\n                      reason: Internal(\"capsule manifest does not declare authority for ...\")\\n                      test: host_key_read_is_refused\\n```\\n\\nThe second word tells you what happened:\\n\\n| Word | Meaning |\\n| --- | --- |\\n| PASS | The allowed action worked. |\\n| REFUSED | The system said no, as it must. This is a good result. |\\n| FAIL | The step did not behave as it should. Send the output to an engineer. |\\n| NOT RUN | The step could not run on this machine. It does not count as a pass. |\\n\\nAt the end, a summary gives one line for each M1 check, then one final line:\\n\\n- `A14: PASS.` Every step ran, and every step used the versions in the receipts.\\n- `A14: NOT RUN.` Some steps did not run here. A14 is not done.\\n- `A14: FAIL.` A step failed, or the versions changed during the run. A14 is not done.\\n\\n## Line 5: what to send\\n\\nLine 5 opens the newest run folder only when that folder exists. A refusal\\nbefore any journey still writes `summary.txt` there, and prints that path in\\nthe `Next:` line. Send that file. It holds the same text that the run printed.\\nThe folder also holds the full output of each test group when journeys ran.\\n\\n## When the run says the versions do not match\\n\\n```text\\nREFUSED: the installed versions do not match VERSIONS.json. No journey was run.\\n```\\n\\nThis is the version lock. Something changed after the install: new code, a\\nrebuilt program, a changed copy, or a changed receipt. Each line under the\\nmessage names the part and both fingerprints. Run line 3 again, then line 4.\\n\\n## The signature\\n\\n`install.sh --sign` makes one ed25519 key for this Mac with `ssh-keygen` and\\nkeeps it in `~/Library/Application Support/elastos-demo-a14/signing`. The key\\nnever goes into the repository. The install signs `VERSIONS.json` and\\n`INSTALL.json` with it.\\n\\nWhile that key exists, signing is on. Then the run refuses to start if either\\nreceipt file has no signature, or if a signature does not match the file and this\\nMac\\'s key.\\n\\nThe signature proves that the receipts are unchanged since the install on this\\nMac. It does not prove who published them, because the key was made here and\\nnobody else trusts it.\\n\\nTo turn signing off, delete the `signing` folder, then install again without\\n`--sign`.\\n\\n## See the lock work (optional)\\n\\nThis changes one byte of the installed Runtime copy, shows the refusal, and then\\nputs the right copy back. Use the receipt path that your install printed.\\n\\n```bash\\nprintf x >> ~/Library/Application\\\\ Support/elastos-demo-a14/current/bin/elastos\\nbash lab/demo-a14/run.sh\\nbash lab/demo-a14/install.sh --receipt \"<the Receipt path from line 3>\"\\n```\\n\\nThe run must print `REFUSED`, name `installed elastos`, and run no step. The\\nsecond install is quick because it reuses the receipt and the builds.\\n\\nTo see the signature work, add one space to the end of the installed\\n`VERSIONS.json`, run, and look for `VERSIONS.json signature does not verify`.\\nThen install again with `--receipt` as above.\\n\\n## Clean up\\n\\nWhen the result is reviewed, delete the folder\\n`~/Library/Application Support/elastos-demo-a14`. It holds the demo\\'s copies,\\nrun outputs and, if you used `--sign`, this Mac\\'s demo key.\\n\\n## For the reviewer\\n\\n**What each check means here.** The M1 sheet is not in this repository, so the\\nlist of which test stands for which M1 check is this demo\\'s reading. Sash\\nconfirms it before A14 is booked. `journeys.json` names the exact test for every\\nstep; the run prints each one.\\n\\n| Check | Steps in the run |\\n| --- | --- |\\n| A1 WASM admission | The Runtime\\'s Wasmtime admits the real agent-host component; it refuses a component with an import outside the Bus, and an unsigned or untrusted capsule. |\\n| A2 journal | With both grants the agent host writes and reads its journal through the real bridge; with both denied it stores nothing; an old journal format is refused with its reason. |\\n| A8 host-secret refusal | The real `elastos` binary refuses a capsule\\'s read of a fake host SSH key. |\\n| C1 to C7 provider refusals | The did, wallet and model providers under their `confine.sb`: outside read, outside write, a file beside the root, another program, network, a profile that cannot be applied, and a refused start that names its reason. |\\n\\n**What binds the versions.** Before any step, the run requires all of these. A\\ndifference is a refusal with exit code 3, and no step runs.\\n\\n- `VERSIONS.json` comes from `lab/agent-conformance` (schema\\n  `agent-conformance.versions/v1`), is complete, records a passing command, a\\n  clean commit and its own `versions_receipt (A14) | PASS` row.\\n- Its bytes still match the SHA-256 that `INSTALL.json` recorded.\\n- The installed `elastos` and `localhost-provider` match its `runtime_sha256` and\\n  `localhost_provider_sha256`, and so do the copies in\\n  `lab/agent-conformance/target/runtime/debug` that the A8 journey launches.\\n- The agent-host guest that A1 and A2 load matches its SHA-256 in `INSTALL.json`.\\n- Each suite\\'s test executable, and each provider binary the C tests start,\\n  matches its SHA-256 in `INSTALL.json` and lies inside the repository. The\\n  install takes these from Cargo\\'s own artifact report, and refuses a suite with\\n  no test executable or more than one.\\n- The checkout is at the receipt\\'s commit and has no local changes.\\n- With signing on, both receipt files carry a valid signature by this Mac\\'s key.\\n\\n**How each step runs.** A1, A2 and the C steps run their recorded test\\nexecutable directly, never through Cargo, so nothing can be rebuilt between the\\ncheck and the run. Each suite\\'s files are checked again immediately before and\\nafter it runs. A suite whose files changed is refused before it runs.\\n\\nA8 runs through `cargo test` with the same environment as\\n`lab/agent-conformance/run.sh`. Its harness builds `elastos` with Cargo inside\\nthe test, and that build starts again under any other parent. On Linux, the\\nsame build under `cargo test`\\'s environment recompiled from `ring` up in 2m41s,\\nalthough the binary came out byte-identical. Cargo must report that it ran\\nexactly the recorded A8 test executable. Immediately before and after A8, the\\n`elastos` and `localhost-provider` that A8 launches must be byte-identical to the\\ninstalled copies; otherwise A8 is refused before it runs. The harness launches\\nits own build path, so the run proves identity with the installed copy rather\\nthan starting the installed path itself.\\n\\nAfter the steps, every `version identity:` line a journey printed must match the\\nreceipt. The A8 journey must print the Runtime, the provider and its\\n`host-key-read` probe. The run then checks everything above again.\\n\\n**What this does not prove.**\\n\\n- The signature proves integrity on this Mac, not publisher identity. Without\\n  `--sign`, nothing is signed, and the lock proves only that the bytes match the\\n  receipts.\\n- `VERSIONS.json` hashes no agent-host guest or test executable. Those hashes are\\n  in `INSTALL.json`, which the install writes after the conformance run.\\n- The A8 harness starts `elastos` from its own build folder. The run proves that\\n  file is byte-identical to the installed copy before and after A8, but it does\\n  not start the installed path.\\n- The C steps start each provider under its own profile with `sandbox-exec`.\\n  The Runtime does not generate or apply that profile yet (M1 check B3).\\n- Off macOS, every macOS step prints NOT RUN, and the demo never prints\\n  `A14: PASS`.\\n\\n**Checks for this folder.**\\n\\n```bash\\npython3 -B -I -m unittest discover -s lab/demo-a14/tests -v\\n```\\n\\nThe signing tests need `ssh-keygen`. `falsifiers.json` lists planted bugs,\\neach with the tests that must fail. The shared falsifier runner has no command\\nfor this folder, so apply each edit by hand, require its tests to fail, restore\\nthe bytes, and require them to pass. Use `-B`: a same-size edit restored in the\\nsame second can otherwise leave the planted bytecode in use. `falsify.sh`\\nplants a missing `ssh-keygen` against `preflight.sh`.\\n'\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (failures=1)"
+    },
+    "restored": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_runbook_stays_on_the_demo_branch (test_version_binding.RunbookMorningSteps.test_runbook_stays_on_the_demo_branch) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nOK"
+    },
+    "verdict": "CAUGHT",
+    "expect_fail": true
+  },
+  {
+    "id": "F-A14am",
+    "claim": "5 step 5 opens only a real path",
+    "kind": "claimed",
+    "applied": "applied",
+    "tests": [
+      "test_runbook_step_5_opens_only_a_real_path"
+    ],
+    "note": null,
+    "planted": {
+      "exit": 1,
+      "failed": true,
+      "tail": "test_runbook_step_5_opens_only_a_real_path (test_version_binding.RunbookMorningSteps.test_runbook_step_5_opens_only_a_real_path) ... FAIL\n\n======================================================================\nFAIL: test_runbook_step_5_opens_only_a_real_path (test_version_binding.RunbookMorningSteps.test_runbook_step_5_opens_only_a_real_path)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/workspace/lab/review-a14-289/checkout/lab/demo-a14/tests/test_version_binding.py\", line 898, in test_runbook_step_5_opens_only_a_real_path\n    self.assertIn('test -n \"$run\" && test -d \"$run\" && open \"$run\"', self.text)\nAssertionError: 'test -n \"$run\" && test -d \"$run\" && open \"$run\"' not found in '# A14 installed demo\\n\\n## Sash\\'s morning steps\\n\\n```bash\\n# 1. Go to the clone you already have. Stop if lab/demo-a14/install.sh is missing.\\n#    Examples: /Users/sash/code/wt-agent-host  or  ~/code/elastos-agent-host-spike\\ncd /path/to/your/clone\\ngit fetch origin cursor/demo-a14-installed-demo-83e1\\ngit checkout cursor/demo-a14-installed-demo-83e1\\ngit pull --ff-only\\ngit status --porcelain=v1          # must print nothing\\ntest -f lab/demo-a14/install.sh\\n\\n# 2. Read-only check of this Mac. Stop on \"preflight: FAIL\".\\nsh lab/demo-a14/preflight.sh\\n\\n# 3. Install and sign (30 minutes or more the first time)\\nbash lab/demo-a14/install.sh --sign\\n\\n# 4. Run every step against the installed versions\\nbash lab/demo-a14/run.sh\\n\\n# 5. Open the newest run folder and send its summary.txt. Book A14 only on \"A14: PASS.\"\\nrun=$(ls -dt \"$HOME/Library/Application Support/elastos-demo-a14/runs/\"*/ | head -1)\\nopen \"$run\"\\n```\\n\\nUntil this demo is on `spike/agent-host`, stay on\\n`cursor/demo-a14-installed-demo-83e1`. That branch is the one that contains\\n`lab/demo-a14`. `spike/agent-host` does not have these files yet.\\n\\nThe rest of this file explains each line, and what to do if a line says\\n`REFUSED`.\\n\\n## What this is\\n\\nM1 check A14 says: Sash runs the installed demo, and its versions are bound.\\n\\nThis folder gives you two commands. `install.sh` installs the demo once. `run.sh`\\nruns it. The run shows each agent journey, one step at a time, and says if the\\nstep passed or was refused, and why. Before it runs anything, it compares every\\ninstalled part with two receipt files: `VERSIONS.json`, which the conformance\\ncheck writes, and `INSTALL.json`, which the install writes. If one part is\\ndifferent, the demo stops and runs nothing.\\n\\n## What you need, one time\\n\\n- A Mac with at least 40 GB of free disk space.\\n- The Terminal app (in Applications, then Utilities).\\n- Apple\\'s command line tools. In Terminal, type `xcode-select --install` and\\n  follow the window. If it says they are already installed, that is fine. They\\n  include `git`, `python3` and `ssh-keygen`, which signs the receipts.\\n- Rust. Go to <https://rustup.rs> and run the one command it shows. Then close\\n  Terminal and open it again.\\n- A copy of this repository on your Mac, made with `git clone` or\\n  `git checkout`. A zip from a browser can make macOS refuse to run the built\\n  programs.\\n\\nThe first time only, in the repository folder, add the Rust target the demo\\nbuilds for:\\n\\n```bash\\nrustup target add wasm32-unknown-unknown\\n```\\n\\n## Lines 1 and 2: the version to test\\n\\nLine 1 uses the clone you already have. The two paths above are examples only.\\nAfter the checkout, `git status --porcelain=v1` must print nothing, and\\n`lab/demo-a14/install.sh` must be present. If either check fails, stop and ask\\nan engineer. The demo refuses to install from a copy with local changes.\\n\\nLine 2 is `preflight.sh`. It writes nothing. It names each gap on its own\\n`missing:` line, then prints `preflight: OK` or `preflight: FAIL`. Stop on\\nFAIL. The same checks run again at the start of `install.sh`, before any\\ndownload or signing key.\\n\\n## Line 3: install\\n\\nThe install first checks this Mac (the same list as preflight). A failure\\nprints `REFUSED: this machine is not ready.` and writes no signing key. Then\\nit does five things and prints each one:\\n\\n1. It downloads the Rust packages that the builds need. This needs the internet.\\n2. It runs the full agent conformance check (`lab/agent-conformance/run.sh`).\\n   That check writes a new `VERSIONS.json`, which records the exact Runtime,\\n   provider and test capsules it used.\\n3. It builds the agent-host guest from the same version of the code.\\n4. It builds the journey tests and records the fingerprint (SHA-256) of every\\n   test program and provider program that the run will start.\\n5. It copies the Runtime, the provider, the guest and `VERSIONS.json` into\\n   `~/Library/Application Support/elastos-demo-a14/current`, and writes\\n   `INSTALL.json` with every fingerprint.\\n\\nWith `--sign`, the install makes the signing key only when the builds have\\nfinished and it is about to write the receipts (see \"The signature\" below). A\\nfailed conformance run or a missing `VERSIONS.json` leaves no new key. Keep the\\nMac awake and plugged in, and do not start other builds at the same time.\\n\\nA good install ends like this:\\n\\n```text\\nInstalled. VERSIONS.json SHA-256 <64 letters and digits>.\\nReceipt: <path to VERSIONS.json>\\nNext: bash lab/demo-a14/run.sh\\n```\\n\\nIf you see `REFUSED:`, read the lines under it. Each line names one problem.\\nThe last line says what to do next.\\n\\n## Line 4: run\\n\\nFirst the run checks the versions and prints them, the program fingerprints and\\nthe signature. Then it runs each step and prints a block like this:\\n\\n```text\\n  A8         REFUSED  A capsule cannot read a host SSH key\\n                      reason: Internal(\"capsule manifest does not declare authority for ...\")\\n                      test: host_key_read_is_refused\\n```\\n\\nThe second word tells you what happened:\\n\\n| Word | Meaning |\\n| --- | --- |\\n| PASS | The allowed action worked. |\\n| REFUSED | The system said no, as it must. This is a good result. |\\n| FAIL | The step did not behave as it should. Send the output to an engineer. |\\n| NOT RUN | The step could not run on this machine. It does not count as a pass. |\\n\\nAt the end, a summary gives one line for each M1 check, then one final line:\\n\\n- `A14: PASS.` Every step ran, and every step used the versions in the receipts.\\n- `A14: NOT RUN.` Some steps did not run here. A14 is not done.\\n- `A14: FAIL.` A step failed, or the versions changed during the run. A14 is not done.\\n\\n## Line 5: what to send\\n\\nLine 5 opens the newest run folder only when that folder exists. A refusal\\nbefore any journey still writes `summary.txt` there, and prints that path in\\nthe `Next:` line. Send that file. It holds the same text that the run printed.\\nThe folder also holds the full output of each test group when journeys ran.\\n\\n## When the run says the versions do not match\\n\\n```text\\nREFUSED: the installed versions do not match VERSIONS.json. No journey was run.\\n```\\n\\nThis is the version lock. Something changed after the install: new code, a\\nrebuilt program, a changed copy, or a changed receipt. Each line under the\\nmessage names the part and both fingerprints. Run line 3 again, then line 4.\\n\\n## The signature\\n\\n`install.sh --sign` makes one ed25519 key for this Mac with `ssh-keygen` and\\nkeeps it in `~/Library/Application Support/elastos-demo-a14/signing`. The key\\nnever goes into the repository. The install signs `VERSIONS.json` and\\n`INSTALL.json` with it.\\n\\nWhile that key exists, signing is on. Then the run refuses to start if either\\nreceipt file has no signature, or if a signature does not match the file and this\\nMac\\'s key.\\n\\nThe signature proves that the receipts are unchanged since the install on this\\nMac. It does not prove who published them, because the key was made here and\\nnobody else trusts it.\\n\\nTo turn signing off, delete the `signing` folder, then install again without\\n`--sign`.\\n\\n## See the lock work (optional)\\n\\nThis changes one byte of the installed Runtime copy, shows the refusal, and then\\nputs the right copy back. Use the receipt path that your install printed.\\n\\n```bash\\nprintf x >> ~/Library/Application\\\\ Support/elastos-demo-a14/current/bin/elastos\\nbash lab/demo-a14/run.sh\\nbash lab/demo-a14/install.sh --receipt \"<the Receipt path from line 3>\"\\n```\\n\\nThe run must print `REFUSED`, name `installed elastos`, and run no step. The\\nsecond install is quick because it reuses the receipt and the builds.\\n\\nTo see the signature work, add one space to the end of the installed\\n`VERSIONS.json`, run, and look for `VERSIONS.json signature does not verify`.\\nThen install again with `--receipt` as above.\\n\\n## Clean up\\n\\nWhen the result is reviewed, delete the folder\\n`~/Library/Application Support/elastos-demo-a14`. It holds the demo\\'s copies,\\nrun outputs and, if you used `--sign`, this Mac\\'s demo key.\\n\\n## For the reviewer\\n\\n**What each check means here.** The M1 sheet is not in this repository, so the\\nlist of which test stands for which M1 check is this demo\\'s reading. Sash\\nconfirms it before A14 is booked. `journeys.json` names the exact test for every\\nstep; the run prints each one.\\n\\n| Check | Steps in the run |\\n| --- | --- |\\n| A1 WASM admission | The Runtime\\'s Wasmtime admits the real agent-host component; it refuses a component with an import outside the Bus, and an unsigned or untrusted capsule. |\\n| A2 journal | With both grants the agent host writes and reads its journal through the real bridge; with both denied it stores nothing; an old journal format is refused with its reason. |\\n| A8 host-secret refusal | The real `elastos` binary refuses a capsule\\'s read of a fake host SSH key. |\\n| C1 to C7 provider refusals | The did, wallet and model providers under their `confine.sb`: outside read, outside write, a file beside the root, another program, network, a profile that cannot be applied, and a refused start that names its reason. |\\n\\n**What binds the versions.** Before any step, the run requires all of these. A\\ndifference is a refusal with exit code 3, and no step runs.\\n\\n- `VERSIONS.json` comes from `lab/agent-conformance` (schema\\n  `agent-conformance.versions/v1`), is complete, records a passing command, a\\n  clean commit and its own `versions_receipt (A14) | PASS` row.\\n- Its bytes still match the SHA-256 that `INSTALL.json` recorded.\\n- The installed `elastos` and `localhost-provider` match its `runtime_sha256` and\\n  `localhost_provider_sha256`, and so do the copies in\\n  `lab/agent-conformance/target/runtime/debug` that the A8 journey launches.\\n- The agent-host guest that A1 and A2 load matches its SHA-256 in `INSTALL.json`.\\n- Each suite\\'s test executable, and each provider binary the C tests start,\\n  matches its SHA-256 in `INSTALL.json` and lies inside the repository. The\\n  install takes these from Cargo\\'s own artifact report, and refuses a suite with\\n  no test executable or more than one.\\n- The checkout is at the receipt\\'s commit and has no local changes.\\n- With signing on, both receipt files carry a valid signature by this Mac\\'s key.\\n\\n**How each step runs.** A1, A2 and the C steps run their recorded test\\nexecutable directly, never through Cargo, so nothing can be rebuilt between the\\ncheck and the run. Each suite\\'s files are checked again immediately before and\\nafter it runs. A suite whose files changed is refused before it runs.\\n\\nA8 runs through `cargo test` with the same environment as\\n`lab/agent-conformance/run.sh`. Its harness builds `elastos` with Cargo inside\\nthe test, and that build starts again under any other parent. On Linux, the\\nsame build under `cargo test`\\'s environment recompiled from `ring` up in 2m41s,\\nalthough the binary came out byte-identical. Cargo must report that it ran\\nexactly the recorded A8 test executable. Immediately before and after A8, the\\n`elastos` and `localhost-provider` that A8 launches must be byte-identical to the\\ninstalled copies; otherwise A8 is refused before it runs. The harness launches\\nits own build path, so the run proves identity with the installed copy rather\\nthan starting the installed path itself.\\n\\nAfter the steps, every `version identity:` line a journey printed must match the\\nreceipt. The A8 journey must print the Runtime, the provider and its\\n`host-key-read` probe. The run then checks everything above again.\\n\\n**What this does not prove.**\\n\\n- The signature proves integrity on this Mac, not publisher identity. Without\\n  `--sign`, nothing is signed, and the lock proves only that the bytes match the\\n  receipts.\\n- `VERSIONS.json` hashes no agent-host guest or test executable. Those hashes are\\n  in `INSTALL.json`, which the install writes after the conformance run.\\n- The A8 harness starts `elastos` from its own build folder. The run proves that\\n  file is byte-identical to the installed copy before and after A8, but it does\\n  not start the installed path.\\n- The C steps start each provider under its own profile with `sandbox-exec`.\\n  The Runtime does not generate or apply that profile yet (M1 check B3).\\n- Off macOS, every macOS step prints NOT RUN, and the demo never prints\\n  `A14: PASS`.\\n\\n**Checks for this folder.**\\n\\n```bash\\npython3 -B -I -m unittest discover -s lab/demo-a14/tests -v\\n```\\n\\nThe signing tests need `ssh-keygen`. `falsifiers.json` lists planted bugs,\\neach with the tests that must fail. The shared falsifier runner has no command\\nfor this folder, so apply each edit by hand, require its tests to fail, restore\\nthe bytes, and require them to pass. Use `-B`: a same-size edit restored in the\\nsame second can otherwise leave the planted bytecode in use. `falsify.sh`\\nplants a missing `ssh-keygen` against `preflight.sh`.\\n'\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (failures=1)"
+    },
+    "restored": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_runbook_step_5_opens_only_a_real_path (test_version_binding.RunbookMorningSteps.test_runbook_step_5_opens_only_a_real_path) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nOK"
+    },
+    "verdict": "CAUGHT",
+    "expect_fail": true
+  },
+  {
+    "id": "X-PASS-SUMMARY",
+    "claim": "PASS path must write summary.txt",
+    "kind": "extra",
+    "applied": "applied",
+    "tests": [
+      "test_matching_run_walks_every_step",
+      "test_run_states_what_the_signature_proves"
+    ],
+    "note": null,
+    "planted": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_matching_run_walks_every_step (test_version_binding.RunBinding.test_matching_run_walks_every_step) ... ok\ntest_run_states_what_the_signature_proves (test_version_binding.Signing.test_run_states_what_the_signature_proves) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.036s\n\nOK"
+    },
+    "restored": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_matching_run_walks_every_step (test_version_binding.RunBinding.test_matching_run_walks_every_step) ... ok\ntest_run_states_what_the_signature_proves (test_version_binding.Signing.test_run_states_what_the_signature_proves) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.040s\n\nOK"
+    },
+    "verdict": "SURVIVED",
+    "expect_fail": true
+  },
+  {
+    "id": "X-RELATIVE-TARGET",
+    "claim": "relative CARGO_TARGET_DIR that walks above the repo is refused",
+    "kind": "extra",
+    "applied": "applied",
+    "tests": [
+      "test_outside_cargo_target_dir_is_refused",
+      "test_relative_cargo_target_dir_is_allowed"
+    ],
+    "note": "strengthening the guard should keep current tests green; used only as a contrast",
+    "planted": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_outside_cargo_target_dir_is_refused (test_version_binding.MachineReady.test_outside_cargo_target_dir_is_refused) ... ok\ntest_relative_cargo_target_dir_is_allowed (test_version_binding.MachineReady.test_relative_cargo_target_dir_is_allowed) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.005s\n\nOK"
+    },
+    "restored": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_outside_cargo_target_dir_is_refused (test_version_binding.MachineReady.test_outside_cargo_target_dir_is_refused) ... ok\ntest_relative_cargo_target_dir_is_allowed (test_version_binding.MachineReady.test_relative_cargo_target_dir_is_allowed) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.005s\n\nOK"
+    },
+    "verdict": "STILL_GREEN",
+    "expect_fail": false
+  },
+  {
+    "id": "X-SPACE-CHECKOUT-ONLY",
+    "claim": "space in the checkout path is tested",
+    "kind": "extra",
+    "applied": "applied",
+    "tests": [
+      "test_space_in_home_is_refused"
+    ],
+    "note": null,
+    "planted": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_space_in_home_is_refused (test_version_binding.MachineReady.test_space_in_home_is_refused) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.002s\n\nOK"
+    },
+    "restored": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_space_in_home_is_refused (test_version_binding.MachineReady.test_space_in_home_is_refused) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.002s\n\nOK"
+    },
+    "verdict": "SURVIVED",
+    "expect_fail": true
+  },
+  {
+    "id": "X-QUARANTINE-PREFLIGHT",
+    "claim": "preflight quarantine check is pinned",
+    "kind": "extra",
+    "applied": "applied",
+    "tests": [
+      "test_runbook_stays_on_the_demo_branch",
+      "test_preflight_names_linux_on_this_machine"
+    ],
+    "note": null,
+    "planted": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_preflight_names_linux_on_this_machine (test_version_binding.PreflightScript.test_preflight_names_linux_on_this_machine) ... ok\ntest_runbook_stays_on_the_demo_branch (test_version_binding.RunbookMorningSteps.test_runbook_stays_on_the_demo_branch) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.061s\n\nOK"
+    },
+    "restored": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_preflight_names_linux_on_this_machine (test_version_binding.PreflightScript.test_preflight_names_linux_on_this_machine) ... ok\ntest_runbook_stays_on_the_demo_branch (test_version_binding.RunbookMorningSteps.test_runbook_stays_on_the_demo_branch) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.061s\n\nOK"
+    },
+    "verdict": "SURVIVED",
+    "expect_fail": true
+  },
+  {
+    "id": "X-ROSETTA-SYSCTL-FAIL-OPEN",
+    "claim": "sysctl failure is treated as not-Rosetta (returns 0)",
+    "kind": "extra",
+    "applied": "applied",
+    "tests": [
+      "test_rosetta_is_refused",
+      "test_ready_mac_is_allowed"
+    ],
+    "note": "tests inject translated=; they never call proc_translated()",
+    "planted": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_ready_mac_is_allowed (test_version_binding.MachineReady.test_ready_mac_is_allowed) ... ok\ntest_rosetta_is_refused (test_version_binding.MachineReady.test_rosetta_is_refused) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.005s\n\nOK"
+    },
+    "restored": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_ready_mac_is_allowed (test_version_binding.MachineReady.test_ready_mac_is_allowed) ... ok\ntest_rosetta_is_refused (test_version_binding.MachineReady.test_rosetta_is_refused) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.005s\n\nOK"
+    },
+    "verdict": "SURVIVED",
+    "expect_fail": true
+  },
+  {
+    "id": "X-INSTALL-NO-SUMMARY",
+    "claim": "install refusal writes summary.txt",
+    "kind": "extra",
+    "applied": "applied",
+    "tests": [
+      "test_install_refuses_before_fetch_when_the_machine_is_not_ready"
+    ],
+    "note": "adding a summary should not break the existing install test; used as contrast if it stays green",
+    "planted": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_install_refuses_before_fetch_when_the_machine_is_not_ready (test_version_binding.InstallBinding.test_install_refuses_before_fetch_when_the_machine_is_not_ready) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.002s\n\nOK"
+    },
+    "restored": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_install_refuses_before_fetch_when_the_machine_is_not_ready (test_version_binding.InstallBinding.test_install_refuses_before_fetch_when_the_machine_is_not_ready) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.002s\n\nOK"
+    },
+    "verdict": "SURVIVED",
+    "expect_fail": true
+  },
+  {
+    "id": "X-RUNBOOK-RESET",
+    "claim": "runbook must not reset an existing tree",
+    "kind": "extra",
+    "applied": "applied",
+    "tests": [
+      "test_runbook_stays_on_the_demo_branch"
+    ],
+    "note": null,
+    "planted": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_runbook_stays_on_the_demo_branch (test_version_binding.RunbookMorningSteps.test_runbook_stays_on_the_demo_branch) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nOK"
+    },
+    "restored": {
+      "exit": 0,
+      "failed": false,
+      "tail": "test_runbook_stays_on_the_demo_branch (test_version_binding.RunbookMorningSteps.test_runbook_stays_on_the_demo_branch) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nOK"
+    },
+    "verdict": "SURVIVED",
+    "expect_fail": true
+  }
+]

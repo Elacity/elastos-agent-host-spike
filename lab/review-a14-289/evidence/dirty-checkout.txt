@@ -1,0 +1,20 @@
+Dirty existing clone on spike/agent-host, then the exact step-1 commands from RUNBOOK.md.
+
+porcelain before:
+ M README.md
+?? a14-review-scratch.txt
+
+git fetch origin cursor/demo-a14-installed-demo-83e1  -> exit 0
+git checkout cursor/demo-a14-installed-demo-83e1
+  Switched to a new branch 'cursor/demo-a14-installed-demo-83e1'
+  M	README.md
+  branch set up to track origin/cursor/demo-a14-installed-demo-83e1
+  checkout_exit:0
+  HEAD: cursor/demo-a14-installed-demo-83e1 39b4b47e
+
+git pull --ff-only -> Already up to date, exit 0
+
+porcelain after:
+ M README.md
+?? a14-review-scratch.txt
+INSTALL_SH_PRESENT
