@@ -1,0 +1,22 @@
+[package]
+name = "fail-closed-linux"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "fail_closed_linux"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fcl-launch"
+path = "src/bin/fcl-launch.rs"
+
+[[bin]]
+name = "stand-in-provider"
+path = "src/bin/stand-in-provider.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "=0.2.189"
+
+[workspace]
