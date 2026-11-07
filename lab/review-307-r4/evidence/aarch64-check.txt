@@ -1,0 +1,8 @@
+HEAD=dc5fe676e8ad13e5882871a27b9f2dd166780bf5
+aarch64-unknown-linux-gnu
+x86_64-unknown-linux-gnu
+   Compiling libc v0.2.189
+   Compiling fail-closed-linux v0.0.0 (/tmp/review-c0-307-r4-src/lab/fail-closed-linux)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.40s
+aarch64 check exit=0
+AARCH64_DONE
