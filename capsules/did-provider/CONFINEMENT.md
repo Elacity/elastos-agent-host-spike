@@ -128,8 +128,8 @@ the test that shows the answer and that test's falsifier.
 
 M1 check B4 stays open: this table records the macOS half of its permission
 model. Linux stays designed, not enforced, and this section claims no current
-Linux behaviour. The design is `../wallet-provider/CONFINEMENT-LINUX.md`; its
-tests do not exist yet. A JSON parse failure answers `parse_error`; it is not
+Linux behaviour beyond the file row in "The Linux file row". The design is
+`../wallet-provider/CONFINEMENT-LINUX.md`. A JSON parse failure answers `parse_error`; it is not
 an operation and gets no row.
 
 | Operation | Inputs | Outputs | Right | Effect | macOS rule and test | Linux |
@@ -158,18 +158,26 @@ one on `linux` is a skip, and a present one on `macos` runs the test.
 The one caller, `sandbox_available`, fails the test on that
 error; `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` calls
 it with `macos` and a missing path and expects the failure.
-This contract has no Linux enforcement or tests yet. A provider-status claim
+The Runtime has no Linux enforcement of this contract. A provider-status claim
 needs host-specific test evidence and the Runtime acceptance step, so no status
 document records `did-provider` or `wallet-provider` as confined on Linux until
 that test exists (P10, P11). The status change lands when the Runtime side
 does.
 
 Future Linux enforcement tests for this lab contract are designed in
-`../wallet-provider/CONFINEMENT-LINUX.md`: it is the one Linux mapping, its
-tests do not exist yet, and it claims no current behaviour. The existing
-source-only check `both_file_profiles_bind_one_storage_parameter_contract`,
+`../wallet-provider/CONFINEMENT-LINUX.md`: it is the one Linux mapping. The
+existing source-only check `both_file_profiles_bind_one_storage_parameter_contract`,
 in `../wallet-provider/tests/confine.rs`, reads the three oracles and supplies
 contract evidence, not Linux execution evidence.
+
+### The Linux file row
+
+`tests/confine_linux.rs` runs the real provider under a Landlock ruleset that a
+lab launcher builds from `tests/fixtures/confine/declared-rights.json`. A rule
+with no Linux row, or a Landlock ABI below 3, refuses the launch. It is lab
+evidence for the file row only: no seccomp, namespaces, capability drop or
+network rule, and not the Runtime, so `linux` stays out of `DECLARED_CONFINED_OS`
+and every Linux cell above stays `designed, not enforced`.
 
 ## What the profile allows
 

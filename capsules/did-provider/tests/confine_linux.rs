@@ -103,28 +103,29 @@ fn ruleset(rows: &[Row]) -> OwnedFd {
 struct Provider(Child, ChildStdin, BufReader<ChildStdout>);
 
 impl Provider {
-    /// A failed install stops the spawn.
-    fn spawn(program: &Path, rows: &[Row]) -> std::io::Result<Self> {
+    /// `rows: None` is the plant that applies no ruleset. A failed install stops the spawn.
+    fn spawn(program: &Path, rows: Option<&[Row]>) -> std::io::Result<Self> {
         let mut command = Command::new(program);
         command.stdin(Stdio::piped()).stdout(Stdio::piped());
-        let fd = ruleset(rows);
-        // SAFETY: the closure makes only two async-signal-safe system calls.
-        unsafe {
-            command.pre_exec(move || {
-                if prctl(PR_SET_NO_NEW_PRIVS, 1u64, 0u64, 0u64, 0u64) != 0
-                    || syscall(SYS_RESTRICT, fd.as_raw_fd(), 0u32) != 0
-                {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
+        if let Some(fd) = rows.map(ruleset) {
+            // SAFETY: the closure makes only two async-signal-safe system calls.
+            unsafe {
+                command.pre_exec(move || {
+                    if prctl(PR_SET_NO_NEW_PRIVS, 1u64, 0u64, 0u64, 0u64) != 0
+                        || syscall(SYS_RESTRICT, fd.as_raw_fd(), 0u32) != 0
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
         }
         let mut child = command.spawn()?;
         let (stdin, stdout) = (child.stdin.take().unwrap(), child.stdout.take().unwrap());
         Ok(Self(child, stdin, BufReader::new(stdout)))
     }
 
-    fn started(base: &Path, rows: &[Row]) -> Self {
+    fn started(base: &Path, rows: Option<&[Row]>) -> Self {
         fs::create_dir_all(base.join("did")).expect("storage root");
         let mut provider = Self::spawn(Path::new(BINARY), rows).expect("the launch must succeed");
         let key = hex::encode([0x42u8; 32]);
@@ -145,6 +146,15 @@ impl Provider {
         assert_eq!(answer["status"], "ok", "{answer}");
         answer["data"].clone()
     }
+
+    /// Links the granted nickname file to `target`, then saves through the link.
+    fn save_through_link(&mut self, base: &Path, target: &Path) -> Value {
+        self.ok(json!({ "op": "set_nickname", "nickname": "Allowed" }));
+        let granted = base.join("did/nickname.enc");
+        fs::remove_file(&granted).expect("granted file");
+        std::os::unix::fs::symlink(target, &granted).expect("link");
+        self.send(json!({ "op": "set_nickname", "nickname": "Outside" }))
+    }
 }
 
 impl Drop for Provider {
@@ -154,12 +164,22 @@ impl Drop for Provider {
     }
 }
 
+fn base_and_outside() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let base = fs::canonicalize(fixture.path()).expect("base").join("base");
+    let (outside, sibling) = (fixture.path().join("outside"), base.join("sibling"));
+    for dir in [&outside, &sibling] {
+        fs::create_dir_all(dir).expect("target directory");
+    }
+    let outside = fs::canonicalize(outside).expect("outside");
+    (fixture, base, outside.join("n.enc"), sibling.join("n.enc"))
+}
+
 #[test]
 fn linux_set_nickname_is_served_and_kept_under_landlock() {
-    let fixture = tempfile::tempdir().expect("fixture");
-    let base = fs::canonicalize(fixture.path()).expect("base");
+    let (_fixture, base, _, _) = base_and_outside();
     let rows = rows_for(&base);
-    let mut provider = Provider::started(&base, &rows);
+    let mut provider = Provider::started(&base, Some(&rows));
     let did = provider.ok(json!({ "op": "get_did" }));
     assert!(
         did["did"].as_str().unwrap().starts_with("did:key:"),
@@ -168,10 +188,73 @@ fn linux_set_nickname_is_served_and_kept_under_landlock() {
     provider.ok(json!({ "op": "set_nickname", "nickname": "Allowed" }));
     assert!(base.join("did/nickname.enc").is_file());
     // A second launch can only answer by reading the file back under the ruleset.
-    let mut again = Provider::started(&base, &rows);
+    let mut again = Provider::started(&base, Some(&rows));
     assert_eq!(
         again.ok(json!({ "op": "get_nickname" }))["nickname"],
         "Allowed"
+    );
+}
+
+#[test]
+fn linux_write_outside_the_storage_root_is_refused() {
+    let (_fixture, base, outside, sibling) = base_and_outside();
+    let mut provider = Provider::started(&base, Some(&rows_for(&base)));
+    for target in [outside, sibling] {
+        let denied = provider.save_through_link(&base, &target);
+        assert_eq!(denied["code"], "storage_error", "{denied}");
+        let message = denied["message"].as_str().expect("a reason");
+        assert!(
+            message.starts_with("did-provider: failed to save nickname:"),
+            "{denied}"
+        );
+        assert!(
+            message.contains("denied"),
+            "not a Landlock refusal: {denied}"
+        );
+        assert!(!target.exists(), "{} must not exist", target.display());
+        fs::remove_file(base.join("did/nickname.enc")).expect("remove the link");
+        provider.ok(json!({ "op": "set_nickname", "nickname": "Recovered" }));
+    }
+}
+
+/// Plant: with no ruleset the same write lands, so the refusal above is Landlock's.
+#[test]
+fn plant_no_ruleset_lets_the_outside_write_land() {
+    let (_fixture, base, outside, _) = base_and_outside();
+    let mut provider = Provider::started(&base, None);
+    let answer = provider.save_through_link(&base, &outside);
+    assert_eq!(answer["status"], "ok", "{answer}");
+    assert!(outside.exists());
+}
+
+/// Plant: a grant on the parent lets the sibling write land, so the row's scope matters.
+#[test]
+fn plant_grant_on_the_parent_lets_the_sibling_write_land() {
+    let (_fixture, base, _, sibling) = base_and_outside();
+    let mut rows = rows_for(&base);
+    rows.iter_mut()
+        .find(|row| row.1 == STORE)
+        .expect("storage row")
+        .0 = base.clone();
+    let mut provider = Provider::started(&base, Some(&rows));
+    let answer = provider.save_through_link(&base, &sibling);
+    assert_eq!(answer["status"], "ok", "{answer}");
+    assert!(sibling.exists());
+}
+
+#[test]
+fn linux_copy_of_the_binary_under_the_root_cannot_start() {
+    let (_fixture, base, _, _) = base_and_outside();
+    fs::create_dir_all(base.join("did")).expect("storage root");
+    let copy = base.join("did/copy");
+    fs::copy(BINARY, &copy).expect("copy");
+    let refused = Provider::spawn(&copy, Some(&rows_for(&base)))
+        .err()
+        .expect("a refusal");
+    assert_eq!(
+        refused.kind(),
+        std::io::ErrorKind::PermissionDenied,
+        "{refused}"
     );
 }
 
