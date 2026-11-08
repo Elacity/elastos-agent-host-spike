@@ -67,6 +67,15 @@ carries:
 | `(allow file-read* (literal "/"))` | the file-read row |
 | `(allow sysctl-read)` | `uname`, `sysinfo` |
 
+On x86-64 the storage row also admits `mkdir` and `unlink`: the older forms of
+`mkdirat` and `unlinkat` that glibc calls there. aarch64 has neither, so its rows
+are as listed. A filter that logged instead of refusing named them on GitHub's
+x86-64 runner (run 42447514431), and each was then dropped alone under the real
+filter (run 42454795461): without `mkdir` did, wallet and model fail to create
+their storage, and without `unlink` wallet's init fails. The same run dropped
+`access`, which glibc also calls there, and every journey still passed, so it is
+not admitted.
+
 The head forms (`(version 1)`, `(deny default)`) and the deny forms grant
 nothing, so they take no row and add no syscall. An allow form with no row is a
 refusal that names the provider and the form and builds no filter, symmetrical
@@ -100,6 +109,14 @@ wallet's preserved policy. Both providers use the same launch table:
 | `mprotect` | `mprotect(0xf2640329f000, 65536, PROT_NONE)` in the loader |
 | `ppoll` | `ppoll([{fd=0, events=0}, {fd=1, events=0}, {fd=2, events=0}], 3, {tv_sec=0, tv_nsec=0}, NULL, 0)` while the provider waits |
 | `rt_sigaction` | `rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[PIPE], sa_flags=SA_RESTART}, 0xffffea09ff80, 8)` in the loader |
+| `arch_prctl` (x86-64 only) | `arch_prctl(ARCH_SET_FS, ...)` as the loader set up thread-local storage; glibc then exited 127, "Cannot allocate TLS block" |
+| `poll` (x86-64 only) | `poll([{fd=0}, {fd=1}, {fd=2}], 3, 0)` in the standard-descriptor check, where aarch64 calls `ppoll`; the provider then aborted |
+
+The drop-one measurement above is the aarch64 host's and covers the first seven
+entries. The two x86-64 entries were named by the x86-64 journeys failing
+without them on GitHub's runner (runs 42446019401 and 42447112526), then each
+was dropped alone from the whole list there and every journey failed (run
+42454795461). aarch64 has neither call, so its launch set is the seven.
 
 Four calls are in no row and in no launch entry, so the default decision is the
 only answer they receive: `ptrace`, `mount`, `bpf` and `keyctl`. Eight socket

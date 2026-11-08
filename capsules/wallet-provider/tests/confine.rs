@@ -6482,7 +6482,6 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
     (
         SHARED_RULES[1],
         &[
-            "access",
             "faccessat",
             "fstat",
             "getdents64",
@@ -6500,7 +6499,6 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
     (
         SHARED_RULES[2],
         &[
-            "access",
             "faccessat",
             "fchmod",
             "fdatasync",
@@ -6531,7 +6529,6 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
     (
         STARTUP_RULES[0],
         &[
-            "access",
             "faccessat",
             "fstat",
             "getdents64",
@@ -6566,8 +6563,6 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("execve", Some(59), Some(221)),
     ("execveat", Some(322), Some(281)),
     ("exit_group", Some(231), Some(94)),
-    // x86-64 only, the older form of faccessat that glibc calls there.
-    ("access", Some(21), None),
     ("faccessat", Some(269), Some(48)),
     ("fchmod", Some(91), Some(52)),
     ("fdatasync", Some(75), Some(83)),
@@ -6625,6 +6620,10 @@ const SECCOMP_AUDIT_ARCH: u32 = 0xc000_003e;
 const SECCOMP_AUDIT_ARCH: u32 = 0xc000_00b7;
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 const SECCOMP_AUDIT_ARCH: u32 = 0;
+
+/// The calls the table carries for x86-64 alone: older forms of admitted
+/// calls, or calls aarch64 does not have.
+const X86_64_ONLY_SYSCALLS: &[&str] = &["arch_prctl", "mkdir", "poll", "unlink"];
 
 /// The first number of the x32 call space on x86-64.
 const SECCOMP_X32_FIRST: u32 = 0x4000_0000;
@@ -7211,8 +7210,8 @@ const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
 /// 42447112526): the interpreter `/lib64/ld-linux-x86-64.so.2`, a link to
 /// `/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2` that the `O_PATH` open follows,
 /// then `libc.so.6` and `libgcc_s.so.1`. Neither binary maps `libm.so.6` there,
-/// so it takes no rule. The drop-one measurement the aarch64 entries carry has
-/// not been made on x86-64; each note says what the entry is for.
+/// so it takes no rule. Each entry was then dropped alone on that runner (run
+/// 42454795461), and every provider's file-row start failed without it.
 #[cfg(target_arch = "x86_64")]
 const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
     (
@@ -7331,9 +7330,9 @@ fn landlock_path_rules(
 /// token through `parameter_tokens`, the same reader the contract check uses,
 /// so the token has one spelling, and it answers the path from the one
 /// bindings list.
-fn parameter_path_for_form<'a>(
+fn parameter_path_for_form(
     form: &str,
-    bindings: &'a [(&'static str, PathBuf)],
+    bindings: &[(&'static str, PathBuf)],
 ) -> Option<(&'static str, PathBuf)> {
     let Ok(tokens) = parameter_tokens(form) else {
         return None;
@@ -7771,7 +7770,8 @@ fn landlock_ruleset_refuses_an_abi_that_cannot_express_a_row() {
             "an ABI that cannot carry the storage row must be refused in these words"
         );
     }
-    for (too_low, needed) in [(4, 5)] {
+    {
+        let (too_low, needed) = (4, 5);
         let refusal = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, too_low, &[])
             .expect_err("an ABI below the default denial's rights must be refused");
         assert_eq!(
@@ -8138,6 +8138,12 @@ impl std::fmt::Display for SeccompLaunchWriteFailure {
 /// the proof ran on, and the comment after each name is that call, quoted from
 /// the run. `mount`, `ptrace`, `bpf` and `keyctl` are in no entry here and in no
 /// table row, so the default decision is the only answer they receive.
+///
+/// That drop-one method is the aarch64 host's and covers every entry but two.
+/// `arch_prctl` and `poll` exist only on x86-64: each was named by the x86-64
+/// journey failing without it on GitHub's runner (runs 42446019401 and
+/// 42447112526), and then dropped alone from the whole list there, which failed
+/// every journey (run 42454795461).
 ///
 /// The table is data and makes no kernel call, so it is compiled on every OS
 /// where the list's launch set is compared; the install that reads it stays
@@ -8935,6 +8941,34 @@ fn seccomp_program_denies_by_default_and_lists_no_undeclared_call() {
             "{name}'s row must be the number libc gives this target"
         );
     }
+    // The rows only x86-64 has: each x86-64 cell must hold a number and each
+    // aarch64 cell none, checked on every OS, so an accidental `None` cannot
+    // drop a row from both the builder and its checks. On x86-64 Linux each
+    // number must also be the one libc gives.
+    for name in X86_64_ONLY_SYSCALLS {
+        assert!(
+            seccomp_syscall_number(name, 0xc000_003e).is_some(),
+            "{name}'s x86-64 cell must hold its number"
+        );
+        assert_eq!(
+            seccomp_syscall_number(name, 0xc000_00b7),
+            None,
+            "{name} exists only on x86-64, so its aarch64 cell must be empty"
+        );
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    for (name, libc_number) in [
+        ("arch_prctl", libc::SYS_arch_prctl),
+        ("poll", libc::SYS_poll),
+        ("mkdir", libc::SYS_mkdir),
+        ("unlink", libc::SYS_unlink),
+    ] {
+        assert_eq!(
+            seccomp_syscall_number(name, SECCOMP_AUDIT_ARCH),
+            Some(libc_number as u32),
+            "{name}'s row must be the number libc gives x86-64"
+        );
+    }
 
     // The audit-arch check reads `seccomp_data.arch`, jumps to its admit arm
     // only for this target's architecture, and falls through to the marker.
@@ -9642,7 +9676,6 @@ fn linux_seccomp_launcher_runs_the_requested_program() {
             ),
             "the refusal must name the provider and say the filter is a linux policy"
         );
-        return;
     }
 
     #[cfg(target_os = "linux")]
@@ -10571,7 +10604,7 @@ fn seccomp_denied_call_probe_with_pipe(
     let text = String::from_utf8_lossy(&bytes).into_owned();
 
     match exit {
-        ProbeExit::Code(code) if code == 0 => {}
+        ProbeExit::Code(0) => {}
         ProbeExit::Code(_) if bytes.starts_with(SECCOMP_PROBE_REFUSED.as_bytes()) => {
             return Err(
                 match decode_seccomp_launch_record(&bytes[SECCOMP_PROBE_REFUSED.len()..]) {
@@ -11304,7 +11337,7 @@ fn linux_kernel_release() -> String {
             .release
             .iter()
             .take_while(|byte| **byte != 0)
-            .map(|byte| *byte as u8)
+            .map(|byte| byte.to_ne_bytes()[0])
             .collect();
         String::from_utf8_lossy(&release).into_owned()
     }
@@ -11919,7 +11952,7 @@ fn landlock_file_probe(
     }
     let text = String::from_utf8_lossy(&bytes).into_owned();
     match exit {
-        ProbeExit::Code(code) if code == 0 => {}
+        ProbeExit::Code(0) => {}
         ProbeExit::Code(_) if bytes.starts_with(LANDLOCK_PROBE_REFUSED) => {
             return Err(
                 match decode_seccomp_launch_record(&bytes[LANDLOCK_PROBE_REFUSED.len()..]) {
@@ -12156,6 +12189,7 @@ fn linux_landlock_requires_no_new_privs() {
 /// outside `Init`, and a `STORAGE_PARENT` row that grants a read fails the
 /// planted read beneath the parent.
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
 fn landlock_file_row_journey(
     name: &str,
     binary: &Path,
@@ -12695,13 +12729,21 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
     // aarch64 run also refuses and the provider tolerates.
     // Then the providers started and their storage calls were refused. A run
     // whose filter logged instead of refusing (measure branch only, run
-    // 42447514431) named the x86-64 calls the list lacked: mkdir (83), unlink
-    // (87) and access (21), the older forms of mkdirat, unlinkat and faccessat
-    // that glibc calls on x86-64 and that aarch64 does not have. Each joins the
-    // rows that hold its newer form. The other logged calls (brk, fcntl,
-    // getpid, munmap, prlimit64, rseq, sched_getaffinity, set_robust_list,
+    // 42447514431) named mkdir (83), unlink (87) and access (21), the older
+    // forms of mkdirat, unlinkat and faccessat that glibc calls on x86-64 and
+    // that aarch64 does not have. The other logged calls (brk, fcntl, getpid,
+    // munmap, prlimit64, rseq, sched_getaffinity, set_robust_list,
     // set_tid_address, sigaltstack) exist on both and are refused on aarch64
     // too, so they stay out.
+    //
+    // Each x86-64 row was then dropped alone under the real filter (measure
+    // branch, run 42454795461). Without arch_prctl every journey failed "Cannot
+    // allocate TLS block"; without poll every journey took SIGSEGV; without
+    // mkdir did, wallet and model failed to create their storage; without
+    // unlink wallet's init failed "Permission denied"; without the interpreter,
+    // libc.so.6 or libgcc_s.so.1 every file-row start failed. Without access
+    // every journey still passed: the loader's refused access check is
+    // tolerated, as on aarch64, so access is not admitted.
 
     let allow = seccomp_probe_list(name).unwrap_or_else(|err| panic!("{err}"));
     assert_eq!(
@@ -19491,9 +19533,9 @@ fn linux_contract_table_check_refuses_each_bad_table() {
     );
 
     let mut cited = rows.clone();
-    cited[0] = format!(
+    cited[0] = String::from(
         "| `(version 1)` | a primitive | Exact: the generator emits one version | \
-         `linux_a_test_that_nothing_holds` |"
+         `linux_a_test_that_nothing_holds` |",
     );
     assert_eq!(
         check(&tables.table(&cited, None, None)),
@@ -19535,9 +19577,9 @@ fn linux_contract_table_check_refuses_each_bad_table() {
     );
     assert_eq!(
         count(&format!(
-            "# fixture\n\n{LINUX_CONTRACT_HEADING}\n\n{}| {} |\n{}\n",
-            format!("| {} |\n", LINUX_CONTRACT_HEADER.join(" | ")),
-            vec!["---"; LINUX_CONTRACT_CELLS].join(" | "),
+            "# fixture\n\n{LINUX_CONTRACT_HEADING}\n\n| {} |\n| {} |\n{}\n",
+            LINUX_CONTRACT_HEADER.join(" | "),
+            ["---"; LINUX_CONTRACT_CELLS].join(" | "),
             rows.join("\n")
         )),
         vec![format!(
@@ -19634,7 +19676,7 @@ impl LinuxContractTables {
         fixture.push_str("\n\n| ");
         fixture.push_str(&LINUX_CONTRACT_HEADER.join(" | "));
         fixture.push_str(" |\n| ");
-        fixture.push_str(&vec!["---"; LINUX_CONTRACT_CELLS].join(" | "));
+        fixture.push_str(&["---"; LINUX_CONTRACT_CELLS].join(" | "));
         fixture.push_str(" |\n");
         for row in rows {
             fixture.push_str(row);
