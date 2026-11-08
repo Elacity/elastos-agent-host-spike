@@ -4,9 +4,18 @@
 Test lines: files under a tests/ directory or named tests.rs or *_test.rs. Comment lines start
 with // or /*, or lie inside a block comment. Blank lines are blank. Code is everything else,
 including a line that begins inside a multi-line string literal.
-"""
-import re
 
+  core-size.py          a short table
+  core-size.py --json   {"total", "tests", "comments", "blank", "code"}
+"""
+import argparse
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
 CRATE = "elastos/crates/elastos-runtime"
 CHAR = re.compile(r"'(\\(u\{[0-9a-fA-F]*\}|x..|.)|[^\\\n])'")
 LIFETIME, WORD, RAW = re.compile(r"'\w*"), re.compile(r"\w+"), re.compile(r'#*"')
@@ -72,3 +81,57 @@ def lex(text):
                 tokens.append((line, "punct", c))
             i += 1
     return tokens, starts
+
+
+def count(files):
+    """files: (path inside the crate, text) pairs. Returns the line totals."""
+    totals = dict.fromkeys(("total", "tests", "comments", "blank", "code"), 0)
+    for path, text in files:
+        lines = text.split("\n")
+        if lines[-1] == "":
+            lines.pop()
+        totals["total"] += len(lines)
+        if is_test_file(path):
+            totals["tests"] += len(lines)
+            continue
+        tokens, starts = lex(text)
+        first = {}
+        for line, kind, value in tokens:
+            first.setdefault(line, kind)
+        for n, body in enumerate(lines):
+            kind = ("comments" if starts[n] == "comment" else
+                    "code" if starts[n] == "string" else "blank" if not body.strip() else
+                    "comments" if first.get(n) == "comment" else "code")
+            totals[kind] += 1
+    return totals
+
+
+def git(root, *args):
+    return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True,
+                          encoding="utf-8", errors="replace").stdout
+
+
+def worktree_files(root):
+    listed = git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", CRATE)
+    for path in sorted(set(filter(None, listed.split("\0")))):
+        if path.endswith(".rs") and (root / path).is_file():
+            yield path[len(CRATE) + 1:], (root / path).read_text(encoding="utf-8", errors="replace")
+
+
+def table(totals):
+    rows = "".join(f"| {key} | {value} |\n" for key, value in totals.items())
+    return f"| {CRATE} | lines |\n|---|---:|\n{rows}"
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--json", action="store_true", help="print the totals as JSON")
+    parser.add_argument("--root", type=Path, default=ROOT, help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    totals = count(worktree_files(args.root))
+    print(json.dumps(totals) if args.json else table(totals), end="\n" if args.json else "")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
