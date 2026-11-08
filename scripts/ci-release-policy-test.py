@@ -4,6 +4,7 @@ import base64
 import os
 import hashlib
 import io
+import itertools
 import json
 from pathlib import Path
 import re
@@ -457,43 +458,58 @@ def validate_cache_credential_scope(source, action):
     return scripts.pop()
 
 
+def save_sites(source):
+    """Every step that can write the Actions cache, with the guard that decides it."""
+    workflow_jobs = jobs(source)
+    sites = []
+    for job in workflow_jobs:
+        for step in steps(job, workflow_jobs):
+            if "actions/cache@" in step:
+                raise AssertionError(f"{job} uses actions/cache, which saves on every run")
+            if "actions/cache/save@" in step or "Swatinem/rust-cache@" in step:
+                guard = field(step, "save-if" if "Swatinem/rust-cache@" in step else "if")
+                sites.append((job, guard.removeprefix("${{").removesuffix("}}").strip()))
+    if not sites:
+        raise AssertionError("missing cache writers")
+    return sites
+
+
+def adversarial_contexts(guard, context):
+    """The github context, with every value a step or input could set given each value."""
+    names = sorted(set(re.findall(r"(?:env|steps|needs|inputs|matrix)\.[\w.-]+", guard)))
+    for values in itertools.product(("true", "false", ""), repeat=len(names)):
+        yield {**context, **dict(zip(names, values))}
+
+
 def validate_cache_writers(source):
-    """Only CACHE_WRITERS runs write any shared cache; every other run restores only."""
+    """Only CACHE_WRITERS runs write any shared cache, decided by github context alone."""
     if re.search(r"type=gha|cache-to", source):
         raise AssertionError("BuildKit layers bypass pinned-hash checks; no remote layer cache")
-    workflow_jobs = jobs(source)
-    writers = [(job, step) for job in workflow_jobs for step in steps(job, workflow_jobs)
-               if "actions/cache/save@" in step or "Swatinem/rust-cache@" in step]
-    if not writers:
-        raise AssertionError("missing cache writers")
-    for event, ref, ref_type, override, _ in [*CASES, *NON_WRITER_CASES]:
-        context = event_context(
-            event, ref, ref_type, override,
-            **{"env.CI_USE_CACHE": "true", "steps.should-run.outputs.run": "true",
-               "steps.engine-cache.outputs.cache-hit": "false", "steps.kubo-cache.outputs.cache-hit": "false",
-               "steps.previous-release-cache.outputs.cache-hit": "false",
-               "steps.apt-prerequisites.outputs.changed": "true"})
-        trusted = (event, ref) in CACHE_WRITERS
-        for job, step in writers:
-            guard = field(step, "save-if" if "Swatinem/rust-cache@" in step else "if")
-            if bool(evaluate(guard, context)) != trusted:
-                raise AssertionError(f"{job} {'saves' if not trusted else 'never saves'} a cache on {event} {ref}")
+    for job, guard in save_sites(source):
+        # A step can set env through GITHUB_ENV; only github context is fixed for the run.
+        if re.search(r"\b(?:env|inputs|vars|needs|matrix)\.", guard):
+            raise AssertionError(f"save guard in {job} reads context a step or input can change: {guard}")
+        # Step outputs may only narrow the writer condition, never widen it.
+        if guard != TRUSTED_WRITER and not (guard.startswith(f"({TRUSTED_WRITER}) && ")
+                                            and "||" not in guard[len(TRUSTED_WRITER) + 2:]):
+            raise AssertionError(f"save guard in {job} is not the trusted writer condition: {guard}")
+        for event, ref, ref_type, override, _ in [*CASES, *NON_WRITER_CASES]:
+            context = event_context(event, ref, ref_type, override)
+            if (event, ref) not in CACHE_WRITERS:
+                if any(evaluate(guard, values) for values in adversarial_contexts(guard, context)):
+                    raise AssertionError(f"{job} saves a cache on {event} {ref}")
+            elif not evaluate(guard, {**context, **NO_CACHE_HIT}):
+                raise AssertionError(f"{job} never saves on {event} {ref}")
 
 
 def validate_pull_requests_restore_only(source):
-    """A pull_request run, from a branch, a lane or a fork, never saves a cache, even on a miss."""
-    workflow_jobs = jobs(source)
+    """A pull_request run, from a branch, a lane or a fork, never saves a cache, whatever
+    its own steps write to GITHUB_ENV or their outputs."""
     for head_ref in ("feature", "spark/lane", "batch/20261108"):
-        context = event_context("pull_request", "refs/pull/7/merge", "branch", "", head_ref,
-                                **{"env.CI_USE_CACHE": "true", "steps.should-run.outputs.run": "true", **NO_CACHE_HIT})
-        for job in workflow_jobs:
-            for step in steps(job, workflow_jobs):
-                if "actions/cache@" in step:
-                    raise AssertionError(f"a pull_request run saves a cache: {job} uses actions/cache")
-                if "actions/cache/save@" in step or "Swatinem/rust-cache@" in step:
-                    guard = field(step, "save-if" if "Swatinem/rust-cache@" in step else "if")
-                    if evaluate(guard, context):
-                        raise AssertionError(f"a pull_request run saves a cache: {job} ({head_ref})")
+        context = event_context("pull_request", "refs/pull/7/merge", "branch", "", head_ref)
+        for job, guard in save_sites(source):
+            if any(evaluate(guard, values) for values in adversarial_contexts(guard, context)):
+                raise AssertionError(f"a pull_request run saves a cache: {job} ({head_ref})")
 
 
 def validate_rust_cache_keys(source):
@@ -1616,10 +1632,13 @@ class ReleasePolicyTests(unittest.TestCase):
 
     def test_pull_requests_never_save_shared_caches(self):
         validate_pull_requests_restore_only(SOURCE)
+        writer = "save-if: ${{ " + TRUSTED_WRITER + " }}"
         mutations = {
             "pull requests join the writers": SOURCE.replace(
                 "save-if: ${{ ", "save-if: ${{ github.event_name == 'pull_request' || ", 1),
-            "a Rust cache saves on PRs": SOURCE.replace("save-if: ${{ " + TRUSTED_WRITER + " }}", "save-if: true", 1),
+            "a Rust cache saves on PRs": SOURCE.replace(writer, "save-if: true", 1),
+            "a save reads env, which a PR step can set": SOURCE.replace(
+                writer, "save-if: ${{ env.CI_SAVE_CACHE == 'true' }}", 1),
             "an engine save drops the writer guard": SOURCE.replace(
                 f"if: ({TRUSTED_WRITER}) && steps.engine-cache", "if: steps.engine-cache", 1),
         }
@@ -1764,6 +1783,11 @@ class ReleasePolicyTests(unittest.TestCase):
             "a Rust cache saves on PRs": SOURCE.replace("save-if: ${{ " + TRUSTED_WRITER + " }}", "save-if: true", 1),
             "a save ignores the writer guard": SOURCE.replace(
                 f"if: ({TRUSTED_WRITER}) && steps.kubo-cache", "if: steps.kubo-cache", 1),
+            "a save reads env": SOURCE.replace(
+                f"if: ({TRUSTED_WRITER}) && steps.kubo-cache", "if: env.CI_SAVE_CACHE == 'true' && steps.kubo-cache", 1),
+            "a step output widens a save": SOURCE.replace(
+                f"if: ({TRUSTED_WRITER}) && steps.kubo-cache.outputs.cache-hit != 'true'",
+                f"if: ({TRUSTED_WRITER}) || steps.kubo-cache.outputs.cache-hit != 'true'", 1),
             "BuildKit restores remote layers": SOURCE.replace(
                 "            --load \\\n", "            --cache-from type=gha \\\n            --load \\\n", 1),
         }
