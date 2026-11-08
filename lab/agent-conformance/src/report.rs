@@ -460,6 +460,46 @@ impl GitIdentity {
     }
 }
 
+/// One review of the tested candidate. It binds only when it passed and names
+/// the exact clean commit this run read; any other review leaves A14 unbound.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Review {
+    pub reviewer: String,
+    pub verdict: String,
+    pub commit: String,
+}
+
+/// Every reason the reviews do not bind to `git`; empty means bound.
+pub fn review_failures(reviews: Option<&[Review]>, git: Option<&GitIdentity>) -> Vec<String> {
+    let mut failures = Vec::new();
+    let reviews = match reviews {
+        Some(reviews) if !reviews.is_empty() => reviews,
+        _ => return vec!["missing review".into()],
+    };
+    match git {
+        None => failures.push("reviews cannot bind: no Git identity".into()),
+        Some(git) if git.dirty => failures.push("reviews cannot bind: dirty tree".into()),
+        Some(_) => {}
+    }
+    for review in reviews {
+        let reviewer = &review.reviewer;
+        if !test_name(reviewer) {
+            failures.push("malformed review: reviewer".into());
+            continue;
+        }
+        if review.verdict != "pass" {
+            failures.push(format!("review did not pass: {reviewer}"));
+        }
+        if git.is_some_and(|git| git.commit != review.commit) {
+            failures.push(format!("review names another commit: {reviewer}"));
+        }
+    }
+    failures.sort();
+    failures.dedup();
+    failures
+}
+
 /// A missing, repeated or unlisted result fails closed. Cargo failure is also
 /// visible even if compilation or a test binary failed before reporting a row.
 pub fn table(listed: &str, output: &str, cargo_ok: bool, gaps: Option<&str>) -> (String, bool) {

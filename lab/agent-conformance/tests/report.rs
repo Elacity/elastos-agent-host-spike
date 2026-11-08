@@ -1164,3 +1164,51 @@ fn session_binding_receipt_still_requires_a_launched_probe() {
         "a session-binding row does not waive the launched-probe receipt"
     );
 }
+
+fn review(reviewer: &str, verdict: &str, commit: &str) -> agent_conformance::report::Review {
+    agent_conformance::report::Review {
+        reviewer: reviewer.into(),
+        verdict: verdict.into(),
+        commit: commit.into(),
+    }
+}
+
+#[test]
+fn review_failures_name_each_unbound_review() {
+    use agent_conformance::report::review_failures;
+    let (_, git) = synthetic(1, false);
+    let other = format!("{:040x}", 2);
+    let fails = |reviews: Option<&[_]>, git: &GitIdentity| review_failures(reviews, Some(git));
+    assert_eq!(fails(None, &git), ["missing review"]);
+    assert_eq!(fails(Some(&[]), &git), ["missing review"]);
+    let wrong = [
+        review("codex", "pass", &git.commit),
+        review("claude", "pass", &other),
+    ];
+    assert_eq!(
+        fails(Some(&wrong), &git),
+        ["review names another commit: claude"]
+    );
+    let rejected = [review("codex", "reject", &git.commit)];
+    assert_eq!(fails(Some(&rejected), &git), ["review did not pass: codex"]);
+    let passed = [review("codex", "pass", &git.commit)];
+    let dirty = GitIdentity {
+        dirty: true,
+        ..git.clone()
+    };
+    assert_eq!(
+        fails(Some(&passed), &dirty),
+        ["reviews cannot bind: dirty tree"]
+    );
+    assert_eq!(
+        review_failures(Some(&passed), None),
+        ["reviews cannot bind: no Git identity"]
+    );
+    let unnamed = [review("", "pass", &git.commit)];
+    assert_eq!(fails(Some(&unnamed), &git), ["malformed review: reviewer"]);
+    let both = [
+        review("codex", "pass", &git.commit),
+        review("claude", "pass", &git.commit),
+    ];
+    assert!(fails(Some(&both), &git).is_empty());
+}
