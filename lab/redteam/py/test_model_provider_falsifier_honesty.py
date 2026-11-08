@@ -10,7 +10,8 @@ it. The required ids are the provider ids at the pinned base, so MP02, MP05,
 and MP11 stay required and a deleted non-score id is reported too. The selftest and PV
 entries in the same file stay out of the checks; ``load_json`` still has
 to accept the whole file. The ``about`` text is the runner's path rule
-for every list, and this probe leaves it alone.
+for every list, and this probe leaves it alone. The deleted-id plant is a
+temporary repository, so this probe writes no checkout file.
 
 One snapshot. ``Snapshot.read`` is paths relative to ``examples/agent-host``,
 which is ``Mutation.__enter__``'s base, and it collapses
@@ -31,9 +32,11 @@ import copy
 import functools
 import json
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import falsifier_data
 from test_agent_host_falsifier_honesty import (
@@ -106,6 +109,29 @@ def base_required():
         if ident not in required:
             required.append(ident)
     return required
+
+
+def deleted_base_id_fixture(root, after_read, document=None):
+    """The model file at ``root`` with MP08 deleted, read once by a snapshot.
+
+    ``root`` is a temporary repository, so the checkout is read once for the
+    document and never written. ``after_read`` runs after the one snapshot
+    read, when another writer's edit can arrive. This fixture restores no
+    bytes, so that edit stays. Returns the provider entries and the path.
+    """
+    if document is None:
+        snapshot = Snapshot()
+        document = load_provider_document(
+            snapshot.read_relative(snapshot.root, MODEL_FILE))
+    kept = [entry for entry in document["falsifiers"] if entry.get("id") != "MP08"]
+    path = Path(root) / MODEL_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({**document, "falsifiers": kept}), encoding="utf-8")
+    fixture = falsifier_data.Snapshot(root)
+    entries = provider_entries(load_provider_document(
+        fixture.read_relative(fixture.root, MODEL_FILE)))
+    after_read(path)
+    return entries, path
 
 
 def row_problems(entries, required):
@@ -412,28 +438,56 @@ class ModelProviderFalsifierHonesty(unittest.TestCase):
 
         The pinned base list does not follow the live file. Rebuilding it
         from the provider entries that read returns would report no problem.
+        The fixture is a temporary repository; the checkout is only read.
         """
-        path = REPO / MODEL_FILE
-        original = path.read_bytes()
-        document = load_provider_document(original)
+        document = load_provider_document((REPO / MODEL_FILE).read_bytes())
         listed = document["falsifiers"]
         self.assertEqual(len([entry for entry in listed if entry.get("id") == "MP08"]), 1)
-        kept = [entry for entry in listed if entry.get("id") != "MP08"]
-        self.assertEqual(len(kept), len(listed) - 1)
-
-        provider_base.cache_clear()
-        try:
-            path.write_text(
-                json.dumps({**document, "falsifiers": kept}), encoding="utf-8")
-            _snapshot, _data, entries = provider_base()
+        self.assertEqual(
+            len([entry for entry in listed if entry.get("id") != "MP08"]),
+            len(listed) - 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            entries, _path = deleted_base_id_fixture(
+                tmp, lambda _path: None, document=document)
             self.assertNotIn("MP08", [entry["id"] for entry in entries])
             self.assertEqual(row_problems(entries, base_required()), [Problem(
                 "id", "MP08", MODEL_FILE,
                 "MP08 is absent from the provider entries")])
-        finally:
-            path.write_bytes(original)
-            provider_base.cache_clear()
-        self.assertEqual(path.read_bytes(), original)
+
+    def test_fixture_keeps_a_concurrent_edit(self):
+        """A trailing newline written after the snapshot read survives.
+
+        The reviewer's falsifier appends a valid trailing newline to the
+        provider file after the snapshot read; restoring bytes captured
+        before it discards the edit. The fixture is a temporary repository,
+        and the probe writes nothing in the checkout.
+        """
+        checkout = REPO / MODEL_FILE
+        before = checkout.read_bytes()
+        written, seen = [], []
+
+        def append(path):
+            seen.append(path.read_bytes())
+            with path.open("ab") as writer:
+                writer.write(b"\n")
+
+        def guard(method):
+            def write(path, *args, **kwargs):
+                if Path(path).resolve().is_relative_to(REPO):
+                    written.append(path)
+                return method(path, *args, **kwargs)
+            return write
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+                Path, "write_text", guard(Path.write_text)), mock.patch.object(
+                Path, "write_bytes", guard(Path.write_bytes)):
+            entries, path = deleted_base_id_fixture(tmp, append)
+            self.assertEqual(row_problems(entries, base_required()), [Problem(
+                "id", "MP08", MODEL_FILE,
+                "MP08 is absent from the provider entries")])
+            self.assertEqual(path.read_bytes(), seen[-1] + b"\n")
+        self.assertEqual(written, [])
+        self.assertEqual(checkout.read_bytes(), before)
 
     def test_report_names_the_bytes_it_read(self):
         """The report names the snapshot commit, the bytes this run read, and the three score ids.
