@@ -4086,17 +4086,20 @@ fn generated_profile_permits_init_and_denies_the_local_offer() {
 /// A declared value with no rights list is refused, and a generated profile
 /// that does not parse never starts the provider.
 ///
-/// `generate_profile` on `json!({})` returns an error that contains
-/// `model-provider` and `rights`. That call starts no provider. `{}` has no
-/// `rights` key. `generated_model_profile_matches_the_oracle` already refuses
-/// a present `rights` value that is not a list, on this same line. When the
-/// sandbox is present, the real fixture's generated text loses its last `)`,
-/// the test writes that text with `fs::write`, and `assert_startup_is_refused`
-/// reads exit 65 with marker `expecting ')'`.
+/// The value below supplies the role, the provider and a platform baseline:
+/// the status is `platform_baseline_status("model-provider")` and the rules
+/// list is empty. It omits `rights`, so `generate_profile` returns exactly
+/// `model-provider declared-rights file must hold a rights list`, the
+/// missing-rights refusal. That call starts no provider.
+/// `generated_model_profile_matches_the_oracle` already refuses a present
+/// `rights` value that is not a list. When the sandbox is present, the real
+/// fixture's generated text loses its last `)`, the test writes that text
+/// with `fs::write`, and `assert_startup_is_refused` reads exit 65 with
+/// marker `expecting ')'`.
 ///
 /// Falsifier: F-cc43a makes `declared_entries` accept a missing rights list,
-/// so this test fails before any launch, and
-/// `generated_model_profile_matches_the_oracle` fails on the same line.
+/// so `generate_profile` returns a profile and this test fails at the
+/// missing-rights refusal before any launch.
 #[test]
 fn standin_refuses_a_start_it_cannot_apply() {
     let refused = generate_profile(
@@ -4111,9 +4114,9 @@ fn standin_refuses_a_start_it_cannot_apply() {
         }),
     )
     .expect_err("a declared value with no rights list is refused");
-    assert!(
-        refused.contains("model-provider") && refused.contains("rights"),
-        "the refusal must name the provider and the rights list: {refused}"
+    assert_eq!(
+        refused, "model-provider declared-rights file must hold a rights list",
+        "the refusal must be the missing-rights refusal"
     );
 
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
