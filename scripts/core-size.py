@@ -13,6 +13,7 @@ lines hold only comments or lie inside a block comment. Blank lines are blank.
 """
 import argparse
 import json
+import posixpath
 import re
 import subprocess
 import sys
@@ -68,18 +69,21 @@ def lex(text):
                     break
             to(end, "comment")
         elif c == '"':
-            tokens.append((line, "literal", '"'))
-            to(STRING.match(text, i).end(), "string")
+            end = STRING.match(text, i).end()
+            tokens.append((line, "literal", text[i:end]))
+            to(end, "string")
         elif c == "'":
-            tokens.append((line, "literal", "'"))
-            i = (CHAR.match(text, i) or LIFETIME.match(text, i)).end()
+            end = (CHAR.match(text, i) or LIFETIME.match(text, i)).end()
+            tokens.append((line, "literal", text[i:end]))
+            i = end
         elif c.isalpha() or c == "_":
             word = WORD.match(text, i).group()
             raw = RAW.match(text, i + len(word))
             if word in ("r", "br", "cr") and raw:
-                tokens.append((line, "literal", '"'))
                 end = text.find('"' + "#" * (len(raw.group()) - 1), raw.end())
-                to(n if end < 0 else end + len(raw.group()), "string")
+                end = n if end < 0 else end + len(raw.group())
+                tokens.append((line, "literal", text[i:end]))
+                to(end, "string")
             elif word in ("b", "c") and text[i + 1:i + 2] in ("'", '"'):
                 i += 1
             else:
@@ -190,7 +194,7 @@ def item_extent(vals, i, end):
     raise Refusal(f"{kind} without a body or ;")
 
 
-def parse_items(vals, lines, i, end, test, found):
+def parse_items(vals, lines, i, end, test, found, inline=()):
     """Walk the items in vals[i:end]: a module, impl, trait or extern body. Test items go to
     found['spans'] as line ranges, every attribute read to found['attrs'], and outline module
     declarations to found['mods']."""
@@ -218,9 +222,9 @@ def parse_items(vals, lines, i, end, test, found):
         if item_test and not test:
             found["spans"].append((lines[start], lines[last]))
         if kind == "mod" and body is None:
-            found["mods"].append((name, vals[start:i], lines[i], item_test))
+            found["mods"].append((name, vals[start:i], lines[i], item_test, inline))
         if body and kind in ("mod", "impl", "trait", "extern"):
-            parse_items(vals, lines, body[0] + 1, body[1], item_test, found)
+            parse_items(vals, lines, body[0] + 1, body[1], item_test, found, inline + (name,) * (kind == "mod"))
         i = last + 1
 
 
@@ -243,6 +247,29 @@ def analyse(tokens):
                 raise Refusal("test cfg on a field, variant, match arm, statement or expression:"
                               " core-size.py will not guess where it ends", lines[k])
     return tests, found["mods"]
+
+
+def crate_roots(tree):
+    """The crate's targets: [lib] and [[bin]] paths in Cargo.toml, src/lib.rs, src/main.rs, src/bin/."""
+    section, roots = "", []
+    for line in tree.get("Cargo.toml", "").splitlines():
+        line, path = line.strip(), re.match(r'\s*path\s*=\s*"([^"]+)"', line)
+        section = line.strip("[] ") if line.startswith("[") else section
+        roots += [posixpath.normpath(path.group(1))] if path and section in ("lib", "bin") else []
+    roots += [path for path in tree if re.fullmatch(r"src/(lib|main|bin/[^/]+|bin/[^/]+/main)\.rs", path)]
+    if not roots or any(root not in tree for root in roots):
+        raise Refusal(f"{CRATE}: no target root, or a Cargo.toml target path that does not exist")
+    return sorted(set(roots))
+
+
+def path_attribute(attrs):
+    """The #[path = "..."] of an outline module declaration's attributes, or None."""
+    for k in range(len(attrs) - 5):
+        if attrs[k:k + 4] == ["#", "[", "path", "="] and attrs[k + 5] == "]":
+            raw = re.fullmatch(r'r(#*)"(.*)"\1', attrs[k + 4], re.S)
+            plain = re.fullmatch(r'"(.*)"', attrs[k + 4], re.S)
+            return raw.group(2) if raw else re.sub(r"\\(.)", r"\1", plain.group(1))
+    return None
 
 
 def count(files):

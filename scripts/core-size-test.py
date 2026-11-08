@@ -151,6 +151,23 @@ class ItemExtentTest(unittest.TestCase):
                 extent(source)
 
 
+class ModuleHelpersTest(unittest.TestCase):
+    def test_crate_roots(self):
+        tree = {"Cargo.toml": '[lib]\npath = "src/core.rs"\n\n[dependencies]\nx = { path = "../x" }\n\n'
+                              '[[bin]]\nname = "tool"\npath = "tools/tool.rs"\n',
+                "src/core.rs": "", "tools/tool.rs": "", "src/main.rs": "", "src/bin/extra.rs": "", "src/other.rs": ""}
+        self.assertEqual(core_size.crate_roots(tree),
+                         ["src/bin/extra.rs", "src/core.rs", "src/main.rs", "tools/tool.rs"])
+        with self.assertRaises(core_size.Refusal):
+            core_size.crate_roots({"Cargo.toml": '[lib]\npath = "src/gone.rs"\n'})
+
+    def test_path_attribute(self):
+        for attribute, expected in (('#[path = "a/b.rs"]', "a/b.rs"), ('#[path = r#"c.rs"#]', "c.rs"),
+                                    ('#[doc = "x"]', None)):
+            values = [token[2] for token in core_size.lex(attribute)[0]]
+            self.assertEqual(core_size.path_attribute(values), expected, attribute)
+
+
 class CheckTest(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory(prefix="core-size-")
