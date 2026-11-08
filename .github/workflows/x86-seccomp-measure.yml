@@ -1,0 +1,43 @@
+# Temporary: measures which syscall x86_64 glibc is refused under the
+# confine tests' seccomp allow-list ("Cannot allocate TLS block"). The
+# allow-list was measured on aarch64 only. Delete once the row is added.
+name: x86-seccomp-measure
+on:
+  push:
+    branches: [claude/x86-measure-model]
+permissions:
+  contents: read
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@72504271e02fb719eb4eb3eaece3a8e3d06f57c0 # 1.91.0
+      - name: host
+        run: |
+          uname -a
+          ldd --version | head -1
+          sudo apt-get install -y -qq strace >/dev/null
+      # CI's loop builds did-provider before wallet-provider, so its crates are
+      # already downloaded when the confine tests build it offline.
+      - name: fetch the did provider's crates
+        run: cd capsules/did-provider && cargo build
+      - name: build the confine tests
+        working-directory: capsules/wallet-provider
+        run: cargo test --test confine --no-run
+      - name: run the whole confine suite on x86-64
+        working-directory: capsules/wallet-provider
+        run: cargo test --test confine --no-fail-fast -- --test-threads=2 2>&1 | grep -E "test result|FAILED" || true
+      - name: log every call the model journey lacks (runner-only patch, logs instead of refusing)
+        working-directory: capsules/wallet-provider
+        run: |
+          sed -i 's/    0x0005_0000 | SECCOMP_DENY_ERRNO as u32/    0x7ffc_0000/' tests/confine.rs
+          grep -c "0x7ffc_0000" tests/confine.rs
+          sudo sysctl -qw kernel.printk_ratelimit=0 kernel.printk_ratelimit_burst=100000
+          sudo dmesg -C
+          for t in linux_model_journey_runs_under_the_seccomp_allow_list linux_model_file_row_is_refused_outside_storage_root; do
+            cargo test --test confine "$t" -- --exact --test-threads=1 2>&1 | grep -E "test result" || true
+          done
+          echo "=== logged calls by process"
+          sudo dmesg | grep "type=1326" | sed -E 's/.*(comm="[^"]*").*(syscall=[0-9]+).*/\1 \2/' | sort | uniq -c | sort -rn
