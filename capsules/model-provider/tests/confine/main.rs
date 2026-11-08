@@ -3472,9 +3472,8 @@ fn generated_profile_starts_a_byte_different_file() {
         .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
     let storage = Storage::prepare("byte-different-standin-launch");
     let written = storage.base.join("standin.sb");
-    let generated =
-        generate_profile("model-provider", &fixture).expect("declared rights build a profile");
-    write_standin_profile(&written, &generated);
+    write_generated_profile("model-provider", &fixture, &written)
+        .expect("write the generated profile");
     let written_text = fs::read_to_string(&written)
         .unwrap_or_else(|err| panic!("the stand-in file must be readable: {err}"));
     assert!(
@@ -3633,42 +3632,6 @@ fn assert_startup_is_refused(case: &str, launch: Launch<'_>, storage: &Storage, 
     );
 }
 
-/// Joins this provider's profile text from the approved declared rights.
-///
-/// The text is `(version 1)`, then `(deny default)`, then `(deny network*)`,
-/// then each rule of each rights entry, then each rule of each
-/// platform-baseline entry. It reads no file and checks no right id.
-fn standin_profile(declared: &Value) -> Result<String, String> {
-    let Some(rights) = declared.get("rights").and_then(Value::as_array) else {
-        return Err("model-provider declared rights must hold a rights list".to_string());
-    };
-    let Some(baseline) = declared
-        .get("platform_baseline")
-        .and_then(|baseline| baseline.get("rules"))
-        .and_then(Value::as_array)
-    else {
-        return Err("model-provider platform baseline must hold a rules list".to_string());
-    };
-    let mut profile = String::from("(version 1)\n(deny default)\n(deny network*)\n");
-    for entry in rights.iter().chain(baseline) {
-        let Some(rules) = entry.get("rules").and_then(Value::as_array) else {
-            return Err("model-provider declares an entry without a rules list".to_string());
-        };
-        for rule in rules {
-            let Some(rule) = rule.as_str() else {
-                return Err("model-provider declares a rule that is not a string".to_string());
-            };
-            profile.push_str(rule);
-            profile.push('\n');
-        }
-    }
-    Ok(profile)
-}
-
-fn write_standin_profile(path: &Path, generated: &str) {
-    fs::write(path, generated).expect("write the generated profile");
-}
-
 /// A launch whose profile cannot be applied never starts the provider.
 ///
 /// The one launcher starts the real binary three ways: a profile path under
@@ -3778,9 +3741,10 @@ fn generated_model_profile_matches_the_oracle() {
     });
     let fixture: Value = serde_json::from_str(&fixture_text)
         .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated =
+        generate_profile("model-provider", &fixture).expect("declared rights build a profile");
     let oracle = fs::read_to_string(PROFILE_PATH)
         .unwrap_or_else(|err| panic!("the profile oracle must be readable: {err}"));
-    let generated = standin_profile(&fixture).expect("declared rights build a profile");
     assert_eq!(non_comment_head(&generated), head);
     assert_eq!(non_comment_head(&oracle), head);
     let mut generated_lines = collect_allow_lines(&generated);
@@ -3833,8 +3797,8 @@ fn generated_model_profile_matches_the_oracle() {
         }
     }
     assert!(replaced, "the bound-executable rule is replaced in memory");
-    let changed_profile =
-        standin_profile(&changed).expect("the changed declared value builds a profile");
+    let changed_profile = generate_profile("model-provider", &changed)
+        .expect("the changed declared value builds a profile");
     let changed_lines = collect_allow_lines(&changed_profile);
     assert_eq!(
         changed_lines
@@ -3856,13 +3820,14 @@ fn generated_model_profile_matches_the_oracle() {
     let mut rights_not_a_list = fixture.clone();
     rights_not_a_list["rights"] = json!("not-a-list");
     assert_eq!(
-        standin_profile(&rights_not_a_list).expect_err("rights that are not a list are refused"),
-        "model-provider declared rights must hold a rights list"
+        generate_profile("model-provider", &rights_not_a_list)
+            .expect_err("rights that are not a list are refused"),
+        "model-provider declared-rights file must hold a rights list"
     );
     let mut baseline_not_a_list = fixture.clone();
     baseline_not_a_list["platform_baseline"]["rules"] = json!("not-a-list");
     assert_eq!(
-        standin_profile(&baseline_not_a_list)
+        generate_profile("model-provider", &baseline_not_a_list)
             .expect_err("a platform baseline that is not a rules list is refused"),
         "model-provider platform baseline must hold a rules list"
     );
@@ -3872,15 +3837,16 @@ fn generated_model_profile_matches_the_oracle() {
         .expect("a rights entry is an object")
         .remove("rules");
     assert_eq!(
-        standin_profile(&entry_without_rules)
+        generate_profile("model-provider", &entry_without_rules)
             .expect_err("an entry without a rules list is refused"),
-        "model-provider declares an entry without a rules list"
+        "model-provider declares storage without a rules list"
     );
     let mut rule_not_a_string = fixture.clone();
     rule_not_a_string["rights"][0]["rules"][0] = json!(1);
     assert_eq!(
-        standin_profile(&rule_not_a_string).expect_err("a rule that is not a string is refused"),
-        "model-provider declares a rule that is not a string"
+        generate_profile("model-provider", &rule_not_a_string)
+            .expect_err("a rule that is not a string is refused"),
+        "model-provider declares storage with a rule that is not a string"
     );
 }
 
@@ -3917,10 +3883,10 @@ fn generated_profile_launch_matches_the_oracle() {
     });
     let fixture: Value = serde_json::from_str(&fixture_text)
         .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
-    let generated = standin_profile(&fixture).expect("declared rights build a profile");
     let storage = Storage::prepare("standin-launched-file");
     let profile = storage.base.join("standin.sb");
-    write_standin_profile(&profile, &generated);
+    write_generated_profile("model-provider", &fixture, &profile)
+        .expect("write the generated profile");
     let written = fs::read_to_string(&profile)
         .unwrap_or_else(|err| panic!("the stand-in file must be readable: {err}"));
     assert!(
@@ -4006,12 +3972,12 @@ fn generated_profile_permits_init_and_denies_the_local_offer() {
     });
     let fixture: Value = serde_json::from_str(&fixture_text)
         .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
-    let generated = standin_profile(&fixture).expect("declared rights build a profile");
     let binary = resolved(Path::new(PROVIDER_BINARY));
 
     let storage = Storage::prepare("standin-permit");
     let profile = storage.base.join("standin.sb");
-    write_standin_profile(&profile, &generated);
+    write_generated_profile("model-provider", &fixture, &profile)
+        .expect("write the generated profile");
     let bindings = canonical_bindings(&storage, &binary);
     let mut provider = Provider::start(Launch::Profile {
         profile: &profile,
@@ -4026,7 +3992,8 @@ fn generated_profile_permits_init_and_denies_the_local_offer() {
 
     let local = LocalEngine::prepare("standin-local-offer");
     let profile = local.storage.base.join("standin.sb");
-    write_standin_profile(&profile, &generated);
+    write_generated_profile("model-provider", &fixture, &profile)
+        .expect("write the generated profile");
     let bindings = canonical_bindings(&local.storage, &binary);
     let mut provider = Provider::start(Launch::Profile {
         profile: &profile,
@@ -4076,8 +4043,18 @@ fn generated_profile_permits_init_and_denies_the_local_offer() {
 /// ignore the generated text, so this launch does not exit 65.
 #[test]
 fn standin_refuses_a_start_it_cannot_apply() {
-    let refused =
-        standin_profile(&json!({})).expect_err("a declared value with no rights list is refused");
+    let refused = generate_profile(
+        "model-provider",
+        &json!({
+            "role": "lab stand-in for the Runtime generator's input, not a manifest field",
+            "provider": "model-provider",
+            "platform_baseline": {
+                "status": "Runtime platform baseline for the model-provider executable on macOS, not approved rights",
+                "rules": []
+            }
+        }),
+    )
+    .expect_err("a declared value with no rights list is refused");
     assert!(
         refused.contains("model-provider") && refused.contains("rights"),
         "the refusal must name the provider and the rights list: {refused}"
@@ -4096,7 +4073,8 @@ fn standin_refuses_a_start_it_cannot_apply() {
     });
     let fixture: Value = serde_json::from_str(&fixture_text)
         .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
-    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    let generated =
+        generate_profile("model-provider", &fixture).expect("declared rights build a profile");
     let trimmed = generated.trim_end();
     assert!(
         trimmed.ends_with(')'),
@@ -4105,7 +4083,7 @@ fn standin_refuses_a_start_it_cannot_apply() {
     let broken = &trimmed[..trimmed.len() - 1];
     let storage = Storage::prepare("standin-cannot-apply");
     let profile = storage.base.join("standin.sb");
-    write_standin_profile(&profile, broken);
+    fs::write(&profile, broken).expect("write the deliberately broken profile");
     let binary = resolved(Path::new(PROVIDER_BINARY));
     let bindings = canonical_bindings(&storage, &binary);
     assert_startup_is_refused(
@@ -4149,10 +4127,10 @@ fn generated_profile_refuses_an_unbound_root() {
     });
     let fixture: Value = serde_json::from_str(&fixture_text)
         .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
-    let generated = standin_profile(&fixture).expect("declared rights build a profile");
     let storage = Storage::prepare("standin-unbound-root");
     let unbound_root_profile = storage.base.join("standin.sb");
-    write_standin_profile(&unbound_root_profile, &generated);
+    write_generated_profile("model-provider", &fixture, &unbound_root_profile)
+        .expect("write the generated profile");
     let written_text = fs::read_to_string(&unbound_root_profile)
         .unwrap_or_else(|err| panic!("the stand-in file must be readable: {err}"));
     assert!(
@@ -4219,11 +4197,11 @@ fn generated_profile_denies_the_hosted_connect() {
     });
     let declared: Value = serde_json::from_str(&fixture_text)
         .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
-    let generated = standin_profile(&declared).expect("declared rights build a profile");
     let binary = resolved(Path::new(PROVIDER_BINARY));
     let fixture = HostedTransport::prepare("standin-hosted-connect");
     let profile = fixture.storage.base.join("standin.sb");
-    write_standin_profile(&profile, &generated);
+    write_generated_profile("model-provider", &declared, &profile)
+        .expect("write the generated profile");
     let bindings = canonical_bindings(&fixture.storage, &binary);
     let mut provider = Provider::start(Launch::Profile {
         profile: &profile,
@@ -4299,7 +4277,8 @@ fn standin_launch_uses_the_generated_profile() {
         removed += before - rules.len();
     }
     assert_eq!(removed, 1, "the storage write rule is removed once");
-    let generated = standin_profile(&dropped).expect("declared rights build a profile");
+    let generated =
+        generate_profile("model-provider", &dropped).expect("declared rights build a profile");
     let allow_lines = collect_allow_lines(&generated);
     assert!(
         !allow_lines.contains(&storage_write),
@@ -4316,8 +4295,11 @@ fn standin_launch_uses_the_generated_profile() {
     }
 
     let storage = Storage::prepare("standin-dropped-storage");
+    let generated =
+        generate_profile("model-provider", &dropped).expect("declared rights build a profile");
     let dropped_profile = storage.base.join("standin-dropped-storage.sb");
-    write_standin_profile(&dropped_profile, &generated);
+    write_generated_profile("model-provider", &dropped, &dropped_profile)
+        .expect("write the generated profile");
     let binary = resolved(Path::new(PROVIDER_BINARY));
     let bindings = canonical_bindings(&storage, &binary);
     let mut provider = Provider::start(Launch::Profile {
