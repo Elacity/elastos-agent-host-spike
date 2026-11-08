@@ -119,3 +119,26 @@ fn run_component_defaults_storage_to_home() {
     let stderr = home.run(&["run", capsule.to_str().unwrap()]);
     assert_refused_at(&stderr, &home.data.join("storage"));
 }
+
+#[test]
+fn serve_defaults_storage_to_home() {
+    let home = Home::new();
+    let stderr = home.run(&["serve", "--addr", "127.0.0.1:0"]);
+    assert_refused_at(&stderr, &home.data.join("storage"));
+}
+
+#[test]
+fn serve_keeps_explicit_storage_path() {
+    let home = Home::new();
+    let explicit = home.temp.path().join("explicit-storage");
+    std::fs::write(&explicit, b"not a directory").unwrap();
+    let explicit_arg = explicit.to_str().unwrap();
+    let stderr = home.run(&[
+        "serve",
+        "--addr",
+        "127.0.0.1:0",
+        "--storage-path",
+        explicit_arg,
+    ]);
+    assert_refused_at(&stderr, &explicit);
+}

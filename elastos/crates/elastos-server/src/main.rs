@@ -119,8 +119,8 @@ enum Commands {
         #[arg(short, long, default_value = "0.0.0.0:3000")]
         addr: String,
 
-        /// Storage directory
-        #[arg(long, default_value = "/tmp/elastos/storage")]
+        /// Storage directory (default: storage under the Home data directory)
+        #[arg(long, default_value_os_t = default_data_dir().join("storage"))]
         storage_path: PathBuf,
 
         /// Capsule directory to serve (web capsule or MicroVM)
