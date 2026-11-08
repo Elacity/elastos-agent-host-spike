@@ -314,8 +314,8 @@ seat refuses the start by name instead of starting the provider unconfined.
 `standin_host_refusal_decides_each_policy` holds both.
 
 Every Linux-only plant below names exactly one test. The quoted outputs are
-from the earlier run on the host above; the repair's new inheritance cases await
-a Linux rerun. None is registered in `falsifiers.json`:
+from the earlier run on the host above, except WP176's inheritance case, whose
+8 Nov run is recorded in its own entry. None is registered in `falsifiers.json`:
 the runner runs on the Mac, where these `#[cfg(target_os = "linux")]` tests do not
 run, so none can print a CAUGHT line there. Two Mac-runnable rules beside them are
 registered instead: WP166's argument rule in

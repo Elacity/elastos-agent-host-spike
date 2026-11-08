@@ -2362,8 +2362,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "    let rendered = generate_profile(name, declared)?;\n    let mut syscalls: Vec<&'static str> = Vec::new();\n    for form in profile_forms(&rendered) {\n        if !is_allow_form(&form) {",
-          "new": "    // WP147 renders every table row and never reads the generated profile.\n    let rendered = generate_profile(name, declared)?;\n    let _ = &rendered;\n    let mut syscalls: Vec<&'static str> = Vec::new();\n    for form in SECCOMP_RULE_SYSCALLS.iter().map(|(form, _)| form.to_string()) {\n        if !is_allow_form(&form) {"
+          "old": "    let mut syscalls: Vec<&'static str> = Vec::new();\n    for form in profile_forms(&rendered) {\n        if !is_allow_form(&form) {",
+          "new": "    // WP147 renders every table row and never reads the generated profile.\n    let _ = &rendered;\n    let mut syscalls: Vec<&'static str> = Vec::new();\n    for form in SECCOMP_RULE_SYSCALLS.iter().map(|(form, _)| form.to_string()) {\n        if !is_allow_form(&form) {"
         }
       ],
       "tests": [
