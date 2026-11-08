@@ -63,7 +63,7 @@ fn validate_component_imports(bytes: &[u8]) -> std::result::Result<(), String> {
                     let import = import.map_err(|err| {
                         format!("failed to parse component import section: {err}")
                     })?;
-                    let name = import.name.0;
+                    let name = import.name.name;
                     if name.starts_with("import-type-") {
                         if !matches!(import.ty, ComponentTypeRef::Type(_)) {
                             return Err(format!(
@@ -96,7 +96,8 @@ fn validate_component_imports(bytes: &[u8]) -> std::result::Result<(), String> {
                 }
             }
             Payload::ImportSection(section) => {
-                for import in section {
+                // Flattens wasmparser's grouped (compact) imports into one per item.
+                for import in section.into_imports() {
                     let import = import.map_err(|err| {
                         format!("failed to parse component core import section: {err}")
                     })?;
@@ -151,7 +152,7 @@ mod tests {
 
         let mut import_section = ComponentImportSection::new();
         for (name, ty) in imports {
-            import_section.import(name, *ty);
+            import_section.import(*name, *ty);
         }
 
         let mut component = Component::new();
