@@ -78,9 +78,10 @@ declared only under a test cfg (the counter follows the module tree from
 only in tests, such as `#[cfg(test)]` or `#[cfg(all(test, unix))]`. So are
 lines holding only comments, and blank lines. A line with any code on it is
 code, wherever its comments sit. Where the counter cannot tell, it refuses
-and exits 2 naming the file and line: a test cfg on a field, variant, match
-arm or statement, a file the module tree does not reach, or a cfg_attr that
-sets cfg or path. To grow the core, raise `CORE-BUDGET` in the same
+and exits 2 naming the file and line: a test cfg on a match arm, statement,
+call argument or tuple field (test struct fields and enum variants are
+counted), a file the module tree does not reach, or a cfg_attr that sets cfg
+or path. To grow the core, raise `CORE-BUDGET` in the same
 pull request, so reviewers see the growth. The budget ratchets down: when the
 core falls more than 50 lines below it, the check fails until the same pull
 request lowers the budget to the new count, so freed room cannot be spent
