@@ -6,6 +6,7 @@ owns the package checksum; release publication supplies its Carrier CID.
 """
 
 import argparse
+from contextlib import contextmanager
 import gzip
 import hashlib
 import http.client
@@ -16,6 +17,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import signal
 import stat
 import sys
 import tarfile
@@ -147,17 +149,64 @@ def transient(error):
     return isinstance(error, (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead))
 
 
-def response(source):
-    """Only HTTPS redirects to recipe-owned hosts; each response has a bound."""
+OPENER_TIMEOUT_SECONDS = 30
+TOTAL_DEADLINE_SECONDS = 360
+
+
+def time_left(source, deadline, clock):
+    remaining = deadline - clock()
+    if remaining <= 0:
+        raise ValueError(f"upstream fetch of {source['url']} gave up after "
+                         f"{TOTAL_DEADLINE_SECONDS - remaining:.0f} s: "
+                         f"{TOTAL_DEADLINE_SECONDS} s deadline")
+    return remaining
+
+
+@contextmanager
+def fetch_deadline(source, deadline, clock):
+    """The build CLI runs on the POSIX main thread; interrupt even trickling I/O."""
+    def expired(*_):
+        elapsed = TOTAL_DEADLINE_SECONDS - (deadline - clock())
+        raise ValueError(f"upstream fetch of {source['url']} gave up after "
+                         f"{elapsed:.0f} s: {TOTAL_DEADLINE_SECONDS} s deadline")
+
+    started = time.monotonic()
+    remaining = time_left(source, deadline, clock)
+    previous_handler = signal.signal(signal.SIGALRM, expired)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, remaining)
+    try:
+        yield
+        time_left(source, deadline, clock)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        delay, interval = previous_timer
+        if delay:
+            signal.setitimer(signal.ITIMER_REAL,
+                             max(0.000001, delay - (time.monotonic() - started)), interval)
+
+
+def response(source, deadline=None, clock=None):
+    """Only HTTPS redirects to recipe-owned hosts; each response has a bound.
+
+    One attempt can open several requests through redirects, so with `deadline`
+    each request is bounded by the time left as well as by OPENER_TIMEOUT_SECONDS."""
+    clock = time.monotonic if clock is None else clock
     url = source["url"]
     allowed = {validate_url(url), *source.get("redirect_hosts", [])}
     opener = urllib.request.build_opener(NoRedirect())
     for hop in range(6):
         if validate_url(url) not in allowed:
             raise ValueError("upstream redirect host is outside the recorded allowlist")
+        timeout = OPENER_TIMEOUT_SECONDS
+        if deadline is not None:
+            timeout = min(timeout, deadline - clock())
+            if timeout <= 0:
+                elapsed = TOTAL_DEADLINE_SECONDS - (deadline - clock())
+                raise ValueError(f"upstream fetch of {source['url']} passed its {TOTAL_DEADLINE_SECONDS} s deadline after {elapsed:.0f} s")
         request = urllib.request.Request(url, headers={"User-Agent": "ElastOS-release-input", "Accept-Encoding": "identity"})
         try:
-            reply = opener.open(request, timeout=30)
+            reply = opener.open(request, timeout=timeout)
         except urllib.error.HTTPError as error:
             if error.code not in (301, 302, 303, 307, 308) or hop == 5:
                 error.close()
@@ -179,10 +228,18 @@ def response(source):
     raise ValueError("too many upstream redirects")
 
 
-def copy_into(stream, output, algorithm, maximum):
+def copy_into(stream, output, algorithm, maximum, source=None, deadline=None, clock=None):
     value, size = hashlib.new(algorithm), 0
     with stream:
-        while chunk := stream.read(CHUNK):
+        while True:
+            if deadline is not None:
+                signal.setitimer(signal.ITIMER_REAL, time_left(source, deadline, clock))
+            read = stream.read1 if isinstance(stream, http.client.HTTPResponse) else stream.read
+            chunk = read(CHUNK)
+            if deadline is not None:
+                time_left(source, deadline, clock)
+            if not chunk:
+                break
             size += len(chunk)
             if size > maximum:
                 raise ValueError("upstream input exceeds its recorded size bound")
@@ -197,23 +254,52 @@ def copy_into(stream, output, algorithm, maximum):
     return value, size
 
 
-def fetch(source, output, algorithm, attempts=4):
+# Six attempts with 135 s of waiting between them. GitHub release downloads
+# returned intermittent 504s for over an hour on 8 Nov 2026; 2 + 4 + 8 s was too
+# short to ride out a burst. A total deadline of 360 s bounds the whole fetch:
+# an opener or body timeout covers one blocking operation, and a redirect chain
+# can open several requests per attempt, so elapsed time is checked before every
+# attempt, retry sleep and body read. A timer interrupts blocking work at the
+# deadline, including headers and trickling bodies that outlast a socket timeout.
+RETRY_DELAYS = (5, 10, 20, 40, 60)
+
+
+def fetch(source, output, algorithm, delays=RETRY_DELAYS, clock=None):
     """A transient failure anywhere in the download (open or body) restarts it from
-    byte zero up to three more times, 2, 4 and 8 s apart: a release build fetches
-    dozens of upstream inputs, and one 504 failed a 60-minute job."""
+    byte zero after each delay in turn: a release build fetches dozens of upstream
+    inputs, and one 504 failed a 60-minute job. Other 4xx, redirects outside the
+    allowlist, size bounds and checksum mismatches are never retried."""
     if "path" in source:
         return copy_into(regular(source["path"]).open("rb"), output, algorithm, source["max_bytes"])
-    for attempt in range(attempts):
+    clock = time.monotonic if clock is None else clock
+    started = clock()
+    with fetch_deadline(source, started + TOTAL_DEADLINE_SECONDS, clock):
+        return fetch_attempts(source, output, algorithm, delays, clock, started)
+
+
+def fetch_attempts(source, output, algorithm, delays, clock, started):
+    for attempt in range(len(delays) + 1):
+        elapsed = clock() - started
+        if elapsed >= TOTAL_DEADLINE_SECONDS:
+            raise ValueError(f"upstream fetch of {source['url']} gave up after {elapsed:.0f} s")
         try:
-            return copy_into(response(source), output, algorithm, source["max_bytes"])
+            return copy_into(response(source, started + TOTAL_DEADLINE_SECONDS, clock),
+                             output, algorithm, source["max_bytes"], source,
+                             started + TOTAL_DEADLINE_SECONDS, clock)
         except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
-            if not transient(error) or attempt == attempts - 1:
+            time_left(source, started + TOTAL_DEADLINE_SECONDS, clock)
+            if not transient(error) or attempt == len(delays):
                 raise
             if isinstance(error, urllib.error.HTTPError):
                 error.close()
-        output.seek(0)
-        output.truncate()
-        time.sleep(2 ** (attempt + 1))
+            output.seek(0)
+            output.truncate()
+            elapsed = clock() - started
+            if elapsed + delays[attempt] >= TOTAL_DEADLINE_SECONDS:
+                raise ValueError(f"upstream fetch of {source['url']} gave up after {elapsed:.0f} s: a {delays[attempt]} s wait would pass the {TOTAL_DEADLINE_SECONDS} s deadline")
+            print(f"upstream fetch attempt {attempt + 1} failed ({error}); retrying in {delays[attempt]} s",
+                  file=sys.stderr, flush=True)
+        time.sleep(delays[attempt])
     raise AssertionError("unreachable")
 
 
