@@ -244,8 +244,9 @@ async fn test_deny_capability_request() {
 
     let updated = updated.unwrap();
     match &updated.status {
-        elastos_runtime::capability::RequestStatus::Denied { reason } => {
+        elastos_runtime::capability::RequestStatus::Denied { reason, settled_by } => {
             assert_eq!(reason, "Access denied by policy");
+            assert_eq!(*settled_by, elastos_runtime::capability::Settler::Shell);
         }
         _ => panic!("Expected Denied status"),
     }

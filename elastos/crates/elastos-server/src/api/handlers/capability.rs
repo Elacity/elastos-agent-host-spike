@@ -205,7 +205,7 @@ pub async fn request_status(
                 reason: None,
             }))
         }
-        elastos_runtime::capability::RequestStatus::Denied { reason } => {
+        elastos_runtime::capability::RequestStatus::Denied { reason, .. } => {
             Ok(Json(RequestStatusOutput {
                 status: "denied".to_string(),
                 token: None,

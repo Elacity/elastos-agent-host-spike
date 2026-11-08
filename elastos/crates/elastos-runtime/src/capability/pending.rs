@@ -62,11 +62,21 @@ pub enum RequestStatus {
         duration: GrantDuration,
     },
 
-    /// User denied the request
-    Denied { reason: String },
+    /// Refused, or revoked after a grant; `settled_by` names who decided
+    Denied { reason: String, settled_by: Settler },
 
-    /// Request timed out without user response
+    /// Timed out with no decision
     Expired,
+}
+
+/// Who settled a denied request. Set by the store function that denies,
+/// never by a caller-supplied body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settler {
+    /// The person, through the shell
+    Shell,
+    /// The Runtime, on its own rule
+    Runtime,
 }
 
 /// Duration for which a capability is granted
@@ -276,6 +286,7 @@ impl PendingRequestStore {
                 );
                 request.status = RequestStatus::Denied {
                     reason: "Too many pending requests".to_string(),
+                    settled_by: Settler::Runtime,
                 };
                 return request;
             }
@@ -304,6 +315,7 @@ impl PendingRequestStore {
                     );
                     request.status = RequestStatus::Denied {
                         reason: "Too many pending requests for this session".to_string(),
+                        settled_by: Settler::Runtime,
                     };
                     return request;
                 }
@@ -382,8 +394,19 @@ impl PendingRequestStore {
         Ok(())
     }
 
-    /// Deny a pending request
+    /// Deny a pending request on the shell's decision
     pub async fn deny_request(&self, request_id: &str, reason: &str) -> Result<(), String> {
+        self.deny_request_by(request_id, reason, Settler::Shell)
+            .await
+    }
+
+    /// Deny a pending request, recording who settled it
+    pub async fn deny_request_by(
+        &self,
+        request_id: &str,
+        reason: &str,
+        settled_by: Settler,
+    ) -> Result<(), String> {
         let mut requests = self.requests.write().await;
 
         let request = requests
@@ -396,6 +419,7 @@ impl PendingRequestStore {
 
         request.status = RequestStatus::Denied {
             reason: reason.to_string(),
+            settled_by,
         };
 
         // Audit
@@ -528,6 +552,7 @@ impl PendingRequestStore {
             if request.is_granted() {
                 request.status = RequestStatus::Denied {
                     reason: "Revoked by user".to_string(),
+                    settled_by: Settler::Shell,
                 };
 
                 // Audit
@@ -553,6 +578,7 @@ impl PendingRequestStore {
             if request.is_granted() {
                 request.status = RequestStatus::Denied {
                     reason: "Epoch advanced - all capabilities revoked".to_string(),
+                    settled_by: Settler::Shell,
                 };
 
                 self.audit_log
@@ -573,6 +599,28 @@ mod tests {
 
     fn create_test_store() -> PendingRequestStore {
         PendingRequestStore::new(Arc::new(AuditLog::new()))
+    }
+
+    fn settler(request: &PendingCapabilityRequest) -> Option<Settler> {
+        match request.status {
+            RequestStatus::Denied { settled_by, .. } => Some(settled_by),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn deny_request_by_records_the_runtime_as_settler() {
+        let store = create_test_store();
+        let session = SessionId::from_string("session-1");
+        let resource = ResourceId::new("localhost://Users/self/Documents/test");
+        let request = store.create_request(session, resource, Action::Read).await;
+        let id = request.id.as_str();
+        store
+            .deny_request_by(id, "instance ended", Settler::Runtime)
+            .await
+            .unwrap();
+        let denied = store.get_request(id).await.unwrap();
+        assert_eq!(settler(&denied), Some(Settler::Runtime));
     }
 
     #[tokio::test]
@@ -819,6 +867,7 @@ mod tests {
             )
             .await;
         assert!(rejected.is_denied());
+        assert_eq!(settler(&rejected), Some(Settler::Runtime));
 
         // But a different session should still be able to create requests
         let other = store
@@ -856,6 +905,7 @@ mod tests {
             )
             .await;
         assert!(rejected.is_denied());
+        assert_eq!(settler(&rejected), Some(Settler::Runtime));
     }
 
     #[tokio::test]
