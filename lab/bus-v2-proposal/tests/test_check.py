@@ -3425,9 +3425,18 @@ class CitationCheckTests(unittest.TestCase):
         groups = ("A3", "A4", "A5", "A7", "B2")
         for name in ("A3", "A5", "A7", "B2"):
             body = self._section_0([group for group in groups if group != name])
+            expected = ["refuse: section 0 has no propose line for " + name]
+            expected += [
+                "refuse: section 0 has no proposal named "
+                + call
+                + " under "
+                + group
+                for group, call in PROPOSAL_CALLS
+                if group == name
+            ]
             self.assertEqual(
                 check.problems(self._bare_draft(body)),
-                ["refuse: section 0 has no propose line for " + name],
+                expected,
                 name,
             )
 
@@ -3505,6 +3514,7 @@ class CitationCheckTests(unittest.TestCase):
                 "refuse: propose line at line %d is not a proposal "
                 "(missing Name:, Inputs:, Refusal:, Owner:)" % line,
                 "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
             ],
         )
 
@@ -3520,6 +3530,7 @@ class CitationCheckTests(unittest.TestCase):
             [
                 "refuse: propose line at line %d is in a fenced code block" % line,
                 "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
             ],
         )
 
@@ -3535,6 +3546,7 @@ class CitationCheckTests(unittest.TestCase):
             [
                 "refuse: propose line at line %d is in an HTML comment" % line,
                 "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
             ],
         )
 
@@ -3550,6 +3562,7 @@ class CitationCheckTests(unittest.TestCase):
             [
                 "refuse: propose line at line %d is indented as code" % line,
                 "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
             ],
         )
 
