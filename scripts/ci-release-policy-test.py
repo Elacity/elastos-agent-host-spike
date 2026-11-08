@@ -1858,7 +1858,8 @@ class ReleasePolicyTests(unittest.TestCase):
         for job in (("core-size", "completed", "failure", [("core-size tests", "failure")]),
                     ("core-size", "completed", "failure", [("measure the core", "failure"), (verdict, "skipped")]),
                     ("core-size", "completed", "timed_out", [(verdict, "cancelled")])):
-            status, cancels, used = self.run_cancel_watcher([[watch, gate, job, macos]])
+            settled = [watch, gate, job, ("source-home-macos", "completed", "success")]
+            status, cancels, used = self.run_cancel_watcher([[watch, gate, job, macos], settled, settled])
             self.assertEqual((status, cancels, used), (0, ["repos/Elacity/elastos-runtime/actions/runs/7/cancel"], 1))
         # The filter names the verdict step, which only runs --check; measuring, with --base, comes first.
         names = [step.splitlines()[0] for step in steps("core-size")]

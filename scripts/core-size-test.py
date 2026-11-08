@@ -97,6 +97,7 @@ class CountTest(unittest.TestCase):
             "struct S {\n    #[cfg(test)]\n    hook: [u8; { 4 }],\n    live: u8,\n}\n": (2, 3),
             "struct S {\n    #[cfg(test)]\n    hook: HashMap<u8, Box<dyn Fn(u8) -> u8>>,\n    live: u8,\n}\n": (2, 3),
             "struct S {\n    live: u8,\n    #[cfg(test)]\n    hook: u8\n}\n": (2, 3),
+            "struct S {\n    #[cfg(test)]\n    hook: HashMap<\n        u8,\n        u8,\n    >,\n    live: u8,\n}\n": (5, 3),
             "enum E {\n    A,\n    #[cfg(test)]\n    B(u8),\n    C { a: Vec<u8> },\n}\n": (2, 4),
         }
         for source, (tests, code) in cases.items():
