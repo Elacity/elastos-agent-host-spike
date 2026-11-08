@@ -5,8 +5,8 @@ states that sentence on a clean commit, a missing commit, and a problem
 list. This probe still judges every provider entry on this base. An id
 captured before a removal is reported absent. Each ``old`` anchor still
 has to occur once, on the updated text, the way ``falsify.py`` applies
-it. The required ids are the provider ids at that base, so MP02, MP05, and
-MP11 stay required and a deleted non-score id is reported too. The selftest and PV
+it. The required ids are the provider ids at the pinned base, so MP02, MP05,
+and MP11 stay required and a deleted non-score id is reported too. The selftest and PV
 entries in the same file stay out of the checks; ``load_json`` still has
 to accept the whole file. The ``about`` text is the runner's path rule
 for every list, and this probe leaves it alone.
@@ -44,6 +44,18 @@ from test_agent_host_falsifier_honesty import (
 REPO = Path(__file__).resolve().parents[3]
 MODEL_FILE = "capsules/model-provider/falsifiers.json"
 SCORE_IDS = ("MP02", "MP05", "MP11")
+# The provider ids in capsules/model-provider/falsifiers.json at the branch
+# base 4b55d14a (spike/agent-host). The live file may add ids; a base id
+# that disappears is an ``id`` problem.
+BASE_IDS = (
+    "MP01", "MP02", "MP03", "MP04", "MP05", "MP06", "MP07", "MP08", "MP09",
+    "MP10", "MP11", "MP12", "MP13", "MP14", "MP15", "MP16", "MP17", "MP18",
+    "MP19", "MP20", "MP21", "MP22", "MP23", "MP24", "MP25", "MP26", "MP27",
+    "MP28", "MP29", "MP30", "MP31", "MP32", "MP33", "MP34", "MP35", "MP36",
+    "MP38", "MP55", "MP56", "MP57", "MP58", "MP59", "MP60", "MP61", "MP62",
+    "MP63", "MP64", "MP65", "MP66", "MP67", "MP68", "MP69", "MP70", "MP71",
+    "MP72", "MP73",
+)
 FINDING_ID = "provider-001"
 FINDING_NAME = "lab/redteam/findings/provider-001.md"
 FINDING = REPO / FINDING_NAME
@@ -81,13 +93,13 @@ def provider_base():
 
 
 def base_required():
-    """The provider ids at the snapshot base, then any score id they omit.
+    """The provider ids at the pinned base, then any score id they omit.
 
-    Planted entries are judged against this base list, so an id the
-    falsifier had at the base and lacks now is an ``id`` problem even when
-    it is not one of ``SCORE_IDS``.
+    The live entries are judged against ``BASE_IDS``, so an id the
+    falsifier had at the base and no longer has is an ``id`` problem even
+    when it is not one of ``SCORE_IDS``.
     """
-    required = [entry["id"] for entry in provider_base()[2]]
+    required = list(BASE_IDS)
     for ident in SCORE_IDS:
         if ident not in required:
             required.append(ident)
@@ -97,10 +109,10 @@ def base_required():
 def row_problems(entries, required):
     """Problems for these entries against ``required``.
 
-    ``required`` is the id sequence at the snapshot base (``base_required``),
-    captured before a plant. An empty entry list is one problem. An id at
-    the base and absent now is reported absent, score id or not. MP02,
-    MP05, and MP11 stay required.
+    ``required`` is the id sequence at the pinned base (``base_required``).
+    An empty entry list is one problem. An id at the base and absent now
+    is reported absent, score id or not. MP02, MP05, and MP11 stay
+    required.
     """
     if not entries:
         return [Problem(
