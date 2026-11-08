@@ -59,6 +59,26 @@ Use `just test-elastos`, `just test-capsules` or `just test-crate <crate>` for
 narrow checks. `just verify` adds the source, lint and contract gates; a plain
 `cargo test --workspace` covers only this workspace.
 
+## Core size budget
+
+The trusted core is `crates/elastos-runtime`. The goal is about 10,000 lines of
+code: small enough to review in full and to put on a chip, with everything
+else in capsules. [`CORE-BUDGET`](CORE-BUDGET) holds the most code lines the
+core may have, and the `core-size` CI job fails above it. From the repository
+root:
+
+```bash
+python3 scripts/core-size.py           # the table
+python3 scripts/core-size.py --check   # against the budget
+```
+
+Only code counts: no files under `tests/`, `tests.rs` or `*_test.rs`, no
+`#[cfg(test)]` items, no comment lines and no blank lines. A line of code with
+a trailing comment is code. To grow the core, raise `CORE-BUDGET` in the same
+pull request, so reviewers see the growth. The budget ratchets down: when the
+core falls more than 50 lines below it, the check asks for the budget to be
+lowered to the new count.
+
 ## Related documentation
 
 - [Architecture](../docs/ARCHITECTURE.md)
