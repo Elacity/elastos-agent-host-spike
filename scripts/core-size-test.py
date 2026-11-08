@@ -66,11 +66,12 @@ class CountTest(unittest.TestCase):
         self.assertEqual(counts(source.replace("test,", "feature = \"test\","))["tests"], 0)
 
     def test_every_cfg_spelling_that_holds_only_in_tests(self):
-        for cfg in ("test,", "all(all(test), unix)", "any(test, all(test, unix),)", "not(not(test))",
+        for cfg in ("test,", "all(all(test), unix)", "any(test, all(test, unix),)", "not(not(test))", "all(test, not(unix))",
                     "all(\n    unix,\n    test\n)"):
             source = f"#[cfg({cfg})]\nfn test_only() {{}}\nfn production() {{}}\n"
             self.assertEqual(counts(source)["code"], 1, cfg)
-        for cfg in ("any(test, unix)", "not(test)", "all(unix, feature = \"test\")", "testing"):
+        for cfg in ("any(test, unix)", "not(test)", "all(unix, feature = \"test\")", "testing", "not(any())",
+                    "not(all(not(test), feature = \"off\"))", "all()", "any(not(test), test)"):
             self.assertEqual(counts(f"#[cfg({cfg})]\nfn production() {{}}\n")["code"], 2, cfg)
 
     def test_unreadable_cfg_is_refused_with_its_line(self):

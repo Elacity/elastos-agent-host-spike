@@ -114,28 +114,31 @@ def closer(vals, p):
 
 
 def predicate(vals, p):
-    """Read the cfg predicate at vals[p]: (holds only in tests, never holds in tests, next index)."""
+    """Evaluate the cfg predicate at vals[p] with test unset and every other option unknown, in
+    three-valued logic: (True, False or None for unknown, next index). False means it can hold only
+    in tests: no setting of the other options makes it true without test."""
     word = vals[p]
     if word in ("all", "any", "not") and vals[p + 1] == "(":
         end, q, parts = closer(vals, p + 1), p + 2, []
         while q < end:
-            needs, bars, q = predicate(vals, q)
-            parts.append((needs, bars))
+            value, q = predicate(vals, q)
+            parts.append(value)
             if vals[q] not in (",", ")"):
                 raise Refusal(f"cannot read the cfg predicate at {vals[q]!r}")
             q += vals[q] == ","
-        needs, bars = [part[0] for part in parts], [part[1] for part in parts]
         if word == "not":
             if len(parts) != 1:
                 raise Refusal("not() takes one cfg predicate")
-            return bars[0], needs[0], end + 1
-        # all() needs test when any part does; any() only when every part does (an empty any() never holds).
-        return (any(needs), any(bars), end + 1) if word == "all" else (all(needs), all(bars), end + 1)
+            return (None if parts[0] is None else not parts[0]), end + 1
+        decisive = word == "any"  # any() is true once a part is; all() is false once a part is
+        if decisive in parts:
+            return decisive, end + 1
+        return (None if None in parts else not decisive), end + 1
     if vals[p + 1] == "=":
-        return False, False, p + 3
+        return None, p + 3
     if not re.fullmatch(r"\w+", word):
         raise Refusal(f"cannot read the cfg predicate at {word!r}")
-    return word == "test", False, p + 1
+    return (False if word == "test" else None), p + 1
 
 
 def attr_is_test(vals, open_, close):
@@ -144,11 +147,11 @@ def attr_is_test(vals, open_, close):
         raise Refusal("cfg_attr that sets cfg or path: the counter will not guess when it applies")
     if vals[open_ + 1] != "cfg" or vals[open_ + 2] != "(":
         return False
-    needs, _, q = predicate(vals, open_ + 3)
+    value, q = predicate(vals, open_ + 3)
     q += vals[q] == ","
     if q != close - 1:
         raise Refusal("cfg() takes one predicate")
-    return needs
+    return value is False
 
 
 def item_extent(vals, i, end):
