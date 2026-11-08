@@ -1064,6 +1064,13 @@ def classify_lines(lines):
     fence = None
     comment = False
     for number, line in enumerate(lines, 1):
+        stripped = line.lstrip()
+        if (line.lstrip(" \t") != stripped
+                and stripped.startswith(("```", "~~~", "#", "<!--", "propose:"))):
+            raise ValueError(
+                "refuse: non-ASCII whitespace before a block marker on line %d"
+                % number
+            )
         width = sum(4 if char == "\t" else 1
                     for char in line[:len(line) - len(line.lstrip(" \t"))])
         if fence is not None:
@@ -1202,7 +1209,8 @@ def proposal_refusals(text):
     proposal; a line in a fence, in a comment or indented as code is refused by
     its own reason, and a propose line outside section 0 is refused.
     """
-    lines = text.splitlines()
+    # Preserve Unicode whitespace within a Markdown line for the refusal guard.
+    lines = re.split(r"\r\n?|\n", text)
     try:
         records = classify_lines(lines)
     except ValueError as error:

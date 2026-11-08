@@ -3722,6 +3722,47 @@ class CitationCheckTests(unittest.TestCase):
                     opener, "## hidden", closer, "## next",
                 ])], ["fence", "fence", "fence", "heading"])
 
+    def test_non_ascii_whitespace_before_block_marker_is_refused(self):
+        falsifier = (
+            "\x1f```\n## 1. Agent identity\n```\n"
+            "propose: fixture another call. Name: another call. Inputs: fixture "
+            "inputs. Refusal: fixture refusal. Owner: fixture owner. B2 stays open."
+        )
+        section = self._section_0()
+        number = len(section.splitlines()) + 1
+        reason = "refuse: non-ASCII whitespace before a block marker on line %d"
+        self.assertEqual(check.proposal_refusals(section + falsifier), [reason % number])
+        for space in ("\x1f", "\u00a0", "\u3000", "\v", "\f", "\x1c", "\x1d",
+                      "\x1e", "\x85", "\u2028", "\u2029"):
+            for indent in (space, " \t" + space + "\t "):
+                for marker in ("```", "~~~", "# title", "<!-- hidden -->", "propose: call"):
+                    for context in ("", "```\n", "<!--\n"):
+                        with self.subTest(indent=indent, marker=marker, context=context):
+                            body = section + context + indent + marker + "\n"
+                            self.assertEqual(check.proposal_refusals(body), [
+                                reason % (number + context.count("\n")),
+                            ])
+
+    def test_non_ascii_whitespace_in_ordinary_prose_is_unchanged(self):
+        for prose in ("\u00a0ordinary prose", " \t\u3000prose with ``` and #",
+                      "\x1f", "\u00a0`inline code`", "\u3000~~strike~~"):
+            with self.subTest(prose=prose):
+                self.assertEqual(check.classify_lines([prose]), [("text", None, prose)])
+                self.assertEqual(check.proposal_refusals(self._section_0() + prose), [])
+
+    def test_ascii_block_indentation_is_unchanged(self):
+        for indent in ("", " ", "   ", "    ", "\t", " \t"):
+            for marker, kind in (("```", "fence"), ("~~~", "fence"),
+                                 ("# title", "heading"), ("<!-- hidden -->", "comment"),
+                                 ("propose: call", "text")):
+                with self.subTest(indent=indent, marker=marker):
+                    expected = "text" if len(indent) > 3 or "\t" in indent else kind
+                    self.assertEqual(check.classify_lines([indent + marker])[0][0], expected)
+        for ending in ("\n", "\r\n", "\r"):
+            with self.subTest(ending=ending):
+                self.assertEqual(check.proposal_refusals(
+                    self._section_0().replace("\n", ending)), [])
+
     def test_comment_marker_inside_a_fence_opens_no_comment(self):
         # Inside a fence nothing else is read, so the heading after the fence
         # is real and closes section 0.
