@@ -414,17 +414,22 @@ mod tests {
             verify_signed_json_envelope_against_dids(&bytes, domain, std::slice::from_ref(&did))
                 .unwrap();
         assert_eq!(signer, did);
-        let no_list: [String; 0] = [];
-        for trusted in [
-            &no_list[..],
-            &[String::new()],
-            &[" ".to_string(), did.clone()],
-        ] {
-            let err = verify_signed_json_envelope_against_dids(&bytes, domain, trusted)
-                .expect_err("a list naming no signer must refuse")
-                .to_string();
-            assert_eq!(err, "Signed envelope has no trusted signer DID");
-            let err = verify_release_envelope_against_dids(&bytes, domain, trusted).unwrap_err();
+        let accepted = verify_signed_json_envelope_against_dids(&bytes, domain, &[]);
+        let err = accepted.expect_err("an empty list must refuse a valid signature");
+        assert_eq!(err.to_string(), "Signed envelope has no trusted signer DID");
+        let accepted = verify_release_envelope_against_dids(&bytes, domain, &[]);
+        let err = accepted.expect_err("an empty release list must refuse");
+        assert_eq!(err.to_string(), "Signed envelope has no trusted signer DID");
+    }
+
+    /// A blank entry voids the list even when the real signer is beside it.
+    #[test]
+    fn blank_trusted_did_refuses_even_beside_the_signer() {
+        let domain = "test.trusted.set.v1";
+        let (bytes, did) = signed_test_envelope(46, domain);
+        for trusted in [vec![" ".to_string(), did.clone()], vec![String::new()]] {
+            let accepted = verify_signed_json_envelope_against_dids(&bytes, domain, &trusted);
+            let err = accepted.expect_err("a list with a blank DID must refuse");
             assert_eq!(err.to_string(), "Signed envelope has no trusted signer DID");
         }
     }
