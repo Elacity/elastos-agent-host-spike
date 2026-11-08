@@ -524,6 +524,7 @@ fn versions_receipt_binds_current_run() {
     fs::write(&results_path, output(&observations)).unwrap();
     let command = || {
         std::process::Command::new(env!("CARGO_BIN_EXE_report"))
+            .env_remove("AGENT_CONFORMANCE_REVIEWS")
             .arg(&listed_path)
             .arg(&results_path)
             .arg("0")
@@ -892,6 +893,7 @@ fn skipped_report_keeps_a_nonzero_exit() {
     fs::write(&list_path, listed).unwrap();
     fs::write(&results_path, output).unwrap();
     let result = std::process::Command::new(env!("CARGO_BIN_EXE_report"))
+        .env_remove("AGENT_CONFORMANCE_REVIEWS")
         .arg(list_path)
         .arg(results_path)
         .arg("101")
@@ -1257,4 +1259,48 @@ fn receipt_records_review_binding_beside_command_success() {
     assert_eq!(document["review_failures"], serde_json::json!([]));
     assert_eq!(document["reviews"], serde_json::to_value(&reviews).unwrap());
     assert_eq!(document["report"]["table"], report.table);
+}
+
+#[test]
+fn report_cli_reads_reviews_and_refuses_a_malformed_file() {
+    let home = ThrowawayHome::new().unwrap();
+    let (observations, _) = synthetic(4, false);
+    let listed_path = home.root().join("list");
+    let results_path = home.root().join("results");
+    let reviews_path = home.root().join("reviews.json");
+    fs::write(&listed_path, format!("{LIVE}: test\n")).unwrap();
+    fs::write(&results_path, output(&observations)).unwrap();
+    let run = |receipt: &str| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_report"))
+            .env("AGENT_CONFORMANCE_REVIEWS", &reviews_path)
+            .arg(&listed_path)
+            .arg(&results_path)
+            .arg("0")
+            .arg(home.root().join(receipt))
+            .output()
+            .unwrap()
+    };
+    // No real commit is all zeros, so this review names another commit.
+    let reviews = [review("codex", "pass", &"0".repeat(40))];
+    fs::write(&reviews_path, serde_json::to_vec(&reviews).unwrap()).unwrap();
+    let result = run("reviewed.json");
+    assert!(result.status.success(), "{result:?}");
+    let receipt = read_receipt(&home.root().join("reviewed.json"));
+    assert_eq!(receipt["reviews"], serde_json::to_value(&reviews).unwrap());
+    assert_eq!(receipt["review_status"], "unbound");
+    assert!(receipt["review_failures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|failure| failure == "review names another commit: codex"));
+
+    fs::write(&reviews_path, br#"[{"reviewer":"codex","verdict":"pass"}]"#).unwrap();
+    let malformed = run("malformed.json");
+    assert_eq!(malformed.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(malformed.stderr).unwrap(),
+        "versions receipt failure: could not read reviews\n"
+    );
+    assert!(!home.root().join("malformed.json").exists());
+    home.finish().unwrap();
 }

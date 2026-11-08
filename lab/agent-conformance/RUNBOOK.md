@@ -258,6 +258,17 @@ command. A write refusal names its cause, including `AlreadyExists` or
 and symlink targets. A report-build failure stops before suite execution and
 retains its build output; the command cannot issue a receipt without its writer.
 
+`review_binding (A14)` passes only when `AGENT_CONFORMANCE_REVIEWS` names a
+JSON list of `{reviewer, verdict, commit}` entries, at least one, each with
+verdict `pass` and the exact commit the receipt's `repository` names, and the
+tree is clean. Reviews live outside the commit they read. The receipt records
+`reviews`, `review_status` (`bound` or `unbound`) and `review_failures`. An
+unreadable or malformed reviews file fails the command; an unbound review
+leaves this row FAIL without changing `command_success`, so CI still reports
+unreviewed candidates. A14 needs both A14 rows to pass. The report checks only
+that each review names this commit; who reviewed, and whether two model
+families did, stays with the reviewer list.
+
 `identity_status` describes identity coverage. `suite_outcome` describes the
 Cargo rows, including FAIL and BLOCKED; `command_success` combines both gates.
 A complete identity record preserves each journey's grade. The parser accepts

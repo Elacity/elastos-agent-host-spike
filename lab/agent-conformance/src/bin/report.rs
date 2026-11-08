@@ -38,11 +38,26 @@ fn main() {
     let output = read(&args[2], "results");
     let gaps = fs::read_to_string(build::lane().join("GAPS.md")).ok();
     let receipt = Path::new(&args[4]);
-    let result = report::write_run(
+    // Reviews name the commit they read, so they live outside that commit.
+    let reviews = match env::var_os("AGENT_CONFORMANCE_REVIEWS") {
+        None => None,
+        Some(path) => match fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Vec<report::Review>>(&bytes).ok())
+        {
+            Some(reviews) => Some(reviews),
+            None => {
+                eprintln!("versions receipt failure: could not read reviews");
+                process::exit(1);
+            }
+        },
+    };
+    let result = report::write_reviewed_run(
         &listed,
         &output,
         inputs_ok && args[3] == "0",
         report::GitIdentity::read(&build::repository()),
+        reviews.as_deref(),
         receipt,
         gaps.as_deref(),
     );
