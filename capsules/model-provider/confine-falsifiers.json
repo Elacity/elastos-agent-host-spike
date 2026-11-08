@@ -1021,14 +1021,14 @@
     },
     {
       "id": "F-cc53a",
-      "title": "the lab generator drops the last rule it emits",
+      "title": "the lab generator drops the process-exec rights rule",
       "command": "provider",
       "expect": "caught",
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/common/profile_generator.rs",
           "old": "    Ok(profile)",
-          "new": "    let mut lines: Vec<&str> = profile.lines().collect();\n    lines.pop();\n    Ok(format!(\"{}\\n\", lines.join(\"\\n\")))"
+          "new": "    let dropped = \"(allow process-exec (literal (param \\\"PROVIDER_EXECUTABLE\\\")))\";\n    let kept: String = profile\n        .lines()\n        .filter(|line| *line != dropped)\n        .map(|line| format!(\"{line}\\n\"))\n        .collect();\n    Ok(kept)"
         }
       ],
       "tests": [

@@ -3863,8 +3863,8 @@ fn generated_model_profile_matches_the_oracle() {
 ///
 /// Falsifier: F-cc48a makes the shared generator append one allow after the
 /// joined rules, so this test fails at the sorted-form comparison. F-cc53a
-/// drops the last form the generator emits, so this test fails because the
-/// committed profile still holds it.
+/// drops the `process-exec` rule the generator emits, so this test fails
+/// because the committed profile still holds it.
 #[test]
 fn generated_model_profile_matches_its_committed_oracle() {
     let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
