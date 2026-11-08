@@ -48,7 +48,7 @@ mod test_support;
 #[path = "../../../wallet-provider/tests/common/profile_generator.rs"]
 mod profile_generator;
 
-use profile_generator::{generate_profile, write_generated_profile};
+use profile_generator::{generate_profile, write_generated_profile, PROFILE_HEAD};
 
 use elastos_model_contract::{
     model_input_hash, model_run_id, RuntimeAccessBinding, RuntimeCreateBinding,
@@ -3850,6 +3850,64 @@ fn generated_model_profile_matches_the_oracle() {
     );
 }
 
+/// The shared lab generator builds this provider's profile from its
+/// declared-rights file, and the generated profile equals the committed
+/// `confine.sb` oracle up to the head order and the sorted remaining forms.
+///
+/// The test reads `tests/fixtures/confine/declared-rights.json`, generates the
+/// profile with `generate_profile`, and requires `PROFILE_HEAD` at the start
+/// of both the generated and the committed profile. It compares the sorted
+/// forms after the head, the same comparison the did and wallet oracle test
+/// uses. The test reads files and starts no process, so it runs on every
+/// platform.
+///
+/// Falsifier: F-cc48a makes the shared generator append one allow after the
+/// joined rules, so this test fails at the sorted-form comparison. F-cc53a
+/// drops the last form the generator emits, so this test fails because the
+/// committed profile still holds it.
+#[test]
+fn generated_model_profile_matches_its_committed_oracle() {
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let committed = fs::read_to_string(PROFILE_PATH)
+        .unwrap_or_else(|err| panic!("the profile oracle must be readable: {err}"));
+    let generated =
+        generate_profile("model-provider", &fixture).expect("declared rights build a profile");
+    for (label, profile) in [("generated", &generated), ("committed", &committed)] {
+        let forms: Vec<&str> = non_comment_lines(profile);
+        assert_eq!(
+            forms
+                .iter()
+                .take(PROFILE_HEAD.len())
+                .copied()
+                .collect::<Vec<_>>(),
+            PROFILE_HEAD.to_vec(),
+            "{label} profile must start with {PROFILE_HEAD:?}"
+        );
+    }
+    let mut generated_forms: Vec<&str> = non_comment_lines(&generated)
+        .into_iter()
+        .skip(PROFILE_HEAD.len())
+        .collect();
+    let mut committed_forms: Vec<&str> = non_comment_lines(&committed)
+        .into_iter()
+        .skip(PROFILE_HEAD.len())
+        .collect();
+    generated_forms.sort();
+    committed_forms.sort();
+    assert_eq!(
+        generated_forms, committed_forms,
+        "generated profile differs from its committed oracle"
+    );
+}
+
 /// The file `Launch::Profile` applies has the oracle's sorted allow lines
 /// and its sorted non-comment lines.
 ///
@@ -4295,8 +4353,6 @@ fn standin_launch_uses_the_generated_profile() {
     }
 
     let storage = Storage::prepare("standin-dropped-storage");
-    let generated =
-        generate_profile("model-provider", &dropped).expect("declared rights build a profile");
     let dropped_profile = storage.base.join("standin-dropped-storage.sb");
     write_generated_profile("model-provider", &dropped, &dropped_profile)
         .expect("write the generated profile");
