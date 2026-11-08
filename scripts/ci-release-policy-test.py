@@ -2041,6 +2041,8 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertEqual(field(JOBS["required"], "if"), "always()")
         self.assertNotIn("actions/checkout@", JOBS["required"])
         self.assertEqual(set(REQUIRED_NEEDS), set(JOBS) - {"required", "cancel-on-failure"})
+        # The cases below run against REQUIRED_NEEDS, so the job must need exactly those.
+        self.assertEqual(field(JOBS["required"], "needs"), "[" + ", ".join(REQUIRED_NEEDS) + "]")
         pr, spark = event_context("pull_request", "refs/pull/9/merge"), event_context("pull_request", "refs/pull/9/merge", head_ref="spark/lane")
         push, nightly = event_context("push", "refs/heads/spike/agent-host"), event_context("schedule", "refs/heads/spike/agent-host")
         mac, assets = {"source-home-macos": "skipped"}, {"release-upstream-assets": "skipped"}
