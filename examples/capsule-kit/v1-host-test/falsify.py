@@ -48,9 +48,9 @@ CASES = [
      "        let response = host.lock().unwrap().answer(line);",
      "run_calls_dispatch_with_the_bus_caller"),
     # This test code stands in for the Runtime's launch by CID, which does not exist yet.
-    ("stand-in loaded instance recording bypassed", "lib.rs",
-     "    record_loaded_instance(&mut bridge.lock().unwrap(), &handle.id.0);",
-     "    let _ = &handle.id.0;",
+    ("stand-in loaded instance recorded after start", "lib.rs",
+     "    record_loaded_instance(&mut bridge.lock().unwrap(), &handle.id.0);\n    let result = provider.start(&handle).await.map_err(|err| err.to_string());",
+     "    let result = provider.start(&handle).await.map_err(|err| err.to_string());\n    record_loaded_instance(&mut bridge.lock().unwrap(), &handle.id.0);",
      "run_records_the_loaded_instance_before_start"),
 ]
 
