@@ -221,14 +221,44 @@ def parse_items(vals, lines, i, end, test, found, inline=()):
             found["spans"].append((lines[start], lines[last]))
         if kind == "mod" and body is None:
             found["mods"].append((name, vals[start:i], lines[i], item_test, inline))
+        if body and kind in ("struct", "union", "enum") and not item_test:
+            parse_fields(vals, lines, body[0], body[1], kind == "enum", found)
         if body and kind in ("mod", "impl", "trait", "extern"):
             parse_items(vals, lines, body[0] + 1, body[1], item_test, found, inline + (name,) * (kind == "mod"))
         i = last + 1
 
 
+def parse_fields(vals, lines, open_, close, enum, found):
+    """Mark test fields of a struct or union body, or test variants of an enum body, vals[open_:close],
+    from their attributes through their comma. Field types close <...> before their comma."""
+    i = open_ + 1
+    while i < close:
+        start, test = i, False
+        while vals[i] == "#":
+            found["attrs"].add(i)
+            try:
+                test = attr_is_test(vals, i + 1, closer(vals, i + 1)) or test
+            except Refusal as error:
+                raise Refusal(str(error), lines[i]) from None
+            i = closer(vals, i + 1) + 1
+        q, angle = i, 0
+        while q < close and (vals[q] != "," or angle):
+            if vals[q] in OPEN:
+                q = closer(vals, q)
+            elif not enum and vals[q] in ("<", ">") and vals[q - 1] != "-":
+                angle += 1 if vals[q] == "<" else -1 if angle else 0
+            elif enum and test and vals[q] == "=":
+                raise Refusal("test enum variant with a discriminant: core-size.py will not guess its end",
+                              lines[start])
+            q += 1
+        if test:
+            found["spans"].append((lines[start], lines[min(q, close - 1)]))
+        i = q + 1
+
+
 def analyse(tokens):
-    """(test lines, outline module declarations) of one file's tokens. A test cfg outside item
-    position (on a field, variant, match arm, statement or expression) is refused."""
+    """(test lines, outline module declarations) of one file's tokens. A test cfg anywhere else (a
+    match arm, statement, expression, tuple field or parameter) is refused."""
     code = [t for t in tokens if t[1] != "comment"]
     vals, lines = [t[2] for t in code] + [""] * 4, [t[0] for t in code]
     found = {"spans": [], "attrs": set(), "mods": []}
@@ -242,7 +272,7 @@ def analyse(tokens):
             except Refusal as error:
                 raise Refusal(str(error), lines[k]) from None
             if refuse:
-                raise Refusal("test cfg on a field, variant, match arm, statement or expression:"
+                raise Refusal("test cfg on a match arm, statement, expression, tuple field or parameter:"
                               " core-size.py will not guess where it ends", lines[k])
     return tests, found["mods"]
 

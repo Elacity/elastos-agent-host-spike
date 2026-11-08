@@ -91,19 +91,31 @@ class CountTest(unittest.TestCase):
             totals = counts(source)
             self.assertEqual((totals["tests"], totals["code"]), (tests, code), source)
 
-    def test_test_cfg_on_fields_arms_and_statements_is_refused(self):
+    def test_test_fields_and_variants_end_at_their_comma(self):
+        cases = {  # the reviewers' inputs: the production field or variant after the test one stays code
+            "struct S {\n    #[cfg(test)]\n    default: u8,\n    live: u8,\n}\n": (2, 3),
+            "struct S {\n    #[cfg(test)]\n    hook: [u8; { 4 }],\n    live: u8,\n}\n": (2, 3),
+            "struct S {\n    #[cfg(test)]\n    hook: HashMap<u8, Box<dyn Fn(u8) -> u8>>,\n    live: u8,\n}\n": (2, 3),
+            "struct S {\n    live: u8,\n    #[cfg(test)]\n    hook: u8\n}\n": (2, 3),
+            "enum E {\n    A,\n    #[cfg(test)]\n    B(u8),\n    C { a: Vec<u8> },\n}\n": (2, 4),
+        }
+        for source, (tests, code) in cases.items():
+            totals = counts(source)
+            self.assertEqual((totals["tests"], totals["code"]), (tests, code), source)
+
+    def test_test_cfg_on_arms_statements_and_tuple_fields_is_refused(self):
         cases = {  # the reviewers' inputs: guessing here hid the production field or arm after it
             "pub fn f(x: u8) -> u8 {\n    match x {\n        #[cfg(test)]\n        0 if x < 2 => 1,\n"
             "        _ => 2,\n    }\n}\n": 3,
             "fn f(x: u8) -> u8 {\n    match x {\n        #[cfg(test)]\n        0 => if x > 1 {\n"
             "            1\n        } else {\n            2\n        },\n        _ => 3,\n    }\n}\n": 3,
-            "struct S {\n    #[cfg(test)]\n    default: u8,\n    live: u8,\n}\n": 2,
-            "struct S {\n    #[cfg(test)]\n    hook: [u8; { 4 }],\n    live: u8,\n}\n": 2,
-            "enum E {\n    A,\n    #[cfg(test)]\n    B(u8),\n    C,\n}\n": 3,
+            "enum E {\n    #[cfg(test)]\n    B = 1 << 2,\n    C,\n}\n": 2,
+            "struct S(\n    #[cfg(test)]\n    u8,\n    u16,\n);\n": 2,
             "fn f() {\n    #[cfg(test)]\n    check();\n    live();\n}\n": 2,
         }
         for source, line in cases.items():
-            with self.assertRaisesRegex(core_size.Refusal, rf"src/lib.rs:{line}: test cfg on a field", msg=source):
+            pattern = rf"src/lib.rs:{line}: test (cfg on a|enum variant)"
+            with self.assertRaisesRegex(core_size.Refusal, pattern, msg=source):
                 counts(source)
 
     def test_block_comments(self):
