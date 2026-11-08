@@ -10662,6 +10662,76 @@ fn seccomp_allow_list_names_the_provider_it_was_built_for() {
     );
 }
 
+/// The calls the model's final program must refuse, with their numbers on both
+/// audit architectures. The list is written here rather than read from
+/// `MODEL_RUNTIME_ESSENTIALS` or `SECCOMP_SYSCALL_NUMBERS`, so a plant that
+/// widens one of those tables cannot also widen this check. Each call reaches
+/// another task, another process's memory, the kernel, a filesystem, a
+/// namespace, a keyring or a kernel-instrumentation interface.
+const MODEL_FORBIDDEN_CALLS: &[(&str, u32, u32)] = &[
+    ("ptrace", 101, 117),
+    ("process_vm_readv", 310, 270),
+    ("process_vm_writev", 311, 271),
+    ("kexec_load", 320, 104),
+    ("init_module", 175, 105),
+    ("finit_module", 313, 273),
+    ("bpf", 321, 280),
+    ("mount", 165, 40),
+    ("umount2", 166, 39),
+    ("pivot_root", 155, 41),
+    ("unshare", 272, 97),
+    ("setns", 308, 268),
+    ("keyctl", 250, 219),
+    ("add_key", 248, 217),
+    ("request_key", 249, 218),
+    ("perf_event_open", 298, 241),
+    ("userfaultfd", 323, 282),
+];
+
+/// The model's final list and rendered program admit none of the fixed
+/// forbidden calls on either architecture.
+///
+/// The model's expected list and expected program elsewhere both come from
+/// `MODEL_RUNTIME_ESSENTIALS` and the shared builder, so adding a call to that
+/// table would pass those comparisons. This check takes its calls and their
+/// numbers from the fixed table above, which no builder reads, and requires the
+/// model's rendered program to test no equality against any of them. It fails
+/// if the model's program admits one of them on either architecture.
+///
+/// The test reads the model's declared-rights file and builds two programs. It
+/// starts no process and makes no kernel call, so it runs on every OS.
+///
+/// Falsifier: WP248 adds `ptrace` to `MODEL_RUNTIME_ESSENTIALS` only, so the
+/// model's list and both rendered programs admit it while the other model
+/// comparisons still agree with that table, and this test fails on the `ptrace`
+/// case.
+#[test]
+fn seccomp_model_program_admits_no_forbidden_call_on_either_architecture() {
+    let allow = seccomp_probe_list(MODEL_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+    for (arch, arch_name) in [(0xc000_003e_u32, "x86-64"), (0xc000_00b7, "aarch64")] {
+        let program = if arch == allow.audit_arch {
+            allow.program.clone()
+        } else {
+            seccomp_program_with_thread_rules(&allow.syscalls, arch)
+        };
+        for &(call, x86_64, aarch64) in MODEL_FORBIDDEN_CALLS {
+            assert!(
+                !allow.syscalls.contains(&call),
+                "the model list must admit no forbidden call, and it admits {call}"
+            );
+            let number = if arch == 0xc000_003e { x86_64 } else { aarch64 };
+            assert!(
+                !program
+                    .iter()
+                    .any(|instruction| instruction.code == SECCOMP_BPF_JEQ_K
+                        && instruction.k == number),
+                "the {arch_name} model program must test no equality against {call}'s number \
+                 {number}"
+            );
+        }
+    }
+}
+
 /// The one judge of the socket sweep accepts a report where every type swept
 /// every family and every family was refused after the filter, and refuses each
 /// way a report can fall short, with its own reason.

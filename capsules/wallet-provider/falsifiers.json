@@ -3687,6 +3687,22 @@
       "tests": [
         "builders_refuse_a_pinned_form_claimed_by_another_id"
       ]
+    },
+    {
+      "id": "WP248",
+      "title": "the model runtime table admits ptrace, so the model's final program tests ptrace's number",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[\n    \"brk\",",
+          "new": "const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[\n    \"ptrace\",\n    \"brk\","
+        }
+      ],
+      "tests": [
+        "seccomp_model_program_admits_no_forbidden_call_on_either_architecture"
+      ]
     }
   ]
 }

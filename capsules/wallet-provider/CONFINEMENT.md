@@ -1677,6 +1677,10 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - WP247: The Landlock builder skips the same check, so that declaration gets a
   `STORAGE_ROOT` rule.
   `builders_refuse_a_pinned_form_claimed_by_another_id` checks this rule.
+- WP248: The model's runtime table carries `ptrace`, so the model's final
+  program tests its number while the table-derived comparisons still agree.
+  `seccomp_model_program_admits_no_forbidden_call_on_either_architecture`
+  checks this rule from a fixed list that no builder reads.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,
