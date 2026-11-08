@@ -183,8 +183,10 @@ class CountTest(unittest.TestCase):
                 {"src/lib.rs": 'include!("production.inc");\n'},
             "src/lib.rs:1: include! of a path that is not one string literal":
                 {"src/lib.rs": 'include!(concat!(env!("OUT_DIR"), "/x.rs"));\n'},
-            "src/lib.rs:3: module declared in a function body": {"src/lib.rs": 'fn f() {\n    #[path = "hidden.rs"]\n'
-                                                                 "    mod hidden;\n}\n", "src/hidden.rs": ""},
+            # Codex: hidden.rs is also reached through a test module, so the orphan refusal does not catch it.
+            "src/lib.rs:5: module declared in a function body": {"src/lib.rs": "#[cfg(test)]\nmod hidden;\nfn f() {\n"
+                                                                 '    #[path = "hidden.rs"]\n    mod hidden;\n}\n',
+                                                                 "src/hidden.rs": "pub fn production() {}\n"},
             "src/lib.rs:1: #.path. on an inline module": {"src/lib.rs": '#[path = "x"]\nmod m {\n}\n'},
             "src/inc.rs: module declared in an include!d file": {"src/lib.rs": 'include!("inc.rs");\n',
                                                                  "src/inc.rs": "mod x;\n", "src/x.rs": ""},
