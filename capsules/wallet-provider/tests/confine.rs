@@ -13643,9 +13643,9 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
     // With that row the same journeys then took SIGSEGV: the provider's check of
     // its standard descriptors calls poll on x86-64, where aarch64 calls ppoll,
     // and poll([{fd=0}, {fd=1}, {fd=2}], 3, 0) = -1 EACCES made it abort
-    // (run 42447112526). Every other refused call in that trace (brk,
+    // (run 42447112526). Every other refused call in that did trace (brk,
     // set_tid_address, set_robust_list, rseq, prlimit64, munmap) is one the
-    // aarch64 run also refuses and the provider tolerates.
+    // aarch64 run also refuses for did and wallet, and the provider tolerates.
     // Then the providers started and their storage calls were refused. A run
     // whose filter logged instead of refusing (measure branch only, run
     // 42447514431) named mkdir (83), unlink (87) and access (21), the older
@@ -13653,7 +13653,10 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
     // that aarch64 does not have. The other logged calls (brk, fcntl, getpid,
     // munmap, prlimit64, rseq, sched_getaffinity, set_robust_list,
     // set_tid_address, sigaltstack) exist on both and are refused on aarch64
-    // too, so they stay out.
+    // too, so they stay out of the launch set did and wallet share. The model
+    // is not covered by this sentence: it admits rseq and munmap through
+    // MODEL_RUNTIME_ESSENTIALS, and fcntl and prlimit64 through argument-checked
+    // rules, as its golden programs show.
     //
     // Each x86-64 row was then dropped alone under the real filter (measure
     // branch, run 42454795461). Without arch_prctl every journey failed "Cannot
