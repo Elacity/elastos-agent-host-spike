@@ -98,9 +98,10 @@ list and one install path (P10).
 each entry was dropped alone from the whole list, the probe re-run, and the call
 that then failed named it. The set is one table for both providers, and the two
 runs measured it separately: wallet's set of seven calls is the table below, and
-did's recorded set is the same seven. That did measurement used the wider
-`fchmodat` policy described below; it proves no complete did journey under
-wallet's preserved policy. Both providers use the same launch table:
+did's recorded set is the same seven. That did measurement was taken under the
+earlier, wider `fchmodat` policy described below; the did journey now passes
+under the same policy as wallet's (see "The did journey" below). Both providers
+use the same launch table:
 
 | Entry | The call whose refusal named it |
 | --- | --- |
@@ -180,10 +181,10 @@ kernel `6.17.0-1029-nvidia`. The wallet caller printed one line per socket type
 after `install_seccomp`: `SOCK_STREAM`, `SOCK_DGRAM`, `SOCK_SEQPACKET`,
 `SOCK_RAW`, `SOCK_RDM`, `SOCK_DCCP`, `SOCK_PACKET` and `socketpair` each answered
 the deny marker for all 45 families, and each answered something other than the
-marker for none of them before the filter. The did caller did not reach the probe
-in that run: it failed at `the confined provider must return the stored
-nickname`, which is the `fchmodat` block recorded below, so the sweep is claimed
-from the wallet caller alone.
+marker for none of them before the filter. The sweep is claimed from the wallet
+caller alone, because the journey runs the probe only when the provider is
+wallet. In that 31 Oct run the did caller also stopped earlier, at the
+`fchmodat` block recorded below, which is since resolved.
 
 The wallet run requires `init` `ok`, one read-only wallet call `ok`, a
 `wallet-key.hex` of 64 hex digits and a newline under `STORAGE_ROOT`, no profile
@@ -223,17 +224,20 @@ inside `rand`'s thread RNG, which cannot seed; `mmap` → `SIGSEGV`; `mprotect` 
 `rt_sigaction` → `fatal runtime error: assertion failed: signal(libc::SIGPIPE,
 handler) != libc::SIG_ERR`.
 
-The did journey is blocked by wallet's preserved syscall policy. The recorded
-run failed with `the confined provider must return the stored nickname` and
-`{"code":"not_set"}`. Its trace showed
+The did journey. Under wallet's preserved syscall policy the 31 Oct did run
+failed with `the confined provider must return the stored nickname` and
+`{"code":"not_set"}`; its trace showed
 `fchmodat(AT_FDCWD, "<root>/did/nickname.enc", 0600) = -1 EACCES` when
-`set_nickname` set the file mode. The earlier successful did run added
-`fchmodat` to the shared storage row, which also widened wallet's program.
-That addition has been removed. The shared policy owner must resolve this
-requirement before a fresh did journey can supply acceptance evidence. The did
-test keeps its permitted-operation assertions and full-program equality; its
-previous run with the wider policy supplies neither proof for the restored
-policy nor acceptance of the did seccomp row.
+`set_nickname` set the file mode. An earlier passing did run had added
+`fchmodat` to the shared storage row, which also widened wallet's program; that
+addition was removed. The block is now resolved in did's store instead:
+`save_nickname_with_device_key` creates `nickname.enc` at 0600 and sets the mode
+on the open file, so `fchmodat` stays out of every list.
+`linux_did_journey_runs_under_the_seccomp_allow_list` passes under the same
+policy as wallet's on aarch64 (receipt
+`~/Sparks/office/evidence/b4-x86/pr1548-6241445e-aarch64.log`) and on x86_64
+(this PR's CI). It is lab stand-in evidence on those hosts, not Runtime
+acceptance.
 
 The current journey also compares the key's final bytes with the bytes captured
 immediately after `init`. The key check requires the trailing newline.
@@ -964,9 +968,9 @@ where this lane's gate runs.
   `6.17.0-1029-nvidia`) printed, for the wallet caller, `45 families, refused
   before 0, after 45, first unrefused none` for `SOCK_STREAM`, `SOCK_DGRAM`,
   `SOCK_SEQPACKET`, `SOCK_RAW`, `SOCK_RDM`, `SOCK_DCCP`, `SOCK_PACKET` and
-  `socketpair`. The did caller did not reach the probe in that run, because the
-  `fchmodat` block above stops it before the sweep, so the policy check exists and
-  the sweep is claimed from the wallet caller alone.
+  `socketpair`. The sweep is claimed from the wallet caller alone, because the
+  journey runs the probe only for wallet; in that run the did caller also
+  stopped earlier, at the `fchmodat` block above, which is since resolved.
   Falsifier: replace the whole-call refusal with a family list that omits
   `AF_VSOCK`; `socket(AF_VSOCK, SOCK_STREAM)` succeeds and the sweep's
   after-count falls below its family count, so the journey's judge refuses it.

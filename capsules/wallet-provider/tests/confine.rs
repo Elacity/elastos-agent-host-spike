@@ -9104,11 +9104,18 @@ fn builders_refuse_a_pinned_form_claimed_by_another_id() {
     let mut misclaimed = declared.clone();
     misclaimed["rights"] = json!([]);
     misclaimed["platform_baseline"]["rules"][0]["rules"] = json!([SHARED_RULES[2]]);
-    let expected = format!("{WALLET_PROVIDER} rule {} must be claimed by storage", SHARED_RULES[2]);
+    let expected = format!(
+        "{WALLET_PROVIDER} rule {} must be claimed by storage",
+        SHARED_RULES[2]
+    );
 
     let seccomp = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &misclaimed)
         .map(|allow| allow.syscalls);
-    assert_eq!(seccomp, Err(expected.clone()), "the seccomp builder must refuse the claim");
+    assert_eq!(
+        seccomp,
+        Err(expected.clone()),
+        "the seccomp builder must refuse the claim"
+    );
 
     let fixture = tempfile::tempdir().expect("temporary provider base");
     let base = resolved(fixture.path());
@@ -9116,7 +9123,11 @@ fn builders_refuse_a_pinned_form_claimed_by_another_id() {
     let bindings = canonical_bindings(WALLET_PROVIDER, &base, binary);
     let landlock = landlock_path_rules(WALLET_PROVIDER, &misclaimed, &bindings, 7, &[])
         .map(|ruleset| ruleset.rules.len());
-    assert_eq!(landlock, Err(expected), "the Landlock builder must refuse the claim");
+    assert_eq!(
+        landlock,
+        Err(expected),
+        "the Landlock builder must refuse the claim"
+    );
 }
 
 #[test]
