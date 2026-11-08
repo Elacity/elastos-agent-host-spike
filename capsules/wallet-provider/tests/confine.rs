@@ -6963,6 +6963,16 @@ fn seccomp_allow_list_from_declared_rights(
     name: &str,
     declared: &Value,
 ) -> Result<SeccompAllowList, String> {
+    seccomp_allow_list_for_arch(name, declared, SECCOMP_AUDIT_ARCH)
+}
+
+/// The one builder for an audit architecture that need not be this target's, so
+/// a test can render the program another architecture would install.
+fn seccomp_allow_list_for_arch(
+    name: &str,
+    declared: &Value,
+    audit_arch: u32,
+) -> Result<SeccompAllowList, String> {
     let rendered = generate_profile(name, declared)?;
     // The rows below grant by form, so a form claimed under another id would
     // bring that right's calls without the right. The pin table decides who
@@ -6989,7 +6999,7 @@ fn seccomp_allow_list_from_declared_rights(
         for syscall in row.1 {
             // A row may name an older call one architecture alone has; a
             // target without it admits nothing for that name.
-            if seccomp_syscall_number(syscall, SECCOMP_AUDIT_ARCH).is_none() {
+            if seccomp_syscall_number(syscall, audit_arch).is_none() {
                 continue;
             }
             if !syscalls.contains(syscall) {
@@ -6997,7 +7007,7 @@ fn seccomp_allow_list_from_declared_rights(
             }
         }
     }
-    if SECCOMP_AUDIT_ARCH == 0 {
+    if audit_arch == 0 {
         return Err(format!(
             "{name} seccomp allow list is unavailable on target architecture {}: \
              the lab filter checks one audit architecture and this target has none",
@@ -7005,10 +7015,10 @@ fn seccomp_allow_list_from_declared_rights(
         ));
     }
     syscalls.sort_unstable();
-    let program = seccomp_program(&syscalls, SECCOMP_AUDIT_ARCH);
+    let program = seccomp_program(&syscalls, audit_arch);
     Ok(SeccompAllowList {
         provider: name.to_string(),
-        audit_arch: SECCOMP_AUDIT_ARCH,
+        audit_arch,
         syscalls,
         program,
         #[cfg(target_os = "linux")]
@@ -10669,8 +10679,14 @@ fn write_number(fd: std::os::fd::RawFd, value: i64) {
 /// It refuses, with `read_declared_rights`' or `seccomp_allow_list_from_declared_rights`'
 /// own reason unchanged, a name whose declared-rights file cannot be read.
 fn seccomp_probe_list(name: &str) -> Result<SeccompAllowList, String> {
+    seccomp_probe_list_for_arch(name, SECCOMP_AUDIT_ARCH)
+}
+
+/// `seccomp_probe_list` for `audit_arch`, so a test reads the list and program
+/// either architecture would install through the same builder and join.
+fn seccomp_probe_list_for_arch(name: &str, audit_arch: u32) -> Result<SeccompAllowList, String> {
     let declared = read_declared_rights(name, &declared_rights_path(name))?;
-    seccomp_allow_list_from_declared_rights(name, &declared)
+    seccomp_allow_list_for_arch(name, &declared, audit_arch)
         .map(|allow| allow.with_launch_essentials())
 }
 
@@ -10777,11 +10793,9 @@ const MODEL_FORBIDDEN_CALLS: &[(&str, u32, u32)] = &[
 fn seccomp_model_program_admits_no_forbidden_call_on_either_architecture() {
     let allow = seccomp_probe_list(MODEL_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
     for (arch, arch_name) in [(0xc000_003e_u32, "x86-64"), (0xc000_00b7, "aarch64")] {
-        let program = if arch == allow.audit_arch {
-            allow.program.clone()
-        } else {
-            seccomp_program_with_thread_rules(&allow.syscalls, arch)
-        };
+        let program = seccomp_probe_list_for_arch(MODEL_PROVIDER, arch)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .program;
         for &(call, x86_64, aarch64) in MODEL_FORBIDDEN_CALLS {
             assert!(
                 !allow.syscalls.contains(&call),
