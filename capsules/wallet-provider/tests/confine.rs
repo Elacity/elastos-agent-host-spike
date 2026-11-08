@@ -10985,6 +10985,101 @@ fn model_syscall_lists_match_libc() {
             "the forbidden list's {call} must be libc's number"
         );
     }
+    // Each golden line that names a call is that call's libc number, and every
+    // other equality in the golden is an argument or architecture check.
+    let clone3 = ("SYS_clone3", 0, libc::SYS_clone3 as u32);
+    for (at, comment) in model_seccomp_golden(SECCOMP_AUDIT_ARCH) {
+        let label = comment.split_whitespace().next().unwrap_or_default();
+        if label.starts_with("SYS_") {
+            let row = allowed.iter().chain([&clone3]).find(|row| row.0 == label);
+            let libc_number = row.unwrap_or_else(|| panic!("the golden's {label} has no libc row"));
+            assert_eq!(at.code, SECCOMP_BPF_JEQ_K, "{comment}");
+            assert_eq!(
+                at.k, libc_number.2,
+                "the golden's {label} must be libc's number"
+            );
+        } else if at.code == SECCOMP_BPF_JEQ_K {
+            assert!(label.starts_with("arg") || label == "arch", "{comment}");
+        }
+    }
+}
+
+/// The checked-in golden copy of the model's final program for `audit_arch`,
+/// one instruction per line as `code jt jf k  # comment`, with each comment.
+fn model_seccomp_golden(audit_arch: u32) -> Vec<(SeccompInstruction, &'static str)> {
+    let text = match audit_arch {
+        0xc000_003e => include_str!("model-seccomp-x86_64.golden"),
+        0xc000_00b7 => include_str!("model-seccomp-aarch64.golden"),
+        other => panic!("no golden model program for audit architecture {other:#x}"),
+    };
+    let number = |word: &str| match word.strip_prefix("0x") {
+        Some(hex) => u32::from_str_radix(hex, 16),
+        None => word.parse(),
+    };
+    let lines = text
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty());
+    lines
+        .map(|line| {
+            let (fields, comment) = line
+                .split_once("  # ")
+                .unwrap_or_else(|| panic!("golden line {line:?} must end in a comment"));
+            let fields: Vec<u32> = fields
+                .split_whitespace()
+                .map(|word| number(word).unwrap_or_else(|err| panic!("{line:?}: {err}")))
+                .collect();
+            let [code, jt, jf, k] = fields[..] else {
+                panic!("golden line {line:?} must hold code, jt, jf and k")
+            };
+            let narrow = |value: u32| u8::try_from(value).expect("a jump offset fits a byte");
+            let code = u16::try_from(code).expect("a code fits 16 bits");
+            (
+                SeccompInstruction::jump(code, k, narrow(jt), narrow(jf)),
+                comment,
+            )
+        })
+        .collect()
+}
+
+/// The model's final program on each architecture equals its checked-in golden
+/// copy, instruction for instruction: every call, argument check, return action
+/// and jump target. Any change to the filter fails here until the golden file
+/// changes in the same diff, where a reviewer reads it. The program is rendered
+/// through the one builder and join, the host's being the launch's, with no
+/// kernel call, so the test runs on every OS.
+///
+/// Falsifiers: WP248, WP249 and WP250 add `ptrace`, `pidfd_getfd` and a
+/// `JEQ 246`; WP252 admits `fcntl` command 2; WP253 loosens the `futex` mask;
+/// WP254 makes `clone3` return `SECCOMP_RET_LOG`; WP255 retargets the `clone`
+/// rule's jump. Each makes the program differ from its golden copy.
+#[test]
+fn seccomp_model_program_equals_its_golden_copy() {
+    let host = seccomp_probe_list(MODEL_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+    for (arch, arch_name) in [(0xc000_003e_u32, "x86-64"), (0xc000_00b7, "aarch64")] {
+        let program = seccomp_probe_list_for_arch(MODEL_PROVIDER, arch)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .program;
+        if arch == host.audit_arch {
+            assert_eq!(
+                program, host.program,
+                "{arch_name} must render the launch's"
+            );
+        }
+        let golden: Vec<SeccompInstruction> = model_seccomp_golden(arch)
+            .into_iter()
+            .map(|(at, _)| at)
+            .collect();
+        let first = (0..program.len().max(golden.len())).find(|&i| program.get(i) != golden.get(i));
+        assert!(
+            first.is_none(),
+            "the {arch_name} model program must equal its golden copy: it has {} instructions \
+             and the golden {}, and instruction {first:?} differs: {:?} against {:?}",
+            program.len(),
+            golden.len(),
+            first.and_then(|i| program.get(i)),
+            first.and_then(|i| golden.get(i)),
+        );
+    }
 }
 
 /// The model's final program lets run exactly the listed calls on each
@@ -10992,7 +11087,10 @@ fn model_syscall_lists_match_libc() {
 /// only forbidden calls, so a widening can pass them. This test renders each
 /// architecture's program through the one builder and join, the host's being the
 /// launch's, and requires the numbers it lets run to equal the literal list. It
-/// makes no kernel call, so it runs on every OS.
+/// makes no kernel call, so it runs on every OS. It is a readable second net
+/// behind `seccomp_model_program_equals_its_golden_copy`, not the pin: it sees
+/// which calls can run, not which arguments, and it samples numbers below 1024
+/// and the program's constants on the program's own architecture only.
 ///
 /// Falsifiers: WP248 adds `ptrace` and WP249 adds `pidfd_getfd` to
 /// `MODEL_RUNTIME_ESSENTIALS`, and WP250 puts a `JEQ 246` with an `ALLOW` behind

@@ -3702,7 +3702,8 @@
       ],
       "tests": [
         "seccomp_model_program_admits_no_forbidden_call_on_either_architecture",
-        "seccomp_model_program_lets_run_exactly_the_listed_calls"
+        "seccomp_model_program_lets_run_exactly_the_listed_calls",
+        "seccomp_model_program_equals_its_golden_copy"
       ]
     },
     {
@@ -3718,7 +3719,8 @@
         }
       ],
       "tests": [
-        "seccomp_model_program_lets_run_exactly_the_listed_calls"
+        "seccomp_model_program_lets_run_exactly_the_listed_calls",
+        "seccomp_model_program_equals_its_golden_copy"
       ]
     },
     {
@@ -3735,7 +3737,8 @@
       ],
       "tests": [
         "seccomp_model_program_lets_run_exactly_the_listed_calls",
-        "seccomp_model_program_admits_no_forbidden_call_on_either_architecture"
+        "seccomp_model_program_admits_no_forbidden_call_on_either_architecture",
+        "seccomp_model_program_equals_its_golden_copy"
       ]
     },
     {

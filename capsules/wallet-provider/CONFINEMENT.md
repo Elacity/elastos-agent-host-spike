@@ -1683,14 +1683,17 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   checks this rule from a fixed list that no builder reads, and
   `seccomp_model_program_lets_run_exactly_the_listed_calls` checks it from the
   literal allow list of each architecture.
+  `seccomp_model_program_equals_its_golden_copy` checks it, and WP249 and WP250,
+  against the checked-in golden program of each architecture.
 - WP249: The model's runtime table carries `pidfd_getfd`, which the forbidden
   list does not name. `seccomp_model_program_lets_run_exactly_the_listed_calls`
   checks this rule: the program lets run a number the allow list does not hold.
+  `seccomp_model_program_equals_its_golden_copy` also checks it.
 - WP250: The model's thread rules gain a `JEQ 246` with an `ALLOW` behind it, so
   the x86-64 program lets `kexec_load` run without naming it.
   `seccomp_model_program_lets_run_exactly_the_listed_calls` and
   `seccomp_model_program_admits_no_forbidden_call_on_either_architecture` check
-  this rule.
+  this rule, and so does `seccomp_model_program_equals_its_golden_copy`.
 - WP251: The x86-64 `libm` users table gains wallet, so wallet's x86-64 launch
   would read `libm.so.6`. `landlock_ruleset_names_each_measured_loader_entry`
   checks this rule against the per-architecture sets it writes out, on any host.
