@@ -911,6 +911,7 @@ async fn fake_runtime_launch_capsule(
             capsule_name: capsule_name.to_string(),
             cid: None,
             trust_level: elastos_runtime::primitives::audit::TrustLevel::Untrusted,
+            signer_did: None,
         },
     );
     AxumJson(json!({
