@@ -9,7 +9,7 @@
 
 mod common;
 
-use common::build::{lane_dir, lane_paths, TempDir};
+use common::build::{fixture_git, lane_dir, lane_paths, TempDir};
 use common::MODULE_BUNDLE_LAB_CID;
 use elastos_common::{CapsuleManifest, CapsuleType};
 use std::fs;
@@ -99,9 +99,8 @@ fn lane_files_reads_names_git_would_quote() {
     // Git quotes a name holding `"` unless the listing is NUL-separated, and a
     // quoted name is not a file, so the guard below would skip it silently.
     let tmp = TempDir::new("lane-files-quoted");
-    let init = Command::new("git")
+    let init = fixture_git(tmp.path())
         .args(["init", "-q"])
-        .current_dir(tmp.path())
         .output()
         .expect("run git init in the temp folder");
     assert!(
@@ -127,6 +126,73 @@ fn lane_files_reads_names_git_would_quote() {
     assert_eq!(
         listed, expected,
         "lane_files did not list every file under its real name"
+    );
+}
+
+/// HEAD, the index's bytes and the two files of the victim repo below.
+fn victim_state(tmp: &TempDir, victim: &Path) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
+    let head = fixture_git(tmp.path())
+        .current_dir(victim)
+        .args(["rev-parse", "HEAD"])
+        .output();
+    let read = |name: &str| fs::read(victim.join(name)).expect("read a victim file");
+    let head = head.expect("run git rev-parse in the victim").stdout;
+    (
+        head,
+        read(".git/index"),
+        read("tracked.txt"),
+        read("plain.md"),
+    )
+}
+
+#[test]
+fn fixture_git_ignores_the_callers_git_dir() {
+    // A hook or `git rebase --exec` exports GIT_DIR and GIT_WORK_TREE. The
+    // fixture test runs as a child with both naming a victim repo that holds
+    // an untracked `plain.md`, the name the fixture writes.
+    let tmp = TempDir::new("git-dir-victim");
+    let victim = tmp.path().join("victim");
+    fs::create_dir_all(&victim).expect("create the victim folder");
+    fs::write(victim.join("tracked.txt"), "victim\n").expect("write the victim file");
+    let identity = [
+        "-c",
+        "user.name=victim",
+        "-c",
+        "user.email=victim@example.invalid",
+    ];
+    for args in [
+        &["init", "-q", "-b", "victim"][..],
+        &["add", "tracked.txt"],
+        &["commit", "-q", "-m", "victim"],
+    ] {
+        let made = fixture_git(tmp.path())
+            .current_dir(&victim)
+            .args(identity)
+            .args(args)
+            .output();
+        assert!(
+            made.expect("run git in the victim").status.success(),
+            "git {args:?} failed in the victim"
+        );
+    }
+    fs::write(victim.join("plain.md"), "victim untracked\n").expect("write the untracked file");
+    let before = victim_state(&tmp, &victim);
+    let child = Command::new(std::env::current_exe().expect("the test binary path"))
+        .args(["--exact", "lane_files_reads_names_git_would_quote"])
+        .env("GIT_DIR", victim.join(".git"))
+        .env("GIT_WORK_TREE", &victim)
+        .output()
+        .expect("run the child test");
+    assert_eq!(
+        victim_state(&tmp, &victim),
+        before,
+        "a fixture git command wrote to GIT_DIR's repo"
+    );
+    assert!(
+        child.status.success(),
+        "the fixture test failed while GIT_DIR named another repo:\n{}\n{}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
     );
 }
 
