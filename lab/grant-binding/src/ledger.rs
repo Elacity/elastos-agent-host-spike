@@ -5361,7 +5361,7 @@ fn model_expired_grant_still_settles() {
         .expect("ask on the standing album");
     verifier
         .reserve(&call, &guest(album), 1)
-        .expect("the ceiling room returned");
+        .expect("the album's own admission opens its own room");
 }
 
 #[test]
