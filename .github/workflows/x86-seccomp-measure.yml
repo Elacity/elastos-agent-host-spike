@@ -29,3 +29,16 @@ jobs:
       - name: run the whole confine suite on x86-64
         working-directory: capsules/wallet-provider
         run: cargo test --test confine --no-fail-fast -- --test-threads=2 || true
+      - name: trace the wallet journey
+        working-directory: capsules/wallet-provider
+        run: |
+          mkdir -p "$RUNNER_TEMP/tr"
+          strace -ff -s 160 -o "$RUNNER_TEMP/tr/t" \
+            cargo test --test confine linux_wallet_journey_runs_under_the_seccomp_allow_list -- --exact --test-threads=1 || true
+          cd "$RUNNER_TEMP/tr"
+          for f in $(grep -l "SIGSEGV" t.* | head -3); do
+            echo "=== $f"
+            grep -E "= -1 E(PERM|ACCES|NOSYS)|SIGSEGV|execve|exit" "$f" | tail -40
+          done
+      - name: loader files on this host
+        run: ls -l /lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/libc.so.6 /lib/x86_64-linux-gnu/libgcc_s.so.1 /lib/x86_64-linux-gnu/libm.so.6 || true
