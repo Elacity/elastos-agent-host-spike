@@ -9,8 +9,10 @@ lines hold only comments or lie inside a block comment. Blank lines are blank.
 
   core-size.py                   a short table
   core-size.py --json            {"total", "tests", "comments", "blank", "code"}
-  core-size.py --check           fail when code is above elastos/CORE-BUDGET or 50+ below it
-  core-size.py --check --base R  also show the change since the merge base of R and HEAD
+  core-size.py --check           fail (exit 1) when code is above elastos/CORE-BUDGET or 50+ below it
+  core-size.py --report          print that verdict without failing on it
+  --base R                       with either, also show the change since the merge base of R and HEAD
+A construct the counter will not guess at, or a missing base, exits 2 in every mode.
 """
 import argparse
 import json
@@ -397,15 +399,17 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--json", action="store_true", help="print the totals as JSON")
     parser.add_argument("--check", action="store_true", help=f"fail when code is above {BUDGET}")
-    parser.add_argument("--base", metavar="REF", help="with --check, show the change since this git ref")
+    parser.add_argument("--report", action="store_true", help="print the --check verdict without failing on it")
+    parser.add_argument("--base", metavar="REF", help="with --check or --report, show the change since this ref")
     parser.add_argument("--root", type=Path, default=ROOT, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    if args.base and not args.check:
-        parser.error("--base needs --check")
+    if args.base and not (args.check or args.report):
+        parser.error("--base needs --check or --report")
     try:
         totals = count(worktree_files(args.root))
         print(json.dumps(totals) if args.json else table(totals), end="\n" if args.json else "")
-        return check(args.root, totals, args.base) if args.check else 0
+        status = check(args.root, totals, args.base) if args.check or args.report else 0
+        return status if args.check else 0
     except Refusal as error:
         print(f"core-size: refused: {error}", file=sys.stderr)
         return 2

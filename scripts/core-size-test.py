@@ -225,6 +225,13 @@ class CheckTest(unittest.TestCase):
         self.assertIn("FAIL: core code is 12 lines, above the budget of 10", output)
         self.write(10, budget=10)
         self.assertEqual(self.run_check()[0], 0)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):  # --report prints the verdict; only --check fails on it
+            self.assertEqual(core_size.main(["--report", "--root", str(self.root)]), 0)
+        self.write(12, budget=10)
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(core_size.main(["--report", "--root", str(self.root)]), 0)
+        self.assertIn("FAIL: core code is 12 lines", output.getvalue())
 
     def test_refusal_exits_2_naming_file_and_line(self):
         source = self.root / core_size.CRATE / "src/lib.rs"

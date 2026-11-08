@@ -1804,8 +1804,9 @@ class ReleasePolicyTests(unittest.TestCase):
             queue.mkdir()
             for index, poll in enumerate(polls):
                 (queue / f"{index:03}").write_text(json.dumps({"jobs": [
-                    {"name": name, "status": status, "conclusion": conclusion}
-                    for name, status, conclusion in poll]}))
+                    {"name": job[0], "status": job[1], "conclusion": job[2],
+                     "steps": [{"name": name, "conclusion": done} for name, done in (job[3] if len(job) > 3 else [])]}
+                    for job in poll]}))
             (shims / "sleep").write_text("#!/bin/bash\n")
             (shims / "gh").write_text(textwrap.dedent("""\
                 #!/bin/bash
@@ -1847,10 +1848,23 @@ class ReleasePolicyTests(unittest.TestCase):
         done = [watch, gate, ("source-home-macos", "completed", "success"), ("lint", "completed", "cancelled")]
         status, cancels, used = self.run_cancel_watcher([[watch, gate], [watch, gate, macos], done, done])
         self.assertEqual((status, cancels, used), (0, [], 4))
-        # cargo-audit and core-size report in their own red job without cancelling the run.
-        for job in ("cargo-audit", "core-size"):
-            red = [watch, gate, (job, "completed", "failure"), ("source-home-macos", "completed", "success")]
+        # cargo-audit, and core-size's budget verdict alone, report in their own red job without cancelling.
+        verdict = "core size against elastos/CORE-BUDGET"
+        tests = [("core-size tests", "success"), ("measure the core", "success"), (verdict, "failure")]
+        for job in (("cargo-audit", "completed", "failure"), ("core-size", "completed", "failure", tests)):
+            red = [watch, gate, job, ("source-home-macos", "completed", "success")]
             self.assertEqual(self.run_cancel_watcher([red, red]), (0, [], 2), job)
+        # Any other core-size failure cancels: its counter tests, a refusal while measuring, a timeout.
+        for job in (("core-size", "completed", "failure", [("core-size tests", "failure")]),
+                    ("core-size", "completed", "failure", [("measure the core", "failure"), (verdict, "skipped")]),
+                    ("core-size", "completed", "timed_out", [(verdict, "cancelled")])):
+            status, cancels, used = self.run_cancel_watcher([[watch, gate, job, macos]])
+            self.assertEqual((status, cancels, used), (0, ["repos/Elacity/elastos-runtime/actions/runs/7/cancel"], 1))
+        # The filter names the verdict step, which only runs --check; measuring, with --base, comes first.
+        names = [step.splitlines()[0] for step in steps("core-size")]
+        self.assertEqual(names[-2:], ["name: measure the core", f"name: {verdict}"])
+        self.assertEqual(field(steps("core-size")[-1], "run"), "python3 -I scripts/core-size.py --check")
+        self.assertIn(f'.name] != ["{verdict}"]', steps("cancel-on-failure")[0])
 
     def test_disposable_refusals_run_on_mac_build_without_operator_inputs(self):
         mac_steps = steps("source-home-macos")

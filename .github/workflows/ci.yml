@@ -162,14 +162,18 @@ jobs:
           fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
       - name: core-size tests
         run: python3 -I scripts/core-size-test.py
-      - name: core size against elastos/CORE-BUDGET
+      # Counting, the base comparison and every refusal fail here (exit 2), so the next step can
+      # fail only on the budget verdict, the one failure cancel-on-failure lets the run finish past.
+      - name: measure the core
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
           base=()
           [[ "$GITHUB_EVENT_NAME" != pull_request ]] || base=(--base "origin/$BASE_REF")
-          python3 -I scripts/core-size.py --check ${base[@]+"${base[@]}"} | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 -I scripts/core-size.py --report ${base[@]+"${base[@]}"} | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: core size against elastos/CORE-BUDGET
+        run: python3 -I scripts/core-size.py --check
 
   # One reviewed input per Linux architecture. PRs restore their develop base's cache;
   # only a develop push can save a verified recipe result in this namespace.
@@ -1677,9 +1681,9 @@ jobs:
           while (( done_polls < 2 )); do
             sleep 20
             # cargo-audit reports RustSec advisories in its own red job but does not cancel the rest: base has open advisories, and cancelling on it killed every PR run within a minute.
-            # core-size does not cancel either: an over-budget core is settled by raising CORE-BUDGET or moving code, and that review wants the test results, not a run killed in its first minute.
+            # A core-size job whose only failed step is its budget verdict does not cancel either: that is settled by changing CORE-BUDGET or moving code, and the review wants the test results. Its counter tests, refusals, checkout and timeouts still cancel.
             counts="$(gh api "$run/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" --jq \
-              '[.jobs[] | select(.name != "cancel-on-failure" and .name != "cargo-audit" and .name != "core-size")] | "\(map(select(.conclusion == "failure" or .conclusion == "timed_out")) | length) \(map(select(.status != "completed")) | length)"')" || continue
+              '[.jobs[] | select(.name != "cancel-on-failure" and .name != "cargo-audit") | select(.name != "core-size" or .conclusion != "failure" or ([.steps[]? | select(.conclusion == "failure") | .name] != ["core size against elastos/CORE-BUDGET"]))] | "\(map(select(.conclusion == "failure" or .conclusion == "timed_out")) | length) \(map(select(.status != "completed")) | length)"')" || continue
             read -r failed pending <<< "$counts"
             if (( failed > 0 )); then
               echo "A job failed; cancelling the rest of this pull request run."
