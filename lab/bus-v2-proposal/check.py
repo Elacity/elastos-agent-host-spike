@@ -377,7 +377,8 @@ def load_draft(root):
     draft = Path(root) / DRAFT
     if not draft.is_file():
         return None
-    return draft.read_text(encoding="utf-8")
+    # GitHub drops an initial UTF-8 BOM before parsing Markdown; keep later BOMs.
+    return draft.read_text(encoding="utf-8-sig")
 
 
 def _pin_lines(text):
@@ -1130,7 +1131,8 @@ def section_0_bounds(lines):
 
 def _fence_after(line, fence):
     """Return the fence still open after this line: (char, count) or None."""
-    stripped = line.strip()
+    # CommonMark allows only ASCII spaces and tabs around a closing fence.
+    stripped = line.strip(" \t")
     if fence is None:
         for char in ("`", "~"):
             if stripped.startswith(char * 3):
@@ -1251,7 +1253,7 @@ def proposal_refusals(text):
                 "refuse: propose line at line %d is in an HTML comment" % number
             )
             continue
-        if line.startswith("\t") or len(line) - len(line.lstrip()) >= 4:
+        if line.startswith("\t") or len(line) - len(line.lstrip(" \t")) >= 4:
             refusals.append(
                 "refuse: propose line at line %d is indented as code" % number
             )

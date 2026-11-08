@@ -3743,6 +3743,54 @@ class CitationCheckTests(unittest.TestCase):
                                 reason % (number + context.count("\n")),
                             ])
 
+    def test_non_ascii_whitespace_after_fence_keeps_b2_hidden(self):
+        section = self._section_0()
+        missing = [
+            "refuse: section 0 has no propose line for B2",
+            "refuse: section 0 has no proposal named typed operation under B2",
+        ]
+        self.assertEqual(check.proposal_refusals(section), [])
+        self.assertEqual(check.proposal_refusals(
+            self._section_0(groups=("A3", "A4", "A5", "A7"))), missing)
+        for fence in ("```", "~~~"):
+            for suffix in ("\u00a0", "\u3000", "\x1f", "\f", "\v", "\x85",
+                           "\u2028", "\u2029", "\x1c", "\x1d", "\x1e", "", " \t"):
+                with self.subTest(fence=fence, suffix=suffix):
+                    body = section.replace("### B2. Fixture group",
+                        fence + "\n" + fence + suffix + "\n### B2. Fixture group")
+                    expected = [] if suffix in ("", " \t") else [
+                        "refuse: propose line at line 23 is in a fenced code block",
+                    ] + missing
+                    self.assertEqual(check.proposal_refusals(body), expected)
+
+    def test_initial_bom_fence_hides_section_0(self):
+        root = self._temp_root()
+        draft = root / check.DRAFT
+        section = self._section_0()
+        body = "```\n" + section + "```\n## 1. Agent identity\n"
+        draft.write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+        self.assertEqual(check.proposal_refusals(check.load_draft(root)), [
+            "refuse: draft has no section 0",
+        ])
+        draft.write_bytes(b"\xef\xbb\xbf" + section.encode("utf-8"))
+        self.assertEqual(check.proposal_refusals(check.load_draft(root)), [])
+        removed = self._section_0(groups=("A3", "A4", "A5", "A7"))
+        draft.write_bytes(b"\xef\xbb\xbf" + removed.encode("utf-8"))
+        self.assertEqual(check.proposal_refusals(check.load_draft(root)), [
+            "refuse: section 0 has no propose line for B2",
+            "refuse: section 0 has no proposal named typed operation under B2",
+        ])
+        draft.write_text("\n\ufeff" + body, encoding="utf-8")
+        self.assertEqual(check.load_draft(root), "\n\ufeff" + body)
+        self.assertEqual(check.proposal_refusals(check.load_draft(root)), [])
+
+    def test_proposal_indentation_counts_only_ascii_whitespace(self):
+        line = self._propose_line("B2", "typed operation")
+        for prefix in ("\u00a0" * 4, "\u3000" * 4, "\f" * 4):
+            with self.subTest(prefix=prefix):
+                body = self._section_0().replace(line, prefix + "Text. " + line)
+                self.assertEqual(check.proposal_refusals(body), [])
+
     def test_non_ascii_whitespace_in_ordinary_prose_is_unchanged(self):
         for prose in ("\u00a0ordinary prose", " \t\u3000prose with ``` and #",
                       "\x1f", "\u00a0`inline code`", "\u3000~~strike~~"):
