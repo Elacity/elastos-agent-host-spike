@@ -1691,6 +1691,9 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `seccomp_model_program_lets_run_exactly_the_listed_calls` and
   `seccomp_model_program_admits_no_forbidden_call_on_either_architecture` check
   this rule.
+- WP251: The x86-64 `libm` users table gains wallet, so wallet's x86-64 launch
+  would read `libm.so.6`. `landlock_ruleset_names_each_measured_loader_entry`
+  checks this rule against the per-architecture sets it writes out, on any host.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

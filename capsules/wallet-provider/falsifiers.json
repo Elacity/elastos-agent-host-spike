@@ -3737,6 +3737,22 @@
         "seccomp_model_program_lets_run_exactly_the_listed_calls",
         "seccomp_model_program_admits_no_forbidden_call_on_either_architecture"
       ]
+    },
+    {
+      "id": "WP251",
+      "title": "the x86-64 libm users table gains wallet, so the grant would widen while the old test skipped every listed user",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "const LIBM_LOADER_USERS_X86_64: &[&str] = &[MODEL_PROVIDER];",
+          "new": "const LIBM_LOADER_USERS_X86_64: &[&str] = &[MODEL_PROVIDER, WALLET_PROVIDER];"
+        }
+      ],
+      "tests": [
+        "landlock_ruleset_names_each_measured_loader_entry"
+      ]
     }
   ]
 }

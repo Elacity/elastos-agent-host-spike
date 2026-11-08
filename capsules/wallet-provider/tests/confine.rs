@@ -7493,11 +7493,14 @@ const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
     ),
 ];
 
-/// The aarch64 `libm.so.6` entry. With it left to the model alone, the wallet's
-/// start exited 127 with `error while loading shared libraries: libm.so.6`
-/// (receipt pr1549-0473c994-aarch64, sha256 c2434a86...); did starts without it.
+/// The providers that map `libm.so.6` on aarch64. With it left to the model
+/// alone, the wallet's start exited 127 with `error while loading shared
+/// libraries: libm.so.6` (receipt pr1549-0473c994-aarch64, sha256 c2434a86...);
+/// did starts without it. Both architectures' tables compile on every target, so
+/// `landlock_ruleset_names_each_measured_loader_entry` checks each.
+const LIBM_LOADER_USERS_AARCH64: &[&str] = &[MODEL_PROVIDER, WALLET_PROVIDER];
 #[cfg(not(target_arch = "x86_64"))]
-const LIBM_LOADER_USERS: &[&str] = &[MODEL_PROVIDER, WALLET_PROVIDER];
+const LIBM_LOADER_USERS: &[&str] = LIBM_LOADER_USERS_AARCH64;
 #[cfg(not(target_arch = "x86_64"))]
 const LIBM_LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[(
     "/lib/aarch64-linux-gnu/libm.so.6",
@@ -7533,11 +7536,11 @@ const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
     ),
 ];
 
-/// The model's extra x86-64 loader entry: it maps `libm.so.6`, which did and
-/// wallet do not.
-/// On x86-64 only the model maps `libm.so.6` (run 42454795461).
+/// The providers that map `libm.so.6` on x86-64: the model alone, as did and
+/// wallet do not (run 42454795461).
+const LIBM_LOADER_USERS_X86_64: &[&str] = &[MODEL_PROVIDER];
 #[cfg(target_arch = "x86_64")]
-const LIBM_LOADER_USERS: &[&str] = &[MODEL_PROVIDER];
+const LIBM_LOADER_USERS: &[&str] = LIBM_LOADER_USERS_X86_64;
 #[cfg(target_arch = "x86_64")]
 const LIBM_LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[(
     "/lib/x86_64-linux-gnu/libm.so.6",
@@ -8359,12 +8362,15 @@ fn landlock_install_record_decodes_each_failed_step() {
 /// and the storage-root rule keeps the eight rights the declared row carries.
 /// The test builds the ruleset from wallet's committed declared-rights file
 /// through `landlock_path_rules` and `LANDLOCK_LOADER_PATHS`. It then requires
-/// the model's launch list to be the shared entries plus its `libm` entry, and
-/// did's and wallet's to hold no `libm` entry. It starts no process and calls no
-/// kernel, so it runs on every OS.
+/// each architecture's `libm` users to be the set written here, not read from
+/// the tables that grant it: the model and wallet on aarch64, the model alone on
+/// x86-64, did on neither. On this target a provider's launch list carries the
+/// `libm` entry exactly when it is in this target's set. It starts no process
+/// and calls no kernel, so it runs on every OS.
 ///
-/// Falsifier: WP212 adds the loader entry without `READ_FILE`, so this test
-/// fails on the rule's rights.
+/// Falsifiers: WP212 adds the loader entry without `READ_FILE`, so this test
+/// fails on the rule's rights. WP251 adds wallet to the x86-64 users, so this
+/// test fails on the x86-64 set on any host.
 #[test]
 fn landlock_ruleset_names_each_measured_loader_entry() {
     let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
@@ -8418,15 +8424,45 @@ fn landlock_ruleset_names_each_measured_loader_entry() {
 
     // Only the providers that map `libm` carry its entry: did never does, and
     // the model always does; wallet does on aarch64 alone.
+    let libm_users = [
+        (
+            "aarch64",
+            LIBM_LOADER_USERS_AARCH64,
+            [MODEL_PROVIDER, WALLET_PROVIDER].as_slice(),
+        ),
+        (
+            "x86-64",
+            LIBM_LOADER_USERS_X86_64,
+            [MODEL_PROVIDER].as_slice(),
+        ),
+    ];
+    for (arch, users, expected) in libm_users {
+        let mut users = users.to_vec();
+        users.sort_unstable();
+        let mut expected = expected.to_vec();
+        expected.sort_unstable();
+        assert_eq!(
+            users, expected,
+            "the {arch} libm users must be exactly these"
+        );
+    }
+    let host = if cfg!(target_arch = "x86_64") {
+        "x86-64"
+    } else {
+        "aarch64"
+    };
+    let (_, _, host_users) = libm_users
+        .iter()
+        .find(|(arch, _, _)| *arch == host)
+        .unwrap();
     for name in [DID_PROVIDER, WALLET_PROVIDER, MODEL_PROVIDER] {
-        if LIBM_LOADER_USERS.contains(&name) {
-            continue;
-        }
-        assert!(
-            landlock_loader_paths(name)
-                .iter()
-                .all(|(path, _)| !path.contains("libm.so.6")),
-            "{name} must carry no libm loader entry"
+        let carries = landlock_loader_paths(name)
+            .iter()
+            .any(|(path, _)| path.contains("libm.so.6"));
+        assert_eq!(
+            carries,
+            host_users.contains(&name),
+            "{name}'s libm entry on {host}"
         );
     }
     let model = landlock_loader_paths(MODEL_PROVIDER);

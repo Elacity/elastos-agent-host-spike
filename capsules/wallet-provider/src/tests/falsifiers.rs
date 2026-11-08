@@ -337,7 +337,9 @@ use std::process::Command;
 /// equality fail. WP249 adds `pidfd_getfd` there, which only the allowlist
 /// equality catches. WP250 puts a `JEQ 246` with an `ALLOW` behind it in the
 /// model's thread rules, which both checks catch on the x86-64 program.
-const EXPECTED_FALSIFIERS: usize = 230;
+/// WP251 adds wallet to the x86-64 `libm` users, so the per-architecture set
+/// check in `landlock_ruleset_names_each_measured_loader_entry` fails.
+const EXPECTED_FALSIFIERS: usize = 231;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
