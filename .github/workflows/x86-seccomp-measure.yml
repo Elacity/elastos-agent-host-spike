@@ -1,0 +1,39 @@
+# Temporary: measures which syscall x86_64 glibc is refused under the
+# confine tests' seccomp allow-list ("Cannot allocate TLS block"). The
+# allow-list was measured on aarch64 only. Delete once the row is added.
+name: x86-seccomp-measure
+on:
+  push:
+    branches: [claude/x86-seccomp-measure]
+permissions:
+  contents: read
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@72504271e02fb719eb4eb3eaece3a8e3d06f57c0 # 1.91.0
+      - name: host
+        run: |
+          uname -a
+          ldd --version | head -1
+          sudo apt-get install -y -qq strace >/dev/null
+      - name: build the confine tests
+        working-directory: capsules/wallet-provider
+        run: cargo test --test confine --no-run
+      - name: trace the failing did journey
+        working-directory: capsules/wallet-provider
+        run: |
+          mkdir -p "$RUNNER_TEMP/tr"
+          strace -ff -s 160 -o "$RUNNER_TEMP/tr/t" \
+            cargo test --test confine linux_did_journey_runs_under_the_seccomp_allow_list -- --exact --test-threads=1 || true
+          cd "$RUNNER_TEMP/tr"
+          for f in $(grep -l "Cannot allocate TLS" t.* | head -3); do
+            echo "=== $f (the provider that died)"
+            cat "$f"
+            echo "=== refused calls in $f"
+            grep -E "= -1 E(PERM|ACCES|NOSYS)" "$f" || echo none
+          done
+          echo "=== the provider binary"
+          file "$(grep -ho 'execve("[^"]*did-provider[^"]*"' t.* | head -1 | cut -d'"' -f2)" || true
