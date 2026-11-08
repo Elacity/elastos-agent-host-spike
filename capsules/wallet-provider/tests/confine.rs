@@ -6626,6 +6626,10 @@ const SECCOMP_AUDIT_ARCH: u32 = 0xc000_00b7;
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 const SECCOMP_AUDIT_ARCH: u32 = 0;
 
+/// The calls the table carries for x86-64 alone: older forms of admitted
+/// calls, or calls aarch64 does not have.
+const X86_64_ONLY_SYSCALLS: &[&str] = &["access", "arch_prctl", "mkdir", "poll", "unlink"];
+
 /// The first number of the x32 call space on x86-64.
 const SECCOMP_X32_FIRST: u32 = 0x4000_0000;
 /// `seccomp_data.arch` sits at byte offset 4 and `seccomp_data.nr` at 0.
@@ -8939,6 +8943,35 @@ fn seccomp_program_denies_by_default_and_lists_no_undeclared_call() {
             seccomp_syscall_number(name, SECCOMP_AUDIT_ARCH),
             Some(libc_number as u32),
             "{name}'s row must be the number libc gives this target"
+        );
+    }
+    // The rows only x86-64 has: each x86-64 cell must hold a number and each
+    // aarch64 cell none, checked on every OS, so an accidental `None` cannot
+    // drop a row from both the builder and its checks. On x86-64 Linux each
+    // number must also be the one libc gives.
+    for name in X86_64_ONLY_SYSCALLS {
+        assert!(
+            seccomp_syscall_number(name, 0xc000_003e).is_some(),
+            "{name}'s x86-64 cell must hold its number"
+        );
+        assert_eq!(
+            seccomp_syscall_number(name, 0xc000_00b7),
+            None,
+            "{name} exists only on x86-64, so its aarch64 cell must be empty"
+        );
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    for (name, libc_number) in [
+        ("arch_prctl", libc::SYS_arch_prctl),
+        ("poll", libc::SYS_poll),
+        ("access", libc::SYS_access),
+        ("mkdir", libc::SYS_mkdir),
+        ("unlink", libc::SYS_unlink),
+    ] {
+        assert_eq!(
+            seccomp_syscall_number(name, SECCOMP_AUDIT_ARCH),
+            Some(libc_number as u32),
+            "{name}'s row must be the number libc gives x86-64"
         );
     }
 
