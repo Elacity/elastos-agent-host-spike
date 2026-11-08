@@ -26,7 +26,6 @@ SECTION_0 = "## 0. What this proposes"
 SECTION_1 = "## 1. Agent identity"
 PROPOSE = "propose:"
 PROPOSE_LINE = re.compile(r"(?<![A-Za-z0-9_])propose:")
-PROPOSE_GROUP = re.compile(r"^(A3|A4|A5|A7|B2)\. ")
 PROPOSE_PARTS = ("Name:", "Inputs:", "Refusal:", "Owner:")
 PROPOSE_NAME = re.compile(r"(?:^|\. )Name: ([^.]+)\.")
 
@@ -40,6 +39,8 @@ PROPOSE_CALLS = (
     ("A7", "usage reservation"),
     ("B2", "typed operation"),
 )
+PROPOSE_GROUPS = "|".join(dict.fromkeys(re.escape(group) for group, _ in PROPOSE_CALLS))
+PROPOSE_GROUP = re.compile(r"^(" + PROPOSE_GROUPS + r")\. ")
 
 # The groups that must hold at least one propose line.
 PROPOSE_REQUIRED = ("A3", "A5", "A7", "B2")
@@ -1209,12 +1210,14 @@ def _section_0_line_refusals(lines, records, start, end):
     """
     allowed = re.compile(
         r"(?:[ \t]*| {0,3}##[ \t]+0\. What this proposes[ \t]*"
-        r"| {0,3}###[ \t]+(?:A3|A4|A5|A7|B2)\. [^<]*"
+        r"| {0,3}###[ \t]+(?:" + PROPOSE_GROUPS + r")\. [^<\[\]]*"
         r"|This section states each core-call proposal once; section 7 holds its evidence\."
-        r"|propose:[^<]*|Evidence: section 7, (?:A3|A4|A5|A7|B2)\.)"
+        r"|propose:[^<\[\]]*|Evidence: section 7, (?:" + PROPOSE_GROUPS + r")\.)"
     )
     return [
-        "refuse: unsupported section 0 line at line %d: %r" % (index + 1, lines[index])
+        ("refuse: unsupported section 0 line at line %d: %r; section 0 allows: "
+         "blank, its heading, group headings, the introduction, propose:, Evidence: section 7")
+        % (index + 1, lines[index])
         for index in range(start, end)
         if records[index][0] in (FENCE, COMMENT)
         or allowed.fullmatch(lines[index]) is None
@@ -1237,6 +1240,13 @@ def proposal_refusals(text):
         records = classify_lines(lines)
     except ValueError as error:
         return [str(error)]
+    html = [
+        "refuse: HTML block start at line %d: %r" % (index + 1, lines[index])
+        for index, (kind, _, _) in enumerate(records)
+        if kind not in (FENCE, COMMENT) and re.match(r" {0,3}<[A-Za-z/]", lines[index])
+    ]
+    if html:
+        return html
     bounds = section_0_bounds(lines)
     if bounds is None:
         return ["refuse: draft has no section 0"]
