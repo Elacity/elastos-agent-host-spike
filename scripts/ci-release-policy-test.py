@@ -1861,6 +1861,11 @@ class ReleasePolicyTests(unittest.TestCase):
             settled = [watch, gate, job, ("source-home-macos", "completed", "success")]
             status, cancels, used = self.run_cancel_watcher([[watch, gate, job, macos], settled, settled])
             self.assertEqual((status, cancels, used), (0, ["repos/Elacity/elastos-runtime/actions/runs/7/cancel"], 1))
+        # The budget mode is the job's: advisory warns and passes, so the verdict-only failure above is
+        # the enforce-mode case. Refusals and an unknown mode fail the measure step in both modes.
+        self.assertIn("    env:\n      # advisory until the M1 hardening pass; set to enforce then (Sash, 8 Nov)\n"
+                      "      CORE_BUDGET_MODE: advisory\n", JOBS["core-size"])
+        self.assertNotRegex("".join(steps("core-size")), r"CORE_BUDGET_MODE\s*[:=]")  # no step overrides it
         # The filter names the verdict step, which only runs --check; measuring, with --base, comes first.
         names = [step.splitlines()[0] for step in steps("core-size")]
         self.assertEqual(names[-2:], ["name: measure the core", f"name: {verdict}"])

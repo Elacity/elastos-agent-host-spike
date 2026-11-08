@@ -153,6 +153,9 @@ jobs:
     name: core-size
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    env:
+      # advisory until the M1 hardening pass; set to enforce then (Sash, 8 Nov)
+      CORE_BUDGET_MODE: advisory
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -162,8 +165,9 @@ jobs:
           fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
       - name: core-size tests
         run: python3 -I scripts/core-size-test.py
-      # Counting, the base comparison and every refusal fail here (exit 2), so the next step can
-      # fail only on the budget verdict, the one failure cancel-on-failure lets the run finish past.
+      # Counting, the base comparison, an unknown CORE_BUDGET_MODE and every refusal fail here (exit 2),
+      # so the next step fails only on the budget verdict, and only in enforce mode: the one failure
+      # cancel-on-failure lets the run finish past. In advisory mode it warns and passes.
       - name: measure the core
         env:
           BASE_REF: ${{ github.base_ref }}

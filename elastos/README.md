@@ -85,7 +85,9 @@ or path. To grow the core, raise `CORE-BUDGET` in the same
 pull request, so reviewers see the growth. The budget ratchets down: when the
 core falls more than 50 lines below it, the check fails until the same pull
 request lowers the budget to the new count, so freed room cannot be spent
-again.
+again. Until the M1 hardening pass the CI job runs with
+`CORE_BUDGET_MODE=advisory`, which turns a failed verdict into a warning; it
+then flips to `enforce`, which fails the job (refusals fail it in both modes).
 
 ## Related documentation
 
