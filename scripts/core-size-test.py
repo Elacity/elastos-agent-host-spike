@@ -69,7 +69,11 @@ class CountTest(unittest.TestCase):
         for cfg in ("test,", "all(all(test), unix)", "any(test, all(test, unix),)", "not(not(test))",
                     "all(test, not(unix))", "all(\n    unix,\n    test\n)"):
             source = f"#[cfg({cfg})]\nfn test_only() {{}}\nfn production() {{}}\n"
-            self.assertEqual(counts(source)["code"], 1, cfg)
+            try:  # refusing a valid spelling is a wrong classification too
+                code = counts(source)["code"]
+            except core_size.Refusal as error:
+                code = f"refused: {error}"
+            self.assertEqual(code, 1, cfg)
         for cfg in ("any(test, unix)", "not(test)", "all(unix, feature = \"test\")", "testing",
                     "not(any())", "not(all(not(test), feature = \"off\"))", "all()", "any(not(test), test)"):
             self.assertEqual(counts(f"#[cfg({cfg})]\nfn production() {{}}\n")["code"], 2, cfg)
@@ -83,6 +87,7 @@ class CountTest(unittest.TestCase):
         cases = {  # source: (test lines, code lines)
             "#[cfg(test)]\nconst T: usize = if true {\n    1\n} else {\n    2\n};\nfn production() {}\n": (6, 1),
             "#[cfg(test)]\nfn f() -> S<{ 1 }> {\n    S\n}\nfn production() {}\n": (4, 1),
+            "#[cfg(test)]\nconst T: usize = { let x = 1; x };\nfn production() {}\n": (2, 1),
             "#[derive(Debug)]\n#[cfg(test)]\nstruct T {\n    a: u8,\n}\nfn production() {}\n": (5, 1),
             "impl S {\n    #[cfg(test)]\n    fn helper() {}\n    fn live() {}\n}\n": (2, 3),
             "#![cfg(test)]\nfn a() {}\nfn b() {}\n": (3, 0),
@@ -214,6 +219,7 @@ class ItemExtentTest(unittest.TestCase):
     def test_items_end_at_their_own_end(self):
         cases = {
             "const T: usize = if true {\n    1\n} else {\n    2\n};\nfn production() {}\n": (5, "const"),
+            "const T: usize = {\n    let x = 1;\n    x\n};\nfn production() {}\n": (4, "const"),
             "fn f() -> S<{ 1 }> {\n    S\n}\nfn production() {}\n": (3, "fn"),
             "impl<const N: usize> X for [u8; N] where S<{ N }>: Sized {\n}\nfn production() {}\n": (2, "impl"),
             'pub(crate) unsafe extern "C" fn f(g: fn() -> u8) -> u8 {\n    g()\n}\nfn production() {}\n': (3, "fn"),
@@ -234,7 +240,24 @@ class ItemExtentTest(unittest.TestCase):
                 extent(source)
 
 
+class LexTest(unittest.TestCase):
+    def test_braces_inside_literals_are_not_tokens(self):
+        source = "let a = \"} {\"; let b = r#\"}\"#; let c = br\"{\"; let d = '}'; let e = b'{';\n"
+        punct = [value for line, kind, value in core_size.lex(source)[0] if kind == "punct"]
+        self.assertEqual(punct, ["=", ";"] * 5)
+
+
 class ModuleHelpersTest(unittest.TestCase):
+    def test_module_file(self):
+        tree = dict.fromkeys(("src/tests/helpers.rs", "src/elsewhere/p.rs", "src/a/b.rs", "src/c/mod.rs"), "")
+        path_attr = [token[2] for token in core_size.lex('#[path = "elsewhere/p.rs"]')[0]]
+        cases = {("src/lib.rs", True, "helpers", (), ("tests",)): [("src/tests/helpers.rs", False)],
+                 ("src/lib.rs", True, "p", tuple(path_attr), ()): [("src/elsewhere/p.rs", True)],
+                 ("src/a.rs", False, "b", (), ()): [("src/a/b.rs", False)],
+                 ("src/lib.rs", True, "c", (), ()): [("src/c/mod.rs", True)]}
+        for (path, owns, name, attrs, inline), expected in cases.items():
+            self.assertEqual(core_size.module_file(tree, path, owns, name, list(attrs), inline), expected, name)
+
     def test_crate_roots(self):
         tree = {"Cargo.toml": '[lib]\npath = "src/core.rs"\n\n[dependencies]\nx = { path = "../x" }\n\n'
                               '[[bin]]\nname = "tool"\npath = "tools/tool.rs"\n',

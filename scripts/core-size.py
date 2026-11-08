@@ -326,6 +326,18 @@ def path_attribute(attrs):
     return None
 
 
+def module_file(tree, path, owns_dir, name, attrs, inline):
+    """[(file, whether it owns its directory)] that `mod name;` in path can load; rustc needs one."""
+    here = posixpath.dirname(path)
+    folder = posixpath.join(here if owns_dir else path[:-3], *inline)
+    given = path_attribute(attrs)
+    if given is not None:
+        options = [posixpath.normpath(posixpath.join(folder if inline else here, given))]
+    else:
+        options = [f"{folder}/{name}.rs", f"{folder}/{name}/mod.rs"]
+    return [(option, given is not None or option.endswith("/mod.rs")) for option in options if option in tree]
+
+
 def module_tree(tree, parsed):
     """{path: True when only test code reaches it} for every file the module tree and include! reach."""
     reached, queue = {}, [(root, False, True, False) for root in crate_roots(tree)]
@@ -343,16 +355,10 @@ def module_tree(tree, parsed):
         if included and parsed(path)[4]:
             raise Refusal(f"{CRATE}/{path}: module declared in an include!d file: core-size.py does not follow it")
         for name, attrs, line, mod_test, inline in parsed(path)[4]:
-            folder = posixpath.join(here if owns_dir else path[:-3], *inline)
-            given = path_attribute(attrs)
-            if given is not None:
-                options = [posixpath.normpath(posixpath.join(folder if inline else here, given))]
-            else:
-                options = [f"{folder}/{name}.rs", f"{folder}/{name}/mod.rs"]
-            options = [option for option in options if option in tree]
+            options = module_file(tree, path, owns_dir, name, attrs, inline)
             if len(options) != 1:
                 raise Refusal(f"{CRATE}/{path}:{line + 1}: mod {name} resolves to {len(options)} files")
-            queue.append((options[0], test or mod_test, given is not None or options[0].endswith("/mod.rs"), False))
+            queue.append((options[0][0], test or mod_test, options[0][1], False))
     return reached
 
 
