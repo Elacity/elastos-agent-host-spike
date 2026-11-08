@@ -1388,8 +1388,8 @@ fn model_provider_ops_under_profile() {
 /// `code` `unsupported_operation`, and message
 /// `unsupported model provider operation`. The oracle case uses
 /// `Launch::Confined` with `Storage::prepare("unknown-op")`. The stand-in
-/// case reads the declared fixture, calls `standin_profile` once, writes
-/// that text with `write_standin_profile` under
+/// case reads the declared fixture, calls `generate_profile` once, writes
+/// that text with `write_generated_profile` under
 /// `Storage::prepare("unknown-op-standin")`, and starts with
 /// `Launch::Profile` and `canonical_bindings`. The written file has no line
 /// that starts with `;;`, and `collect_allow_lines` on that file, sorted,
@@ -1563,7 +1563,7 @@ fn tree_snapshot(dir: &Path) -> Vec<(PathBuf, u32, Vec<u8>)> {
 ///
 /// Falsifiers: F-cc1a (`(allow default)`) and F-cc1b (the read/write grant
 /// widened to `STORAGE_PARENT`) let the oracle case's redirected `init`
-/// succeed. F-cc42a makes `write_standin_profile` write an allow-default
+/// succeed. F-cc42a makes `write_generated_profile` write an allow-default
 /// profile, so the generated case's redirected `init` answers `ok` and this
 /// test fails at its refusal assertion.
 #[test]
@@ -1670,8 +1670,8 @@ fn redirect_journal_materializes_outside_when_unconfined() {
 ///
 /// The oracle case calls `Launch::Confined` with
 /// `Storage::prepare("status-offers-shutdown")`. The generated case reads the
-/// declared fixture, calls `standin_profile`, writes that text with
-/// `write_standin_profile` under a fresh
+/// declared fixture, calls `generate_profile`, writes that text with
+/// `write_generated_profile` under a fresh
 /// `Storage::prepare("status-offers-shutdown-standin")` base, and starts with
 /// `Launch::Profile` and `canonical_bindings`. The file passed to
 /// `Launch::Profile` has no line that starts with `;;`, and
@@ -1872,7 +1872,7 @@ fn only_record(runs: &Path) -> PathBuf {
 /// `offers_list`. Moved back, the record reads as before.
 ///
 /// After that shutdown, a fresh storage stores the run and reads it back
-/// under `Launch::Profile` on the file `standin_profile` writes. The outside
+/// under `Launch::Profile` on the file `write_generated_profile` writes. The outside
 /// denial then runs under `Launch::Fixture` on that file with
 /// `READ_FIXTURE_RULE`. The profile that launch applies contains the rule and
 /// has no line that starts with `;;`. The in-root create's message is
@@ -2078,8 +2078,8 @@ fn model_outside_read_denied() {
 ///
 /// The oracle case is `Launch::Confined` with
 /// `Storage::prepare("terminal-read")`. The generated case reads the
-/// declared fixture, calls `standin_profile`, writes that text with
-/// `write_standin_profile` under a fresh
+/// declared fixture, calls `generate_profile`, writes that text with
+/// `write_generated_profile` under a fresh
 /// `Storage::prepare("terminal-read-standin")`, and starts with
 /// `Launch::Profile` and `canonical_bindings`. The file passed to
 /// `Launch::Profile` has no line that starts with `;;`, and its sorted
@@ -2249,8 +2249,8 @@ const CREATE_FIXTURE_RULE: &str =
 /// The same journey runs under the oracle copy and under the stand-in file
 /// plus the one metadata rule, `CREATE_FIXTURE_RULE`. The oracle case calls
 /// `FixtureProfile::write` on `confine.sb` and starts under `Launch::Fixture`.
-/// The generated case reads the declared fixture, calls `standin_profile`,
-/// writes that text with `write_standin_profile` under that case's storage,
+/// The generated case reads the declared fixture, calls `generate_profile`,
+/// writes that text with `write_generated_profile` under that case's storage,
 /// and calls the same writer on that file. `Launch::Fixture` applies the
 /// file. The launched stand-in copy contains the rule and has no line that
 /// starts with `;;`. Each case has its own `Redirect` fixture. With the rule,
@@ -3089,8 +3089,8 @@ fn model_bound_copy_serves_under_profile() {
 /// The stand-in file refuses an unbound copy.
 ///
 /// The oracle launch stays `model_unbound_program_refused_under_profile`.
-/// This launch is the stand-in file. `standin_profile` builds the text,
-/// `write_standin_profile` writes it under the storage base, and the written
+/// This launch is the stand-in file. `generate_profile` builds the text,
+/// `write_generated_profile` writes it under the storage base, and the written
 /// file has no `;;` line. Its sorted allow lines equal the oracle's. The
 /// real binary is bound as `PROVIDER_EXECUTABLE` and the copy is started.
 /// `init` gets no answer. `sandbox-exec` exits 71 and logs `execvp()` of the
@@ -3191,8 +3191,8 @@ fn generated_profile_refuses_an_unbound_copy() {
 /// The stand-in file serves the copy bound as `PROVIDER_EXECUTABLE`.
 ///
 /// The oracle launch stays `model_bound_copy_serves_under_profile`, which
-/// starts the copy under `PROFILE_PATH`. `standin_profile` builds the text,
-/// `write_standin_profile` writes it under the storage base, and the written
+/// starts the copy under `PROFILE_PATH`. `generate_profile` builds the text,
+/// `write_generated_profile` writes it under the storage base, and the written
 /// file has no `;;` line. Its sorted allow lines equal the oracle's. The
 /// copy is bound as `PROVIDER_EXECUTABLE` and started. `init` passes
 /// `assert_serving`, `runs/` exists under `STORAGE_ROOT`, and `shutdown`
@@ -3381,7 +3381,7 @@ fn byte_different_file_at_bound_path_starts() {
 /// The oracle launch stays `byte_different_file_at_bound_path_starts`, which
 /// starts the flipped copy under `PROFILE_PATH`. This test repeats that copy,
 /// the last-byte flip and the directory checks in its own temporary directory.
-/// `standin_profile` builds the text, `write_standin_profile` writes it under
+/// `generate_profile` builds the text, `write_generated_profile` writes it under
 /// the storage base, and the written file has no `;;` line. Its sorted allow
 /// lines equal the oracle's. The launch binds the flipped copy and starts it,
 /// with `bound_digest: None`, under the written file. After `start`, the
@@ -3719,7 +3719,7 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
 /// and a rule that is not a string are each refused with their reason. The
 /// test starts no process and needs no sandbox.
 ///
-/// Falsifier: F-cc41a makes `standin_profile` return the oracle file and
+/// Falsifier: F-cc41a makes `generate_profile` return the oracle file and
 /// ignore the declared value, so a changed declared rule still matches the
 /// oracle. F-cc48a appends
 /// `(allow file-read-data (literal "/tmp/cc-standin-extra"))` after the
@@ -3911,8 +3911,8 @@ fn generated_model_profile_matches_its_committed_oracle() {
 /// The file `Launch::Profile` applies has the oracle's sorted allow lines
 /// and its sorted non-comment lines.
 ///
-/// `standin_profile` builds the text from the approved declared rights.
-/// `write_standin_profile` writes it at `storage.base.join("standin.sb")`.
+/// `generate_profile` builds the text from the approved declared rights.
+/// `write_generated_profile` writes it at `storage.base.join("standin.sb")`.
 /// The written file has no `;;` line. Before `Provider::start`, that file's
 /// sorted allow lines equal the oracle's, and its sorted non-comment lines
 /// equal the oracle's. `Launch::Profile` applies that
@@ -4013,7 +4013,7 @@ fn generated_profile_launch_matches_the_oracle() {
 /// same provider then accepts a hosted `init`, `offers_list` answers, and
 /// `shutdown` exits cleanly.
 ///
-/// Falsifier: F-cc42a makes `write_standin_profile` write an allow-default
+/// Falsifier: F-cc42a makes `write_generated_profile` write an allow-default
 /// profile and ignore the generated text, so the local offer's `init`
 /// answers ok.
 #[test]
@@ -4086,19 +4086,17 @@ fn generated_profile_permits_init_and_denies_the_local_offer() {
 /// A declared value with no rights list is refused, and a generated profile
 /// that does not parse never starts the provider.
 ///
-/// `standin_profile` on `json!({})` returns an error that contains
+/// `generate_profile` on `json!({})` returns an error that contains
 /// `model-provider` and `rights`. That call starts no provider. `{}` has no
 /// `rights` key. `generated_model_profile_matches_the_oracle` already refuses
 /// a present `rights` value that is not a list, on this same line. When the
 /// sandbox is present, the real fixture's generated text loses its last `)`,
-/// `write_standin_profile` writes that text, and `assert_startup_is_refused`
+/// the test writes that text with `fs::write`, and `assert_startup_is_refused`
 /// reads exit 65 with marker `expecting ')'`.
 ///
-/// Falsifier: F-cc43a makes `standin_profile` return an empty profile when
-/// the rights list is missing, so this test fails before any launch, and
+/// Falsifier: F-cc43a makes `declared_entries` accept a missing rights list,
+/// so this test fails before any launch, and
 /// `generated_model_profile_matches_the_oracle` fails on the same line.
-/// F-cc42a makes `write_standin_profile` write an allow-default profile and
-/// ignore the generated text, so this launch does not exit 65.
 #[test]
 fn standin_refuses_a_start_it_cannot_apply() {
     let refused = generate_profile(
@@ -4157,8 +4155,8 @@ fn standin_refuses_a_start_it_cannot_apply() {
 
 /// A generated profile with `STORAGE_ROOT` unbound never starts the provider.
 ///
-/// `standin_profile` builds the text from the approved declared rights.
-/// `write_standin_profile` writes it at `storage.base.join("standin.sb")`,
+/// `generate_profile` builds the text from the approved declared rights.
+/// `write_generated_profile` writes it at `storage.base.join("standin.sb")`,
 /// outside `STORAGE_PARENT`. The written file has no `;;` line, and its
 /// sorted allow lines equal the oracle's. The bindings are
 /// `canonical_bindings` with the `STORAGE_ROOT` pair removed, so
@@ -4230,7 +4228,7 @@ fn generated_profile_refuses_an_unbound_root() {
 
 /// The stand-in text denies the hosted connect.
 ///
-/// `Launch::Profile` applies the text `standin_profile` builds. The one
+/// `Launch::Profile` applies the text `generate_profile` builds. The one
 /// Runtime socket stand-in counts zero connections. The run settles
 /// `transport_interrupted`: `status` `failed`, and `terminal.error` is
 /// `class` `transport_interrupted`, `code` `transport_interrupted`,
@@ -4238,7 +4236,7 @@ fn generated_profile_refuses_an_unbound_root() {
 /// answers and `shutdown` exits cleanly. This is the stand-in's count,
 /// and this is not the Runtime's refusal.
 ///
-/// Falsifier: F-cc44a makes `standin_profile` emit `(allow network*)`
+/// Falsifier: F-cc44a makes `generate_profile` emit `(allow network*)`
 /// instead of `(deny network*)`. The stand-in then counts a connection,
 /// and the generated head's third line is `(allow network*)`.
 #[test]
@@ -4292,9 +4290,9 @@ fn generated_profile_denies_the_hosted_connect() {
 /// The stand-in launch uses the generated file.
 ///
 /// A clone of the declared rights drops the storage write and keeps the
-/// parent read. `standin_profile` builds that text once. `collect_allow_lines`
+/// parent read. `generate_profile` builds that text once. `collect_allow_lines`
 /// shows the write rule absent, the parent read present, and the exec rule
-/// present. Those checks run before the sandbox return. `write_standin_profile`
+/// present. Those checks run before the sandbox return. `write_generated_profile`
 /// writes the text, and `Launch::Profile` applies that file. `init` with no
 /// journal directory answers `journal_access_denied` with message
 /// `model run journal is not writable`. `storage.root` does not exist, and
