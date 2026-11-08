@@ -3413,6 +3413,40 @@ class CitationCheckTests(unittest.TestCase):
             ["refuse: draft has no section 0"],
         )
 
+    def test_commented_section_0_heading_is_not_a_section(self):
+        # A heading inside an HTML comment does not render.
+        body = (
+            "<!--\n"
+            "## 0. What this proposes\n"
+            "-->\n"
+            "\n"
+            "## 1. Agent identity\n"
+        )
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            ["refuse: draft has no section 0"],
+        )
+
+    def test_indented_heading_closes_section_0(self):
+        # Markdown renders a heading indented three spaces, so section 7 starts
+        # there and the proposal below it is outside section 0.
+        second = (
+            "propose: a second spelling. Name: another call. Inputs: fixture "
+            "inputs. Refusal: fixture refusal. Owner: fixture owner. B2 stays "
+            "open."
+        )
+        body = (
+            self._section_0()
+            + "   ## 7. Open questions\n\n"
+            + second
+            + "\n"
+        )
+        line = body.splitlines().index(second) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            ["refuse: propose line outside section 0 at line " + str(line)],
+        )
+
     def test_section_0_after_section_1_is_refused(self):
         body = "## 1. Agent identity\n\n" + self._section_0()
         self.assertEqual(

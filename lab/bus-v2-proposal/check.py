@@ -1039,21 +1039,47 @@ def a3_claim_refusals(text):
     return refusals
 
 
+HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*\S)[ \t]*$")
+
+
+def _heading(line):
+    """Return (level, text) for a heading indented 0-3 spaces, or None."""
+    match = HEADING.match(line)
+    if match is None:
+        return None
+    return len(match.group(1)), match.group(2)
+
+
+def _headings(lines):
+    """Yield each heading that sits outside a fence and outside a comment."""
+    fence = None
+    comment = False
+    for index, line in enumerate(lines):
+        indent = len(line) - len(line.lstrip(" "))
+        fence_before = fence
+        comment_before = comment
+        fence = _fence_after(line, fence)
+        comment = _comment_at(line, len(line), comment)
+        heading = _heading(line)
+        if heading is None or fence_before is not None or fence_before != fence:
+            continue
+        if _comment_at(line, indent, comment_before):
+            continue
+        yield index, heading
+
+
 def section_0_bounds(lines):
     """Return the start and end indexes of section 0, or None when it is absent."""
     start = None
-    for index, line in enumerate(lines):
-        if line.strip() == SECTION_0:
-            start = index
-            break
+    for index, (level, text) in _headings(lines):
+        if start is None:
+            if level == 2 and text == SECTION_0[3:]:
+                start = index
+        elif level <= 2:
+            return start, index
     if start is None:
         return None
-    end = len(lines)
-    for index in range(start + 1, len(lines)):
-        if lines[index].startswith("## "):
-            end = index
-            break
-    return start, end
+    return start, len(lines)
 
 
 def _fence_after(line, fence):
@@ -1151,8 +1177,8 @@ def proposal_refusals(text):
         return ["refuse: draft has no section 0"]
     start, end = bounds
     refusals = []
-    for index, line in enumerate(lines):
-        if line.strip() == SECTION_1:
+    for index, (_, text) in _headings(lines):
+        if text == SECTION_1[3:]:
             if index < start:
                 refusals.append("refuse: section 0 is not before section 1")
             break
