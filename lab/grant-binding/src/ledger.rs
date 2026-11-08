@@ -42,22 +42,30 @@ fn handles_match(bound: Handle, presented: Handle) -> bool {
     bound == presented
 }
 
-fn held_for_identity(
-    open: &HashMap<u64, OpenHold>,
-    grants: &HashMap<Handle, crate::EndedGrant>,
-    identity: &str,
-) -> u64 {
-    let mut sum: u64 = 0;
-    for open_hold in open.values() {
-        let Some(grant) = grants.get(&open_hold.handle) else {
-            continue;
-        };
-        if grant.record.identity != identity {
-            continue;
+impl Verifier {
+    /// The ceiling key of one grant handle: its oldest ancestor's handle, so a
+    /// child journal counts against the grant that minted it. Two instances of
+    /// one identity keep separate keys.
+    pub(super) fn ceiling_key(&self, handle: Handle) -> String {
+        let mut root = handle;
+        while let Some(parent) = self.grants.get(&root).and_then(|grant| grant.record.parent) {
+            root = parent;
         }
-        sum = sum.saturating_add(open_hold.amount);
+        format!("grant-{}", root.0)
     }
-    sum
+
+    /// The open holds one grant key compares: every hold whose handle has that
+    /// key, including a hold on a child journal minted from the grant.
+    fn held_for_key(&self, ledger: &Ledger, key: &str) -> u64 {
+        let mut sum: u64 = 0;
+        for open_hold in ledger.open.values() {
+            if self.ceiling_key(open_hold.handle) != key {
+                continue;
+            }
+            sum = sum.saturating_add(open_hold.amount);
+        }
+        sum
+    }
 }
 
 /// The one ledger the verifier owns.
@@ -221,16 +229,16 @@ impl std::fmt::Display for TimeoutRecord {
 }
 
 impl Verifier {
-    /// Records `ceiling`, the last admitted ceiling, in one ledger lock. An
-    /// identity updates records the ceiling for that identity alone. None
-    /// lowers every identity ceiling above `ceiling` and leaves no identity
-    /// above it. `ceiling` is stored in the same lock.
-    pub(super) fn store_admitted_ceiling(&self, identity: Option<&str>, ceiling: u64) {
+    /// Records `ceiling` for one grant key in one ledger lock. A key updates
+    /// its own grant alone, so two grants of one identity stay separate. None
+    /// lowers every stored grant ceiling above `ceiling` and grants no ceiling
+    /// to a grant that has none.
+    pub(super) fn store_admitted_ceiling(&self, key: Option<&str>, ceiling: u64) {
         let mut ledger = self.ledger.lock().expect("ledger lock");
         ledger.admitted = ceiling;
-        match identity {
-            Some(identity) => {
-                ledger.ceilings.insert(identity.to_owned(), ceiling);
+        match key {
+            Some(key) => {
+                ledger.ceilings.insert(key.to_owned(), ceiling);
             }
             None => {
                 for stored in ledger.ceilings.values_mut() {
@@ -241,19 +249,19 @@ impl Verifier {
         ledger.ceiling = ceiling;
     }
 
-    /// Sets the allowance ceiling. Outstanding holds stay as they are.
-    /// Every identity ceiling above `ceiling` is lowered to it, and an
-    /// identity with no ceiling keeps none until an ask names it.
+    /// Sets the allowance cap. Outstanding holds stay as they are.
+    /// Every grant ceiling above `ceiling` is lowered to it, and a grant with
+    /// no ceiling keeps none until an ask admits that grant.
     pub fn admit(&self, ceiling: u64) {
         self.store_admitted_ceiling(None, ceiling);
     }
 
-    /// Holds `amount` on the ledger when the total this identity compares plus
-    /// `amount` stays at or under the ceiling. A binding refusal records nothing,
-    /// an identity with no stored ceiling is refused with no ceiling, a total
-    /// that does not fit in `u64` is over the ceiling, a stored sum of every
-    /// open hold plus `amount` that does not fit in `u64` is a sum overflow,
-    /// and the request's reported usage does not lower the hold.
+    /// Holds `amount` on the ledger when the total this grant compares plus
+    /// `amount` stays at or under the ceiling. A binding refusal records
+    /// nothing, a grant with no stored ceiling is refused with no ceiling, a
+    /// total that does not fit in `u64` is over the ceiling, a stored sum of
+    /// every open hold plus `amount` that does not fit in `u64` is a sum
+    /// overflow, and the request's reported usage does not lower the hold.
     pub fn reserve(
         &self,
         call: &Call,
@@ -262,27 +270,21 @@ impl Verifier {
     ) -> Result<Reservation, ReserveRefuse> {
         self.resolve(*call, request.handle)
             .map_err(ReserveRefuse::Binding)?;
-        let identity = self
-            .grants
-            .get(&request.handle)
-            .expect("resolved grant")
-            .record
-            .identity
-            .clone();
+        let key = self.ceiling_key(request.handle);
         let mut ledger = self.ledger.lock().expect("ledger lock");
         let held = ledger.held;
         let shared = held;
-        let own = held_for_identity(&ledger.open, &self.grants, &identity);
-        let held = if ledger.ceilings.contains_key(&identity) {
+        let own = self.held_for_key(&ledger, &key);
+        let held = if ledger.ceilings.contains_key(&key) {
             own
         } else {
             shared
         };
-        if !ledger.ceilings.contains_key(&identity) {
+        if !ledger.ceilings.contains_key(&key) {
             return Err(ReserveRefuse::NoCeiling);
         }
         ledger.ceiling = ledger.admitted;
-        if let Some(agent_ceiling) = ledger.ceilings.get(&identity).copied() {
+        if let Some(agent_ceiling) = ledger.ceilings.get(&key).copied() {
             ledger.ceiling = agent_ceiling;
         }
         let ledger: &mut Ledger = &mut ledger;
@@ -296,7 +298,7 @@ impl Verifier {
                 })
             }
         };
-        let put_back = if ledger.ceilings.contains_key(&identity) {
+        let put_back = if ledger.ceilings.contains_key(&key) {
             match shared.checked_add(amount) {
                 Some(shared_total) => Some(shared_total),
                 None => {
@@ -465,7 +467,7 @@ impl Verifier {
     ///
     /// The record also goes to the ledger, so a hold the handle opened before
     /// the end still resolves through `settle`, `release` and `timeout_hold`
-    /// and gives back its amount. `held_for_identity` counts it until then,
+    /// and gives back its amount. `held_for_key` counts it until then,
     /// and the ledger forgets the record with that last hold. A grant ended
     /// with no open hold leaves the ledger at once.
     pub fn end_grant(&mut self, handle: Handle) {
@@ -4699,8 +4701,11 @@ fn model_second_agent_hold_past_the_shared_u64_total_is_refused() {
     assert_eq!(after.charged, 0);
 }
 
+/// Two instances of one identity keep separate ceilings, one per admitted
+/// grant. This reverses the earlier rule that one identity shares one
+/// ceiling, on purpose (finding F4).
 #[test]
-fn model_same_identity_shares_one_ceiling() {
+fn model_each_grant_keeps_its_own_ceiling() {
     let mut verifier = Verifier::new();
     let asked = verifier.register_instance("agent-1", "session-a");
     let other = verifier.register_instance("agent-1", "session-b");
@@ -4720,28 +4725,76 @@ fn model_same_identity_shares_one_ceiling() {
         .admit_ask(
             &asked_call,
             &asked_request,
+            crate::ask::BudgetAsk { amount: 4 },
+            4,
+        )
+        .expect("first ask");
+    let no_ceiling = verifier
+        .reserve(&other_call, &other_request, 1)
+        .expect_err("the second grant was not admitted");
+    assert_eq!(no_ceiling, ReserveRefuse::NoCeiling);
+    verifier
+        .admit_ask(
+            &other_call,
+            &other_request,
             crate::ask::BudgetAsk { amount: 10 },
             10,
         )
-        .expect("one ask for the identity");
+        .expect("second ask");
+    verifier
+        .reserve(&asked_call, &asked_request, 4)
+        .expect("first grant holds its own four");
     verifier
         .reserve(&other_call, &other_request, 6)
-        .expect("other session holds inside the shared ceiling");
+        .expect("second grant holds its own six");
     let refusal = verifier
-        .reserve(&asked_call, &asked_request, 6)
-        .expect_err("the other session's hold fills this identity");
+        .reserve(&asked_call, &asked_request, 1)
+        .expect_err("the second grant's hold fills only that grant");
     assert_eq!(
         refusal,
         ReserveRefuse::OverCeiling {
-            ceiling: 10,
-            held: 6,
-            asked: 6,
+            ceiling: 4,
+            held: 4,
+            asked: 1,
         }
     );
     assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
-    assert_eq!(after.held, 6);
+    assert_eq!(after.held, 10);
+}
+
+#[test]
+fn model_child_hold_counts_against_the_issuing_grant() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 6 },
+            6,
+        )
+        .expect("ask");
+    let child = verifier
+        .create_child_journal(&call, &guest(handle), "UsersAI/agent-1/notes/child")
+        .expect("child journal");
+    verifier
+        .reserve(&call, &guest(child), 4)
+        .expect("child hold inside the issuing ceiling");
+    let refusal = verifier
+        .reserve(&call, &guest(handle), 3)
+        .expect_err("the child hold fills the issuing ceiling");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 6,
+            held: 4,
+            asked: 3,
+        }
+    );
+    assert_eq!(books(&verifier).held, 4);
 }
 
 #[test]
@@ -5184,8 +5237,10 @@ fn model_reported_usage_does_not_pick_the_reserve_ceiling() {
     assert_eq!(after.held, 0);
 }
 
+/// A hold on an ended grant keeps that grant's own ceiling key, so it no
+/// longer fills a later grant of the same identity.
 #[test]
-fn model_ended_grant_hold_still_counts_against_the_identity_ceiling() {
+fn model_ended_grant_hold_keeps_its_own_key() {
     let mut verifier = Verifier::new();
     let (instance, a) = bound(&mut verifier);
     let call = verifier.open_call(instance);
@@ -5197,10 +5252,10 @@ fn model_ended_grant_hold_still_counts_against_the_identity_ceiling() {
     verifier
         .admit_ask(&call, &guest(b), crate::ask::BudgetAsk { amount: 5 }, 5)
         .expect("ask on b");
-    assert!(
-        verifier.reserve(&call, &guest(b), 1).is_err(),
-        "the ended grant's open hold of 5 still fills the identity ceiling of 5"
-    );
+    verifier
+        .reserve(&call, &guest(b), 1)
+        .expect("the ended grant's hold keeps its own key");
+    assert_eq!(books(&verifier).held, 6);
 }
 
 #[test]
@@ -5254,15 +5309,9 @@ fn model_expired_grant_still_settles() {
     assert_eq!(opened, ReserveRefuse::Binding(Refuse::Expired));
     let blocked = verifier
         .reserve(&call, &guest(album), 1)
-        .expect_err("the open hold still fills the ceiling");
-    assert_eq!(
-        blocked,
-        ReserveRefuse::OverCeiling {
-            ceiling: 5,
-            held: 5,
-            asked: 1,
-        }
-    );
+        .expect_err("the album grant was never admitted");
+    assert_eq!(blocked, ReserveRefuse::NoCeiling);
+    assert_eq!(books(&verifier).held, 5, "the open hold still counts");
     assert_eq!(
         verifier.settle(&call, &guest(library), reservation, SettleOutcome::Known(5)),
         Ok(5),
@@ -5282,6 +5331,9 @@ fn model_expired_grant_still_settles() {
         .use_grant(call, &guest(library))
         .expect_err("settle does not end the expiry");
     assert_eq!(later, Refuse::Expired);
+    verifier
+        .admit_ask(&call, &guest(album), crate::ask::BudgetAsk { amount: 1 }, 1)
+        .expect("ask on the standing album");
     verifier
         .reserve(&call, &guest(album), 1)
         .expect("the ceiling room returned");

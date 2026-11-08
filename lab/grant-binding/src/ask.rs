@@ -31,9 +31,9 @@ fn guest_budget_ok(_ask: &BudgetAsk) -> bool {
 
 impl Verifier {
     /// Caps one agent's budget ask at `cap`, then records the granted amount
-    /// as that agent's own ceiling in one ledger lock. A binding refusal
-    /// stores nothing, and an ask above the cap is refused with the cap and
-    /// the asked amount.
+    /// as the ceiling of the grant the ask was admitted for, in one ledger
+    /// lock. A binding refusal stores nothing, and an ask above the cap is
+    /// refused with the cap and the asked amount.
     #[rustfmt::skip]
     pub fn admit_ask(
         &self,
@@ -49,14 +49,8 @@ impl Verifier {
                 asked: ask.amount,
             });
         }
-        let identity = self
-            .grants
-            .get(&request.handle)
-            .expect("resolved grant")
-            .record
-            .identity
-            .clone();
-        self.store_admitted_ceiling(Some(&identity), ask.amount);
+        let key = self.ceiling_key(request.handle);
+        self.store_admitted_ceiling(Some(&key), ask.amount);
         Ok(ask.amount)
     }
 }
