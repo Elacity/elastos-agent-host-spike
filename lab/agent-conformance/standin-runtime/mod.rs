@@ -17,7 +17,7 @@
 //! route. `post_capability_validate` and `post_hosted_effect` are the two
 //! use paths; the private `use_grant` runs `authorise` on that same filter,
 //! then `admit_effect`, which holds the ask on the grant's own ledger handle
-//! against the session ceiling the grant route set at bind, and only then
+//! against the grant's own ceiling the grant route set at bind, and only then
 //! spends a `once` grant (M1 checks A6, A7).
 //!
 //! `stop_one` and the `worker_exited` seam share one private end path,
@@ -299,11 +299,12 @@ pub struct StandIn {
     /// The `InstanceId` each live instance holds on `ledger`. It maps one
     /// instance id to one number and never goes the other way.
     instances_on_ledger: Vec<(String, InstanceId)>,
-    /// The bind step's one budget admission, by session. The first bind of a
-    /// session asks `EFFECT_BUDGET_CAP` and stores that as the session's
-    /// ceiling; a later bind of the same session asks nothing, so no use can
-    /// raise or lower the ceiling it reserves against.
-    admitted_on: Vec<String>,
+    /// The bind step's one budget admission, by grant handle. Each bind asks
+    /// `EFFECT_BUDGET_CAP` for the grant it just bound and stores that as that
+    /// grant's ceiling; a handle already admitted asks nothing, so no use can
+    /// raise or lower the ceiling its grant reserves against. Two grants of
+    /// one session keep separate ceilings.
+    admitted_on: Vec<Handle>,
 }
 
 impl StandIn {
@@ -822,7 +823,7 @@ impl StandIn {
             .expect("the caller just stored this request's grant");
         stored.binding = Some(bound);
         stored.run = mint_run_binding(request_id);
-        self.admit_on_ledger(&session_id, bound, instance)?;
+        self.admit_on_ledger(bound, instance)?;
         Ok(())
     }
 
@@ -1831,24 +1832,19 @@ impl StandIn {
             .map_err(|refusal| (403, refusal.to_string()))
     }
 
-    /// The one budget admission, run once per session by `bind_stored_grant`.
+    /// The one budget admission, run once per grant by `bind_stored_grant`.
     ///
-    /// The session's first bind asks `EFFECT_BUDGET_CAP` through
-    /// `Verifier::admit_ask`, which sets that session identity's ceiling to
-    /// the cap; a later bind of the same session skips the ask, so no use
-    /// raises or lowers the ceiling it reserves against. A refusal is status
-    /// 403 with `AdmitRefuse`'s text and the caller stores nothing.
+    /// Each bind asks `EFFECT_BUDGET_CAP` through `Verifier::admit_ask`, which
+    /// sets that grant's ceiling to the cap; a handle already admitted skips
+    /// the ask, so no use raises or lowers the ceiling its grant reserves
+    /// against. A refusal is status 403 with `AdmitRefuse`'s text and the
+    /// caller stores nothing.
     fn admit_on_ledger(
         &mut self,
-        session_id: &str,
         handle: Handle,
         instance: InstanceId,
     ) -> Result<(), (u16, String)> {
-        if self
-            .admitted_on
-            .iter()
-            .any(|admitted| admitted == session_id)
-        {
+        if self.admitted_on.iter().any(|admitted| *admitted == handle) {
             return Ok(());
         }
         let call = self.ledger.open_call(instance);
@@ -1862,7 +1858,7 @@ impl StandIn {
                 EFFECT_BUDGET_CAP,
             )
             .map_err(|refusal| (403, admit_text(&refusal)))?;
-        self.admitted_on.push(session_id.to_owned());
+        self.admitted_on.push(handle);
         Ok(())
     }
 
