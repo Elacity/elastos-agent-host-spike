@@ -4490,4 +4490,26 @@ mod tests {
         let result = &response["response"]["result"];
         assert_eq!(result["code"], "unauthorized_run_access", "{response}");
     }
+
+    #[tokio::test]
+    async fn a_model_run_without_a_principal_is_refused() {
+        let (ctx, provider, _temp) = model_bus(None, "capsule-x").await;
+        let response = model_invoke(&ctx, "runs_create", Action::Execute, model_create("m")).await;
+        let code = &response["response"]["code"];
+        assert_eq!(code, "principal_context_required", "{response}");
+        assert!(provider.requests.lock().await.is_empty());
+    }
+
+    /// The gateway's admin-only hosted gate applies on the Bus too.
+    #[tokio::test]
+    async fn a_guest_bus_capsule_cannot_create_a_hosted_run() {
+        let (ctx, provider, _temp) = model_bus(Some(BOB), "capsule-b").await;
+        let local = model_invoke(&ctx, "runs_create", Action::Execute, model_create("m")).await;
+        assert_eq!(local["response"]["type"], "resource_result", "{local}");
+        let hosted = model_create("model:openrouter");
+        let response = model_invoke(&ctx, "runs_create", Action::Execute, hosted).await;
+        let code = &response["response"]["code"];
+        assert_eq!(code, "hosted_run_admin_only", "{response}");
+        assert_eq!(provider.requests.lock().await.len(), 1);
+    }
 }
