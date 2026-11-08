@@ -3891,6 +3891,43 @@ class CitationCheckTests(unittest.TestCase):
                         "refuse: propose line " + reason,
                     ])
 
+    def test_fences_inside_comments_leave_section_1_visible(self):
+        second = self._propose_line("B2", "another call")
+        body = (self._section_0() + "<!--\n~~~\n-->\n## 1. Agent identity\n\n"
+                "<!--\n~~~\n-->\n" + second)
+        self.assertEqual(check.problems(self._bare_draft(body)), [
+            "refuse: propose line outside section 0 at line %d"
+            % (len(body.splitlines()) + 1),
+        ])
+
+    def test_mixed_fence_comment_heading_roles(self):
+        cases = (
+            ("fence/comment", ["~~~", "<!--", "~~~", "## next"],
+             "fence fence fence heading"),
+            ("comment/fence/heading", ["<!--", "~~~", "## hidden", "-->", "## next"],
+             "comment comment comment comment heading"),
+            ("heading/fence", ["### ~~~", "~~~", "# hidden", "~~~"],
+             "heading fence fence fence"),
+            ("heading/comment", ["### title <!--", "~~~", "## hidden", "-->", "## next"],
+             "heading comment comment comment heading"),
+            ("fence opener/comment", ["~~~ <!--", "## hidden", "~~~", "## next"],
+             "fence fence fence heading"),
+            ("closed comment/fence", ["<!-- hidden -->~~~", "## next"],
+             "comment heading"),
+            ("comment closer/heading", ["<!--", "--> ## hidden", "## next"],
+             "comment comment heading"),
+            ("fence/fence", ["```", "~~~", "## hidden", "```", "## next"],
+             "fence fence fence fence heading"),
+            ("comment/comment", ["<!--", "<!--", "-->", "## next"],
+             "comment comment comment heading"),
+            ("heading/heading", ["## title", "### ~~~", "### <!-- hidden --> title"],
+             "heading heading heading"),
+        )
+        for name, lines, roles in cases:
+            with self.subTest(pairing=name):
+                self.assertEqual([kind for kind, _, _ in check.classify_lines(lines)],
+                                 roles.split())
+
     def test_indented_propose_line_outside_section_0_is_refused(self):
         # Three spaces is not code, but it is still outside section 0.
         second = (

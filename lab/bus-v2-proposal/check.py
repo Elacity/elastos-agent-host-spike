@@ -1052,22 +1052,34 @@ def _heading(line):
 
 
 def classify_lines(lines):
-    """Return one (kind, level, text) record per line: fence, comment, heading or text."""
+    """Classify raw lines, then expose visible text without changing their roles.
+
+    An open fence reads only its closer. Otherwise an open comment reads only
+    through its closer, and owns that whole line. Only neutral lines can open
+    a fence or become a heading; comment markers in a fence are literal text.
+    """
     records = []
     fence = None
     comment = False
     for line in lines:
         width = sum(4 if char == "\t" else 1
                     for char in line[:len(line) - len(line.lstrip(" \t"))])
-        before = fence
-        fence = fence if width > 3 else _fence_after(line, fence)
-        if before is not None or fence is not None:
+        if fence is not None:
+            fence = fence if width > 3 else _fence_after(line, fence)
             records.append((FENCE, None, ""))
             continue
-        inside, text, comment = _visible(line, comment)
+        if comment:
+            _, _, comment = _visible(line, comment)
+            records.append((COMMENT, None, ""))
+            continue
+        fence = None if width > 3 else _fence_after(line, None)
+        if fence is not None:
+            records.append((FENCE, None, ""))
+            continue
+        _, text, comment = _visible(line, False)
         # Raw syntax owns the role; comment removal only supplies visible text.
         heading = _heading(text) if _heading(line) is not None else None
-        if inside or line.lstrip().startswith("<!--"):
+        if line.lstrip().startswith("<!--"):
             records.append((COMMENT, None, ""))
         elif heading is not None:
             records.append((HEADING_KIND, heading[0], heading[1]))
