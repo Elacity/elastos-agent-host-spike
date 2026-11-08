@@ -1,7 +1,7 @@
 //! The one ledger the verifier owns: the ceiling, the outstanding holds, the
 //! reservations recorded so far and the total charged by settled holds.
 //!
-//! `admit` sets the allowance ceiling and leaves outstanding holds alone.
+//! `admit` lowers every stored grant ceiling and leaves outstanding holds alone.
 //! `reserve` first takes the binding decision from `Verifier::resolve`, then
 //! records the hold on this ledger. `settle` and `release` end a hold.
 //! `timeout_hold` records an uncertain hold and does not end it. Each takes
