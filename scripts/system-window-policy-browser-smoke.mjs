@@ -1,12 +1,11 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
+import { importProductSmokePlaywright, productSmokeLaunchOptions } from "./product-smoke-browser.mjs";
 import { extname } from "node:path";
 import test from "node:test";
 
-const require = createRequire(new URL("../elastos/tools/browser-playwright-engine/package.json", import.meta.url));
-const { chromium } = require(process.env.ELASTOS_PLAYWRIGHT_MODULE || "playwright");
+const { chromium } = await importProductSmokePlaywright();
 const origin = "https://system-window.test";
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 const template = await read("capsules/home-gui/browser/home-gui-template.html");
@@ -63,7 +62,7 @@ window.fixture = {
 </script>`;
 
 const browser = await chromium.launch({
-  executablePath: process.env.BRAVE_BIN || "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+  ...productSmokeLaunchOptions(),
   headless: true,
 });
 try {
