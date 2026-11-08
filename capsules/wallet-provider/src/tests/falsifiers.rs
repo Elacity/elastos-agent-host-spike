@@ -189,7 +189,7 @@ use std::process::Command;
 /// the appended allow form because no declared right names it; the suite never
 /// starts. Task 101's
 /// WP128
-/// returns `did_provider_dir().join("target/debug/did-provider")` from the one
+/// returns `provider_dir(DID_PROVIDER).join("target/debug/did-provider")` from the one
 /// build-output reader instead of the reported `executable`, so
 /// `did_binary_is_the_executable_the_build_reports` fails on its fixture path
 /// while `standin_launcher_finds_the_built_did_binary` alone still passes

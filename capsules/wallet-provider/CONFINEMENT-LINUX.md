@@ -81,6 +81,19 @@ which does the same thing. The model also admits `epoll_wait` on x86-64, the
 older form of `epoll_pwait`: a logging filter named it (run 42448113772), and with
 it dropped alone both model journeys failed (run 42454795461).
 
+TODO, x86-64 drop-one not yet run: the model's runtime calls `epoll_create1`,
+`epoll_ctl`, `epoll_pwait`, `eventfd2`, `exit`, `flock`, `geteuid` and `rseq`
+were each refused alone only on aarch64 (model-drop1/aarch64-af92d32f*.log). On
+x86-64 the model journeys pass with them, which shows the list is enough there,
+not that each call is needed there. The same holds for the seven shared
+`LAUNCH_ESSENTIALS` entries below and for the model's five argument-checked
+rules (`clone`, `socketpair`, `fcntl`, `prlimit64`, `futex`). Each needs a run on
+GitHub's x86-64 runner that refuses it alone and runs the three `linux_model_*`
+tests (and the did and wallet journeys for a launch entry). `munmap` is a stated
+exception, not a measured need, so a green drop-one would not remove it. The
+x86-64-only rows (`epoll_wait`, `arch_prctl`, `poll`, `mkdir`, `unlink`) and the
+x86-64 loader entries already have that run (42454795461).
+
 The head forms (`(version 1)`, `(deny default)`) and the deny forms grant
 nothing, so they take no row and add no syscall. An allow form with no row is a
 refusal that names the provider and the form and builds no filter, symmetrical
@@ -820,7 +833,12 @@ The model provider's three Linux tests are `linux_model_journey_runs_under_the_s
 `linux_model_file_row_is_refused_outside_storage_root` and
 `linux_model_filter_admits_threads_and_refuses_new_processes`. The model's filter
 writes some Linux ABI values out, because it is built on macOS too, and
-`linux_abi_constants_match_libc` checks them against libc on Linux.
+`linux_abi_constants_match_libc` checks them against libc on Linux. The model's
+literal allow list for each architecture, which
+`seccomp_model_program_lets_run_exactly_the_listed_calls` compares with the
+numbers its program lets run, and the forbidden-call table are checked against
+`libc::SYS_*` on the Linux host of each architecture by
+`model_syscall_lists_match_libc`.
 
 Today `sandbox_gate` requires `/usr/bin/sandbox-exec`, and
 `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` explicitly expects

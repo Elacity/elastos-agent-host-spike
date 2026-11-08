@@ -1359,7 +1359,7 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   fails at did's launched-profile check, where `check_declared_rights` refuses
   the appended allow form because no declared right names it, and the suite
   never starts.
-- Return `did_provider_dir().join("target/debug/did-provider")` from the one
+- Return `provider_dir(DID_PROVIDER).join("target/debug/did-provider")` from the one
   build-output reader instead of the reported `executable` (WP128):
   `did_binary_is_the_executable_the_build_reports` fails because its fixture
   path sits outside any `target` directory, while
