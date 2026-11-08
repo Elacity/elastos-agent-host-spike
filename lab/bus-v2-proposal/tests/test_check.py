@@ -82,6 +82,13 @@ SECTION_0_FORMS = (
     "propose:, Evidence: section 7"
 )
 
+
+def section_0_forms(row):
+    text = re.sub(r"^ {0,3}#{2,3}[ \t]+", "", row)
+    bad = next((c for c in text if c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ',.-:;"), None)
+    return SECTION_0_FORMS + ("; character U+%04X" % ord(bad) if bad else "")
+
+
 OWNED_REL = "examples/agent-host/src/lib.rs"
 OWNED_NUMBER = 3754
 OWNED_SPAN = "examples/agent-host/src/lib.rs:3754"
@@ -3765,7 +3772,7 @@ class CitationCheckTests(unittest.TestCase):
                     body = section.replace("### B2. Fixture group",
                         fence + "\n" + fence + suffix + "\n### B2. Fixture group")
                     expected = [
-                        "refuse: unsupported section 0 line at line %d: %r" % (i + 20, row) + SECTION_0_FORMS
+                        "refuse: unsupported section 0 line at line %d: %r" % (i + 20, row) + section_0_forms(row)
                         for i, row in enumerate((fence, fence + suffix))
                     ] if suffix in ("", " \t") else [
                         "refuse: propose line at line 23 is in a fenced code block",
@@ -3782,7 +3789,7 @@ class CitationCheckTests(unittest.TestCase):
         multi = '[x]: /u "'
         cases = [
             ("link title", b2.replace(line, "\n" + single), [single]),
-            ("multiline link title", b2.replace(line, "\n" + multi + "\n" + line + '"'), [multi]),
+            ("multiline link title", b2.replace(line, "\n" + multi + "\n" + line + '"'), [multi, line + '"']),
             ("setext", b2.replace(line, line + "\n---"), ["---"]),
             ("quote", b2.replace(line, "> " + line), ["> " + line]),
             ("heading proposal", b2.replace(line, "### B2. " + line), ["### B2. " + line]),
@@ -3794,7 +3801,7 @@ class CitationCheckTests(unittest.TestCase):
             with self.subTest(form=name):
                 body = section.replace(b2, replacement)
                 self.assertEqual(check.proposal_refusals(body), [
-                    "refuse: unsupported section 0 line at line %d: %r" % (i + 1, row) + SECTION_0_FORMS
+                    "refuse: unsupported section 0 line at line %d: %r" % (i + 1, row) + section_0_forms(row)
                     for i, row in enumerate(body.split("\n")) if row in rejected
                 ])
                 # The same new grammar has no effect beyond section 0.
@@ -3805,7 +3812,7 @@ class CitationCheckTests(unittest.TestCase):
         line = self._propose_line("B2", "typed operation").rstrip("\n")
         other = line.replace("typed operation", "another call").rstrip(".")
         cases = (
-            ("link title", other + ' [.](/u "\n' + line + '")', 1),
+            ("link title", other + ' [.](/u "\n' + line + '")', 2),
             ("image alt", other + " ![\n" + line + "](/missing.png)", 2),
             ("hidden fields", line.replace(". Name:", ' [.](/u "x. Name:')
              .split(" B2 stays open.")[0] + '")', 1),
@@ -3815,7 +3822,7 @@ class CitationCheckTests(unittest.TestCase):
             with self.subTest(form=name):
                 body = PROPOSAL_SKELETON.replace(line, replacement)
                 self.assertEqual(check.proposal_refusals(body), [
-                    "refuse: unsupported section 0 line at line %d: %r" % (i + 1, row) + SECTION_0_FORMS
+                    "refuse: unsupported section 0 line at line %d: %r" % (i + 1, row) + section_0_forms(row)
                     for i, row in enumerate(body.split("\n")) if row in replacement.split("\n")[:count]
                 ])
         for bracket in "[]":
@@ -3823,8 +3830,49 @@ class CitationCheckTests(unittest.TestCase):
                 row = "### B2. Typed operations" + bracket
                 body = PROPOSAL_SKELETON.replace("### B2. Typed operations", row)
                 self.assertEqual(check.proposal_refusals(body), [
-                    "refuse: unsupported section 0 line at line 22: %r" % row + SECTION_0_FORMS,
+                    "refuse: unsupported section 0 line at line 22: %r" % row + section_0_forms(row),
                 ])
+
+    def test_section_0_characters(self):
+        self.assertEqual(check.proposal_refusals(PROPOSAL_SKELETON), [])
+        self.assertEqual(check.proposal_refusals(check.load_draft(check.worktree_root())), [])
+        line = self._propose_line("B2", "typed operation").rstrip("\n")
+        plain = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ',.-:;"
+        self.assertEqual(check.proposal_refusals(PROPOSAL_SKELETON.replace(line, line + plain)), [])
+        samples = (r"$\phantom{x. Name: typed operation. Inputs: fixture inputs. Refusal: fixture refusal. Owner: fixture owner.}$",
+                   "`code`", "*emphasis*", "_emphasis_", "~~strike~~", r"\escape", "&lt;", "|")
+        samples += tuple("<>[]()${}!&#\\`*_~|\u00e9\u200b\t/+?=\"")
+        for row in (line, "### B2. Typed operations", "Evidence: section 7, B2.",
+                    "This section states each core-call proposal once; section 7 holds its evidence."):
+            for sample in samples:
+                with self.subTest(row=row, sample=sample):
+                    replacement = row + " " + sample
+                    if row == line and sample.startswith(r"$\phantom"):
+                        replacement = "propose: fixture typed operation " + sample + " B2 stays open."
+                    body = PROPOSAL_SKELETON.replace(row, replacement)
+                    number = body.split("\n").index(replacement) + 1
+                    self.assertEqual(check.proposal_refusals(body), [
+                        "refuse: unsupported section 0 line at line %d: %r" % (number, replacement)
+                        + section_0_forms(replacement),
+                    ])
+
+    def test_preamble_html(self):
+        for opener, closer in (("<?", "?>"), ("<!X", ">"), ("<![CDATA[", "]]>"),
+                               ("See below. <details>", "Done. </details>"),
+                               ("See below.\n    <details>", "")):
+            with self.subTest(opener=opener):
+                body = "# Core calls proposal\n\n" + opener + "\n\n" + PROPOSAL_SKELETON + closer
+                number = 3 + opener.count("\n")
+                reason = ("refuse: HTML block start at line %d: %r" % (number, opener)
+                          if opener.startswith("<") else "refuse: HTML before section 0 at line %d" % number)
+                self.assertEqual(check.proposal_refusals(body), [reason])
+                if opener.startswith("<"):
+                    for indent in range(4):
+                        after = " " * indent + opener
+                        self.assertEqual(check.proposal_refusals(PROPOSAL_SKELETON + after), [
+                            "refuse: HTML block start at line %d: %r"
+                            % (len(PROPOSAL_SKELETON.split("\n")), after),
+                        ])
 
     def test_draft_html_block_starts(self):
         live = check.load_draft(check.worktree_root())
@@ -3864,7 +3912,7 @@ class CitationCheckTests(unittest.TestCase):
         draft.write_text("\n\ufeff" + body, encoding="utf-8")
         self.assertEqual(check.load_draft(root), "\n\ufeff" + body)
         self.assertEqual(check.proposal_refusals(check.load_draft(root)), [
-            "refuse: unsupported section 0 line at line %d: %r" % (i + 26, row) + SECTION_0_FORMS
+            "refuse: unsupported section 0 line at line %d: %r" % (i + 26, row) + section_0_forms(row)
             for i, row in enumerate(("```", "## 1. Agent identity", ""))
         ])
 
@@ -3875,7 +3923,7 @@ class CitationCheckTests(unittest.TestCase):
                 body = self._section_0().replace(line, prefix + "Text. " + line)
                 self.assertEqual(check.proposal_refusals(body), [
                     "refuse: unsupported section 0 line at line 21: %r"
-                    % (prefix + "Text. " + line.rstrip("\n")) + SECTION_0_FORMS,
+                    % (prefix + "Text. " + line.rstrip("\n")) + section_0_forms(prefix + "Text. " + line.rstrip("\n")),
                 ])
 
     def test_non_ascii_whitespace_in_prose_outside_section_0_is_unchanged(self):
@@ -4012,7 +4060,7 @@ class CitationCheckTests(unittest.TestCase):
             + "```\n## 1. Agent identity\n```\n\n" + second + "\n"
         )
         self.assertEqual(check.problems(self._bare_draft(body)), [
-            "refuse: unsupported section 0 line at line %d: %r" % (i + 25, row) + SECTION_0_FORMS
+            "refuse: unsupported section 0 line at line %d: %r" % (i + 25, row) + section_0_forms(row)
             for i, row in enumerate(("```", "## 1. Agent identity", "```"))
         ])
 
@@ -4062,7 +4110,7 @@ class CitationCheckTests(unittest.TestCase):
                 self.assertEqual(check.classify_lines([line])[0][0], role)
         self.assertEqual(check.problems(self._bare_draft(
             self._section_0() + "pro<!-- hidden -->pose: rubbish\n"
-        )), ["refuse: unsupported section 0 line at line 25: 'pro<!-- hidden -->pose: rubbish'" + SECTION_0_FORMS])
+        )), ["refuse: unsupported section 0 line at line 25: 'pro<!-- hidden -->pose: rubbish'" + section_0_forms("pro<!-- hidden -->pose: rubbish")])
 
     def test_heading_proposal_in_live_draft_is_refused(self):
         root = check.worktree_root()

@@ -42,6 +42,10 @@ PROPOSE_CALLS = (
 PROPOSE_GROUPS = "|".join(dict.fromkeys(re.escape(group) for group, _ in PROPOSE_CALLS))
 PROPOSE_GROUP = re.compile(r"^(" + PROPOSE_GROUPS + r")\. ")
 
+# Draft prose uses ASCII letters/digits and these punctuation marks, all inert
+# inside these line forms. Hashes belong only to the fixed ATX heading prefixes.
+SECTION_0_CHAR = re.compile(r"[A-Za-z0-9 ',.\-:;]")
+
 # The groups that must hold at least one propose line.
 PROPOSE_REQUIRED = ("A3", "A5", "A7", "B2")
 
@@ -1210,18 +1214,22 @@ def _section_0_line_refusals(lines, records, start, end):
     """
     allowed = re.compile(
         r"(?:[ \t]*| {0,3}##[ \t]+0\. What this proposes[ \t]*"
-        r"| {0,3}###[ \t]+(?:" + PROPOSE_GROUPS + r")\. [^<\[\]]*"
+        r"| {0,3}###[ \t]+(?:" + PROPOSE_GROUPS + r")\. .*"
         r"|This section states each core-call proposal once; section 7 holds its evidence\."
-        r"|propose:[^<\[\]]*|Evidence: section 7, (?:" + PROPOSE_GROUPS + r")\.)"
+        r"|propose:.*|Evidence: section 7, (?:" + PROPOSE_GROUPS + r")\.)"
     )
     return [
         ("refuse: unsupported section 0 line at line %d: %r; section 0 allows: "
          "blank, its heading, group headings, the introduction, propose:, Evidence: section 7")
         % (index + 1, lines[index])
+        + ("; character U+%04X" % ord(bad) if bad else "")
         for index in range(start, end)
+        for bad in [next((char for char in re.sub(r"^ {0,3}#{2,3}[ \t]+", "", lines[index])
+                          if SECTION_0_CHAR.fullmatch(char) is None), None)]
         if records[index][0] in (FENCE, COMMENT)
         or allowed.fullmatch(lines[index]) is None
         or (PROPOSE_LINE.search(lines[index]) and not lines[index].startswith(PROPOSE))
+        or bad
     ]
 
 
@@ -1243,7 +1251,7 @@ def proposal_refusals(text):
     html = [
         "refuse: HTML block start at line %d: %r" % (index + 1, lines[index])
         for index, (kind, _, _) in enumerate(records)
-        if kind not in (FENCE, COMMENT) and re.match(r" {0,3}<[A-Za-z/]", lines[index])
+        if kind not in (FENCE, COMMENT) and re.match(r" {0,3}<[A-Za-z/?!]", lines[index])
     ]
     if html:
         return html
@@ -1251,7 +1259,8 @@ def proposal_refusals(text):
     if bounds is None:
         return ["refuse: draft has no section 0"]
     start, end = bounds
-    refusals = []
+    refusals = ["refuse: HTML before section 0 at line %d" % (index + 1)
+                for index in range(start) if "<" in lines[index]]
     for index, (_, text) in _headings(lines):
         if text == SECTION_1[3:]:
             if index < start:
