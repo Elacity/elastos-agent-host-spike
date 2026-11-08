@@ -6641,6 +6641,8 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("epoll_create1", Some(291), Some(20)),
     ("epoll_ctl", Some(233), Some(21)),
     ("epoll_pwait", Some(281), Some(22)),
+    // x86-64 only, the older form of epoll_pwait that the model calls there.
+    ("epoll_wait", Some(232), None),
     ("eventfd2", Some(290), Some(19)),
     ("execve", Some(59), Some(221)),
     ("execveat", Some(322), Some(281)),
@@ -6768,11 +6770,15 @@ impl SeccompInstruction {
 /// kernel 7.0. did and wallet are single-threaded and have none of these, so their
 /// programs stay byte-equal. `clone`, `clone3` and `socketpair` are not here: they
 /// take the argument-checked rules in `seccomp_program_with_thread_rules`.
+/// `epoll_wait` is the x86-64 form of `epoll_pwait`, named by a run on GitHub's
+/// x86-64 runner whose filter logged instead of refusing; aarch64 has no
+/// `epoll_wait`, so its list is unchanged.
 const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[
     "brk",
     "epoll_create1",
     "epoll_ctl",
     "epoll_pwait",
+    "epoll_wait",
     "eventfd2",
     "exit",
     "flock",
