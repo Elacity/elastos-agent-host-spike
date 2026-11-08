@@ -3696,8 +3696,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[\n    \"brk\",",
-          "new": "const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[\n    \"ptrace\",\n    \"brk\","
+          "old": "const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[\n    \"epoll_create1\",",
+          "new": "const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[\n    \"ptrace\",\n    \"epoll_create1\","
         }
       ],
       "tests": [
