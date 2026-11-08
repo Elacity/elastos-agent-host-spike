@@ -6482,7 +6482,6 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
     (
         SHARED_RULES[1],
         &[
-            "access",
             "faccessat",
             "fstat",
             "getdents64",
@@ -6500,7 +6499,6 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
     (
         SHARED_RULES[2],
         &[
-            "access",
             "faccessat",
             "fchmod",
             "fdatasync",
@@ -6531,7 +6529,6 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
     (
         STARTUP_RULES[0],
         &[
-            "access",
             "faccessat",
             "fstat",
             "getdents64",
@@ -6566,8 +6563,6 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("execve", Some(59), Some(221)),
     ("execveat", Some(322), Some(281)),
     ("exit_group", Some(231), Some(94)),
-    // x86-64 only, the older form of faccessat that glibc calls there.
-    ("access", Some(21), None),
     ("faccessat", Some(269), Some(48)),
     ("fchmod", Some(91), Some(52)),
     ("fdatasync", Some(75), Some(83)),
@@ -6628,7 +6623,7 @@ const SECCOMP_AUDIT_ARCH: u32 = 0;
 
 /// The calls the table carries for x86-64 alone: older forms of admitted
 /// calls, or calls aarch64 does not have.
-const X86_64_ONLY_SYSCALLS: &[&str] = &["access", "arch_prctl", "mkdir", "poll", "unlink"];
+const X86_64_ONLY_SYSCALLS: &[&str] = &["arch_prctl", "mkdir", "poll", "unlink"];
 
 /// The first number of the x32 call space on x86-64.
 const SECCOMP_X32_FIRST: u32 = 0x4000_0000;
@@ -7215,8 +7210,8 @@ const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
 /// 42447112526): the interpreter `/lib64/ld-linux-x86-64.so.2`, a link to
 /// `/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2` that the `O_PATH` open follows,
 /// then `libc.so.6` and `libgcc_s.so.1`. Neither binary maps `libm.so.6` there,
-/// so it takes no rule. The drop-one measurement the aarch64 entries carry has
-/// not been made on x86-64; each note says what the entry is for.
+/// so it takes no rule. Each entry was then dropped alone on that runner (run
+/// 42454795461), and every provider's file-row start failed without it.
 #[cfg(target_arch = "x86_64")]
 const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
     (
@@ -8146,8 +8141,9 @@ impl std::fmt::Display for SeccompLaunchWriteFailure {
 ///
 /// That drop-one method is the aarch64 host's and covers every entry but two.
 /// `arch_prctl` and `poll` exist only on x86-64: each was named by the x86-64
-/// journey failing without it on GitHub's runner and passing with it (runs
-/// 42446019401 and 42447112526).
+/// journey failing without it on GitHub's runner (runs 42446019401 and
+/// 42447112526), and then dropped alone from the whole list there, which failed
+/// every journey (run 42454795461).
 ///
 /// The table is data and makes no kernel call, so it is compiled on every OS
 /// where the list's launch set is compared; the install that reads it stays
@@ -8964,7 +8960,6 @@ fn seccomp_program_denies_by_default_and_lists_no_undeclared_call() {
     for (name, libc_number) in [
         ("arch_prctl", libc::SYS_arch_prctl),
         ("poll", libc::SYS_poll),
-        ("access", libc::SYS_access),
         ("mkdir", libc::SYS_mkdir),
         ("unlink", libc::SYS_unlink),
     ] {
@@ -12734,13 +12729,21 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
     // aarch64 run also refuses and the provider tolerates.
     // Then the providers started and their storage calls were refused. A run
     // whose filter logged instead of refusing (measure branch only, run
-    // 42447514431) named the x86-64 calls the list lacked: mkdir (83), unlink
-    // (87) and access (21), the older forms of mkdirat, unlinkat and faccessat
-    // that glibc calls on x86-64 and that aarch64 does not have. Each joins the
-    // rows that hold its newer form. The other logged calls (brk, fcntl,
-    // getpid, munmap, prlimit64, rseq, sched_getaffinity, set_robust_list,
+    // 42447514431) named mkdir (83), unlink (87) and access (21), the older
+    // forms of mkdirat, unlinkat and faccessat that glibc calls on x86-64 and
+    // that aarch64 does not have. The other logged calls (brk, fcntl, getpid,
+    // munmap, prlimit64, rseq, sched_getaffinity, set_robust_list,
     // set_tid_address, sigaltstack) exist on both and are refused on aarch64
     // too, so they stay out.
+    //
+    // Each x86-64 row was then dropped alone under the real filter (measure
+    // branch, run 42454795461). Without arch_prctl every journey failed "Cannot
+    // allocate TLS block"; without poll every journey took SIGSEGV; without
+    // mkdir did, wallet and model failed to create their storage; without
+    // unlink wallet's init failed "Permission denied"; without the interpreter,
+    // libc.so.6 or libgcc_s.so.1 every file-row start failed. Without access
+    // every journey still passed: the loader's refused access check is
+    // tolerated, as on aarch64, so access is not admitted.
 
     let allow = seccomp_probe_list(name).unwrap_or_else(|err| panic!("{err}"));
     assert_eq!(

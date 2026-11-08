@@ -67,11 +67,14 @@ carries:
 | `(allow file-read* (literal "/"))` | the file-read row |
 | `(allow sysctl-read)` | `uname`, `sysinfo` |
 
-On x86-64 the file-read rows also admit `access`, and the storage row also
-admits `mkdir` and `unlink`: the older forms of `faccessat`, `mkdirat` and
-`unlinkat` that glibc calls there. aarch64 has none of the three, so its rows
+On x86-64 the storage row also admits `mkdir` and `unlink`: the older forms of
+`mkdirat` and `unlinkat` that glibc calls there. aarch64 has neither, so its rows
 are as listed. A filter that logged instead of refusing named them on GitHub's
-x86-64 runner (run 42447514431).
+x86-64 runner (run 42447514431), and each was then dropped alone under the real
+filter (run 42454795461): without `mkdir` did, wallet and model fail to create
+their storage, and without `unlink` wallet's init fails. The same run dropped
+`access`, which glibc also calls there, and every journey still passed, so it is
+not admitted.
 
 The head forms (`(version 1)`, `(deny default)`) and the deny forms grant
 nothing, so they take no row and add no syscall. An allow form with no row is a
@@ -110,9 +113,10 @@ wallet's preserved policy. Both providers use the same launch table:
 | `poll` (x86-64 only) | `poll([{fd=0}, {fd=1}, {fd=2}], 3, 0)` in the standard-descriptor check, where aarch64 calls `ppoll`; the provider then aborted |
 
 The drop-one measurement above is the aarch64 host's and covers the first seven
-entries. The two x86-64 entries were named differently: each x86-64 journey
-failed without it on GitHub's runner and passed with it (runs 42446019401 and
-42447112526). aarch64 has neither call, so its launch set is the seven.
+entries. The two x86-64 entries were named by the x86-64 journeys failing
+without them on GitHub's runner (runs 42446019401 and 42447112526), then each
+was dropped alone from the whole list there and every journey failed (run
+42454795461). aarch64 has neither call, so its launch set is the seven.
 
 Four calls are in no row and in no launch entry, so the default decision is the
 only answer they receive: `ptrace`, `mount`, `bpf` and `keyctl`. Eight socket
