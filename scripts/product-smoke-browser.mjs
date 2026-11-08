@@ -1,7 +1,8 @@
 // Product smokes launch one browser.
 // BRAVE_BIN, when set, is that executable.
-// Otherwise the executable is Playwright Chromium from the behaviour cache
-// that scripts/test-behaviour.sh installs, when that file is on disk.
+// Otherwise the executable is full Playwright Chromium from the core pin
+// that scripts/test-behaviour.sh inputs installs, when that file is on disk.
+// The headless shell misses clicks in Home iframes, so it is not this binary.
 // A missing file leaves the executable to the Playwright module.
 
 import { createRequire } from "node:module";

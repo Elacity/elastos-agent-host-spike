@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   behaviourInputsDir,
   playwrightCoreDir,
@@ -78,9 +79,42 @@ test("a Playwright lookup failure other than a missing module is reported", () =
   );
 });
 
+function browserInstallDir(executablePath) {
+  let dir = dirname(executablePath);
+  while (!/^chromium(?:_headless_shell)?-\d+$/.test(basename(dir))) {
+    const parent = dirname(dir);
+    assert.notEqual(parent, dir, executablePath);
+    dir = parent;
+  }
+  return dir;
+}
+
+function chooseFromInstallDir(browserDir, executable) {
+  const scratch = mkdtempSync(join(tmpdir(), "behaviour-browsers-"));
+  try {
+    symlinkSync(browserDir, join(scratch, basename(browserDir)));
+    assert.deepEqual(readdirSync(scratch), [basename(browserDir)]);
+    const expected = join(scratch, basename(browserDir), relative(browserDir, executable));
+    assert.equal(existsSync(expected), true, expected);
+    const helper = pathToFileURL(fileURLToPath(new URL("./product-smoke-browser.mjs", import.meta.url))).href;
+    const env = { ...process.env, PLAYWRIGHT_BROWSERS_PATH: scratch };
+    delete env.BRAVE_BIN;
+    const result = spawnSync(process.execPath, [
+      "--input-type=module",
+      "-e",
+      `import { productSmokeLaunchOptions } from ${JSON.stringify(helper)};
+       process.stdout.write(JSON.stringify(productSmokeLaunchOptions()));`,
+    ], { env, encoding: "utf8", timeout: 15_000 });
+    assert.equal(result.status, 0, result.stderr);
+    return { options: JSON.parse(result.stdout), expected };
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
 test("unset BRAVE_BIN uses the installed behaviour-cache Chromium", () => {
   const env = {};
-  for (const key of ["HOME", "RUNNER_TEMP", "BEHAVIOUR_INPUTS", "BROWSER_OPERATOR_PLAYWRIGHT_CORE"]) {
+  for (const key of ["HOME", "RUNNER_TEMP", "BEHAVIOUR_INPUTS", "BROWSER_OPERATOR_PLAYWRIGHT_CORE", "PLAYWRIGHT_BROWSERS_PATH"]) {
     if (process.env[key]) env[key] = process.env[key];
   }
   const core = playwrightCoreDir(env);
@@ -90,27 +124,59 @@ test("unset BRAVE_BIN uses the installed behaviour-cache Chromium", () => {
     assert.deepEqual(options, {});
     return;
   }
-  const { chromium } = createRequire(packageJson)(core);
-  const executablePath = chromium.executablePath();
+  const requireFromCore = createRequire(packageJson);
+  const executablePath = requireFromCore(core).chromium.executablePath();
+  const shell = requireFromCore(join(core, "lib/server/registry/index.js")).registry
+    .findExecutable("chromium-headless-shell").executablePath();
   if (existsSync(executablePath)) {
     assert.deepEqual(options, { executablePath });
-    assert.equal(executablePath.includes("Brave Browser.app"), false);
+    assert.notEqual(executablePath, shell);
   } else {
     assert.deepEqual(options, {});
   }
 });
 
-test("product smokes do not default to the Brave application", () => {
-  const dir = fileURLToPath(new URL(".", import.meta.url));
-  const bravePath = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser";
-  const hits = readdirSync(dir)
-    .filter((name) => name.endsWith(".mjs") || name.endsWith(".sh"))
-    .filter((name) => name !== "product-smoke-browser.test.mjs")
-    .filter((name) => readFileSync(join(dir, name), "utf8").includes(bravePath))
-    .sort();
-  assert.deepEqual(hits, [
-    "gba-opaque-frame-browser-smoke.sh",
-    "home-browser-context-opaque-frame-smoke.sh",
-    "home-gui-sign-out-opaque-frame-smoke.sh",
-  ]);
+function registryExecutable(kind, browsersPath) {
+  const core = playwrightCoreDir(process.env);
+  const packageJson = join(core, "package.json");
+  assert.equal(existsSync(packageJson), true, "behaviour inputs are not installed");
+  const env = { ...process.env };
+  delete env.BRAVE_BIN;
+  if (browsersPath === undefined) delete env.PLAYWRIGHT_BROWSERS_PATH;
+  else env.PLAYWRIGHT_BROWSERS_PATH = browsersPath;
+  const executableExpression = kind === "shell"
+    ? `req(join(core, "lib/server/registry/index.js")).registry.findExecutable("chromium-headless-shell").executablePath()`
+    : `req(core).chromium.executablePath()`;
+  const result = spawnSync(process.execPath, [
+    "--input-type=module",
+    "-e",
+    `import { createRequire } from "node:module";
+     import { join } from "node:path";
+     const core = ${JSON.stringify(core)};
+     const req = createRequire(join(core, "package.json"));
+     process.stdout.write(${executableExpression});`,
+  ], { env, encoding: "utf8", timeout: 15_000 });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout;
+}
+
+function installedExecutable(kind) {
+  if (process.env.PLAYWRIGHT_BROWSERS_PATH) {
+    const current = registryExecutable(kind, process.env.PLAYWRIGHT_BROWSERS_PATH);
+    if (existsSync(current)) return current;
+  }
+  const fallback = registryExecutable(kind, undefined);
+  assert.equal(existsSync(fallback), true, fallback);
+  return fallback;
+}
+
+test("a cache with only the installed full Chromium is the product smoke browser", () => {
+  const full = installedExecutable("chromium");
+  const chosen = chooseFromInstallDir(browserInstallDir(full), full);
+  assert.deepEqual(chosen.options, { executablePath: chosen.expected });
+});
+
+test("a cache with only the headless shell is not the product smoke browser", () => {
+  const shell = installedExecutable("shell");
+  assert.deepEqual(chooseFromInstallDir(browserInstallDir(shell), shell).options, {});
 });

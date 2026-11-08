@@ -3629,11 +3629,10 @@ function summarize(run) {
 
 async function launchEngine(playwright, engineId) {
   const engine = playwright[engineId];
-  const shared = engineId === "chromium" ? productSmokeLaunchOptions() : {};
-  const executable = engineId === "chromium" && process.env.ELASTOS_BROWSER_EXECUTABLE
-    ? process.env.ELASTOS_BROWSER_EXECUTABLE
-    : shared.executablePath || engine.executablePath();
-  if (!existsSync(executable)) {
+  const executable = engineId === "chromium"
+    ? (process.env.ELASTOS_BROWSER_EXECUTABLE || productSmokeLaunchOptions().executablePath)
+    : engine.executablePath();
+  if (!executable || !existsSync(executable)) {
     return null;
   }
   const args = engineId === "chromium"
