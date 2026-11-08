@@ -4,9 +4,10 @@ Measurement only. This record changes no provider profile and no Runtime code.
 Base: `ea80c9ef` on `claude/confine-b0-rootread`. Host: macOS 26.5.2, arm64,
 Rust 1.91.0, `/usr/bin/sandbox-exec` present.
 
-The evidence is one receipt at `~/Sparks/office/evidence/confine-b0/`, named
-`receipt-<head8>.log` for the head it pins. The log prints the head, tree,
-toolchain and every command with its full output and exit.
+The evidence is one receipt at `~/Sparks/office/evidence/confine-b0-fix/`,
+named `receipt-<head8>.log` for the head it pins, with its sha256 in the
+sibling `.sha256` file. The log prints the head, tree, toolchain and every
+command with its full output and exit.
 
 ## The committed forms
 
@@ -41,42 +42,61 @@ attributes), then no rule. The measured candidates are those four rungs.
 Each plant is one command of the receipt. It runs
 `lab/confine-measurements/root-read-b0-plant.sh`, which checks that the profile
 holds exactly one copy of the expected line, substitutes the candidate or
-deletes it, runs the provider's named macOS tests, restores the profile with
-`cp -p`, and proves the restore with `cmp` and `git diff --quiet`.
+deletes it, runs the provider's whole confine suite with `--no-fail-fast`, and
+restores the profile with `cp -p` in its exit trap; `cmp` proves the bytes and
+`git diff --quiet` proves the tree.
 
 Control runs the whole confine suite per provider with `--no-fail-fast` on the
 unmodified tree: did 16 passed and 1 ignored, wallet 103 passed, model 39 passed.
 
 The tool touches the restored profile after `cp -p`, because the wallet suite
 embeds its profile with `include_str!`; an older mtime would keep the planted
-copy inside the next test binary.
+copy inside the next test binary. The receipt also runs
+`root-read-b0-interrupt-test.sh`, which plants the wallet profile, sends SIGTERM
+while the suite is running, and proves the profile and the tree are restored.
 
-Each plant runs three named tests: the provider's operations journey and its
-two outside-denial tests.
+Every test in each suite therefore has a recorded result under each candidate
+form:
 
-| Provider | Journey and denial tests | `file-read-data` | `file-read-metadata` | no root read |
-|---|---|---|---|---|
-| did | `confined_provider_serves_did_operations_under_its_root`, `outside_write_denied`, `outside_read_denied` | 3 passed | 3 failed | 3 failed |
-| wallet | `confined_provider_serves_wallet_operations_under_its_root`, `confined_outside_write_is_denied`, `confined_outside_read_is_denied` | 3 passed | 3 failed | 3 failed |
-| model | `model_provider_ops_under_profile`, `model_outside_write_denied`, `model_outside_read_denied` | 3 passed | 3 failed | 3 failed |
+| Provider | `file-read-data` | `file-read-metadata` | no root read |
+|---|---|---|---|
+| did | 16 passed, 1 ignored | 8 passed, 8 failed, 1 ignored | 8 passed, 8 failed, 1 ignored |
+| wallet | 97 passed, 6 failed | 81 passed, 22 failed | 82 passed, 21 failed |
+| model | 39 passed | 21 passed, 18 failed | 21 passed, 18 failed |
 
 The model profile already holds `file-read-data`, so its `data` plant is the
 control run of the same line and changes no byte.
 
-Every failed test fails at its own start assertion, not at a skip or a parse
-error:
+The six wallet `file-read-data` failures are profile-text checks. They compare a
+generated profile or a document with the committed profile, so the substituted
+line fails them by construction:
 
-- did and wallet, both narrower candidates:
+- `generated_did_and_wallet_profiles_match_their_committed_oracles`
+  (`capsules/wallet-provider/tests/confine.rs:18553`)
+- `every_did_and_wallet_allow_rule_traces_to_one_declared_right` (`:18450`)
+- `every_did_and_wallet_allow_rule_has_a_registered_removal` (`:19124`)
+- `every_confinement_document_lists_its_profiles_allow_rules` (`:19194`)
+- `linux_contract_table_check_refuses_each_bad_table` (`:19513`)
+- `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
+  (`:5546`)
+
+Every test that starts a working provider under the committed profile passes
+under `file-read-data` for all three providers. In the narrower runs those
+starts fail at their start assertion, and the profile-text checks fail as well;
+the receipt lists each failing test and its panic:
+
+- did and wallet launch failures:
   `provider did not answer request {... "op":"init"} (the response stream
   ended); child signal: 6 (SIGABRT)`.
-- model, both narrower candidates:
+- model launch failures:
   `the provider process exited before answering "init": signal: 6 (SIGABRT)`.
 
 ## Conclusion
 
-`(allow file-read-data (literal "/"))` is the narrowest measured form that all
-three macOS journeys pass. It is sufficient for did, wallet and model, and its
-removal fails each provider, so the form is needed, not merely harmless.
+`(allow file-read-data (literal "/"))` is the narrowest measured form that every
+working start in the three macOS suites passes. It is sufficient for did, wallet
+and model, and its removal fails every measured working-start journey at
+startup for each provider, so the form is needed, not merely harmless.
 
 The did and wallet `file-read*` form is broader than necessary. The metadata
 rung is too narrow for every provider, which confirms the model document's
@@ -90,12 +110,12 @@ id, not to a provider name. B0 makes no such change.
 ## Limits
 
 - Measured on arm64 macOS 26.5.2 only; no x86-64 macOS host was available.
-- Each plant ran the three named tests above. The rest of each suite pins the
-  committed profile text, for example
-  `generated_did_and_wallet_profiles_match_their_committed_oracles` and
-  `linux_contract_table_covers_every_committed_allow_form`, and fails by
-  construction when the profile form changes. The control suites ran those
-  tests on the unmodified tree, and they passed.
-- The measurement shows startup and the named journeys. It does not enumerate
-  every file operation the loader performs, so it does not prove the form will
-  serve a future provider that reads the root directory differently.
+- Each plant ran the whole suite, so every test in those suites has a result in
+  the receipt; no journey in them is unmeasured. The profile-text checks, such
+  as the six named above, fail when the plant changes the committed text, and
+  the receipt records the exact failing set for each candidate form. The
+  control suites ran the same tests on the unmodified tree, and they passed.
+- The measurement shows startup and every journey in the three suites. It does
+  not enumerate every file operation the loader performs, so it does not prove
+  the form will serve a future provider that reads the root directory
+  differently.

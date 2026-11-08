@@ -1,6 +1,6 @@
 #!/bin/bash
 # B0 measurement plant: apply one macOS root-read form to one provider profile,
-# run that provider's named macOS tests, then restore the profile and prove it.
+# run that provider's whole confine suite, then restore the profile and prove it.
 #
 # Usage: root-read-b0-plant.sh <did|wallet|model> <data|metadata|none>
 #
@@ -23,19 +23,16 @@ did)
   file=capsules/did-provider/confine.sb
   old='(allow file-read* (literal "/"))'
   manifest=capsules/did-provider/Cargo.toml
-  tests=(confined_provider_serves_did_operations_under_its_root outside_write_denied outside_read_denied)
   ;;
 wallet)
   file=capsules/wallet-provider/confine.sb
   old='(allow file-read* (literal "/"))'
   manifest=capsules/wallet-provider/Cargo.toml
-  tests=(confined_provider_serves_wallet_operations_under_its_root confined_outside_write_is_denied confined_outside_read_is_denied)
   ;;
 model)
   file=capsules/model-provider/confine.sb
   old='(allow file-read-data (literal "/"))'
   manifest=capsules/model-provider/Cargo.toml
-  tests=(model_provider_ops_under_profile model_outside_write_denied model_outside_read_denied)
   ;;
 *)
   echo "usage: $0 <did|wallet|model> <data|metadata|none>" >&2
@@ -96,13 +93,10 @@ else
 fi
 cat "$scratch" > "$file" || exit 2
 
-for test in "${tests[@]}"; do
-  cargo test --locked --manifest-path "$manifest" --test confine "$test" -- --exact --nocapture &
-  child=$!
-  wait "$child"
-  rc=$?
-  child=
-  echo "plant $provider $mode test $test exit=$rc"
-  [ "$rc" -eq 0 ] || status=1
-done
+cargo test --locked --manifest-path "$manifest" --test confine --no-fail-fast -- --nocapture &
+child=$!
+wait "$child"
+status=$?
+child=
+echo "plant $provider $mode suite exit=$status"
 exit "$status"
