@@ -5711,7 +5711,8 @@ mod tests {
             admit(root.path(), &record);
             let _engine = install_engine(root.path());
             let (valid, provider) = readiness_provider(root.path(), &registry).await;
-            let (app, token) = readiness_catalog_app(root.path(), registry, &stored_context(root.path()));
+            let (app, token) =
+                readiness_catalog_app(root.path(), registry, &stored_context(root.path()));
             let ordinary = readiness_catalog_request(&app, &token, None).await.1["capsules"]
                 .as_array()
                 .unwrap()
@@ -5810,7 +5811,8 @@ mod tests {
             let _engine = install_engine(root.path());
             let (_, provider) = readiness_provider(root.path(), &registry).await;
             retention_intent(root.path(), &context(), &record.package_cid, true).unwrap();
-            let (app, token) = readiness_catalog_app(root.path(), registry.clone(), &stored_context(root.path()));
+            let (app, token) =
+                readiness_catalog_app(root.path(), registry.clone(), &stored_context(root.path()));
             for (method, input) in [
                 ("catalog.list", serde_json::json!({})),
                 (
@@ -5957,7 +5959,8 @@ mod tests {
                 })
                 .collect();
             let calls = backend.calls.lock().unwrap().clone();
-            let (app, token) = readiness_catalog_app(root.path(), registry.clone(), &stored_context(root.path()));
+            let (app, token) =
+                readiness_catalog_app(root.path(), registry.clone(), &stored_context(root.path()));
             for (strategy, expected) in [
                 ("source-build", serde_json::json!("source_engine_required")),
                 ("local-copy", serde_json::json!("source_engine_required")),
@@ -6095,7 +6098,8 @@ mod tests {
             admit(root.path(), &record);
             let _engine = install_engine(root.path());
             let (_, provider) = readiness_provider(root.path(), &registry).await;
-            let (app, token) = readiness_catalog_app(root.path(), registry.clone(), &stored_context(root.path()));
+            let (app, token) =
+                readiness_catalog_app(root.path(), registry.clone(), &stored_context(root.path()));
             provider.hold.store(true, Ordering::Release);
             let request_app = app.clone();
             let request_token = token.clone();
@@ -6170,7 +6174,8 @@ mod tests {
             payload["entries"][0]["cid"] =
                 serde_json::json!(cid::Cid::new_v1(0x70, hash).to_string());
             write_preparation_catalog(root.path(), &payload);
-            let (app, token) = readiness_catalog_app(root.path(), registry.clone(), &stored_context(root.path()));
+            let (app, token) =
+                readiness_catalog_app(root.path(), registry.clone(), &stored_context(root.path()));
             let (_, catalog) = readiness_catalog_request(&app, &token, None).await;
             let model = catalog["capsules"]
                 .as_array()
@@ -6186,7 +6191,8 @@ mod tests {
             let second = payload["entries"][0].clone();
             payload["entries"].as_array_mut().unwrap().push(second);
             write_preparation_catalog(root.path(), &payload);
-            let (app, token) = readiness_catalog_app(root.path(), registry, &stored_context(root.path()));
+            let (app, token) =
+                readiness_catalog_app(root.path(), registry, &stored_context(root.path()));
             let (_, catalog) = readiness_catalog_request(&app, &token, None).await;
             assert_eq!(catalog["model_catalog_state"], "unavailable");
             assert!(catalog["capsules"]

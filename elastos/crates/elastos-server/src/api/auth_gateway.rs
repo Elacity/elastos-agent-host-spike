@@ -40,8 +40,8 @@ use super::gateway::{
     consume_passkey_step_up_token, home_session_cookie_header_for_token,
     is_wallet_connector_capsule_id, issue_home_launch_token_for_auth_grant,
     issue_home_launch_token_for_verified_grant, require_home_launch_token_binding,
-    require_runtime_wallet_authority, runtime_wallet_authority,
-    GatewayState, RuntimeWalletAdapter, RuntimeWalletAuthority, HOME_CAPSULE_ID, HOME_ROUTE,
+    require_runtime_wallet_authority, runtime_wallet_authority, GatewayState, RuntimeWalletAdapter,
+    RuntimeWalletAuthority, HOME_CAPSULE_ID, HOME_ROUTE,
 };
 
 use crate::auth::AUTH_SESSION_TTL_SECS;
