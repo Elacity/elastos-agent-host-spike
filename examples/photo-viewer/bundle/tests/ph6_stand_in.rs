@@ -649,7 +649,7 @@ fn stand_in_binding_refuses_a_member_the_uri_check_rejects() {
     let world = World::new();
     let path = "images/bad?.png";
     let bytes = b"invalid member URI".to_vec();
-    let mut loaded = Loaded {
+    let loaded = Loaded {
         cid: capsule_bundle::cid_v1_raw_sha256(b"stand-in binding fixture"),
         path: world.path("unstaged"),
         entries: vec![Entry {
@@ -665,9 +665,24 @@ fn stand_in_binding_refuses_a_member_the_uri_check_rejects() {
         &loaded.cid,
         "images/bad?.png: uri must not contain ?, #, \\ or control characters",
     );
+}
 
-    loaded.entries[0].path = "images/01.png".into();
-    loaded.bytes.clear();
+/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+#[test]
+fn stand_in_binding_refuses_a_member_with_no_loaded_bytes() {
+    let world = World::new();
+    let path = "images/01.png";
+    let loaded = Loaded {
+        cid: capsule_bundle::cid_v1_raw_sha256(b"stand-in binding fixture"),
+        path: world.path("unstaged"),
+        entries: vec![Entry {
+            path: path.into(),
+            size: 0,
+            sha256: hex::encode(Sha256::digest(b"")),
+        }],
+        manifest: Value::Null,
+        bytes: BTreeMap::new(),
+    };
     binding_refusal(
         bind_content_stand_in(&loaded).unwrap_err(),
         &loaded.cid,
