@@ -14596,7 +14596,7 @@ fn linux_inexact_row_count_problems(document_name: &str, document: &str) -> Vec<
 
 /// The count a line states before `phrase`, as digits or as a number word.
 ///
-/// The document writes `Five rows have no exact Linux rule`, so the count is the
+/// The document writes `Six rows have no exact Linux rule`, so the count is the
 /// last word before the phrase. A line whose text before the phrase states no
 /// digits and no number word answers `None`, which the caller refuses instead of
 /// reading the count as zero.
@@ -19446,7 +19446,7 @@ fn linux_contract_table_check_refuses_each_bad_table() {
             None
         )),
         vec![format!(
-            "{WALLET_PROVIDER} CONFINEMENT-LINUX.md: the table has 5 rows whose exactness starts \
+            "{WALLET_PROVIDER} CONFINEMENT-LINUX.md: the table has 6 rows whose exactness starts \
              No exact match, the opening line states 3, and {LINUX_INEXACT_HEADING} holds {bullets} \
              bullets, and the one count must be one number",
             bullets = inexact_bullets(&inexact)
@@ -19456,12 +19456,12 @@ fn linux_contract_table_check_refuses_each_bad_table() {
     assert_eq!(
         count(&tables.table(
             &rows,
-            Some("Five rows have no exact Linux rule."),
-            Some("- One bullet, where the table has five such rows.")
+            Some("Six rows have no exact Linux rule."),
+            Some("- One bullet, where the table has six such rows.")
         )),
         vec![format!(
-            "{WALLET_PROVIDER} CONFINEMENT-LINUX.md: the table has 5 rows whose exactness starts \
-             No exact match, the opening line states 5, and {LINUX_INEXACT_HEADING} holds 1 \
+            "{WALLET_PROVIDER} CONFINEMENT-LINUX.md: the table has 6 rows whose exactness starts \
+             No exact match, the opening line states 6, and {LINUX_INEXACT_HEADING} holds 1 \
              bullets, and the one count must be one number"
         )],
         "a bullet list that disagrees with the table must be refused"
@@ -19680,8 +19680,8 @@ impl LinuxContractTables {
                     WALLET_PROVIDER,
                     &self.table(
                         &rows,
-                        Some("Five rows have no exact Linux rule."),
-                        Some("- One bullet, where the table has five such rows."),
+                        Some("Six rows have no exact Linux rule."),
+                        Some("- One bullet, where the table has six such rows."),
                     ),
                 ),
             ),
@@ -19689,14 +19689,14 @@ impl LinuxContractTables {
                 "a document with no count line",
                 linux_inexact_row_count_problems(
                     WALLET_PROVIDER,
-                    // Five bullets, one per inexact row, and no line states the
+                    // Six bullets, one per inexact row, and no line states the
                     // count, so only the missing-line refusal can answer here.
                     &self.table(
                         &rows,
                         None,
                         Some(
                             "- One bullet per inexact row.\n- The second.\n- The third.\n\
-                             - The fourth.\n- The fifth.",
+                             - The fourth.\n- The fifth.\n- The sixth.",
                         ),
                     ),
                 ),
