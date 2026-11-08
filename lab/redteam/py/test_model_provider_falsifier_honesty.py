@@ -5,7 +5,8 @@ states that sentence on a clean commit, a missing commit, and a problem
 list. This probe still judges every provider entry on this base. An id
 captured before a removal is reported absent. Each ``old`` anchor still
 has to occur once, on the updated text, the way ``falsify.py`` applies
-it. MP02, MP05, and MP11 stay required. The selftest and PV
+it. The required ids are the provider ids at that base, so MP02, MP05, and
+MP11 stay required and a deleted non-score id is reported too. The selftest and PV
 entries in the same file stay out of the checks; ``load_json`` still has
 to accept the whole file. The ``about`` text is the runner's path rule
 for every list, and this probe leaves it alone.
@@ -79,9 +80,14 @@ def provider_base():
     return snapshot, data, provider_entries(document)
 
 
-def live_required(entries):
-    """Entry ids, then any score id those entries omit."""
-    required = [entry["id"] for entry in entries]
+def base_required():
+    """The provider ids at the snapshot base, then any score id they omit.
+
+    Planted entries are judged against this base list, so an id the
+    falsifier had at the base and lacks now is an ``id`` problem even when
+    it is not one of ``SCORE_IDS``.
+    """
+    required = [entry["id"] for entry in provider_base()[2]]
     for ident in SCORE_IDS:
         if ident not in required:
             required.append(ident)
@@ -91,11 +97,10 @@ def live_required(entries):
 def row_problems(entries, required):
     """Problems for these entries against ``required``.
 
-    ``required`` is the id sequence captured before a plant. The three
-    score ids are part of that sequence when the caller uses
-    ``live_required``. An empty entry list is one problem. An id
-    captured before a removal is reported absent. MP02, MP05, and MP11
-    stay required.
+    ``required`` is the id sequence at the snapshot base (``base_required``),
+    captured before a plant. An empty entry list is one problem. An id at
+    the base and absent now is reported absent, score id or not. MP02,
+    MP05, and MP11 stay required.
     """
     if not entries:
         return [Problem(
@@ -126,7 +131,7 @@ def row_problems(entries, required):
 
 def provider_problems(entries, read):
     """Row, caught-without-a-test, and anchor problems for the provider entries."""
-    return [*row_problems(entries, live_required(entries)),
+    return [*row_problems(entries, base_required()),
             *caught_without_tests(entries), *anchors_of(entries, read)]
 
 
@@ -260,11 +265,11 @@ class ModelProviderFalsifierHonesty(unittest.TestCase):
     def test_provider_ids_are_the_row_10_list(self):
         """Every provider entry on this base is caught and names a test.
 
-        An id captured before a removal is reported absent. MP02, MP05, and
-        MP11 stay required.
+        An id at the base and absent now is reported absent. MP02, MP05, and
+        MP11 stay required, and so does every other base id.
         """
-        _snapshot, _data, entries = provider_base()
-        self.assertEqual(row_problems(entries, live_required(entries)), [])
+        snapshot, _data, entries = provider_base()
+        self.assertEqual(row_problems(entries, base_required()), [])
         self.assertGreaterEqual(len(entries), 2)
         present = [entry["id"] for entry in entries]
         self.assertEqual(SCORE_IDS, ("MP02", "MP05", "MP11"))
@@ -319,9 +324,21 @@ class ModelProviderFalsifierHonesty(unittest.TestCase):
         without_mp05 = [
             entry for entry in copy.deepcopy(entries) if entry["id"] != "MP05"]
         self.assertEqual(
-            row_problems(without_mp05, live_required(without_mp05)), [Problem(
+            row_problems(without_mp05, base_required()), [Problem(
                 "id", "MP05", MODEL_FILE,
                 "MP05 is absent from the provider entries")])
+
+        # The base list names every provider id, so a non-score removal is
+        # an id problem too. Rebuilding the list from the remaining entries
+        # would hide this absence.
+        self.assertIn("MP07", present)
+        self.assertNotIn("MP07", SCORE_IDS)
+        without_mp07 = [
+            entry for entry in copy.deepcopy(entries) if entry["id"] != "MP07"]
+        self.assertEqual(len(without_mp07), len(entries) - 1)
+        self.assertEqual(provider_problems(without_mp07, snapshot.read), [Problem(
+            "id", "MP07", MODEL_FILE,
+            "MP07 is absent from the provider entries")])
 
         mixed = copy.deepcopy(entries)
         mixed_removed = mixed.pop(0)["id"]
