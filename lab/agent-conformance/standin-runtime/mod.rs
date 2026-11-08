@@ -1196,7 +1196,7 @@ impl StandIn {
     /// An authorised grant is then admitted for its one effect (M1 check
     /// A7): the body's optional `amount` is the ask, defaulting to
     /// `EFFECT_BUDGET_CAP`, and `admit_effect` reserves it against the
-    /// session ceiling on the shared ledger before the `once` spend. A
+    /// grant's own ceiling on the shared ledger before the `once` spend. A
     /// missing, non-numeric or
     /// negative `amount` is status 400 with
     /// `budget ask needs a non-negative integer amount`, from `validate_body`
@@ -1894,7 +1894,7 @@ impl StandIn {
 
     /// The one budget use. `use_grant` is its caller, for both routes.
     ///
-    /// The bind set the identity's ceiling (`admit_on_ledger`); a use only
+    /// The bind set the grant's own ceiling (`admit_on_ledger`); a use only
     /// holds its amount on the grant's own handle. A `once` grant asks
     /// against the cap first: an ask above `EFFECT_BUDGET_CAP` is 403 with
     /// `AdmitRefuse`'s text (a plain compare, no ceiling write).

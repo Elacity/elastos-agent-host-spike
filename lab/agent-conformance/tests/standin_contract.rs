@@ -1681,7 +1681,7 @@ fn standin_admission_admits_a_granted_ask_within_budget_and_refuses_one_above() 
         Ok(json!({ "valid": true })),
         "the stand-in admits an ask at the cap"
     );
-    // The 4096 above consumed the identity's budget, so a later ask on the
+    // The 4096 above consumed this grant's budget, so a later ask on the
     // same grant is refused by the reserve and leaves the grant live.
     let later_ask = standin.post_capability_validate(owner, &json!({ "request_id": request_id }));
     assert_eq!(
@@ -1761,17 +1761,18 @@ fn standin_admission_admits_a_granted_ask_within_budget_and_refuses_one_above() 
         BTreeSet::from([request_id.clone(), once_id.clone()]),
         "the refused ask leaves the once grant live and unspent"
     );
-    // The session ceiling is filled by the cap use above, so the once grant's
-    // own ask is refused by the reserve and spends nothing.
+    // Each grant keeps its own ceiling, so the first grant's cap use does not
+    // fill the once grant's ceiling: the once grant's ask at the cap is
+    // admitted on its own ceiling and spends it.
     assert_eq!(
         standin.post_capability_validate(owner, &json!({ "request_id": once_id, "amount": 4096 })),
-        Err((403, "reservation exceeds the ceiling".to_owned())),
-        "the once grant's ask is refused once the session ceiling is filled"
+        Ok(json!({ "valid": true })),
+        "the once grant's ask at the cap is admitted on its own ceiling"
     );
     assert_eq!(
         live(&standin),
-        BTreeSet::from([request_id.clone(), once_id.clone()]),
-        "the refused ask leaves the once grant live and unspent"
+        BTreeSet::from([request_id.clone()]),
+        "the admitted ask spends the once grant and leaves the first grant live"
     );
 
     // The spend order shows where nothing holds the ceiling: a second session
