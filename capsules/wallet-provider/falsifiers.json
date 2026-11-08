@@ -3647,8 +3647,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "    let binary = if name == DID_PROVIDER {\n        did_provider_binary()\n    } else {\n        Path::new(PROVIDER_BINARY)\n    };",
-          "new": "    let binary = if name == \"no-such-provider\" {\n        did_provider_binary()\n    } else {\n        Path::new(PROVIDER_BINARY)\n    };"
+          "old": "        DID_PROVIDER => provider_binary(DID_PROVIDER),",
+          "new": "        DID_PROVIDER => Path::new(PROVIDER_BINARY),"
         }
       ],
       "tests": [
