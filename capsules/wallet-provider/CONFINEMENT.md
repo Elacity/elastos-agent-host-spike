@@ -1577,14 +1577,16 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - WP217: The file row's bound-executable probe read names wallet's binary for
   both providers, so did's probe would read the wrong program.
   `landlock_probe_paths_follow_the_bound_parameters` checks this rule.
-- WP218: The Outputs compare ignores the children of `data`, so a literal key
-  the cell omits passes.
+- WP218: The Outputs compare reads only the top-level names, so a literal key
+  the cell omits from `data` passes while the passing table still passes.
   `operations_table_row_check_refuses_each_bad_table` checks this rule.
-- WP219: The ordinary ok side accepts the cell's own names and does not read
-  the handler `json!`, so a key the literal does not write passes.
+- WP219: The ordinary ok side takes its expected `data` names from the cell
+  instead of the handler `json!`, so a key the cell omits passes while the
+  passing table still passes.
   `operations_table_row_check_refuses_each_bad_table` checks this rule.
-- WP220: The `wallet_contract` compare does not read
-  `WalletProviderResponseV2`, so an extra envelope name passes.
+- WP220: The `wallet_contract` compare takes its expected names from the cell
+  instead of `WalletProviderResponseV2`, so an extra envelope name passes while
+  the passing table still passes.
   `operations_table_row_check_refuses_each_bad_table` checks this rule.
 - WP221: The macOS allow compare accepts any allow quote on a declared-right
   row, so the exec form on a `storage` row passes.
@@ -1660,6 +1662,11 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   so the cross-crate read passes.
   `every_declared_test_is_cited_in_its_own_documents` checks this rule.
 - WP244: A failed publish keeps the directories it created, so a retry answers ok without the parent's sync. Caught by `wallet_init_publishes_only_the_entries_it_creates`.
+- WP245: The provider chooser answers wallet's binary for did, so the
+  executable rule and the probe read bind the other provider's binary and the
+  did iteration fails on the binary's name.
+  `landlock_ruleset_follows_the_declared_rights` and
+  `landlock_probe_paths_follow_the_bound_parameters` check this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

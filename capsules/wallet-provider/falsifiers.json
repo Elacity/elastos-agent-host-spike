@@ -3204,14 +3204,14 @@
     },
     {
       "id": "WP218",
-      "title": "the Outputs compare ignores the children of data, so a literal key the cell omits passes",
+      "title": "the Outputs compare sees only top-level names, so a literal key the cell omits from data passes",
       "command": "wallet",
       "expect": "caught",
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "    let expected = ok_row_items(keys);\n    if input_items(ok_side).is_some_and(|observed| inputs_match(&observed, &expected)) {",
-          "new": "    let expected = ok_row_items(&[]);\n    if input_items(ok_side).is_some_and(|observed| inputs_match(&observed, &expected)) {"
+          "old": "    if input_items(ok_side).is_some_and(|observed| inputs_match(&observed, &expected)) {",
+          "new": "    if input_items(ok_side).is_some_and(|observed| observed == expected) {"
         }
       ],
       "tests": [
@@ -3226,8 +3226,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "            let keys = match object_keys(body) {\n                Ok(keys) => keys,",
-          "new": "            let keys = match object_keys(body).map(|_keys| Vec::new()) {\n                Ok(keys) => keys,"
+          "old": "                ok_side,\n                &keys,\n                &format!(\"{label} names\"),",
+          "new": "                ok_side,\n                &input_items(ok_side)\n                    .and_then(|items| items.get(1).map(|data| data.children.iter().map(|child| child.name.clone()).collect()))\n                    .unwrap_or(keys),\n                &format!(\"{label} names\"),"
         }
       ],
       "tests": [
@@ -3242,8 +3242,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "            let fields = match contract_response_fields(&path) {\n                Ok(fields) => fields,",
-          "new": "            let fields = match contract_response_fields(&path).map(|_fields| Vec::new()) {\n                Ok(fields) => fields,"
+          "old": "                &stripped,\n                &fields,\n                &format!(\"{} names\", path.display()),",
+          "new": "                &stripped,\n                &input_items(&stripped)\n                    .and_then(|items| items.get(1).map(|data| data.children.iter().map(|child| child.name.clone()).collect()))\n                    .unwrap_or(fields),\n                &format!(\"{} names\", path.display()),"
         }
       ],
       "tests": [
@@ -3637,6 +3637,23 @@
       ],
       "tests": [
         "tests::storage_root::wallet_init_publishes_only_the_entries_it_creates"
+      ]
+    },
+    {
+      "id": "WP245",
+      "title": "the provider chooser answers wallet's binary for did, so the executable rule binds the other provider's binary",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let binary = if name == DID_PROVIDER {\n        did_provider_binary()\n    } else {\n        Path::new(PROVIDER_BINARY)\n    };",
+          "new": "    let binary = if name == \"no-such-provider\" {\n        did_provider_binary()\n    } else {\n        Path::new(PROVIDER_BINARY)\n    };"
+        }
+      ],
+      "tests": [
+        "landlock_ruleset_follows_the_declared_rights",
+        "landlock_probe_paths_follow_the_bound_parameters"
       ]
     }
   ]

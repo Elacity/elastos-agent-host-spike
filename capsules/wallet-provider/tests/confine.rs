@@ -7752,7 +7752,8 @@ fn landlock_abi_refusal(ruleset: &LandlockRuleset) -> String {
 /// Falsifier: WP202 adds `READ_FILE` to the `STORAGE_PARENT` row, so this test
 /// fails on the parent decision. WP216 makes the chooser ignore the provider
 /// name and answer wallet's `STORAGE_ROOT` binding for both, so the did
-/// iteration fails on the expected root.
+/// iteration fails on the expected root. WP245 makes the chooser answer
+/// wallet's binary for did, so the did iteration fails on the binary's name.
 #[test]
 fn landlock_ruleset_follows_the_declared_rights() {
     for name in [DID_PROVIDER, WALLET_PROVIDER] {
@@ -7835,6 +7836,17 @@ fn landlock_ruleset_follows_the_declared_rights() {
             rule("PROVIDER_EXECUTABLE").path,
             resolved(inputs.binary),
             "{name}: the PROVIDER_EXECUTABLE rule must bind this provider's own binary"
+        );
+        // The chooser supplies both the binary and its binding, so the compare
+        // above cannot see the chooser answer another provider's binary. The
+        // expected file name is written from the provider's name instead.
+        assert_eq!(
+            rule("PROVIDER_EXECUTABLE")
+                .path
+                .file_name()
+                .and_then(|file| file.to_str()),
+            Some(name),
+            "{name}: the PROVIDER_EXECUTABLE rule must bind the binary named for this provider"
         );
 
         let parent = LANDLOCK_RULE_RIGHTS
@@ -11822,7 +11834,9 @@ impl LandlockProbeCall {
 ///
 /// Falsifier: WP217 reads `PROVIDER_BINARY` for the bound-executable call
 /// instead of the launch's own binding, so did's probe would read wallet's
-/// binary and the did iteration fails on that path.
+/// binary and the did iteration fails on that path. WP245 makes the chooser
+/// answer wallet's binary for did, so the did iteration fails on the binary's
+/// name.
 #[test]
 fn landlock_probe_paths_follow_the_bound_parameters() {
     for name in [DID_PROVIDER, WALLET_PROVIDER] {
@@ -11866,6 +11880,14 @@ fn landlock_probe_paths_follow_the_bound_parameters() {
             LandlockProbeCall::ReadExecutable.path(bindings),
             resolved(inputs.binary),
             "{name}: the bound-executable read must use this provider's own binary"
+        );
+        assert_eq!(
+            LandlockProbeCall::ReadExecutable
+                .path(bindings)
+                .file_name()
+                .and_then(|file| file.to_str()),
+            Some(name),
+            "{name}: the bound-executable read must use the binary named for this provider"
         );
     }
 }
@@ -24779,7 +24801,11 @@ enum WalletProviderOperationV2 {
     // the literal writes and the cell omits, a key the cell names and the
     // literal does not write, two `json!` answers in one handler, a wrong error
     // envelope name, the `empty_ok` text on a `data` row and a `data` side on
-    // the `empty_ok` row.
+    // the `empty_ok` row. WP218 compares only the top-level names and WP219
+    // takes the expected `data` names from the cell instead of the `json!`
+    // literal; the passing table still passes under both, and the first case
+    // here fails. WP220 does the same for the `wallet_contract` compare, so the
+    // undeclared-field case below fails.
     for (case, operation, cell) in [
         (
             "a literal key the cell omits",
