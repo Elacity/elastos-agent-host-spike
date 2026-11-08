@@ -438,8 +438,10 @@ class ModelProviderFalsifierHonesty(unittest.TestCase):
 
         The pinned base list does not follow the live file. Rebuilding it
         from the provider entries that read returns would report no problem.
-        The fixture is a temporary repository; the checkout is only read.
+        Both reads use the temporary repository. Its fresh provider cache
+        leaves the checkout snapshot intact for the report and teardown.
         """
+        checkout_base = provider_base()
         document = load_provider_document((REPO / MODEL_FILE).read_bytes())
         listed = document["falsifiers"]
         self.assertEqual(len([entry for entry in listed if entry.get("id") == "MP08"]), 1)
@@ -449,10 +451,19 @@ class ModelProviderFalsifierHonesty(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             entries, _path = deleted_base_id_fixture(
                 tmp, lambda _path: None, document=document)
-            self.assertNotIn("MP08", [entry["id"] for entry in entries])
-            self.assertEqual(row_problems(entries, base_required()), [Problem(
-                "id", "MP08", MODEL_FILE,
-                "MP08 is absent from the provider entries")])
+            # Exercise the real reader with an empty cache even when another
+            # test has already cached the checkout's complete provider list.
+            fixture_base = functools.lru_cache(maxsize=None)(provider_base.__wrapped__)
+            with mock.patch(__name__ + ".Snapshot", lambda: falsifier_data.Snapshot(tmp)), \
+                    mock.patch(__name__ + ".provider_base", fixture_base):
+                snapshot, _data, observed = provider_base()
+                self.assertEqual(snapshot.root, Path(tmp).resolve())
+                self.assertEqual(observed, entries)
+                self.assertNotIn("MP08", [entry["id"] for entry in observed])
+                self.assertEqual(row_problems(observed, base_required()), [Problem(
+                    "id", "MP08", MODEL_FILE,
+                    "MP08 is absent from the provider entries")])
+        self.assertIs(provider_base(), checkout_base)
 
     def test_fixture_keeps_a_concurrent_edit(self):
         """A trailing newline written after the snapshot read survives.
