@@ -1669,6 +1669,47 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # The one check that sums up the run, for branch protection to require: it fails
+  # unless every job succeeded or was skipped by its own guard for a reason pinned
+  # here. A required job that is skipped otherwise, such as test-behaviour after a
+  # failed source-gate, would count as passed. cancel-on-failure is not needed: it
+  # controls the run, and it waits for this job.
+  required:
+    name: required
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    if: always()
+    needs: [source-gate, fork-gate, test-behaviour, cargo-audit, engine-llama-amd64, engine-llama-arm64, lint, lab-standin, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, release-upstream-assets, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux]
+    steps:
+      - name: every job passed or was skipped by its own guard
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          SPARK_PULL_REQUEST: ${{ github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/') }}
+          POST_MERGE: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
+          CUSTODY_EVENT: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'push' && (github.ref == 'refs/heads/spike/agent-host' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main')) }}
+        run: |
+          python3 -I -S - <<'PY'
+          import json, os
+          needs = json.loads(os.environ["NEEDS"])
+          # Lane pull requests (spark/*) run only the quick checks.
+          full_proof = {"engine-llama-amd64", "engine-llama-arm64", "test-elastos", "test-capsules",
+                        "custody-harness-smoke", "release-upstream-paths", "release-upstream-assets",
+                        "source-home-linux", "source-home-linux-arm64", "source-home-macos", "update-hop-linux"}
+          may_skip = set(full_proof) if os.environ["SPARK_PULL_REQUEST"] == "true" else set()
+          if os.environ["POST_MERGE"] != "true":
+              may_skip.add("source-home-macos")
+          if os.environ["CUSTODY_EVENT"] != "true":
+              may_skip.add("custody-harness-smoke")
+          if needs.get("release-upstream-paths", {}).get("outputs", {}).get("run") != "true":
+              may_skip.add("release-upstream-assets")
+          failed = [f"{job}: {need['result']}" for job, need in sorted(needs.items())
+                    if need["result"] != "success" and not (need["result"] == "skipped" and job in may_skip)]
+          for line in failed:
+              print(f"::error::{line}")
+          print(f"{len(needs) - len(failed)} of {len(needs)} jobs passed or were skipped by their own guard")
+          raise SystemExit(1 if failed else 0)
+          PY
+
   # A pull request run stops at its first failed job, source-gate included, so
   # the Linux journeys do not run on for 30+ minutes after a decisive failure. Pushes,
   # merge queues and dispatches keep running every job to the end. This job

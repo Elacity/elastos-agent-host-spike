@@ -39,6 +39,11 @@ SPARK_SKIP = "!(github.event_name == 'pull_request' && startsWith(github.head_re
 # Jobs that run only after merge (pushes and the nightly schedule), never on a PR, batch or baseline run.
 POST_MERGE_JOBS = {"source-home-macos"}
 POST_MERGE_GUARD = "${{ github.event_name == 'push' || github.event_name == 'schedule' }}"
+# Every job the required check sums up: all but itself and cancel-on-failure.
+REQUIRED_NEEDS = ("source-gate", "fork-gate", "test-behaviour", "cargo-audit", "engine-llama-amd64", "engine-llama-arm64",
+                  "lint", "lab-standin", "test-elastos", "test-capsules", "custody-harness-smoke", "release-upstream-paths",
+                  "release-upstream-assets", "source-home-linux", "source-home-linux-arm64", "source-home-macos",
+                  "update-hop-linux")
 # Read the fixed job/step indentation used here; actionlint checks YAML syntax.
 def jobs(source):
     return dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)",
@@ -870,7 +875,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertIn("\n  schedule:\n", triggers)
         context = event_context("merge_group", "refs/heads/gh-readonly-queue/develop/pr-1")
         for job in JOBS:
-            if job in ("cancel-on-failure", "fork-gate"):
+            if job in ("cancel-on-failure", "fork-gate", "required"):
                 continue
             guard = re.search(r"(?m)^    if: (.*)$", JOBS[job])
             if job == "release-upstream-assets":
@@ -1891,6 +1896,7 @@ class ReleasePolicyTests(unittest.TestCase):
         expected = {
             "source-gate": ("source-gate", "ubuntu-24.04"),
             "fork-gate": ("fork-gate", "ubuntu-24.04"),
+            "required": ("required", "ubuntu-24.04"),
             "engine-llama-arm64": ("engine-llama-arm64", "ubuntu-24.04-arm"),
             "engine-llama-amd64": ("engine-llama-amd64", "ubuntu-24.04"),
             "lint": ("lint", "ubuntu-24.04"),
@@ -1965,6 +1971,9 @@ class ReleasePolicyTests(unittest.TestCase):
             "release-upstream-paths": None, "release-upstream-assets": "[release-upstream-paths, engine-llama-arm64]",
             "source-home-linux": "engine-llama-amd64", "source-home-linux-arm64": "engine-llama-arm64",
             "source-home-macos": "source-gate", "update-hop-linux": "fork-gate", "cancel-on-failure": None,
+            "required": "[source-gate, fork-gate, test-behaviour, cargo-audit, engine-llama-amd64, engine-llama-arm64, "
+                        "lint, lab-standin, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, "
+                        "release-upstream-assets, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux]",
         }
         graph = {job: (re.search(r"(?m)^    needs: (.+)$", block) or [None, None])[1] for job, block in JOBS.items()}
         self.assertEqual(graph, expected)
@@ -2013,6 +2022,46 @@ class ReleasePolicyTests(unittest.TestCase):
         for conclusion in ("failure", "timed_out", "cancelled", "skipped"):
             self.assertEqual(self.run_fork_gate([None, conclusion, "success"]), (1, 2),
                              f"a source-gate {conclusion} must stop a fork pull request's compile jobs")
+
+    def run_required(self, context, results, upstream="false"):
+        """Run the required job's check as Actions would for this context; return its exit status."""
+        step, = steps("required")
+        env = {name: str(evaluate(field(step, name), context)).lower()
+               for name in ("SPARK_PULL_REQUEST", "POST_MERGE", "CUSTODY_EVENT")}
+        needs = {job: {"result": "success", "outputs": {}} for job in REQUIRED_NEEDS}
+        needs["release-upstream-paths"]["outputs"]["run"] = upstream
+        for job, result in results.items():
+            needs[job]["result"] = result
+        # The run block is its 10-space lines; the next job's leading comment follows it.
+        script = textwrap.dedent(re.match(r"(?:(?: {10}[^\n]*)?\n)*", step.split("        run: |\n", 1)[1])[0])
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30,
+                              env={**os.environ, **env, "NEEDS": json.dumps(needs)}).returncode
+
+    def test_required_fails_unless_every_job_passed_or_was_skipped_by_its_guard(self):
+        self.assertEqual(field(JOBS["required"], "if"), "always()")
+        self.assertNotIn("actions/checkout@", JOBS["required"])
+        self.assertEqual(set(REQUIRED_NEEDS), set(JOBS) - {"required", "cancel-on-failure"})
+        pr, spark = event_context("pull_request", "refs/pull/9/merge"), event_context("pull_request", "refs/pull/9/merge", head_ref="spark/lane")
+        push, nightly = event_context("push", "refs/heads/spike/agent-host"), event_context("schedule", "refs/heads/spike/agent-host")
+        mac, assets = {"source-home-macos": "skipped"}, {"release-upstream-assets": "skipped"}
+        skipped_full = {job: "skipped" for job in FULL_PROOF_JOBS}
+        cases = [
+            ("ordinary PR", pr, {**mac, **assets}, "false", 0),
+            ("PR whose upstream inputs changed", pr, mac, "true", 0),
+            ("spark lane PR", spark, skipped_full, "false", 0),
+            ("push", push, assets, "false", 0),
+            ("nightly", nightly, {**assets, "custody-harness-smoke": "skipped"}, "false", 0),
+            ("failed source-gate skips test-behaviour", pr, {**mac, **assets, "source-gate": "failure", "test-behaviour": "skipped"}, "false", 1),
+            ("fork PR whose gate failed", pr, {**mac, **assets, "source-gate": "failure", "fork-gate": "failure",
+                                               **{job: "skipped" for job in FULL_PROOF_JOBS | {"lint", "lab-standin"}}}, "false", 1),
+            ("a full proof skipped on an ordinary PR", pr, {**mac, **assets, "test-elastos": "skipped"}, "false", 1),
+            ("macOS skipped after merge", push, {**mac, **assets}, "false", 1),
+            ("upstream assets skipped though their inputs changed", pr, {**mac, **assets}, "true", 1),
+            ("a cancelled job", pr, {**mac, **assets, "lint": "cancelled"}, "false", 1),
+            ("custody skipped on a PR", pr, {**mac, **assets, "custody-harness-smoke": "skipped"}, "false", 1),
+        ]
+        for name, context, results, upstream, expected in cases:
+            self.assertEqual(self.run_required(context, results, upstream), expected, name)
 
     def test_pull_request_runs_cancel_at_the_first_failed_job(self):
         watcher = JOBS["cancel-on-failure"]
