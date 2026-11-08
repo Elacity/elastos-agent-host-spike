@@ -541,16 +541,6 @@ impl PendingRequestStore {
         requests.values().filter(|r| r.is_pending()).count()
     }
 
-    /// List granted requests for a specific session
-    pub async fn list_session_granted(&self, session_id: &str) -> Vec<PendingCapabilityRequest> {
-        let requests = self.requests.read().await;
-        requests
-            .values()
-            .filter(|r| r.session_id.to_string() == session_id && r.is_granted())
-            .cloned()
-            .collect()
-    }
-
     /// Mark a granted request as revoked, recording who settled it. This
     /// changes the request record only; `CapabilityManager::revoke` revokes
     /// the token itself.
