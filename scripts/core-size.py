@@ -229,6 +229,9 @@ def parse_items(vals, lines, i, end, test, found, inline=()):
             found["spans"].append((start, last))
         if kind == "mod" and body is None:
             found["mods"].append((name, vals[start:i], lines[i], item_test, inline))
+            found["mod_tokens"].add(i + vals[i:last].index("mod"))
+        elif kind == "mod" and path_attribute(vals[start:i]) is not None:
+            raise Refusal("#[path] on an inline module: core-size.py does not follow it", lines[start])
         if body and kind in ("struct", "union", "enum") and not item_test:
             parse_fields(vals, lines, body[0], body[1], kind == "enum", found)
         if body and kind in ("mod", "impl", "trait", "extern"):
@@ -270,9 +273,19 @@ def analyse(tokens):
     or parameter) is refused."""
     code = [t for t in tokens if t[1] != "comment"]
     vals, lines = [t[2] for t in code] + [""] * 4, [t[0] for t in code]
-    found = {"spans": [], "attrs": set(), "mods": []}
+    found = {"spans": [], "attrs": set(), "mods": [], "mod_tokens": set(), "includes": []}
     parse_items(vals, lines, 0, len(code), False, found)
     tests = {k for a, b in found["spans"] for k in range(a, b + 1)}
+    for k in range(len(code)):  # module and source inclusions the item walk did not see are refused
+        outline = vals[k] == "mod" and re.fullmatch(r"\w+", vals[k + 1]) and vals[k + 2] == ";"
+        if outline and k not in found["mod_tokens"]:
+            raise Refusal("module declared in a function body, block or macro: core-size.py does not follow it",
+                          lines[k])
+        if vals[k] == "include" and vals[k + 1] == "!":
+            target = literal_text(vals[k + 3]) if vals[k + 2] in OPEN and closer(vals, k + 2) == k + 4 else None
+            if target is None:
+                raise Refusal("include! of a path that is not one string literal", lines[k])
+            found["includes"].append((target, lines[k], k in tests))
     for k in range(len(code)):
         open_ = k + 1 + (vals[k + 1] == "!")
         if vals[k] == "#" and k not in found["attrs"] and k not in tests and vals[open_] == "[":
@@ -283,7 +296,7 @@ def analyse(tokens):
             if refuse:
                 raise Refusal("test cfg on a match arm, statement, expression, tuple field or parameter:"
                               " core-size.py will not guess where it ends", lines[k])
-    return tests, found["spans"], found["mods"]
+    return tests, found["spans"], found["mods"], found["includes"]
 
 
 def crate_roots(tree):
@@ -299,25 +312,36 @@ def crate_roots(tree):
     return sorted(set(roots))
 
 
+def literal_text(value):
+    """The text of a plain or raw string literal token, or None for any other token."""
+    raw, plain = re.fullmatch(r'r(#*)"(.*)"\1', value, re.S), re.fullmatch(r'"(.*)"', value, re.S)
+    return raw.group(2) if raw else re.sub(r"\\(.)", r"\1", plain.group(1)) if plain else None
+
+
 def path_attribute(attrs):
-    """The #[path = "..."] of an outline module declaration's attributes, or None."""
+    """The #[path = "..."] of a module declaration's attributes, or None."""
     for k in range(len(attrs) - 5):
         if attrs[k:k + 4] == ["#", "[", "path", "="] and attrs[k + 5] == "]":
-            raw = re.fullmatch(r'r(#*)"(.*)"\1', attrs[k + 4], re.S)
-            plain = re.fullmatch(r'"(.*)"', attrs[k + 4], re.S)
-            return raw.group(2) if raw else re.sub(r"\\(.)", r"\1", plain.group(1))
+            return literal_text(attrs[k + 4])
     return None
 
 
 def module_tree(tree, parsed):
-    """{path: True when only test code declares it} for every file the module tree reaches."""
-    reached, queue = {}, [(root, False, True) for root in crate_roots(tree)]
+    """{path: True when only test code reaches it} for every file the module tree and include! reach."""
+    reached, queue = {}, [(root, False, True, False) for root in crate_roots(tree)]
     while queue:
-        path, test, owns_dir = queue.pop()  # owns_dir: lib.rs, main.rs, mod.rs and #[path] files
+        path, test, owns_dir, included = queue.pop()  # owns_dir: lib.rs, main.rs, mod.rs, #[path] files
         if path in reached and (test or not reached[path]):
             continue
         reached[path] = test
         here = posixpath.dirname(path)
+        for target, line, include_test in parsed(path)[5]:  # include! pastes the file in place
+            where, target = f"{CRATE}/{path}:{line + 1}", posixpath.normpath(posixpath.join(here, target))
+            if target not in tree:
+                raise Refusal(f"{where}: include! of {target}, which is not in the crate")
+            queue.append((target, test or include_test, owns_dir, True))
+        if included and parsed(path)[4]:
+            raise Refusal(f"{CRATE}/{path}: module declared in an include!d file: core-size.py does not follow it")
         for name, attrs, line, mod_test, inline in parsed(path)[4]:
             folder = posixpath.join(here if owns_dir else path[:-3], *inline)
             given = path_attribute(attrs)
@@ -328,12 +352,13 @@ def module_tree(tree, parsed):
             options = [option for option in options if option in tree]
             if len(options) != 1:
                 raise Refusal(f"{CRATE}/{path}:{line + 1}: mod {name} resolves to {len(options)} files")
-            queue.append((options[0], test or mod_test, given is not None or options[0].endswith("/mod.rs")))
+            queue.append((options[0], test or mod_test, given is not None or options[0].endswith("/mod.rs"), False))
     return reached
 
 
 def count(tree):
-    """tree: {path inside the crate: text} for its .rs files and Cargo.toml. Returns the line totals."""
+    """tree: {path inside the crate: text} for its files. Counts its .rs files and every file the module
+    tree or include! reaches. Returns the line totals."""
     analysed = {}
 
     def parsed(path):
@@ -348,7 +373,7 @@ def count(tree):
 
     reached = module_tree(tree, parsed)
     totals = dict.fromkeys(("total", "tests", "comments", "blank", "code"), 0)
-    for path in sorted(path for path in tree if path.endswith(".rs")):
+    for path in sorted({path for path in tree if path.endswith(".rs")} | set(reached)):
         lines = tree[path].split("\n")
         if lines[-1] == "":
             lines.pop()
@@ -361,7 +386,7 @@ def count(tree):
         if path not in reached:
             raise Refusal(f"{CRATE}/{path}: the module tree does not reach it; core-size.py will not guess"
                           " whether it is compiled")
-        tokens, starts, tests, spans, mods = parsed(path)
+        tokens, starts, tests, spans, mods, includes = parsed(path)
         code = [token for token in tokens if token[1] != "comment"]
         firsts = [token[0] for token in code]
         # A line with any production token on it is code, wherever its comments or test items sit.
@@ -382,20 +407,16 @@ def git(root, *args):
                           encoding="utf-8", errors="replace").stdout
 
 
-def counted(path):
-    return path.endswith(".rs") or path == f"{CRATE}/Cargo.toml"
-
-
 def worktree_files(root):
     listed = git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", CRATE)
     return {path[len(CRATE) + 1:]: (root / path).read_text(encoding="utf-8", errors="replace")
-            for path in set(filter(None, listed.split("\0"))) if counted(path) and (root / path).is_file()}
+            for path in set(filter(None, listed.split("\0"))) if (root / path).is_file()}
 
 
 def ref_files(root, ref):
     listed = git(root, "ls-tree", "-r", "-z", "--name-only", ref, "--", CRATE)
     return {path[len(CRATE) + 1:]: git(root, "show", f"{ref}:{path}")
-            for path in filter(None, listed.split("\0")) if counted(path)}
+            for path in filter(None, listed.split("\0"))}
 
 
 def read_budget(text):

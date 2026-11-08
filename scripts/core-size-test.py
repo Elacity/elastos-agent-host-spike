@@ -163,6 +163,33 @@ class CountTest(unittest.TestCase):
         target = {"Cargo.toml": '[lib]\npath = "tests/production.rs"\n', "tests/production.rs": production}
         self.assertEqual(core_size.count(target)["code"], 1)
 
+    def test_include_pastes_its_file_in_place(self):
+        production = "pub fn production() {}\n"
+        tree = {"src/lib.rs": '#[cfg(test)]\nmod fixtures;\ninclude!("fixtures.rs");\n', "src/fixtures.rs": production}
+        self.assertEqual(core_size.count(tree), {"total": 4, "tests": 2, "comments": 0, "blank": 0, "code": 2})
+        tree = {"src/lib.rs": 'include!("production.inc");\n', "src/production.inc": production}
+        self.assertEqual(core_size.count(tree)["code"], 2)
+        tree = {"src/lib.rs": '#[cfg(test)]\nmod t {\n    include!("helpers.rs");\n}\n', "src/helpers.rs": production}
+        self.assertEqual(core_size.count(tree)["tests"], 5)
+
+    def test_inclusions_it_cannot_follow_are_refused(self):
+        cases = {  # message: tree
+            "src/lib.rs:1: include! of src/production.inc, which is not in":
+                {"src/lib.rs": 'include!("production.inc");\n'},
+            "src/lib.rs:1: include! of a path that is not one string literal":
+                {"src/lib.rs": 'include!(concat!(env!("OUT_DIR"), "/x.rs"));\n'},
+            "src/lib.rs:3: module declared in a function body": {"src/lib.rs": 'fn f() {\n    #[path = "hidden.rs"]\n'
+                                                                 "    mod hidden;\n}\n", "src/hidden.rs": ""},
+            "src/lib.rs:1: #.path. on an inline module": {"src/lib.rs": '#[path = "x"]\nmod m {\n}\n'},
+            "src/inc.rs: module declared in an include!d file": {"src/lib.rs": 'include!("inc.rs");\n',
+                                                                 "src/inc.rs": "mod x;\n", "src/x.rs": ""},
+            "src/value.rs:1: unrecognised item": {"src/lib.rs": 'fn f() -> u32 {\n    include!("value.rs")\n}\n',
+                                                  "src/value.rs": "1 + 2\n"},
+        }
+        for message, tree in cases.items():
+            with self.assertRaisesRegex(core_size.Refusal, message):
+                core_size.count(tree)
+
     def test_module_paths_resolve_like_rustc(self):
         tree = {"src/lib.rs": 'mod a;\n#[path = "elsewhere/p.rs"]\nmod p;\n'
                               "#[cfg(test)]\nmod tests {\n    mod helpers;\n}\n",
