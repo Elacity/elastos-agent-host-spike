@@ -519,17 +519,28 @@ def validate_pull_requests_restore_only(source):
                 raise AssertionError(f"a pull_request run saves a cache: {job} ({head_ref})")
 
 
-# Every action any workflow uses, by what it can write to the Actions cache. A new action
-# fails until it is reviewed here; checkout and the artifact actions use no cache.
-NO_CACHE_ACTIONS = {"actions/checkout", "actions/upload-artifact", "actions/download-artifact",
-                    "actions/cache/restore", "actions/attest-build-provenance", "dorny/paths-filter",
-                    "dtolnay/rust-toolchain"}
-# Writers whose guard save_sites checks: ci.yml only.
-GUARDED_ACTIONS = {"actions/cache/save", "Swatinem/rust-cache"}
-# Actions with their own cache, each pinned off: setup-node v4 caches only with `cache`,
-# setup-buildx saves its binary unless cache-binary is false.
-CACHE_OFF = {"actions/setup-node": r"(?m)^\s+cache(?:-dependency-path)?:",
-             "docker/setup-buildx-action": None}
+# Every action implementation any workflow uses, by exact commit, with what it can write to
+# the Actions cache. Each was read at that commit; a new commit fails until it is reviewed
+# here: a newer release can cache on its own (setup-node v6 caches npm without a cache input).
+NO_CACHE, GUARDED, CACHE_INPUT_OFF, CACHE_BINARY_OFF = "no cache", "guarded save", "cache input off", "cache-binary off"
+REVIEWED_ACTIONS = {
+    "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09": NO_CACHE,
+    "actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4": NO_CACHE,
+    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02": NO_CACHE,
+    "actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0": NO_CACHE,
+    "actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830": NO_CACHE,
+    "actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a": NO_CACHE,
+    "dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad": NO_CACHE,
+    "dtolnay/rust-toolchain@72504271e02fb719eb4eb3eaece3a8e3d06f57c0": NO_CACHE,
+    "dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067": NO_CACHE,
+    # Writers whose guard save_sites checks: ci.yml only.
+    "actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830": GUARDED,
+    "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6": GUARDED,
+    # v4 caches only when a cache input names a package manager.
+    "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020": CACHE_INPUT_OFF,
+    # Saves its binary unless cache-binary is false.
+    "docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f": CACHE_BINARY_OFF,
+}
 WORKFLOWS = sorted(WORKFLOW.parent.glob("*.yml"))
 
 
@@ -539,17 +550,18 @@ def validate_no_indirect_cache_writers(sources):
         workflow_jobs = jobs(source)
         blocks = [step for job in workflow_jobs for step in steps(job, workflow_jobs)]
         for action in re.findall(r"(?m)^\s*(?:- )?uses: (\S+)", source):
-            action = action.split("@")[0]
             if action == LOCAL_CACHE_ACTION:
                 continue  # sccache on local disk; validate_cache_credential_scope forbids its GHA backend
-            if action in GUARDED_ACTIONS and name != "ci.yml":
+            if action not in REVIEWED_ACTIONS:
+                raise AssertionError(f"{name} uses an unreviewed action implementation that may write the Actions cache: {action}")
+            if REVIEWED_ACTIONS[action] == GUARDED and name != "ci.yml":
                 raise AssertionError(f"{name} writes a cache outside ci.yml's guarded saves: {action}")
-            if action not in NO_CACHE_ACTIONS | GUARDED_ACTIONS | set(CACHE_OFF):
-                raise AssertionError(f"{name} uses an unreviewed action that may write the Actions cache: {action}")
         for step in blocks:
-            if "uses: actions/setup-node@" in step and re.search(CACHE_OFF["actions/setup-node"], step):
+            action = re.search(r"(?m)^\s*(?:- )?uses: (\S+)", step)
+            policy = REVIEWED_ACTIONS.get(action[1]) if action else None
+            if policy == CACHE_INPUT_OFF and re.search(r"(?m)^\s+cache(?:-dependency-path)?:", step):
                 raise AssertionError(f"{name}: setup-node caches, and saves from every run that has a cache input")
-            if "uses: docker/setup-buildx-action@" in step and "          cache-binary: false\n" not in step:
+            if policy == CACHE_BINARY_OFF and "          cache-binary: false\n" not in step:
                 raise AssertionError(f"{name}: setup-buildx saves its binary to the Actions cache unless cache-binary is false")
 
 
@@ -1848,6 +1860,8 @@ class ReleasePolicyTests(unittest.TestCase):
             "setup-buildx caches its binary": ("ci.yml", SOURCE.replace("          cache-binary: false\n", "", 1)),
             "an unreviewed action": ("ci.yml", SOURCE.replace(
                 node, "      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5\n" + node, 1)),
+            "setup-node v6, which caches npm without a cache input": ("ci.yml", SOURCE.replace(
+                node, node.replace("49933ea5288caeca8642d1e84afbd3f7d6820020 # v4", "249970729cb0ef3589644e2896645e5dc5ba9c38 # v6"), 1)),
             "a cache save in another workflow": ("canary-holder-linux.yml", sources["canary-holder-linux.yml"] + save),
         }
         for name, (path, changed) in mutations.items():
