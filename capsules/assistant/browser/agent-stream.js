@@ -67,37 +67,35 @@ function observeTranscript(scroller, content) {
   if (!scroller || !content || transcriptFollow) return;
   let atEnd = true;
   let readerPending = false;
-  let readerMoved = false;
   let dragging = false;
-  let settleFrame = 0;
-  const hasScrollend = "onscrollend" in scroller;
+  let touching = false;
+  const heldKeys = new Set();
+  let settleTimer = 0;
   let touchY = 0;
   const showFollow = () => {
     scroller.classList.toggle("is-follow-bottom", atEnd && scroller.classList.contains("is-live-streaming"));
     updateJumpToLatestVisibility();
   };
   const nearEnd = () => scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= READER_AT_END_PX;
-  // Input can leave follow. Only a settled reader scroll can return to it.
-  const readerInput = (toward) => {
-    readerPending = true;
-    readerMoved = false;
-    window.cancelAnimationFrame(settleFrame);
-    if (!toward) atEnd = false;
-    showFollow();
-  };
-  const settleReader = () => {
-    if (dragging || !readerPending || !readerMoved) return;
-    readerPending = false;
-    atEnd = nearEnd();
-    showFollow();
-  };
-  const nextFrameSettled = () => {
-    window.cancelAnimationFrame(settleFrame);
+  // Reader input owns follow until release and 150 ms without movement.
+  // Key animations can emit scrollend while they are still near the end.
+  const waitForReader = () => {
+    window.clearTimeout(settleTimer);
+    if (!readerPending) return;
     const top = scroller.scrollTop;
-    settleFrame = window.requestAnimationFrame(() => {
-      if (scroller.scrollTop !== top) nextFrameSettled();
-      else settleReader();
-    });
+    settleTimer = window.setTimeout(() => {
+      if (dragging || touching || heldKeys.size || !readerPending) return;
+      if (scroller.scrollTop !== top) { waitForReader(); return; }
+      readerPending = false;
+      atEnd = nearEnd();
+      showFollow();
+    }, 150);
+  };
+  const readerInput = () => {
+    readerPending = true;
+    atEnd = false;
+    waitForReader();
+    showFollow();
   };
   const pinFollowing = () => {
     if (atEnd) pinTranscriptToEnd(scroller);
@@ -105,44 +103,58 @@ function observeTranscript(scroller, content) {
   };
   transcriptFollow = {
     get atEnd() { return atEnd; },
-    reset() { atEnd = true; readerPending = false; window.cancelAnimationFrame(settleFrame); pinFollowing(); },
+    reset() { atEnd = true; readerPending = false; window.clearTimeout(settleTimer); pinFollowing(); },
   };
   scroller.addEventListener("wheel", event => {
-    if (event.deltaY && !event.ctrlKey) readerInput(event.deltaY > 0);
+    if (event.deltaY && !event.ctrlKey) readerInput();
   }, { passive: true });
-  scroller.addEventListener("touchstart", event => { touchY = event.touches[0].clientY; }, { passive: true });
+  scroller.addEventListener("touchstart", event => {
+    touchY = event.touches[0].clientY;
+    touching = true;
+    readerInput();
+  }, { passive: true });
   scroller.addEventListener("touchmove", event => {
     const y = event.touches[0].clientY;
-    if (y !== touchY) readerInput(y < touchY);
+    if (y !== touchY) readerInput();
     touchY = y;
   }, { passive: true });
   scroller.addEventListener("pointerdown", () => {
     dragging = true;
-    readerInput(false);
+    readerInput();
   });
   const releasePointer = () => {
     if (!dragging) return;
     dragging = false;
-    if (!hasScrollend) nextFrameSettled();
+    waitForReader();
   };
   document.addEventListener("pointerup", releasePointer);
   document.addEventListener("pointercancel", releasePointer);
+  const releaseTouch = event => {
+    if (event.touches.length) return;
+    touching = false;
+    waitForReader();
+  };
+  document.addEventListener("touchend", releaseTouch, { passive: true });
+  document.addEventListener("touchcancel", releaseTouch, { passive: true });
   document.addEventListener("keydown", event => {
     if (event.defaultPrevented || event.target.closest?.("input, textarea, select, [contenteditable]")) return;
-    if (["PageUp", "Home", "ArrowUp"].includes(event.key) || (event.key === " " && event.shiftKey)) readerInput(false);
-    if (["PageDown", "End", "ArrowDown"].includes(event.key) || (event.key === " " && !event.shiftKey)) readerInput(true);
+    if (event.target !== document.body && !scroller.contains(event.target)) return;
+    if (["PageUp", "Home", "ArrowUp", "PageDown", "End", "ArrowDown", " "].includes(event.key)) {
+      heldKeys.add(event.key);
+      readerInput();
+    }
+  });
+  document.addEventListener("keyup", event => {
+    if (heldKeys.delete(event.key)) waitForReader();
   });
   document.addEventListener("keydown", event => {
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") readerInput(false);
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") readerInput();
   });
   scroller.addEventListener("scroll", () => {
-    if (readerPending) {
-      readerMoved = true;
-      if (!hasScrollend) nextFrameSettled();
-    }
+    waitForReader();
     showFollow();
   }, { passive: true });
-  scroller.addEventListener("scrollend", nextFrameSettled);
+  scroller.addEventListener("scrollend", waitForReader);
   const resize = new ResizeObserver(pinFollowing);
   resize.observe(scroller);
   resize.observe(content);

@@ -16,6 +16,8 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const output = resolve(root, "output/assistant-follow-input");
 const run = promisify(execFile);
 const ref = process.env.ASSISTANT_FOLLOW_REF;
+const native = process.env.ASSISTANT_FOLLOW_WEBKIT === "1";
+const binary = resolve(output, "webkit");
 const reports = [];
 const record = report => {
   reports.push(report);
@@ -39,34 +41,58 @@ try {
   await mkdir(output, { recursive: true });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   const url = `http://127.0.0.1:${server.address().port}/`;
-  browser = await chromium.launch({ headless: true, ignoreDefaultArgs: ["--hide-scrollbars"],
+  if (native) {
+    assert.equal(process.platform, "darwin", "system WKWebView needs macOS");
+    await run("swiftc", ["-O", "-module-cache-path", resolve(output, "module-cache"), "-o", binary,
+      resolve(root, "scripts/fixtures/assistant-follow-input-webkit.swift")], { timeout: 60000 });
+  }
+  browser = await chromium.launch({ headless: !native, args: native ? ["--force-renderer-accessibility"] : [], ignoreDefaultArgs: ["--hide-scrollbars"],
     ...(process.env.BRAVE_BIN ? { executablePath: process.env.BRAVE_BIN } : {}) });
-  for (const fallback of [false, true]) {
-    const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
-    await page.goto(`${url}${fallback ? "?fallback" : ""}`);
-    await page.waitForFunction(() => window.__drag);
-    const b = await page.evaluate(() => window.__drag);
-    await page.mouse.move(b.x + b.width - 3, b.y + b.height - 14);
-    await page.mouse.down();
-    await page.mouse.move(b.x + b.width - 3, b.y + 36, { steps: 16 });
-    await page.mouse.up();
-    await page.evaluate(() => window.__continue(true));
-    await page.waitForFunction(() => window.__report, null, { timeout: 20000 });
-    record({ engine: "Chromium", ...await page.evaluate(() => window.__report) });
+  for (const mode of native ? ["", "fallback", "swallow"] : ["", "fallback"]) {
+    const page = await browser.newPage({ viewport: native ? null : { width: 800, height: 600 } });
+    const browserSession = native ? await browser.newBrowserCDPSession() : null;
+    const browserPid = native ? (await browserSession.send("SystemInfo.getProcessInfo")).processInfo.find(p => p.type === "browser").id : null;
+    const driverErrors = [];
+    page.on("console", message => { if (message.type() === "error") driverErrors.push(message.text()); });
+    await page.exposeFunction("driveInput", async request => {
+      const b = request.rect;
+      if (native) {
+        await run(binary, ["--input", String(browserPid), JSON.stringify(request)], { timeout: 5000 });
+      } else if (request.phase === "key") {
+        await page.keyboard.press(request.key);
+      } else {
+        const selection = request.phase === "select";
+        const back = request.phase === "drag-back";
+        const x = selection ? b.x + 8 : b.x + b.width - 3;
+        const y = selection ? b.y + b.height / 2 : b.y + (back ? 14 : b.height - 14);
+        await page.mouse.move(x, y);
+        await page.mouse.down();
+        await page.mouse.move(selection ? b.x + b.width - 8 : x,
+          selection ? y : b.y + (back ? b.height - 14 : 36), { steps: 16 });
+        await page.mouse.up();
+      }
+    });
+    await page.addInitScript(() => {
+      window.webkit = { messageHandlers: { probe: { postMessage: async text => {
+        const request = JSON.parse(text);
+        if (request.phase === "done") return;
+        try { await window.driveInput(request); window.__continue(true); }
+        catch (error) { console.error(error); window.__continue(false); }
+      } } } };
+    });
+    await page.goto(`${url}?${mode}`);
+    await page.waitForFunction(() => window.__report, null, { timeout: 45000 });
+    record({ engine: "Chromium", input: native ? "CGEvent" : "Playwright", driverErrors, ...await page.evaluate(() => window.__report) });
     await page.close();
   }
   await browser.close(); browser = null;
-  if (process.env.ASSISTANT_FOLLOW_WEBKIT === "1") {
-    assert.equal(process.platform, "darwin", "system WKWebView needs macOS");
-    const binary = resolve(output, "webkit");
-    await run("swiftc", ["-O", "-module-cache-path", resolve(output, "module-cache"), "-o", binary,
-      resolve(root, "scripts/fixtures/assistant-follow-input-webkit.swift")], { timeout: 60000 });
-    for (const fallback of [false, true]) {
-      const { stdout } = await run(binary, [`${url}${fallback ? "?fallback" : ""}`], { timeout: 30000 });
-      record({ engine: "system WebKit", ...JSON.parse(stdout.trim()) });
+  if (native) {
+    for (const mode of ["", "fallback", "swallow"]) {
+      const { stdout } = await run(binary, [`${url}?${mode}`], { timeout: 60000 });
+      record({ engine: "system WebKit", input: "CGEvent", ...JSON.parse(stdout.trim()) });
     }
   }
-  assert.deepEqual(reports.flatMap(r => r.failures.map(f => `${r.engine} fallback=${r.fallback}: ${f}`)), []);
+  assert.deepEqual(reports.flatMap(r => r.failures.map(f => `${r.engine} fallback=${r.fallback} swallow=${r.swallow}: ${f}`)), []);
   console.log(`PASS Assistant follow input: ${reports.length} engine/settlement runs`);
 } finally {
   await browser?.close();

@@ -1,4 +1,4 @@
-// System WKWebView plus a real CGEvent scrollbar drag, matching the review method.
+// Native CGEvent keys and drags for system WKWebView and the owned Chromium test window.
 import ApplicationServices
 import Cocoa
 import WebKit
@@ -6,6 +6,7 @@ import WebKit
 final class Probe: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
   var web: WKWebView!
   var window: NSWindow!
+  var screenOrigin: CGPoint?
 
   func start(url: String) {
     let config = WKWebViewConfiguration()
@@ -14,18 +15,19 @@ final class Probe: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     web = WKWebView(frame: NSRect(x: 0, y: 0, width: 800, height: 600), configuration: config)
     web.navigationDelegate = self
     window = NSWindow(
-      contentRect: NSRect(x: 60, y: 80, width: 800, height: 600),
+      contentRect: NSRect(x: 240, y: 160, width: 800, height: 600),
       styleMask: [.titled, .closable],
       backing: .buffered,
       defer: false)
     window.contentView = web
     window.title = "Assistant follow input regression"
+    window.level = .floating
     NSApp.setActivationPolicy(.regular)
     window.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
     let url = URL(string: url)!
     web.load(URLRequest(url: url))
-    DispatchQueue.main.asyncAfter(deadline: .now() + 25) {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 55) {
       fputs("timeout\n", stderr)
       exit(2)
     }
@@ -55,12 +57,11 @@ final class Probe: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
       fflush(stdout)
       exit(0)
     }
-    let trusted = AXIsProcessTrusted()
-    let rect = obj["rect"] as? [String: Double] ?? [:]
-    if phase == "drag" && trusted {
-      drag(rect)
-      pump(0.7)
-    }
+    NSApp.activate(ignoringOtherApps: true)
+    window.makeKeyAndOrderFront(nil)
+    pump(0.1)
+    let trusted = AXIsProcessTrusted() && NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid()
+    if trusted { input(obj) }
     let flag = trusted ? "true" : "false"
     web.evaluateJavaScript("window.__continue(\(flag)); 0") { _, error in
       if let error {
@@ -70,6 +71,7 @@ final class Probe: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
   }
 
   func cgPoint(viewX: CGFloat, viewY: CGFloat) -> CGPoint {
+    if let origin = screenOrigin { return CGPoint(x: origin.x + viewX, y: origin.y + viewY) }
     let viewPoint = NSPoint(x: viewX, y: web.isFlipped ? viewY : web.bounds.height - viewY)
     let windowPoint = web.convert(viewPoint, to: nil)
     let screenPoint = window.convertToScreen(NSRect(x: windowPoint.x, y: windowPoint.y, width: 0, height: 0)).origin
@@ -86,12 +88,28 @@ final class Probe: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     RunLoop.current.run(until: Date().addingTimeInterval(seconds))
   }
 
-  func drag(_ rect: [String: Double]) {
+  func input(_ obj: [String: Any]) {
+    let rect = obj["rect"] as? [String: Double] ?? [:]
+    switch obj["phase"] as? String {
+    case "drag-away": drag(rect, fromTop: false)
+    case "drag-back": drag(rect, fromTop: true)
+    case "select": select(rect)
+    case "key": press(obj["key"] as? String ?? "PageUp")
+    default: break
+    }
+    // Pump native animation steps as in the system WebKit review. The page
+    // waits separately for event delivery and quiet-period settlement.
+    if screenOrigin == nil { pump(0.5) }
+  }
+
+  func drag(_ rect: [String: Double], fromTop: Bool) {
     let x = CGFloat(rect["x"] ?? 0) + CGFloat(rect["width"] ?? 0) - 3
     let top = CGFloat(rect["y"] ?? 0)
     let height = CGFloat(rect["height"] ?? 0)
-    let start = cgPoint(viewX: x, viewY: top + height - 14)
-    let end = cgPoint(viewX: x, viewY: top + 36)
+    let startY = fromTop ? top + 14 : top + height - 14
+    let endY = fromTop ? top + height - 14 : top + 36
+    let start = cgPoint(viewX: x, viewY: startY)
+    let end = cgPoint(viewX: x, viewY: endY)
     post(start, .mouseMoved)
     pump(0.08)
     post(start, .leftMouseDown)
@@ -103,9 +121,83 @@ final class Probe: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     }
     post(end, .leftMouseUp)
   }
+
+  func select(_ rect: [String: Double]) {
+    let y = CGFloat(rect["y"] ?? 0) + CGFloat(rect["height"] ?? 0) / 2
+    let x0 = CGFloat(rect["x"] ?? 0) + 8
+    let x1 = CGFloat(rect["x"] ?? 0) + max(24, CGFloat(rect["width"] ?? 0) - 8)
+    let start = cgPoint(viewX: x0, viewY: y)
+    let end = cgPoint(viewX: x1, viewY: y)
+    post(start, .mouseMoved)
+    pump(0.06)
+    post(start, .leftMouseDown)
+    pump(0.04)
+    for step in 1...10 {
+      let x = start.x + (end.x - start.x) * CGFloat(step) / 10
+      post(CGPoint(x: x, y: start.y), .leftMouseDragged)
+      pump(0.02)
+    }
+    post(end, .leftMouseUp)
+  }
+
+  func press(_ name: String) {
+    let code: CGKeyCode
+    switch name {
+    case "Home": code = 115
+    case "ArrowUp": code = 126
+    case "End": code = 119
+    case "PageDown": code = 121
+    default: code = 116
+    }
+    let source = CGEventSource(stateID: .hidSystemState)
+    let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true)
+    let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false)
+    down?.post(tap: .cghidEventTap)
+    pump(0.05)
+    up?.post(tap: .cghidEventTap)
+  }
 }
 
 let app = NSApplication.shared
 let probe = Probe()
-probe.start(url: CommandLine.arguments[1])
-app.run()
+if CommandLine.arguments[1] == "--input" {
+  // The runner supplies the browser PID it just launched, and page coordinates.
+  // Refuse input if that owned window cannot become the frontmost application.
+  let pid = pid_t(CommandLine.arguments[2])!
+  guard AXIsProcessTrusted(), let owned = NSRunningApplication(processIdentifier: pid) else { exit(3) }
+  owned.activate(options: [.activateIgnoringOtherApps])
+  probe.pump(0.15)
+  guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { exit(4) }
+  let obj = try! JSONSerialization.jsonObject(with: Data(CommandLine.arguments[3].utf8)) as! [String: Any]
+  func webOrigin(_ element: AXUIElement, depth: Int = 0) -> CGPoint? {
+    guard depth < 15 else { return nil }
+    var role: CFTypeRef?
+    AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+    if role as? String == "AXWebArea" {
+      var position: CFTypeRef?
+      if AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &position) == .success,
+         let position {
+        var point = CGPoint.zero
+        if AXValueGetValue(position as! AXValue, .cgPoint, &point) { return point }
+      }
+    }
+    var children: CFTypeRef?
+    AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children)
+    for child in children as? [AXUIElement] ?? [] {
+      if let point = webOrigin(child, depth: depth + 1) { return point }
+    }
+    return nil
+  }
+  var origin: CGPoint?
+  for _ in 0..<20 {
+    origin = webOrigin(AXUIElementCreateApplication(pid))
+    if origin != nil { break }
+    probe.pump(0.1)
+  }
+  guard let origin else { exit(5) }
+  probe.screenOrigin = origin
+  probe.input(obj)
+} else {
+  probe.start(url: CommandLine.arguments[1])
+  app.run()
+}
