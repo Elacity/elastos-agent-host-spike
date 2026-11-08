@@ -4587,6 +4587,25 @@ mod tests {
         )
     }
 
+    /// A stored Human principal, as a real launch stores one, with the context
+    /// built from its resolved root.
+    fn stored_context(data_dir: &Path) -> HomeLaunchTokenContext {
+        crate::auth::store_test_human_principal(data_dir, "person:reservation-fixture");
+        let root = crate::auth::ResolvedPrincipalRoot::resolve(
+            data_dir,
+            data_dir,
+            "person:reservation-fixture",
+        )
+        .unwrap();
+        HomeLaunchTokenContext::resolved(
+            root,
+            "person:reservation-fixture".to_string(),
+            "session-1".to_string(),
+            Some("proof-1".into()),
+            "grant-1".to_string(),
+        )
+    }
+
     fn fixture() -> (tempfile::TempDir, String) {
         let root = tempfile::tempdir().unwrap();
         let payload = super::super::tests::model_catalog_fixture();
@@ -9844,7 +9863,7 @@ server.serve_forever()
                 .unwrap();
             register_content(&registry, root.path()).await;
 
-            let context = context();
+            let context = stored_context(root.path());
             let grant = AuthSessionGrantV1 {
                 schema: AuthSessionGrantV1::SCHEMA.into(),
                 principal_id: context.principal_id.clone(),
@@ -9869,6 +9888,14 @@ server.serve_forever()
             )
             .unwrap();
             assert_eq!(admitted, context);
+            // Independent of the fixture's builder: the stored Human's root is
+            // the one Users path for this id.
+            admitted
+                .root()
+                .owns_object_uri(
+                    "localhost://Users/b7372fffe50885c1dfcd9aaf/Documents/preparation.txt",
+                )
+                .unwrap();
             let path = root.path().to_path_buf();
             let revalidate: Revalidate = Arc::new(move || {
                 if fault == "authority_revoked"
