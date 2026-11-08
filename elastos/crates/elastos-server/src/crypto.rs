@@ -134,6 +134,25 @@ pub fn verify_signed_json_envelope_against_dids(
     domain: &str,
     expected_dids: &[String],
 ) -> anyhow::Result<(serde_json::Value, String)> {
+    verify_signed_json_envelope_inner(envelope_bytes, domain, Some(expected_dids))
+}
+
+/// Verify an envelope signed by its own `signer_did`, whoever that is.
+/// This proves only that the named key signed the payload; the caller must
+/// tie the returned signer to an authority (a signed Profile, the announced
+/// node DID) or use it for display only.
+pub fn verify_self_signed_json_envelope(
+    envelope_bytes: &[u8],
+    domain: &str,
+) -> anyhow::Result<(serde_json::Value, String)> {
+    verify_signed_json_envelope_inner(envelope_bytes, domain, None)
+}
+
+fn verify_signed_json_envelope_inner(
+    envelope_bytes: &[u8],
+    domain: &str,
+    expected_dids: Option<&[String]>,
+) -> anyhow::Result<(serde_json::Value, String)> {
     let envelope: serde_json::Value = serde_json::from_slice(envelope_bytes)?;
 
     let signer_did = envelope["signer_did"]
@@ -141,12 +160,14 @@ pub fn verify_signed_json_envelope_against_dids(
         .ok_or_else(|| anyhow::anyhow!("Missing signer_did in envelope"))?
         .to_string();
 
-    if !expected_dids.is_empty() && !expected_dids.iter().any(|did| did == &signer_did) {
-        anyhow::bail!(
-            "Signer DID mismatch: trusted set = {:?}, got {}",
-            expected_dids,
-            signer_did
-        );
+    if let Some(expected_dids) = expected_dids.filter(|dids| !dids.is_empty()) {
+        if !expected_dids.iter().any(|did| did == &signer_did) {
+            anyhow::bail!(
+                "Signer DID mismatch: trusted set = {:?}, got {}",
+                expected_dids,
+                signer_did
+            );
+        }
     }
 
     let sig_hex = envelope["signature"]
