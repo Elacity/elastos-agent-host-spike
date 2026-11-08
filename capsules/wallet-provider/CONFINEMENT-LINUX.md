@@ -442,11 +442,14 @@ and B4's Linux cells are credited per architecture and boundary, not flipped.
 
     host: linux/aarch64, Ubuntu 24.04.5 in UTM, kernel 7.0.0-42-generic, Landlock ABI 8
     rustc 1.91.0, binary sha256 e567baad76790ac298a9aa951cb6689a4de0d31c58b97409e92076eeef127160
-    cargo test --locked (capsules/wallet-provider), umask 022: 438 passed, 109 passed in tests/confine.rs
+    cargo test --locked (capsules/wallet-provider), umask 022: 438 passed, 109 passed in tests/confine.rs (did and wallet)
+    cargo test --locked --test confine at the model leg's head: 114 passed (did, wallet and model);
+      receipt ~/Sparks/office/evidence/b4-x86/pr1549-42900e7c-aarch64.log
+    x86-64, GitHub ubuntu-24.04, kernel 7.0.0-1017-azure: the same 114 passed (run 42456977016)
 
 Every control call succeeded, and under the ruleset the two inside calls and the
 read of the bound executable succeeded while the other six answered `EACCES` (13).
-The outside effect was refused by the kernel for both providers and created
+The outside effect was refused by the kernel for each provider and created
 nothing. Wallet's `Init` is that effect. did's `Init` records the root and writes
 nothing, so its first write is.
 
