@@ -42,6 +42,14 @@ fn code() {}
 '''
 
 
+def extent(source):
+    """(1-based line where the first item of source ends, its kind)."""
+    tokens = [t for t in core_size.lex(source)[0] if t[1] != "comment"]
+    vals = [t[2] for t in tokens] + [""] * 4
+    last, kind, name, body = core_size.item_extent(vals, 0, len(tokens))
+    return tokens[last][0] + 1, kind
+
+
 def counts(source, path="src/lib.rs"):
     return core_size.count([(path, source)])
 
@@ -88,6 +96,30 @@ class CountTest(unittest.TestCase):
         for path in ("tests/integration.rs", "src/tests.rs", "src/io_test.rs"):
             self.assertEqual(counts("fn a() {}\n", path)["tests"], 1, path)
         self.assertEqual(counts("fn a() {}\n", "src/contests.rs")["code"], 1)
+
+
+class ItemExtentTest(unittest.TestCase):
+    def test_items_end_at_their_own_end(self):
+        cases = {
+            "const T: usize = if true {\n    1\n} else {\n    2\n};\nfn production() {}\n": (5, "const"),
+            "fn f() -> S<{ 1 }> {\n    S\n}\nfn production() {}\n": (3, "fn"),
+            "impl<const N: usize> X for [u8; N] where S<{ N }>: Sized {\n}\nfn production() {}\n": (2, "impl"),
+            'pub(crate) unsafe extern "C" fn f(g: fn() -> u8) -> u8 {\n    g()\n}\nfn production() {}\n': (3, "fn"),
+            "struct T(u8);\nfn production() {}\n": (1, "struct"),
+            "struct S<A, B> where A: Fn() -> B {\n    a: A,\n}\nfn production() {}\n": (3, "struct"),
+            "macro_rules! m {\n    () => {};\n}\nfn production() {}\n": (3, "macro"),
+            "thread_local!(static X: u8 = 1);\nfn production() {}\n": (1, "macro"),
+            "use a::{\n    b,\n    c,\n};\nfn production() {}\n": (4, "use"),
+            'extern "C" {\n    fn g();\n}\nfn production() {}\n': (3, "extern"),
+            "mod outline;\nfn production() {}\n": (1, "mod"),
+        }
+        for source, expected in cases.items():
+            self.assertEqual(extent(source), expected, source)
+
+    def test_what_is_not_an_item_is_refused(self):
+        for source in ("let x = 1;\n", "x.call();\n", "foo!(x)\nfn production() {}\n", "fn f()\n"):
+            with self.assertRaises(core_size.Refusal, msg=source):
+                extent(source)
 
 
 class CheckTest(unittest.TestCase):

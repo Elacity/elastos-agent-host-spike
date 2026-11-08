@@ -147,6 +147,51 @@ def attr_is_test(vals, open_, close):
     return needs
 
 
+def item_extent(vals, i, end):
+    """(last token, kind, name, (open, close) of its body or None) of the item at vals[i]."""
+    p = i
+    while True:  # visibility and qualifiers
+        if vals[p] == "pub" and vals[p + 1] == "(":
+            p = closer(vals, p + 1) + 1
+        elif vals[p] in ("pub", "async", "unsafe", "safe", "default", "auto") or (
+                vals[p] == "const" and vals[p + 1] in ("fn", "unsafe", "async", "extern")):
+            p += 1
+        elif vals[p] == "extern" and vals[p + 1] != "crate":
+            p += 1 + vals[p + 1].startswith('"')
+            if vals[p] == "{":
+                return closer(vals, p), "extern", None, (p, closer(vals, p))
+        else:
+            break
+    kind, q = vals[p], p
+    if kind in ("use", "static", "const", "type", "extern"):  # these end at their ; (extern crate too)
+        while vals[q] != ";" and q < end:
+            q = closer(vals, q) + 1 if vals[q] in OPEN else q + 1
+        return q, kind, None, None
+    while vals[q + 1:q + 3] == [":", ":"]:
+        q += 3
+    if vals[q + 1] == "!":  # macro_rules! name {...}, path! {...} or path!(...);
+        q += 2
+        q += vals[q] not in OPEN
+        c = closer(vals, q)
+        if vals[q] != "{" and vals[c + 1] != ";":
+            raise Refusal(f"macro {kind}! without its ;")
+        return (c if vals[q] == "{" else c + 1), "macro", None, None
+    if kind not in ("fn", "mod", "impl", "trait", "struct", "enum", "union"):
+        raise Refusal(f"unrecognised item at {kind!r}")
+    q, angle = p + 1, 0
+    while q < end:  # the header ends at the body { or the ; outside <...>; const args {..} sit inside
+        if vals[q] in OPEN and (vals[q] != "{" or angle):
+            q = closer(vals, q)
+        elif vals[q] == "{":
+            return closer(vals, q), kind, vals[p + 1], (q, closer(vals, q))
+        elif vals[q] == ";" and not angle:
+            return q, kind, vals[p + 1], None
+        elif vals[q] in ("<", ">") and vals[q - 1] != "-":
+            angle += 1 if vals[q] == "<" else -1 if angle else 0
+        q += 1
+    raise Refusal(f"{kind} without a body or ;")
+
+
 def cfg_test_spans(tokens):
     """Yield (first_line, last_line) for each item behind #[cfg(test)] or #[cfg(all(test, ...))]."""
     vals = [t[2] for t in tokens] + [""] * 4
