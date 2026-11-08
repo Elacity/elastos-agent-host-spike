@@ -4089,7 +4089,7 @@ fn room_control_summary_from_state(state: &RoomState) -> RoomControlSummary {
         .cloned()
         .map(room_key_epoch_view_from_record)
         .collect::<Vec<_>>();
-    key_epochs.sort_by(|left, right| left.epoch.cmp(&right.epoch));
+    key_epochs.sort_by_key(|left| left.epoch);
     RoomControlSummary {
         title: state.control.title.clone(),
         owner_did: state.control.owner_did.clone(),

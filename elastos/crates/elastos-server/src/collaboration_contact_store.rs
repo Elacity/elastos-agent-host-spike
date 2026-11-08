@@ -1484,7 +1484,7 @@ impl CollaborationContactStore {
                 break;
             }
         }
-        resendable.sort_by(|left, right| left.removed_at.cmp(&right.removed_at));
+        resendable.sort_by_key(|left| left.removed_at);
         Ok(resendable)
     }
 

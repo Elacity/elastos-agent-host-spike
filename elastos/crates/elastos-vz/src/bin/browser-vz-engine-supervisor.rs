@@ -4804,7 +4804,7 @@ fn install_shutdown_signal_reporter() -> Result<ShutdownSignalReporter, String> 
     SHUTDOWN_SIGNAL_INSTALL.call_once(|| {
         let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
         action.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
-        action.sa_sigaction = report_shutdown_signal as libc::sighandler_t;
+        action.sa_sigaction = report_shutdown_signal as *const () as libc::sighandler_t;
         unsafe {
             libc::sigemptyset(&mut action.sa_mask);
             installed = libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut()) == 0
