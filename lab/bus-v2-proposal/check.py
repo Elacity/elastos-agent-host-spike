@@ -1171,8 +1171,6 @@ def proposal_refusals(text):
         if name not in proposed:
             refusals.append("refuse: section 0 has no propose line for " + name)
     for group, call in PROPOSE_CALLS:
-        if group not in proposed:
-            continue
         if call.casefold() not in names[group]:
             refusals.append(
                 "refuse: section 0 has no proposal named "

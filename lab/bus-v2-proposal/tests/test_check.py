@@ -3448,6 +3448,36 @@ class CitationCheckTests(unittest.TestCase):
                 call,
             )
 
+    def test_a_group_with_no_proposal_still_needs_its_named_call(self):
+        # A4 has one call, so deleting that line leaves the call missing.
+        body = self._section_0().replace(
+            self._propose_line("A4", "hosted model call"), ""
+        )
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            ["refuse: section 0 has no proposal named hosted model call under A4"],
+        )
+
+    def test_whole_group_with_no_proposal_still_needs_its_named_call(self):
+        # Deleting the whole A4 group does not exempt its call.
+        body = self._section_0(("A3", "A5", "A7", "B2"))
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            ["refuse: section 0 has no proposal named hosted model call under A4"],
+        )
+
+    def test_call_moved_under_another_group_is_still_missing(self):
+        # Moving A4's line under A3 leaves A4 with no proposal.
+        line = self._propose_line("A4", "hosted model call")
+        body = self._section_0().replace(line, "")
+        body = body.replace(
+            "Evidence: section 7, A3.\n", line + "Evidence: section 7, A3.\n"
+        )
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            ["refuse: section 0 has no proposal named hosted model call under A4"],
+        )
+
     def test_production_requires_the_six_named_core_calls(self):
         # Stated here, not read back from production: dropping a call fails.
         self.assertEqual(
