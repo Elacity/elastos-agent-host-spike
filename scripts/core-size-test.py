@@ -115,14 +115,16 @@ class CheckTest(unittest.TestCase):
         self.write(10, budget=10)
         self.assertEqual(self.run_check()[0], 0)
 
-    def test_ratchet_reminder_when_more_than_50_below(self):
+    def test_ratchet_fails_when_more_than_50_below(self):
         self.write(10, budget=61)
         status, output = self.run_check()
-        self.assertEqual(status, 0)
-        self.assertIn("Reminder: core code is 51 lines below the budget of 61. Lower elastos/CORE-BUDGET to 10",
+        self.assertEqual(status, 1)
+        self.assertIn("FAIL: core code is 10 lines, 51 below the budget of 61: lower elastos/CORE-BUDGET to 10",
                       output)
         self.write(10, budget=60)
-        self.assertNotIn("Reminder", self.run_check()[1])
+        status, output = self.run_check()
+        self.assertEqual(status, 0)
+        self.assertIn("OK: core code is 10 lines, within the budget of 60", output)
 
     def test_base_change_reports_code_and_budget(self):
         self.git("checkout", "-q", "-b", "grow")

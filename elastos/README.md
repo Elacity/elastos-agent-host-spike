@@ -76,8 +76,9 @@ Only code counts: no files under `tests/`, `tests.rs` or `*_test.rs`, no
 `#[cfg(test)]` items, no comment lines and no blank lines. A line of code with
 a trailing comment is code. To grow the core, raise `CORE-BUDGET` in the same
 pull request, so reviewers see the growth. The budget ratchets down: when the
-core falls more than 50 lines below it, the check asks for the budget to be
-lowered to the new count.
+core falls more than 50 lines below it, the check fails until the same pull
+request lowers the budget to the new count, so freed room cannot be spent
+again.
 
 ## Related documentation
 

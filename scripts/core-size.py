@@ -8,7 +8,7 @@ lines hold only comments or lie inside a block comment. Blank lines are blank.
 
   core-size.py                   a short table
   core-size.py --json            {"total", "tests", "comments", "blank", "code"}
-  core-size.py --check           fail when code is above elastos/CORE-BUDGET
+  core-size.py --check           fail when code is above elastos/CORE-BUDGET or 50+ below it
   core-size.py --check --base R  also show the change since the merge base of R and HEAD
 """
 import argparse
@@ -20,7 +20,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CRATE, BUDGET = "elastos/crates/elastos-runtime", "elastos/CORE-BUDGET"
-SLACK = 50  # more room than this below the budget asks for the budget to come down
+SLACK = 50  # the budget may sit at most this far above the code; further, the check fails
 OPEN, CLOSE = "{([", "})]"
 ITEM_WORDS = {"fn", "mod", "impl", "struct", "enum", "trait", "union", "const", "static", "type",
               "use", "extern", "async", "unsafe", "macro_rules", "let", "default"}
@@ -219,17 +219,17 @@ def check(root, totals, base):
                      f" ({before} -> {code}).")
         notes.append(f"{BUDGET}: " + ("absent at the base" if old is None else "unchanged" if old == budget
                                       else f"changed {old} -> {budget} ({budget - old:+d})") + ".")
-    over = code > budget
-    if over:
+    failed = code > budget or budget - code > SLACK
+    if code > budget:
         notes.append(f"FAIL: core code is {code} lines, above the budget of {budget} in {BUDGET}. Move code out"
                      f" of the core, or raise {BUDGET} in this change so reviewers see it.")
+    elif budget - code > SLACK:  # a ratchet: room freed in the core cannot be spent again
+        notes.append(f"FAIL: core code is {code} lines, {budget - code} below the budget of {budget}:"
+                     f" lower {BUDGET} to {code} in this change.")
     else:
         notes.append(f"OK: core code is {code} lines, within the budget of {budget} in {BUDGET}.")
-    if budget - code > SLACK:  # a ratchet: room freed in the core is not silently spent
-        notes.append(f"Reminder: core code is {budget - code} lines below the budget of {budget}. Lower {BUDGET}"
-                     f" to {code}, so the freed room is not silently spent.")
     print("".join(f"\n- {note}" for note in notes))
-    return 1 if over else 0
+    return 1 if failed else 0
 
 
 def main(argv=None):
