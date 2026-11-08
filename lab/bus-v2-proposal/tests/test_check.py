@@ -4858,6 +4858,23 @@ class CitationCheckTests(unittest.TestCase):
                 ],
             )
 
+    def test_range_citation_without_a_quoted_block_is_refused(self):
+        # The range marker stands once with no block: the refusal names the whole
+        # path:start-end the draft cites, not the first target's start line.
+        body = self._edit_walk_body(groups=["range"], indented=False)
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._file_ask_source()}
+        )
+        self.assertEqual(
+            got,
+            [
+                "refuse: citation "
+                + EDIT_RANGE_SPAN
+                + " at line 2 has no quoted block"
+            ],
+        )
+        self.assertEqual(reads, [])
+
     def test_citation_with_its_quoted_block_passes(self):
         # The same citation with its four-space quotation under it is scored and
         # adds no refusal. The owned block holds both lines the walk reads.

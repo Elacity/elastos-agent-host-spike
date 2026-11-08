@@ -1035,7 +1035,7 @@ def _quote_refusal(root, text, sha, target, refused_spans=frozenset()):
         return "refuse: quoted line is not one line: " + marker.strip("`")
     if citation_has_no_block(text, marker):
         return "refuse: citation %s at line %s has no quoted block" % (
-            span,
+            marker.strip("`"),
             citation_line(text, marker),
         )
     if not _remainders(text, marker):
