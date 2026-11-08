@@ -1065,8 +1065,9 @@ def classify_lines(lines):
             records.append((FENCE, None, ""))
             continue
         inside, text, comment = _visible(line, comment)
-        heading = _heading(text)
-        if inside or ("<!--" in line or "-->" in line) and not text.strip():
+        # Raw syntax owns the role; comment removal only supplies visible text.
+        heading = _heading(text) if _heading(line) is not None else None
+        if inside or line.lstrip().startswith("<!--"):
             records.append((COMMENT, None, ""))
         elif heading is not None:
             records.append((HEADING_KIND, heading[0], heading[1]))
@@ -1120,7 +1121,7 @@ def _has_value(text):
 
 
 def _visible(line, comment):
-    """Return (starts inside, visible text, comment) for one line."""
+    """Return (starts inside, visible text, comment), masking hidden columns."""
     pieces = []
     inside = comment
     index = 0
@@ -1128,7 +1129,9 @@ def _visible(line, comment):
         if comment:
             found = line.find("-->", index)
             if found < 0:
+                pieces.append(" " * (len(line) - index))
                 break
+            pieces.append(" " * (found + 3 - index))
             comment = False
             index = found + 3
         else:
@@ -1137,6 +1140,7 @@ def _visible(line, comment):
                 pieces.append(line[index:])
                 break
             pieces.append(line[index:found])
+            pieces.append(" " * 4)
             comment = True
             index = found + 4
     return inside, "".join(pieces), comment
@@ -1193,7 +1197,7 @@ def proposal_refusals(text):
             if found is not None and level == 3 and start <= index < end:
                 group = found.group(1)
             continue
-        found = PROPOSE_LINE.search(line if kind in (FENCE, COMMENT) else text)
+        found = PROPOSE_LINE.search(line)
         if found is None:
             continue
         number = index + 1
@@ -1203,7 +1207,9 @@ def proposal_refusals(text):
                 % number
             )
             continue
-        if kind == COMMENT:
+        if kind == COMMENT or (
+            len(PROPOSE_LINE.findall(line)) > len(PROPOSE_LINE.findall(text))
+        ):
             refusals.append(
                 "refuse: propose line at line %d is in an HTML comment" % number
             )

@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -3819,6 +3820,48 @@ class CitationCheckTests(unittest.TestCase):
         if check.load_draft(root) is None:
             self.skipTest("no draft in this worktree")
         self.assertEqual(check.problems(root), [])
+
+    def test_comment_prefix_cannot_create_live_a5_heading(self):
+        root = check.worktree_root()
+        draft = check.load_draft(root)
+        self.assertIsNotNone(draft)
+        heading = "### A5. Grant handle"
+        self.assertEqual(draft.count(heading), 1)
+        broken = draft.replace(heading, "<!-- hidden -->" + heading)
+        with patch.object(check, "load_draft", return_value=broken):
+            self.assertEqual(check.problems(root), [
+                "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
+            ])
+
+    def test_inline_comment_proposal_in_live_draft_is_refused(self):
+        root = check.worktree_root()
+        draft = check.load_draft(root)
+        self.assertIsNotNone(draft)
+        for prefix in ("visible text ", "propose: visible text "):
+            with self.subTest(prefix=prefix):
+                broken = draft + "\n" + prefix + "<!-- propose: rubbish -->\n"
+                number = len(broken.splitlines())
+                with patch.object(check, "load_draft", return_value=broken):
+                    self.assertEqual(check.problems(root), [
+                        "refuse: propose line at line %d is in an HTML comment" % number,
+                    ])
+
+    def test_comment_removal_preserves_raw_line_roles(self):
+        cases = (
+            ("<!-- hidden -->### A5. Grant handle", "comment"),
+            ("#<!-- hidden --># next", "text"),
+            ("    <!-- hidden -->## next", "comment"),
+            ("### <!-- hidden -->A5. Grant handle", "heading"),
+            ("visible text <!-- propose: rubbish -->", "text"),
+            ("pro<!-- hidden -->pose: rubbish", "text"),
+        )
+        for line, role in cases:
+            with self.subTest(line=line):
+                self.assertEqual(check.classify_lines([line])[0][0], role)
+        self.assertEqual(check.problems(self._bare_draft(
+            self._section_0() + "pro<!-- hidden -->pose: rubbish\n"
+        )), [])
 
     def test_indented_propose_line_outside_section_0_is_refused(self):
         # Three spaces is not code, but it is still outside section 0.
