@@ -3700,6 +3700,28 @@ class CitationCheckTests(unittest.TestCase):
                 opener,
             )
 
+    def test_backtick_in_info_string_does_not_open_fence(self):
+        falsifier = (
+            "``` bad`\n## 1. Agent identity\n```\n"
+            "propose: fixture another call. Name: another call. Inputs: fixture "
+            "inputs. Refusal: fixture refusal. Owner: fixture owner. B2 stays open."
+        )
+        body = self._section_0() + falsifier
+        self.assertEqual(check.proposal_refusals(body), [
+            "refuse: propose line at line %d is in a fenced code block"
+            % len(body.splitlines()),
+        ])
+        self.assertEqual(check.classify_lines(falsifier.splitlines()), [
+            ("text", None, "``` bad`"), ("heading", 2, "1. Agent identity"),
+            ("fence", None, ""), ("fence", None, ""),
+        ])
+        for opener, closer in (("```python", "```"), ("````", "````"),
+                               ("~~~ bad`", "~~~")):
+            with self.subTest(opener=opener):
+                self.assertEqual([kind for kind, _, _ in check.classify_lines([
+                    opener, "## hidden", closer, "## next",
+                ])], ["fence", "fence", "fence", "heading"])
+
     def test_comment_marker_inside_a_fence_opens_no_comment(self):
         # Inside a fence nothing else is read, so the heading after the fence
         # is real and closes section 0.

@@ -1127,7 +1127,10 @@ def _fence_after(line, fence):
     if fence is None:
         for char in ("`", "~"):
             if stripped.startswith(char * 3):
-                return char, len(stripped) - len(stripped.lstrip(char))
+                count = len(stripped) - len(stripped.lstrip(char))
+                if char == "`" and "`" in stripped[count:]:
+                    return None
+                return char, count
         return None
     char, count = fence
     if len(stripped) >= count and stripped == char * len(stripped):
