@@ -1826,6 +1826,7 @@ class SourceRecordTest(unittest.TestCase):
             victim, pointed = fixture_git.victim_repo(root)
             os.utime(victim / "tracked.txt", (1, 1))  # so a leaked status would rewrite its index
             before = fixture_git.repo_state(victim)
+            config = fixture_git.shared_config(source)
             env = fixture_git.fixture_git_env(root)
             run = self.fixture_run(inputs.run)
             with patch.object(inputs, "SOURCE_ROOT", source), patch.object(inputs, "run", side_effect=run), \
@@ -1835,6 +1836,7 @@ class SourceRecordTest(unittest.TestCase):
                 except (ValueError, subprocess.CalledProcessError) as error:  # judged below, after the victim
                     commit = f"no recorded source: {error}"
             self.assertEqual(fixture_git.repo_state(victim), before, "a source read wrote to GIT_DIR's repo")
+            self.assertEqual(fixture_git.shared_config(source), config, "the fixture's shared git config changed")
             receipt = stage / "platform-input.json"
             bound = json.loads(receipt.read_text())["source"]["commit"] if receipt.is_file() else None
             self.assertEqual(bound, commit, "record bound GIT_DIR's repository")
