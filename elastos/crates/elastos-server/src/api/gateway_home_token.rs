@@ -490,6 +490,32 @@ pub(crate) fn require_home_token_context(
     .map(|required| required.context)
 }
 
+/// A launch token the Browser page can renew. Other failures stay opaque.
+#[derive(Debug)]
+pub(in crate::api) enum HomeLaunchTokenError {
+    Expired,
+    SessionInactive,
+}
+
+impl std::fmt::Display for HomeLaunchTokenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Expired => "home launch token expired",
+            Self::SessionInactive => "home launch token auth session is not active",
+        })
+    }
+}
+
+impl std::error::Error for HomeLaunchTokenError {}
+
+pub(in crate::api) fn home_launch_token_needs_reopen(err: &anyhow::Error) -> bool {
+    matches!(
+        err.chain()
+            .find_map(|source| source.downcast_ref::<HomeLaunchTokenError>()),
+        Some(HomeLaunchTokenError::Expired | HomeLaunchTokenError::SessionInactive)
+    )
+}
+
 /// Verify a launch before body extraction. The handler retains its actor gate.
 pub(super) fn require_gateway_launch(
     data_dir: &std::path::Path,
@@ -752,7 +778,7 @@ fn require_home_launch_token_value_from_expected_did(
     }
     let now = now_ts();
     if envelope.payload.exp <= now {
-        anyhow::bail!("home launch token expired");
+        return Err(anyhow::Error::from(HomeLaunchTokenError::Expired));
     }
     if envelope.payload.iat > now.saturating_add(60)
         || envelope.payload.exp <= envelope.payload.iat
@@ -779,7 +805,7 @@ fn require_home_launch_token_value_from_expected_did(
                 &envelope.payload.session_id,
                 now,
             )
-            .map_err(|_| anyhow::anyhow!("home launch token auth session is not active"))?;
+            .map_err(|_| anyhow::Error::from(HomeLaunchTokenError::SessionInactive))?;
             if grant.principal_id != envelope.payload.principal_id
                 || grant.proof_binding_id != proof_binding_id
                 || grant.grant_id != envelope.payload.grant_id
