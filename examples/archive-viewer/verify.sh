@@ -25,11 +25,12 @@ host_log=""
 runtime_log=""
 
 snapshot_cleanup() {
-    # On a signal, Bash runs this EXIT trap in a subshell while the handler
-    # runs, and that copy sees status 0 and no marker. Only the main shell
-    # (BASHPID = $$) decides; the handler leaves a marker file instead of a
-    # variable, because a subshell's variable would not reach this trap.
-    if [[ "$BASHPID" -eq "$$" && ! -e "${VIEWER_DIR}/.verify-snapshot-keep" ]]; then
+    # A signal handler writes the keep marker before it exits. Only the main
+    # shell removes the snapshot, so an EXIT trap that Bash runs in a subshell
+    # (BASH_SUBSHELL > 0) keeps it. BASH_SUBSHELL exists in Bash 3.2 and 5;
+    # the handler leaves a marker file instead of a variable, because a
+    # subshell's variable would not reach this trap.
+    if [[ "${BASH_SUBSHELL:-1}" -eq 0 && ! -e "${VIEWER_DIR}/.verify-snapshot-keep" ]]; then
         rm -rf "${VIEWER_DIR}/.verify-snapshot"
     fi
     rm -f "$host_log" "$runtime_log"

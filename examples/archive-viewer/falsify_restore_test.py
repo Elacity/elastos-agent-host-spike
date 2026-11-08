@@ -15,6 +15,9 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from falsify import SNAPSHOT_FILES, kit  # noqa: E402
 
+# macOS /bin/bash is 3.2 and Linux /bin/bash is 5: the cleanup must work on both.
+BASH = "/bin/bash" if pathlib.Path("/bin/bash").is_file() else "bash"
+
 CLEAN_PREVIEW = b"if consumed != data.len() || produced != declared {\n"
 PLANTED_PREVIEW = CLEAN_PREVIEW.replace(b"produced != declared", b"produced > declared")
 
@@ -48,7 +51,7 @@ def restore(root):
 class RestoreTests(unittest.TestCase):
     def test_a_normal_failure_removes_the_snapshot(self):
         """a normal failure removes the snapshot"""
-        for command, code in (("false", 1), ("exit 1", 1), ("exit 0", 0)):
+        for command, code in (("false", 1), ("exit 1", 1), ("exit 0", 0), ("exit 7", 7)):
             with tempfile.TemporaryDirectory() as folder:
                 root = pathlib.Path(folder)
                 script = snapshot_shell() + '''install_snapshot_traps
@@ -57,7 +60,7 @@ touch "$VIEWER_DIR/.verify-snapshot/INCOMPLETE"
 ''' + command
                 started = time.monotonic()
                 result = subprocess.run(
-                    ["bash", "-c", script, "snapshot-test", folder],
+                    [BASH, "-c", script, "snapshot-test", folder],
                     capture_output=True, text=True, timeout=2,
                 )
                 self.assertLess(time.monotonic() - started, 2)
@@ -80,7 +83,7 @@ sleep 30 &
 wait "$!"
 '''
             process = subprocess.Popen(
-                ["bash", "-c", script, "snapshot-test", folder],
+                [BASH, "-c", script, "snapshot-test", folder],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                 start_new_session=True,
             )
