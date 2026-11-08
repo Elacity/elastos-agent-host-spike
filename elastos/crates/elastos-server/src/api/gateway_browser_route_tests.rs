@@ -55,6 +55,34 @@ console.log(JSON.stringify({
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+fn browser_test_router(data_dir: &std::path::Path) -> Router {
+    gateway_router_with_api_url(test_state(data_dir), "http://localhost:61180".to_string())
+}
+
+async fn assert_recognizable_browser_launch_refusal(response: Response, body_text: &str) {
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let allow_origin = response
+        .headers()
+        .get("access-control-allow-origin")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let body = axum::body::to_bytes(response.into_body(), 32768)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::str::from_utf8(&body).unwrap(),
+        body_text,
+        "browser launch refusal bytes"
+    );
+    assert_eq!(allow_origin.as_deref(), Some("null"), "{body_text}");
+    let consumer = browser_open_response_consumers(StatusCode::FORBIDDEN, &body);
+    assert_eq!(consumer["authority"], true, "{body_text}");
+    assert_eq!(
+        consumer["message"],
+        "Browser session expired. Reopening from Home..."
+    );
+}
+
 #[tokio::test]
 async fn test_browser_open_expired_token_reopens_from_home_without_engine_warning() {
     let Some(log) = browser_open_route_log(
@@ -62,41 +90,59 @@ async fn test_browser_open_expired_token_reopens_from_home_without_engine_warnin
     ) else {
         return;
     };
-    for after_admission in [false, true] {
+    for case in [
+        "already_expired",
+        "already_inactive",
+        "inactive_after_admission",
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let authority = passkey_authority(dir.path());
         let token = app_token_for_authority(dir.path(), BROWSER_CAPSULE_ID, &authority);
         let context =
             runtime_wallet_authority_for_app_token(dir.path(), BROWSER_CAPSULE_ID, &token)
                 .home_launch_context();
-        let (app, token) = if after_admission {
-            (gateway_router(test_state(dir.path())), token)
+        let token = if case == "already_expired" {
+            issue_expired_home_launch_token_with_context(dir.path(), BROWSER_CAPSULE_ID, &context)
+                .unwrap()
         } else {
-            // Mount the route itself: the outer admission gate deliberately
-            // gives an already-expired token a generic refusal.
-            (
-                axum::Router::new()
-                    .route(
-                        "/api/apps/browser/open",
-                        axum::routing::post(gateway_browser::browser_app_open),
-                    )
-                    .with_state(test_state(dir.path())),
-                issue_expired_home_launch_token_with_context(
-                    dir.path(),
-                    BROWSER_CAPSULE_ID,
-                    &context,
-                )
-                .unwrap(),
-            )
+            token
         };
+        if case == "already_inactive" {
+            let now = crate::auth::now_ts();
+            let mut grant =
+                crate::auth::load_active_session_grant(dir.path(), &context.session_id, now)
+                    .unwrap();
+            grant.expires_at = now;
+            crate::auth::store_session_grant(dir.path(), grant).unwrap();
+        }
+        let expected = if case == "already_expired" {
+            "home launch token expired"
+        } else {
+            "home launch token auth session is not active"
+        };
+        let app = browser_test_router(dir.path());
+        if case != "inactive_after_admission" {
+            let summary = app
+                .clone()
+                .oneshot(
+                    test_browser_request("localhost:61180", "null")
+                        .method("GET")
+                        .uri("/api/apps/browser/summary")
+                        .header("x-elastos-home-token", &token)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_recognizable_browser_launch_refusal(summary, expected).await;
+        }
+        let lapse = case == "inactive_after_admission";
         let data_dir = dir.path().to_path_buf();
         let body = Body::from_stream(futures_lite::stream::unfold(
-            Some((data_dir, context)),
+            Some((data_dir, context, lapse)),
             move |state| async move {
-                let (data_dir, context) = state?;
-                if after_admission {
-                    // Real gateway admission passes first. Expire sign-in when
-                    // JSON extraction reads the body, before the handler checks it.
+                let (data_dir, context, lapse) = state?;
+                if lapse {
                     let now = crate::auth::now_ts();
                     let mut grant =
                         crate::auth::load_active_session_grant(&data_dir, &context.session_id, now)
@@ -104,9 +150,12 @@ async fn test_browser_open_expired_token_reopens_from_home_without_engine_warnin
                     grant.expires_at = now;
                     crate::auth::store_session_grant(&data_dir, grant).unwrap();
                 }
-                Some((Ok::<_, std::io::Error>(axum::body::Bytes::from_static(
-                br#"{"url":"https://example.com/","display_mode":"webrtc_remote_display","guarantee_level":"operator_rbi","async_open":true}"#,
-            )), None))
+                Some((
+                    Ok::<_, std::io::Error>(axum::body::Bytes::from_static(
+                        br#"{"url":"https://example.com/","display_mode":"webrtc_remote_display","guarantee_level":"operator_rbi","async_open":true}"#,
+                    )),
+                    None,
+                ))
             },
         ));
         let response = app
@@ -121,26 +170,75 @@ async fn test_browser_open_expired_token_reopens_from_home_without_engine_warnin
             )
             .await
             .unwrap();
-        let status = response.status();
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        let body = axum::body::to_bytes(response.into_body(), 32768)
-            .await
-            .unwrap();
-        let consumer = browser_open_response_consumers(status, &body);
-        assert_eq!(
-            consumer["authority"],
-            true,
-            "{}",
-            String::from_utf8_lossy(&body)
-        );
-        assert_eq!(
-            consumer["message"],
-            "Browser session expired. Reopening from Home..."
-        );
+        assert_recognizable_browser_launch_refusal(response, expected).await;
     }
     assert!(!String::from_utf8(log.lock().unwrap().clone())
         .unwrap()
         .contains("Browser Engine open failed"));
+}
+
+#[tokio::test]
+async fn test_browser_open_missing_and_forged_tokens_stay_generic_at_the_front_door() {
+    let dir = tempfile::tempdir().unwrap();
+    let authority = passkey_authority(dir.path());
+    let token = app_token_for_authority(dir.path(), BROWSER_CAPSULE_ID, &authority);
+    let context = runtime_wallet_authority_for_app_token(dir.path(), BROWSER_CAPSULE_ID, &token)
+        .home_launch_context();
+    let mut forged = token.into_bytes();
+    let last = forged.len() - 1;
+    forged[last] = if forged[last] == b'A' { b'B' } else { b'A' };
+    let forged = String::from_utf8(forged).unwrap();
+    let expired =
+        issue_expired_home_launch_token_with_context(dir.path(), BROWSER_CAPSULE_ID, &context)
+            .unwrap();
+    let app = browser_test_router(dir.path());
+    for (uri, token) in [
+        ("/api/apps/browser/open", None),
+        ("/api/apps/browser/open", Some(forged.as_str())),
+        ("/api/apps/browser/summary", Some("not-a-token")),
+        ("/api/apps/chat-room/summary", Some(expired.as_str())),
+    ] {
+        let mut request = test_browser_request("localhost:61180", "null")
+            .method("POST")
+            .uri(uri)
+            .header(CONTENT_TYPE, "application/json");
+        if let Some(token) = token {
+            request = request.header("x-elastos-home-token", token);
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                request
+                    .body(Body::from(
+                        r#"{"url":"https://example.com/","display_mode":"webrtc_remote_display","guarantee_level":"operator_rbi","async_open":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none(),
+            "{uri}"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 32768)
+            .await
+            .unwrap();
+        assert_eq!(
+            body.as_ref(),
+            b"Gateway request requires an admitted host and caller",
+            "{uri}"
+        );
+        let consumer = browser_open_response_consumers(StatusCode::FORBIDDEN, &body);
+        assert_eq!(consumer["authority"], false, "{uri}");
+        assert_eq!(
+            consumer["message"],
+            "This page was blocked by your Exit Node settings."
+        );
+    }
 }
 
 #[derive(Clone)]
