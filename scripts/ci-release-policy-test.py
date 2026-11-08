@@ -2191,8 +2191,8 @@ class CustodyKuboDownloadTests(unittest.TestCase):
                             f"https://github.com/ipfs/kubo/releases/download/{self.version}/{tarball}"]
                     self.assertEqual([event["args"][-1] for event in events], urls[:len(events)])
                     for event in events:
-                        self.assertEqual(event["args"][:13], ["-fsSL", "--connect-timeout", "15", "--max-time", "90",
-                            "--retry", "2", "--retry-all-errors", "--retry-delay", "5", "--retry-max-time", "200", "-o"])
+                        self.assertEqual(event["args"][:-2], ["-fsSL", "--connect-timeout", "20", "--max-time", "120",
+                            "--retry", "8", "--retry-all-errors", "--retry-max-time", "300", "-o"])
                     if primary == "failed":
                         self.assertFalse(events[1]["existing"], "failed primary bytes must be removed before fallback")
 
