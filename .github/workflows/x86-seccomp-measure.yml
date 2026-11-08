@@ -42,5 +42,11 @@ jobs:
             echo "=== refused in $f"
             grep -E "= -1 E(ACCES|NOSYS)" "$f" || echo none
           done
-      - name: loader files on this host
-        run: ls -l /lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/libc.so.6 /lib/x86_64-linux-gnu/libgcc_s.so.1 /lib/x86_64-linux-gnu/libm.so.6 || true
+      - name: loader files the providers map on this host
+        run: |
+          for b in capsules/wallet-provider/target/debug/wallet-provider capsules/did-provider/target/debug/did-provider; do
+            echo "=== $b"
+            readelf -l "$b" | grep -i interpreter || true
+            ldd "$b" || true
+          done
+          ls -l /lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 || true
