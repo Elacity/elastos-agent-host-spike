@@ -6482,6 +6482,7 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
     (
         SHARED_RULES[1],
         &[
+            "access",
             "faccessat",
             "fstat",
             "getdents64",
@@ -6499,6 +6500,7 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
     (
         SHARED_RULES[2],
         &[
+            "access",
             "faccessat",
             "fchmod",
             "fdatasync",
@@ -6508,6 +6510,7 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
             "getdents64",
             "linkat",
             "lseek",
+            "mkdir",
             "mkdirat",
             "newfstatat",
             "openat",
@@ -6519,6 +6522,7 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
             "readv",
             "renameat2",
             "statx",
+            "unlink",
             "unlinkat",
             "write",
             "writev",
@@ -6527,6 +6531,7 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
     (
         STARTUP_RULES[0],
         &[
+            "access",
             "faccessat",
             "fstat",
             "getdents64",
@@ -6561,6 +6566,8 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("execve", Some(59), Some(221)),
     ("execveat", Some(322), Some(281)),
     ("exit_group", Some(231), Some(94)),
+    // x86-64 only, the older form of faccessat that glibc calls there.
+    ("access", Some(21), None),
     ("faccessat", Some(269), Some(48)),
     ("fchmod", Some(91), Some(52)),
     ("fdatasync", Some(75), Some(83)),
@@ -6572,6 +6579,8 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("keyctl", Some(250), Some(219)),
     ("linkat", Some(265), Some(37)),
     ("lseek", Some(8), Some(62)),
+    // x86-64 only, the older form of mkdirat that glibc calls there.
+    ("mkdir", Some(83), None),
     ("mkdirat", Some(258), Some(34)),
     ("mmap", Some(9), Some(222)),
     ("mount", Some(165), Some(40)),
@@ -6600,6 +6609,8 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("statx", Some(332), Some(291)),
     ("sysinfo", Some(99), Some(179)),
     ("uname", Some(63), Some(160)),
+    // x86-64 only, the older form of unlinkat that glibc calls there.
+    ("unlink", Some(87), None),
     ("unlinkat", Some(263), Some(35)),
     ("write", Some(1), Some(64)),
     ("writev", Some(20), Some(66)),
@@ -6705,6 +6716,9 @@ impl SeccompAllowList {
         let mut syscalls = self.syscalls.clone();
         for (syscall, _) in LAUNCH_ESSENTIALS {
             let syscall = *syscall;
+            if seccomp_syscall_number(syscall, self.audit_arch).is_none() {
+                continue;
+            }
             if !syscalls.contains(&syscall) {
                 syscalls.push(syscall);
             }
@@ -6776,6 +6790,11 @@ fn seccomp_allow_list_from_declared_rights(
             ));
         };
         for syscall in row.1 {
+            // A row may name an older call one architecture alone has; a
+            // target without it admits nothing for that name.
+            if seccomp_syscall_number(syscall, SECCOMP_AUDIT_ARCH).is_none() {
+                continue;
+            }
             if !syscalls.contains(syscall) {
                 syscalls.push(syscall);
             }
@@ -12674,6 +12693,15 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
     // (run 42447112526). Every other refused call in that trace (brk,
     // set_tid_address, set_robust_list, rseq, prlimit64, munmap) is one the
     // aarch64 run also refuses and the provider tolerates.
+    // Then the providers started and their storage calls were refused. A run
+    // whose filter logged instead of refusing (measure branch only, run
+    // 42447514431) named the x86-64 calls the list lacked: mkdir (83), unlink
+    // (87) and access (21), the older forms of mkdirat, unlinkat and faccessat
+    // that glibc calls on x86-64 and that aarch64 does not have. Each joins the
+    // rows that hold its newer form. The other logged calls (brk, fcntl,
+    // getpid, munmap, prlimit64, rseq, sched_getaffinity, set_robust_list,
+    // set_tid_address, sigaltstack) exist on both and are refused on aarch64
+    // too, so they stay out.
 
     let allow = seccomp_probe_list(name).unwrap_or_else(|err| panic!("{err}"));
     assert_eq!(
