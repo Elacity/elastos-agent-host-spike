@@ -4372,4 +4372,122 @@ mod tests {
             .unwrap()
             .contains("local runtime data directory"));
     }
+
+    /// The provider's ownership rule: a run is read only by the principal
+    /// and capsule its binding names (`assert_run_owner`).
+    #[derive(Default)]
+    struct OwnedRunsModelProvider {
+        requests: Mutex<Vec<serde_json::Value>>,
+        owners: Mutex<std::collections::HashMap<String, (String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for OwnedRunsModelProvider {
+        async fn handle(&self, _: ResourceRequest) -> Result<ResourceResponse, ProviderError> {
+            Err(ProviderError::Provider("raw model fixture".to_string()))
+        }
+        fn schemes(&self) -> Vec<&'static str> {
+            vec!["model"]
+        }
+        fn name(&self) -> &'static str {
+            "owned-runs-model"
+        }
+        async fn send_raw(
+            &self,
+            request: &serde_json::Value,
+        ) -> Result<serde_json::Value, ProviderError> {
+            self.requests.lock().await.push(request.clone());
+            let field = |key: &str| request["runtime_binding"][key].as_str().unwrap_or("");
+            let caller = (
+                field("principal_id").to_string(),
+                field("capsule_id").to_string(),
+            );
+            let run_id = request["run_id"].as_str().unwrap_or("");
+            Ok(match self.owners.lock().await.get(run_id) {
+                Some(owner) if *owner != caller => {
+                    serde_json::json!({"status": "error", "code": "unauthorized_run_access"})
+                }
+                _ => serde_json::json!({"status": "ok", "data": {"run_id": run_id}}),
+            })
+        }
+    }
+
+    const ALICE: &str = "person:local:alice";
+    const BOB: &str = "person:local:bob";
+    const ALICE_RUN: &str =
+        "run:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    async fn model_bus(
+        principal: Option<&str>,
+        capsule: &str,
+    ) -> (
+        BridgeContext,
+        Arc<OwnedRunsModelProvider>,
+        tempfile::TempDir,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut ctx = bridge_context();
+        ctx.capsule_id = capsule.to_string();
+        ctx.principal_id = principal.map(str::to_string);
+        for id in [ALICE, BOB] {
+            crate::auth::store_test_human_principal(temp.path(), id);
+        }
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        ctx.manifest_capabilities = vec!["elastos://model/*".to_string()];
+        let provider = Arc::new(OwnedRunsModelProvider::default());
+        let registry = &ctx.provider_registry;
+        registry
+            .register_sub_provider("model", provider.clone())
+            .await
+            .unwrap();
+        (ctx, provider, temp)
+    }
+
+    async fn model_invoke(
+        ctx: &BridgeContext,
+        op: &str,
+        action: Action,
+        body: serde_json::Value,
+    ) -> serde_json::Value {
+        let token = bridge_token(ctx, "elastos://model/*", action);
+        let line = serde_json::json!({"id": 71, "request": {"type": "resource_invoke",
+            "uri": format!("elastos://model/{op}"), "operation": op, "token": token, "body": body}});
+        handle_request(&line.to_string(), &Some(ctx.clone()))
+            .await
+            .unwrap()
+    }
+
+    fn model_create(offer_id: &str) -> serde_json::Value {
+        serde_json::json!({"offer_id": offer_id, "operation": "text.generate",
+            "input": {"prompt": "hi"}, "request_id": "model-v1:1700000000000:n1",
+            "runtime_binding": {"principal_id": BOB, "capsule_id": "capsule-b"}})
+    }
+
+    #[tokio::test]
+    async fn model_dispatch_stamps_the_bridge_caller_over_a_body_binding() {
+        let (ctx, provider, _temp) = model_bus(Some(ALICE), "capsule-x").await;
+        let response = model_invoke(&ctx, "runs_create", Action::Execute, model_create("m")).await;
+        let kind = &response["response"]["type"];
+        assert_eq!(kind, "resource_result", "{response}");
+        let sent = provider.requests.lock().await.clone();
+        let binding = &sent[0]["runtime_binding"];
+        assert_eq!(binding["principal_id"], "person:local:alice", "{binding}");
+        assert_eq!(binding["capsule_id"], "capsule-x", "{binding}");
+        assert_eq!(binding["session_id"], "capsule-x", "{binding}");
+        let grant = binding["grant_id"].as_str().unwrap();
+        assert!(grant.starts_with("capability:"), "{grant}");
+    }
+
+    #[tokio::test]
+    async fn another_principals_bus_capsule_cannot_read_a_run() {
+        let (ctx, provider, _temp) = model_bus(Some(BOB), "capsule-b").await;
+        let mut owners = provider.owners.lock().await;
+        owners.insert(ALICE_RUN.into(), (ALICE.into(), "capsule-x".into()));
+        drop(owners);
+        let body = serde_json::json!({"run_id": ALICE_RUN, "request_id": "model-v1:1:n2",
+            "runtime_binding": {"principal_id": ALICE, "capsule_id": "capsule-x"}});
+        let response = model_invoke(&ctx, "runs_get", Action::Read, body).await;
+        let result = &response["response"]["result"];
+        assert_eq!(result["code"], "unauthorized_run_access", "{response}");
+    }
 }
