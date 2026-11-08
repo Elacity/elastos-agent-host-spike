@@ -1208,6 +1208,8 @@ fn review_failures_name_each_unbound_review() {
     );
     let unnamed = [review("", "pass", &git.commit)];
     assert_eq!(fails(Some(&unnamed), &git), ["malformed review: reviewer"]);
+    let spaced = [review("co dex", "pass", &git.commit)];
+    assert_eq!(fails(Some(&spaced), &git), ["malformed review: reviewer"]);
     let both = [
         review("codex", "pass", &git.commit),
         review("claude", "pass", &git.commit),
