@@ -1882,7 +1882,7 @@ html[data-agent-reasoning="off"] .agent-thinking {
   display: block;
   flex: 1 1 auto;
   min-height: 0;
-  overflow-anchor: none;
+  overflow-anchor: auto;
   /* Extra inset so the last lines sit clearly above the Shelf, not in the fade. */
   padding: 28px 0 calc(var(--harness-composer-clearance) + 36px);
   overflow-x: hidden;
@@ -1917,8 +1917,15 @@ html[data-agent-reasoning="off"] .agent-thinking {
   mask-image: none;
 }
 
+/* Only the end marker can anchor transcript layout. */
+#agent-transcript-end {
+  height: 1px;
+  margin-top: -1px;
+}
+
 /* Locked to live Shelf geometry via --agent-column-width / --agent-column-left (JS). */
 .agent-harness-stream-column {
+  overflow-anchor: none;
   display: flex;
   flex-direction: column;
   gap: 16px;

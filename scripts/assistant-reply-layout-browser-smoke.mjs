@@ -7,18 +7,15 @@
 // newest reply sit fully above the composer, not behind it. A reader at the
 // end who sends a message follows its long reply to the end, while it
 // streams and once it settles, without being offered Jump to latest.
-// A reader who scrolls up after follow cleanup starts stays at that position.
-// Jump to latest, while a reply finishes, keeps the end in view.
-// A shrink and a partial growth, with no reader input, still lands at the end.
-// A scroll back to the end during cleanup does not leave follow on. Jump
-// shows once the reader moves up again.
-// Find, a scrollbar drag with no gutter, and a touch that changes direction
-// leave the reader above the end. Find does this while the reply streams
-// and again at the last pin.
+// Reader movement owns the transcript during streaming and completion.
+// Growth and clamp-then-grow keep a reader at the end there. The same cases
+// run in a task and inside rAF, before scroll-event delivery. Find, native
+// zero-gutter scrollbar drag, reversing touch, keyboard and Jump cover input.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { readFile } from "node:fs/promises";
+import { readFile, mkdtemp, writeFile, unlink, rmdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "./system-uiux-fixture.mjs";
@@ -200,11 +197,28 @@ function newestClearance(selector) {
 }
 
 let browser, page, frame, cdp, stage = "launch";
-let beforeClamp;
+let beforeClamp, launchScriptDir;
 const pageErrors = [];
 try {
   server.listen(0, "127.0.0.1"); await once(server, "listening");
-  browser = await chromium.launch({ headless: true, ...(process.env.BRAVE_BIN ? { executablePath: process.env.BRAVE_BIN } : {}) });
+  const launch = { headless: true, ignoreDefaultArgs: ["--hide-scrollbars"],
+    args: ["--enable-features=OverlayScrollbar"],
+    ...(process.env.BRAVE_BIN ? { executablePath: process.env.BRAVE_BIN } : {}) };
+  if (process.platform === "darwin") {
+    // Cocoa needs a separate value argument; Playwright only accepts switches.
+    // Apply the overlay preference to this browser process with a tiny launcher.
+    const probe = await chromium.launch({ ...launch, args: [...launch.args, "--enable-automation"] });
+    let executable;
+    try {
+      const session = await probe.newBrowserCDPSession();
+      executable = (await session.send("Browser.getBrowserCommandLine")).arguments[0];
+    } finally { await probe.close(); }
+    launchScriptDir = await mkdtemp(resolve(tmpdir(), "assistant-layout-"));
+    launch.executablePath = resolve(launchScriptDir, "browser");
+    const quoted = "'" + executable.replaceAll("'", "'\\''") + "'";
+    await writeFile(launch.executablePath, `#!/bin/sh\nexec ${quoted} -AppleShowScrollBars WhenScrolling "$@"\n`, { mode: 0o755 });
+  }
+  browser = await chromium.launch(launch);
   page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   cdp = await page.context().newCDPSession(page);
   await cdp.send("Emulation.setCPUThrottlingRate", { rate: cpuRate ?? 4 });
@@ -214,6 +228,20 @@ try {
   await room.locator(".agent-msg").nth(history.length - 1).waitFor({ state: "attached" });
   frame = page.frames().find(candidate => candidate.url().includes("/apps/assistant/"));
 
+  await frame.evaluate(() => {
+    const s = document.querySelector("#agent-harness-stream");
+    const c = document.querySelector("#agent-harness-stream-column");
+    window.__scrollTrace = [];
+    const trace = kind => {
+      window.__scrollTrace.push({ kind, t: Math.round(performance.now()), top: s.scrollTop,
+        end: s.scrollHeight - s.clientHeight, follow: s.classList.contains("is-follow-bottom"),
+        phase: [...c.querySelectorAll(".agent-msg-agent")].at(-1)?.dataset.streamPhase });
+      if (window.__scrollTrace.length > 120) window.__scrollTrace.shift();
+    };
+    document.addEventListener("scroll", e => { if (e.target === s) trace("scroll"); }, true);
+    new ResizeObserver(() => trace("resize")).observe(c);
+    new MutationObserver(() => trace("mutation")).observe(c, { childList: true, subtree: true, attributes: true, characterData: true });
+  });
   const input = room.locator("#agent-composer-input");
   // Polls until the newest block is at the end and fully above the composer,
   // for up to 5 s; then asserts on the last measurement.
@@ -317,6 +345,7 @@ try {
         following: scroller.classList.contains("is-follow-bottom"),
         buttonHeight: jump?.getBoundingClientRect().height || 0,
         phase: newestReply !== previousReply ? newestReply?.dataset.streamPhase : null,
+        visibility: newestReply ? getComputedStyle(newestReply).contentVisibility : null,
         fromEnd: scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight };
     };
     const sample = () => {
@@ -356,9 +385,10 @@ try {
     const completed = window.__follow.samples.filter(sample =>
       sample.phase === "finalizing" || sample.phase === "presentation_done");
     return { behindMs: Math.round(behindMs), jumpFrames: window.__follow.samples.filter(sample => sample.jump).length,
-      completedFrames: completed.length, completionGaps: completed.filter(sample => sample.fromEnd > 8) };
+      completedFrames: completed.length, skippedNewest: completed.filter(sample => sample.visibility !== "visible"), completionGaps: completed.filter(sample => sample.fromEnd > 8) };
   });
   assert.ok(follow.completedFrames > 0, "completion frames were sampled");
+  assert.deepEqual(follow.skippedNewest, [], "the newest reply cannot use the 400 px placeholder");
   assert.deepEqual(follow.completionGaps, [],
     `a reader at the end stays within 8 px on every completion frame: ${JSON.stringify(follow)}`);
   // Streaming flushes can precede their follow frame.
@@ -488,6 +518,9 @@ try {
     const point = await gutter();
     await page.mouse.move(point.x, point.y);
   });
+  seen.pageUpMovedPx = await readerMovesUp("PageUp", async () => {
+    await page.keyboard.press("PageUp");
+  }, clickTranscriptAWhileAgo);
   seen.shiftSpaceMovedPx = await readerMovesUp("Shift+Space", async (pushChunk) => {
     // More words arrive while the page-up scroll is still moving.
     await page.keyboard.press("Shift+Space");
@@ -525,7 +558,7 @@ try {
     const box = await room.locator("#agent-harness-stream").boundingBox();
     assert.ok(box && box.width > 40 && box.height > 200, `the transcript can show a scrollbar: ${JSON.stringify(box)}`);
     const x = Math.round(box.x + box.width - 2);
-    const startY = Math.round(box.y + box.height * 0.78);
+    const startY = Math.round(box.y + box.height - 8);
     const endY = Math.round(box.y + Math.max(24, box.height * 0.12));
     await page.mouse.move(x, startY);
     await page.waitForTimeout(120);
@@ -535,17 +568,15 @@ try {
     await settled();
     const dragged = await scrollState();
     seen.scrollbarDragFromEnd = dragged.fromEnd;
-    if (dragged.fromEnd <= 300) {
-      await frame.evaluate(() => {
-        document.querySelector("#agent-harness-stream").scrollBy(0, -700);
-      });
-    }
+    assert.ok(dragged.fromEnd > 300, `a native zero-gutter scrollbar drag moves the reader: ${JSON.stringify(dragged)}`);
     for (let i = 0; i < 2; i += 1) await pushChunk();
   }, async () => {
     const gutter = await frame.evaluate(() => {
       const scroller = document.querySelector("#agent-harness-stream");
       const natural = scroller.offsetWidth - scroller.clientWidth;
-      scroller.style.setProperty("scrollbar-width", "none");
+      // Keep the native thumb above the Shelf for pointer access.
+      Object.assign(scroller.style, { height: "400px", maxHeight: "400px", flex: "none" });
+      scroller.style.setProperty("scrollbar-width", "auto");
       scroller.style.setProperty("scrollbar-gutter", "auto");
       return { natural, overlay: scroller.offsetWidth - scroller.clientWidth };
     });
@@ -558,6 +589,7 @@ try {
   });
   await frame.evaluate(() => {
     const scroller = document.querySelector("#agent-harness-stream");
+    for (const property of ["height", "max-height", "flex"]) scroller.style.removeProperty(property);
     scroller.style.removeProperty("scrollbar-width");
     scroller.style.removeProperty("scrollbar-gutter");
   });
@@ -565,19 +597,19 @@ try {
     const box = await room.locator("#agent-harness-stream").boundingBox();
     assert.ok(box && box.height > 200, `the transcript can take a touch: ${JSON.stringify(box)}`);
     const x = Math.round(box.x + box.width / 2);
-    const startY = Math.round(box.y + box.height * 0.15);
-    const downY = Math.round(box.y + box.height * 0.92);
-    const returnY = Math.round(box.y + box.height * 0.62);
+    const startY = Math.round(box.y + box.height * 0.65);
+    const upY = Math.round(box.y + box.height * 0.20);
+    const returnY = Math.round(box.y + box.height * 0.42);
     const beforeTouch = await scrollState();
     let afterTouch = beforeTouch;
     try {
       // Touch emulation turns these mouse moves into a touch. The move goes
       // into the sandboxed frame. A raw touch event stops on the outer iframe.
       await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
-      // Finger moves down, then reverses and stops short of the start.
+      // Finger moves up, then reverses down while still above its start.
       await page.mouse.move(x, startY);
       await page.mouse.down();
-      await page.mouse.move(x, downY, { steps: 16 });
+      await page.mouse.move(x, upY, { steps: 16 });
       await page.mouse.move(x, returnY, { steps: 8 });
       await page.mouse.up();
       await settled();
@@ -589,16 +621,16 @@ try {
     const touchMoved = beforeTouch.top - afterTouch.top > 30;
     if (!touchMoved) {
       // Headless Chromium does not deliver that touch into the sandboxed frame.
-      // Apply the scroll the reversing finger travel produces: up, then part
-      // of the way back, still far from the end.
+      // The first upward finger travel clamps at the end; the downward
+      // reversal then scrolls the reader away from the end.
       await frame.evaluate(() => {
         const scroller = document.querySelector("#agent-harness-stream");
-        scroller.scrollBy(0, -900);
-        scroller.scrollBy(0, 220);
+        scroller.scrollBy(0, 900);
+        scroller.scrollBy(0, -680);
       });
       afterTouch = await scrollState();
     }
-    seen.touchGesture = { touchMoved, before: beforeTouch, after: afterTouch, startY, returnY };
+    seen.touchGesture = { touchMoved, before: beforeTouch, after: afterTouch, startY, upY, returnY };
     assert.ok(afterTouch.fromEnd > 300 && afterTouch.top < beforeTouch.top - 300,
       `a reversing touch leaves the reader above the end: ${JSON.stringify(seen.touchGesture)}`);
   }, async () => {
@@ -606,272 +638,221 @@ try {
     await atEnd().catch(async () => assert.fail(`a reversing touch: the room follows before the gesture: ${JSON.stringify(await scrollState())}`));
   }, { sampleAfter: true });
 
-  // releaseFollow drops is-follow-bottom, then queues the last pin. Hold that
-  // frame, scroll up, and let the frame run. The reader stays put.
-  stage = "a reader who scrolls up after follow cleanup begins";
-  await frame.evaluate(() => {
+  // The same scroll rule applies while streaming, before the idle Markdown
+  // paint, and after completion. Hold only the painter, never a follow phase.
+  const startReply = async (marker) => {
+    const runId = `run-sent-${fixture.runs.size + 1}`;
+    await input.fill(`Plan a garden: ${marker}`);
+    await input.press("Enter");
+    for (const deadline = Date.now() + 10000; !fixture.runs.has(runId);) {
+      assert.ok(Date.now() < deadline, `${marker}: the run starts`);
+      await page.waitForTimeout(20);
+    }
+    const run = fixture.runs.get(runId);
+    run.push({ sequence: 1, kind: "text_delta", data: { text: `${gardenReply}\n${marker}` } });
+    await room.locator(".agent-msg-agent.is-streaming").filter({ hasText: marker }).waitFor();
+    await settled();
+    return () => run.push({ sequence: 2, kind: "completed", data: {} });
+  };
+  const holdPaint = () => frame.evaluate(() => {
+    const native = window.requestIdleCallback;
+    window.requestIdleCallback = (callback) => {
+      window.requestIdleCallback = native;
+      window.__finishReply = callback;
+      return 0;
+    };
+  });
+  const finishPaint = () => frame.evaluate(() => { window.__finishReply(); delete window.__finishReply; });
+  const waitForPaint = () => frame.waitForFunction(() => typeof window.__finishReply === "function");
+  const holdCompletionFrame = () => frame.evaluate(() => {
     const native = window.requestAnimationFrame.bind(window);
-    window.__nativeRequestAnimationFrame = native;
-    window.requestAnimationFrame = (callback) => {
-      const scroller = document.querySelector("#agent-harness-stream");
+    window.requestAnimationFrame = callback => {
       const newest = [...document.querySelectorAll(".agent-msg-agent")].at(-1);
-      if (!window.__runFinalFrame
-          && newest?.textContent.includes("End of the reply after cleanup.")
-          && newest.dataset.streamPhase === "presentation_done"
-          && scroller
-          && !scroller.classList.contains("is-follow-bottom")) {
-        window.__runFinalFrame = () => new Promise((resolve) => {
-          native((time) => {
-            callback(time);
-            resolve();
-          });
-        });
+      if (newest?.dataset.streamPhase === "presentation_done") {
+        window.requestAnimationFrame = native;
+        window.__cleanupReply = () => new Promise(done => native(time => { callback(time); done(); }));
         return 0;
       }
       return native(callback);
     };
   });
-  const cleanupRunId = `run-sent-${fixture.runs.size + 1}`;
-  const cleanupMarker = "End of the reply after cleanup.";
-  await input.fill("Plan a garden, then scroll during cleanup");
-  await input.press("Enter");
-  for (const deadline = Date.now() + 10000; !fixture.runs.has(cleanupRunId);) {
-    assert.ok(Date.now() < deadline, "cleanup scroll: the message started a run");
-    await page.waitForTimeout(20);
-  }
-  const cleanupRun = fixture.runs.get(cleanupRunId);
-  const cleanupChunks = `${gardenReply}\n${cleanupMarker}\n`.match(/[\s\S]{1,300}/g);
-  for (const [index, text] of cleanupChunks.entries()) {
-    cleanupRun.push({ sequence: index + 1, kind: "text_delta", data: { text } });
-  }
-  cleanupRun.push({ sequence: cleanupChunks.length + 1, kind: "completed", data: {} });
-  await frame.waitForFunction(() => typeof window.__runFinalFrame === "function", null, { timeout: 10000 });
-  const raced = await frame.evaluate(async () => {
-    const scroller = document.querySelector("#agent-harness-stream");
-    const atRelease = Math.round(scroller.scrollTop);
-    scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -120, bubbles: true, cancelable: true }));
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
-    scroller.scrollTop = Math.max(0, scroller.scrollTop - 400);
-    const afterReader = Math.round(scroller.scrollTop);
-    await window.__runFinalFrame();
-    const afterFinalFrame = Math.round(scroller.scrollTop);
-    window.requestAnimationFrame = window.__nativeRequestAnimationFrame;
-    delete window.__runFinalFrame;
-    delete window.__nativeRequestAnimationFrame;
-    return { atRelease, afterReader, afterFinalFrame, pulledDownPx: afterFinalFrame - afterReader };
+  const runCompletionFrame = () => frame.evaluate(async () => {
+    await window.__cleanupReply();
+    delete window.__cleanupReply;
   });
-  assert.ok(raced.atRelease >= 500, `the reader was at the end when cleanup began: ${JSON.stringify(raced)}`);
-  assert.ok(raced.afterReader <= raced.atRelease - 300, `the reader scrolled up before the last pin: ${JSON.stringify(raced)}`);
-  assert.ok(Math.abs(raced.pulledDownPx) <= 2, `the last pin left the reader where they scrolled: ${JSON.stringify(raced)}`);
-  const parked = await scrollState();
-  assert.ok(parked.fromEnd > 300 && parked.jump,
-    `Jump to latest is offered and the reader stays above the end: ${JSON.stringify({ raced, parked })}`);
-  seen.cleanupScroll = raced;
+  const geometry = () => frame.evaluate(() => {
+    const s = document.querySelector("#agent-harness-stream");
+    const c = document.querySelector("#agent-harness-stream-column");
+    window.__geometryStyles = [s.style.cssText, c.style.cssText];
+    Object.assign(s.style, { height: "400px", maxHeight: "400px", flex: "none", padding: "0px" });
+    Object.assign(c.style, { height: "2600px", minHeight: "0px", overflow: "hidden" });
+  });
+  const restoreGeometry = () => frame.evaluate(() => {
+    const s = document.querySelector("#agent-harness-stream");
+    const c = document.querySelector("#agent-harness-stream-column");
+    [s.style.cssText, c.style.cssText] = window.__geometryStyles;
+    delete window.__geometryStyles;
+  });
+  const resetEnd = async () => {
+    await frame.evaluate(() => {
+      document.querySelector("#agent-harness-stream-column").style.height = "2600px";
+      Object.assign(document.querySelector("#agent-harness-stream").style, { height: "400px", maxHeight: "400px" });
+      document.querySelector("[data-agent-jump-latest]").click();
+    });
+    await settled();
+    await settled();
+    assert.equal((await scrollState()).top, 2200, "the real transcript starts at end 2200");
+  };
+  const layoutCase = async (label, kind, inFrame = false) => {
+    stage = label;
+    await resetEnd();
+    const before = await frame.evaluate(async ({ kind, inFrame }) => {
+      if (inFrame) await new Promise(requestAnimationFrame);
+      const s = document.querySelector("#agent-harness-stream");
+      const c = document.querySelector("#agent-harness-stream-column");
+      let clamped = null;
+      if (kind === "small-steps") {
+        const steps = [];
+        for (let i = 0; i < 3; i += 1) {
+          const scrolled = new Promise(done => s.addEventListener("scroll", done, { once: true }));
+          s.scrollBy(0, -3);
+          await scrolled;
+          steps.push(s.scrollTop);
+        }
+        clamped = steps;
+        c.style.height = "2700px";
+      } else if (kind === "small-reader-first" || kind === "large-reader-first") {
+        s.scrollBy(0, kind === "small-reader-first" ? -16 : -400);
+        clamped = s.scrollTop;
+        c.style.height = "2700px";
+      } else if (kind === "growth-then-resize") {
+        c.style.height = "2700px";
+        void s.scrollTop;
+        s.style.height = "300px";
+      } else if (kind === "resize-and-growth") {
+        s.style.height = "300px";
+        c.style.height = "2700px";
+      } else if (kind === "clamp") {
+        c.style.height = "2300px";
+        clamped = s.scrollTop;
+        c.style.height = "2400px";
+      } else if (kind === "resize-growth" || kind === "resize-small-reader") {
+        s.style.height = "300px";
+        s.style.maxHeight = "300px";
+        void s.clientHeight;
+        if (kind === "resize-small-reader") s.scrollBy(0, -16);
+      } else if (kind === "resize-reader") {
+        s.style.height = "500px";
+        s.style.maxHeight = "500px";
+        void s.clientHeight;
+        s.scrollBy(0, -16);
+      } else {
+        c.style.height = "2700px";
+        if (kind === "small-reader") s.scrollBy(0, -16);
+        if (kind === "large-reader") s.scrollBy(0, -400);
+      }
+      return { top: s.scrollTop, end: s.scrollHeight - s.clientHeight, clamped };
+    }, { kind, inFrame });
+    await settled();
+    await settled();
+    const after = await scrollState();
+    if (kind === "clamp") assert.equal(before.clamped, 1900, `${label}: shrink clamps to 1900`);
+    if (kind === "growth" || kind === "clamp" || kind === "resize-growth" || kind === "resize-and-growth" || kind === "growth-then-resize") {
+      assert.ok(after.fromEnd <= 8, `${label}: layout follows: ${JSON.stringify({ before, after })}`);
+      if (kind === "clamp") assert.equal(after.top, 2000, `${label}: growth pins to 2000`);
+    } else {
+      if (kind === "small-steps") assert.deepEqual(before.clamped, [2197, 2194, 2191], `${label}: small steps accumulate past 8 px`);
+      if (kind.endsWith("-first")) assert.equal(before.top, before.clamped, `${label}: layout preserves input before growth`);
+      assert.equal(after.top, before.top, `${label}: the reader owns the scroll: ${JSON.stringify({ before, after })}`);
+      assert.equal(after.jump, true, `${label}: Jump is offered outside 8 px`);
+    }
+    return { before, after };
+  };
+  seen.layoutCases = {};
+  for (const phase of ["streaming", "before finish", "at finish"]) {
+    const marker = `End of the ${phase} regression reply.`;
+    const complete = await startReply(marker);
+    if (phase !== "streaming") {
+      await holdPaint();
+      complete();
+      await waitForPaint();
+      if (phase === "at finish") {
+        await holdCompletionFrame();
+        await finishPaint();
+        await frame.waitForFunction(() => typeof window.__cleanupReply === "function");
+      }
+    }
+    await geometry();
+    for (const inFrame of [false, true]) {
+      for (const kind of ["growth", "small-reader", "small-steps", "small-reader-first", "large-reader-first", "resize-reader", "resize-growth", "resize-and-growth", "growth-then-resize", "resize-small-reader", "clamp", "large-reader"]) {
+        const label = `${phase}: ${kind} in ${inFrame ? "animation frame" : "task"}`;
+        seen.layoutCases[label] = await layoutCase(label, kind, inFrame);
+      }
+    }
+    await restoreGeometry();
+    if (phase === "streaming") complete();
+    if (phase === "before finish") await finishPaint();
+    if (phase === "at finish") await runCompletionFrame();
+    await room.locator('.agent-msg-agent[data-stream-phase="presentation_done"]').filter({ hasText: marker })
+      .waitFor({ state: "attached", timeout: 10000 });
+    await settled();
+  }
 
-  stage = "Jump to latest while a reply finishes";
-  const jumpRunId = `run-sent-${fixture.runs.size + 1}`;
-  const jumpMarker = "End of the reply after Jump to latest.";
-  await input.fill("Plan a garden, then jump");
-  await input.press("Enter");
-  for (const deadline = Date.now() + 10000; !fixture.runs.has(jumpRunId);) {
-    assert.ok(Date.now() < deadline, "jump: the message started a run");
-    await page.waitForTimeout(20);
-  }
-  const jumpRun = fixture.runs.get(jumpRunId);
-  const jumpChunks = `${gardenReply}\n${jumpMarker}\n`.match(/[\s\S]{1,300}/g);
-  for (const [index, text] of jumpChunks.entries()) {
-    jumpRun.push({ sequence: index + 1, kind: "text_delta", data: { text } });
-  }
-  await room.locator(".agent-msg-agent.is-streaming").filter({ hasText: jumpMarker }).waitFor({ timeout: 10000 });
-  await frame.evaluate(() => {
-    const scroller = document.querySelector("#agent-harness-stream");
-    scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -480, bubbles: true, cancelable: true }));
-    scroller.scrollTop -= 600;
-  });
-  await frame.waitForFunction(() => {
-    const jump = document.querySelector("[data-agent-jump-latest]");
-    const scroller = document.querySelector("#agent-harness-stream");
-    return jump && !jump.hidden && jump.getBoundingClientRect().height > 0
-      && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight > 300;
-  }, null, { timeout: 5000 });
-  await frame.evaluate(() => {
-    const schedule = window.requestIdleCallback.bind(window);
-    window.requestIdleCallback = (callback, options) => {
-      window.requestIdleCallback = schedule;
-      window.__finishReply = () => schedule(callback, options);
-      return 0;
-    };
-  });
-  jumpRun.push({ sequence: jumpChunks.length + 1, kind: "completed", data: {} });
-  await frame.waitForFunction(() => typeof window.__finishReply === "function", null, { timeout: 10000 });
-  const jumpPhase = await frame.evaluate(() => [...document.querySelectorAll(".agent-msg-agent")].at(-1)?.dataset.streamPhase);
-  assert.equal(jumpPhase, "finalizing", `Jump to latest is clicked while the reply finishes, phase ${jumpPhase}`);
-  // The Shelf covers the pill, so a pointer click lands on the Shelf.
-  // The button's own click is the one Jump to latest handles.
+  stage = "Find and Jump to latest while a reply finishes";
+  const marker = "End of the Find and Jump regression reply.";
+  const complete = await startReply(marker);
+  await holdPaint();
+  complete();
+  await waitForPaint();
+  const found = await scrollFindMatchIntoView();
+  await settled();
+  assert.equal(found.found, true, "Find selects earlier text at finish");
+  const findTop = (await scrollState()).top;
+  await finishPaint();
+  await settled();
+  assert.equal((await scrollState()).top, findTop, "completion preserves the Find result");
+  seen.findAtFinish = await scrollState();
+
+  stage = "Jump to latest before the finished paint";
+  const jumpComplete = await startReply("End of the Jump regression reply.");
+  await frame.evaluate(() => document.querySelector("#agent-harness-stream").scrollBy(0, -600));
+  await settled();
+  await holdPaint();
+  jumpComplete();
+  await waitForPaint();
   await frame.evaluate(() => document.querySelector("[data-agent-jump-latest]").click());
-  await frame.evaluate(() => { window.__finishReply(); delete window.__finishReply; });
-  await room.locator('.agent-msg-agent[data-stream-phase="presentation_done"]').filter({ hasText: jumpMarker })
-    .waitFor({ state: "attached", timeout: 10000 });
+  await finishPaint();
   await settled();
   await atEnd();
-  const jumped = await scrollState();
-  assert.ok(jumped.fromEnd <= 8, `Jump to latest keeps the end in view: ${JSON.stringify(jumped)}`);
-  assert.equal(jumped.jump, false, `a reader at the end is not offered Jump to latest: ${JSON.stringify(jumped)}`);
-  seen.jumpDuringFinish = jumped.fromEnd;
+  seen.jumpDuringFinish = await scrollState();
 
-  const armFinalFrame = async (marker) => {
-    await frame.evaluate((text) => {
-      const native = window.__nativeRequestAnimationFrame || window.requestAnimationFrame.bind(window);
-      window.__nativeRequestAnimationFrame = native;
-      window.requestAnimationFrame = (callback) => {
-        const scroller = document.querySelector("#agent-harness-stream");
-        const newest = [...document.querySelectorAll(".agent-msg-agent")].at(-1);
-        if (!window.__runFinalFrame
-            && newest?.textContent.includes(text)
-            && newest.dataset.streamPhase === "presentation_done"
-            && scroller
-            && !scroller.classList.contains("is-follow-bottom")) {
-          window.__runFinalFrame = () => new Promise((resolve) => {
-            native((time) => { callback(time); resolve(); });
-          });
-          return 0;
-        }
-        return native(callback);
-      };
-    }, marker);
-  };
-  const sendSettledReply = async (prompt, marker) => {
-    const runId = `run-sent-${fixture.runs.size + 1}`;
-    await input.fill(prompt);
-    await input.press("Enter");
-    for (const deadline = Date.now() + 10000; !fixture.runs.has(runId);) {
-      assert.ok(Date.now() < deadline, `${marker}: the message started a run`);
-      await page.waitForTimeout(20);
-    }
-    const run = fixture.runs.get(runId);
-    const chunks = `${gardenReply}\n${marker}\n`.match(/[\s\S]{1,300}/g);
-    for (const [index, text] of chunks.entries()) {
-      run.push({ sequence: index + 1, kind: "text_delta", data: { text } });
-    }
-    run.push({ sequence: chunks.length + 1, kind: "completed", data: {} });
-  };
+  stage = "follow resumes across completion cleanup";
+  const resumeComplete = await startReply("End of the cleanup resume regression reply.");
+  await holdPaint();
+  resumeComplete();
+  await waitForPaint();
+  await holdCompletionFrame();
+  await finishPaint();
+  await frame.waitForFunction(() => typeof window.__cleanupReply === "function");
+  await settled();
+  await frame.evaluate(() => document.querySelector("#agent-harness-stream").scrollBy(0, -500));
+  await settled();
+  assert.equal((await scrollState()).jump, true);
+  await frame.evaluate(() => { const s = document.querySelector("#agent-harness-stream"); s.scrollTop = s.scrollHeight; });
+  await settled();
+  await runCompletionFrame();
+  await frame.evaluate(() => document.querySelector("#agent-harness-stream").scrollBy(0, -500));
+  await settled();
+  assert.equal((await scrollState()).jump, true, "returning then leaving the end still shows Jump");
+  seen.resume = await scrollState();
 
-  stage = "Find to earlier text while a reply finishes";
-  const findFinishMarker = "End of the reply after Find.";
-  await armFinalFrame(findFinishMarker);
-  await sendSettledReply("Plan a garden, then find", findFinishMarker);
-  await frame.waitForFunction(() => typeof window.__runFinalFrame === "function", null, { timeout: 10000 });
-  const findFinish = await frame.evaluate(async () => {
-    const scroller = document.querySelector("#agent-harness-stream");
-    const atRelease = Math.round(scroller.scrollTop);
-    document.querySelector("#agent-composer-input").focus({ preventScroll: true });
-    const found = window.find("Choose the site", false, false, true);
-    const node = document.getSelection()?.rangeCount ? document.getSelection().getRangeAt(0).startContainer : null;
-    const el = node && (node.nodeType === 1 ? node : node.parentElement);
-    el?.scrollIntoView({ block: "start" });
-    if (scroller.scrollTop > 2) scroller.scrollTop -= 2;
-    const afterFind = Math.round(scroller.scrollTop);
-    const fromEnd = Math.round(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight);
-    await window.__runFinalFrame();
-    const afterFinal = Math.round(scroller.scrollTop);
-    window.requestAnimationFrame = window.__nativeRequestAnimationFrame;
-    delete window.__runFinalFrame;
-    delete window.__nativeRequestAnimationFrame;
-    return { found, atRelease, afterFind, fromEnd, afterFinal, pulledDownPx: afterFinal - afterFind };
-  });
-  assert.equal(findFinish.found, true, `Find locates earlier reply text at the last pin: ${JSON.stringify(findFinish)}`);
-  assert.ok(findFinish.atRelease >= 500, `the reader was at the end when Find ran: ${JSON.stringify(findFinish)}`);
-  assert.ok(findFinish.afterFind <= findFinish.atRelease - 300 && findFinish.fromEnd > 300,
-    `Find leaves the reader above the end: ${JSON.stringify(findFinish)}`);
-  assert.ok(Math.abs(findFinish.pulledDownPx) <= 2,
-    `the last pin leaves the reader on the Find result: ${JSON.stringify(findFinish)}`);
-  seen.findAtFinish = findFinish.pulledDownPx;
-
-  stage = "a shrink then a partial growth with no reader input";
-  const shrinkMarker = "End of the reply after a shrink and a partial growth.";
-  await armFinalFrame(shrinkMarker);
-  await sendSettledReply("Plan a garden, then let layout move", shrinkMarker);
-  await frame.waitForFunction(() => typeof window.__runFinalFrame === "function", null, { timeout: 10000 });
-  const shrink = await frame.evaluate(async () => {
-    const scroller = document.querySelector("#agent-harness-stream");
-    const newest = [...document.querySelectorAll(".agent-msg-agent")].at(-1);
-    const body = newest.querySelector(".agent-msg-body");
-    const full = body.getBoundingClientRect().height;
-    body.style.overflow = "hidden";
-    body.style.maxHeight = `${Math.max(40, Math.round(full - 300))}px`;
-    const clampedTop = scroller.scrollTop;
-    body.style.maxHeight = `${Math.max(80, Math.round(full - 100))}px`;
-    const beforePin = {
-      full: Math.round(full),
-      clampedTop: Math.round(clampedTop),
-      top: Math.round(scroller.scrollTop),
-      fromEnd: Math.round(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight),
-      follow: scroller.classList.contains("is-follow-bottom"),
-    };
-    await window.__runFinalFrame();
+  const visibility = await frame.evaluate(() => {
     const rows = [...document.querySelectorAll(".agent-msg-agent")];
-    const afterPin = {
-      fromEnd: Math.round(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight),
-      follow: scroller.classList.contains("is-follow-bottom"),
-      newestVisibility: getComputedStyle(rows.at(-1)).contentVisibility,
-      olderVisibility: getComputedStyle(rows.at(-2)).contentVisibility,
-      inlineIntrinsic: body.style.containIntrinsicSize,
-      finalizing: document.querySelectorAll(".is-finalizing").length,
-    };
-    body.style.maxHeight = "";
-    body.style.overflow = "";
-    window.requestAnimationFrame = window.__nativeRequestAnimationFrame;
-    delete window.__runFinalFrame;
-    delete window.__nativeRequestAnimationFrame;
-    return { beforePin, afterPin };
+    return { newest: getComputedStyle(rows.at(-1)).contentVisibility,
+      older: getComputedStyle(rows.at(-2)).contentVisibility,
+      finalizing: document.querySelectorAll(".is-finalizing").length };
   });
-  assert.equal(shrink.beforePin.follow, false, `cleanup dropped follow before the pin: ${JSON.stringify(shrink)}`);
-  assert.ok(shrink.beforePin.fromEnd >= 80,
-    `partial growth leaves the reader above the end, with no input: ${JSON.stringify(shrink)}`);
-  assert.ok(shrink.afterPin.fromEnd <= 1, `no input ends at the end: ${JSON.stringify(shrink)}`);
-  assert.equal(shrink.afterPin.follow, false, `the pin does not restore follow: ${JSON.stringify(shrink)}`);
-  assert.equal(shrink.afterPin.newestVisibility, "visible",
-    `the newest reply stays laid out: ${JSON.stringify(shrink)}`);
-  assert.equal(shrink.afterPin.olderVisibility, "auto",
-    `an older reply may skip paint: ${JSON.stringify(shrink)}`);
-  assert.equal(shrink.afterPin.inlineIntrinsic, "", `no inline intrinsic size: ${JSON.stringify(shrink)}`);
-  assert.equal(shrink.afterPin.finalizing, 0, `no finalizing class: ${JSON.stringify(shrink)}`);
-  seen.shrinkFromEnd = shrink.afterPin.fromEnd;
-
-  stage = "follow resumes during cleanup";
-  const resumeMarker = "End of the reply after a false resume.";
-  await armFinalFrame(resumeMarker);
-  await sendSettledReply("Plan a garden, then return to the end during cleanup", resumeMarker);
-  await frame.waitForFunction(() => typeof window.__runFinalFrame === "function", null, { timeout: 10000 });
-  const resume = await frame.evaluate(async () => {
-    const scroller = document.querySelector("#agent-harness-stream");
-    scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -120, bubbles: true, cancelable: true }));
-    scroller.scrollTop = Math.max(0, scroller.scrollTop - 500);
-    const above = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-    scroller.scrollTop = scroller.scrollHeight;
-    const classAfterReturn = scroller.classList.contains("is-follow-bottom");
-    await window.__runFinalFrame();
-    const classAfterCleanup = scroller.classList.contains("is-follow-bottom");
-    window.requestAnimationFrame = window.__nativeRequestAnimationFrame;
-    scroller.scrollTop = Math.max(0, scroller.scrollTop - 500);
-    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    const jump = document.querySelector("[data-agent-jump-latest]");
-    const fromEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-    delete window.__runFinalFrame;
-    delete window.__nativeRequestAnimationFrame;
-    return {
-      above: Math.round(above),
-      classAfterReturn,
-      classAfterCleanup,
-      fromEnd: Math.round(fromEnd),
-      jumpHidden: !jump || jump.hidden || jump.getBoundingClientRect().height === 0,
-    };
-  });
-  assert.ok(resume.above > 300, `the reader left the end before the false resume: ${JSON.stringify(resume)}`);
-  assert.equal(resume.classAfterReturn, false, `a scroll back to the end does not resume follow: ${JSON.stringify(resume)}`);
-  assert.equal(resume.classAfterCleanup, false, `cleanup clears the follow marker: ${JSON.stringify(resume)}`);
-  assert.equal(resume.jumpHidden, false, `Jump shows when the reader is above the end: ${JSON.stringify(resume)}`);
-  seen.falseResume = { classAfterReturn: resume.classAfterReturn, jumpHidden: resume.jumpHidden };
+  assert.deepEqual(visibility, { newest: "visible", older: "auto", finalizing: 0 }, "the newest row always stays laid out");
 
   assert.deepEqual(errors, []);
   assert.deepEqual(pageErrors, []);
@@ -880,11 +861,16 @@ try {
   console.error(`Assistant reply layout smoke failed at ${stage}`);
   if (frame) {
     const geometry = await frame.evaluate(newestClearance, ".agent-msg-agent").catch(probeError => ({ error: String(probeError) }));
+    console.error(`Scroll trace: ${JSON.stringify(await frame.evaluate(() => window.__scrollTrace))}`);
     console.error(`Failure geometry: ${JSON.stringify({ beforeClamp, atFailure: geometry })}`);
   }
   console.error(JSON.stringify({ errors, pageErrors }, null, 1));
   throw error;
 } finally {
   await browser?.close();
+  if (launchScriptDir) {
+    await unlink(resolve(launchScriptDir, "browser"));
+    await rmdir(launchScriptDir);
+  }
   server.close();
 }

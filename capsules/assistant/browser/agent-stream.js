@@ -41,53 +41,101 @@ import { renderToString as renderMathToString } from "./vendor/katex/katex.mjs";
 let ctx = null;
 /** @type {null | Record<string, Function>} */
 let host = null;
-/* The current turn owns follow through its final presentation. */
+/* A turn owns its visibility listener and streaming marker. */
 let streamFollowCleanup = null;
 
 /* A reader within this distance of the end is at the end. */
 export const READER_AT_END_PX = 8;
-/* A viewport resize clamps scrollTop near the new end, and Chromium can miss
-   that end by a few dozen pixels. A reader scroll is farther from the clamp.
-   A content box that changes by more than this during cleanup is that layout,
-   not a reader scroll sharing the event. */
-const LAYOUT_CLAMP_PX = 96;
-const CONTENT_LAYOUT_PX = 40;
+let transcriptFollow = null;
+const ownTranscriptScrolls = new WeakMap();
 
-let programmaticScrollTop = null;
-let programmaticScrollMark = 0;
-/* Last scrollTop a follow pin wrote, or the scrollTop where follow was turned
-   on. The follow frame skips when the reader has since moved past a layout
-   clamp and is still far from the end. Content growth leaves scrollTop here. */
-let followAnchorTop = null;
-
-/* scrollTop this code is about to write. The scroll event is not the reader.
-   The record lasts one frame, then a later scroll counts. */
+/* Instant writes coalesce to one scroll event. Consume its actual position;
+   a reader movement before delivery takes ownership of that event instead. */
 export function pinTranscriptToEnd(scroller) {
   if (!scroller) return 0;
-  const top = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-  const mark = ++programmaticScrollMark;
-  programmaticScrollTop = top;
-  scroller.scrollTop = top;
-  followAnchorTop = scroller.scrollTop;
-  window.requestAnimationFrame(() => {
-    if (programmaticScrollMark === mark) programmaticScrollTop = null;
-  });
+  const before = scroller.scrollTop;
+  scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
+  if (scroller.scrollTop !== before) ownTranscriptScrolls.set(scroller, scroller.scrollTop);
   return scroller.scrollTop;
 }
 
-function isOwnTranscriptScroll(scroller) {
-  return programmaticScrollTop != null && Math.abs(scroller.scrollTop - programmaticScrollTop) <= 1;
+export function followTranscriptToEnd(scroller) {
+  transcriptFollow?.reset();
+  return pinTranscriptToEnd(scroller);
 }
 
-/* True when scrollTop has left the recorded follow place by more than a
-   layout clamp and is still far from the end. Find does this before its
-   scroll event is delivered. */
-function readerLeftFollowAnchor(scroller) {
-  if (!scroller || followAnchorTop == null) return false;
-  const fromEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-  return Math.abs(scroller.scrollTop - followAnchorTop) > LAYOUT_CLAMP_PX
-    && fromEnd > LAYOUT_CLAMP_PX
-    && !isOwnTranscriptScroll(scroller);
+function observeTranscript(scroller, content) {
+  if (!scroller || !content || transcriptFollow) return;
+  let atEnd = true;
+  let frame = 0;
+  let clientHeight = scroller.clientHeight;
+  let hadScrollRange = scroller.scrollHeight > clientHeight;
+  let lastTop = scroller.scrollTop;
+  // The native anchor owns layout clamps even when shrink and growth coalesce
+  // before a scroll event. It is eligible only while the reader is at the end.
+  const anchor = document.createElement("div");
+  anchor.id = "agent-transcript-end";
+  anchor.ariaHidden = "true";
+  scroller.append(anchor);
+  const showFollow = () => {
+    anchor.style.overflowAnchor = atEnd ? "auto" : "none";
+    scroller.classList.toggle("is-follow-bottom", atEnd && scroller.classList.contains("is-live-streaming"));
+    updateJumpToLatestVisibility();
+  };
+  const readAtEnd = () => {
+    // Native anchoring has applied layout when geometry is read. Reader input
+    // in a rAF can precede its scroll event; check the end contract here too.
+    const client = scroller.clientHeight;
+    // A shorter viewport leaves its exact lost height below the native anchor.
+    const resizeGap = Math.max(0, clientHeight - client);
+    const end = scroller.scrollHeight - client;
+    // Native anchoring starts after the first scrollable layout.
+    const top = scroller.scrollTop;
+    // Resizing the scrollport suppresses native anchoring for that layout.
+    // An unchanged position still belongs to layout, including content growth.
+    const resizeWithoutMovement = client !== clientHeight && top === lastTop;
+    const atLayoutEnd = !hadScrollRange || end - top <= (atEnd ? resizeGap : 0) + READER_AT_END_PX
+      || (atEnd && resizeWithoutMovement);
+    hadScrollRange = end > 0;
+    clientHeight = client;
+    lastTop = top;
+    return atLayoutEnd;
+  };
+  const pinFollowing = () => {
+    const atLayoutEnd = readAtEnd();
+    atEnd = atEnd && atLayoutEnd;
+    if (atEnd) lastTop = pinTranscriptToEnd(scroller);
+    showFollow();
+  };
+  const layout = () => {
+    if (frame) return;
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      pinFollowing();
+    });
+  };
+  transcriptFollow = {
+    get atEnd() { return atEnd; },
+    layout,
+    reset() { atEnd = true; showFollow(); layout(); },
+  };
+  scroller.addEventListener("scroll", () => {
+    const ownTop = ownTranscriptScrolls.get(scroller);
+    ownTranscriptScrolls.delete(scroller);
+    if (ownTop === scroller.scrollTop) { lastTop = scroller.scrollTop; return; }
+    atEnd = readAtEnd();
+    // A coalesced layout scroll must land before its resize record is consumed.
+    // Ordinary reader steps inside the end band keep their native animation.
+    if (atEnd && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop > READER_AT_END_PX) {
+      lastTop = pinTranscriptToEnd(scroller);
+    }
+    showFollow();
+  }, { passive: true });
+  const resize = new ResizeObserver(pinFollowing);
+  resize.observe(scroller);
+  resize.observe(content);
+  new MutationObserver(layout).observe(content, { childList: true, subtree: true, characterData: true, attributes: true });
+  layout();
 }
 
 /** Canonical live-turn buffers. The DOM is never the source of truth. */
@@ -815,6 +863,7 @@ export function ensureJumpToLatest() {
   btn.hidden = true;
   btn.textContent = "Jump to latest";
   viewport.append(btn);
+  observeTranscript(host.streamScrollEl?.(), host.streamEl?.());
   return btn;
 }
 
@@ -825,10 +874,7 @@ export function updateJumpToLatestVisibility() {
     return;
   }
   const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-  /* Offered whenever the reader is meaningfully above the end, except while a
-     reply streams and the room is following it (its own scroll events see
-     the reply a frame ahead of the follow). */
-  btn.hidden = scroller.classList.contains("is-follow-bottom") || distance < 120;
+  btn.hidden = transcriptFollow?.atEnd || distance <= READER_AT_END_PX;
 }
 
 function commitAgentReply(session, answer, thinking = "", { partial = false, quiet = false, progress = null, run = null, turn = null } = {}) {
@@ -1057,6 +1103,7 @@ export function showEmptyState() {
 
 function clearVisibleTranscript() {
   streamFollowCleanup?.();
+  transcriptFollow?.reset();
   host.clearEmptyState?.();
   const column = host.streamEl?.();
   const scroll = host.streamScrollEl?.();
@@ -1067,7 +1114,7 @@ function clearVisibleTranscript() {
      survive column.replaceChildren() and make New chat look like a no-op. */
   if (scroll && scroll !== column) {
     for (const node of [...scroll.children]) {
-      if (node === column || node.id === "agent-harness-stream-column") {
+      if (node === column || node.id === "agent-harness-stream-column" || node.id === "agent-transcript-end") {
         continue;
       }
       node.remove();
@@ -2131,33 +2178,10 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
   let renderAbort = null;
   let lastFlushAt = 0;
   let sawFirstToken = false;
-  let stickToBottom = true;
-  let followReleased = false;
-  let presentationPending = false;
-  const pinToEnd = () => {
-    if (!scroller || !stickToBottom) {
-      return scroller?.scrollTop ?? 0;
-    }
-    if (readerLeftFollowAnchor(scroller)) {
-      setFollowBottom(false);
-      return scroller.scrollTop;
-    }
-    const top = pinTranscriptToEnd(scroller);
-    window.requestAnimationFrame(() => {
-      if (!stickToBottom || generation !== ctx.streamGeneration || !scroller) return;
-      if (readerLeftFollowAnchor(scroller)) {
-        setFollowBottom(false);
-        return;
-      }
-      pinTranscriptToEnd(scroller);
-    });
-    return top;
-  };
   let answerNotifiedAt = 0;
   let hiddenBuffered = false;
   let progressEl = null;
   let revealTimer = 0;
-  let followRaf = 0;
   let longTaskObserver = null;
   let frameWatch = 0;
   let streamingFlush = false;
@@ -2204,7 +2228,6 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       }
       if (!progressEl && next.revealed) {
         progressEl = appendProgressBlock();
-        progressEl?.addEventListener("toggle", () => pauseFollow());
       }
       paintProgressView(progressEl, next, {
         reasoning: ctx.reasoningVisible ? getReasoning() : "",
@@ -2276,133 +2299,8 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     return Boolean(node && (answerRow?.contains(node) || progressEl?.contains(node)));
   };
 
-  const followAfterFlush = () => {
-    if (!stickToBottom || followRaf || selectionInStream()) {
-      return;
-    }
-    followRaf = window.requestAnimationFrame(() => {
-      followRaf = 0;
-      if (!stickToBottom || selectionInStream() || !scroller) {
-        return;
-      }
-      if (readerLeftFollowAnchor(scroller)) {
-        setFollowBottom(false);
-        return;
-      }
-      const t0 = performance.now();
-      /* True bottom: the stream's bottom padding keeps the end above the
-         floating composer; scrollIntoView on an anchor left it underneath. */
-      pinTranscriptToEnd(scroller);
-      const took = performance.now() - t0;
-      perf.followMs += took;
-      const last = perf.traces[perf.traces.length - 1];
-      if (last) {
-        last.followMs = Number(took.toFixed(2));
-      }
-    });
-  };
-
-  const setFollowBottom = (on) => {
-    stickToBottom = on;
-    scroller?.classList.toggle("is-follow-bottom", on);
-    const btn = document.querySelector("[data-agent-jump-latest]");
-    if (btn) {
-      btn.hidden = on;
-    }
-    if (on) {
-      /* Jump to latest and a reader who returned to the end may pin.
-         A pin queued earlier still sees the old anchor and will not. */
-      followAnchorTop = scroller ? scroller.scrollTop : followAnchorTop;
-      followAfterFlush();
-    } else if (followRaf) {
-      window.cancelAnimationFrame(followRaf);
-      followRaf = 0;
-    }
-  };
-
-  const pauseFollow = () => {
-    setFollowBottom(false);
-  };
-
+  const followAfterFlush = () => transcriptFollow?.layout();
   const scroller = host.streamScrollEl?.();
-  const streamRoot = host.streamEl?.();
-  let scrollBox = null;
-  let clientClamp = false;
-  const rememberScrollBox = () => {
-    if (!scroller) return;
-    scrollBox = {
-      top: scroller.scrollTop,
-      height: scroller.scrollHeight,
-      client: scroller.clientHeight,
-    };
-  };
-  const onReaderScroll = () => {
-    if (!scroller || generation !== ctx.streamGeneration) return;
-    const top = scroller.scrollTop;
-    const height = scroller.scrollHeight;
-    const client = scroller.clientHeight;
-    const previous = scrollBox;
-    const layoutChanged = Boolean(previous)
-      && (Math.abs(height - previous.height) > 1 || Math.abs(client - previous.client) > 1);
-    scrollBox = { top, height, client };
-    const fromEnd = height - top - client;
-    if (isOwnTranscriptScroll(scroller)) {
-      followAnchorTop = top;
-      if (fromEnd > 1 && stickToBottom && !followReleased) followAfterFlush();
-      return;
-    }
-    const clientChanged = Boolean(previous) && Math.abs(client - previous.client) > 1;
-    if (layoutChanged) {
-      const topDelta = Math.abs(top - previous.top);
-      const readerMoved = topDelta > LAYOUT_CLAMP_PX && fromEnd > LAYOUT_CLAMP_PX;
-      const contentChanged = Math.abs(height - previous.height) > CONTENT_LAYOUT_PX
-        || Math.abs(client - previous.client) > CONTENT_LAYOUT_PX;
-      if (followReleased) {
-        if (!contentChanged && readerMoved && stickToBottom) setFollowBottom(false);
-        return;
-      }
-      if (readerMoved) {
-        clientClamp = false;
-        if (stickToBottom) setFollowBottom(false);
-        return;
-      }
-      followAnchorTop = top;
-      if (clientChanged) clientClamp = true;
-      if (stickToBottom) followAfterFlush();
-      return;
-    }
-    if (fromEnd > READER_AT_END_PX) {
-      if (clientClamp && fromEnd <= LAYOUT_CLAMP_PX && stickToBottom && !followReleased) {
-        followAnchorTop = top;
-        followAfterFlush();
-        return;
-      }
-      clientClamp = false;
-      if (stickToBottom) setFollowBottom(false);
-      return;
-    }
-    clientClamp = false;
-    followAnchorTop = top;
-    if (!followReleased && !stickToBottom) setFollowBottom(true);
-  };
-  rememberScrollBox();
-  const onSelectStart = (event) => {
-    if (answerRow?.contains(event.target) || progressEl?.contains(event.target)) {
-      pauseFollow();
-    }
-  };
-  const onStreamPointer = (event) => {
-    if (
-      event.target.closest?.("pre, code, .agent-md-code, .agent-thinking, .agent-progress, a, button")
-    ) {
-      pauseFollow();
-    }
-  };
-  const onContextMenu = (event) => {
-    if (answerRow?.contains(event.target) || progressEl?.contains(event.target)) {
-      pauseFollow();
-    }
-  };
   const onVisibility = () => {
     if (!streamTabHidden() && hiddenBuffered && generation === ctx.streamGeneration) {
       hiddenBuffered = false;
@@ -2410,62 +2308,15 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     }
   };
   scroller?.classList.add("is-live-streaming");
-  setFollowBottom(true);
-  scroller?.addEventListener("scroll", onReaderScroll, { passive: true });
-  streamRoot?.addEventListener("selectstart", onSelectStart);
-  streamRoot?.addEventListener("pointerdown", onStreamPointer);
-  streamRoot?.addEventListener("contextmenu", onContextMenu);
+  transcriptFollow?.reset();
   document.addEventListener("visibilitychange", onVisibility);
-  const jumpBtn = document.querySelector("[data-agent-jump-latest]");
-  const onJumpLatest = () => {
-    setFollowBottom(true);
-  };
-  jumpBtn?.addEventListener("click", onJumpLatest);
-  const onResizeFollow = () => {
-    if (stickToBottom) {
+  const releaseFollow = () => {
+    document.removeEventListener("visibilitychange", onVisibility);
+    if (streamFollowCleanup === releaseFollow) streamFollowCleanup = null;
+    if (generation === ctx.streamGeneration) {
+      scroller?.classList.remove("is-live-streaming", "is-follow-bottom");
       followAfterFlush();
     }
-  };
-  window.addEventListener("resize", onResizeFollow, { passive: true });
-
-  const releaseFollow = () => {
-    if (followReleased) return;
-    followReleased = true;
-    if (streamFollowCleanup === releaseFollow) streamFollowCleanup = null;
-    if (followRaf) {
-      window.cancelAnimationFrame(followRaf);
-      followRaf = 0;
-    }
-    const detachReaderControls = () => {
-      scroller?.removeEventListener("scroll", onReaderScroll);
-    };
-    window.removeEventListener("resize", onResizeFollow);
-    jumpBtn?.removeEventListener("click", onJumpLatest);
-    streamRoot?.removeEventListener("selectstart", onSelectStart);
-    streamRoot?.removeEventListener("pointerdown", onStreamPointer);
-    streamRoot?.removeEventListener("contextmenu", onContextMenu);
-    document.removeEventListener("visibilitychange", onVisibility);
-    const ownsTurn = generation === ctx.streamGeneration;
-    if (ownsTurn) {
-      scroller?.classList.remove("is-live-streaming", "is-follow-bottom");
-      updateJumpToLatestVisibility();
-    }
-    const finishPin = () => {
-      if (stickToBottom && scroller && generation === ctx.streamGeneration) {
-        pinTranscriptToEnd(scroller);
-      }
-      detachReaderControls();
-      stickToBottom = false;
-      if (generation === ctx.streamGeneration) {
-        scroller?.classList.remove("is-follow-bottom");
-        updateJumpToLatestVisibility();
-      }
-    };
-    if (!(ownsTurn && stickToBottom && scroller)) {
-      finishPin();
-      return;
-    }
-    window.requestAnimationFrame(finishPin);
   };
   streamFollowCleanup = releaseFollow;
 
@@ -2679,7 +2530,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       tailLen: tail.length,
       frozenBlocks: state.frozenBlocks,
       hidden: streamTabHidden(),
-      follow: stickToBottom,
+      follow: transcriptFollow?.atEnd ?? true,
     });
     adaptQuality();
     } finally {
@@ -3027,7 +2878,6 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
         releaseFollow();
         return;
       }
-      const pinned = stickToBottom && generation === ctx.streamGeneration && !!scroller;
       /* Streaming painted plain text (live tokens never run Markdown, see
          adaptQuality). The finished reply, stopped early or not, now gets the
          render a reopened chat gives it: the whole text through the history
@@ -3040,9 +2890,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       } catch {
         /* keep streamed prefix — canonical survives presentation failure */
       }
-      if (pinned) {
-        pinToEnd();
-      }
+      followAfterFlush();
       updateJumpToLatestVisibility();
       timings.t6 = Date.now();
       setPhase("presentation_done");
@@ -3112,7 +2960,6 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       }
     };
     scheduleIdleWork(finalize);
-    presentationPending = true;
 
     const turnUsage = noteLiveTurnUsage({
       usage: result.usage || null,
@@ -3240,23 +3087,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       window.cancelAnimationFrame(frameWatch);
       frameWatch = 0;
     }
-    if (followRaf) {
-      window.cancelAnimationFrame(followRaf);
-      followRaf = 0;
-    }
-    /* The cancelled frame carried the final flush (and the Stopped note sits
-       below it): land on the true end before the listeners go. */
-    if (stickToBottom && scroller && generation === ctx.streamGeneration) {
-      pinToEnd();
-    }
-    if (generation === ctx.streamGeneration) scroller?.classList.remove("is-live-streaming");
-    if (!presentationPending) {
-      if (stickToBottom && scroller && generation === ctx.streamGeneration) {
-        window.requestAnimationFrame(releaseFollow);
-      } else {
-        releaseFollow();
-      }
-    }
+    releaseFollow();
     if (revealTimer) {
       window.clearTimeout(revealTimer);
     }

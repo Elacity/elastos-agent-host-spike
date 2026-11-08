@@ -76,6 +76,7 @@ import {
   updateJumpToLatestVisibility,
   ensureJumpToLatest,
   pinTranscriptToEnd,
+  followTranscriptToEnd,
   READER_AT_END_PX,
   setStreamStatus,
   openCodeArtifact,
@@ -574,21 +575,9 @@ function clearEmptyState() {
   document.querySelector(".agent-harness-empty")?.remove();
 }
 
-/** Pin the transcript to the end after layout settles (markdown/code can grow). */
+/** Jump and transcript changes reset the shared follow rule. */
 function scrollStreamToEnd() {
-  const scroller = streamScrollEl();
-  if (!scroller) {
-    return;
-  }
-  pinTranscriptToEnd(scroller);
-  /* One follow-up frame is enough for layout settle. The old double-rAF
-     pin-every-call pattern stacked dozens of scroll writes per second during
-     live tokens and helped peg the Brave renderer at ~100% CPU. */
-  if (!turnBusy) {
-    requestAnimationFrame(() => {
-      pinTranscriptToEnd(scroller);
-    });
-  }
+  followTranscriptToEnd(streamScrollEl());
 }
 
 function titleEl() {

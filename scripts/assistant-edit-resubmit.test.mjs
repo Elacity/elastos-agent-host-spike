@@ -372,6 +372,30 @@ test("A long streamed reply ends with its actions above the composer and the tra
   assert.deepEqual(app.errors, []);
 });
 
+test("Edit/resubmit and New chat reset a reader who left the end", async t => {
+  const app = await openAssistant(t, { eventsPage: longReply() });
+  await app.send("Write a long answer", "Last paragraph of the reply.");
+  await presented(app.frame);
+  await settled(app.frame);
+  await app.frame.locator("#agent-harness-stream").evaluate(el => el.scrollBy(0, -400));
+  await settled(app.frame);
+  assert.ok((await scrollState(app.frame)).fromBottom > 300);
+  const form = await app.startEdit(0);
+  await app.resubmit(form, "Write the revised answer", "Last paragraph of the reply.");
+  await presented(app.frame);
+  await settled(app.frame);
+  assert.ok((await scrollState(app.frame)).fromBottom <= 8, "the revised reply follows to the end");
+  await app.frame.locator("#agent-harness-stream").evaluate(el => el.scrollBy(0, -400));
+  await settled(app.frame);
+  await app.frame.locator("#agent-harness-new-chat").click();
+  await app.frame.locator(".agent-harness-empty").waitFor({ state: "visible" });
+  await app.send("Write in the new chat", "Last paragraph of the reply.");
+  await presented(app.frame);
+  await settled(app.frame);
+  assert.ok((await scrollState(app.frame)).fromBottom <= 8, "the new chat follows its reply to the end");
+  assert.deepEqual(app.errors, []);
+});
+
 test("Scrolling up while a reply streams keeps the reader's place and offers Jump to latest", async t => {
   let release;
   const gate = new Promise(done => { release = done; });
