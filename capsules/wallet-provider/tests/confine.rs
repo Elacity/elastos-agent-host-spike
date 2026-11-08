@@ -13065,6 +13065,11 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
         // is a widening.
         let mut expected = wallet_allow.syscalls.clone();
         for syscall in MODEL_RUNTIME_ESSENTIALS {
+            // A call this architecture lacks, such as x86-64's epoll_wait on
+            // aarch64, is never admitted.
+            if seccomp_syscall_number(syscall, allow.audit_arch).is_none() {
+                continue;
+            }
             if !expected.contains(syscall) {
                 expected.push(syscall);
             }
