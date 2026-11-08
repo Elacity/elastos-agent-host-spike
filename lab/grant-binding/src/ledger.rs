@@ -4830,6 +4830,9 @@ fn model_forged_identity_does_not_pick_the_reserve_ceiling() {
             10,
         )
         .expect("agent-1 ceiling is 4");
+    verifier
+        .reserve(&first_call, &first_honest, 1)
+        .expect("an honest reserve stays inside agent-1's four");
     let forged = GuestRequest {
         forged_identity: Some("agent-2".to_owned()),
         ..guest(first_handle)
@@ -4842,14 +4845,14 @@ fn model_forged_identity_does_not_pick_the_reserve_ceiling() {
         refusal,
         ReserveRefuse::OverCeiling {
             ceiling: 4,
-            held: 0,
+            held: 1,
             asked: 40,
         }
     );
     assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
-    assert_eq!(after.held, 0);
+    assert_eq!(after.held, 1);
 }
 
 #[test]
@@ -4885,6 +4888,9 @@ fn model_forged_session_does_not_pick_the_reserve_ceiling() {
             10,
         )
         .expect("agent-1 ceiling is 4");
+    verifier
+        .reserve(&first_call, &first_honest, 1)
+        .expect("an honest reserve stays inside agent-1's four");
     let forged = GuestRequest {
         forged_session: Some("agent-2".to_owned()),
         ..guest(first_handle)
@@ -4897,14 +4903,14 @@ fn model_forged_session_does_not_pick_the_reserve_ceiling() {
         refusal,
         ReserveRefuse::OverCeiling {
             ceiling: 4,
-            held: 0,
+            held: 1,
             asked: 40,
         }
     );
     assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
-    assert_eq!(after.held, 0);
+    assert_eq!(after.held, 1);
 }
 
 #[test]
@@ -4940,6 +4946,9 @@ fn model_forged_instance_does_not_pick_the_reserve_ceiling() {
             10,
         )
         .expect("agent-1 ceiling is 4");
+    verifier
+        .reserve(&first_call, &first_honest, 1)
+        .expect("an honest reserve stays inside agent-1's four");
     let forged = GuestRequest {
         forged_instance: Some(second),
         ..guest(first_handle)
@@ -4952,14 +4961,14 @@ fn model_forged_instance_does_not_pick_the_reserve_ceiling() {
         refusal,
         ReserveRefuse::OverCeiling {
             ceiling: 4,
-            held: 0,
+            held: 1,
             asked: 40,
         }
     );
     assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
-    assert_eq!(after.held, 0);
+    assert_eq!(after.held, 1);
 }
 
 #[test]
@@ -4995,6 +5004,9 @@ fn model_forged_append_does_not_pick_the_reserve_ceiling() {
             10,
         )
         .expect("agent-1 ceiling is 4");
+    verifier
+        .reserve(&first_call, &first_honest, 1)
+        .expect("an honest reserve stays inside agent-1's four");
     let forged = GuestRequest {
         forged_append: true,
         ..guest(first_handle)
@@ -5007,14 +5019,14 @@ fn model_forged_append_does_not_pick_the_reserve_ceiling() {
         refusal,
         ReserveRefuse::OverCeiling {
             ceiling: 4,
-            held: 0,
+            held: 1,
             asked: 40,
         }
     );
     assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
-    assert_eq!(after.held, 0);
+    assert_eq!(after.held, 1);
 }
 
 #[test]
@@ -5050,6 +5062,9 @@ fn model_forged_overwrite_does_not_pick_the_reserve_ceiling() {
             10,
         )
         .expect("agent-1 ceiling is 4");
+    verifier
+        .reserve(&first_call, &first_honest, 1)
+        .expect("an honest reserve stays inside agent-1's four");
     let forged = GuestRequest {
         forged_overwrite: true,
         ..guest(first_handle)
@@ -5062,14 +5077,14 @@ fn model_forged_overwrite_does_not_pick_the_reserve_ceiling() {
         refusal,
         ReserveRefuse::OverCeiling {
             ceiling: 4,
-            held: 0,
+            held: 1,
             asked: 40,
         }
     );
     assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
-    assert_eq!(after.held, 0);
+    assert_eq!(after.held, 1);
 }
 
 #[test]
@@ -5105,6 +5120,9 @@ fn model_forged_child_journal_does_not_pick_the_reserve_ceiling() {
             10,
         )
         .expect("agent-1 ceiling is 4");
+    verifier
+        .reserve(&first_call, &first_honest, 1)
+        .expect("an honest reserve stays inside agent-1's four");
     let forged = GuestRequest {
         forged_child_journal: true,
         ..guest(first_handle)
@@ -5117,14 +5135,14 @@ fn model_forged_child_journal_does_not_pick_the_reserve_ceiling() {
         refusal,
         ReserveRefuse::OverCeiling {
             ceiling: 4,
-            held: 0,
+            held: 1,
             asked: 40,
         }
     );
     assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
-    assert_eq!(after.held, 0);
+    assert_eq!(after.held, 1);
 }
 
 #[test]
@@ -5160,6 +5178,9 @@ fn model_forged_ceiling_does_not_pick_the_reserve_ceiling() {
             10,
         )
         .expect("agent-1 ceiling is 4");
+    verifier
+        .reserve(&first_call, &first_honest, 1)
+        .expect("an honest reserve stays inside agent-1's four");
     let forged = GuestRequest {
         forged_ceiling: 100,
         ..guest(first_handle)
@@ -5172,14 +5193,14 @@ fn model_forged_ceiling_does_not_pick_the_reserve_ceiling() {
         refusal,
         ReserveRefuse::OverCeiling {
             ceiling: 4,
-            held: 0,
+            held: 1,
             asked: 40,
         }
     );
     assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
-    assert_eq!(after.held, 0);
+    assert_eq!(after.held, 1);
 }
 
 #[test]
@@ -5215,6 +5236,9 @@ fn model_reported_usage_does_not_pick_the_reserve_ceiling() {
             10,
         )
         .expect("agent-1 ceiling is 4");
+    verifier
+        .reserve(&first_call, &first_honest, 1)
+        .expect("an honest reserve stays inside agent-1's four");
     let forged = GuestRequest {
         reported_usage: 1,
         ..guest(first_handle)
@@ -5227,14 +5251,14 @@ fn model_reported_usage_does_not_pick_the_reserve_ceiling() {
         refusal,
         ReserveRefuse::OverCeiling {
             ceiling: 4,
-            held: 0,
+            held: 1,
             asked: 40,
         }
     );
     assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
-    assert_eq!(after.held, 0);
+    assert_eq!(after.held, 1);
 }
 
 /// A hold on an ended grant keeps that grant's own ceiling key, so it no
