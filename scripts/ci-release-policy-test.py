@@ -195,7 +195,7 @@ CASES = [
     ("workflow_dispatch", "refs/tags/v0.7.1", "tag", "main", False),
 ]
 # Pushes to these branches run every trusted proof.
-SAVING_REFS = {"refs/heads/develop", "refs/heads/main"}
+SAVING_REFS = {"refs/heads/spike/agent-host", "refs/heads/develop", "refs/heads/main"}
 # The only (event, ref) runs that write shared caches: trusted pushes to the default
 # branch spike/agent-host, and to develop if it exists. Every other run restores only.
 CACHE_WRITERS = {("push", "refs/heads/spike/agent-host"), ("push", "refs/heads/develop")}
@@ -858,7 +858,8 @@ class ReleasePolicyTests(unittest.TestCase):
             job_level_if("custody-harness-smoke"),
             "(github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || "
             "github.event_name == 'merge_group' || (github.event_name == 'push' && "
-            "(github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'))) && " + SPARK_SKIP)
+            "(github.ref == 'refs/heads/spike/agent-host' || github.ref == 'refs/heads/develop' || "
+            "github.ref == 'refs/heads/main'))) && " + SPARK_SKIP)
         self.assertEqual(
             job_level_if("release-upstream-assets"),
             "(needs.release-upstream-paths.outputs.run == 'true') && " + SPARK_SKIP)

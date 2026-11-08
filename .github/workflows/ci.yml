@@ -573,15 +573,15 @@ jobs:
   # deploy/custody-host 3-node compose harness -- scripts/custody-harness-ci-smoke.sh
   # owns all the logic (throwaway client identity, throwaway compose
   # project, receipt assertions, full teardown); this job is thin glue over
-  # it. Trusted develop/main pushes warm the shared image cache. Runs also for
-  # every merge group, workflow_dispatch, and PRs that change an input the
-  # smoke builds or calls.
+  # it. Trusted spike/agent-host, develop and main pushes run it; the first two
+  # save its Rust cache for PRs. Runs also for every merge group,
+  # workflow_dispatch, and PRs that change an input the smoke builds or calls.
   custody-harness-smoke:
     name: custody-harness-smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     needs: source-gate
-    if: (github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'push' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'))) && !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))
+    if: (github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'push' && (github.ref == 'refs/heads/spike/agent-host' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'))) && !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))
     # The top-level `permissions: contents: read` above zeroes every other
     # scope for every job; dorny/paths-filter resolves a pull_request's
     # changed files via the GitHub API (this job's checkout is fetch-depth 1,
