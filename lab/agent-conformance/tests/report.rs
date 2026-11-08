@@ -1193,6 +1193,31 @@ fn review_failures_name_each_unbound_review() {
     );
     let rejected = [review("codex", "reject", &git.commit)];
     assert_eq!(fails(Some(&rejected), &git), ["review did not pass: codex"]);
+    // Exact match only: a prefix, another case, or a verdict that merely
+    // contains "pass" does not bind.
+    let lettered = GitIdentity {
+        commit: "ab".repeat(20),
+        ..git.clone()
+    };
+    let near = [
+        review("prefix", "pass", &lettered.commit[..12]),
+        review("upper", "pass", &lettered.commit.to_uppercase()),
+    ];
+    assert_eq!(
+        fails(Some(&near), &lettered),
+        [
+            "review names another commit: prefix",
+            "review names another commit: upper"
+        ]
+    );
+    let worded = [
+        review("codex", "did not pass", &git.commit),
+        review("claude", "PASS", &git.commit),
+    ];
+    assert_eq!(
+        fails(Some(&worded), &git),
+        ["review did not pass: claude", "review did not pass: codex"]
+    );
     let passed = [review("codex", "pass", &git.commit)];
     let dirty = GitIdentity {
         dirty: true,
@@ -1304,5 +1329,14 @@ fn report_cli_reads_reviews_and_refuses_a_malformed_file() {
         "versions receipt failure: could not read reviews\n"
     );
     assert!(!home.root().join("malformed.json").exists());
+
+    fs::remove_file(&reviews_path).unwrap();
+    let missing = run("missing.json");
+    assert_eq!(missing.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(missing.stderr).unwrap(),
+        "versions receipt failure: could not read reviews\n"
+    );
+    assert!(!home.root().join("missing.json").exists());
     home.finish().unwrap();
 }

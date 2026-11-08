@@ -261,7 +261,10 @@ retains its build output; the command cannot issue a receipt without its writer.
 `review_binding (A14)` passes only when `AGENT_CONFORMANCE_REVIEWS` names a
 JSON list of `{reviewer, verdict, commit}` entries, at least one, each with
 verdict `pass` and the exact commit the receipt's `repository` names, and the
-tree is clean. Reviews live outside the commit they read. The receipt records
+tree is clean when the report is written. That is checked after the suite
+runs, so the row does not show that the results came from that tree. Reviews
+live outside the commit they read: keep the file outside the repository, since
+an untracked file inside it makes the tree dirty. The receipt records
 `reviews`, `review_status` (`bound` or `unbound`) and `review_failures`. An
 unreadable or malformed reviews file fails the command; an unbound review
 leaves this row FAIL without changing `command_success`, so CI still reports

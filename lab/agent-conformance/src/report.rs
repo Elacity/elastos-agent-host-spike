@@ -461,7 +461,9 @@ impl GitIdentity {
 }
 
 /// One review of the tested candidate. It binds only when it passed and names
-/// the exact clean commit this run read; any other review leaves A14 unbound.
+/// the exact commit checked out, on a clean tree, when the report is written;
+/// any other review leaves A14 unbound. It does not show that the suite's
+/// results came from that tree.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Review {
