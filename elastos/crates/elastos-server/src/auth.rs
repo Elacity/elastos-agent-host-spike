@@ -7224,6 +7224,16 @@ impl ResolvedPrincipalRoot {
             .map_err(|err| anyhow!(err))
     }
 
+    /// The device arm for a launch token whose signature already verified
+    /// against `did`, the Runtime's trusted signer. A subordinate Runtime
+    /// trusts its parent's DID without holding that device key, so this takes
+    /// the device root directly and MUST NOT call `resolve`.
+    pub(crate) fn verified_device_signer(did: &str) -> Self {
+        Self(RootArm::Local(principal_localhost_root(
+            PrincipalId::device_did(did).as_str(),
+        )))
+    }
+
     /// Test-only root for a fixture principal (A5-P2a-ii-0b's two
     /// `from_verified_context` test constructors). Production's only
     /// constructor is `resolve`.
