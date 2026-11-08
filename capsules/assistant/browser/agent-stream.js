@@ -2415,10 +2415,14 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       window.cancelAnimationFrame(followRaf);
       followRaf = 0;
     }
+    /* Scroll, wheel and keys stay through the last pin. A move in that frame
+       cancels it, and the pin checks the reader stayed at the release position. */
+    const detachReaderControls = () => {
+      document.removeEventListener("keydown", onKeyNav);
+      scroller?.removeEventListener("scroll", onUserScroll);
+      scroller?.removeEventListener("wheel", onUserScrollUp);
+    };
     window.removeEventListener("resize", onResizeFollow);
-    document.removeEventListener("keydown", onKeyNav);
-    scroller?.removeEventListener("scroll", onUserScroll);
-    scroller?.removeEventListener("wheel", onUserScrollUp);
     scroller?.removeEventListener("pointerdown", onReaderHold);
     scroller?.removeEventListener("touchstart", onReaderHold);
     for (const type of ["pointerup", "pointercancel", "touchend", "touchcancel"]) {
@@ -2434,15 +2438,18 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       updateJumpToLatestVisibility();
     }
     if (!following) {
+      detachReaderControls();
       stickToBottom = false;
       endScrollTop = null;
       return;
     }
+    const pinTop = scroller.scrollTop;
     window.requestAnimationFrame(() => {
-      if (stickToBottom && scroller && generation === ctx.streamGeneration) {
+      if (stickToBottom && scroller && generation === ctx.streamGeneration && stayedAtPin(pinTop)) {
         scroller.scrollTop = scroller.scrollHeight;
         noteScrollPosition();
       }
+      detachReaderControls();
       stickToBottom = false;
       endScrollTop = null;
       if (generation === ctx.streamGeneration) updateJumpToLatestVisibility();

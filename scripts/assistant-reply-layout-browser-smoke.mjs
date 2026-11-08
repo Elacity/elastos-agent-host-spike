@@ -7,6 +7,8 @@
 // newest reply sit fully above the composer, not behind it. A reader at the
 // end who sends a message follows its long reply to the end, while it
 // streams and once it settles, without being offered Jump to latest.
+// A reader who scrolls up after follow cleanup starts stays at that position.
+// Jump to latest, while a reply finishes, keeps the end in view.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
@@ -470,6 +472,115 @@ try {
     await frame.evaluate(() => { document.querySelector("#agent-harness-stream").scrollTop -= 600; });
     for (let i = 0; i < 2; i += 1) await pushChunk();
   });
+
+  // releaseFollow drops is-follow-bottom, then queues the last pin. Hold that
+  // frame, scroll up, and let the frame run. The reader stays put.
+  stage = "a reader who scrolls up after follow cleanup begins";
+  await frame.evaluate(() => {
+    const native = window.requestAnimationFrame.bind(window);
+    window.__nativeRequestAnimationFrame = native;
+    window.requestAnimationFrame = (callback) => {
+      const scroller = document.querySelector("#agent-harness-stream");
+      const newest = [...document.querySelectorAll(".agent-msg-agent")].at(-1);
+      if (!window.__runFinalFrame
+          && newest?.textContent.includes("End of the reply after cleanup.")
+          && newest.dataset.streamPhase === "presentation_done"
+          && scroller
+          && !scroller.classList.contains("is-follow-bottom")) {
+        window.__runFinalFrame = () => new Promise((resolve) => {
+          native((time) => {
+            callback(time);
+            resolve();
+          });
+        });
+        return 0;
+      }
+      return native(callback);
+    };
+  });
+  const cleanupRunId = `run-sent-${fixture.runs.size + 1}`;
+  const cleanupMarker = "End of the reply after cleanup.";
+  await input.fill("Plan a garden, then scroll during cleanup");
+  await input.press("Enter");
+  for (const deadline = Date.now() + 10000; !fixture.runs.has(cleanupRunId);) {
+    assert.ok(Date.now() < deadline, "cleanup scroll: the message started a run");
+    await page.waitForTimeout(20);
+  }
+  const cleanupRun = fixture.runs.get(cleanupRunId);
+  const cleanupChunks = `${gardenReply}\n${cleanupMarker}\n`.match(/[\s\S]{1,300}/g);
+  for (const [index, text] of cleanupChunks.entries()) {
+    cleanupRun.push({ sequence: index + 1, kind: "text_delta", data: { text } });
+  }
+  cleanupRun.push({ sequence: cleanupChunks.length + 1, kind: "completed", data: {} });
+  await frame.waitForFunction(() => typeof window.__runFinalFrame === "function", null, { timeout: 10000 });
+  const raced = await frame.evaluate(async () => {
+    const scroller = document.querySelector("#agent-harness-stream");
+    const atRelease = Math.round(scroller.scrollTop);
+    scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -120, bubbles: true, cancelable: true }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    scroller.scrollTop = Math.max(0, scroller.scrollTop - 400);
+    const afterReader = Math.round(scroller.scrollTop);
+    await window.__runFinalFrame();
+    const afterFinalFrame = Math.round(scroller.scrollTop);
+    window.requestAnimationFrame = window.__nativeRequestAnimationFrame;
+    delete window.__runFinalFrame;
+    delete window.__nativeRequestAnimationFrame;
+    return { atRelease, afterReader, afterFinalFrame, pulledDownPx: afterFinalFrame - afterReader };
+  });
+  assert.ok(raced.atRelease >= 500, `the reader was at the end when cleanup began: ${JSON.stringify(raced)}`);
+  assert.ok(raced.afterReader <= raced.atRelease - 300, `the reader scrolled up before the last pin: ${JSON.stringify(raced)}`);
+  assert.ok(Math.abs(raced.pulledDownPx) <= 2, `the last pin left the reader where they scrolled: ${JSON.stringify(raced)}`);
+  const parked = await scrollState();
+  assert.ok(parked.fromEnd > 300 && parked.jump,
+    `Jump to latest is offered and the reader stays above the end: ${JSON.stringify({ raced, parked })}`);
+  seen.cleanupScroll = raced;
+
+  stage = "Jump to latest while a reply finishes";
+  const jumpRunId = `run-sent-${fixture.runs.size + 1}`;
+  const jumpMarker = "End of the reply after Jump to latest.";
+  await input.fill("Plan a garden, then jump");
+  await input.press("Enter");
+  for (const deadline = Date.now() + 10000; !fixture.runs.has(jumpRunId);) {
+    assert.ok(Date.now() < deadline, "jump: the message started a run");
+    await page.waitForTimeout(20);
+  }
+  const jumpRun = fixture.runs.get(jumpRunId);
+  const jumpChunks = `${gardenReply}\n${jumpMarker}\n`.match(/[\s\S]{1,300}/g);
+  for (const [index, text] of jumpChunks.entries()) {
+    jumpRun.push({ sequence: index + 1, kind: "text_delta", data: { text } });
+  }
+  await room.locator(".agent-msg-agent.is-streaming").filter({ hasText: jumpMarker }).waitFor({ timeout: 10000 });
+  await frame.evaluate(() => { document.querySelector("#agent-harness-stream").scrollTop -= 600; });
+  await frame.waitForFunction(() => {
+    const jump = document.querySelector("[data-agent-jump-latest]");
+    const scroller = document.querySelector("#agent-harness-stream");
+    return jump && !jump.hidden && jump.getBoundingClientRect().height > 0
+      && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight > 300;
+  }, null, { timeout: 5000 });
+  await frame.evaluate(() => {
+    const schedule = window.requestIdleCallback.bind(window);
+    window.requestIdleCallback = (callback, options) => {
+      window.requestIdleCallback = schedule;
+      window.__finishReply = () => schedule(callback, options);
+      return 0;
+    };
+  });
+  jumpRun.push({ sequence: jumpChunks.length + 1, kind: "completed", data: {} });
+  await frame.waitForFunction(() => typeof window.__finishReply === "function", null, { timeout: 10000 });
+  const jumpPhase = await frame.evaluate(() => [...document.querySelectorAll(".agent-msg-agent")].at(-1)?.dataset.streamPhase);
+  assert.equal(jumpPhase, "finalizing", `Jump to latest is clicked while the reply finishes, phase ${jumpPhase}`);
+  // The Shelf covers the pill, so a pointer click lands on the Shelf.
+  // The button's own click is the one Jump to latest handles.
+  await frame.evaluate(() => document.querySelector("[data-agent-jump-latest]").click());
+  await frame.evaluate(() => { window.__finishReply(); delete window.__finishReply; });
+  await room.locator('.agent-msg-agent[data-stream-phase="presentation_done"]').filter({ hasText: jumpMarker })
+    .waitFor({ state: "attached", timeout: 10000 });
+  await settled();
+  await atEnd();
+  const jumped = await scrollState();
+  assert.ok(jumped.fromEnd <= 8, `Jump to latest keeps the end in view: ${JSON.stringify(jumped)}`);
+  assert.equal(jumped.jump, false, `a reader at the end is not offered Jump to latest: ${JSON.stringify(jumped)}`);
+  seen.jumpDuringFinish = jumped.fromEnd;
 
   assert.deepEqual(errors, []);
   assert.deepEqual(pageErrors, []);
