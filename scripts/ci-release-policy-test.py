@@ -3,6 +3,7 @@
 import base64
 import os
 import hashlib
+import importlib.util
 import io
 import json
 from pathlib import Path
@@ -19,6 +20,9 @@ import time
 import unittest
 from unittest import mock
 
+git_env_spec = importlib.util.spec_from_file_location("fixture_git_env", Path(__file__).with_name("fixture-git-env.py"))
+fixture_git = importlib.util.module_from_spec(git_env_spec)
+git_env_spec.loader.exec_module(fixture_git)
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml"
 SOURCE = WORKFLOW.read_text()
@@ -553,8 +557,8 @@ def validate_dependency_audit(source):
             (root / lock).write_text("")
         (root / "untracked").mkdir()
         (root / "untracked/Cargo.lock").write_text("")
-        subprocess.run(["git", "init", "-q", str(root)], check=True)
-        subprocess.run(["git", "-C", str(root), "add", *locks], check=True)
+        subprocess.run(["git", "init", "-q", str(root)], check=True, env=fixture_git.fixture_git_env(directory))
+        subprocess.run(["git", "-C", str(root), "add", *locks], check=True, env=fixture_git.fixture_git_env(directory))
         tools = Path(directory) / "bin"
         tools.mkdir()
         (tools / "cargo-audit").write_text(

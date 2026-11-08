@@ -4,6 +4,7 @@ import bz2
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tarfile
@@ -14,6 +15,9 @@ from unittest.mock import patch
 spec = importlib.util.spec_from_file_location("builder", Path(__file__).with_name("media-tools-build.py"))
 builder = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(builder)
+git_env_spec = importlib.util.spec_from_file_location("fixture_git_env", Path(__file__).with_name("fixture-git-env.py"))
+fixture_git = importlib.util.module_from_spec(git_env_spec)
+git_env_spec.loader.exec_module(fixture_git)
 
 
 class SourcePinTest(unittest.TestCase):
@@ -42,7 +46,22 @@ class SourcePinTest(unittest.TestCase):
             self.addCleanup(pin.stop)
 
     def git(self, *args):
-        return subprocess.check_output(["git", "-C", str(self.repo), *args])
+        return subprocess.check_output(["git", "-C", str(self.repo), *args], env=fixture_git.fixture_git_env(self.root))
+
+    def test_fixture_commit_ignores_the_callers_git_dir(self):
+        """A hook or ``rebase --exec`` exports GIT_DIR. The fixture commit stays in its own repo."""
+        with tempfile.TemporaryDirectory() as scratch:
+            victim, pointed = fixture_git.victim_repo(scratch, untracked=("COPYING", "configure"))
+            before = fixture_git.repo_state(victim)
+            with patch.dict(os.environ, pointed):
+                try:
+                    self.setUp()  # a second fixture, built while GIT_DIR names the victim
+                except subprocess.CalledProcessError as error:  # judged below, after the victim
+                    self.commit = f"no fixture commit: {error}"
+            self.assertEqual(fixture_git.repo_state(victim), before, "a fixture git command wrote to GIT_DIR's repo")
+            log = subprocess.run(["git", "-C", str(self.repo), "log", "--format=%H %s"], capture_output=True,
+                                 text=True, env=fixture_git.fixture_git_env(self.root)).stdout
+            self.assertEqual(log, f"{self.commit} fixture\n", "the fixture repo lacks its one commit")
 
     def fetch(self, digest=None):
         builder.fetch_source(self.archive, self.repo.as_uri(), digest or self.digest)
