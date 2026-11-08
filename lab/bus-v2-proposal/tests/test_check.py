@@ -30,7 +30,7 @@ IDENTITY = {
 PROPOSAL_SKELETON = (
     "## 0. What this proposes\n"
     "\n"
-    "This section states each proposal once.\n"
+    "This section states each core-call proposal once; section 7 holds its evidence.\n"
     "\n"
     "### A3. Agent identity\n"
     "propose: fixture agent principal. Name: agent principal. Inputs: fixture "
@@ -62,6 +62,7 @@ PROPOSAL_SKELETON = (
     "inputs. Refusal: fixture refusal. Owner: fixture owner. B2 stays open.\n"
     "Evidence: section 7, B2.\n"
     "\n"
+    "## 1. Agent identity\n\n"
 )
 
 # The expected core calls and groups, stated literally so that removing one
@@ -3758,10 +3759,44 @@ class CitationCheckTests(unittest.TestCase):
                 with self.subTest(fence=fence, suffix=suffix):
                     body = section.replace("### B2. Fixture group",
                         fence + "\n" + fence + suffix + "\n### B2. Fixture group")
-                    expected = [] if suffix in ("", " \t") else [
+                    expected = [
+                        "refuse: unsupported section 0 line at line %d: %r" % (i + 20, row)
+                        for i, row in enumerate((fence, fence + suffix))
+                    ] if suffix in ("", " \t") else [
                         "refuse: propose line at line 23 is in a fenced code block",
                     ] + missing
                     self.assertEqual(check.proposal_refusals(body), expected)
+
+    def test_section_0_allowlist(self):
+        section = self._section_0()
+        self.assertEqual(check.proposal_refusals(section), [])
+        self.assertEqual(check.proposal_refusals(check.load_draft(check.worktree_root())), [])
+        line = self._propose_line("B2", "typed operation").rstrip("\n")
+        b2 = section[section.index("### B2."):]
+        single = '[x]: /u "' + line + '"'
+        multi = '[x]: /u "'
+        cases = [
+            ("link title", b2.replace(line, "\n" + single), [single]),
+            ("multiline link title", b2.replace(line, "\n" + multi + "\n" + line + '"'), [multi]),
+            ("pre", "<pre>\n" + b2 + "</pre>\n", ["<pre>", "</pre>"]),
+            ("details", "<details>\n" + b2 + "</details>\n", ["<details>", "</details>"]),
+            ("setext", b2.replace(line, line + "\n---"), ["---"]),
+            ("quote", b2.replace(line, "> " + line), ["> " + line]),
+            ("heading proposal", b2.replace(line, "### B2. " + line), ["### B2. " + line]),
+        ]
+        for extra in ("<span>inline</span>", "- item", "1. item", "| a | b |", "    code",
+                      "```\n```", "<!-- comment -->", "#### deeper", "ordinary prose"):
+            cases.append((extra, b2 + extra + "\n", extra.split("\n")))
+        for name, replacement, rejected in cases:
+            with self.subTest(form=name):
+                body = section.replace(b2, replacement)
+                self.assertEqual(check.proposal_refusals(body), [
+                    "refuse: unsupported section 0 line at line %d: %r" % (i + 1, row)
+                    for i, row in enumerate(body.split("\n")) if row in rejected
+                ])
+                # The same new grammar has no effect beyond section 0.
+                outside = section + "## 1. Agent identity\n" + replacement.replace("propose:", "call:")
+                self.assertEqual(check.proposal_refusals(outside), [])
 
     def test_initial_bom_fence_hides_section_0(self):
         root = self._temp_root()
@@ -3782,21 +3817,28 @@ class CitationCheckTests(unittest.TestCase):
         ])
         draft.write_text("\n\ufeff" + body, encoding="utf-8")
         self.assertEqual(check.load_draft(root), "\n\ufeff" + body)
-        self.assertEqual(check.proposal_refusals(check.load_draft(root)), [])
+        self.assertEqual(check.proposal_refusals(check.load_draft(root)), [
+            "refuse: unsupported section 0 line at line %d: %r" % (i + 26, row)
+            for i, row in enumerate(("```", "## 1. Agent identity", ""))
+        ])
 
     def test_proposal_indentation_counts_only_ascii_whitespace(self):
         line = self._propose_line("B2", "typed operation")
         for prefix in ("\u00a0" * 4, "\u3000" * 4, "\f" * 4):
             with self.subTest(prefix=prefix):
                 body = self._section_0().replace(line, prefix + "Text. " + line)
-                self.assertEqual(check.proposal_refusals(body), [])
+                self.assertEqual(check.proposal_refusals(body), [
+                    "refuse: unsupported section 0 line at line 21: %r"
+                    % (prefix + "Text. " + line.rstrip("\n")),
+                ])
 
-    def test_non_ascii_whitespace_in_ordinary_prose_is_unchanged(self):
+    def test_non_ascii_whitespace_in_prose_outside_section_0_is_unchanged(self):
         for prose in ("\u00a0ordinary prose", " \t\u3000prose with ``` and #",
                       "\x1f", "\u00a0`inline code`", "\u3000~~strike~~"):
             with self.subTest(prose=prose):
                 self.assertEqual(check.classify_lines([prose]), [("text", None, prose)])
-                self.assertEqual(check.proposal_refusals(self._section_0() + prose), [])
+                self.assertEqual(check.proposal_refusals(
+                    self._section_0() + "## 1. Agent identity\n" + prose), [])
 
     def test_ascii_block_indentation_is_unchanged(self):
         for indent in ("", " ", "   ", "    ", "\t", " \t"):
@@ -3913,8 +3955,7 @@ class CitationCheckTests(unittest.TestCase):
         )
 
     def test_fenced_heading_does_not_close_section_0(self):
-        # A heading inside a fence states no heading, so section 0 runs on and
-        # the complete proposal below it passes.
+        # A fenced heading leaves section 0 open; its lines fail the grammar.
         second = (
             "propose: a second spelling. Name: another call. Inputs: fixture "
             "inputs. Refusal: fixture refusal. Owner: fixture owner. B2 stays "
@@ -3924,7 +3965,10 @@ class CitationCheckTests(unittest.TestCase):
             self._section_0()
             + "```\n## 1. Agent identity\n```\n\n" + second + "\n"
         )
-        self.assertEqual(check.problems(self._bare_draft(body)), [])
+        self.assertEqual(check.problems(self._bare_draft(body)), [
+            "refuse: unsupported section 0 line at line %d: %r" % (i + 25, row)
+            for i, row in enumerate(("```", "## 1. Agent identity", "```"))
+        ])
 
     def test_live_draft_passes(self):
         root = check.worktree_root()
@@ -3972,7 +4016,7 @@ class CitationCheckTests(unittest.TestCase):
                 self.assertEqual(check.classify_lines([line])[0][0], role)
         self.assertEqual(check.problems(self._bare_draft(
             self._section_0() + "pro<!-- hidden -->pose: rubbish\n"
-        )), [])
+        )), ["refuse: unsupported section 0 line at line 25: 'pro<!-- hidden -->pose: rubbish'"])
 
     def test_heading_proposal_in_live_draft_is_refused(self):
         root = check.worktree_root()

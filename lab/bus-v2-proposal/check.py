@@ -1202,6 +1202,26 @@ def _empty_fields(line):
     return [part for part in PROPOSE_PARTS if part in empty]
 
 
+def _section_0_line_refusals(lines, records, start, end):
+    """Accept blank lines, ATX section/group headings, the introduction,
+    left-margin proposals and evidence pointers. There are no continuations.
+    Raw lines own admission; HTML and hidden lines are outside this grammar.
+    """
+    allowed = re.compile(
+        r"(?:[ \t]*| {0,3}##[ \t]+0\. What this proposes[ \t]*"
+        r"| {0,3}###[ \t]+(?:A3|A4|A5|A7|B2)\. [^<]*"
+        r"|This section states each core-call proposal once; section 7 holds its evidence\."
+        r"|propose:[^<]*|Evidence: section 7, (?:A3|A4|A5|A7|B2)\.)"
+    )
+    return [
+        "refuse: unsupported section 0 line at line %d: %r" % (index + 1, lines[index])
+        for index in range(start, end)
+        if records[index][0] in (FENCE, COMMENT)
+        or allowed.fullmatch(lines[index]) is None
+        or (PROPOSE_LINE.search(lines[index]) and not lines[index].startswith(PROPOSE))
+    ]
+
+
 def proposal_refusals(text):
     """Return one refusal per missing section, incomplete call or stray proposal.
 
@@ -1293,7 +1313,8 @@ def proposal_refusals(text):
                 + " under "
                 + group
             )
-    return refusals
+    # Preserve the established named refusals before reporting grammar errors.
+    return refusals or _section_0_line_refusals(lines, records, start, end)
 
 
 def _past_end(number, rel, count):
