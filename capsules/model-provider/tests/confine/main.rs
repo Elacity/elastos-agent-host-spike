@@ -40,6 +40,16 @@
 #[path = "../../src/test_support.rs"]
 mod test_support;
 
+// The one lab profile generator, included rather than copied: the did, wallet
+// and model test crates all name this one file (P10). This target uses the
+// generator, its writer and the head; the other shared items stay available
+// for the declared-rights checks this crate owns.
+#[allow(dead_code)]
+#[path = "../../../wallet-provider/tests/common/profile_generator.rs"]
+mod profile_generator;
+
+use profile_generator::generate_profile;
+
 use elastos_model_contract::{
     model_input_hash, model_run_id, RuntimeAccessBinding, RuntimeCreateBinding,
     RUNTIME_ACCESS_BINDING_SCHEMA, RUNTIME_CREATE_BINDING_SCHEMA, TEXT_INPUT_V1_SCHEMA,
@@ -1438,8 +1448,9 @@ fn model_unknown_op_is_refused_under_profile() {
     });
     let fixture: Value = serde_json::from_str(&fixture_text)
         .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
-    let generated = standin_profile(&fixture).expect("declared rights build a profile");
     let profile = storage.base.join("standin.sb");
+    let generated =
+        generate_profile("model-provider", &fixture).expect("declared rights build a profile");
     write_standin_profile(&profile, &generated);
     let launched = fs::read_to_string(&profile).unwrap_or_else(|err| {
         panic!("stand-in: the file passed to Launch::Profile must be readable: {err}")
@@ -1581,9 +1592,10 @@ fn model_outside_write_denied() {
                 let declared: Value = serde_json::from_str(&fixture_text).unwrap_or_else(|err| {
                     panic!("{case}: the declared-rights fixture must be JSON: {err}")
                 });
-                let generated = standin_profile(&declared).unwrap_or_else(|err| {
-                    panic!("{case}: declared rights must build a profile: {err}")
-                });
+                let generated =
+                    generate_profile("model-provider", &declared).unwrap_or_else(|err| {
+                        panic!("{case}: declared rights must build a profile: {err}")
+                    });
                 let profile = fixture.storage.base.join("standin.sb");
                 write_standin_profile(&profile, &generated);
                 let binary = resolved(Path::new(PROVIDER_BINARY));
@@ -1789,8 +1801,9 @@ fn model_status_offers_and_shutdown_leave_storage_unchanged() {
     });
     let fixture: Value = serde_json::from_str(&fixture_text)
         .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
-    let generated = standin_profile(&fixture).expect("declared rights build a profile");
     let profile = storage.base.join("standin.sb");
+    let generated =
+        generate_profile("model-provider", &fixture).expect("declared rights build a profile");
     write_standin_profile(&profile, &generated);
     let launched = fs::read_to_string(&profile).unwrap_or_else(|err| {
         panic!("generated: the file passed to Launch::Profile must be readable: {err}")
@@ -2008,8 +2021,9 @@ fn model_outside_read_denied() {
     });
     let fixture: Value = serde_json::from_str(&fixture_text)
         .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
-    let generated = standin_profile(&fixture).expect("declared rights build a profile");
     let standin = storage.base.join("standin.sb");
+    let generated =
+        generate_profile("model-provider", &fixture).expect("declared rights build a profile");
     write_standin_profile(&standin, &generated);
     let binary = resolved(Path::new(PROVIDER_BINARY));
     let bindings = canonical_bindings(&storage, &binary);
@@ -2196,8 +2210,9 @@ fn model_terminal_run_page_and_cancel_read_under_profile() {
     });
     let fixture: Value = serde_json::from_str(&fixture_text)
         .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
-    let generated = standin_profile(&fixture).expect("declared rights build a profile");
     let profile = storage.base.join("standin.sb");
+    let generated =
+        generate_profile("model-provider", &fixture).expect("declared rights build a profile");
     write_standin_profile(&profile, &generated);
     let launched = fs::read_to_string(&profile).unwrap_or_else(|err| {
         panic!("generated: the file passed to Launch::Profile must be readable: {err}")
@@ -2342,8 +2357,9 @@ fn model_outside_create_reports_access_denied() {
     });
     let fixture: Value = serde_json::from_str(&fixture_text)
         .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
-    let generated = standin_profile(&fixture).expect("declared rights build a profile");
     let standin = redirect.storage.base.join("standin.sb");
+    let generated =
+        generate_profile("model-provider", &fixture).expect("declared rights build a profile");
     write_standin_profile(&standin, &generated);
     let profile = FixtureProfile::write(
         &standin,
@@ -3108,7 +3124,8 @@ fn generated_profile_refuses_an_unbound_copy() {
     });
     let declared: Value = serde_json::from_str(&fixture_text)
         .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
-    let generated = standin_profile(&declared).expect("declared rights build a profile");
+    let generated =
+        generate_profile("model-provider", &declared).expect("declared rights build a profile");
     let written = fixture.storage.base.join("standin.sb");
     write_standin_profile(&written, &generated);
     let written_text = fs::read_to_string(&written)
@@ -3213,8 +3230,9 @@ fn generated_profile_bound_copy_serves() {
     });
     let fixture: Value = serde_json::from_str(&fixture_text)
         .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
-    let generated = standin_profile(&fixture).expect("declared rights build a profile");
     let written = stored.storage.base.join("standin.sb");
+    let generated =
+        generate_profile("model-provider", &fixture).expect("declared rights build a profile");
     write_standin_profile(&written, &generated);
     let written_text = fs::read_to_string(&written)
         .unwrap_or_else(|err| panic!("the stand-in file must be readable: {err}"));
@@ -3462,9 +3480,10 @@ fn generated_profile_starts_a_byte_different_file() {
     });
     let fixture: Value = serde_json::from_str(&fixture_text)
         .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
-    let generated = standin_profile(&fixture).expect("declared rights build a profile");
     let storage = Storage::prepare("byte-different-standin-launch");
     let written = storage.base.join("standin.sb");
+    let generated =
+        generate_profile("model-provider", &fixture).expect("declared rights build a profile");
     write_standin_profile(&written, &generated);
     let written_text = fs::read_to_string(&written)
         .unwrap_or_else(|err| panic!("the stand-in file must be readable: {err}"));
