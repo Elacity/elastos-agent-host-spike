@@ -444,6 +444,20 @@ impl PendingRequestStore {
             .collect()
     }
 
+    /// List granted requests across every session, read-only, for the shell.
+    ///
+    /// This is request history, not a token inventory: `cleanup_old` can drop
+    /// a granted record whose token is still live. Epoch, expiry and use count
+    /// are checked by `CapabilityManager` and `CapabilityStore`, not here.
+    pub async fn list_granted(&self) -> Vec<PendingCapabilityRequest> {
+        let requests = self.requests.read().await;
+        requests
+            .values()
+            .filter(|r| r.is_granted())
+            .cloned()
+            .collect()
+    }
+
     /// List pending requests for a specific session
     pub async fn list_session_pending(&self, session_id: &str) -> Vec<PendingCapabilityRequest> {
         let session_requests = self.session_requests.read().await;
@@ -635,6 +649,41 @@ mod tests {
             .await
             .unwrap();
         id
+    }
+
+    #[tokio::test]
+    async fn list_granted_lists_only_granted_requests_in_every_session() {
+        let store = create_test_store();
+        let first = granted_request(&store).await;
+        let resource = ResourceId::new("localhost://Users/self/Documents/test");
+        let pending = store
+            .create_request(SessionId::from_string("session-2"), resource, Action::Read)
+            .await;
+        let revoked = granted_request(&store).await;
+        store.revoke_request(&revoked).await;
+        let other = granted_request(&store).await;
+        store
+            .requests
+            .write()
+            .await
+            .get_mut(&other)
+            .unwrap()
+            .session_id = SessionId::from_string("session-3");
+        let mut ids: Vec<String> = store
+            .list_granted()
+            .await
+            .into_iter()
+            .map(|r| r.id.0)
+            .collect();
+        ids.sort();
+        let mut want = vec![first, other];
+        want.sort();
+        assert_eq!(ids, want);
+        assert!(store
+            .get_request(pending.id.as_str())
+            .await
+            .unwrap()
+            .is_pending());
     }
 
     #[tokio::test]
