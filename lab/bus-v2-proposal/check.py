@@ -1057,11 +1057,12 @@ def classify_lines(lines):
     An open fence reads only its closer. Otherwise an open comment reads only
     through its closer, and owns that whole line. Only neutral lines can open
     a fence or become a heading; comment markers in a fence are literal text.
+    Inline comments must close on their own line or classification is refused.
     """
     records = []
     fence = None
     comment = False
-    for line in lines:
+    for number, line in enumerate(lines, 1):
         width = sum(4 if char == "\t" else 1
                     for char in line[:len(line) - len(line.lstrip(" \t"))])
         if fence is not None:
@@ -1069,7 +1070,7 @@ def classify_lines(lines):
             records.append((FENCE, None, ""))
             continue
         if comment:
-            _, _, comment = _visible(line, comment)
+            comment = "-->" not in line
             records.append((COMMENT, None, ""))
             continue
         fence = None if width > 3 else _fence_after(line, None)
@@ -1077,9 +1078,14 @@ def classify_lines(lines):
             records.append((FENCE, None, ""))
             continue
         _, text, comment = _visible(line, False)
+        block_comment = line.lstrip().startswith("<!--")
+        if block_comment:
+            comment = "-->" not in line
+        elif comment:
+            raise ValueError("refuse: unclosed inline HTML comment at line %d" % number)
         # Raw syntax owns the role; comment removal only supplies visible text.
         heading = _heading(text) if _heading(line) is not None else None
-        if line.lstrip().startswith("<!--"):
+        if block_comment:
             records.append((COMMENT, None, ""))
         elif heading is not None:
             records.append((HEADING_KIND, heading[0], heading[1]))
@@ -1188,7 +1194,10 @@ def proposal_refusals(text):
     its own reason, and a propose line outside section 0 is refused.
     """
     lines = text.splitlines()
-    records = classify_lines(lines)
+    try:
+        records = classify_lines(lines)
+    except ValueError as error:
+        return [str(error)]
     bounds = section_0_bounds(lines)
     if bounds is None:
         return ["refuse: draft has no section 0"]

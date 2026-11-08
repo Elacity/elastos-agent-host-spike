@@ -3900,6 +3900,31 @@ class CitationCheckTests(unittest.TestCase):
             % (len(body.splitlines()) + 1),
         ])
 
+    def test_unclosed_inline_html_comment_is_refused(self):
+        falsifier = "Some text <!--\n## 1. Agent identity\n-->\npropose: …\n"
+        self.assertEqual(check.proposal_refusals(falsifier), [
+            "refuse: unclosed inline HTML comment at line 1",
+        ])
+        for opener in ("Some text <!--", "### title <!--", "text <!-- closed --> <!--"):
+            with self.subTest(opener=opener):
+                body = (self._section_0() + opener + "\n## 1. Agent identity\n-->\n"
+                        + self._propose_line("B2", "another call"))
+                number = body.splitlines().index(opener) + 2
+                self.assertEqual(check.problems(self._bare_draft(body)), [
+                    "refuse: unclosed inline HTML comment at line %d" % number,
+                ])
+                with self.assertRaisesRegex(ValueError,
+                        "^refuse: unclosed inline HTML comment at line 1$"):
+                    check.classify_lines([opener, "## 1. Agent identity", "-->"])
+        for indent in range(4):
+            with self.subTest(indent=indent):
+                lines = [" " * indent + "<!--", "## hidden", "-->", "## next"]
+                self.assertEqual([kind for kind, _, _ in check.classify_lines(lines)],
+                                 ["comment", "comment", "comment", "heading"])
+        for lines in (["<!-- closed --> text <!--", "## next"],
+                      ["<!--", "--> text <!--", "## next"]):
+            self.assertEqual(check.classify_lines(lines)[-1], ("heading", 2, "next"))
+
     def test_mixed_fence_comment_heading_roles(self):
         cases = (
             ("fence/comment", ["~~~", "<!--", "~~~", "## next"],
@@ -3908,8 +3933,8 @@ class CitationCheckTests(unittest.TestCase):
              "comment comment comment comment heading"),
             ("heading/fence", ["### ~~~", "~~~", "# hidden", "~~~"],
              "heading fence fence fence"),
-            ("heading/comment", ["### title <!--", "~~~", "## hidden", "-->", "## next"],
-             "heading comment comment comment heading"),
+            ("heading/comment", ["### title <!-- hidden -->", "## next"],
+             "heading heading"),
             ("fence opener/comment", ["~~~ <!--", "## hidden", "~~~", "## next"],
              "fence fence fence heading"),
             ("closed comment/fence", ["<!-- hidden -->~~~", "## next"],
