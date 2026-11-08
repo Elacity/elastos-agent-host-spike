@@ -6512,10 +6512,24 @@ fn check_declared_rights(name: &str, profile: &str, declared: &Value) -> Result<
             }
         }
     }
+    check_pinned_claims(name, &forms, &claims, true)
+}
+
+/// Every pinned rule `forms` holds is claimed by the id the pin table names for
+/// it. With `shared_required`, a shared rule the profile lacks is refused too,
+/// as the full check requires; without it, as the builders read a declaration
+/// that may drop a right, only the rules the profile holds are checked.
+fn check_pinned_claims(
+    name: &str,
+    forms: &[String],
+    claims: &[&DeclaredClaim],
+    shared_required: bool,
+) -> Result<(), String> {
     for &(rule, expected) in PINNED_RULES {
         // A startup form is pinned only when the profile holds it; the model
         // profile reads the root directory with its own form.
-        if !forms.iter().any(|form| form == rule) && !SHARED_RULES.contains(&rule) {
+        let required = shared_required && SHARED_RULES.contains(&rule);
+        if !forms.iter().any(|form| form == rule) && !required {
             continue;
         }
         let claimant = claims
@@ -6945,6 +6959,12 @@ fn seccomp_allow_list_from_declared_rights(
     declared: &Value,
 ) -> Result<SeccompAllowList, String> {
     let rendered = generate_profile(name, declared)?;
+    // The rows below grant by form, so a form claimed under another id would
+    // bring that right's calls without the right. The pin table decides who
+    // may claim each pinned form, as the full check does.
+    let (rights, baseline) = declared_entries(name, declared)?;
+    let claims: Vec<&DeclaredClaim> = rights.iter().chain(baseline.iter()).collect();
+    check_pinned_claims(name, &allow_forms(&rendered), &claims, false)?;
     let mut syscalls: Vec<&'static str> = Vec::new();
     for form in profile_forms(&rendered) {
         if !is_allow_form(&form) {
@@ -7530,6 +7550,11 @@ fn landlock_path_rules(
     loader: &[(&str, &str)],
 ) -> Result<LandlockRuleset, String> {
     let rendered = generate_profile(name, declared)?;
+    // As in the seccomp builder: a pinned form claimed under another id would
+    // bring that right's paths without the right.
+    let (rights, baseline) = declared_entries(name, declared)?;
+    let claims: Vec<&DeclaredClaim> = rights.iter().chain(baseline.iter()).collect();
+    check_pinned_claims(name, &allow_forms(&rendered), &claims, false)?;
     let mut rules: Vec<LandlockPathRule> = Vec::new();
     for form in profile_forms(&rendered) {
         if !is_allow_form(&form) {
@@ -9330,6 +9355,37 @@ fn seccomp_program_denies_by_default_and_lists_no_undeclared_call() {
 /// declared input, so neither the removal case nor its syscalls change. WP160
 /// adds an unconditional syscall beside the rows, so the empty case admits it
 /// and this test fails on the empty list.
+/// A declaration that drops `storage` and claims the storage subpath form under
+/// the startup-root-directory baseline id, keeping that entry's justification,
+/// is refused by both builders with the pin table's reason, and neither builds
+/// a filter or a ruleset (found by Codex's re-review of #1085). Runs on every
+/// OS: it starts no process and calls no kernel.
+///
+/// Falsifier: WP246 skips the pinned-claim check in the seccomp builder, and
+/// WP247 in the Landlock builder; the misclaimed form then builds a list or a
+/// ruleset that grants storage without the right, and this test fails.
+#[test]
+fn builders_refuse_a_pinned_form_claimed_by_another_id() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let mut misclaimed = declared.clone();
+    misclaimed["rights"] = json!([]);
+    misclaimed["platform_baseline"]["rules"][0]["rules"] = json!([SHARED_RULES[2]]);
+    let expected = format!("{WALLET_PROVIDER} rule {} must be claimed by storage", SHARED_RULES[2]);
+
+    let seccomp = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &misclaimed)
+        .map(|allow| allow.syscalls);
+    assert_eq!(seccomp, Err(expected.clone()), "the seccomp builder must refuse the claim");
+
+    let fixture = tempfile::tempdir().expect("temporary provider base");
+    let base = resolved(fixture.path());
+    let binary = Path::new(PROVIDER_BINARY);
+    let bindings = canonical_bindings(WALLET_PROVIDER, &base, binary);
+    let landlock = landlock_path_rules(WALLET_PROVIDER, &misclaimed, &bindings, 7, &[])
+        .map(|ruleset| ruleset.rules.len());
+    assert_eq!(landlock, Err(expected), "the Landlock builder must refuse the claim");
+}
+
 #[test]
 fn seccomp_allow_list_follows_the_declared_rights() {
     let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
