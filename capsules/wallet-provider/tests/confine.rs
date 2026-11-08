@@ -6553,6 +6553,8 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
 /// so each keeps the default decision, and the journey's sweep proves the
 /// refusal on the Linux host.
 const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
+    // x86-64 only: aarch64 sets its thread pointer without a call.
+    ("arch_prctl", Some(158), None),
     ("bpf", Some(321), Some(280)),
     ("close", Some(3), Some(57)),
     ("connect", Some(42), Some(203)),
@@ -8095,6 +8097,12 @@ impl std::fmt::Display for SeccompLaunchWriteFailure {
 /// where the list's launch set is compared; the install that reads it stays
 /// Linux-only.
 const LAUNCH_ESSENTIALS: &[(&str, &str)] = &[
+    (
+        "arch_prctl",
+        "arch_prctl(ARCH_SET_FS, 0x7f937e346780) refused as the loader set up \
+         thread-local storage on x86-64, after which glibc exited 127 with \
+         \"Cannot allocate TLS block\"",
+    ),
     (
         "close",
         "close(3) refused in the loader, before the first mapping",
@@ -12619,6 +12627,14 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
     // `libgcc_s.so.1: cannot close file descriptor`, an unclean exit, a `rand`
     // seed panic, `SIGSEGV`, `libgcc_s.so.1: cannot change memory protections`,
     // `SIGTRAP`, and `assertion failed: signal(libc::SIGPIPE, handler)`.
+    //
+    // arch_prctl exists only on x86-64, so the aarch64 run above could not name
+    // it. On GitHub's ubuntu-24.04 runner (x86-64, kernel 7.0.0-1017-azure,
+    // glibc 2.39) the did journey, traced with strace -ff, failed at
+    // arch_prctl(ARCH_SET_FS, 0x7f937e346780) = -1 EACCES, and glibc exited 127
+    // with "Cannot allocate TLS block" (8 Nov, run 42446019401). The call sets
+    // only the calling thread's own registers and mappings, so it reaches no
+    // other process.
 
     let allow = seccomp_probe_list(name).unwrap_or_else(|err| panic!("{err}"));
     assert_eq!(
