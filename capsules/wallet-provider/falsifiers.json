@@ -3655,6 +3655,38 @@
         "landlock_ruleset_follows_the_declared_rights",
         "landlock_probe_paths_follow_the_bound_parameters"
       ]
+    },
+    {
+      "id": "WP246",
+      "title": "the seccomp builder skips the pinned-claim check, so a storage form claimed under a baseline id grants storage calls without the right",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    // may claim each pinned form, as the full check does.\n    let (rights, baseline) = declared_entries(name, declared)?;\n    let claims: Vec<&DeclaredClaim> = rights.iter().chain(baseline.iter()).collect();\n    check_pinned_claims(name, &allow_forms(&rendered), &claims, false)?;",
+          "new": "    // may claim each pinned form, as the full check does."
+        }
+      ],
+      "tests": [
+        "builders_refuse_a_pinned_form_claimed_by_another_id"
+      ]
+    },
+    {
+      "id": "WP247",
+      "title": "the Landlock builder skips the pinned-claim check, so a storage form claimed under a baseline id grants the storage root without the right",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    // bring that right's paths without the right.\n    let (rights, baseline) = declared_entries(name, declared)?;\n    let claims: Vec<&DeclaredClaim> = rights.iter().chain(baseline.iter()).collect();\n    check_pinned_claims(name, &allow_forms(&rendered), &claims, false)?;",
+          "new": "    // bring that right's paths without the right."
+        }
+      ],
+      "tests": [
+        "builders_refuse_a_pinned_form_claimed_by_another_id"
+      ]
     }
   ]
 }

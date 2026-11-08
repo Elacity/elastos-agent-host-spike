@@ -1665,6 +1665,13 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   did iteration fails on the binary's name.
   `landlock_ruleset_follows_the_declared_rights` and
   `landlock_probe_paths_follow_the_bound_parameters` check this rule.
+- WP246: The seccomp builder skips the pinned-claim check, so a declaration
+  with no `storage` right that claims the storage subpath form under a
+  baseline id gets the storage calls.
+  `builders_refuse_a_pinned_form_claimed_by_another_id` checks this rule.
+- WP247: The Landlock builder skips the same check, so that declaration gets a
+  `STORAGE_ROOT` rule.
+  `builders_refuse_a_pinned_form_claimed_by_another_id` checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,
