@@ -3660,6 +3660,166 @@ class CitationCheckTests(unittest.TestCase):
             ],
         )
 
+    def test_fence_closing_indented_four_spaces_does_not_close(self):
+        # A closing fence indented four spaces is indented code, so the fence
+        # stays open and both proposals below it stay inside the fence.
+        line = self._propose_line("A5", "grant handle")
+        hidden = "```\n" + line + "    ```\n" + line + "```\n"
+        body = self._section_0().replace(line, hidden)
+        rows = body.splitlines()
+        first = rows.index(line.strip()) + 2
+        second = rows.index(line.strip(), first - 1) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: propose line at line %d is in a fenced code block" % first,
+                "refuse: propose line at line %d is in a fenced code block" % second,
+                "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
+            ],
+        )
+
+    def test_fence_opener_indented_as_code_is_not_a_fence(self):
+        # A fence opener indented four spaces or one tab is indented code, so
+        # the section 1 heading below it closes section 0.
+        second = (
+            "propose: a second spelling. Name: another call. Inputs: fixture "
+            "inputs. Refusal: fixture refusal. Owner: fixture owner. B2 stays "
+            "open."
+        )
+        for opener in ("    ```", "\t```"):
+            body = (
+                self._section_0()
+                + opener + "\n\n## 1. Agent identity\n\n" + second + "\n"
+            )
+            line = body.splitlines().index(second) + 2
+            self.assertEqual(
+                check.problems(self._bare_draft(body)),
+                ["refuse: propose line outside section 0 at line " + str(line)],
+                opener,
+            )
+
+    def test_comment_marker_inside_a_fence_opens_no_comment(self):
+        # Inside a fence nothing else is read, so the heading after the fence
+        # is real and closes section 0.
+        second = (
+            "propose: a second spelling. Name: another call. Inputs: fixture "
+            "inputs. Refusal: fixture refusal. Owner: fixture owner. B2 stays "
+            "open."
+        )
+        body = (
+            self._section_0()
+            + "```\n<!--\n```\n\n## 1. Agent identity\n\n" + second + "\n"
+        )
+        line = body.splitlines().index(second) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            ["refuse: propose line outside section 0 at line " + str(line)],
+        )
+
+    def test_empty_level_two_heading_closes_section_0(self):
+        # A bare ## renders as an empty heading and still ends section 0.
+        second = (
+            "propose: a second spelling. Name: another call. Inputs: fixture "
+            "inputs. Refusal: fixture refusal. Owner: fixture owner. B2 stays "
+            "open."
+        )
+        body = self._section_0() + "## \n\n" + second + "\n\n## 1. Agent identity\n"
+        line = body.splitlines().index(second) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            ["refuse: propose line outside section 0 at line " + str(line)],
+        )
+
+    def test_group_heading_indented_four_spaces_is_not_a_group(self):
+        # Four spaces make indented code, so the A5 heading groups nothing.
+        body = self._section_0().replace(
+            "### A5. Fixture group\n", "    ### A5. Fixture group\n"
+        )
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
+            ],
+        )
+
+    def test_field_value_needs_a_letter_or_digit(self):
+        # A zero-width space is a format character and states no value.
+        line = self._propose_line("A5", "grant handle")
+        for broken, missing in (
+            (line.replace("Inputs: fixture inputs.", "Inputs: \u200b."), "Inputs:"),
+            (
+                line.replace("propose: fixture grant handle. ", "propose:\u200b"),
+                "the proposal text, Name:",
+            ),
+        ):
+            body = self._section_0().replace(line, broken)
+            number = body.splitlines().index(broken.strip()) + 2
+            self.assertEqual(
+                check.problems(self._bare_draft(body)),
+                [
+                    "refuse: propose line at line %d is not a proposal "
+                    "(missing %s)" % (number, missing),
+                    "refuse: section 0 has no propose line for A5",
+                    "refuse: section 0 has no proposal named grant handle under A5",
+                ],
+                broken,
+            )
+
+    def test_repeated_empty_field_label_is_refused(self):
+        # The first Name: is empty, so every occurrence of the label counts.
+        line = self._propose_line("A5", "grant handle")
+        broken = line.replace("Name: grant handle.", "Name: . Name: grant handle.")
+        body = self._section_0().replace(line, broken)
+        number = body.splitlines().index(broken.strip()) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: propose line at line %d is not a proposal "
+                "(missing Name:)" % number,
+                "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
+            ],
+        )
+
+    def test_empty_preamble_guard_refuses_the_proposal_text(self):
+        # Text after propose: needs a letter or digit; a format character and
+        # a full stop state nothing.
+        line = self._propose_line("A5", "grant handle")
+        broken = "propose:\u200b. " + line[len("propose: fixture grant handle. "):]
+        body = self._section_0().replace(line, broken)
+        number = body.splitlines().index(broken.strip()) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: propose line at line %d is not a proposal "
+                "(missing the proposal text)" % number,
+                "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
+            ],
+        )
+
+    def test_fenced_heading_does_not_close_section_0(self):
+        # A heading inside a fence states no heading, so section 0 runs on and
+        # the complete proposal below it passes.
+        second = (
+            "propose: a second spelling. Name: another call. Inputs: fixture "
+            "inputs. Refusal: fixture refusal. Owner: fixture owner. B2 stays "
+            "open."
+        )
+        body = (
+            self._section_0()
+            + "```\n## 1. Agent identity\n```\n\n" + second + "\n"
+        )
+        self.assertEqual(check.problems(self._bare_draft(body)), [])
+
+    def test_live_draft_passes(self):
+        root = check.worktree_root()
+        if check.load_draft(root) is None:
+            self.skipTest("no draft in this worktree")
+        self.assertEqual(check.problems(root), [])
+
     def test_indented_propose_line_outside_section_0_is_refused(self):
         # Three spaces is not code, but it is still outside section 0.
         second = (
