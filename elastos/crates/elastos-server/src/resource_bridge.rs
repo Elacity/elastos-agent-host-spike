@@ -343,7 +343,7 @@ async fn authorize_and_dispatch_resource_invoke(
     bridge_ctx: &BridgeContext,
 ) -> serde_json::Value {
     let token_b64 = request["token"].as_str().unwrap_or("");
-    let dispatch = match resource_invoke_dispatch(
+    let mut dispatch = match resource_invoke_dispatch(
         request,
         bridge_ctx.principal_id.as_deref(),
         bridge_ctx.data_dir.as_deref(),
@@ -423,6 +423,27 @@ async fn authorize_and_dispatch_resource_invoke(
 
     if let Some(refusal) = agents_area_dispatch_refusal(&dispatch) {
         return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
+    }
+
+    // A model run is bound to this bridge's caller, never to the body.
+    if dispatch.scheme == "model" && dispatch.operation != "offers_list" {
+        match crate::api::gateway::bus_model_provider_request(
+            &dispatch.operation,
+            &dispatch.request,
+            bridge_ctx.data_dir.as_deref(),
+            bridge_ctx.principal_id.as_deref(),
+            &bridge_ctx.capsule_id,
+            &format!("capability:{}", token.id()),
+            &bridge_ctx.capsule_id,
+        ) {
+            Ok(stamped) => dispatch.request = stamped,
+            Err((code, message)) => {
+                let refusal = resource_error_response(code, &message);
+                return finish_component_invoke(
+                    bridge_ctx, &audit_id, &dispatch, "denied", refusal,
+                );
+            }
+        }
     }
 
     if let Some(response) = protected_principal_root_resource_response(
