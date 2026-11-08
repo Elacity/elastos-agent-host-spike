@@ -683,11 +683,13 @@ fn model_hosted_offer() -> Value {
 }
 
 /// One `init` request for `name` at `base`, built from the one config above.
+#[cfg(target_os = "linux")]
 fn provider_init_request(name: &str, base: &Path) -> Value {
     json!({ "op": "init", "config": provider_init_config(name, base) })
 }
 
 /// `init` and `status` report the model provider with its one offer ready.
+#[cfg(target_os = "linux")]
 fn assert_serving(data: &Value) {
     assert_eq!(data["provider"], MODEL_PROVIDER, "{data}");
     assert_eq!(data["offers_ready"], 1, "{data}");
@@ -7591,9 +7593,9 @@ fn landlock_path_rules(
 /// token through `parameter_tokens`, the same reader the contract check uses,
 /// so the token has one spelling, and it answers the path from the one
 /// bindings list.
-fn parameter_path_for_form<'a>(
+fn parameter_path_for_form(
     form: &str,
-    bindings: &'a [(&'static str, PathBuf)],
+    bindings: &[(&'static str, PathBuf)],
 ) -> Option<(&'static str, PathBuf)> {
     let Ok(tokens) = parameter_tokens(form) else {
         return None;
@@ -8031,7 +8033,8 @@ fn landlock_ruleset_refuses_an_abi_that_cannot_express_a_row() {
             "an ABI that cannot carry the storage row must be refused in these words"
         );
     }
-    for (too_low, needed) in [(4, 5)] {
+    {
+        let (too_low, needed) = (4, 5);
         let refusal = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, too_low, &[])
             .expect_err("an ABI below the default denial's rights must be refused");
         assert_eq!(
@@ -9902,7 +9905,6 @@ fn linux_seccomp_launcher_runs_the_requested_program() {
             ),
             "the refusal must name the provider and say the filter is a linux policy"
         );
-        return;
     }
 
     #[cfg(target_os = "linux")]
@@ -10831,7 +10833,7 @@ fn seccomp_denied_call_probe_with_pipe(
     let text = String::from_utf8_lossy(&bytes).into_owned();
 
     match exit {
-        ProbeExit::Code(code) if code == 0 => {}
+        ProbeExit::Code(0) => {}
         ProbeExit::Code(_) if bytes.starts_with(SECCOMP_PROBE_REFUSED.as_bytes()) => {
             return Err(
                 match decode_seccomp_launch_record(&bytes[SECCOMP_PROBE_REFUSED.len()..]) {
@@ -11564,7 +11566,7 @@ fn linux_kernel_release() -> String {
             .release
             .iter()
             .take_while(|byte| **byte != 0)
-            .map(|byte| *byte as u8)
+            .map(|byte| byte.to_ne_bytes()[0])
             .collect();
         String::from_utf8_lossy(&release).into_owned()
     }
@@ -12179,7 +12181,7 @@ fn landlock_file_probe(
     }
     let text = String::from_utf8_lossy(&bytes).into_owned();
     match exit {
-        ProbeExit::Code(code) if code == 0 => {}
+        ProbeExit::Code(0) => {}
         ProbeExit::Code(_) if bytes.starts_with(LANDLOCK_PROBE_REFUSED) => {
             return Err(
                 match decode_seccomp_launch_record(&bytes[LANDLOCK_PROBE_REFUSED.len()..]) {
@@ -12424,6 +12426,7 @@ fn linux_landlock_requires_no_new_privs() {
 /// outside `Init`, and a `STORAGE_PARENT` row that grants a read fails the
 /// planted read beneath the parent.
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
 fn landlock_file_row_journey(
     name: &str,
     binary: &Path,
@@ -13065,6 +13068,11 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
         // is a widening.
         let mut expected = wallet_allow.syscalls.clone();
         for syscall in MODEL_RUNTIME_ESSENTIALS {
+            // A call this architecture lacks, such as x86-64's epoll_wait on
+            // aarch64, is never admitted.
+            if seccomp_syscall_number(syscall, allow.audit_arch).is_none() {
+                continue;
+            }
             if !expected.contains(syscall) {
                 expected.push(syscall);
             }
@@ -20077,9 +20085,9 @@ fn linux_contract_table_check_refuses_each_bad_table() {
     );
 
     let mut cited = rows.clone();
-    cited[0] = format!(
+    cited[0] = String::from(
         "| `(version 1)` | a primitive | Exact: the generator emits one version | \
-         `linux_a_test_that_nothing_holds` |"
+         `linux_a_test_that_nothing_holds` |",
     );
     assert_eq!(
         check(&tables.table(&cited, None, None)),
@@ -20121,9 +20129,9 @@ fn linux_contract_table_check_refuses_each_bad_table() {
     );
     assert_eq!(
         count(&format!(
-            "# fixture\n\n{LINUX_CONTRACT_HEADING}\n\n{}| {} |\n{}\n",
-            format!("| {} |\n", LINUX_CONTRACT_HEADER.join(" | ")),
-            vec!["---"; LINUX_CONTRACT_CELLS].join(" | "),
+            "# fixture\n\n{LINUX_CONTRACT_HEADING}\n\n| {} |\n| {} |\n{}\n",
+            LINUX_CONTRACT_HEADER.join(" | "),
+            ["---"; LINUX_CONTRACT_CELLS].join(" | "),
             rows.join("\n")
         )),
         vec![format!(
@@ -20220,7 +20228,7 @@ impl LinuxContractTables {
         fixture.push_str("\n\n| ");
         fixture.push_str(&LINUX_CONTRACT_HEADER.join(" | "));
         fixture.push_str(" |\n| ");
-        fixture.push_str(&vec!["---"; LINUX_CONTRACT_CELLS].join(" | "));
+        fixture.push_str(&["---"; LINUX_CONTRACT_CELLS].join(" | "));
         fixture.push_str(" |\n");
         for row in rows {
             fixture.push_str(row);

@@ -492,6 +492,11 @@ not the designed policy:
   under the same ruleset and filter, so it gains no path or syscall, but "only the
   bound executable runs" does not hold. A no-loader build removes it. Found by the
   night shift's did work (draft #1546).
+- **One loader table for every provider.** On x86-64 the model maps `libm.so.6`
+  and did and wallet do not, but the table is shared, so did and wallet also get
+  `READ_FILE` and `EXECUTE` on it. It is a world-readable system library, and a
+  file run through it stays under the same ruleset and filter. A per-provider
+  table, or a no-loader build, would remove it.
 - **Namespaces and the capability drop** stay unbuilt, so the frame's PID, IPC,
   mount and network rows are not carried here.
 
