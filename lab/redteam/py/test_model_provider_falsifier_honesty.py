@@ -3,12 +3,15 @@
 Grade row 10 (local model ops) scores those three ids. The printed report
 states that sentence on a clean commit, a missing commit, and a problem
 list. This probe still judges every provider entry on this base. An id
-captured before a removal is reported absent. Each ``old`` anchor still
+captured before a removal is reported absent, and so is a base id the live
+file drops before the first snapshot read. Each ``old`` anchor still
 has to occur once, on the updated text, the way ``falsify.py`` applies
-it. MP02, MP05, and MP11 stay required. The selftest and PV
+it. The required ids are the provider ids at the pinned base, so MP02, MP05,
+and MP11 stay required and a deleted non-score id is reported too. The selftest and PV
 entries in the same file stay out of the checks; ``load_json`` still has
 to accept the whole file. The ``about`` text is the runner's path rule
-for every list, and this probe leaves it alone.
+for every list, and this probe leaves it alone. The deleted-id plant is a
+temporary repository, so this probe writes no checkout file.
 
 One snapshot. ``Snapshot.read`` is paths relative to ``examples/agent-host``,
 which is ``Mutation.__enter__``'s base, and it collapses
@@ -27,10 +30,13 @@ Run: python3 -I -m unittest discover -s lab/redteam/py
 
 import copy
 import functools
+import json
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import falsifier_data
 from test_agent_host_falsifier_honesty import (
@@ -43,6 +49,18 @@ from test_agent_host_falsifier_honesty import (
 REPO = Path(__file__).resolve().parents[3]
 MODEL_FILE = "capsules/model-provider/falsifiers.json"
 SCORE_IDS = ("MP02", "MP05", "MP11")
+# The provider ids in capsules/model-provider/falsifiers.json at the branch
+# base 4b55d14a (spike/agent-host). The live file may add ids; a base id
+# that disappears is an ``id`` problem.
+BASE_IDS = (
+    "MP01", "MP02", "MP03", "MP04", "MP05", "MP06", "MP07", "MP08", "MP09",
+    "MP10", "MP11", "MP12", "MP13", "MP14", "MP15", "MP16", "MP17", "MP18",
+    "MP19", "MP20", "MP21", "MP22", "MP23", "MP24", "MP25", "MP26", "MP27",
+    "MP28", "MP29", "MP30", "MP31", "MP32", "MP33", "MP34", "MP35", "MP36",
+    "MP38", "MP55", "MP56", "MP57", "MP58", "MP59", "MP60", "MP61", "MP62",
+    "MP63", "MP64", "MP65", "MP66", "MP67", "MP68", "MP69", "MP70", "MP71",
+    "MP72", "MP73",
+)
 FINDING_ID = "provider-001"
 FINDING_NAME = "lab/redteam/findings/provider-001.md"
 FINDING = REPO / FINDING_NAME
@@ -79,23 +97,50 @@ def provider_base():
     return snapshot, data, provider_entries(document)
 
 
-def live_required(entries):
-    """Entry ids, then any score id those entries omit."""
-    required = [entry["id"] for entry in entries]
+def base_required():
+    """The provider ids at the pinned base, then any score id they omit.
+
+    The live entries are judged against ``BASE_IDS``, so an id the
+    falsifier had at the base and no longer has is an ``id`` problem even
+    when it is not one of ``SCORE_IDS``.
+    """
+    required = list(BASE_IDS)
     for ident in SCORE_IDS:
         if ident not in required:
             required.append(ident)
     return required
 
 
+def deleted_base_id_fixture(root, after_read, document=None):
+    """The model file at ``root`` with MP08 deleted, read once by a snapshot.
+
+    ``root`` is a temporary repository, so the checkout is read once for the
+    document and never written. ``after_read`` runs after the one snapshot
+    read, when another writer's edit can arrive. This fixture restores no
+    bytes, so that edit stays. Returns the provider entries and the path.
+    """
+    if document is None:
+        snapshot = Snapshot()
+        document = load_provider_document(
+            snapshot.read_relative(snapshot.root, MODEL_FILE))
+    kept = [entry for entry in document["falsifiers"] if entry.get("id") != "MP08"]
+    path = Path(root) / MODEL_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({**document, "falsifiers": kept}), encoding="utf-8")
+    fixture = falsifier_data.Snapshot(root)
+    entries = provider_entries(load_provider_document(
+        fixture.read_relative(fixture.root, MODEL_FILE)))
+    after_read(path)
+    return entries, path
+
+
 def row_problems(entries, required):
     """Problems for these entries against ``required``.
 
-    ``required`` is the id sequence captured before a plant. The three
-    score ids are part of that sequence when the caller uses
-    ``live_required``. An empty entry list is one problem. An id
-    captured before a removal is reported absent. MP02, MP05, and MP11
-    stay required.
+    ``required`` is the id sequence at the pinned base (``base_required``).
+    An empty entry list is one problem. An id at the base and absent now
+    is reported absent, score id or not. MP02, MP05, and MP11 stay
+    required.
     """
     if not entries:
         return [Problem(
@@ -126,7 +171,7 @@ def row_problems(entries, required):
 
 def provider_problems(entries, read):
     """Row, caught-without-a-test, and anchor problems for the provider entries."""
-    return [*row_problems(entries, live_required(entries)),
+    return [*row_problems(entries, base_required()),
             *caught_without_tests(entries), *anchors_of(entries, read)]
 
 
@@ -260,11 +305,11 @@ class ModelProviderFalsifierHonesty(unittest.TestCase):
     def test_provider_ids_are_the_row_10_list(self):
         """Every provider entry on this base is caught and names a test.
 
-        An id captured before a removal is reported absent. MP02, MP05, and
-        MP11 stay required.
+        An id at the base and absent now is reported absent. MP02, MP05, and
+        MP11 stay required, and so does every other base id.
         """
-        _snapshot, _data, entries = provider_base()
-        self.assertEqual(row_problems(entries, live_required(entries)), [])
+        snapshot, _data, entries = provider_base()
+        self.assertEqual(row_problems(entries, base_required()), [])
         self.assertGreaterEqual(len(entries), 2)
         present = [entry["id"] for entry in entries]
         self.assertEqual(SCORE_IDS, ("MP02", "MP05", "MP11"))
@@ -319,9 +364,21 @@ class ModelProviderFalsifierHonesty(unittest.TestCase):
         without_mp05 = [
             entry for entry in copy.deepcopy(entries) if entry["id"] != "MP05"]
         self.assertEqual(
-            row_problems(without_mp05, live_required(without_mp05)), [Problem(
+            row_problems(without_mp05, base_required()), [Problem(
                 "id", "MP05", MODEL_FILE,
                 "MP05 is absent from the provider entries")])
+
+        # The base list names every provider id, so a non-score removal is
+        # an id problem too. Rebuilding the list from the remaining entries
+        # would hide this absence.
+        self.assertIn("MP07", present)
+        self.assertNotIn("MP07", SCORE_IDS)
+        without_mp07 = [
+            entry for entry in copy.deepcopy(entries) if entry["id"] != "MP07"]
+        self.assertEqual(len(without_mp07), len(entries) - 1)
+        self.assertEqual(provider_problems(without_mp07, snapshot.read), [Problem(
+            "id", "MP07", MODEL_FILE,
+            "MP07 is absent from the provider entries")])
 
         mixed = copy.deepcopy(entries)
         mixed_removed = mixed.pop(0)["id"]
@@ -375,6 +432,73 @@ class ModelProviderFalsifierHonesty(unittest.TestCase):
             return original.encode()
 
         self.assertEqual(anchors_of([entry], read), [])
+
+    def test_base_id_deleted_before_the_first_read(self):
+        """MP08 deleted before the first snapshot read is still an ``id`` problem.
+
+        The pinned base list does not follow the live file. Rebuilding it
+        from the provider entries that read returns would report no problem.
+        Both reads use the temporary repository. Its fresh provider cache
+        leaves the checkout snapshot intact for the report and teardown.
+        """
+        checkout_base = provider_base()
+        document = load_provider_document((REPO / MODEL_FILE).read_bytes())
+        listed = document["falsifiers"]
+        self.assertEqual(len([entry for entry in listed if entry.get("id") == "MP08"]), 1)
+        self.assertEqual(
+            len([entry for entry in listed if entry.get("id") != "MP08"]),
+            len(listed) - 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            entries, _path = deleted_base_id_fixture(
+                tmp, lambda _path: None, document=document)
+            # Exercise the real reader with an empty cache even when another
+            # test has already cached the checkout's complete provider list.
+            fixture_base = functools.lru_cache(maxsize=None)(provider_base.__wrapped__)
+            with mock.patch(__name__ + ".Snapshot", lambda: falsifier_data.Snapshot(tmp)), \
+                    mock.patch(__name__ + ".provider_base", fixture_base):
+                snapshot, _data, observed = provider_base()
+                self.assertEqual(snapshot.root, Path(tmp).resolve())
+                self.assertEqual(observed, entries)
+                self.assertNotIn("MP08", [entry["id"] for entry in observed])
+                self.assertEqual(row_problems(observed, base_required()), [Problem(
+                    "id", "MP08", MODEL_FILE,
+                    "MP08 is absent from the provider entries")])
+        self.assertIs(provider_base(), checkout_base)
+
+    def test_fixture_keeps_a_concurrent_edit(self):
+        """A trailing newline written after the snapshot read survives.
+
+        The reviewer's falsifier appends a valid trailing newline to the
+        provider file after the snapshot read; restoring bytes captured
+        before it discards the edit. The fixture is a temporary repository,
+        and the probe writes nothing in the checkout.
+        """
+        checkout = REPO / MODEL_FILE
+        before = checkout.read_bytes()
+        written, seen = [], []
+
+        def append(path):
+            seen.append(path.read_bytes())
+            with path.open("ab") as writer:
+                writer.write(b"\n")
+
+        def guard(method):
+            def write(path, *args, **kwargs):
+                if Path(path).resolve().is_relative_to(REPO):
+                    written.append(path)
+                return method(path, *args, **kwargs)
+            return write
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+                Path, "write_text", guard(Path.write_text)), mock.patch.object(
+                Path, "write_bytes", guard(Path.write_bytes)):
+            entries, path = deleted_base_id_fixture(tmp, append)
+            self.assertEqual(row_problems(entries, base_required()), [Problem(
+                "id", "MP08", MODEL_FILE,
+                "MP08 is absent from the provider entries")])
+            self.assertEqual(path.read_bytes(), seen[-1] + b"\n")
+        self.assertEqual(written, [])
+        self.assertEqual(checkout.read_bytes(), before)
 
     def test_report_names_the_bytes_it_read(self):
         """The report names the snapshot commit, the bytes this run read, and the three score ids.

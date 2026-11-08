@@ -2655,8 +2655,8 @@
       "edits": [
         {
           "file": "../../capsules/model-provider/tests/process.rs",
-          "old": "            if let Err((_, reason)) = grants.lock().unwrap().authorise(\n                Caller::Client {\n                    session_id: &served_session,\n                },\n                &request_id,\n            ) {\n                refusals.lock().unwrap().push(reason);\n                let _ = (&stream).write_all(RUNTIME_HOSTED_REFUSAL);\n                return;\n            }",
-          "new": "            // MP38 drops the shared authorise call, so a live grant for another session reaches the model."
+          "old": "            let use_body = json!({ \"request_id\": request_id });\n            if let Err((_, reason)) = grants.lock().unwrap().post_capability_validate(\n                Caller::Client {\n                    session_id: &served_session,\n                },\n                &use_body,\n            ) {\n                refusals.lock().unwrap().push(reason);\n                let _ = (&stream).write_all(RUNTIME_HOSTED_REFUSAL);\n                return;\n            }",
+          "new": "            // MP38 drops the shared stand-in's admission call, so a live grant for another session reaches the model."
         }
       ],
       "tests": [
