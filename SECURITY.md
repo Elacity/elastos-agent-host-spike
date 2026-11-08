@@ -75,7 +75,24 @@ durable rotation receipt.
 **Status:** Open (host-plane envelope)
 
 Runtime identifies each Carrier peer by its endpoint key. A key alone gives no
-authority. Any peer can read content that this Home holds locally. In this
+authority. A Home serves a peer's `content/fetch` only for a CID that an active
+publication on it lists, and a Library publication only to a peer whose
+authenticated device belongs to an accepted contact of the person who
+published it, as receiving Homes take files only from contacts. A protected
+listing's sealed payload is served to any peer; opening it needs the key
+release a purchase grants. A pin is only local storage: files received in
+Chat, models and withdrawn publications stay pinned, and pinned alone is never
+served to peers. Unpublish withdraws the record, which stops new transfers of
+that file at once, unless another file still shared on this Home (yours or
+another person's) has the same contents. The pin stays until a later cleanup.
+A Home answers a peer's read in one message and checks again just before
+sending it, so a read under way when the publication is withdrawn is refused
+on the same terms. Bytes already sent can't be recalled.
+Over HTTP, an ordinary Home's raw CID routes (`/content/<cid>`, `/ipfs/<cid>`,
+`/s/<cid>`) answer only its own Home and app sessions; a seed keeps its public
+CID gateway.
+Only a node that serves publisher content (a seed) answers the raw
+`content_fetch` byte operation or serves without these checks. In this
 release a seed accepts no new copies from other Homes; copies it already holds
 stay. A Home accepts a new copy from a peer only if the owner gave that peer
 the `content.replica` permission; copies it already holds stay. The owner
@@ -86,10 +103,10 @@ remove or repair content on a Home or a seed. Peers cannot use the
 availability provider. A Home signs an availability announcement only from its
 own pin state. Peers cannot push or read gossip messages directly. Only topics
 that a Home joins keep messages, to a maximum of 100 topics. A granted peer's
-`ensure` (once the pin succeeds) and `import_object` announce the CID and join
-its topic, so a granted peer shares that limit with the Home's own topics. A
-granted peer's `import_exact`, `admission` and `status`, and any peer's
-`fetch`, join no topic.
+`ensure` (once the pin succeeds) announces the CID and joins its topic, so a
+granted peer shares that limit with the Home's own topics. A granted peer's
+`import_exact`, `admission` and `status`, and any peer's `fetch`, join no
+topic. No peer can push a whole object with `import_object`.
 
 Host-process provider capsules use a raw operation and path envelope without a
 capsule capability token. Runtime owns admission for this trusted provider
@@ -115,6 +132,24 @@ A whole-object content fetch reply arrives as one line. It is refused while
 reading once it passes one 200 MiB file as base64 (about 268 MiB), the largest
 file Runtime downloads whole. Only two such fetches run at once, and one per
 peer.
+
+### Contact requests by DID
+
+**Severity:** Low
+**Files:** `elastos/crates/elastos-server/src/collaboration_discovery_runtime.rs`, `elastos/crates/elastos-server/src/collaboration_contact_store.rs`
+**Status:** Open ([#86](https://github.com/Elacity/elastos-runtime/issues/86))
+
+Anyone who has a Profile's DID can send it one contact request through the
+seed's Community node, whether or not that Profile is visible in Discovery.
+The node learns which Profile asked which and holds the requester's signed
+Profile; it learns nothing more about the recipient until the recipient
+answers in Inbox. Only the device that signed a request, answer or mailbox
+read may submit it, and the recipient's Home checks every request and answer
+itself. Profiles and devices are free to create, so the per-sender and
+per-device limits bound one identity only: many new identities can fill one
+person's 16 request slots on the node until those requests expire after
+24 hours, and that person's other requests wait meanwhile. Leave Community
+stops all requests.
 
 ## Resolved Findings
 

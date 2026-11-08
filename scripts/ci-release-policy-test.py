@@ -2651,6 +2651,53 @@ class InstalledJourneyTests(unittest.TestCase):
                         self.assertTrue(path.is_symlink())
                         self.assertFalse(path.exists())
 
+    def test_the_package_holder_starts_as_a_seed(self):
+        journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
+        with tempfile.TemporaryDirectory() as temp:
+            home, data = Path(temp) / "holder", Path(temp) / "holder/.local/share/elastos"
+            data.mkdir(parents=True)
+            started = []
+
+            def refuse_start(*args, **kwargs):
+                started.append((data / "ElastOS/SystemServices/Publisher/artifacts").is_dir())
+                raise RuntimeError("fixture stops at start")
+
+            with mock.patch.object(journey["subprocess"], "Popen", side_effect=refuse_start):
+                with self.assertRaisesRegex(RuntimeError, "fixture stops at start"):
+                    journey["start_holder"](home, data, Path(temp) / "consumer", {})
+            self.assertEqual(started, [True], "the holder is a seed before its Runtime starts")
+            artifacts = data / "ElastOS/SystemServices/Publisher/artifacts"
+            self.assertEqual(artifacts.stat().st_mode & 0o777, 0o700)
+
+    def test_the_canary_holder_and_gateway_start_as_seeds(self):
+        # Since 2.0 an ordinary Home's Carrier serves a publication only to the publisher's
+        # contacts, and its raw CID routes need an authorized session (1002b205, 9baee260),
+        # so the canary's Carrier and /content reads need seeds.
+        canary = CANARY.read_text()
+        setup = canary.index("for role in ('holder', 'consumer', 'gateway', 'bounded'):")
+        seed = canary.index("if role in ('holder', 'gateway'):", setup)
+        self.assertLess(seed, canary.index("processes.spawn(", setup))
+        # Run the workflow's own seed block for each role and look at what it made.
+        lines = canary[canary.rindex("\n", 0, seed) + 1:].splitlines()
+        indent = len(lines[0]) - len(lines[0].lstrip())
+        block = [lines[0]]
+        for line in lines[1:]:
+            if line.strip() and len(line) - len(line.lstrip()) <= indent:
+                break
+            block.append(line)
+        code = textwrap.dedent("\n".join(block))
+        for role in ("holder", "consumer", "gateway", "bounded"):
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as temp:
+                data = Path(temp) / "data"
+                data.mkdir()
+                exec(code, {"role": role, "data": data})
+                artifacts = data / "ElastOS/SystemServices/Publisher/artifacts"
+                if role in ("holder", "gateway"):
+                    self.assertTrue(artifacts.is_dir(), f"{role} is not started as a seed")
+                    self.assertEqual(artifacts.stat().st_mode & 0o777, 0o700)
+                else:
+                    self.assertFalse((data / "ElastOS").exists(), f"{role} must stay an ordinary Home")
+
     def test_gateway_and_node_share_the_installed_fixture_root(self):
         for platform in ("macos", "linux"):
             with self.subTest(platform=platform), tempfile.TemporaryDirectory() as temp:
