@@ -1779,6 +1779,8 @@ class ReleasePolicyTests(unittest.TestCase):
             "cargo-audit": ("cargo-audit", "ubuntu-24.04"),
             # Sash decides whether this becomes a required check (lab stand-in contract).
             "lab-standin": ("lab-standin", "ubuntu-24.04"),
+            # Sash decides whether this becomes a required check (Runtime core size budget).
+            "core-size": ("core-size", "ubuntu-24.04"),
         }
         self.assertEqual(set(JOBS), set(expected))
         for job, (name, runner) in expected.items():
@@ -1845,6 +1847,10 @@ class ReleasePolicyTests(unittest.TestCase):
         done = [watch, gate, ("source-home-macos", "completed", "success"), ("lint", "completed", "cancelled")]
         status, cancels, used = self.run_cancel_watcher([[watch, gate], [watch, gate, macos], done, done])
         self.assertEqual((status, cancels, used), (0, [], 4))
+        # cargo-audit and core-size report in their own red job without cancelling the run.
+        for job in ("cargo-audit", "core-size"):
+            red = [watch, gate, (job, "completed", "failure"), ("source-home-macos", "completed", "success")]
+            self.assertEqual(self.run_cancel_watcher([red, red]), (0, [], 2), job)
 
     def test_disposable_refusals_run_on_mac_build_without_operator_inputs(self):
         mac_steps = steps("source-home-macos")

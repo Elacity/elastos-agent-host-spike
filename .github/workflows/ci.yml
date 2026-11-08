@@ -146,6 +146,31 @@ jobs:
           done
           exit "$failed"
 
+  # The Runtime core's code lines (elastos/crates/elastos-runtime without tests, comments or
+  # blank lines) against elastos/CORE-BUDGET. Growing the core means raising the budget in the
+  # same pull request, where reviewers see it.
+  core-size:
+    name: core-size
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+          persist-credentials: false
+          # A pull request is compared with its base branch, which needs the history.
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+      - name: core-size tests
+        run: python3 -I scripts/core-size-test.py
+      - name: core size against elastos/CORE-BUDGET
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          base=()
+          [[ "$GITHUB_EVENT_NAME" != pull_request ]] || base=(--base "origin/$BASE_REF")
+          python3 -I scripts/core-size.py --check ${base[@]+"${base[@]}"} | tee -a "$GITHUB_STEP_SUMMARY"
+
   # One reviewed input per Linux architecture. PRs restore their develop base's cache;
   # only a develop push can save a verified recipe result in this namespace.
   engine-llama-amd64:
@@ -1652,8 +1677,9 @@ jobs:
           while (( done_polls < 2 )); do
             sleep 20
             # cargo-audit reports RustSec advisories in its own red job but does not cancel the rest: base has open advisories, and cancelling on it killed every PR run within a minute.
+            # core-size does not cancel either: an over-budget core is settled by raising CORE-BUDGET or moving code, and that review wants the test results, not a run killed in its first minute.
             counts="$(gh api "$run/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" --jq \
-              '[.jobs[] | select(.name != "cancel-on-failure" and .name != "cargo-audit")] | "\(map(select(.conclusion == "failure" or .conclusion == "timed_out")) | length) \(map(select(.status != "completed")) | length)"')" || continue
+              '[.jobs[] | select(.name != "cancel-on-failure" and .name != "cargo-audit" and .name != "core-size")] | "\(map(select(.conclusion == "failure" or .conclusion == "timed_out")) | length) \(map(select(.status != "completed")) | length)"')" || continue
             read -r failed pending <<< "$counts"
             if (( failed > 0 )); then
               echo "A job failed; cancelling the rest of this pull request run."
