@@ -1382,6 +1382,19 @@ fn installed_runtime_binds_only_a_matching_hash_chain() {
         "platforms": { "x86_64-linux": {
             "binary": { "sha256": sha256(b"elastos") } } } } })
     .to_string();
+    let sourceless = serde_json::json!({ "payload": {
+        "version": "2.0.0",
+        "platforms": { "x86_64-linux": {
+            "binary": { "sha256": sha256(b"elastos") },
+            "components": { "sha256": sha256(b"components") } } } } })
+    .to_string();
+    let platform_array = serde_json::json!({ "payload": {
+        "version": "2.0.0",
+        "source": { "commit": commit },
+        "platforms": [{
+            "binary": { "sha256": sha256(b"elastos") },
+            "components": { "sha256": sha256(b"components") } }] } })
+    .to_string();
     let (head_without_hash, head_without_version, head_versionless) = (
         serde_json::json!({ "payload": { "version": "2.0.0" } }).to_string(),
         serde_json::json!({
@@ -1419,7 +1432,7 @@ fn installed_runtime_binds_only_a_matching_hash_chain() {
         "components do not match the release",
     );
     #[rustfmt::skip]
-    let cases: [(&str, &str, &str, &[u8], &[u8], &[&str]); 18] = [
+    let cases: [(&str, &str, &str, &[u8], &[u8], &[&str]); 20] = [
         (&good, &release, "x86_64-linux", b"other", b"components", &[bin]),
         (&good, &release, "x86_64-linux", b"elastos", b"other", &[comp]),
         (&good, &other, "x86_64-linux", b"elastos", b"components", &["release", "version"]),
@@ -1438,6 +1451,8 @@ fn installed_runtime_binds_only_a_matching_hash_chain() {
         (&head(&without_components, "2.0.0"), &without_components, "x86_64-linux", b"elastos", b"components", &[comp]),
         (&head_versionless, &versionless, "x86_64-linux", b"elastos", b"components", &["version"]),
         (&head(&versionless, "2.0.0"), &versionless, "x86_64-linux", b"elastos", b"components", &["version"]),
+        (&head(&sourceless, "2.0.0"), &sourceless, "x86_64-linux", b"elastos", b"components", &["malformed release source commit"]),
+        (&head(&platform_array, "2.0.0"), &platform_array, "0", b"elastos", b"components", &["release names no entry for 0"]),
     ];
     for (index, (head, release, platform, binary, components, want)) in
         cases.into_iter().enumerate()

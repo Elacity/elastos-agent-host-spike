@@ -547,8 +547,12 @@ pub fn installed_runtime(
     let [release_sha256, binary_sha256, components_sha256] =
         [release, binary, components].map(sha256);
     let entry = format!("/payload/platforms/{platform}");
+    // `pointer` reads a digit token as an array index, so the platform is looked
+    // up by key in an object: a `platforms` array names no platform.
     if !record
-        .pointer(&entry)
+        .pointer("/payload/platforms")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|platforms| platforms.get(platform))
         .is_some_and(serde_json::Value::is_object)
     {
         return Err(vec![format!("release names no entry for {platform}")]);
