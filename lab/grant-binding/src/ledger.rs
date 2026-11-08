@@ -4783,6 +4783,7 @@ fn model_child_hold_counts_against_the_issuing_grant() {
     verifier
         .reserve(&call, &guest(child), 4)
         .expect("child hold inside the issuing ceiling");
+    assert_eq!(books(&verifier).held, 4, "the child hold is on the books");
     let refusal = verifier
         .reserve(&call, &guest(handle), 3)
         .expect_err("the child hold fills the issuing ceiling");

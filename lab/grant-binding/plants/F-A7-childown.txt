@@ -2,9 +2,7 @@ id: F-A7-childown
 file: src/ledger.rs
 test: ledger::model_child_hold_counts_against_the_issuing_grant
 --- old
-        while let Some(parent) = self.grants.get(&root).and_then(|grant| grant.record.parent) {
-            root = parent;
-        }
+            if self.ceiling_key(open_hold.handle) != key {
 --- new
-        let root = handle;
+            if format!("grant-{}", open_hold.handle.0) != key {
 --- end
