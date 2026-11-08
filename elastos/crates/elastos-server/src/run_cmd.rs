@@ -234,7 +234,7 @@ async fn run_component_via_operator_runtime(
         coords.api_url
     );
 
-    let runtime = crate::create_runtime("/tmp/elastos/storage").await?;
+    let runtime = crate::create_runtime(crate::default_data_dir().join("storage")).await?;
     let tokens = crate::runtime_control::attach_to_runtime(&coords).await?;
     let api_url = coords.api_url.clone();
     let client_token = tokens.client_token;

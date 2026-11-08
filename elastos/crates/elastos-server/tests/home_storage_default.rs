@@ -4,7 +4,7 @@
 //! must then refuse, naming that exact path. A `/tmp/elastos/storage` default
 //! opens storage elsewhere, so the Home path never appears.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -92,6 +92,30 @@ fn run_data_capsule_defaults_storage_to_home() {
             "description":"N0 fixture","author":"ElastOS","role":"content",
             "type":"data","entrypoint":"index.html"}"#,
     ));
+    let stderr = home.run(&["run", capsule.to_str().unwrap()]);
+    assert_refused_at(&stderr, &home.data.join("storage"));
+}
+
+/// A component run first needs a live operator Runtime: a loopback health
+/// answer and coords naming this test's own (live) pid.
+#[test]
+fn run_component_defaults_storage_to_home() {
+    let home = Home::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let api_url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let ok = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
+            let _ = stream.write_all(ok);
+        }
+    });
+    let coords = serde_json::json!({"api_url": api_url, "attach_secret": "",
+        "pid": std::process::id(), "runtime_kind": "operator"});
+    std::fs::write(home.data.join("runtime-coords.json"), coords.to_string()).unwrap();
+    let manifest = include_str!("../../../tests/fixtures/components/bus-v1/capsule.json");
+    let capsule = home.capsule(Some(manifest));
     let stderr = home.run(&["run", capsule.to_str().unwrap()]);
     assert_refused_at(&stderr, &home.data.join("storage"));
 }
