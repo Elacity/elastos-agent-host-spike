@@ -2059,4 +2059,59 @@ mod tests {
             ))
             .unwrap();
     }
+
+    fn r1_unstored_grant(
+        dir: &std::path::Path,
+        principal_id: &str,
+    ) -> elastos_runtime::auth::AuthSessionGrantV1 {
+        use elastos_runtime::auth::AuthSessionGrantV1;
+        let now = now_ts();
+        let grant = AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: format!("grant:{}", uuid_like_token()),
+            session_id: format!("auth:{}", uuid_like_token()),
+            principal_id: principal_id.to_string(),
+            proof_binding_id: format!("proof:r1:{principal_id}"),
+            issued_at: now,
+            expires_at: now + HOME_LAUNCH_TOKEN_TTL_SECS,
+            apps: vec![HOME_CAPSULE_ID.to_string()],
+        };
+        crate::auth::store_session_grant(dir, grant.clone()).unwrap();
+        grant
+    }
+
+    /// R1: an unstored principal refuses before a token is minted. The named
+    /// error replaces the id-rule fallback.
+    #[test]
+    fn r1_auth_grant_issue_refuses_a_principal_with_no_stored_root() {
+        let dir = tempfile::tempdir().unwrap();
+        elastos_identity::load_or_create_did(dir.path()).unwrap();
+        let grant = r1_unstored_grant(dir.path(), "person:local:r1-no-record");
+        let err =
+            issue_home_launch_token_for_auth_grant(dir.path(), HOME_CAPSULE_ID, &grant).unwrap_err();
+        assert_eq!(err.to_string(), "Home launch principal root unresolved");
+    }
+
+    /// R1: a token whose principal has no stored record refuses when verified,
+    /// with the same named error.
+    #[test]
+    fn r1_launch_token_verification_refuses_a_principal_with_no_stored_root() {
+        let dir = tempfile::tempdir().unwrap();
+        elastos_identity::load_or_create_did(dir.path()).unwrap();
+        let grant = r1_unstored_grant(dir.path(), "person:local:r1-no-record");
+        let context = HomeLaunchTokenContext::for_test(
+            grant.principal_id.clone(),
+            grant.session_id.clone(),
+            Some(grant.proof_binding_id.clone()),
+            grant.grant_id.clone(),
+        );
+        let token =
+            issue_home_launch_token_with_context(dir.path(), HOME_CAPSULE_ID, &context).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-elastos-home-token", token.parse().unwrap());
+        headers.insert("host", "localhost:61180".parse().unwrap());
+        headers.insert("origin", "http://localhost:61180".parse().unwrap());
+        let err = require_home_token_context(dir.path(), &headers).unwrap_err();
+        assert_eq!(err.to_string(), "Home launch principal root unresolved");
+    }
 }
