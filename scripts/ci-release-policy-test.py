@@ -2365,8 +2365,9 @@ class InstalledJourneyTests(unittest.TestCase):
             self.assertEqual(artifacts.stat().st_mode & 0o777, 0o700)
 
     def test_the_canary_holder_and_gateway_start_as_seeds(self):
-        # Since 2.0 an ordinary Home serves peers and open HTTP only published files
-        # (1002b205, 9baee260), so the canary's Carrier and /content reads need seeds.
+        # Since 2.0 an ordinary Home's Carrier serves a publication only to the publisher's
+        # contacts, and its raw CID routes need an authorized session (1002b205, 9baee260),
+        # so the canary's Carrier and /content reads need seeds.
         canary = CANARY.read_text()
         setup = canary.index("for role in ('holder', 'consumer', 'gateway', 'bounded'):")
         seed = canary.index("if role in ('holder', 'gateway'):", setup)
