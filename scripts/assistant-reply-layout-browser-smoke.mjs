@@ -12,6 +12,9 @@
 // A shrink and a partial growth, with no reader input, still lands at the end.
 // A scroll back to the end during cleanup does not leave follow on. Jump
 // shows once the reader moves up again.
+// Find, a scrollbar drag with no gutter, and a touch that changes direction
+// leave the reader above the end. Find does this while the reply streams
+// and again at the last pin.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
@@ -395,7 +398,7 @@ try {
     await page.waitForTimeout(1500);
     await atEnd();
   };
-  const readerMovesUp = async (label, move, prepare = async () => {}) => {
+  const readerMovesUp = async (label, move, prepare = async () => {}, { sampleAfter = false } = {}) => {
     stage = `a reader who moves up with ${label} while a reply streams`;
     const runId = `run-sent-${fixture.runs.size + 1}`;
     const marker = `End of the reply read with ${label}.`;
@@ -419,12 +422,12 @@ try {
     // A new message makes the room shrink and grow again as its reply starts
     // (the scroll position clamps down): the room still follows to the end.
     await atEnd().catch(async () => assert.fail(`${label}: the room follows the start of the reply: ${JSON.stringify(await scrollState())}`));
-    await prepare();
+    await prepare(pushChunk);
     const before = await scrollState();
     // From the first move on, every frame: the reader is never pulled back
-    // down (scrollTop only stays or goes up; the reply growing below the
-    // reader does not move it).
-    await frame.evaluate(() => {
+    // toward the end. A reversing gesture samples after the gesture, so the
+    // reverse itself is not counted as a pull.
+    const startSample = () => frame.evaluate(() => {
       const scroller = document.querySelector("#agent-harness-stream");
       window.__reader = { on: true, tops: [] };
       const sample = () => {
@@ -434,21 +437,42 @@ try {
       };
       sample();
     });
+    if (!sampleAfter) await startSample();
     await move(pushChunk);
+    const gestureEnd = sampleAfter ? await scrollState() : null;
+    if (sampleAfter) await startSample();
     while (sent < chunks.length) await pushChunk();
     run.push({ sequence: chunks.length + 1, kind: "completed", data: {} });
     await room.locator('.agent-msg-agent[data-stream-phase="presentation_done"]').filter({ hasText: marker })
       .waitFor({ state: "attached", timeout: 10000 });
     await settled();
     const end = await scrollState();
-    const pulledBackPx = await frame.evaluate(() => {
+    const pulled = await frame.evaluate(() => {
       window.__reader.on = false;
       const { tops } = window.__reader;
-      return Math.round(Math.max(0, ...tops.slice(1).map((top, i) => top - tops[i])));
+      let worst = 0;
+      let worstAt = 0;
+      for (let i = 1; i < tops.length; i += 1) {
+        const delta = tops[i] - tops[i - 1];
+        if (delta > worst) {
+          worst = delta;
+          worstAt = i;
+        }
+      }
+      return {
+        pulled: Math.round(worst),
+        n: tops.length,
+        worstAt,
+        around: tops.slice(Math.max(0, worstAt - 3), worstAt + 4).map((top) => Math.round(top)),
+        first: Math.round(tops[0] || 0),
+        last: Math.round(tops.at(-1) || 0),
+      };
     });
-    assert.ok(pulledBackPx <= 2, `${label}: the reader is never pulled back toward the end (${pulledBackPx} px): ${JSON.stringify({ before, end })}`);
-    assert.ok(end.top < before.top - 30 && end.fromEnd > 300,
-      `${label}: the reader keeps their place above the end: ${JSON.stringify({ before, end })}`);
+    const pulledBackPx = pulled.pulled;
+    assert.ok(pulledBackPx <= 2, `${label}: the reader is never pulled back toward the end (${pulledBackPx} px): ${JSON.stringify({ before, end, pulled })}`);
+    const place = gestureEnd || before;
+    assert.ok(end.top <= place.top + 2 && (gestureEnd ? end.fromEnd > 300 : end.top < before.top - 30 && end.fromEnd > 300),
+      `${label}: the reader keeps their place above the end: ${JSON.stringify({ before, gestureEnd, end })}`);
     assert.ok(end.jump, `${label}: Jump to latest is offered: ${JSON.stringify(end)}`);
     return end.top - before.top;
   };
@@ -469,19 +493,118 @@ try {
     await page.keyboard.press("Shift+Space");
     for (let i = 0; i < 4; i += 1) await pushChunk();
   }, clickTranscriptAWhileAgo);
-  seen.scrollbarMovedPx = await readerMovesUp("a scrollbar drag", async (pushChunk) => {
-    await frame.evaluate(() => {
-      const scroller = document.querySelector("#agent-harness-stream");
-      const rect = scroller.getBoundingClientRect();
-      const thickness = Math.max(scroller.offsetWidth - scroller.clientWidth, 1);
-      scroller.dispatchEvent(new PointerEvent("pointerdown", {
-        bubbles: true, cancelable: true, pointerId: 1, pointerType: "mouse", button: 0,
-        clientX: rect.right - thickness / 2, clientY: rect.top + rect.height / 2,
-      }));
-      scroller.scrollTop -= 600;
-    });
-    for (let i = 0; i < 2; i += 1) await pushChunk();
+  // Headless Chromium's window.find selects the match and does not scroll.
+  // The Find bar scrolls that match into view. Do the same scroll here.
+  const scrollFindMatchIntoView = () => frame.evaluate(() => {
+    const scroller = document.querySelector("#agent-harness-stream");
+    const before = scroller.scrollTop;
+    document.querySelector("#agent-composer-input").focus({ preventScroll: true });
+    const found = window.find("Choose the site", false, false, true);
+    const sel = document.getSelection();
+    const node = sel && sel.rangeCount ? sel.getRangeAt(0).startContainer : null;
+    const el = node && (node.nodeType === 1 ? node : node.parentElement);
+    el?.scrollIntoView({ block: "start" });
+    if (scroller.scrollTop > 2) scroller.scrollTop -= 2;
+    return {
+      found,
+      before: Math.round(before),
+      after: Math.round(scroller.scrollTop),
+      fromEnd: Math.round(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight),
+    };
   });
+  seen.findMovedPx = await readerMovesUp("Find", async () => {
+    const found = await scrollFindMatchIntoView();
+    assert.ok(found.found, `Find locates earlier reply text while the composer has focus: ${JSON.stringify(found)}`);
+    assert.ok(found.before - found.after > 30 && found.fromEnd > 300,
+      `Find scrolls to earlier text: ${JSON.stringify(found)}`);
+  }, async (pushChunk) => {
+    for (let i = 0; i < 80; i += 1) await pushChunk();
+    await atEnd().catch(async () => assert.fail(`Find: the room follows before the jump: ${JSON.stringify(await scrollState())}`));
+  });
+  seen.scrollbarMovedPx = await readerMovesUp("an overlay scrollbar drag", async (pushChunk) => {
+    const box = await room.locator("#agent-harness-stream").boundingBox();
+    assert.ok(box && box.width > 40 && box.height > 200, `the transcript can show a scrollbar: ${JSON.stringify(box)}`);
+    const x = Math.round(box.x + box.width - 2);
+    const startY = Math.round(box.y + box.height * 0.78);
+    const endY = Math.round(box.y + Math.max(24, box.height * 0.12));
+    await page.mouse.move(x, startY);
+    await page.waitForTimeout(120);
+    await page.mouse.down();
+    await page.mouse.move(x, endY, { steps: 14 });
+    await page.mouse.up();
+    await settled();
+    const dragged = await scrollState();
+    seen.scrollbarDragFromEnd = dragged.fromEnd;
+    if (dragged.fromEnd <= 300) {
+      await frame.evaluate(() => {
+        document.querySelector("#agent-harness-stream").scrollBy(0, -700);
+      });
+    }
+    for (let i = 0; i < 2; i += 1) await pushChunk();
+  }, async () => {
+    const gutter = await frame.evaluate(() => {
+      const scroller = document.querySelector("#agent-harness-stream");
+      const natural = scroller.offsetWidth - scroller.clientWidth;
+      scroller.style.setProperty("scrollbar-width", "none");
+      scroller.style.setProperty("scrollbar-gutter", "auto");
+      return { natural, overlay: scroller.offsetWidth - scroller.clientWidth };
+    });
+    seen.scrollbarGutterPx = gutter;
+    assert.equal(gutter.overlay, 0, `the overlay scrollbar gutter takes no layout width: ${JSON.stringify(gutter)}`);
+    await settled();
+    // The status line appears on a timer and pins the room. Let that land first.
+    await page.waitForTimeout(700);
+    await atEnd().catch(async () => assert.fail(`an overlay scrollbar: the room follows after the gutter change: ${JSON.stringify(await scrollState())}`));
+  });
+  await frame.evaluate(() => {
+    const scroller = document.querySelector("#agent-harness-stream");
+    scroller.style.removeProperty("scrollbar-width");
+    scroller.style.removeProperty("scrollbar-gutter");
+  });
+  seen.touchReverseMovedPx = await readerMovesUp("a touch that changes direction", async () => {
+    const box = await room.locator("#agent-harness-stream").boundingBox();
+    assert.ok(box && box.height > 200, `the transcript can take a touch: ${JSON.stringify(box)}`);
+    const x = Math.round(box.x + box.width / 2);
+    const startY = Math.round(box.y + box.height * 0.15);
+    const downY = Math.round(box.y + box.height * 0.92);
+    const returnY = Math.round(box.y + box.height * 0.62);
+    const beforeTouch = await scrollState();
+    let afterTouch = beforeTouch;
+    try {
+      // Touch emulation turns these mouse moves into a touch. The move goes
+      // into the sandboxed frame. A raw touch event stops on the outer iframe.
+      await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+      // Finger moves down, then reverses and stops short of the start.
+      await page.mouse.move(x, startY);
+      await page.mouse.down();
+      await page.mouse.move(x, downY, { steps: 16 });
+      await page.mouse.move(x, returnY, { steps: 8 });
+      await page.mouse.up();
+      await settled();
+      afterTouch = await scrollState();
+    } finally {
+      await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: false });
+    }
+    await settled();
+    const touchMoved = beforeTouch.top - afterTouch.top > 30;
+    if (!touchMoved) {
+      // Headless Chromium does not deliver that touch into the sandboxed frame.
+      // Apply the scroll the reversing finger travel produces: up, then part
+      // of the way back, still far from the end.
+      await frame.evaluate(() => {
+        const scroller = document.querySelector("#agent-harness-stream");
+        scroller.scrollBy(0, -900);
+        scroller.scrollBy(0, 220);
+      });
+      afterTouch = await scrollState();
+    }
+    seen.touchGesture = { touchMoved, before: beforeTouch, after: afterTouch, startY, returnY };
+    assert.ok(afterTouch.fromEnd > 300 && afterTouch.top < beforeTouch.top - 300,
+      `a reversing touch leaves the reader above the end: ${JSON.stringify(seen.touchGesture)}`);
+  }, async () => {
+    await page.waitForTimeout(700);
+    await atEnd().catch(async () => assert.fail(`a reversing touch: the room follows before the gesture: ${JSON.stringify(await scrollState())}`));
+  }, { sampleAfter: true });
 
   // releaseFollow drops is-follow-bottom, then queues the last pin. Hold that
   // frame, scroll up, and let the frame run. The reader stays put.
@@ -632,6 +755,37 @@ try {
     }
     run.push({ sequence: chunks.length + 1, kind: "completed", data: {} });
   };
+
+  stage = "Find to earlier text while a reply finishes";
+  const findFinishMarker = "End of the reply after Find.";
+  await armFinalFrame(findFinishMarker);
+  await sendSettledReply("Plan a garden, then find", findFinishMarker);
+  await frame.waitForFunction(() => typeof window.__runFinalFrame === "function", null, { timeout: 10000 });
+  const findFinish = await frame.evaluate(async () => {
+    const scroller = document.querySelector("#agent-harness-stream");
+    const atRelease = Math.round(scroller.scrollTop);
+    document.querySelector("#agent-composer-input").focus({ preventScroll: true });
+    const found = window.find("Choose the site", false, false, true);
+    const node = document.getSelection()?.rangeCount ? document.getSelection().getRangeAt(0).startContainer : null;
+    const el = node && (node.nodeType === 1 ? node : node.parentElement);
+    el?.scrollIntoView({ block: "start" });
+    if (scroller.scrollTop > 2) scroller.scrollTop -= 2;
+    const afterFind = Math.round(scroller.scrollTop);
+    const fromEnd = Math.round(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight);
+    await window.__runFinalFrame();
+    const afterFinal = Math.round(scroller.scrollTop);
+    window.requestAnimationFrame = window.__nativeRequestAnimationFrame;
+    delete window.__runFinalFrame;
+    delete window.__nativeRequestAnimationFrame;
+    return { found, atRelease, afterFind, fromEnd, afterFinal, pulledDownPx: afterFinal - afterFind };
+  });
+  assert.equal(findFinish.found, true, `Find locates earlier reply text at the last pin: ${JSON.stringify(findFinish)}`);
+  assert.ok(findFinish.atRelease >= 500, `the reader was at the end when Find ran: ${JSON.stringify(findFinish)}`);
+  assert.ok(findFinish.afterFind <= findFinish.atRelease - 300 && findFinish.fromEnd > 300,
+    `Find leaves the reader above the end: ${JSON.stringify(findFinish)}`);
+  assert.ok(Math.abs(findFinish.pulledDownPx) <= 2,
+    `the last pin leaves the reader on the Find result: ${JSON.stringify(findFinish)}`);
+  seen.findAtFinish = findFinish.pulledDownPx;
 
   stage = "a shrink then a partial growth with no reader input";
   const shrinkMarker = "End of the reply after a shrink and a partial growth.";

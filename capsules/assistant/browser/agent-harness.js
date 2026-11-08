@@ -75,6 +75,8 @@ import {
   regenerateLastAgentTurn,
   updateJumpToLatestVisibility,
   ensureJumpToLatest,
+  pinTranscriptToEnd,
+  READER_AT_END_PX,
   setStreamStatus,
   openCodeArtifact,
   refreshEmptyModelHint,
@@ -398,8 +400,6 @@ function toggleSidebarCollapsed() {
   setSidebarCollapsed(!collapsed);
 }
 
-/* A reader this close to the transcript's end counts as at the end. */
-const READER_AT_END_PX = 8;
 let lastComposerColumnKey = "";
 let lastComposerClearance = -1;
 /* During a turn the column stays put while the stream grows. */
@@ -467,7 +467,7 @@ function syncComposerGeometry({ clearanceOnly = false } = {}) {
     lastComposerColumnKey = columnKey;
   }
   if (atEnd) {
-    scroller.scrollTop = scroller.scrollHeight;
+    pinTranscriptToEnd(scroller);
   }
   requestAnimationFrame(() => {
     composerGeometrySyncing = false;
@@ -580,13 +580,13 @@ function scrollStreamToEnd() {
   if (!scroller) {
     return;
   }
-  scroller.scrollTop = scroller.scrollHeight;
+  pinTranscriptToEnd(scroller);
   /* One follow-up frame is enough for layout settle. The old double-rAF
      pin-every-call pattern stacked dozens of scroll writes per second during
      live tokens and helped peg the Brave renderer at ~100% CPU. */
   if (!turnBusy) {
     requestAnimationFrame(() => {
-      scroller.scrollTop = scroller.scrollHeight;
+      pinTranscriptToEnd(scroller);
     });
   }
 }
