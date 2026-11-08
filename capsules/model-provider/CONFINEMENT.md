@@ -37,18 +37,17 @@ profile from its approved declared rights, one generator covers
 `model-provider` too, and the profile it generates for this provider must
 match this file, with the same three parameters bound to the same paths. A
 lab generator, `generate_profile` in
-`capsules/wallet-provider/tests/confine.rs`, builds a profile from a
-declared-rights file and the contract head.
-`generated_did_and_wallet_profiles_match_their_committed_oracles` requires
-the generated did and wallet profiles to equal their oracles and does not
-read this profile.
-`standin_profile` in `tests/confine/main.rs` builds this provider's profile
-text from the approved declared rights in
-`tests/fixtures/confine/declared-rights.json`, the three head forms then each
-declared rule; `generated_model_profile_matches_the_oracle` requires that
-text's head and allow lines and its sorted non-comment lines to match this
-oracle; this is a lab stand-in for
-the Runtime generator, not the Runtime, and it does not count toward B3-R.
+`capsules/wallet-provider/tests/common/profile_generator.rs`, builds a
+profile from a declared-rights file and the contract head. The model test
+target includes that one file by `#[path]`, as the did and wallet targets
+do. `generated_did_and_wallet_profiles_match_their_committed_oracles`
+requires the generated did and wallet profiles to equal their oracles and
+does not read this profile. The model's
+`generated_model_profile_matches_its_committed_oracle` builds its profile
+from the declared rights in `tests/fixtures/confine/declared-rights.json`
+with the same generator and requires the generated profile's head and sorted
+remaining forms to match this oracle. This is a lab stand-in for the Runtime
+generator, not the Runtime, and it does not count toward B3-R.
 `generated_profile_launch_matches_the_oracle` reads the file
 `applied_profile` records after `Launch::Profile` starts, and that file's
 sorted allow lines match this oracle.
@@ -167,8 +166,8 @@ its subtree, the same `runs_get` returns the run.
 The outside content open is refused under the oracle and under the stand-in
 file plus the one metadata rule. The sequence above is the oracle. After its
 shutdown, a fresh storage stores one run and reads it back under
-`Launch::Profile` on the file `standin_profile` writes.
-`write_standin_profile` puts that file under the case's `storage.base`, and
+`Launch::Profile` on the file the shared writer generates.
+`write_generated_profile` puts that file under the case's `storage.base`, and
 the one fixture writer appends `READ_FIXTURE_RULE`. `Launch::Fixture` applies
 that file. The launched stand-in profile contains the rule and has no line
 that starts with `;;`. The in-root create's message is
@@ -555,8 +554,8 @@ profile does not grant".
   `unsupported_operation`, and message `unsupported model provider
   operation`. `tree_snapshot` of `STORAGE_ROOT` is unchanged. The oracle
   case uses `Launch::Confined` with label `unknown-op`. The stand-in case
-  calls `standin_profile` once, writes the file with
-  `write_standin_profile` under `unknown-op-standin`, and starts with
+  calls `generate_profile` once, writes the file with
+  `write_generated_profile` under `unknown-op-standin`, and starts with
   `Launch::Profile` and `canonical_bindings`. The written file has no `;;`
   line, and its sorted allow lines equal the oracle's. Both cases call
   `shutdown`.
