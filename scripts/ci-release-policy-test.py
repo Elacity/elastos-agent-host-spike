@@ -1779,6 +1779,8 @@ class ReleasePolicyTests(unittest.TestCase):
             "cargo-audit": ("cargo-audit", "ubuntu-24.04"),
             # Sash decides whether this becomes a required check (lab stand-in contract).
             "lab-standin": ("lab-standin", "ubuntu-24.04"),
+            # Sash decides whether this becomes a required check (Runtime core size budget).
+            "core-size": ("core-size", "ubuntu-24.04"),
         }
         self.assertEqual(set(JOBS), set(expected))
         for job, (name, runner) in expected.items():
@@ -1802,8 +1804,9 @@ class ReleasePolicyTests(unittest.TestCase):
             queue.mkdir()
             for index, poll in enumerate(polls):
                 (queue / f"{index:03}").write_text(json.dumps({"jobs": [
-                    {"name": name, "status": status, "conclusion": conclusion}
-                    for name, status, conclusion in poll]}))
+                    {"name": job[0], "status": job[1], "conclusion": job[2],
+                     "steps": [{"name": name, "conclusion": done} for name, done in (job[3] if len(job) > 3 else [])]}
+                    for job in poll]}))
             (shims / "sleep").write_text("#!/bin/bash\n")
             (shims / "gh").write_text(textwrap.dedent("""\
                 #!/bin/bash
@@ -1845,6 +1848,29 @@ class ReleasePolicyTests(unittest.TestCase):
         done = [watch, gate, ("source-home-macos", "completed", "success"), ("lint", "completed", "cancelled")]
         status, cancels, used = self.run_cancel_watcher([[watch, gate], [watch, gate, macos], done, done])
         self.assertEqual((status, cancels, used), (0, [], 4))
+        # cargo-audit, and core-size's budget verdict alone, report in their own red job without cancelling.
+        verdict = "core size against elastos/CORE-BUDGET"
+        tests = [("core-size tests", "success"), ("measure the core", "success"), (verdict, "failure")]
+        for job in (("cargo-audit", "completed", "failure"), ("core-size", "completed", "failure", tests)):
+            red = [watch, gate, job, ("source-home-macos", "completed", "success")]
+            self.assertEqual(self.run_cancel_watcher([red, red]), (0, [], 2), job)
+        # Any other core-size failure cancels: its counter tests, a refusal while measuring, a timeout.
+        for job in (("core-size", "completed", "failure", [("core-size tests", "failure")]),
+                    ("core-size", "completed", "failure", [("measure the core", "failure"), (verdict, "skipped")]),
+                    ("core-size", "completed", "timed_out", [(verdict, "cancelled")])):
+            settled = [watch, gate, job, ("source-home-macos", "completed", "success")]
+            status, cancels, used = self.run_cancel_watcher([[watch, gate, job, macos], settled, settled])
+            self.assertEqual((status, cancels, used), (0, ["repos/Elacity/elastos-runtime/actions/runs/7/cancel"], 1))
+        # The budget mode is the job's: advisory warns and passes, so the verdict-only failure above is
+        # the enforce-mode case. Refusals and an unknown mode fail the measure step in both modes.
+        self.assertIn("    env:\n      # advisory until the M1 hardening pass; set to enforce then (Sash, 8 Nov)\n"
+                      "      CORE_BUDGET_MODE: advisory\n", JOBS["core-size"])
+        self.assertNotRegex("".join(steps("core-size")), r"CORE_BUDGET_MODE\s*[:=]")  # no step overrides it
+        # The filter names the verdict step, which only runs --check; measuring, with --base, comes first.
+        names = [step.splitlines()[0] for step in steps("core-size")]
+        self.assertEqual(names[-2:], ["name: measure the core", f"name: {verdict}"])
+        self.assertEqual(field(steps("core-size")[-1], "run"), "python3 -I scripts/core-size.py --check")
+        self.assertIn(f'.name] != ["{verdict}"]', steps("cancel-on-failure")[0])
 
     def test_disposable_refusals_run_on_mac_build_without_operator_inputs(self):
         mac_steps = steps("source-home-macos")
@@ -2191,8 +2217,8 @@ class CustodyKuboDownloadTests(unittest.TestCase):
                             f"https://github.com/ipfs/kubo/releases/download/{self.version}/{tarball}"]
                     self.assertEqual([event["args"][-1] for event in events], urls[:len(events)])
                     for event in events:
-                        self.assertEqual(event["args"][:13], ["-fsSL", "--connect-timeout", "15", "--max-time", "90",
-                            "--retry", "2", "--retry-all-errors", "--retry-delay", "5", "--retry-max-time", "200", "-o"])
+                        self.assertEqual(event["args"][:-2], ["-fsSL", "--connect-timeout", "20", "--max-time", "120",
+                            "--retry", "8", "--retry-all-errors", "--retry-max-time", "300", "-o"])
                     if primary == "failed":
                         self.assertFalse(events[1]["existing"], "failed primary bytes must be removed before fallback")
 

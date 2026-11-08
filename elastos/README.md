@@ -59,6 +59,40 @@ Use `just test-elastos`, `just test-capsules` or `just test-crate <crate>` for
 narrow checks. `just verify` adds the source, lint and contract gates; a plain
 `cargo test --workspace` covers only this workspace.
 
+## Core size budget
+
+The trusted core is `crates/elastos-runtime`. The goal is about 10,000 lines of
+code: small enough to review in full and to put on a chip, with everything
+else in capsules. [`CORE-BUDGET`](CORE-BUDGET) holds the most code lines the
+core may have, and the `core-size` CI job fails above it, or more than 50
+lines below it. From the repository root:
+
+```bash
+python3 scripts/core-size.py           # the table
+python3 scripts/core-size.py --check   # against the budget
+```
+
+Only code counts. Tests are left out: files only test code reaches (the
+counter follows the module tree and `include!` from `src/lib.rs`, whatever the
+files are named or where they sit), files under `tests/` that production does
+not reach, and items behind a cfg that can hold only in tests, such as
+`#[cfg(test)]` or `#[cfg(all(test, unix))]`. So are lines holding only
+comments, and blank lines. A line with any production code on it is code,
+wherever its comments or test items sit. Where the counter cannot tell, it
+refuses and exits 2 naming the file and line: a test cfg on a match arm,
+statement, call argument or tuple field (test struct fields and enum variants
+are counted), a file the module tree does not reach, a module declared in a
+function body or macro, an `include!` of a computed path, an `include!` or
+`#[path]` that is not a plain relative ASCII path (no escapes, no `..`), a raw
+identifier such as `r#include`, a Cargo.toml target not written as a plain
+`[lib]` or `[[bin]]` table, or a cfg_attr that sets cfg or path. To grow the core, raise `CORE-BUDGET` in the same
+pull request, so reviewers see the growth. The budget ratchets down: when the
+core falls more than 50 lines below it, the check fails until the same pull
+request lowers the budget to the new count, so freed room cannot be spent
+again. Until the M1 hardening pass the CI job runs with
+`CORE_BUDGET_MODE=advisory`, which turns a failed verdict into a warning; it
+then flips to `enforce`, which fails the job (refusals fail it in both modes).
+
 ## Related documentation
 
 - [Architecture](../docs/ARCHITECTURE.md)
