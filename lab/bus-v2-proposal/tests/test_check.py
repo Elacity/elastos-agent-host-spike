@@ -3851,7 +3851,7 @@ class CitationCheckTests(unittest.TestCase):
         cases = (
             ("<!-- hidden -->### A5. Grant handle", "comment"),
             ("#<!-- hidden --># next", "text"),
-            ("    <!-- hidden -->## next", "comment"),
+            ("    <!-- hidden -->## next", "text"),
             ("### <!-- hidden -->A5. Grant handle", "heading"),
             ("visible text <!-- propose: rubbish -->", "text"),
             ("pro<!-- hidden -->pose: rubbish", "text"),
@@ -3924,6 +3924,25 @@ class CitationCheckTests(unittest.TestCase):
         for lines in (["<!-- closed --> text <!--", "## next"],
                       ["<!--", "--> text <!--", "## next"]):
             self.assertEqual(check.classify_lines(lines)[-1], ("heading", 2, "next"))
+
+    def test_indented_comment_opener_leaves_section_1_visible(self):
+        for indent in ("    ", "     ", "        ", "\t", " \t"):
+            with self.subTest(indent=indent):
+                opener = indent + "<!--"
+                second = self._propose_line("B2", "another call")
+                body = self._section_0() + opener + "\n## 1. Agent identity\n-->\n" + second
+                self.assertEqual(check.problems(self._bare_draft(body)), [
+                    "refuse: propose line outside section 0 at line %d"
+                    % (len(body.splitlines()) + 1),
+                ])
+                self.assertEqual(check.classify_lines(
+                    [opener, "## 1. Agent identity", "-->"]), [
+                    ("text", None, opener),
+                    ("heading", 2, "1. Agent identity"),
+                    ("text", None, "-->"),
+                ])
+                closed = indent + "<!-- propose: rubbish -->"
+                self.assertEqual(check.classify_lines([closed]), [("text", None, closed)])
 
     def test_mixed_fence_comment_heading_roles(self):
         cases = (

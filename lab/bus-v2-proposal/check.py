@@ -1077,8 +1077,11 @@ def classify_lines(lines):
         if fence is not None:
             records.append((FENCE, None, ""))
             continue
+        if width > 3:
+            records.append((TEXT, None, line))
+            continue
         _, text, comment = _visible(line, False)
-        block_comment = line.lstrip().startswith("<!--")
+        block_comment = line.lstrip(" ").startswith("<!--")
         if block_comment:
             comment = "-->" not in line
         elif comment:
