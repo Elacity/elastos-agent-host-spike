@@ -47,8 +47,8 @@ env:
 
 jobs:
   # Fast, compile-free gate: formatting and script-based source proofs.
-  # Everything compile-heavy (clippy, tests, source-home) fans out in
-  # parallel once this passes.
+  # Compile jobs start beside it rather than after it; a failure here still
+  # fails the run, and cancel-on-failure stops a pull request run at once.
   source-gate:
     name: source-gate
     runs-on: ubuntu-24.04
@@ -158,7 +158,6 @@ jobs:
     # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
     if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
     timeout-minutes: 45
-    needs: source-gate
     container:
       image: ubuntu@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
     defaults:
@@ -227,7 +226,6 @@ jobs:
     # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
     if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
     timeout-minutes: 45
-    needs: source-gate
     container:
       image: ubuntu@sha256:1cc7bb38a74c0e126716646e47c0b3c5c139547d386d5ff7a64cf3ea316ca523
     defaults:
@@ -294,7 +292,6 @@ jobs:
     name: lint
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    needs: source-gate
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -352,7 +349,6 @@ jobs:
     name: lab-standin
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    needs: source-gate
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -384,7 +380,6 @@ jobs:
     # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
     if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
     timeout-minutes: 60
-    needs: source-gate
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -472,7 +467,6 @@ jobs:
     # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
     if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
     timeout-minutes: 45
-    needs: source-gate
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -583,7 +577,6 @@ jobs:
     name: custody-harness-smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    needs: source-gate
     if: (github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'push' && (github.ref == 'refs/heads/spike/agent-host' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'))) && !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))
     # The top-level `permissions: contents: read` above zeroes every other
     # scope for every job; dorny/paths-filter resolves a pull_request's
@@ -783,8 +776,8 @@ jobs:
           # prepare-release-platform.sh merges this stdout with jq; it must be one JSON document.
           jq -e '.external | length > 0' "$RUNNER_TEMP/upstream-assets.json" > /dev/null
 
-  # The source-home jobs run after the cheap source gate, in parallel
-  # with tests across the three architectures. setup-source-home compiles the
+  # The source-home jobs run in parallel with tests across the three
+  # architectures, beside the cheap source gate. setup-source-home compiles the
   # runtime, shell, home-cli and every provider in --release; ARM also
   # packages every candidate for the Jetson compatibility gate. Signed
   # releases come from release-package.yml and reach users over Carrier.
@@ -794,7 +787,7 @@ jobs:
     # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
     if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
     timeout-minutes: 120
-    needs: [source-gate, engine-llama-amd64]
+    needs: engine-llama-amd64
     env:
       CI_APT_PACKAGES: coturn e2fsprogs ffmpeg musl-tools nasm pkg-config
     strategy:
@@ -1077,7 +1070,7 @@ jobs:
     # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
     if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
     timeout-minutes: 90
-    needs: [source-gate, engine-llama-arm64]
+    needs: engine-llama-arm64
     env:
       CI_APT_PACKAGES: coturn e2fsprogs ffmpeg musl-tools nasm pkg-config
     strategy:
@@ -1100,6 +1093,8 @@ jobs:
     if: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
     # The two hop builds may take 30 minutes and the update journey step 75.
     timeout-minutes: 150
+    # cancel-on-failure never runs after merge, so the gate's verdict is what
+    # spares about 80 macOS minutes when it fails; macOS is off the PR path.
     needs: source-gate
     steps:
       - name: set job build directories
@@ -1416,7 +1411,6 @@ jobs:
     if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
     # Source-home with the hop builds may take 45 minutes and the update journey 75.
     timeout-minutes: 150
-    needs: source-gate
     env:
       CI_APT_PACKAGES: coturn e2fsprogs ffmpeg musl-tools nasm pkg-config
     steps:
@@ -1635,8 +1629,8 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  # A pull request run stops at its first failed job, so the macOS and Linux
-  # journeys do not run on for 30+ minutes after a decisive failure. Pushes,
+  # A pull request run stops at its first failed job, source-gate included, so
+  # the Linux journeys do not run on for 30+ minutes after a decisive failure. Pushes,
   # merge queues and dispatches keep running every job to the end. This job
   # runs no repository code and is the only one that may cancel the run.
   cancel-on-failure:

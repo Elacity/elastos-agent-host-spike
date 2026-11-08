@@ -1476,7 +1476,7 @@ class ReleasePolicyTests(unittest.TestCase):
 
     def test_custody_smoke_always_runs_on_develop_and_filters_only_prs(self):
         self.assertNotIn("changes", list(JOBS))
-        self.assertEqual(field(JOBS["custody-harness-smoke"], "needs"), "source-gate")
+        self.assertNotRegex(JOBS["custody-harness-smoke"], r"(?m)^    needs:")
         filter_step, = [step for step in steps("custody-harness-smoke") if "id: filter" in step]
         self.assertEqual(field(filter_step, "if"), "github.event_name == 'pull_request'")
         self.assertEqual(field(filter_step, "uses"), "dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3")
@@ -1883,6 +1883,23 @@ class ReleasePolicyTests(unittest.TestCase):
             cancels = (root / "cancels").read_text().splitlines() if (root / "cancels").exists() else []
             return result.returncode, cancels, len(polls) - len(list(queue.iterdir()))
 
+    def test_compile_jobs_start_beside_the_source_gate(self):
+        # The whole job graph. Only these two wait for source-gate: test-behaviour is not a
+        # compile job, and post-merge macOS has no cancel-on-failure to stop it.
+        expected = {
+            "source-gate": None, "cargo-audit": None, "test-behaviour": "source-gate",
+            "engine-llama-amd64": None, "engine-llama-arm64": None, "lint": None, "lab-standin": None,
+            "test-elastos": None, "test-capsules": None, "custody-harness-smoke": None,
+            "release-upstream-paths": None, "release-upstream-assets": "[release-upstream-paths, engine-llama-arm64]",
+            "source-home-linux": "engine-llama-amd64", "source-home-linux-arm64": "engine-llama-arm64",
+            "source-home-macos": "source-gate", "update-hop-linux": None, "cancel-on-failure": None,
+        }
+        graph = {job: (re.search(r"(?m)^    needs: (.+)$", block) or [None, None])[1] for job, block in JOBS.items()}
+        self.assertEqual(graph, expected)
+        # source-gate has no outputs to wait for, and its failure fails the run.
+        self.assertNotRegex(JOBS["source-gate"], r"(?m)^    (?:outputs|if|continue-on-error):")
+        self.assertNotIn("needs.source-gate", SOURCE)
+
     def test_pull_request_runs_cancel_at_the_first_failed_job(self):
         watcher = JOBS["cancel-on-failure"]
         self.assertNotIn("actions/checkout@", watcher)
@@ -1902,6 +1919,13 @@ class ReleasePolicyTests(unittest.TestCase):
             status, cancels, used = self.run_cancel_watcher(
                 [[watch, gate, macos], [watch, gate, ("lint", "completed", conclusion), macos]])
             self.assertEqual((status, cancels, used), (0, ["repos/Elacity/elastos-runtime/actions/runs/7/cancel"], 2))
+        # A failed source-gate cancels the compile jobs that start beside it.
+        for conclusion in ("failure", "timed_out"):
+            status, cancels, used = self.run_cancel_watcher(
+                [[watch, ("source-gate", "completed", conclusion), ("lint", "in_progress", None),
+                  ("source-home-linux (ubuntu-24.04)", "in_progress", None)]])
+            self.assertEqual((status, cancels, used), (0, ["repos/Elacity/elastos-runtime/actions/runs/7/cancel"], 1),
+                             f"a source-gate {conclusion} must cancel the pull request run")
         # A completed gate before dependent jobs appear is not the end of the run.
         done = [watch, gate, ("source-home-macos", "completed", "success"), ("lint", "completed", "cancelled")]
         status, cancels, used = self.run_cancel_watcher([[watch, gate], [watch, gate, macos], done, done])
@@ -2057,9 +2081,8 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertNotIn("RECIPE_COMMIT: ${{ github.sha }}", JOBS["engine-llama-arm64"])
 
     def test_engine_consumers_gate_the_current_run_input_with_shared_pin(self):
-        self.assertEqual(field(JOBS["source-home-linux"], "needs"), "[source-gate, engine-llama-amd64]")
-        self.assertEqual(field(JOBS["source-home-linux-arm64"], "needs"),
-                         "[source-gate, engine-llama-arm64]")
+        self.assertEqual(field(JOBS["source-home-linux"], "needs"), "engine-llama-amd64")
+        self.assertEqual(field(JOBS["source-home-linux-arm64"], "needs"), "engine-llama-arm64")
         download, = [step for step in steps("source-home-linux-arm64") if "actions/download-artifact@" in step and "name: llama-arm64-bundle" in step]
         self.assertIn("name: llama-arm64-bundle", download)
         self.assertEqual(field(download, "if"), "matrix.os == 'ubuntu-22.04-arm'")
