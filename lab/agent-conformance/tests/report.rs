@@ -1364,6 +1364,21 @@ fn installed_runtime_binds_only_a_matching_hash_chain() {
         record("2.0.0", &commit[..39]),
     );
     let not_hex = record("2.0.0", &format!("{}g", &commit[..39]));
+    let versionless = serde_json::json!({ "payload": {
+        "source": { "commit": commit },
+        "platforms": { "x86_64-linux": {
+            "binary": { "sha256": sha256(b"elastos") },
+            "components": { "sha256": sha256(b"components") } } } } })
+    .to_string();
+    let (head_without_hash, head_without_version, head_versionless) = (
+        serde_json::json!({ "payload": { "version": "2.0.0" } }).to_string(),
+        serde_json::json!({
+            "payload": { "release_sha256": sha256(release.as_bytes()) } })
+        .to_string(),
+        serde_json::json!({
+            "payload": { "release_sha256": sha256(versionless.as_bytes()) } })
+        .to_string(),
+    );
     let good = head(&release, "2.0.0");
     let check = |head: &str, release: &str, platform: &str, binary: &[u8], components: &[u8]| {
         installed_runtime(
@@ -1392,12 +1407,12 @@ fn installed_runtime_binds_only_a_matching_hash_chain() {
         "components do not match the release",
     );
     #[rustfmt::skip]
-    let cases: [(&str, &str, &str, &[u8], &[u8], &[&str]); 12] = [
+    let cases: [(&str, &str, &str, &[u8], &[u8], &[&str]); 15] = [
         (&good, &release, "x86_64-linux", b"other", b"components", &[bin]),
         (&good, &release, "x86_64-linux", b"elastos", b"other", &[comp]),
         (&good, &other, "x86_64-linux", b"elastos", b"components", &["release", "version"]),
         (&head(&other, "2.0.0"), &other, "x86_64-linux", b"elastos", b"components", &["version"]),
-        (&good, &release, "aarch64-darwin", b"elastos", b"components", &[bin, comp]),
+        (&good, &release, "aarch64-darwin", b"elastos", b"components", &["release names no entry for aarch64-darwin"]),
         (&head(&short, "2.0.0"), &short, "x86_64-linux", b"elastos", b"components", &["malformed release source commit"]),
         (&head(&not_hex, "2.0.0"), &not_hex, "x86_64-linux", b"elastos", b"components", &["malformed release source commit"]),
         (&good, &release, "", b"elastos", b"components", &["malformed platform"]),
@@ -1405,6 +1420,9 @@ fn installed_runtime_binds_only_a_matching_hash_chain() {
         (&good, &release, "x86_64-linux~1", b"elastos", b"components", &["malformed platform"]),
         ("{", &release, "x86_64-linux", b"elastos", b"components", &["malformed release head"]),
         (&good, "", "x86_64-linux", b"elastos", b"components", &["malformed release"]),
+        (&head_without_hash, &release, "x86_64-linux", b"elastos", b"components", &["release"]),
+        (&head_without_version, &release, "x86_64-linux", b"elastos", b"components", &["version"]),
+        (&head_versionless, &versionless, "x86_64-linux", b"elastos", b"components", &["version"]),
     ];
     for (index, (head, release, platform, binary, components, want)) in
         cases.into_iter().enumerate()

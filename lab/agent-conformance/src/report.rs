@@ -547,6 +547,12 @@ pub fn installed_runtime(
     let [release_sha256, binary_sha256, components_sha256] =
         [release, binary, components].map(sha256);
     let entry = format!("/payload/platforms/{platform}");
+    if !record
+        .pointer(&entry)
+        .is_some_and(serde_json::Value::is_object)
+    {
+        return Err(vec![format!("release names no entry for {platform}")]);
+    }
     let mut failures = Vec::new();
     for (named, actual, reason) in [
         (
@@ -577,20 +583,24 @@ pub fn installed_runtime(
     if source_commit.is_none() {
         failures.push("malformed release source commit".into());
     }
-    match (version, source_commit) {
-        (Some(version), Some(source_commit)) if failures.is_empty() => Ok(InstalledRuntime {
-            version,
-            platform: platform.to_owned(),
-            source_commit,
-            release_sha256,
-            binary_sha256,
-            components_sha256,
-        }),
-        _ => {
-            failures.sort();
-            Err(failures)
-        }
+    if !failures.is_empty() {
+        failures.sort();
+        return Err(failures);
     }
+    let (Some(version), Some(source_commit)) = (version, source_commit) else {
+        // Each missing field above pushes its reason, so this arm is not
+        // reachable today. It keeps Err non-empty if one of those checks is
+        // ever weakened.
+        return Err(vec!["release record omits a required field".into()]);
+    };
+    Ok(InstalledRuntime {
+        version,
+        platform: platform.to_owned(),
+        source_commit,
+        release_sha256,
+        binary_sha256,
+        components_sha256,
+    })
 }
 
 /// A missing, repeated or unlisted result fails closed. Cargo failure is also
