@@ -1340,3 +1340,84 @@ fn report_cli_reads_reviews_and_refuses_a_malformed_file() {
     assert!(!home.root().join("missing.json").exists());
     home.finish().unwrap();
 }
+
+#[test]
+fn installed_runtime_binds_only_a_matching_hash_chain() {
+    use agent_conformance::{identity::sha256, report::installed_runtime};
+    let commit = "7bc3704b5e181e5aa435c2b2cafbd73a996932ef";
+    let record = |version: &str, commit: &str| {
+        let (bin, comp) = (sha256(b"elastos"), sha256(b"components"));
+        let platform =
+            serde_json::json!({ "binary": { "sha256": bin }, "components": { "sha256": comp } });
+        let payload = serde_json::json!({ "version": version, "source": { "commit": commit },
+            "platforms": { "x86_64-linux": platform } });
+        serde_json::json!({ "payload": payload }).to_string()
+    };
+    let head = |release: &str, version: &str| {
+        let payload =
+            serde_json::json!({ "release_sha256": sha256(release.as_bytes()), "version": version });
+        serde_json::json!({ "payload": payload }).to_string()
+    };
+    let (release, other, short) = (
+        record("2.0.0", commit),
+        record("2.0.1", commit),
+        record("2.0.0", &commit[..39]),
+    );
+    let good = head(&release, "2.0.0");
+    let check = |head: &str, release: &str, platform: &str, binary: &[u8], components: &[u8]| {
+        installed_runtime(
+            head.as_bytes(),
+            release.as_bytes(),
+            platform,
+            binary,
+            components,
+        )
+    };
+    let installed = check(&good, &release, "x86_64-linux", b"elastos", b"components").unwrap();
+    assert_eq!(
+        (
+            installed.version.as_str(),
+            installed.platform.as_str(),
+            installed.source_commit.as_str()
+        ),
+        ("2.0.0", "x86_64-linux", commit)
+    );
+    assert_eq!(installed.release_sha256, sha256(release.as_bytes()));
+    assert_eq!(installed.binary_sha256, sha256(b"elastos"));
+    assert_eq!(installed.components_sha256, sha256(b"components"));
+    let (another, bin, comp) = (
+        "release head names another ",
+        "binary does not match the release",
+        "components do not match the release",
+    );
+    #[rustfmt::skip]
+    let cases: [(&str, &str, &str, &[u8], &[u8], &[&str]); 11] = [
+        (&good, &release, "x86_64-linux", b"other", b"components", &[bin]),
+        (&good, &release, "x86_64-linux", b"elastos", b"other", &[comp]),
+        (&good, &other, "x86_64-linux", b"elastos", b"components", &["release", "version"]),
+        (&head(&other, "2.0.0"), &other, "x86_64-linux", b"elastos", b"components", &["version"]),
+        (&good, &release, "aarch64-darwin", b"elastos", b"components", &[bin, comp]),
+        (&head(&short, "2.0.0"), &short, "x86_64-linux", b"elastos", b"components", &["malformed release source commit"]),
+        (&good, &release, "", b"elastos", b"components", &["malformed platform"]),
+        (&good, &release, "x86_64-linux/binary", b"elastos", b"components", &["malformed platform"]),
+        (&good, &release, "x86_64-linux~1", b"elastos", b"components", &["malformed platform"]),
+        ("{", &release, "x86_64-linux", b"elastos", b"components", &["malformed release head"]),
+        (&good, "", "x86_64-linux", b"elastos", b"components", &["malformed release"]),
+    ];
+    for (index, (head, release, platform, binary, components, want)) in
+        cases.into_iter().enumerate()
+    {
+        let want: Vec<String> = want
+            .iter()
+            .map(|reason| match *reason {
+                "release" | "version" => format!("{another}{reason}"),
+                reason => reason.to_owned(),
+            })
+            .collect();
+        assert_eq!(
+            check(head, release, platform, binary, components),
+            Err(want),
+            "case {index}"
+        );
+    }
+}

@@ -502,6 +502,97 @@ pub fn review_failures(reviews: Option<&[Review]>, git: Option<&GitIdentity>) ->
     failures
 }
 
+/// The installed Runtime a receipt can name, from the records the installer
+/// keeps. Only the hash chain is checked: release-head.json names the hash of
+/// release.json, which names the binary and components.json for one platform.
+/// Neither signature is verified, so this shows which release the installed
+/// bytes match, not that the release is genuine.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct InstalledRuntime {
+    pub version: String,
+    pub platform: String,
+    pub source_commit: String,
+    pub release_sha256: String,
+    pub binary_sha256: String,
+    pub components_sha256: String,
+}
+
+/// Every reason the installed bytes do not match their release; Ok only when
+/// none.
+pub fn installed_runtime(
+    head: &[u8],
+    release: &[u8],
+    platform: &str,
+    binary: &[u8],
+    components: &[u8],
+) -> Result<InstalledRuntime, Vec<String>> {
+    let parse = |bytes: &[u8], name: &str| {
+        serde_json::from_slice::<serde_json::Value>(bytes)
+            .map_err(|_| vec![format!("malformed {name}")])
+    };
+    let field = |value: &serde_json::Value, pointer: &str| {
+        value
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    if platform.is_empty()
+        || !platform
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+    {
+        return Err(vec!["malformed platform".into()]);
+    }
+    let (head, record) = (parse(head, "release head")?, parse(release, "release")?);
+    let [release_sha256, binary_sha256, components_sha256] =
+        [release, binary, components].map(sha256);
+    let entry = format!("/payload/platforms/{platform}");
+    let mut failures = Vec::new();
+    for (named, actual, reason) in [
+        (
+            field(&head, "/payload/release_sha256"),
+            &release_sha256,
+            "release head names another release",
+        ),
+        (
+            field(&record, &format!("{entry}/binary/sha256")),
+            &binary_sha256,
+            "binary does not match the release",
+        ),
+        (
+            field(&record, &format!("{entry}/components/sha256")),
+            &components_sha256,
+            "components do not match the release",
+        ),
+    ] {
+        if named.as_ref() != Some(actual) {
+            failures.push(reason.to_owned());
+        }
+    }
+    let version = field(&record, "/payload/version");
+    if version.is_none() || version != field(&head, "/payload/version") {
+        failures.push("release head names another version".into());
+    }
+    let source_commit = field(&record, "/payload/source/commit").filter(|commit| hex(commit, 40));
+    if source_commit.is_none() {
+        failures.push("malformed release source commit".into());
+    }
+    match (version, source_commit) {
+        (Some(version), Some(source_commit)) if failures.is_empty() => Ok(InstalledRuntime {
+            version,
+            platform: platform.to_owned(),
+            source_commit,
+            release_sha256,
+            binary_sha256,
+            components_sha256,
+        }),
+        _ => {
+            failures.sort();
+            Err(failures)
+        }
+    }
+}
+
 /// A missing, repeated or unlisted result fails closed. Cargo failure is also
 /// visible even if compilation or a test binary failed before reporting a row.
 pub fn table(listed: &str, output: &str, cargo_ok: bool, gaps: Option<&str>) -> (String, bool) {
