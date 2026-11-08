@@ -155,6 +155,14 @@ class CountTest(unittest.TestCase):
                 "tests/integration.rs": "fn i() {}\n"}
         self.assertEqual(core_size.count(tree), {"total": 6, "tests": 4, "comments": 0, "blank": 0, "code": 2})
 
+    def test_production_reach_beats_the_tests_directory(self):
+        production = "pub fn production() {}\n"
+        tree = {"src/lib.rs": '#[path = "../tests/production.rs"]\npub mod production;\n',
+                "tests/production.rs": production, "tests/integration.rs": "fn i() {}\n"}
+        self.assertEqual(core_size.count(tree), {"total": 4, "tests": 1, "comments": 0, "blank": 0, "code": 3})
+        target = {"Cargo.toml": '[lib]\npath = "tests/production.rs"\n', "tests/production.rs": production}
+        self.assertEqual(core_size.count(target)["code"], 1)
+
     def test_module_paths_resolve_like_rustc(self):
         tree = {"src/lib.rs": 'mod a;\n#[path = "elsewhere/p.rs"]\nmod p;\n'
                               "#[cfg(test)]\nmod tests {\n    mod helpers;\n}\n",

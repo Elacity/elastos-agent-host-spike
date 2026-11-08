@@ -353,7 +353,9 @@ def count(tree):
         if lines[-1] == "":
             lines.pop()
         totals["total"] += len(lines)
-        if path.startswith("tests/") or reached.get(path):
+        # The tree decides: a reached file is production unless only test code reaches it, wherever it
+        # sits. Files under tests/ that it does not reach are the crate's integration tests.
+        if reached.get(path) or (path not in reached and path.startswith("tests/")):
             totals["tests"] += len(lines)
             continue
         if path not in reached:
