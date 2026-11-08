@@ -10814,6 +10814,126 @@ fn seccomp_model_program_admits_no_forbidden_call_on_either_architecture() {
     }
 }
 
+/// The model's whole allow list on each architecture: every call its final
+/// program lets run, unconditionally or through an argument-checked rule, by
+/// `libc::SYS_*` name and number. No builder reads it. Each macro hands its rows
+/// to `$rows`, so the same rows give literal numbers on every OS and are compared
+/// with `libc::SYS_*` on the Linux host of that architecture.
+macro_rules! model_allowed_x86_64 {
+    ($rows:ident) => {
+        $rows! {
+            SYS_read = 0, SYS_write = 1, SYS_close = 3, SYS_fstat = 5, SYS_poll = 7, SYS_lseek = 8,
+            SYS_mmap = 9, SYS_mprotect = 10, SYS_munmap = 11, SYS_rt_sigaction = 13,
+            SYS_pread64 = 17, SYS_pwrite64 = 18, SYS_readv = 19, SYS_writev = 20,
+            SYS_socketpair = 53, SYS_clone = 56, SYS_execve = 59, SYS_exit = 60, SYS_uname = 63,
+            SYS_fcntl = 72, SYS_flock = 73, SYS_fsync = 74, SYS_fdatasync = 75, SYS_ftruncate = 77,
+            SYS_mkdir = 83, SYS_unlink = 87, SYS_fchmod = 91, SYS_sysinfo = 99, SYS_geteuid = 107,
+            SYS_arch_prctl = 158, SYS_futex = 202, SYS_getdents64 = 217, SYS_exit_group = 231,
+            SYS_epoll_wait = 232, SYS_epoll_ctl = 233, SYS_openat = 257, SYS_mkdirat = 258,
+            SYS_newfstatat = 262, SYS_unlinkat = 263, SYS_linkat = 265, SYS_readlinkat = 267,
+            SYS_faccessat = 269, SYS_ppoll = 271, SYS_epoll_pwait = 281, SYS_eventfd2 = 290,
+            SYS_epoll_create1 = 291, SYS_prlimit64 = 302, SYS_renameat2 = 316, SYS_getrandom = 318,
+            SYS_execveat = 322, SYS_statx = 332, SYS_rseq = 334, SYS_openat2 = 437,
+        }
+    };
+}
+macro_rules! model_allowed_aarch64 {
+    ($rows:ident) => {
+        $rows! {
+            SYS_eventfd2 = 19, SYS_epoll_create1 = 20, SYS_epoll_ctl = 21, SYS_epoll_pwait = 22,
+            SYS_fcntl = 25, SYS_flock = 32, SYS_mkdirat = 34, SYS_unlinkat = 35, SYS_linkat = 37,
+            SYS_ftruncate = 46, SYS_faccessat = 48, SYS_fchmod = 52, SYS_openat = 56,
+            SYS_close = 57, SYS_getdents64 = 61, SYS_lseek = 62, SYS_read = 63, SYS_write = 64,
+            SYS_readv = 65, SYS_writev = 66, SYS_pread64 = 67, SYS_pwrite64 = 68, SYS_ppoll = 73,
+            SYS_readlinkat = 78, SYS_newfstatat = 79, SYS_fstat = 80, SYS_fsync = 82,
+            SYS_fdatasync = 83, SYS_exit = 93, SYS_exit_group = 94, SYS_futex = 98,
+            SYS_rt_sigaction = 134, SYS_uname = 160, SYS_geteuid = 175, SYS_sysinfo = 179,
+            SYS_socketpair = 199, SYS_munmap = 215, SYS_clone = 220, SYS_execve = 221,
+            SYS_mmap = 222, SYS_mprotect = 226, SYS_prlimit64 = 261, SYS_renameat2 = 276,
+            SYS_getrandom = 278, SYS_execveat = 281, SYS_statx = 291, SYS_rseq = 293,
+            SYS_openat2 = 437,
+        }
+    };
+}
+macro_rules! syscall_rows {
+    ($($name:ident = $number:literal,)*) => {
+        &[$((stringify!($name), $number),)*]
+    };
+}
+const MODEL_ALLOWED_X86_64: &[(&str, u32)] = model_allowed_x86_64!(syscall_rows);
+const MODEL_ALLOWED_AARCH64: &[(&str, u32)] = model_allowed_aarch64!(syscall_rows);
+
+/// The syscall numbers `program` lets run on `audit_arch` for some arguments:
+/// every number below 1024 and every constant the program holds, walked through
+/// it. An argument word is unknown, so a jump on one takes both arms. A return
+/// that is not an errno, trap or kill lets the call run. An instruction this
+/// reader does not know is a panic, not a pass.
+fn seccomp_numbers_let_run(program: &[SeccompInstruction], audit_arch: u32) -> Vec<u32> {
+    fn runs(program: &[SeccompInstruction], pc: usize, acc: Option<u32>, data: [u32; 2]) -> bool {
+        let at = program[pc];
+        let next = |pc, acc| runs(program, pc, acc, data);
+        let (taken, skipped) = (pc + 1 + usize::from(at.jt), pc + 1 + usize::from(at.jf));
+        let branch = |hit: Option<bool>| match hit {
+            Some(hit) => next(if hit { taken } else { skipped }, acc),
+            None => next(taken, acc) || next(skipped, acc),
+        };
+        match at.code {
+            SECCOMP_BPF_RET_K => !matches!(
+                at.k & 0xffff_0000,
+                0 | 0x0003_0000 | 0x0005_0000 | 0x8000_0000
+            ),
+            SECCOMP_BPF_LD_W_ABS if at.k == SECCOMP_NUMBER_OFFSET => next(pc + 1, Some(data[0])),
+            SECCOMP_BPF_LD_W_ABS if at.k == SECCOMP_ARCH_OFFSET => next(pc + 1, Some(data[1])),
+            SECCOMP_BPF_LD_W_ABS => next(pc + 1, None),
+            SECCOMP_BPF_AND_K => next(pc + 1, acc.map(|a| a & at.k)),
+            SECCOMP_BPF_JEQ_K => branch(acc.map(|a| a == at.k)),
+            SECCOMP_BPF_JGE_K => branch(acc.map(|a| a >= at.k)),
+            SECCOMP_BPF_JSET_K => branch(acc.map(|a| a & at.k != 0)),
+            code => panic!("instruction {pc} has code {code:#x}, which this reader does not know"),
+        }
+    }
+    let mut candidates: Vec<u32> = (0..1024).chain(program.iter().map(|at| at.k)).collect();
+    candidates.sort_unstable();
+    candidates.dedup();
+    candidates.retain(|&number| runs(program, 0, None, [number, audit_arch]));
+    candidates
+}
+
+/// The model's final program lets run exactly the listed calls on each
+/// architecture. The other model checks read `MODEL_RUNTIME_ESSENTIALS` or name
+/// only forbidden calls, so a widening can pass them. This test renders each
+/// architecture's program through the one builder and join, the host's being the
+/// launch's, and requires the numbers it lets run to equal the literal list. It
+/// makes no kernel call, so it runs on every OS.
+///
+/// Falsifiers: WP248 adds `ptrace` and WP249 adds `pidfd_getfd` to
+/// `MODEL_RUNTIME_ESSENTIALS`, and WP250 puts a `JEQ 246` with an `ALLOW` behind
+/// it in the model's thread rules; each lets run a number the list does not hold.
+#[test]
+fn seccomp_model_program_lets_run_exactly_the_listed_calls() {
+    let host = seccomp_probe_list(MODEL_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+    for (arch, arch_name, listed) in [
+        (0xc000_003e_u32, "x86-64", MODEL_ALLOWED_X86_64),
+        (0xc000_00b7, "aarch64", MODEL_ALLOWED_AARCH64),
+    ] {
+        let allow =
+            seccomp_probe_list_for_arch(MODEL_PROVIDER, arch).unwrap_or_else(|err| panic!("{err}"));
+        if arch == host.audit_arch {
+            assert_eq!(
+                allow.program, host.program,
+                "{arch_name} must render the launch's"
+            );
+        }
+        let mut expected: Vec<u32> = listed.iter().map(|(_, number)| *number).collect();
+        expected.sort_unstable();
+        assert_eq!(
+            seccomp_numbers_let_run(&allow.program, arch),
+            expected,
+            "the {arch_name} model program must let run exactly the listed calls"
+        );
+    }
+}
+
 /// The one judge of the socket sweep accepts a report where every type swept
 /// every family and every family was refused after the filter, and refuses each
 /// way a report can fall short, with its own reason.
