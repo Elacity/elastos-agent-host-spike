@@ -2441,6 +2441,39 @@ mod tests {
         assert!(data.contains(REQUEST_STATE_COMPLETED));
     }
 
+    /// With no usable operator config (absent, unparseable, no peers), the
+    /// stream handler's trusted list is empty, and a request self-signed by
+    /// a fresh key fails verification itself.
+    #[test]
+    fn unconfigured_node_refuses_self_signed_request_at_verification() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sk, did) = elastos_identity::derive_did(&[16u8; 32]);
+        let request = OperatorRequestPayload {
+            version: 1,
+            request_id: "req-self-signed-1".to_string(),
+            requester_did: did.clone(),
+            target_did: did.clone(),
+            ts: now_ts(),
+            action: OPERATOR_ACTION_STATUS_READ.to_string(),
+            args: serde_json::Value::Null,
+        };
+        let signed = sign_envelope(&sk, OPERATOR_REQUEST_DOMAIN, &request).unwrap();
+        let bytes = serde_json::to_vec(&signed).unwrap();
+        verify_request_envelope(&bytes, std::slice::from_ref(&did)).unwrap();
+        for contents in [None, Some("{not json"), Some(r#"{"peers":[]}"#)] {
+            if let Some(contents) = contents {
+                std::fs::write(operator_control_path(dir.path()), contents).unwrap();
+            }
+            // As handle_operator_stream builds the list.
+            let config = load_operator_control(dir.path())
+                .unwrap_or_else(|_| OperatorControlConfig::empty());
+            let expected: Vec<String> = config.peers.iter().map(|p| p.did.clone()).collect();
+            let err = verify_request_envelope(&bytes, &expected)
+                .expect_err("an unconfigured node must refuse a self-signed request");
+            assert_eq!(err.to_string(), "Signed envelope has no trusted signer DID");
+        }
+    }
+
     #[tokio::test]
     async fn operator_stream_drops_oversized_and_stalled_requests_before_auth() {
         let dir = tempfile::tempdir().unwrap();

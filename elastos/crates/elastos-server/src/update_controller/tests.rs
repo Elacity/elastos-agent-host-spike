@@ -693,6 +693,48 @@ fn fresh_source_persistence_keeps_an_uninstalled_binary_parent_uncreated() {
     assert!(!binary.parent().unwrap().exists());
 }
 
+/// A retained controller receipt whose source pins no publisher admits no
+/// signed release, whoever signed it.
+#[test]
+fn retained_receipt_with_empty_publisher_pins_is_refused() {
+    let fixture = PrivateFixture::new();
+    let expected = digest(b"signed fixture Runtime");
+    let mut release: Value = serde_json::from_slice(&signed_release(&expected)).unwrap();
+    let other = ed25519_dalek::SigningKey::from_bytes(&[77; 32]);
+    let payload = serde_json::to_vec(&release["payload"]).unwrap();
+    let (signature, signer) =
+        crate::crypto::domain_separated_sign(&other, "elastos.release.v1", &payload);
+    release["signature"] = json!(signature);
+    release["signer_did"] = json!(signer);
+    let launch = LaunchPlan {
+        args: Vec::new(),
+        environment: Vec::new(),
+        cwd: BASE64.encode(fixture.data.as_os_str().as_bytes()),
+    };
+    let mut receipt = Receipt {
+        schema: "elastos.update-controller/v1".into(),
+        data_dir: fixture.data.clone(),
+        binary: fixture.binary.clone(),
+        controller: fixture.controller(),
+        controller_sha256: expected,
+        signed_controller_release: BASE64.encode(serde_json::to_vec(&release).unwrap()),
+        trusted_source: TrustedSource {
+            publisher_dids: vec![signer],
+            ..test_source()
+        },
+        launch_sha256: launch.sha256().unwrap(),
+        launch,
+    };
+    validate_retained_receipt_record(&receipt).unwrap();
+    receipt.trusted_source.publisher_dids = Vec::new();
+    let refused = validate_retained_receipt_record(&receipt)
+        .expect_err("a receipt with empty publisher pins must be refused");
+    assert_eq!(
+        refused.to_string(),
+        "Signed envelope has no trusted signer DID"
+    );
+}
+
 #[test]
 fn installed_controller_admission_binds_signature_channel_version_platform_and_binary() {
     let fixture = PrivateFixture::new();
