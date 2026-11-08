@@ -618,7 +618,9 @@ seccomp allow list generated from this provider's declared rights, with the one
 builder, the one mapping table, the one step sequencer and the one install
 function that file names
 (`seccomp_allow_list_from_declared_rights`, `SECCOMP_RULE_SYSCALLS`,
-`install_seccomp_with`, `install_seccomp`). On a real Linux host the wallet
+`install_seccomp_with`, `install_seccomp`). The model provider's filter adds argument-checked rules
+for five calls; `thread_rule_calls_are_not_in_the_unconditional_list` keeps those
+calls out of the unconditional list, where they would be admitted first. On a real Linux host the wallet
 provider starts under that filter and the four denied calls answer the filter's
 own marker there, as `CONFINEMENT-LINUX.md` records with its host, kernel and
 per-call answers. The Landlock file row has a recorded run there too. That is the
@@ -1357,7 +1359,7 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   fails at did's launched-profile check, where `check_declared_rights` refuses
   the appended allow form because no declared right names it, and the suite
   never starts.
-- Return `did_provider_dir().join("target/debug/did-provider")` from the one
+- Return `provider_dir(DID_PROVIDER).join("target/debug/did-provider")` from the one
   build-output reader instead of the reported `executable` (WP128):
   `did_binary_is_the_executable_the_build_reports` fails because its fixture
   path sits outside any `target` directory, while
@@ -1675,6 +1677,38 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - WP247: The Landlock builder skips the same check, so that declaration gets a
   `STORAGE_ROOT` rule.
   `builders_refuse_a_pinned_form_claimed_by_another_id` checks this rule.
+- WP248: The model's runtime table carries `ptrace`, so the model's final
+  program tests its number while the table-derived comparisons still agree.
+  `seccomp_model_program_admits_no_forbidden_call_on_either_architecture`
+  checks this rule from a fixed list that no builder reads, and
+  `seccomp_model_program_lets_run_exactly_the_listed_calls` checks it from the
+  literal allow list of each architecture.
+  `seccomp_model_program_equals_its_golden_copy` checks it, and WP249 and WP250,
+  against the checked-in golden program of each architecture.
+- WP249: The model's runtime table carries `pidfd_getfd`, which the forbidden
+  list does not name. `seccomp_model_program_lets_run_exactly_the_listed_calls`
+  checks this rule: the program lets run a number the allow list does not hold.
+  `seccomp_model_program_equals_its_golden_copy` also checks it.
+- WP250: The model's thread rules gain a `JEQ 246` with an `ALLOW` behind it, so
+  the x86-64 program lets `kexec_load` run without naming it.
+  `seccomp_model_program_lets_run_exactly_the_listed_calls` and
+  `seccomp_model_program_admits_no_forbidden_call_on_either_architecture` check
+  this rule, and so does `seccomp_model_program_equals_its_golden_copy`.
+- WP251: The x86-64 `libm` users table gains wallet, so wallet's x86-64 launch
+  would read `libm.so.6`. `landlock_ruleset_names_each_measured_loader_entry`
+  checks this rule against the per-architecture sets it writes out, on any host.
+- WP252: The `fcntl` rule also admits command 2, `F_SETFD`. No syscall number
+  changes. `seccomp_model_program_equals_its_golden_copy` checks this rule.
+- WP253: The `futex` rule masks its op with 1, so every op reads as wait or
+  wake. `seccomp_model_program_equals_its_golden_copy` checks this rule.
+- WP254: `clone3` returns `SECCOMP_RET_LOG` instead of `ENOSYS`, so the kernel
+  runs it. `seccomp_model_program_equals_its_golden_copy` checks this rule.
+- WP255: The `clone` rule's miss jump lands on its allow, so every number after
+  it is allowed. `seccomp_model_program_equals_its_golden_copy` checks this rule.
+- WP256: The shared `SeccompInstruction::jump` constructor turns the
+  `F_DUPFD_CLOEXEC` equality into a bit test, so `fcntl` commands 2, 4 and 15
+  are allowed. The golden is read as plain integers, not through that
+  constructor, so `seccomp_model_program_equals_its_golden_copy` checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,
