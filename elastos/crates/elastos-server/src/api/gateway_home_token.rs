@@ -161,12 +161,13 @@ impl RuntimeWalletAuthority {
     }
 
     pub(in crate::api) fn home_launch_context(&self) -> HomeLaunchTokenContext {
-        HomeLaunchTokenContext {
-            principal_id: self.context.principal_id().to_string(),
-            session_id: self.context.session_id().to_string(),
-            proof_binding_id: self.context.proof_binding_id().map(ToString::to_string),
-            grant_id: self.context.grant_id().to_string(),
-        }
+        HomeLaunchTokenContext::resolved(
+            self.root.clone(),
+            self.context.principal_id().to_string(),
+            self.context.session_id().to_string(),
+            self.context.proof_binding_id().map(ToString::to_string),
+            self.context.grant_id().to_string(),
+        )
     }
 
     #[cfg(test)]
@@ -263,14 +264,16 @@ pub(in crate::api) fn local_home_launch_token_context(
     data_dir: &std::path::Path,
 ) -> anyhow::Result<HomeLaunchTokenContext> {
     let (_signing_key, did) = elastos_identity::load_or_create_did(data_dir)?;
-    Ok(HomeLaunchTokenContext {
-        principal_id: elastos_runtime::auth::PrincipalId::device_did(&did)
-            .as_str()
-            .to_string(),
-        session_id: format!("local:{}", uuid_like_token()),
-        proof_binding_id: None,
-        grant_id: format!("grant:local:{}", uuid_like_token()),
-    })
+    let principal_id = elastos_runtime::auth::PrincipalId::device_did(&did)
+        .as_str()
+        .to_string();
+    Ok(HomeLaunchTokenContext::resolved(
+        crate::auth::ResolvedPrincipalRoot::verified_device_signer(&did),
+        principal_id,
+        format!("local:{}", uuid_like_token()),
+        None,
+        format!("grant:local:{}", uuid_like_token()),
+    ))
 }
 
 pub(crate) fn uuid_like_token() -> String {
@@ -304,15 +307,21 @@ pub(crate) fn issue_home_launch_token_for_auth_grant(
     if !grant.apps.iter().any(|allowed| allowed == app) {
         anyhow::bail!("auth session grant is not authorized for app");
     }
+    let root = launch_principal_root(
+        data_dir,
+        &home_launch_auth_data_dir(data_dir),
+        &grant.principal_id,
+    )?;
     issue_home_launch_token_with_context(
         data_dir,
         app,
-        &HomeLaunchTokenContext {
-            principal_id: grant.principal_id.clone(),
-            session_id: grant.session_id.clone(),
-            proof_binding_id: Some(grant.proof_binding_id.clone()),
-            grant_id: grant.grant_id.clone(),
-        },
+        &HomeLaunchTokenContext::resolved(
+            root,
+            grant.principal_id.clone(),
+            grant.session_id.clone(),
+            Some(grant.proof_binding_id.clone()),
+            grant.grant_id.clone(),
+        ),
     )
 }
 
