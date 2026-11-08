@@ -6796,9 +6796,11 @@ impl SeccompInstruction {
 /// journey fails; with `exit` refused, the thread test never ends. `brk`,
 /// `rt_sigprocmask`, `sched_getaffinity`, `set_robust_list`, `set_tid_address`
 /// and `sigaltstack` were removed: refused alone, every model test passed.
-/// `madvise` and `munmap` also pass when refused, and stay: they hand memory
-/// back, so refusing them grants nothing less and leaks memory in a long run
-/// that a short journey cannot show.
+/// `madvise` was removed too: refused alone, every model test passed, and it
+/// does more than release memory (`MADV_POPULATE_WRITE` populates it).
+/// `munmap` also passes when refused, and stays as a stated exception, not a
+/// measured need: it unmaps only the caller's own memory, so refusing it takes
+/// no authority away and only stops memory being returned. No run shows a leak.
 const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[
     "epoll_create1",
     "epoll_ctl",
@@ -6808,7 +6810,6 @@ const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[
     "exit",
     "flock",
     "geteuid",
-    "madvise",
     "munmap",
     "rseq",
 ];
