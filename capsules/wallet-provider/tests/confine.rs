@@ -18569,7 +18569,7 @@ fn generated_did_and_wallet_profiles_match_their_committed_oracles() {
 ///
 /// A file may name `generate_profile` or `write_generated_profile` only when
 /// its path relative to `root` has a component exactly `tests`, its file name
-/// is exactly `falsifiers.json`, or its extension is `md`. Every other file
+/// ends in `falsifiers.json`, or its extension is `md`. Every other file
 /// fails. The walk reads every regular file as bytes, so a non-UTF-8 file is
 /// read, not skipped, and matches each name as a plain byte substring, so a
 /// longer name that contains one also fails (P11). It does not follow symbolic
@@ -18618,7 +18618,9 @@ fn check_lab_generator_names(root: &Path) -> Result<usize, String> {
                 .any(|component| component.as_os_str().to_str() == Some("tests"));
             let file_name = path.file_name().and_then(|name| name.to_str());
             let extension = path.extension().and_then(|extension| extension.to_str());
-            if in_tests || file_name == Some("falsifiers.json") || extension == Some("md") {
+            let is_falsifier_list =
+                file_name.is_some_and(|name| name.ends_with("falsifiers.json"));
+            if in_tests || is_falsifier_list || extension == Some("md") {
                 continue;
             }
             if NAMES
@@ -18660,7 +18662,8 @@ fn lab_generator_is_named_only_in_test_code() {
 /// files and build output are not.
 ///
 /// The fixture holds `src/main.rs` and `elastos/x.py` naming the generator and
-/// writer, the exempt `tests`, `falsifiers.json` and `md` names, and a
+/// writer, the exempt `tests` path, `falsifiers.json` and `confine-falsifiers.json`
+/// names and `md` extension, and a
 /// `target/` file naming it. The refusal names exactly the first two, sorted;
 /// after they are removed the check returns `Ok`. A longer name that contains
 /// `generate_profile` and a non-UTF-8 file naming it are then each refused,
@@ -18676,6 +18679,10 @@ fn lab_generator_name_check_refuses_a_non_test_file() {
         ("crate/src/tests/b.rs", "write_generated_profile\n"),
         (
             "crate/falsifiers.json",
+            "{\"about\": \"generate_profile\"}\n",
+        ),
+        (
+            "crate/confine-falsifiers.json",
             "{\"about\": \"generate_profile\"}\n",
         ),
         ("crate/README.md", "generate_profile\n"),
@@ -18698,7 +18705,7 @@ fn lab_generator_name_check_refuses_a_non_test_file() {
     fs::remove_file(root.join("src/main.rs")).expect("remove the rust fixture");
     assert_eq!(
         check_lab_generator_names(root).expect("only test code and build output remain"),
-        4
+        5
     );
     fs::write(root.join("crate/longer.rs"), "regenerate_profile\n")
         .expect("a fixture file under crate/");

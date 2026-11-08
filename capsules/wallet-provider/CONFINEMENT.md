@@ -76,13 +76,14 @@ profile from the declared-rights file and the contract head, and
 to equal this oracle; the Runtime's own generator and its comparison are not
 built and stay in `elastos/`, outside this lane.
 This file is the lab generator for did and wallet: wallet's `tests/confine.rs`
-includes it by `#[path]` and never copies it (P10). The model crate's own
-confine tests still build their profile with a separate `standin_profile` in
-`capsules/model-provider/tests/confine/main.rs`; moving them onto this file is
-open follow-up work.
+includes it by `#[path]` and never copies it (P10). The model crate's confine target includes
+the same file by `#[path]`, and
+`generated_model_profile_matches_its_committed_oracle` compares its generated
+profile with the model oracle.
 The lab generator and writer are test code only, and
 `lab_generator_is_named_only_in_test_code` fails if a file outside test code
-names either, so the Runtime keeps one profile generator (P10).
+names either, so the Runtime keeps one profile generator (P10). A falsifier
+list ends in `falsifiers.json` and is test code.
 The one contract check, `check_profile_contract`, holds every oracle
 to these terms, and the generated profile meets them too: `(version 1)` first,
 `(deny default)` second, an explicit `(deny network*)`, no `(allow default)`,
