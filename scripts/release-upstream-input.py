@@ -197,23 +197,33 @@ def copy_into(stream, output, algorithm, maximum):
     return value, size
 
 
-def fetch(source, output, algorithm, attempts=4):
+# Six attempts with 135 s of waiting between them. GitHub release downloads
+# returned intermittent 504s for over an hour on 8 Nov 2026; 2 + 4 + 8 s was too
+# short to ride out a burst. With the 30 s open timeout, a source that never
+# answers gives up in under six minutes.
+RETRY_DELAYS = (5, 10, 20, 40, 60)
+
+
+def fetch(source, output, algorithm, delays=RETRY_DELAYS):
     """A transient failure anywhere in the download (open or body) restarts it from
-    byte zero up to three more times, 2, 4 and 8 s apart: a release build fetches
-    dozens of upstream inputs, and one 504 failed a 60-minute job."""
+    byte zero after each delay in turn: a release build fetches dozens of upstream
+    inputs, and one 504 failed a 60-minute job. Other 4xx, redirects outside the
+    allowlist, size bounds and checksum mismatches are never retried."""
     if "path" in source:
         return copy_into(regular(source["path"]).open("rb"), output, algorithm, source["max_bytes"])
-    for attempt in range(attempts):
+    for attempt in range(len(delays) + 1):
         try:
             return copy_into(response(source), output, algorithm, source["max_bytes"])
         except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
-            if not transient(error) or attempt == attempts - 1:
+            if not transient(error) or attempt == len(delays):
                 raise
             if isinstance(error, urllib.error.HTTPError):
                 error.close()
+            print(f"upstream fetch attempt {attempt + 1} failed ({error}); retrying in {delays[attempt]} s",
+                  file=sys.stderr, flush=True)
         output.seek(0)
         output.truncate()
-        time.sleep(2 ** (attempt + 1))
+        time.sleep(delays[attempt])
     raise AssertionError("unreachable")
 
 

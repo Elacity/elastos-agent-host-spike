@@ -294,14 +294,14 @@ class UpstreamTest(unittest.TestCase):
             build.return_value.open.side_effect = [busy(), busy(), self.reply(b"inert")]
             self.assertEqual(upstream.cached_input(source, self.cache).read_bytes(), b"inert")
             self.assertEqual(build.return_value.open.call_count, 3)
-            self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4])
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [5, 10])
         source["checksum"] = "sha256:" + hashlib.sha256(b"other").hexdigest()
         with patch.object(upstream.urllib.request, "build_opener") as build, \
                 patch.object(upstream.time, "sleep"):
-            build.return_value.open.side_effect = [busy() for _ in range(4)]
+            build.return_value.open.side_effect = [busy() for _ in range(6)]
             with self.assertRaises(urllib.error.HTTPError):
                 upstream.cached_input(source, self.cache)
-            self.assertEqual(build.return_value.open.call_count, 4)
+            self.assertEqual(build.return_value.open.call_count, 6)
         with patch.object(upstream.urllib.request, "build_opener") as build, \
                 patch.object(upstream.time, "sleep") as sleep:
             build.return_value.open.side_effect = urllib.error.HTTPError(source["url"], 404, "Not Found", {}, io.BytesIO())
@@ -310,6 +310,44 @@ class UpstreamTest(unittest.TestCase):
             self.assertEqual(build.return_value.open.call_count, 1)
             sleep.assert_not_called()
         self.assertEqual(sorted(p.name for p in self.cache.iterdir()), ["sha256-" + hashlib.sha256(b"inert").hexdigest()])
+
+    def test_retry_schedule_is_bounded_and_only_rate_limits_and_outages_retry(self):
+        # Six attempts, no wait above 60 s, all waits plus six 30 s open timeouts under six minutes.
+        self.assertEqual(len(upstream.RETRY_DELAYS) + 1, 6)
+        self.assertLessEqual(max(upstream.RETRY_DELAYS), 60)
+        self.assertLess(sum(upstream.RETRY_DELAYS) + 6 * 30, 6 * 60)
+        self.assertEqual(list(upstream.RETRY_DELAYS), sorted(upstream.RETRY_DELAYS))
+        url = "https://upstream.example.test/input"
+        source = {"url": url, "checksum": "sha256:" + hashlib.sha256(b"inert").hexdigest(), "max_bytes": 10}
+        failures = {
+            "429": lambda: urllib.error.HTTPError(url, 429, "Too Many Requests", {}, io.BytesIO()),
+            "503": lambda: urllib.error.HTTPError(url, 503, "Service Unavailable", {}, io.BytesIO()),
+            "timeout": lambda: urllib.error.URLError(TimeoutError("timed out")),
+            "refused": lambda: ConnectionRefusedError("refused"),
+        }
+        for name, failure in failures.items():
+            with self.subTest(retried=name), \
+                    patch.object(upstream.urllib.request, "build_opener") as build, \
+                    patch.object(upstream.time, "sleep") as sleep:
+                for path in self.cache.glob("*"):
+                    path.unlink()
+                build.return_value.open.side_effect = [failure(), failure(), self.reply(b"inert")]
+                self.assertEqual(upstream.cached_input(source, self.cache).read_bytes(), b"inert")
+                self.assertEqual(build.return_value.open.call_count, 3)
+                self.assertEqual([call.args[0] for call in sleep.call_args_list], [5, 10])
+        for code in (400, 401, 403, 404, 410):
+            with self.subTest(permanent=code), \
+                    patch.object(upstream.urllib.request, "build_opener") as build, \
+                    patch.object(upstream.time, "sleep") as sleep:
+                for path in self.cache.glob("*"):
+                    path.unlink()
+                build.return_value.open.side_effect = [urllib.error.HTTPError(url, code, "Client Error", {}, io.BytesIO()),
+                                                       self.reply(b"inert")]
+                with self.assertRaises(urllib.error.HTTPError):
+                    upstream.cached_input(source, self.cache)
+                self.assertEqual(build.return_value.open.call_count, 1)
+                sleep.assert_not_called()
+                self.assertEqual(list(self.cache.iterdir()), [])
 
     def test_body_read_failures_restart_the_whole_download(self):
         data = b"payload bytes"
@@ -325,7 +363,7 @@ class UpstreamTest(unittest.TestCase):
                     path = upstream.cached_input(source, self.cache)
                     self.assertEqual(path.read_bytes(), data)
                     self.assertEqual(build.return_value.open.call_count, 2)
-                    self.assertEqual([call.args[0] for call in sleep.call_args_list], [2])
+                    self.assertEqual([call.args[0] for call in sleep.call_args_list], [5])
                 self.assertEqual([p.name for p in self.cache.iterdir()], [path.name])
 
     def http_reply(self, body, declared):
@@ -345,7 +383,7 @@ class UpstreamTest(unittest.TestCase):
             build.return_value.open.side_effect = [self.http_reply(data[:7], len(data)), self.http_reply(data, len(data))]
             self.assertEqual(upstream.cached_input(source, self.cache).read_bytes(), data)
             self.assertEqual(build.return_value.open.call_count, 2)
-            self.assertEqual([call.args[0] for call in sleep.call_args_list], [2])
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [5])
         for path in self.cache.glob("*"):
             path.unlink()
         with patch.object(upstream.urllib.request, "build_opener") as build, \
@@ -363,11 +401,11 @@ class UpstreamTest(unittest.TestCase):
         source = {"url": "https://upstream.example.test/input", "checksum": "sha256:" + hashlib.sha256(data).hexdigest(), "max_bytes": 32}
         with patch.object(upstream.urllib.request, "build_opener") as build, \
                 patch.object(upstream.time, "sleep") as sleep:
-            build.return_value.open.side_effect = [self.reply(data[:4], ConnectionResetError("reset")) for _ in range(4)]
+            build.return_value.open.side_effect = [self.reply(data[:4], ConnectionResetError("reset")) for _ in range(6)]
             with self.assertRaises(ConnectionResetError):
                 upstream.cached_input(source, self.cache)
-            self.assertEqual(build.return_value.open.call_count, 4)
-            self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4, 8])
+            self.assertEqual(build.return_value.open.call_count, 6)
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [5, 10, 20, 40, 60])
         self.assertEqual(list(self.cache.iterdir()), [])
         with patch.object(upstream.urllib.request, "build_opener") as build, \
                 patch.object(upstream.time, "sleep") as sleep:
