@@ -322,12 +322,10 @@ mod tests {
         std::fs::write(&storage, b"not a directory").unwrap();
         let open = super::open_capsule_dir(temp.path().to_path_buf(), "127.0.0.1:0", false);
         let deadline = std::time::Duration::from_secs(60);
-        let outcome = tokio::time::timeout(deadline, open).await;
-        let error = outcome.expect("open must refuse, not serve").unwrap_err();
+        // A spawned task turns a panic past the storage step into an outcome.
+        let outcome = tokio::time::timeout(deadline, tokio::spawn(open)).await;
         let expected = format!("cannot open storage {}", storage.display());
-        assert!(
-            error.to_string().contains(&expected),
-            "want {expected:?}; got {error:?}"
-        );
+        let refused = matches!(&outcome, Ok(Ok(Err(e))) if e.to_string().contains(&expected));
+        assert!(refused, "want {expected:?}; got {outcome:?}");
     }
 }
