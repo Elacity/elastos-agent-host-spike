@@ -123,8 +123,9 @@ jobs:
           directory="$RUNNER_TEMP/cargo-audit"
           mkdir -p "$directory"
           # GitHub release downloads can return 5xx for minutes at a time (8 Nov 2026: 504s
-          # for over an hour). Back off 1, 2, 4 ... 128 s within a 5-minute bound; the pinned
-          # digest below still decides what is used.
+          # for over an hour). The 1, 2, 4 ... 128 s backoff is a retry budget of 5 minutes:
+          # a transfer already running can overrun it, and the 15-minute job timeout is the
+          # hard bound. The pinned digest below still decides what is used.
           curl -fsSL --connect-timeout 20 --max-time 120 --retry 8 --retry-all-errors --retry-max-time 300 \
             "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv0.22.2/$archive.tgz" \
             -o "$directory/$archive.tgz"
