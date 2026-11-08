@@ -980,35 +980,6 @@ async fn setup_server_infrastructure_impl(
         Err(_) => tracing::warn!("Skipping media-provider due to verification failure"),
     }
 
-    if let Some(path) = crate::find_installed_provider_binary("operator-drive-adapter") {
-        if let Err(e) = verify_provider_binary("operator-drive-adapter", &path) {
-            tracing::warn!(
-                "Skipping operator-drive-adapter due to verification failure: {}",
-                e
-            );
-        } else {
-            let adapter_config = provider::BridgeProviderConfig {
-                base_path: data_dir.to_string_lossy().to_string(),
-                read_only: false,
-                extra: operator_drive_adapter_config_from_env(&data_dir)
-                    .unwrap_or(serde_json::Value::Null),
-                ..Default::default()
-            };
-            match provider::ProviderBridge::spawn(&path, adapter_config).await {
-                Ok(bridge) => {
-                    let provider: Arc<dyn provider::Provider> =
-                        Arc::new(provider::CapsuleProvider::with_scheme(
-                            Arc::new(bridge),
-                            "operator-drive-adapter",
-                        ));
-                    provider_registry.register(provider).await;
-                    tracing::info!("operator-drive-adapter capsule from {}", path.display());
-                }
-                Err(e) => tracing::warn!("Failed to spawn operator-drive-adapter: {}", e),
-            }
-        }
-    }
-
     match binaries::resolve_verified_native_provider_binary("ipfs-provider") {
         Ok(Some(path)) => {
             match register_ipfs_provider_plane_with_role(&provider_registry, &path, ipfs_role).await
@@ -2103,14 +2074,6 @@ fn browser_engine_adapter_config_from_env(data_dir: &std::path::Path) -> Option<
         data_dir,
         "ELASTOS_BROWSER_ENGINE_ADAPTER_CONFIG",
         "browser-engine-adapter.json",
-    )
-}
-
-fn operator_drive_adapter_config_from_env(data_dir: &std::path::Path) -> Option<serde_json::Value> {
-    provider_config_from_env_or_file(
-        data_dir,
-        "ELASTOS_OPERATOR_DRIVE_ADAPTER_CONFIG",
-        "operator-drive-adapter.json",
     )
 }
 
@@ -3804,27 +3767,6 @@ mod tests {
     }
 
     #[test]
-    fn operator_drive_adapter_config_prefers_explicit_json() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard::new(&["ELASTOS_OPERATOR_DRIVE_ADAPTER_CONFIG"]);
-        std::env::set_var(
-            "ELASTOS_OPERATOR_DRIVE_ADAPTER_CONFIG",
-            r#"{"operator_endpoint":{"url":"http://127.0.0.1:9797/operator-drive","authorization":"Bearer secret"}}"#,
-        );
-
-        let data_dir = crate::sources::default_data_dir();
-        let config = operator_drive_adapter_config_from_env(&data_dir).unwrap();
-        assert_eq!(
-            config["operator_endpoint"]["url"],
-            "http://127.0.0.1:9797/operator-drive"
-        );
-        assert_eq!(
-            config["operator_endpoint"]["authorization"],
-            "Bearer secret"
-        );
-    }
-
-    #[test]
     fn browser_local_exit_config_prefers_explicit_json() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _guard = EnvGuard::new(&["ELASTOS_BROWSER_LOCAL_EXIT_CONFIG"]);
@@ -4299,5 +4241,145 @@ mod tests {
             ),
             "revoked token must stay revoked after restart: {result:?}"
         );
+    }
+
+    struct RestoreVar {
+        key: String,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl RestoreVar {
+        fn set(key: &str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self {
+                key: key.to_string(),
+                previous,
+            }
+        }
+    }
+
+    impl Drop for RestoreVar {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(&self.key, value),
+                None => std::env::remove_var(&self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn home_startup_does_not_spawn_operator_drive_adapter() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _lock = ENV_LOCK.lock().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(home_startup_does_not_spawn_operator_drive_adapter_body());
+    }
+
+    async fn home_startup_does_not_spawn_operator_drive_adapter_body() {
+        struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for LogWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let operator_home = std::env::var_os("HOME");
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let _home = RestoreVar::set("HOME", &home);
+
+        let data_dir = default_data_dir();
+        assert!(
+            data_dir.starts_with(&home),
+            "refusing to start a Home outside the test directory: {}",
+            data_dir.display()
+        );
+        if let Some(operator_home) = operator_home.as_deref() {
+            assert!(
+                !data_dir.starts_with(operator_home),
+                "refusing to start a Home in the operator home: {}",
+                data_dir.display()
+            );
+        }
+
+        let bin_dir = data_dir.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let marker = data_dir.join("operator-drive-adapter-spawned");
+        let stub = bin_dir.join("operator-drive-adapter");
+        std::fs::write(
+            &stub,
+            format!("#!/bin/sh\ntouch '{}'\nexit 0\n", marker.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer({
+                let log = log.clone();
+                move || LogWriter(log.clone())
+            })
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+
+        let mut infra = setup_control_plane_infrastructure()
+            .await
+            .expect("control-plane Home startup");
+        if let Some(carrier) = infra.carrier_service.as_mut() {
+            carrier.shutdown().await.expect("carrier shutdown");
+        }
+        if let Some(collaboration) = infra.collaboration_service.as_mut() {
+            collaboration
+                .shutdown()
+                .await
+                .expect("collaboration shutdown");
+        }
+
+        let output = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        assert!(
+            !output.contains("operator-drive-adapter"),
+            "Home startup logged operator-drive-adapter:\n{output}"
+        );
+        assert!(
+            !marker.exists(),
+            "Home startup executed operator-drive-adapter"
+        );
+        assert!(infra
+            .provider_registry
+            .get("operator-drive-adapter")
+            .await
+            .is_none());
+
+        let response = elastos_server::library::handle_object_provider_runtime_request(
+            &data_dir,
+            infra.provider_registry.clone(),
+            &serde_json::json!({
+                "op": "stat",
+                "principal_id": "owner",
+                "uri": "localhost://WebSpaces/Operator"
+            }),
+        )
+        .await;
+        assert_eq!(response["status"], "error");
+        let message = response["message"].as_str().unwrap_or("");
+        assert!(
+            message.contains("unavailable") || message.contains("unknown WebSpace moniker"),
+            "{response}"
+        );
+        assert!(!serde_json::to_string(&response)
+            .unwrap()
+            .contains("operator://"));
     }
 }

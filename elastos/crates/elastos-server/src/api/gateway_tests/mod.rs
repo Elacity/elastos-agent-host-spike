@@ -405,6 +405,72 @@ async fn library_webspace_test_state(cache_dir: &std::path::Path) -> GatewayStat
     }
 }
 
+struct UnmountedWebSpaceProvider;
+
+#[async_trait::async_trait]
+impl Provider for UnmountedWebSpaceProvider {
+    async fn handle(&self, _request: ResourceRequest) -> Result<ResourceResponse, ProviderError> {
+        Err(ProviderError::Provider(
+            "webspace resource is not configured".into(),
+        ))
+    }
+
+    fn schemes(&self) -> Vec<&'static str> {
+        vec!["webspace"]
+    }
+
+    fn name(&self) -> &'static str {
+        "webspace-provider"
+    }
+
+    async fn send_raw(
+        &self,
+        request: &serde_json::Value,
+    ) -> Result<serde_json::Value, ProviderError> {
+        let op = request
+            .get("op")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let path = request
+            .get("path")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        if path == "localhost://WebSpaces/Operator"
+            || path.starts_with("localhost://WebSpaces/Operator/")
+        {
+            let code = match op {
+                "list" => "list_failed",
+                "read" => "read_failed",
+                _ => "stat_failed",
+            };
+            return Ok(json!({
+                "status": "error",
+                "code": code,
+                "message": "unknown WebSpace moniker: Operator"
+            }));
+        }
+        Err(ProviderError::Provider(
+            "webspace-provider is not configured".into(),
+        ))
+    }
+}
+
+async fn library_unmounted_operator_webspace_state(cache_dir: &std::path::Path) -> GatewayState {
+    seed_test_browser_capsules(cache_dir);
+    let registry = Arc::new(ProviderRegistry::new());
+    registry.register(Arc::new(UnmountedWebSpaceProvider)).await;
+    GatewayState {
+        provider_registry: Some(registry),
+        collaboration_chat_product_port: None,
+        collaboration_presence_product_port: None,
+        carrier_endpoint: None,
+        collaboration_discovery_service: None,
+        identity_manager: Arc::new(std::sync::OnceLock::new()),
+        cache_dir: cache_dir.to_path_buf(),
+        data_dir: cache_dir.to_path_buf(),
+    }
+}
+
 async fn library_test_state_with_content(
     cache_dir: &std::path::Path,
     with_content: bool,
