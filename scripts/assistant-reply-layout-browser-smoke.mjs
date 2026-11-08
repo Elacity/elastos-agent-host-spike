@@ -9,6 +9,9 @@
 // streams and once it settles, without being offered Jump to latest.
 // A reader who scrolls up after follow cleanup starts stays at that position.
 // Jump to latest, while a reply finishes, keeps the end in view.
+// A shrink and a partial growth, with no reader input, still lands at the end.
+// A scroll back to the end during cleanup does not leave follow on. Jump
+// shows once the reader moves up again.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
@@ -361,11 +364,9 @@ try {
   seen.sentReplyBehindMs = follow.behindMs;
   seen.sentReplyCompletionFrames = follow.completedFrames;
 
-  // A reader who moves up while a reply streams keeps their place, by any
-  // amount and however they moved, while more of the reply keeps arriving:
-  // small steps (ArrowUp, a 40 px wheel), a page (Shift+Space), or a scroll
-  // position set directly, as a screen reader does. Then Jump to latest is
-  // offered.
+  // A reader who moves up while a reply streams keeps their place, while more
+  // of the reply keeps arriving. The move is explicit: ArrowUp and a 40 px
+  // wheel, Shift+Space, or a scrollbar drag. Then Jump to latest is offered.
   const scrollState = () => frame.evaluate(() => {
     const scroller = document.querySelector("#agent-harness-stream");
     const jump = document.querySelector("[data-agent-jump-latest]");
@@ -468,8 +469,17 @@ try {
     await page.keyboard.press("Shift+Space");
     for (let i = 0; i < 4; i += 1) await pushChunk();
   }, clickTranscriptAWhileAgo);
-  seen.setScrollMovedPx = await readerMovesUp("a set scroll position", async (pushChunk) => {
-    await frame.evaluate(() => { document.querySelector("#agent-harness-stream").scrollTop -= 600; });
+  seen.scrollbarMovedPx = await readerMovesUp("a scrollbar drag", async (pushChunk) => {
+    await frame.evaluate(() => {
+      const scroller = document.querySelector("#agent-harness-stream");
+      const rect = scroller.getBoundingClientRect();
+      const thickness = Math.max(scroller.offsetWidth - scroller.clientWidth, 1);
+      scroller.dispatchEvent(new PointerEvent("pointerdown", {
+        bubbles: true, cancelable: true, pointerId: 1, pointerType: "mouse", button: 0,
+        clientX: rect.right - thickness / 2, clientY: rect.top + rect.height / 2,
+      }));
+      scroller.scrollTop -= 600;
+    });
     for (let i = 0; i < 2; i += 1) await pushChunk();
   });
 
@@ -550,7 +560,11 @@ try {
     jumpRun.push({ sequence: index + 1, kind: "text_delta", data: { text } });
   }
   await room.locator(".agent-msg-agent.is-streaming").filter({ hasText: jumpMarker }).waitFor({ timeout: 10000 });
-  await frame.evaluate(() => { document.querySelector("#agent-harness-stream").scrollTop -= 600; });
+  await frame.evaluate(() => {
+    const scroller = document.querySelector("#agent-harness-stream");
+    scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -480, bubbles: true, cancelable: true }));
+    scroller.scrollTop -= 600;
+  });
   await frame.waitForFunction(() => {
     const jump = document.querySelector("[data-agent-jump-latest]");
     const scroller = document.querySelector("#agent-harness-stream");
@@ -581,6 +595,129 @@ try {
   assert.ok(jumped.fromEnd <= 8, `Jump to latest keeps the end in view: ${JSON.stringify(jumped)}`);
   assert.equal(jumped.jump, false, `a reader at the end is not offered Jump to latest: ${JSON.stringify(jumped)}`);
   seen.jumpDuringFinish = jumped.fromEnd;
+
+  const armFinalFrame = async (marker) => {
+    await frame.evaluate((text) => {
+      const native = window.__nativeRequestAnimationFrame || window.requestAnimationFrame.bind(window);
+      window.__nativeRequestAnimationFrame = native;
+      window.requestAnimationFrame = (callback) => {
+        const scroller = document.querySelector("#agent-harness-stream");
+        const newest = [...document.querySelectorAll(".agent-msg-agent")].at(-1);
+        if (!window.__runFinalFrame
+            && newest?.textContent.includes(text)
+            && newest.dataset.streamPhase === "presentation_done"
+            && scroller
+            && !scroller.classList.contains("is-follow-bottom")) {
+          window.__runFinalFrame = () => new Promise((resolve) => {
+            native((time) => { callback(time); resolve(); });
+          });
+          return 0;
+        }
+        return native(callback);
+      };
+    }, marker);
+  };
+  const sendSettledReply = async (prompt, marker) => {
+    const runId = `run-sent-${fixture.runs.size + 1}`;
+    await input.fill(prompt);
+    await input.press("Enter");
+    for (const deadline = Date.now() + 10000; !fixture.runs.has(runId);) {
+      assert.ok(Date.now() < deadline, `${marker}: the message started a run`);
+      await page.waitForTimeout(20);
+    }
+    const run = fixture.runs.get(runId);
+    const chunks = `${gardenReply}\n${marker}\n`.match(/[\s\S]{1,300}/g);
+    for (const [index, text] of chunks.entries()) {
+      run.push({ sequence: index + 1, kind: "text_delta", data: { text } });
+    }
+    run.push({ sequence: chunks.length + 1, kind: "completed", data: {} });
+  };
+
+  stage = "a shrink then a partial growth with no reader input";
+  const shrinkMarker = "End of the reply after a shrink and a partial growth.";
+  await armFinalFrame(shrinkMarker);
+  await sendSettledReply("Plan a garden, then let layout move", shrinkMarker);
+  await frame.waitForFunction(() => typeof window.__runFinalFrame === "function", null, { timeout: 10000 });
+  const shrink = await frame.evaluate(async () => {
+    const scroller = document.querySelector("#agent-harness-stream");
+    const newest = [...document.querySelectorAll(".agent-msg-agent")].at(-1);
+    const body = newest.querySelector(".agent-msg-body");
+    const full = body.getBoundingClientRect().height;
+    body.style.overflow = "hidden";
+    body.style.maxHeight = `${Math.max(40, Math.round(full - 300))}px`;
+    const clampedTop = scroller.scrollTop;
+    body.style.maxHeight = `${Math.max(80, Math.round(full - 100))}px`;
+    const beforePin = {
+      full: Math.round(full),
+      clampedTop: Math.round(clampedTop),
+      top: Math.round(scroller.scrollTop),
+      fromEnd: Math.round(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight),
+      follow: scroller.classList.contains("is-follow-bottom"),
+    };
+    await window.__runFinalFrame();
+    const rows = [...document.querySelectorAll(".agent-msg-agent")];
+    const afterPin = {
+      fromEnd: Math.round(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight),
+      follow: scroller.classList.contains("is-follow-bottom"),
+      newestVisibility: getComputedStyle(rows.at(-1)).contentVisibility,
+      olderVisibility: getComputedStyle(rows.at(-2)).contentVisibility,
+      inlineIntrinsic: body.style.containIntrinsicSize,
+      finalizing: document.querySelectorAll(".is-finalizing").length,
+    };
+    body.style.maxHeight = "";
+    body.style.overflow = "";
+    window.requestAnimationFrame = window.__nativeRequestAnimationFrame;
+    delete window.__runFinalFrame;
+    delete window.__nativeRequestAnimationFrame;
+    return { beforePin, afterPin };
+  });
+  assert.equal(shrink.beforePin.follow, false, `cleanup dropped follow before the pin: ${JSON.stringify(shrink)}`);
+  assert.ok(shrink.beforePin.fromEnd >= 80,
+    `partial growth leaves the reader above the end, with no input: ${JSON.stringify(shrink)}`);
+  assert.ok(shrink.afterPin.fromEnd <= 1, `no input ends at the end: ${JSON.stringify(shrink)}`);
+  assert.equal(shrink.afterPin.follow, false, `the pin does not restore follow: ${JSON.stringify(shrink)}`);
+  assert.equal(shrink.afterPin.newestVisibility, "visible",
+    `the newest reply stays laid out: ${JSON.stringify(shrink)}`);
+  assert.equal(shrink.afterPin.olderVisibility, "auto",
+    `an older reply may skip paint: ${JSON.stringify(shrink)}`);
+  assert.equal(shrink.afterPin.inlineIntrinsic, "", `no inline intrinsic size: ${JSON.stringify(shrink)}`);
+  assert.equal(shrink.afterPin.finalizing, 0, `no finalizing class: ${JSON.stringify(shrink)}`);
+  seen.shrinkFromEnd = shrink.afterPin.fromEnd;
+
+  stage = "follow resumes during cleanup";
+  const resumeMarker = "End of the reply after a false resume.";
+  await armFinalFrame(resumeMarker);
+  await sendSettledReply("Plan a garden, then return to the end during cleanup", resumeMarker);
+  await frame.waitForFunction(() => typeof window.__runFinalFrame === "function", null, { timeout: 10000 });
+  const resume = await frame.evaluate(async () => {
+    const scroller = document.querySelector("#agent-harness-stream");
+    scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -120, bubbles: true, cancelable: true }));
+    scroller.scrollTop = Math.max(0, scroller.scrollTop - 500);
+    const above = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    scroller.scrollTop = scroller.scrollHeight;
+    const classAfterReturn = scroller.classList.contains("is-follow-bottom");
+    await window.__runFinalFrame();
+    const classAfterCleanup = scroller.classList.contains("is-follow-bottom");
+    window.requestAnimationFrame = window.__nativeRequestAnimationFrame;
+    scroller.scrollTop = Math.max(0, scroller.scrollTop - 500);
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const jump = document.querySelector("[data-agent-jump-latest]");
+    const fromEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    delete window.__runFinalFrame;
+    delete window.__nativeRequestAnimationFrame;
+    return {
+      above: Math.round(above),
+      classAfterReturn,
+      classAfterCleanup,
+      fromEnd: Math.round(fromEnd),
+      jumpHidden: !jump || jump.hidden || jump.getBoundingClientRect().height === 0,
+    };
+  });
+  assert.ok(resume.above > 300, `the reader left the end before the false resume: ${JSON.stringify(resume)}`);
+  assert.equal(resume.classAfterReturn, false, `a scroll back to the end does not resume follow: ${JSON.stringify(resume)}`);
+  assert.equal(resume.classAfterCleanup, false, `cleanup clears the follow marker: ${JSON.stringify(resume)}`);
+  assert.equal(resume.jumpHidden, false, `Jump shows when the reader is above the end: ${JSON.stringify(resume)}`);
+  seen.falseResume = { classAfterReturn: resume.classAfterReturn, jumpHidden: resume.jumpHidden };
 
   assert.deepEqual(errors, []);
   assert.deepEqual(pageErrors, []);
