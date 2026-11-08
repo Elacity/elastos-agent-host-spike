@@ -10787,10 +10787,11 @@ const MODEL_FORBIDDEN_CALLS: &[(&str, u32, u32)] = &[
 /// The test reads the model's declared-rights file and builds two programs. It
 /// starts no process and makes no kernel call, so it runs on every OS.
 ///
-/// Falsifier: WP248 adds `ptrace` to `MODEL_RUNTIME_ESSENTIALS` only, so the
+/// Falsifiers: WP248 adds `ptrace` to `MODEL_RUNTIME_ESSENTIALS` only, so the
 /// model's list and both rendered programs admit it while the other model
 /// comparisons still agree with that table, and this test fails on the `ptrace`
-/// case.
+/// case. WP250 puts a `JEQ 246` in the model's thread rules, so the x86-64
+/// program tests `kexec_load`'s number and this test fails on that case.
 #[test]
 fn seccomp_model_program_admits_no_forbidden_call_on_either_architecture() {
     let allow = seccomp_probe_list(MODEL_PROVIDER).unwrap_or_else(|err| panic!("{err}"));

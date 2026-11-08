@@ -333,8 +333,11 @@ use std::process::Command;
 /// WP245 makes the provider chooser answer wallet's binary for did. WP246 and
 /// WP247 skip the pinned-claim check in the seccomp and the Landlock builder.
 /// WP248 adds `ptrace` to `MODEL_RUNTIME_ESSENTIALS`, so the model's final
-/// program admits it and the fixed forbidden-call check fails.
-const EXPECTED_FALSIFIERS: usize = 228;
+/// program admits it and both the fixed forbidden-call check and the allowlist
+/// equality fail. WP249 adds `pidfd_getfd` there, which only the allowlist
+/// equality catches. WP250 puts a `JEQ 246` with an `ALLOW` behind it in the
+/// model's thread rules, which both checks catch on the x86-64 program.
+const EXPECTED_FALSIFIERS: usize = 230;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

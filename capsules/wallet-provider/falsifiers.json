@@ -2570,8 +2570,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "    if SECCOMP_AUDIT_ARCH == 0 {",
-          "new": "    // WP160 admits close without any allow form selecting it.\n    syscalls.push(\"close\");\n    if SECCOMP_AUDIT_ARCH == 0 {"
+          "old": "    if audit_arch == 0 {",
+          "new": "    // WP160 admits close without any allow form selecting it.\n    syscalls.push(\"close\");\n    if audit_arch == 0 {"
         }
       ],
       "tests": [
@@ -2698,8 +2698,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "fn seccomp_probe_list(name: &str) -> Result<SeccompAllowList, String> {\n    let declared = read_declared_rights(name, &declared_rights_path(name))?;\n    seccomp_allow_list_from_declared_rights(name, &declared)\n        .map(|allow| allow.with_launch_essentials())\n}",
-          "new": "fn seccomp_probe_list(_: &str) -> Result<SeccompAllowList, String> {\n    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))?;\n    seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &declared)\n        .map(|allow| allow.with_launch_essentials())\n}"
+          "old": "fn seccomp_probe_list(name: &str) -> Result<SeccompAllowList, String> {\n    seccomp_probe_list_for_arch(name, SECCOMP_AUDIT_ARCH)\n}",
+          "new": "fn seccomp_probe_list(_: &str) -> Result<SeccompAllowList, String> {\n    seccomp_probe_list_for_arch(WALLET_PROVIDER, SECCOMP_AUDIT_ARCH)\n}"
         }
       ],
       "tests": [
@@ -3701,6 +3701,40 @@
         }
       ],
       "tests": [
+        "seccomp_model_program_admits_no_forbidden_call_on_either_architecture",
+        "seccomp_model_program_lets_run_exactly_the_listed_calls"
+      ]
+    },
+    {
+      "id": "WP249",
+      "title": "the model runtime table admits pidfd_getfd, a call the forbidden list does not name, so only the allowlist equality sees the model's program let it run",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    \"munmap\",\n    \"rseq\",\n];",
+          "new": "    \"munmap\",\n    \"pidfd_getfd\",\n    \"rseq\",\n];"
+        }
+      ],
+      "tests": [
+        "seccomp_model_program_lets_run_exactly_the_listed_calls"
+      ]
+    },
+    {
+      "id": "WP250",
+      "title": "the model's thread rules gain a JEQ 246 with an ALLOW behind it, so the x86-64 program lets kexec_load run under no name",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    program.pop();\n    program.extend([\n",
+          "new": "    program.pop();\n    program.extend([\n        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, 246, 0, 1),\n        allow,\n"
+        }
+      ],
+      "tests": [
+        "seccomp_model_program_lets_run_exactly_the_listed_calls",
         "seccomp_model_program_admits_no_forbidden_call_on_either_architecture"
       ]
     }

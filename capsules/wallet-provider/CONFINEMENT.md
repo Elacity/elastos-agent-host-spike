@@ -1680,7 +1680,17 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - WP248: The model's runtime table carries `ptrace`, so the model's final
   program tests its number while the table-derived comparisons still agree.
   `seccomp_model_program_admits_no_forbidden_call_on_either_architecture`
-  checks this rule from a fixed list that no builder reads.
+  checks this rule from a fixed list that no builder reads, and
+  `seccomp_model_program_lets_run_exactly_the_listed_calls` checks it from the
+  literal allow list of each architecture.
+- WP249: The model's runtime table carries `pidfd_getfd`, which the forbidden
+  list does not name. `seccomp_model_program_lets_run_exactly_the_listed_calls`
+  checks this rule: the program lets run a number the allow list does not hold.
+- WP250: The model's thread rules gain a `JEQ 246` with an `ALLOW` behind it, so
+  the x86-64 program lets `kexec_load` run without naming it.
+  `seccomp_model_program_lets_run_exactly_the_listed_calls` and
+  `seccomp_model_program_admits_no_forbidden_call_on_either_architecture` check
+  this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,
