@@ -6,11 +6,12 @@
 #
 # The plant replaces the profile's one root-read line with another operation, or
 # deletes it for `none`. It refuses when the profile does not hold exactly one
-# copy of the line it expects. `mktemp` holds the backup; `cp -p` restores it;
-# `cmp` proves the bytes and `git diff --quiet` proves the tree. `touch` then
-# gives the restored file a new mtime, because the wallet suite embeds its
-# profile with include_str! and a preserved older mtime would keep the planted
-# copy inside the next test binary.
+# copy of the line it expects. `mktemp` holds the backup; the EXIT trap restores
+# the profile with `cp -p` before it deletes anything, so an interrupted run
+# cannot leave a planted profile behind. `cmp` proves the bytes and
+# `git diff --quiet` proves the tree. `touch` then gives the restored file a new
+# mtime, because the wallet suite embeds its profile with include_str! and a
+# preserved older mtime would keep the planted copy inside the next test binary.
 set -u
 root=$(cd "$(dirname "$0")/../.." && pwd) || exit 2
 cd "$root" || exit 2
@@ -57,9 +58,36 @@ if [ "$held" -ne 1 ]; then
   exit 3
 fi
 
+backup=
+scratch=
+child=
+status=0
+cleanup() {
+  rc=$?
+  if [ -n "$child" ] && kill -0 "$child" 2>/dev/null; then
+    kill -TERM "$child" 2>/dev/null
+    wait "$child" 2>/dev/null
+  fi
+  if [ -n "$backup" ] && [ -f "$backup" ]; then
+    cp -p "$backup" "$file" || { echo "restore $file failed" >&2; rc=97; }
+    touch "$file" 2>/dev/null || rc=97
+    cmp "$backup" "$file" || { echo "restore $file differs from its backup" >&2; rc=97; }
+    rm -f "$backup"
+  fi
+  rm -f "$scratch"
+  if ! git diff --quiet; then
+    echo "worktree changed after restore" >&2
+    rc=98
+  fi
+  if [ "$rc" -eq 0 ] && [ "$status" -ne 0 ]; then rc=$status; fi
+  exit "$rc"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 backup=$(mktemp) || exit 2
 scratch=$(mktemp) || exit 2
-trap 'rm -f "$backup" "$scratch"' EXIT
 cp -p "$file" "$backup" || exit 2
 if [ -z "$new" ]; then
   awk -v o="$old" '$0==o{next} {print}' "$file" > "$scratch" || exit 2
@@ -68,16 +96,13 @@ else
 fi
 cat "$scratch" > "$file" || exit 2
 
-status=0
 for test in "${tests[@]}"; do
-  cargo test --locked --manifest-path "$manifest" --test confine "$test" -- --exact --nocapture
+  cargo test --locked --manifest-path "$manifest" --test confine "$test" -- --exact --nocapture &
+  child=$!
+  wait "$child"
   rc=$?
+  child=
   echo "plant $provider $mode test $test exit=$rc"
   [ "$rc" -eq 0 ] || status=1
 done
-
-cp -p "$backup" "$file"
-touch "$file"
-cmp "$backup" "$file" || status=97
-git diff --quiet || status=98
 exit "$status"
