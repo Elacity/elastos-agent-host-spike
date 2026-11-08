@@ -7454,9 +7454,9 @@ struct LandlockRuleset {
 ///   fails to map `libgcc_s.so.1` and exits with `error while loading shared
 ///   libraries: libgcc_s.so.1: cannot open shared object file`.
 ///
-/// The model maps `libm.so.6` as well; that entry is in
-/// `MODEL_LANDLOCK_LOADER_PATHS` below, so did and wallet keep no rule for a
-/// library they do not load.
+/// The model and wallet also map `libm.so.6` here; that entry is in
+/// `LIBM_LANDLOCK_LOADER_PATHS` below and goes only to the providers in
+/// `LIBM_LOADER_USERS`, so did keeps no rule for a library it does not load.
 ///
 /// That drop-one measurement was not repeated against each binary on the host
 /// `CONFINEMENT-LINUX.md` names; the run there shows the list is enough for both.
@@ -7482,10 +7482,13 @@ const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
     ),
 ];
 
-/// The model's extra aarch64 loader entry: it maps `libm.so.6`, which did and
-/// wallet do not.
+/// The aarch64 `libm.so.6` entry. With it left to the model alone, the wallet's
+/// start exited 127 with `error while loading shared libraries: libm.so.6`
+/// (receipt pr1549-0473c994-aarch64, sha256 c2434a86...); did starts without it.
 #[cfg(not(target_arch = "x86_64"))]
-const MODEL_LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[(
+const LIBM_LOADER_USERS: &[&str] = &[MODEL_PROVIDER, WALLET_PROVIDER];
+#[cfg(not(target_arch = "x86_64"))]
+const LIBM_LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[(
     "/lib/aarch64-linux-gnu/libm.so.6",
     "without READ_FILE here the loader fails to map libm.so.6 and exits with \
      `error while loading shared libraries: libm.so.6: cannot open shared object file`",
@@ -7497,7 +7500,7 @@ const MODEL_LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[(
 /// `/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2` that the `O_PATH` open follows,
 /// then `libc.so.6` and `libgcc_s.so.1`. did and wallet do not map `libm.so.6`
 /// there; the model provider does, and its entry is
-/// `MODEL_LANDLOCK_LOADER_PATHS` below. The model's start first failed without it
+/// `LIBM_LANDLOCK_LOADER_PATHS` below. The model's start first failed without it
 /// (run 42448388508). Each entry was then dropped alone on that runner, from this
 /// model leg's tree (run 42454795461): without the interpreter, `libc.so.6` or
 /// `libgcc_s.so.1` every provider's file-row start failed, and without
@@ -7521,8 +7524,11 @@ const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
 
 /// The model's extra x86-64 loader entry: it maps `libm.so.6`, which did and
 /// wallet do not.
+/// On x86-64 only the model maps `libm.so.6` (run 42454795461).
 #[cfg(target_arch = "x86_64")]
-const MODEL_LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[(
+const LIBM_LOADER_USERS: &[&str] = &[MODEL_PROVIDER];
+#[cfg(target_arch = "x86_64")]
+const LIBM_LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[(
     "/lib/x86_64-linux-gnu/libm.so.6",
     "without READ_FILE here the x86-64 model provider exits 127 with `error while \
      loading shared libraries: libm.so.6: cannot open shared object file`; did and \
@@ -7530,11 +7536,12 @@ const MODEL_LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[(
 )];
 
 /// The loader paths a launch of `name` passes: the shared entries every
-/// dynamically linked provider maps, plus the model's `libm` entry.
+/// dynamically linked provider maps, plus the `libm` entry for the providers
+/// in `LIBM_LOADER_USERS`.
 fn landlock_loader_paths(name: &str) -> Vec<(&'static str, &'static str)> {
     let mut paths = LANDLOCK_LOADER_PATHS.to_vec();
-    if name == MODEL_PROVIDER {
-        paths.extend_from_slice(MODEL_LANDLOCK_LOADER_PATHS);
+    if LIBM_LOADER_USERS.contains(&name) {
+        paths.extend_from_slice(LIBM_LANDLOCK_LOADER_PATHS);
     }
     paths
 }
@@ -8398,9 +8405,12 @@ fn landlock_ruleset_names_each_measured_loader_entry() {
         "the storage-root rule must keep the eight rights the declared row carries"
     );
 
-    // The model alone maps `libm`, so its launch list carries the shared
-    // entries and one model-only entry, and did and wallet carry none.
-    for name in [DID_PROVIDER, WALLET_PROVIDER] {
+    // Only the providers that map `libm` carry its entry: did never does, and
+    // the model always does; wallet does on aarch64 alone.
+    for name in [DID_PROVIDER, WALLET_PROVIDER, MODEL_PROVIDER] {
+        if LIBM_LOADER_USERS.contains(&name) {
+            continue;
+        }
         assert!(
             landlock_loader_paths(name)
                 .iter()
@@ -8411,10 +8421,14 @@ fn landlock_ruleset_names_each_measured_loader_entry() {
     let model = landlock_loader_paths(MODEL_PROVIDER);
     assert_eq!(
         model.len(),
-        LANDLOCK_LOADER_PATHS.len() + MODEL_LANDLOCK_LOADER_PATHS.len(),
+        LANDLOCK_LOADER_PATHS.len() + LIBM_LANDLOCK_LOADER_PATHS.len(),
         "the model list must carry the shared entries and the model-only entry"
     );
-    for (path, _) in MODEL_LANDLOCK_LOADER_PATHS {
+    assert!(
+        !LIBM_LOADER_USERS.contains(&DID_PROVIDER),
+        "did must not carry libm"
+    );
+    for (path, _) in LIBM_LANDLOCK_LOADER_PATHS {
         assert!(
             path.contains("libm.so.6"),
             "the model's extra entry must be libm: {path}"

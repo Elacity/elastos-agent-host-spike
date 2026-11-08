@@ -522,8 +522,10 @@ against each binary on this host; the run shows only that they are enough for bo
 providers on this distribution. Other distributions may keep them elsewhere, in
 which case the start is refused rather than unconfined.
 
-The model's `libm.so.6` entry is model-only: `landlock_loader_paths` appends
-`MODEL_LANDLOCK_LOADER_PATHS` for that provider alone.
+The `libm.so.6` entry goes only to providers that map it: `landlock_loader_paths`
+appends `LIBM_LANDLOCK_LOADER_PATHS` for those in `LIBM_LOADER_USERS`. That is the
+model and the wallet on aarch64, where the wallet's start exits 127 without it, and
+the model alone on x86-64 (run 42454795461). did never carries it.
 
 Two departures from "The frame" below stay open, so this row is lab evidence and
 not the designed policy:
