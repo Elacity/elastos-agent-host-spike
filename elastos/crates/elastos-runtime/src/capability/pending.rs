@@ -616,9 +616,9 @@ mod tests {
         }
     }
 
-    async fn granted_request(store: &PendingRequestStore) -> String {
+    async fn granted_request(store: &PendingRequestStore, session: &str) -> String {
         let resource = ResourceId::new("localhost://Users/self/Documents/test");
-        let session = SessionId::from_string("session-1");
+        let session = SessionId::from_string(session);
         let request = store
             .create_request(session, resource.clone(), Action::Read)
             .await;
@@ -642,23 +642,18 @@ mod tests {
     #[tokio::test]
     async fn list_granted_lists_only_granted_requests_in_every_session() {
         let store = create_test_store();
-        let first = granted_request(&store).await;
+        let first = granted_request(&store, "session-1").await;
         let resource = ResourceId::new("localhost://Users/self/Documents/test");
         let pending = store
             .create_request(SessionId::from_string("session-2"), resource, Action::Read)
             .await;
-        let revoked = granted_request(&store).await;
+        let revoked = granted_request(&store, "session-1").await;
         store
             .revoke_request_by(&revoked, "Revoked by user", Settler::Shell)
             .await;
-        let other = granted_request(&store).await;
-        store
-            .requests
-            .write()
-            .await
-            .get_mut(&other)
-            .unwrap()
-            .session_id = SessionId::from_string("session-3");
+        let other = granted_request(&store, "session-3").await;
+        let other_session = store.get_request(&other).await.unwrap().session_id;
+        assert_eq!(other_session.0, "session-3");
         let mut ids: Vec<String> = store
             .list_granted()
             .await
@@ -679,8 +674,8 @@ mod tests {
     #[tokio::test]
     async fn revocations_record_their_settler() {
         let store = create_test_store();
-        let by_runtime = granted_request(&store).await;
-        let by_epoch = granted_request(&store).await;
+        let by_runtime = granted_request(&store, "session-1").await;
+        let by_epoch = granted_request(&store, "session-1").await;
         store
             .revoke_request_by(&by_runtime, "instance ended", Settler::Runtime)
             .await;
