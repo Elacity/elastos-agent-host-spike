@@ -26,7 +26,7 @@ SECTION_0 = "## 0. What this proposes"
 SECTION_1 = "## 1. Agent identity"
 PROPOSE = "propose:"
 PROPOSE_LINE = re.compile(r"(?<![A-Za-z0-9_])propose:")
-PROPOSE_GROUP = re.compile(r"^### (A3|A4|A5|A7|B2)\. ")
+PROPOSE_GROUP = re.compile(r"^(A3|A4|A5|A7|B2)\. ")
 PROPOSE_PARTS = ("Name:", "Inputs:", "Refusal:", "Owner:")
 PROPOSE_NAME = re.compile(r"(?:^|\. )Name: ([^.]+)\.")
 
@@ -1039,33 +1039,47 @@ def a3_claim_refusals(text):
     return refusals
 
 
-HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*\S)[ \t]*$")
+FENCE, COMMENT, HEADING_KIND, TEXT = "fence", "comment", "heading", "text"
+HEADING = re.compile(r" {0,3}(#{1,6})(?=[ \t]|$)[ \t]*(.*?)[ \t]*$")
 
 
 def _heading(line):
-    """Return (level, text) for a heading indented 0-3 spaces, or None."""
+    """Return (level, text) for an ATX heading indented 0-3, else None."""
     match = HEADING.match(line)
     if match is None:
         return None
     return len(match.group(1)), match.group(2)
 
 
-def _headings(lines):
-    """Yield each heading that sits outside a fence and outside a comment."""
+def classify_lines(lines):
+    """Return one (kind, level, text) record per line: fence, comment, heading or text."""
+    records = []
     fence = None
     comment = False
-    for index, line in enumerate(lines):
-        indent = len(line) - len(line.lstrip(" "))
-        fence_before = fence
-        comment_before = comment
-        fence = _fence_after(line, fence)
-        comment = _comment_at(line, len(line), comment)
-        heading = _heading(line)
-        if heading is None or fence_before is not None or fence_before != fence:
+    for line in lines:
+        width = sum(4 if char == "\t" else 1
+                    for char in line[:len(line) - len(line.lstrip(" \t"))])
+        before = fence
+        fence = fence if width > 3 else _fence_after(line, fence)
+        if before is not None or fence is not None:
+            records.append((FENCE, None, ""))
             continue
-        if _comment_at(line, indent, comment_before):
-            continue
-        yield index, heading
+        inside, text, comment = _visible(line, comment)
+        heading = _heading(text)
+        if inside or ("<!--" in line or "-->" in line) and not text.strip():
+            records.append((COMMENT, None, ""))
+        elif heading is not None:
+            records.append((HEADING_KIND, heading[0], heading[1]))
+        else:
+            records.append((TEXT, None, text))
+    return records
+
+
+def _headings(lines):
+    """Yield each heading's index and (level, text) from the classifier."""
+    for index, (kind, level, text) in enumerate(classify_lines(lines)):
+        if kind == HEADING_KIND:
+            yield index, (level, text)
 
 
 def section_0_bounds(lines):
@@ -1096,26 +1110,6 @@ def _fence_after(line, fence):
     return fence
 
 
-def _comment_at(line, stop, open_comment):
-    """Return whether an HTML comment is open at character STOP of this line."""
-    index = 0
-    limit = min(stop, len(line))
-    while index < limit:
-        if open_comment:
-            found = line.find("-->", index)
-            if found < 0 or found >= limit:
-                return True
-            open_comment = False
-            index = found + 3
-        else:
-            found = line.find("<!--", index)
-            if found < 0 or found >= limit:
-                return False
-            open_comment = True
-            index = found + 4
-    return open_comment
-
-
 def _has_value(text):
     """True when TEXT holds a character that is neither space nor punctuation."""
     for char in text:
@@ -1124,26 +1118,27 @@ def _has_value(text):
     return False
 
 
-def _strip_comments(line, open_comment):
-    """Return LINE without its HTML comment spans, reading OPEN_COMMENT first."""
+def _visible(line, comment):
+    """Return (starts inside, visible text, comment) for one line."""
     pieces = []
+    inside = comment
     index = 0
     while index < len(line):
-        if open_comment:
+        if comment:
             found = line.find("-->", index)
             if found < 0:
-                return "".join(pieces)
-            open_comment = False
+                break
+            comment = False
             index = found + 3
         else:
             found = line.find("<!--", index)
             if found < 0:
                 pieces.append(line[index:])
-                return "".join(pieces)
+                break
             pieces.append(line[index:found])
-            open_comment = True
+            comment = True
             index = found + 4
-    return "".join(pieces)
+    return inside, "".join(pieces), comment
 
 
 def _empty_fields(line):
@@ -1172,6 +1167,7 @@ def proposal_refusals(text):
     its own reason, and a propose line outside section 0 is refused.
     """
     lines = text.splitlines()
+    records = classify_lines(lines)
     bounds = section_0_bounds(lines)
     if bounds is None:
         return ["refuse: draft has no section 0"]
@@ -1185,39 +1181,29 @@ def proposal_refusals(text):
     names = {group: set() for group, _ in PROPOSE_CALLS}
     proposed = set()
     group = None
-    fence = None
-    comment = False
-    for index, line in enumerate(lines):
-        stripped = line.strip()
-        indent = len(line) - len(line.lstrip())
-        fence_before = fence
-        comment_before = comment
-        fence = _fence_after(line, fence)
-        comment = _comment_at(line, len(line), comment)
-        heading = PROPOSE_GROUP.match(stripped)
-        if (
-            heading is not None
-            and start <= index < end
-            and fence_before is None
-            and not _comment_at(line, indent, comment_before)
-        ):
-            group = heading.group(1)
-        found = PROPOSE_LINE.search(line)
+    for index, (kind, level, text) in enumerate(records):
+        line = lines[index]
+        if kind == HEADING_KIND:
+            found = PROPOSE_GROUP.match(text)
+            if found is not None and level == 3 and start <= index < end:
+                group = found.group(1)
+            continue
+        found = PROPOSE_LINE.search(line if kind in (FENCE, COMMENT) else text)
         if found is None:
             continue
         number = index + 1
-        if fence_before is not None or fence_before != fence:
+        if kind == FENCE:
             refusals.append(
                 "refuse: propose line at line %d is in a fenced code block"
                 % number
             )
             continue
-        if _comment_at(line, found.start(), comment_before):
+        if kind == COMMENT:
             refusals.append(
                 "refuse: propose line at line %d is in an HTML comment" % number
             )
             continue
-        if line.startswith("\t") or indent >= 4:
+        if line.startswith("\t") or len(line) - len(line.lstrip()) >= 4:
             refusals.append(
                 "refuse: propose line at line %d is indented as code" % number
             )
@@ -1227,8 +1213,7 @@ def proposal_refusals(text):
                 "refuse: propose line outside section 0 at line %d" % number
             )
             continue
-        cleaned = _strip_comments(line, comment_before)
-        parsed = cleaned.strip()
+        parsed = text.strip()
         name = PROPOSE_NAME.search(parsed)
         missing = _empty_fields(parsed)
         body = parsed[PROPOSE_LINE.search(parsed).end():]
