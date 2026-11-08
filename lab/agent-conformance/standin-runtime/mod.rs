@@ -8238,6 +8238,67 @@ mod tests {
         );
     }
 
+    /// F6 (Rong's table) on the stand-in path: `end_one_live_grant` runs the
+    /// `end_live_grant` step `revoke_live` runs, which ends the grant's
+    /// ledger binding through `Verifier::end_grant` and keeps the hold the
+    /// grant opened before the end. The hold comes from `admit_effect`, the
+    /// step the use routes run. After the end, a new hold on that handle is
+    /// refused `unknown handle`, and the earlier hold still releases through
+    /// the kept binding, which then leaves. Without the `end_grant` call the binding
+    /// stays live, so the new hold is refused over the ceiling instead.
+    #[test]
+    fn standin_ended_grant_keeps_its_open_hold() {
+        use grant_binding::ledger::{ReleaseRefuse, ReserveRefuse};
+        let mut standin = StandIn::new();
+        standin.seed_grant(
+            "req-a",
+            "component-1",
+            "res",
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        bind_seeded(&mut standin, "req-a", "component-1");
+        let handle = standin.grants[0].binding.expect("the bind stores a handle");
+        let hold = standin
+            .admit_effect("component-1", Some(handle), 4096)
+            .expect("the use step holds the whole cap");
+        let instance = standin.instance_on_ledger("component-1");
+        let call = standin.ledger.open_call(instance);
+        assert_eq!(
+            standin.ledger.reserve(&call, &guest_request(handle), 1),
+            Err(ReserveRefuse::OverCeiling {
+                ceiling: 4096,
+                held: 4096,
+                asked: 1
+            }),
+            "before the end, the open hold fills the grant's own ceiling"
+        );
+        standin.end_one_live_grant("req-a");
+        assert_eq!(
+            grant_record(&standin, "req-a"),
+            (Life::Revoked, false),
+            "the stand-in writes Revoked on the ended grant"
+        );
+        assert_eq!(
+            standin.ledger.reserve(&call, &guest_request(handle), 1),
+            Err(ReserveRefuse::Binding(Refuse::UnknownHandle)),
+            "the end reached the ledger: the ended binding takes no new hold"
+        );
+        assert_eq!(
+            standin.ledger.release(&call, &guest_request(handle), hold),
+            Ok(()),
+            "the hold opened before the end is kept and releases through the kept binding"
+        );
+        assert_eq!(
+            standin.ledger.release(&call, &guest_request(handle), hold),
+            Err(ReleaseRefuse::Binding(Refuse::UnknownHandle)),
+            "the kept binding leaves the ledger with its last hold"
+        );
+    }
+
     #[test]
     fn standin_authorise_unknown_grant() {
         let mut standin = StandIn::new();

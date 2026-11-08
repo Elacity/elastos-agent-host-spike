@@ -647,11 +647,15 @@ fn a_session_grants_allowance_is_held_across_its_uses() {
 /// ceiling, so A's hold fills only A's key: B's ask of 1 is admitted before
 /// the stop and again after it.
 ///
-/// The ledger model owns the kept-hold pin:
+/// This journey pins the route behaviour that a sibling grant keeps its own
+/// ceiling across an end. It does not show the end reached the ledger: B's
+/// ceiling is its own, so dropping the `end_grant` call from `end_live_grant`
+/// keeps it green. F6 (Rong's table) on this same stand-in step is pinned by
+/// `standin_runtime::tests::standin_ended_grant_keeps_its_open_hold`, which
+/// ends A through `end_one_live_grant` and reads A's handle on the ledger:
+/// a new hold is refused `unknown handle` and the open hold still releases.
 /// `model_ended_grant_hold_keeps_its_own_key` in `grant-binding/src/ledger.rs`
-/// reserves on B after A ends. F6 (Rong's table) is pinned there; this
-/// journey pins the route behaviour that a sibling grant keeps its own
-/// ceiling across an end.
+/// pins the kept hold on the ledger alone.
 #[test]
 fn an_ended_grants_open_hold_keeps_its_own_ceiling() {
     let mut standin = StandIn::new();
