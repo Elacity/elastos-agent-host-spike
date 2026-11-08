@@ -1,0 +1,11 @@
+# Runtime core size budget: the most code lines elastos/crates/elastos-runtime may hold.
+#
+# scripts/core-size.py counts the crate as code only: no tests (tests/ files, tests.rs,
+# *_test.rs and #[cfg(test)] items), no comment lines, no blank lines. The core-size CI
+# job fails when the count is above this number. The goal is a core of about 10,000 lines.
+#
+# To grow the core, raise this number in the same pull request as the code, so reviewers
+# see the growth and decide on it. When the core shrinks more than 50 lines below the
+# budget, the check asks for the budget to come down to the new count: lower it, so the
+# freed room is not spent silently. Measure with: python3 scripts/core-size.py
+9843

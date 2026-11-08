@@ -6,8 +6,10 @@ Test lines: files under a tests/ directory or named tests.rs or *_test.rs, and e
 start with // or /*, or lie inside a block comment. Blank lines are blank. Code is everything
 else, including a line that begins inside a multi-line string literal.
 
-  core-size.py          a short table
-  core-size.py --json   {"total", "tests", "comments", "blank", "code"}
+  core-size.py                   a short table
+  core-size.py --json            {"total", "tests", "comments", "blank", "code"}
+  core-size.py --check           fail when code is above elastos/CORE-BUDGET
+  core-size.py --check --base R  also show the change since the merge base of R and HEAD
 """
 import argparse
 import json
@@ -17,7 +19,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-CRATE = "elastos/crates/elastos-runtime"
+CRATE, BUDGET = "elastos/crates/elastos-runtime", "elastos/CORE-BUDGET"
+SLACK = 50  # more room than this below the budget asks for the budget to come down
 OPEN, CLOSE = "{([", "})]"
 ITEM_WORDS = {"fn", "mod", "impl", "struct", "enum", "trait", "union", "const", "static", "type",
               "use", "extern", "async", "unsafe", "macro_rules", "let", "default"}
@@ -179,19 +182,68 @@ def worktree_files(root):
             yield path[len(CRATE) + 1:], (root / path).read_text(encoding="utf-8", errors="replace")
 
 
+def ref_files(root, ref):
+    listed = git(root, "ls-tree", "-r", "-z", "--name-only", ref, "--", CRATE)
+    for path in sorted(filter(None, listed.split("\0"))):
+        if path.endswith(".rs"):
+            yield path[len(CRATE) + 1:], git(root, "show", f"{ref}:{path}")
+
+
+def read_budget(text):
+    values = [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+    if len(values) != 1 or not values[0].isdigit():
+        raise SystemExit(f"{BUDGET} must hold exactly one integer line besides # comments")
+    return int(values[0])
+
+
 def table(totals):
     rows = "".join(f"| {key} | {value} |\n" for key, value in totals.items())
     return f"| {CRATE} | lines |\n|---|---:|\n{rows}"
 
 
+def check(root, totals, base):
+    """Print the verdict against the budget and, with base, the change since base; return the exit."""
+    code, budget = totals["code"], read_budget((root / BUDGET).read_text())
+    notes = []
+    if base:
+        try:
+            point = git(root, "merge-base", base, "HEAD").strip()
+        except subprocess.CalledProcessError as error:
+            raise SystemExit(f"no merge base of {base} and HEAD (fetch the base with history): {error.stderr.strip()}")
+        before = count(ref_files(root, point))["code"]
+        try:
+            old = read_budget(git(root, "show", f"{point}:{BUDGET}"))
+        except subprocess.CalledProcessError:
+            old = None
+        notes.append(f"Change against {base} (merge base {point[:8]}): core code {code - before:+d} lines"
+                     f" ({before} -> {code}).")
+        notes.append(f"{BUDGET}: " + ("absent at the base" if old is None else "unchanged" if old == budget
+                                      else f"changed {old} -> {budget} ({budget - old:+d})") + ".")
+    over = code > budget
+    if over:
+        notes.append(f"FAIL: core code is {code} lines, above the budget of {budget} in {BUDGET}. Move code out"
+                     f" of the core, or raise {BUDGET} in this change so reviewers see it.")
+    else:
+        notes.append(f"OK: core code is {code} lines, within the budget of {budget} in {BUDGET}.")
+    if budget - code > SLACK:  # a ratchet: room freed in the core is not silently spent
+        notes.append(f"Reminder: core code is {budget - code} lines below the budget of {budget}. Lower {BUDGET}"
+                     f" to {code}, so the freed room is not silently spent.")
+    print("".join(f"\n- {note}" for note in notes))
+    return 1 if over else 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--json", action="store_true", help="print the totals as JSON")
+    parser.add_argument("--check", action="store_true", help=f"fail when code is above {BUDGET}")
+    parser.add_argument("--base", metavar="REF", help="with --check, show the change since this git ref")
     parser.add_argument("--root", type=Path, default=ROOT, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.base and not args.check:
+        parser.error("--base needs --check")
     totals = count(worktree_files(args.root))
     print(json.dumps(totals) if args.json else table(totals), end="\n" if args.json else "")
-    return 0
+    return check(args.root, totals, args.base) if args.check else 0
 
 
 if __name__ == "__main__":
