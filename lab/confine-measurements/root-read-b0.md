@@ -4,9 +4,9 @@ Measurement only. This record changes no provider profile and no Runtime code.
 Base: `ea80c9ef` on `claude/confine-b0-rootread`. Host: macOS 26.5.2, arm64,
 Rust 1.91.0, `/usr/bin/sandbox-exec` present.
 
-The evidence is one receipt at `~/Sparks/office/evidence/confine-b0/`. Its name
-and log carry the head of the commit that adds this record; the log prints the
-head, tree, toolchain and every command with its full output and exit.
+The evidence is one receipt at `~/Sparks/office/evidence/confine-b0/`, named
+`receipt-<head8>.log` for the head it pins. The log prints the head, tree,
+toolchain and every command with its full output and exit.
 
 ## The committed forms
 
