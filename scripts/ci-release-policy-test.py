@@ -197,8 +197,9 @@ CASES = [
 # Pushes to these branches run every trusted proof.
 SAVING_REFS = {"refs/heads/spike/agent-host", "refs/heads/develop", "refs/heads/main"}
 # The only (event, ref) runs that write shared caches: trusted pushes to the default
-# branch spike/agent-host, and to develop if it exists. Every other run restores only.
-CACHE_WRITERS = {("push", "refs/heads/spike/agent-host"), ("push", "refs/heads/develop")}
+# branch spike/agent-host (and to develop if it exists), and the nightly on spike/agent-host.
+CACHE_WRITERS = {("push", "refs/heads/spike/agent-host"), ("push", "refs/heads/develop"),
+                 ("schedule", "refs/heads/spike/agent-host")}
 # Shapes no writer guard may admit: other pushes, queues, dispatches and every pull request.
 NON_WRITER_CASES = [
     ("push", "refs/heads/feature", "branch", "", True),
@@ -206,7 +207,11 @@ NON_WRITER_CASES = [
     ("merge_group", "refs/heads/gh-readonly-queue/spike/agent-host/pr-2-abc", "branch", "", True),
     ("workflow_dispatch", "refs/heads/spike/agent-host", "branch", "", True),
     ("pull_request", "refs/heads/spike/agent-host", "branch", "", True),
+    ("schedule", "refs/heads/main", "branch", "", True),
 ]
+# Linux journey jobs build the PR profile on the nightly too, so its caches match PR runs;
+# macOS, which no PR runs, keeps the shipped profile on every push and nightly.
+NIGHTLY_PR_PROFILE_JOBS = {"source-home-linux", "source-home-linux-arm64", "update-hop-linux"}
 RUST_CACHE_KEY = "-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}"
 # rustsec/rustsec release cargo-audit/v0.22.2, x86_64-unknown-linux-musl archive.
 AUDIT_ARCHIVE_SHA256 = "7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428"
@@ -654,7 +659,8 @@ def validate_journey_builds(source, release_source):
                 raise AssertionError(f"missing journey profile setting: {job} {key}")
         for event, ref, ref_type, override, _ in CASES:
             context = event_context(event, ref, ref_type, override)
-            expected = event in ("pull_request", "merge_group") or (event == "push" and ref == "refs/heads/develop")
+            expected = event in ("pull_request", "merge_group") or (event == "push" and ref == "refs/heads/develop") \
+                or (event == "schedule" and job in NIGHTLY_PR_PROFILE_JOBS)
             if evaluate(field(profile, "if"), context) != expected:
                 raise AssertionError(f"journey profile changes shipped build: {job} {event} {ref}")
         cache, = [step for step in job_steps if "Swatinem/rust-cache@" in step]
@@ -1225,6 +1231,8 @@ class ReleasePolicyTests(unittest.TestCase):
 
     def test_journey_build_policy_rejects_profile_leaks_and_split_targets(self):
         release = (WORKFLOW.parent / "release-package.yml").read_text()
+        shipped = "if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'push'"
+        nightly = "if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'schedule' ||"
         mutations = (
             SOURCE.replace('CARGO_PROFILE_RELEASE_LTO=false', 'CARGO_PROFILE_RELEASE_LTO=true', 1),
             SOURCE.replace('CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16', 'CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1', 1),
@@ -1244,6 +1252,9 @@ class ReleasePolicyTests(unittest.TestCase):
                            'journey artifacts start fresh.\n          cache-targets: true', 1),
             SOURCE.replace('scripts/setup-source-home.sh 2>&1', 'CARGO_TARGET_DIR=other scripts/setup-source-home.sh 2>&1', 1),
             SOURCE.replace('  lint:\n', '  lint:\n    env:\n      CARGO_PROFILE_RELEASE_LTO: "false"\n', 1),
+            # The nightly Linux journeys stop warming PR caches, or macOS loses its shipped nightly build.
+            SOURCE.replace(nightly, nightly.replace(" github.event_name == 'schedule' ||", ""), 1),
+            SOURCE.replace(shipped, shipped.replace(" ||", " || github.event_name == 'schedule' ||", 1), 1),
         )
         for index, changed in enumerate(mutations):
             self.assertNotEqual(changed, SOURCE)
@@ -1611,9 +1622,9 @@ class ReleasePolicyTests(unittest.TestCase):
 
     def test_pull_requests_never_save_shared_caches(self):
         validate_pull_requests_restore_only(SOURCE)
-        writer = "CI_SAVE_CACHE: ${{ github.event_name == 'push' && "
         mutations = {
-            "pull requests set CI_SAVE_CACHE": SOURCE.replace(writer, writer.replace("${{ ", "${{ github.event_name == 'pull_request' || "), 1),
+            "pull requests set CI_SAVE_CACHE": SOURCE.replace(
+                "CI_SAVE_CACHE: ${{ ", "CI_SAVE_CACHE: ${{ github.event_name == 'pull_request' || ", 1),
             "a Rust cache saves on PRs": SOURCE.replace("save-if: ${{ env.CI_SAVE_CACHE == 'true' }}", "save-if: true", 1),
             "an engine save drops the writer guard": SOURCE.replace(
                 "if: env.CI_USE_CACHE == 'true' && env.CI_SAVE_CACHE == 'true' && steps.engine-cache", "if: env.CI_USE_CACHE == 'true' && steps.engine-cache", 1),
@@ -1753,6 +1764,9 @@ class ReleasePolicyTests(unittest.TestCase):
                                                              "github.ref == 'refs/heads/develop'", 1),
             "a ref prefix writes": SOURCE.replace("github.ref == 'refs/heads/spike/agent-host' ||",
                                                   "startsWith(github.ref, 'refs/heads/spike/agent-host') ||", 1),
+            "any nightly writes": SOURCE.replace("(github.event_name == 'schedule' && github.ref == 'refs/heads/spike/agent-host')",
+                                                 "github.event_name == 'schedule'", 1),
+            "the nightly stops writing": SOURCE.replace(" || (github.event_name == 'schedule' && github.ref == 'refs/heads/spike/agent-host')", "", 1),
             "a Rust cache saves on PRs": SOURCE.replace("save-if: ${{ env.CI_SAVE_CACHE == 'true' }}", "save-if: true", 1),
             "a save ignores the writer guard": SOURCE.replace(
                 "if: env.CI_USE_CACHE == 'true' && env.CI_SAVE_CACHE == 'true' && steps.kubo-cache",
