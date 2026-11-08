@@ -1,0 +1,13 @@
+id: F-A7-identitykey
+file: src/ledger.rs
+test: ledger::model_each_grant_keeps_its_own_ceiling
+--- old
+        format!("grant-{}", root.0)
+--- new
+        self.grants
+            .get(&root)
+            .expect("resolved grant")
+            .record
+            .identity
+            .clone()
+--- end

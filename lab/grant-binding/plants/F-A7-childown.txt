@@ -1,0 +1,10 @@
+id: F-A7-childown
+file: src/ledger.rs
+test: ledger::model_child_hold_counts_against_the_issuing_grant
+--- old
+        while let Some(parent) = self.grants.get(&root).and_then(|grant| grant.record.parent) {
+            root = parent;
+        }
+--- new
+        let root = handle;
+--- end

@@ -2,13 +2,7 @@ id: F-A7-resoverwrite
 file: src/ledger.rs
 test: ledger::model_forged_overwrite_does_not_pick_the_reserve_ceiling
 --- old
-        let identity = self
-            .grants
-            .get(&request.handle)
-            .expect("resolved grant")
-            .record
-            .identity
-            .clone();
+        let key = self.ceiling_key(request.handle);
 --- new
         let stored = self
             .grants
@@ -25,5 +19,5 @@ test: ledger::model_forged_overwrite_does_not_pick_the_reserve_ceiling
         } else {
             None
         };
-        let identity = other.unwrap_or(stored);
+        let key = other.unwrap_or(stored);
 --- end
