@@ -47,6 +47,10 @@ deletes it, runs the provider's named macOS tests, restores the profile with
 Control runs the whole confine suite per provider with `--no-fail-fast` on the
 unmodified tree: did 16 passed and 1 ignored, wallet 103 passed, model 39 passed.
 
+The tool touches the restored profile after `cp -p`, because the wallet suite
+embeds its profile with `include_str!`; an older mtime would keep the planted
+copy inside the next test binary.
+
 Each plant runs three named tests: the provider's operations journey and its
 two outside-denial tests.
 

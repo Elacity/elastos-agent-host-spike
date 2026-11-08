@@ -7,7 +7,10 @@
 # The plant replaces the profile's one root-read line with another operation, or
 # deletes it for `none`. It refuses when the profile does not hold exactly one
 # copy of the line it expects. `mktemp` holds the backup; `cp -p` restores it;
-# `cmp` proves the bytes and `git diff --quiet` proves the tree.
+# `cmp` proves the bytes and `git diff --quiet` proves the tree. `touch` then
+# gives the restored file a new mtime, because the wallet suite embeds its
+# profile with include_str! and a preserved older mtime would keep the planted
+# copy inside the next test binary.
 set -u
 root=$(cd "$(dirname "$0")/../.." && pwd) || exit 2
 cd "$root" || exit 2
@@ -74,6 +77,7 @@ for test in "${tests[@]}"; do
 done
 
 cp -p "$backup" "$file"
+touch "$file"
 cmp "$backup" "$file" || status=97
 git diff --quiet || status=98
 exit "$status"
