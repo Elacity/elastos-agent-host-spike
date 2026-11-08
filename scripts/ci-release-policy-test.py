@@ -2372,7 +2372,26 @@ class InstalledJourneyTests(unittest.TestCase):
         setup = canary.index("for role in ('holder', 'consumer', 'gateway', 'bounded'):")
         seed = canary.index("if role in ('holder', 'gateway'):", setup)
         self.assertLess(seed, canary.index("processes.spawn(", setup))
-        self.assertIn("for part in ('ElastOS', 'SystemServices', 'Publisher', 'artifacts'):", canary[seed:seed + 400])
+        # Run the workflow's own seed block for each role and look at what it made.
+        lines = canary[canary.rindex("\n", 0, seed) + 1:].splitlines()
+        indent = len(lines[0]) - len(lines[0].lstrip())
+        block = [lines[0]]
+        for line in lines[1:]:
+            if line.strip() and len(line) - len(line.lstrip()) <= indent:
+                break
+            block.append(line)
+        code = textwrap.dedent("\n".join(block))
+        for role in ("holder", "consumer", "gateway", "bounded"):
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as temp:
+                data = Path(temp) / "data"
+                data.mkdir()
+                exec(code, {"role": role, "data": data})
+                artifacts = data / "ElastOS/SystemServices/Publisher/artifacts"
+                if role in ("holder", "gateway"):
+                    self.assertTrue(artifacts.is_dir(), f"{role} is not started as a seed")
+                    self.assertEqual(artifacts.stat().st_mode & 0o777, 0o700)
+                else:
+                    self.assertFalse((data / "ElastOS").exists(), f"{role} must stay an ordinary Home")
 
     def test_gateway_and_node_share_the_installed_fixture_root(self):
         for platform in ("macos", "linux"):
