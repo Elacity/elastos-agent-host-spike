@@ -2364,6 +2364,15 @@ class InstalledJourneyTests(unittest.TestCase):
             artifacts = data / "ElastOS/SystemServices/Publisher/artifacts"
             self.assertEqual(artifacts.stat().st_mode & 0o777, 0o700)
 
+    def test_the_canary_holder_and_gateway_start_as_seeds(self):
+        # Since 2.0 an ordinary Home serves peers and open HTTP only published files
+        # (1002b205, 9baee260), so the canary's Carrier and /content reads need seeds.
+        canary = CANARY.read_text()
+        setup = canary.index("for role in ('holder', 'consumer', 'gateway', 'bounded'):")
+        seed = canary.index("if role in ('holder', 'gateway'):", setup)
+        self.assertLess(seed, canary.index("processes.spawn(", setup))
+        self.assertIn("for part in ('ElastOS', 'SystemServices', 'Publisher', 'artifacts'):", canary[seed:seed + 400])
+
     def test_gateway_and_node_share_the_installed_fixture_root(self):
         for platform in ("macos", "linux"):
             with self.subTest(platform=platform), tempfile.TemporaryDirectory() as temp:
