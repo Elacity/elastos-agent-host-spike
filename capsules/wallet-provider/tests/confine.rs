@@ -6789,8 +6789,17 @@ impl SeccompInstruction {
 /// x86-64 runner whose filter logged instead of refusing (run 42448113772);
 /// dropped alone there, both model journeys failed (run 42454795461). aarch64
 /// has no `epoll_wait`, so its list is unchanged.
+///
+/// Each remaining call was dropped alone on aarch64 (evidence
+/// model-drop1/aarch64-af92d32f*.log): with `epoll_create1`, `epoll_ctl`,
+/// `epoll_pwait`, `eventfd2`, `flock`, `geteuid` or `rseq` refused, a model
+/// journey fails; with `exit` refused, the thread test never ends. `brk`,
+/// `rt_sigprocmask`, `sched_getaffinity`, `set_robust_list`, `set_tid_address`
+/// and `sigaltstack` were removed: refused alone, every model test passed.
+/// `madvise` and `munmap` also pass when refused, and stay: they hand memory
+/// back, so refusing them grants nothing less and leaks memory in a long run
+/// that a short journey cannot show.
 const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[
-    "brk",
     "epoll_create1",
     "epoll_ctl",
     "epoll_pwait",
@@ -6802,11 +6811,6 @@ const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[
     "madvise",
     "munmap",
     "rseq",
-    "rt_sigprocmask",
-    "sched_getaffinity",
-    "set_robust_list",
-    "set_tid_address",
-    "sigaltstack",
 ];
 /// Argument words in `seccomp_data`: each argument is 64 bits, low word first on
 /// both aarch64 and x86_64.
