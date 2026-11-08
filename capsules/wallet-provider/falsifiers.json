@@ -3756,6 +3756,70 @@
       "tests": [
         "landlock_ruleset_names_each_measured_loader_entry"
       ]
+    },
+    {
+      "id": "WP252",
+      "title": "the fcntl rule also admits command 2 (F_SETFD), an argument widening that adds no syscall number",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number(\"fcntl\"), 0, 5),\n        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG1_LOW),\n",
+          "new": "        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number(\"fcntl\"), 0, 6),\n        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG1_LOW),\n        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, 2, 2, 0),\n"
+        }
+      ],
+      "tests": [
+        "seccomp_model_program_equals_its_golden_copy"
+      ]
+    },
+    {
+      "id": "WP253",
+      "title": "the futex rule masks its op with 1 instead of FUTEX_CMD_MASK, so every op reads as wait or wake",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        SeccompInstruction::stmt(SECCOMP_BPF_AND_K, LINUX_FUTEX_CMD_MASK),",
+          "new": "        SeccompInstruction::stmt(SECCOMP_BPF_AND_K, 0x1),"
+        }
+      ],
+      "tests": [
+        "seccomp_model_program_equals_its_golden_copy"
+      ]
+    },
+    {
+      "id": "WP254",
+      "title": "clone3 returns SECCOMP_RET_LOG instead of ENOSYS, so the kernel runs it and a new process can start",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        SeccompInstruction::stmt(SECCOMP_BPF_RET_K, SECCOMP_RET_ENOSYS),",
+          "new": "        SeccompInstruction::stmt(SECCOMP_BPF_RET_K, 0x7ffc_0000),"
+        }
+      ],
+      "tests": [
+        "seccomp_model_program_equals_its_golden_copy"
+      ]
+    },
+    {
+      "id": "WP255",
+      "title": "the clone rule's miss jump lands on its allow instead of the next rule, so every later number is allowed",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number(\"clone\"), 0, 4),",
+          "new": "        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number(\"clone\"), 0, 2),"
+        }
+      ],
+      "tests": [
+        "seccomp_model_program_equals_its_golden_copy"
+      ]
     }
   ]
 }

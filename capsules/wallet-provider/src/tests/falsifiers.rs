@@ -339,7 +339,10 @@ use std::process::Command;
 /// model's thread rules, which both checks catch on the x86-64 program.
 /// WP251 adds wallet to the x86-64 `libm` users, so the per-architecture set
 /// check in `landlock_ruleset_names_each_measured_loader_entry` fails.
-const EXPECTED_FALSIFIERS: usize = 231;
+/// WP252 admits `fcntl` command 2, WP253 loosens the `futex` mask, WP254 makes
+/// `clone3` return `SECCOMP_RET_LOG` and WP255 retargets the `clone` rule's
+/// jump; `seccomp_model_program_equals_its_golden_copy` catches each.
+const EXPECTED_FALSIFIERS: usize = 235;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

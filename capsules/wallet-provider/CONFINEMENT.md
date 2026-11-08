@@ -1697,6 +1697,14 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - WP251: The x86-64 `libm` users table gains wallet, so wallet's x86-64 launch
   would read `libm.so.6`. `landlock_ruleset_names_each_measured_loader_entry`
   checks this rule against the per-architecture sets it writes out, on any host.
+- WP252: The `fcntl` rule also admits command 2, `F_SETFD`. No syscall number
+  changes. `seccomp_model_program_equals_its_golden_copy` checks this rule.
+- WP253: The `futex` rule masks its op with 1, so every op reads as wait or
+  wake. `seccomp_model_program_equals_its_golden_copy` checks this rule.
+- WP254: `clone3` returns `SECCOMP_RET_LOG` instead of `ENOSYS`, so the kernel
+  runs it. `seccomp_model_program_equals_its_golden_copy` checks this rule.
+- WP255: The `clone` rule's miss jump lands on its allow, so every number after
+  it is allowed. `seccomp_model_program_equals_its_golden_copy` checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,
