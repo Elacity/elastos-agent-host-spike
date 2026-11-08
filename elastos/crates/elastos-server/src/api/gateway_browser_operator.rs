@@ -57,6 +57,29 @@ struct Admission {
     bindings: BTreeMap<String, String>,
 }
 
+#[cfg(test)]
+impl BrowserOperatorService {
+    /// An admission's request record, and how its token validates now.
+    pub(crate) async fn admission_for_test(
+        &self,
+        id: &str,
+    ) -> (
+        elastos_runtime::capability::pending::PendingCapabilityRequest,
+        Result<(), elastos_runtime::capability::manager::ValidationError>,
+    ) {
+        let request = self.pending.get_request(id).await.unwrap();
+        let records = self.records.lock().await;
+        let record = &records[id];
+        let token = record.token.as_ref().unwrap();
+        let session = record.session.id.as_str();
+        let resource = resource(&record.page_id, id);
+        let validated = self
+            .capabilities
+            .validate(token, session, Action::Write, &resource, None);
+        (request, validated.await)
+    }
+}
+
 pub(crate) fn register_browser_operator_sessions(
     data_dir: &FsPath,
     sessions: Arc<SessionRegistry>,
@@ -815,7 +838,11 @@ pub(in crate::api::gateway) async fn operator_input(
         }
         service
             .pending
-            .revoke_request_by(&input.admission_id, "Revoked by user", Settler::Shell)
+            .revoke_request_by(
+                &input.admission_id,
+                "Browser input outcome uncertain",
+                Settler::Runtime,
+            )
             .await;
     }
     drop(records);
