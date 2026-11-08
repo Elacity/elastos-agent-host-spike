@@ -554,11 +554,18 @@ fn stand_in_stops_when_content_is_revoked_after_grant() {
 async fn stand_in_stops_when_policy_changes_mid_run() {
     let fixture = Fixture::new(&fixture_images());
     let policy = Arc::new(Mutex::new(fixture.policy.clone()));
+    let caller_policy = Arc::clone(&policy);
     let content_cid = fixture.content.cid.clone();
-    let on_admit: Option<OnAdmit> = Some(Box::new(move |calls, current| {
-        // The album grant, the album read, then the first image grant.
+    let on_admit: Option<OnAdmit> = Some(Box::new(move |calls| {
+        // The album grant, the album read, then the first image grant. The
+        // launch holds no lock here, so the caller changes its own policy
+        // through its own handle.
         if calls == 3 {
-            current.revoked_cids.push(content_cid.clone());
+            caller_policy
+                .lock()
+                .unwrap()
+                .revoked_cids
+                .push(content_cid.clone());
         }
     }));
     let error = open_content_stand_in(

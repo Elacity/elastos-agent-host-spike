@@ -15,8 +15,9 @@ use serde_json::Value;
 pub const ALBUM: &str = "localhost://Users/self/.AppData/App/photo-viewer/album.json";
 pub const PLAYLIST: &str = "localhost://Users/self/.AppData/App/photo-viewer/playlist.json";
 
-/// A test hook that runs after an admission, with the call count and the held policy.
-pub type OnAdmit = Box<dyn FnMut(usize, &mut TrustPolicy) + Send>;
+/// A test hook that runs after an admission, with the call count. The caller
+/// changes its own policy through its own handle while the launch holds none.
+pub type OnAdmit = Box<dyn FnMut(usize) + Send>;
 
 pub fn launch_members(
     album: &str,
@@ -65,7 +66,7 @@ pub fn content_readmit(
 ) -> Box<dyn FnMut() -> Result<(), String> + Send> {
     let mut calls = 0;
     Box::new(move || {
-        let mut policy = policy.lock().unwrap();
+        let policy = policy.lock().unwrap();
         for package in &packages {
             admit_staged_for_stand_in(package, &claims, &policy, &installed, &store, now)
                 .map_err(|refusal| match refusal {
@@ -79,8 +80,9 @@ pub fn content_readmit(
                 })?;
         }
         calls += 1;
+        drop(policy);
         if let Some(on_admit) = on_admit.as_mut() {
-            on_admit(calls, &mut policy);
+            on_admit(calls);
         }
         Ok(())
     })

@@ -96,13 +96,10 @@ CASES = [
     (
         "F24 launch drops the shared policy",
         SUPPORT,
-        [
-            (
-                "            Arc::clone(&policy),",
-                "            Arc::new(Mutex::new(policy.lock().unwrap().clone())),",
-            ),
-            ("            on_admit,\n", "            None,\n"),
-        ],
+        [(
+            "            Arc::clone(&policy),",
+            "            Arc::new(Mutex::new(policy.lock().unwrap().clone())),",
+        )],
         ["stand_in_stops_when_policy_changes_mid_run"],
     ),
 ]
