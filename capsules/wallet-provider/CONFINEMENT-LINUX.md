@@ -74,7 +74,9 @@ x86-64 runner (run 42447514431), and each was then dropped alone under the real
 filter (run 42454795461): without `mkdir` did, wallet and model fail to create
 their storage, and without `unlink` wallet's init fails. The same run dropped
 `access`, which glibc also calls there, and every journey still passed, so it is
-not admitted.
+not admitted. The storage row is shared, so did and the model also receive
+`unlink`, though only wallet failed without it; each already holds `unlinkat`,
+which does the same thing.
 
 The head forms (`(version 1)`, `(deny default)`) and the deny forms grant
 nothing, so they take no row and add no syscall. An allow form with no row is a
