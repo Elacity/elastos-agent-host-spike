@@ -293,6 +293,30 @@ class ModuleHelpersTest(unittest.TestCase):
         with self.assertRaises(core_size.Refusal):
             core_size.crate_roots({"Cargo.toml": '[lib]\npath = "src/gone.rs"\n'})
 
+    def test_cargo_targets_are_read_only_in_their_plain_form(self):
+        self.assertEqual(core_size.cargo_targets('[package]\nversion.workspace = true\n[lib]\nname = "x"\n'
+                                                 'path = "src/lib.rs" # the library\n[[bin]]\npath = "src/t.rs"\n'
+                                                 "[target.'cfg(unix)'.dependencies]\nlibc = \"0.2\"\n"),
+                         ["src/lib.rs", "src/t.rs"])
+        cases = [  # (message, manifest); Codex's round-3 inputs first
+            ("Cargo.toml:2: target key written as path = 'tests/production.rs'",
+             "[lib]\npath = 'tests/production.rs'\n"),
+            ('Cargo.toml:2: target key written as "path" = ', '[lib]\n"path" = "tests/production.rs"\n'),
+            ("Cargo.toml:1: target defined by a dotted key or inline table",
+             'lib = { path = "tests/production.rs" }\n'),
+            ("Cargo.toml:2: target defined by a dotted key", '[package]\nlib.path = "tests/production.rs"\n'),
+            ("Cargo.toml:1: target table written as \\[ lib \\]", '[ lib ]\npath = "src/lib.rs"\n'),
+            ("Cargo.toml:1: target table written as \\[bin\\]", '[bin]\npath = "src/t.rs"\n'),
+            ("Cargo.toml:2: target key written as path.workspace", "[lib]\npath.workspace = true\n"),
+            ("Cargo.toml:2: path .* is not a plain", '[lib]\npath = "src/../x.rs"\n'),
+        ]
+        for message, manifest in cases:
+            with self.assertRaisesRegex(core_size.Refusal, message, msg=manifest):
+                core_size.cargo_targets(manifest)
+        with self.assertRaisesRegex(core_size.Refusal, "Cargo.toml:2: target key"):  # the whole count refuses
+            core_size.count({"Cargo.toml": "[lib]\npath = 'tests/production.rs'\n", "src/lib.rs": "",
+                             "tests/production.rs": "pub fn production() {}\n"})
+
     def test_path_attribute(self):
         for attribute, expected in (('#[path = "a/b.rs"]', "a/b.rs"), ('#[path = r#"c.rs"#]', "c.rs"),
                                     ('#[doc = "x"]', None)):

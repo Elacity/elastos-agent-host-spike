@@ -26,6 +26,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+try:
+    import tomllib
+except ImportError:  # before Python 3.11 the strict reader alone decides
+    tomllib = None
+
 ROOT = Path(__file__).resolve().parent.parent
 CRATE, BUDGET = "elastos/crates/elastos-runtime", "elastos/CORE-BUDGET"
 SLACK = 50  # the budget may sit at most this far above the code; further, the check fails
@@ -312,13 +317,45 @@ def analyse(tokens):
     return tests, found["spans"], found["mods"], found["includes"]
 
 
+def cargo_targets(text):
+    """The [lib] and [[bin]] paths of a Cargo.toml, read only in their plain form: a `[lib]` or
+    `[[bin]]` header line with bare keys and `path = "..."` holding a plain path. Any other spelling of
+    a target or its keys is refused, and with tomllib so is any disagreement with a full TOML reading."""
+    section, paths = "", []
+    for number, line in enumerate((line.strip() for line in text.splitlines()), 1):
+        def refuse(what):
+            raise Refusal(f"{CRATE}/Cargo.toml:{number}: {what}: core-size.py reads only `[lib]` and `[[bin]]`"
+                          ' tables with bare keys and a plain `path = "..."`')
+        if line.startswith("["):
+            if re.sub(r"[\s\"'\[\]]", "", line).split(".")[0] in ("lib", "bin") and line not in ("[lib]", "[[bin]]"):
+                refuse(f"target table written as {line}")
+            section = line
+        elif re.match(r"""["']?(lib|bin)["']?\s*[.=]""", line):
+            refuse("target defined by a dotted key or inline table")
+        elif section in ("[lib]", "[[bin]]") and line and not line.startswith("#"):
+            key = re.match(r"([A-Za-z0-9_-]+)\s*=", line)
+            plain = re.fullmatch(r'path\s*=\s*("[^"\\]*")\s*(#.*)?', line)
+            if not key or (key.group(1) == "path" and not plain):
+                refuse(f"target key written as {line}")
+            if plain:
+                try:
+                    paths.append(plain_path(plain.group(1)))
+                except Refusal as error:
+                    refuse(str(error))
+    if tomllib:
+        try:
+            data = tomllib.loads(text)
+        except tomllib.TOMLDecodeError as error:
+            raise Refusal(f"{CRATE}/Cargo.toml: not TOML: {error}") from None
+        targets = [data.get("lib", {})] + list(data.get("bin", []))
+        if sorted(target.get("path", "") for target in targets if "path" in target) != sorted(paths):
+            raise Refusal(f"{CRATE}/Cargo.toml: target paths that core-size.py cannot read plainly")
+    return paths
+
+
 def crate_roots(tree):
     """The crate's targets: [lib] and [[bin]] paths in Cargo.toml, src/lib.rs, src/main.rs, src/bin/."""
-    section, roots = "", []
-    for line in tree.get("Cargo.toml", "").splitlines():
-        line, path = line.strip(), re.match(r'\s*path\s*=\s*"([^"]+)"', line)
-        section = line.strip("[] ") if line.startswith("[") else section
-        roots += [posixpath.normpath(path.group(1))] if path and section in ("lib", "bin") else []
+    roots = [posixpath.normpath(path) for path in cargo_targets(tree.get("Cargo.toml", ""))]
     roots += [path for path in tree if re.fullmatch(r"src/(lib|main|bin/[^/]+|bin/[^/]+/main)\.rs", path)]
     if not roots or any(root not in tree for root in roots):
         raise Refusal(f"{CRATE}: no target root, or a Cargo.toml target path that does not exist")
