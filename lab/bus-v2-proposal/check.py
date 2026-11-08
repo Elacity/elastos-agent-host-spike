@@ -19,6 +19,14 @@ CITATION = re.compile(
 
 DRAFT = Path("lab/bus-v2-proposal/CORE-CALLS-PROPOSAL.md")
 
+# Section 0 states each core-call proposal once. Each group starts with a
+# heading, and its propose lines stand under that heading.
+SECTION_0 = "## 0. What this proposes"
+SECTION_1 = "## 1. Agent identity"
+PROPOSE = "propose:"
+PROPOSE_GROUP = re.compile(r"^### (A3|A4|A5|A7|B2)\. ")
+PROPOSE_REQUIRED = ("A3", "A5", "A7", "B2")
+
 # The one owned citation. Its quotation stays unchecked until a slice owns it.
 OWNED_SPAN = "examples/agent-host/src/lib.rs:3754"
 OWNED_MARKER = "`" + OWNED_SPAN + "`"
@@ -1014,6 +1022,61 @@ def a3_claim_refusals(text):
     return refusals
 
 
+def section_0_bounds(lines):
+    """Return the start and end indexes of section 0, or None when it is absent."""
+    start = None
+    for index, line in enumerate(lines):
+        if line.strip() == SECTION_0:
+            start = index
+            break
+    if start is None:
+        return None
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if lines[index].startswith("## "):
+            end = index
+            break
+    return start, end
+
+
+def proposal_refusals(text):
+    """Return one refusal per missing section, missing proposal or stray proposal.
+
+    Section 0 sits before section 1 and holds at least one propose line under
+    each required group heading. Every other propose line is a second spelling
+    of a rule, so it is refused.
+    """
+    lines = text.splitlines()
+    bounds = section_0_bounds(lines)
+    if bounds is None:
+        return ["refuse: draft has no section 0"]
+    start, end = bounds
+    refusals = []
+    for index, line in enumerate(lines):
+        if line.strip() == SECTION_1:
+            if index < start:
+                refusals.append("refuse: section 0 is not before section 1")
+            break
+    found = {name: 0 for name in PROPOSE_REQUIRED}
+    group = None
+    for index in range(start + 1, end):
+        line = lines[index]
+        heading = PROPOSE_GROUP.match(line.strip())
+        if heading is not None:
+            group = heading.group(1)
+        elif line.startswith(PROPOSE) and group in found:
+            found[group] += 1
+    for name in PROPOSE_REQUIRED:
+        if not found[name]:
+            refusals.append("refuse: section 0 has no propose line for " + name)
+    for index, line in enumerate(lines):
+        if line.startswith(PROPOSE) and not start <= index < end:
+            refusals.append(
+                "refuse: propose line outside section 0 at line " + str(index + 1)
+            )
+    return refusals
+
+
 def _past_end(number, rel, count):
     return "refuse: line %s is past the end of %s (%s lines)" % (number, rel, count)
 
@@ -1064,11 +1127,12 @@ def pin_allows_structural_reads(pin_reason, pinned):
 
 
 def problems(root):
-    """Return one refusal per bad pin or citation, pin refusals first.
+    """Return one refusal per bad pin, citation or section 0 rule, pin first.
 
     A bad pin, a bad pin line or an unknown pin is the only refusal of its own,
     because no revision is named to read. The structural reads run only once
-    the pin names a commit, and they read that commit.
+    the pin names a commit, and they read that commit. The section 0 rules read
+    the draft alone, so they run even when the pin does not name a commit.
     """
     text = load_draft(root)
     if text is None:
@@ -1096,6 +1160,7 @@ def problems(root):
                 refused_spans.add(span)
         refusals.extend(_quote_refusals(root, text, sha, refused_spans))
         refusals.extend(a3_claim_refusals(text))
+    refusals.extend(proposal_refusals(text))
     return refusals
 
 

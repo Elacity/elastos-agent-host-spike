@@ -23,6 +23,35 @@ IDENTITY = {
     "GIT_COMMITTER_EMAIL": "citation-check@example.com",
 }
 
+# Every fixture draft carries this section 0, so a citation rule is the only
+# reason its fixture adds. Each group heading holds one propose line.
+PROPOSAL_SKELETON = (
+    "## 0. What this proposes\n"
+    "\n"
+    "This section states each proposal once.\n"
+    "\n"
+    "### A3. Agent identity\n"
+    "propose: fixture A3.\n"
+    "Evidence: section 7, A3.\n"
+    "\n"
+    "### A4. Model operations\n"
+    "propose: fixture A4.\n"
+    "Evidence: section 7, A4.\n"
+    "\n"
+    "### A5. Grant handle\n"
+    "propose: fixture A5.\n"
+    "Evidence: section 7, A5.\n"
+    "\n"
+    "### A7. Usage reservation\n"
+    "propose: fixture A7.\n"
+    "Evidence: section 7, A7.\n"
+    "\n"
+    "### B2. Typed operations\n"
+    "propose: fixture B2.\n"
+    "Evidence: section 7, B2.\n"
+    "\n"
+)
+
 OWNED_REL = "examples/agent-host/src/lib.rs"
 OWNED_NUMBER = 3754
 OWNED_SPAN = "examples/agent-host/src/lib.rs:3754"
@@ -2486,8 +2515,8 @@ class CitationCheckTests(unittest.TestCase):
         self._git(root, "commit", "-q", "-m", "fixture")
         return self._git_output(root, "rev-parse", "HEAD")
 
-    def _draft(self, body, files=None):
-        """A temp root whose draft pins the repository's committed HEAD."""
+    def _bare_draft(self, body, files=None):
+        """A temp root whose draft pins HEAD and holds only BODY, no section 0."""
         root = self._temp_root()
         self._write(root, body, files or {})
         sha = self._commit_all(root)
@@ -2496,13 +2525,26 @@ class CitationCheckTests(unittest.TestCase):
         )
         return root
 
+    def _draft(self, body, files=None):
+        """A temp root whose draft pins HEAD and holds the section 0 skeleton."""
+        return self._bare_draft(PROPOSAL_SKELETON + body, files)
+
     def _raw_draft(self, body, files=None, commit=False):
         """A temp draft with the caller's pin text and no automatic pin."""
         root = self._temp_root()
-        self._write(root, body, files or {})
+        self._write(root, PROPOSAL_SKELETON + body, files or {})
         if commit:
             self._commit_all(root)
         return root
+
+    def _section_0(self, groups=("A3", "A4", "A5", "A7", "B2")):
+        """A valid section 0 with one propose line under each group heading."""
+        parts = ["## 0. What this proposes\n", "\n"]
+        for name in groups:
+            parts.append("### " + name + ". Fixture group\n")
+            parts.append("propose: fixture " + name + ".\n")
+            parts.append("Evidence: section 7, " + name + ".\n\n")
+        return "".join(parts)
 
     def _assert_one(self, body, files, expected):
         got = check.problems(self._draft(body, files))
@@ -3329,6 +3371,73 @@ class CitationCheckTests(unittest.TestCase):
             check.problems(Path(tmp.name)),
             ["refuse: proposal is absent"],
         )
+
+    def test_missing_section_0_is_refused(self):
+        # A draft with numbered sections and no section 0 states no proposal.
+        body = "## 1. Agent identity\n\nSee `pkg/kept.rs:1`.\n"
+        self.assertEqual(
+            check.problems(self._bare_draft(body, {"pkg/kept.rs": b"fn kept(\n"})),
+            ["refuse: draft has no section 0"],
+        )
+
+    def test_section_0_after_section_1_is_refused(self):
+        body = "## 1. Agent identity\n\n" + self._section_0()
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            ["refuse: section 0 is not before section 1"],
+        )
+
+    def test_section_0_needs_a_propose_line_for_each_required_group(self):
+        # Each required core call keeps its own propose line under its heading.
+        groups = ("A3", "A4", "A5", "A7", "B2")
+        for name in check.PROPOSE_REQUIRED:
+            body = self._section_0([group for group in groups if group != name])
+            self.assertEqual(
+                check.problems(self._bare_draft(body)),
+                ["refuse: section 0 has no propose line for " + name],
+                name,
+            )
+
+    def test_propose_line_outside_section_0_is_refused(self):
+        # One rule has one spelling: section 0 holds the proposal, and section 7
+        # points to it.
+        body = (
+            self._section_0()
+            + "## 7. Open questions\n\npropose: a second spelling.\n"
+        )
+        line = body.splitlines().index("propose: a second spelling.") + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            ["refuse: propose line outside section 0 at line " + str(line)],
+        )
+
+    def _live_refusals(self):
+        """The refusals this worktree's draft gives, or a skip without a draft."""
+        root = check.worktree_root()
+        if check.load_draft(root) is None:
+            self.skipTest("no draft in this worktree")
+        return check.problems(root)
+
+    def test_live_draft_has_section_0(self):
+        found = [
+            reason for reason in self._live_refusals()
+            if reason == "refuse: draft has no section 0"
+        ]
+        self.assertEqual(found, [])
+
+    def test_live_draft_section_0_holds_every_required_proposal(self):
+        found = [
+            reason for reason in self._live_refusals()
+            if reason.startswith("refuse: section 0 has no propose line for ")
+        ]
+        self.assertEqual(found, [])
+
+    def test_live_draft_has_no_propose_line_outside_section_0(self):
+        found = [
+            reason for reason in self._live_refusals()
+            if "propose line outside section 0" in reason
+        ]
+        self.assertEqual(found, [])
 
     def test_missing_pin_is_refused(self):
         # An absent path in the same draft adds no second line: no revision is
@@ -5082,7 +5191,7 @@ class CitationCheckTests(unittest.TestCase):
         self._write(root, body, {"pkg/pin.rs": source})
         sha = self._commit_all(root)
         (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
-            "Pinned commit: " + sha + "\n" + body, encoding="utf-8"
+            "Pinned commit: " + sha + "\n" + PROPOSAL_SKELETON + body, encoding="utf-8"
         )
         (root / "pkg" / "pin.rs").unlink()
         self.assertEqual(check.problems(root), [])
@@ -5093,7 +5202,8 @@ class CitationCheckTests(unittest.TestCase):
         (root / worktree_only).write_bytes(b"fn only_here(\n")
         extended = body + "Also `" + worktree_only + "::only_here`.\n"
         (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
-            "Pinned commit: " + sha + "\n" + extended, encoding="utf-8"
+            "Pinned commit: " + sha + "\n" + PROPOSAL_SKELETON + extended,
+            encoding="utf-8",
         )
         self.assertEqual(
             check.problems(root),
@@ -10124,7 +10234,8 @@ class CitationCheckTests(unittest.TestCase):
         check.pinned_line = record
         try:
             (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
-                "Pinned commit: " + sha + "\n" + body, encoding="utf-8"
+                "Pinned commit: " + sha + "\n" + PROPOSAL_SKELETON + body,
+                encoding="utf-8",
             )
             got = check.problems(root)
         finally:
