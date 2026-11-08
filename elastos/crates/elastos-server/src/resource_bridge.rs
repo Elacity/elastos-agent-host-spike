@@ -1306,6 +1306,13 @@ pub async fn handle_remote_request_with_audit_dir(
                     "principal_context_required",
                     "principal-root storage requires an in-runtime protected storage bridge",
                 ))
+            } else if dispatch.scheme == "model" && dispatch.operation != "offers_list" {
+                // The HTTP route refuses runs too, as plain text; answer here
+                // in the Bus shape and never post the guest's body.
+                Some(resource_error_response(
+                    "principal_context_required",
+                    "model runs require the in-runtime Bus bridge, which binds them to a principal",
+                ))
             } else {
                 None
             };
@@ -3558,6 +3565,54 @@ mod tests {
             ("component.invoke.completed", "error")
         );
         assert_eq!(events[0].2, events[1].2);
+    }
+
+    /// An attached component's model run gets a Bus-shaped refusal from the
+    /// adapter, not the HTTP route's plain-text 403, and nothing is posted.
+    #[tokio::test]
+    async fn an_attached_component_model_run_gets_a_structured_refusal() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_url = format!("http://{}", listener.local_addr().unwrap());
+        let posted = Arc::new(AtomicUsize::new(0));
+        let seen = posted.clone();
+        tokio::spawn(async move {
+            // What POST /api/provider/model/<run op> answers.
+            let reply =
+                "principal_context_required: model runs require a principal-scoped launch context";
+            while let Ok((mut socket, _)) = listener.accept().await {
+                seen.fetch_add(1, Ordering::SeqCst);
+                let _ = socket.read(&mut [0u8; 16 * 1024]).await;
+                let head = format!("HTTP/1.1 403 Forbidden\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", reply.len());
+                let _ = socket.write_all(format!("{head}{reply}").as_bytes()).await;
+            }
+        });
+        let run_id = format!("run:sha256:{}", "a".repeat(64));
+        for op in ["runs_create", "runs_get", "runs_events", "runs_cancel"] {
+            let line = serde_json::json!({"id": 97, "request": {"type": "resource_invoke",
+                "uri": format!("elastos://model/{op}"), "operation": op, "token": "tok",
+                "body": {"run_id": run_id, "request_id": "model-v1:1:n", "offer_id": "m",
+                    "operation": "text.generate", "input": {}}}});
+            let manifest = ["elastos://model/*".to_string()];
+            let response = handle_remote_request(
+                &line.to_string(),
+                &api_url,
+                "client-token",
+                "test-capsule",
+                &manifest,
+                Some(ALICE),
+            )
+            .await
+            .expect("the guest gets a structured refusal, not a bridge error");
+            let code = &response["response"]["code"];
+            assert_eq!(code, "principal_context_required", "{op}: {response}");
+        }
+        assert_eq!(
+            posted.load(Ordering::SeqCst),
+            0,
+            "a model run body was posted"
+        );
     }
 
     /// Inside the Agents area only read and write may be asked for. Anything
