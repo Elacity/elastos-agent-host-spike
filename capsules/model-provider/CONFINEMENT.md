@@ -739,6 +739,11 @@ profile does not grant".
   rule is reflected, and the test needs no sandbox. F-cc48a fails at the
   allow-line compare, and F-cc41a fails at `the stub exec rule is present
   once`.
+- `generated_model_profile_matches_its_committed_oracle`: reads the
+  declared-rights fixture, generates the profile with the shared generator,
+  and compares `PROFILE_HEAD` and the sorted remaining forms with this
+  oracle. It needs no sandbox. F-cc48a fails at the sorted-form compare, and
+  F-cc53a fails because the committed oracle holds the dropped form.
 - `generated_profile_launch_matches_the_oracle`: reads the file
   `applied_profile` records after `Launch::Profile` starts, and that file's
   sorted allow lines match this oracle. The post-start non-comment compare
@@ -817,9 +822,10 @@ python3 -I examples/agent-host/falsify.py --from capsules/model-provider/confine
 `confine-falsifiers.json` holds this profile's falsifiers for the shared
 runner. Every entry uses `expect: caught`. F-cc12a uses command `wallet`,
 because the one shape check is in the wallet crate, and every other entry
-uses command `provider`. Each mutates `confine.sb` only, except the thirty-one
-entries that edit `tests/confine/main.rs`.
-The thirty-one are: F-cc1e removes the outside-read
+uses command `provider`. Each mutates `confine.sb` only, except the twenty-six
+entries that edit `tests/confine/main.rs` and the six that edit
+`capsules/wallet-provider/tests/common/profile_generator.rs`.
+The test entries are: F-cc1e removes the outside-read
 fixture rule, F-cc8-rm-journal removes the outside-create fixture grant,
 F-cc15a, F-cc15b and F-cc15c each undo one part of how the Runtime socket
 stand-in counts connections, F-cc16a, F-cc16b and F-cc16c each undo one
@@ -831,7 +837,7 @@ keeps none of the stderr lines `Provider::ended` reads, and F-cc29a skips
 the digest compare in refuse_changed_provider_executable, and F-cc31a
 renames `model_provider_ops_under_profile`, and F-cc30b,
 F-cc30c, F-cc30d and F-cc30e each change the declared-rights path in
-allow_rules_trace_to_declared_rights. F-cc40a makes falsifier_section_ids_match return Ok before it compares. F-cc41a makes standin_profile return the oracle file and ignore the declared value. F-cc42a makes write_standin_profile write an allow-default profile and ignore the generated text, so generated_profile_permits_init_and_denies_the_local_offer and standin_refuses_a_start_it_cannot_apply fail. F-cc43a makes standin_profile return an empty profile when the rights list is missing, so standin_refuses_a_start_it_cannot_apply and generated_model_profile_matches_the_oracle fail. F-cc44a makes standin_profile emit (allow network*) instead of (deny network*). F-cc45a makes standin_launch_uses_the_generated_profile start under the committed oracle instead of the generated file. F-cc46a makes Launch::Program pass the committed oracle to sandboxed instead of the profile it was given, so generated_profile_refuses_an_unbound_copy fails because the recorded profile path is the committed oracle. F-cc47a makes generated_profile_refuses_an_unbound_root start under the committed oracle instead of the stand-in file, so that test fails because the recorded profile path is the committed oracle. Both files exit 65. F-cc48a appends `(allow file-read-data (literal "/tmp/cc-standin-extra"))` after the joined rules, so `generated_model_profile_matches_the_oracle` fails at the sorted allow-line compare. F-cc49a drops the `generated_` acceptance in `cited_test_name`, so the in-memory stand-in citation fails. F-cc50a drops the exact `allow_rules_trace_to_declared_rights` return in `cited_test_name`, so the in-memory trace citation fails. F-cc51a appends `(allow file-read-data (literal "/tmp/cc-launched-extra"))` inside `sandboxed` after the path is recorded, so `generated_profile_launch_matches_the_oracle` fails at the post-start allow-line compare. F-cc52a drops `(deny network*)` inside `sandboxed` after the path is recorded, so `generated_profile_launch_matches_the_oracle` fails at the post-start non-comment compare.
+allow_rules_trace_to_declared_rights. F-cc40a makes falsifier_section_ids_match return Ok before it compares. The six shared-generator entries are F-cc41a, F-cc42a, F-cc43a, F-cc44a, F-cc48a and F-cc53a. F-cc41a makes generate_profile return the oracle file and ignore the declared value. F-cc42a makes write_generated_profile write an allow-default profile and ignore the generated text, so generated_profile_permits_init_and_denies_the_local_offer and model_outside_write_denied fail. F-cc43a makes declared_entries accept a missing rights list, so standin_refuses_a_start_it_cannot_apply and generated_model_profile_matches_the_oracle fail. F-cc44a makes PROFILE_HEAD emit (allow network*) instead of (deny network*). F-cc48a appends one allow rule after the joined rules, so generated_model_profile_matches_its_committed_oracle and generated_model_profile_matches_the_oracle fail. F-cc53a drops the last form generate_profile emits, so generated_model_profile_matches_its_committed_oracle fails. F-cc45a makes standin_launch_uses_the_generated_profile start under the committed oracle instead of the generated file. F-cc46a makes Launch::Program pass the committed oracle to sandboxed instead of the profile it was given, so generated_profile_refuses_an_unbound_copy fails because the recorded profile path is the committed oracle. F-cc47a makes generated_profile_refuses_an_unbound_root start under the committed oracle instead of the stand-in file, so that test fails because the recorded profile path is the committed oracle. Both files exit 65. F-cc49a drops the `generated_` acceptance in `cited_test_name`, so the in-memory stand-in citation fails. F-cc50a drops the exact `allow_rules_trace_to_declared_rights` return in `cited_test_name`, so the in-memory trace citation fails. F-cc51a appends `(allow file-read-data (literal "/tmp/cc-launched-extra"))` inside `sandboxed` after the path is recorded, so `generated_profile_launch_matches_the_oracle` fails at the post-start allow-line compare. F-cc52a drops `(deny network*)` inside `sandboxed` after the path is recorded, so `generated_profile_launch_matches_the_oracle` fails at the post-start non-comment compare.
 
 | Id | Mutation | Named test | Why the test fails |
 | --- | --- | --- | --- |
@@ -886,28 +892,29 @@ allow_rules_trace_to_declared_rights. F-cc40a makes falsifier_section_ids_match 
 | F-cc38a | `(allow` is written on its own line after the root pin, then `file-read* (literal "/tmp/cc-unclosed"))` on the next line | `platform_baseline_rules_stay_narrow` | The allow form does not close. |
 | F-cc39a | A line `(` is written after the root pin, then `allow file-read* (literal "/tmp/cc-split-allow"))` on the next line | `platform_baseline_rules_stay_narrow` and `allow_rules_trace_to_declared_rights` | The allow form does not close. |
 | F-cc40a | In the test, `falsifier_section_ids_match` returns `Ok` before it compares | `falsifier_section_names_every_list_id` | A table that drops F-cc39a is accepted. |
-| F-cc41a | In the test, `standin_profile` returns the oracle file and ignores the declared value | `generated_model_profile_matches_the_oracle` | A changed declared rule still matches the oracle. |
-| F-cc42a | In the test, `write_standin_profile` writes an allow-default profile and ignores the generated text | `generated_profile_permits_init_and_denies_the_local_offer`, `standin_refuses_a_start_it_cannot_apply` and `model_outside_write_denied` | The local offer's init answers ok, the broken generated text is ignored so the launch does not exit 65, and the generated case's redirected `init` answers `ok`. |
-| F-cc43a | In the test, `standin_profile` returns an empty profile when the rights list is missing | `standin_refuses_a_start_it_cannot_apply` and `generated_model_profile_matches_the_oracle` | The missing rights list is accepted. |
-| F-cc44a | In the test, `standin_profile` emits `(allow network*)` instead of `(deny network*)` | `generated_profile_denies_the_hosted_connect` and `generated_model_profile_matches_the_oracle` | The stand-in counts a connection and the generated head's third line is `(allow network*)`. |
+| F-cc41a | In the shared generator, `generate_profile` returns the oracle file and ignores the declared value | `generated_model_profile_matches_the_oracle` | A changed declared rule still matches the oracle. |
+| F-cc42a | In the shared writer, `write_generated_profile` writes an allow-default profile and ignores the generated text | `generated_profile_permits_init_and_denies_the_local_offer` and `model_outside_write_denied` | The local offer's init answers ok, and the generated case's redirected `init` answers `ok`. |
+| F-cc43a | In the shared generator, `declared_entries` accepts a file without a rights list | `standin_refuses_a_start_it_cannot_apply` and `generated_model_profile_matches_the_oracle` | The missing rights list is accepted. |
+| F-cc44a | In the shared file, `PROFILE_HEAD` emits `(allow network*)` instead of `(deny network*)` | `generated_profile_denies_the_hosted_connect` and `generated_model_profile_matches_the_oracle` | The stand-in counts a connection and the generated head's third line is `(allow network*)`. |
 | F-cc45a | In the test, the launch uses the committed oracle instead of the generated file | `standin_launch_uses_the_generated_profile` | `init` answers ok because the launch uses the committed oracle, which still has the storage write. |
 | F-cc46a | In the test, `Launch::Program` passes the committed oracle to `sandboxed` instead of the profile it was given | `generated_profile_refuses_an_unbound_copy` | The recorded profile path is the committed oracle. The copy is still refused with exit 71. |
 | F-cc47a | In the test, `generated_profile_refuses_an_unbound_root` starts under the committed oracle instead of the stand-in file | `generated_profile_refuses_an_unbound_root` | The recorded profile path is the committed oracle. Both files exit 65. |
-| F-cc48a | In the test, `standin_profile` appends `(allow file-read-data (literal "/tmp/cc-standin-extra"))` after the joined rules | `generated_model_profile_matches_the_oracle` | The sorted allow-line compare fails. |
+| F-cc48a | In the shared generator, `generate_profile` appends `(allow file-read-data (literal "/tmp/cc-standin-extra"))` after the joined rules | `generated_model_profile_matches_its_committed_oracle` and `generated_model_profile_matches_the_oracle` | The sorted allow-line compare fails. |
 | F-cc49a | In the test, `cited_test_name` drops the `generated_` acceptance | `operations_section_cites_existing_tests` | The in-memory stand-in citation fails. |
 | F-cc50a | In the test, `cited_test_name` drops the exact `allow_rules_trace_to_declared_rights` return | `operations_section_cites_existing_tests` | The in-memory trace citation fails. |
 | F-cc51a | In the test, `sandboxed` appends `(allow file-read-data (literal "/tmp/cc-launched-extra"))` after the path is recorded | `generated_profile_launch_matches_the_oracle` | The post-start allow-line compare fails. |
 | F-cc52a | In the test, `sandboxed` drops `(deny network*)` after the path is recorded | `generated_profile_launch_matches_the_oracle` | The post-start non-comment compare fails. |
+| F-cc53a | In the shared generator, `generate_profile` drops the last form it emits | `generated_model_profile_matches_its_committed_oracle` | The committed oracle still holds the dropped form. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
 same for the outside-create grant: the refusal that test observes is the
 create, not the inspect before it. The runner rebuilds the test for both, and
 for the F-cc15, F-cc16, F-cc17, F-cc19 and F-cc29a entries, and for F-cc30b,
-F-cc30c, F-cc30d, F-cc30e F-cc31a, F-cc40a, F-cc41a, F-cc42a, F-cc43a, F-cc44a, F-cc45a, F-cc46a, F-cc47a, F-cc48a, F-cc49a, F-cc50a, F-cc51a and F-cc52a. F-cc30a and F-cc30f need no rebuild:
+F-cc30c, F-cc30d, F-cc30e F-cc31a, F-cc40a, F-cc41a, F-cc42a, F-cc43a, F-cc44a, F-cc45a, F-cc46a, F-cc47a, F-cc48a, F-cc49a, F-cc50a, F-cc51a, F-cc52a and F-cc53a. F-cc30a and F-cc30f need no rebuild:
 the test reads confine.sb at runtime. Its startup recovery restores
-`tests/confine/main.rs` after a killed run (provider task 015), as it restores
-`confine.sb`. F-cc35a needs no rebuild: the test reads confine.sb at runtime.
+`tests/confine/main.rs` and `capsules/wallet-provider/tests/common/profile_generator.rs`
+after a killed run (provider task 015), as it restores `confine.sb`. F-cc35a needs no rebuild: the test reads confine.sb at runtime.
 F-cc35b needs no rebuild: the test reads confine.sb at runtime.
 F-cc35c, F-cc35d and F-cc35e also read confine.sb at runtime and need no rebuild.
 F-cc35f needs no rebuild: the test reads confine.sb at runtime.
@@ -917,8 +924,8 @@ F-cc37a needs no rebuild: the test reads confine.sb at runtime.
 F-cc38a needs no rebuild: the test reads confine.sb at runtime.
 F-cc39a needs no rebuild: the test reads confine.sb at runtime.
 F-cc40a needs a rebuild: it edits tests/confine/main.rs.
-F-cc41a needs a rebuild: it edits tests/confine/main.rs.
-F-cc42a needs a rebuild: it edits tests/confine/main.rs. F-cc42a needs the sandbox: the named tests launch the provider. F-cc43a needs a rebuild: it edits tests/confine/main.rs. F-cc44a needs a rebuild: it edits tests/confine/main.rs. F-cc44a needs the sandbox: the hosted test launches the provider. F-cc45a needs a rebuild: it edits tests/confine/main.rs. F-cc45a needs the sandbox: the named test launches the provider. F-cc46a needs a rebuild: it edits tests/confine/main.rs. F-cc46a needs the sandbox: the named test launches the provider. F-cc47a needs a rebuild: it edits tests/confine/main.rs. F-cc47a needs the sandbox: the named test launches the provider. F-cc48a needs a rebuild: it edits tests/confine/main.rs and needs no sandbox, and the sorted allow-line compare fails. F-cc49a needs a rebuild: it edits tests/confine/main.rs and needs no sandbox, and dropping the `generated_` acceptance fails the in-memory stand-in citation. F-cc50a needs a rebuild: it edits tests/confine/main.rs and needs no sandbox, and dropping the exact `allow_rules_trace_to_declared_rights` return fails the in-memory trace citation. F-cc51a needs a rebuild: it edits tests/confine/main.rs and needs the sandbox. F-cc52a needs a rebuild: it edits tests/confine/main.rs and needs the sandbox.
+F-cc41a needs a rebuild: it edits the shared generator.
+F-cc42a needs a rebuild: it edits the shared writer. F-cc42a needs the sandbox: the named tests launch the provider. F-cc43a needs a rebuild: it edits the shared generator. F-cc44a needs a rebuild: it edits the shared file. F-cc44a needs the sandbox: the hosted test launches the provider. F-cc45a needs a rebuild: it edits tests/confine/main.rs. F-cc45a needs the sandbox: the named test launches the provider. F-cc46a needs a rebuild: it edits tests/confine/main.rs. F-cc46a needs the sandbox: the named test launches the provider. F-cc47a needs a rebuild: it edits tests/confine/main.rs. F-cc47a needs the sandbox: the named test launches the provider. F-cc48a needs a rebuild: it edits the shared generator and needs no sandbox, and the sorted allow-line compare fails. F-cc53a needs a rebuild: it edits the shared generator and needs no sandbox, and the committed-oracle form compare fails. F-cc49a needs a rebuild: it edits tests/confine/main.rs and needs no sandbox, and dropping the `generated_` acceptance fails the in-memory stand-in citation. F-cc50a needs a rebuild: it edits tests/confine/main.rs and needs no sandbox, and dropping the exact `allow_rules_trace_to_declared_rights` return fails the in-memory trace citation. F-cc51a needs a rebuild: it edits tests/confine/main.rs and needs the sandbox. F-cc52a needs a rebuild: it edits tests/confine/main.rs and needs the sandbox.
 
 The list is a Mac gate. On a Mac without `/usr/bin/sandbox-exec` the unmutated
 suite fails, so a list run there is no evidence. Off macOS, when
@@ -927,7 +934,7 @@ entry reads SURVIVED there. The entries whose tests need no sandbox (F-cc12a,
 F-cc15a, F-cc15b, F-cc15c, F-cc16a, F-cc16b, F-cc16c, F-cc17a, F-cc17b,
 F-cc29a, F-cc30a, F-cc30b, F-cc30c, F-cc30d, F-cc30e, F-cc30f, F-cc31a,
 F-cc35a, F-cc35b, F-cc35c, F-cc35d, F-cc35e, F-cc35f, F-cc35g, F-cc37a,
-F-cc38a, F-cc39a, F-cc40a, F-cc41a, F-cc43a, F-cc48a, F-cc49a and F-cc50a) are
+F-cc38a, F-cc39a, F-cc40a, F-cc41a, F-cc43a, F-cc48a, F-cc53a, F-cc49a and F-cc50a) are
 CAUGHT on any host that builds their crate. F-cc49a drops the `generated_` acceptance. F-cc50a drops the exact `allow_rules_trace_to_declared_rights` return. F-cc12a reads the profile files
 and is CAUGHT on any host that builds the wallet crate. The model-provider
 entries among them are CAUGHT on any Unix host where `tests/confine/main.rs`
