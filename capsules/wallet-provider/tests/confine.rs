@@ -6772,8 +6772,9 @@ impl SeccompInstruction {
 /// programs stay byte-equal. `clone`, `clone3` and `socketpair` are not here: they
 /// take the argument-checked rules in `seccomp_program_with_thread_rules`.
 /// `epoll_wait` is the x86-64 form of `epoll_pwait`, named by a run on GitHub's
-/// x86-64 runner whose filter logged instead of refusing; aarch64 has no
-/// `epoll_wait`, so its list is unchanged.
+/// x86-64 runner whose filter logged instead of refusing (run 42448113772);
+/// dropped alone there, both model journeys failed (run 42454795461). aarch64
+/// has no `epoll_wait`, so its list is unchanged.
 const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[
     "brk",
     "epoll_create1",
@@ -7466,9 +7467,11 @@ const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
 /// `/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2` that the `O_PATH` open follows,
 /// then `libc.so.6` and `libgcc_s.so.1`. did and wallet do not map `libm.so.6`
 /// there; the model provider does, so the shared table carries it as aarch64's
-/// does. Each entry was dropped alone on that runner (run 42454795461): without
-/// the interpreter, `libc.so.6` or `libgcc_s.so.1` every provider's file-row
-/// start failed, and without `libm.so.6` only the model's did.
+/// does. The model's start first failed without it (run 42448388508). Each entry
+/// was then dropped alone on that runner, from this model leg's tree, which
+/// carries `libm.so.6` (run 42454795461): without the interpreter, `libc.so.6` or
+/// `libgcc_s.so.1` every provider's file-row start failed, and without
+/// `libm.so.6` only the model's did.
 #[cfg(target_arch = "x86_64")]
 const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
     (
