@@ -1562,7 +1562,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertNotRegex(SOURCE, r"action-gh-release|elastos-runtime-\*|contents: write")
         for job, runner in (("source-home-linux", "ubuntu-24.04"),
                             ("source-home-linux-arm64", "ubuntu-22.04-arm"),
-                            ("source-home-macos", "macos-14")):
+                            ("source-home-macos", "macos-15")):
             packages = [step for step in steps(job) if step.startswith("name: build and package release binaries\n")]
             for event, ref, ref_type, override, _ in CASES:
                 context = event_context(event, ref, ref_type, override, **{"matrix.os": runner})
@@ -1771,7 +1771,7 @@ class ReleasePolicyTests(unittest.TestCase):
             "release-upstream-assets": ("release-upstream-assets (${{ matrix.platform }})", "${{ matrix.os }}"),
             "source-home-linux": ("source-home-linux (${{ matrix.os }})", "${{ matrix.os }}"),
             "source-home-linux-arm64": ("source-home-linux (${{ matrix.check_name || matrix.os }})", "${{ matrix.os }}"),
-            "source-home-macos": ("source-home-macos", "macos-14"),
+            "source-home-macos": ("source-home-macos", "macos-15"),
             "cancel-on-failure": ("cancel-on-failure", "ubuntu-24.04"),
             # Anders decides whether this becomes a required check (#320).
             "update-hop-linux": ("update-hop-linux", "ubuntu-24.04"),
