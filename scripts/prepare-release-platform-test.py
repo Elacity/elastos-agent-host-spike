@@ -18,6 +18,9 @@ import unittest
 from unittest.mock import patch
 
 
+git_env_spec = importlib.util.spec_from_file_location("fixture_git_env", Path(__file__).with_name("fixture-git-env.py"))
+fixture_git = importlib.util.module_from_spec(git_env_spec)
+git_env_spec.loader.exec_module(fixture_git)
 SOURCE = Path(__file__).resolve().parent.parent
 # A synthetic platform-scoped helper exercises omission and lock admission.
 LINUX_ONLY = {"linux-fixture-helper"}
@@ -409,7 +412,7 @@ class PrepareWorkerTest(unittest.TestCase):
                              ("git", "config", "gc.autoDetach", "false")])
         commands.extend([("git", "add", "."), ("git", "commit", "-m", message)])
         for command in commands:
-            result = self.command(*command)
+            result = self.command(*command, env=fixture_git.fixture_git_env(self.root))
             self.assertEqual(result.returncode, 0, result.stderr)
 
     def prepare(self, name="prepared", env=None, version="0.7.1", reuse_support=None):

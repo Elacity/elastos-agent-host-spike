@@ -33,6 +33,9 @@ signer_spec.loader.exec_module(signer)
 provenance_spec = importlib.util.spec_from_file_location("release_provenance", Path(__file__).with_name("release-provenance.py"))
 provenance = importlib.util.module_from_spec(provenance_spec)
 provenance_spec.loader.exec_module(provenance)
+git_env_spec = importlib.util.spec_from_file_location("fixture_git_env", Path(__file__).with_name("fixture-git-env.py"))
+fixture_git = importlib.util.module_from_spec(git_env_spec)
+git_env_spec.loader.exec_module(fixture_git)
 
 
 def binary(platform):
@@ -561,9 +564,9 @@ class PlatformInputTest(unittest.TestCase):
         for args in (("init", "-q"), ("add", "."),
                      ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                       "commit", "-qm", "controlled publisher fixture")):
-            subprocess.run(["git", *args], cwd=source, check=True, capture_output=True)
-        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
-        tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=source, text=True).strip()
+            subprocess.run(["git", *args], cwd=source, check=True, capture_output=True, env=fixture_git.fixture_git_env(self.root))
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True, env=fixture_git.fixture_git_env(self.root)).strip()
+        tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=source, text=True, env=fixture_git.fixture_git_env(self.root)).strip()
         for root in self.bundles.values():
             receipt = json.loads((root / "platform-input.json").read_text())
             receipt["source"] = {"clean": True, "commit": commit, "tree": tree,
@@ -1771,7 +1774,7 @@ class SourceRecordTest(unittest.TestCase):
             (source / "components.json").write_text(json.dumps(template))
             (source / "Cargo.lock").write_text("version = 3\n")
             def git(*args):
-                return subprocess.check_output(["git", *args], cwd=source, text=True).strip()
+                return subprocess.check_output(["git", *args], cwd=source, text=True, env=fixture_git.fixture_git_env(root)).strip()
             git("init", "--quiet")
             git("add", ".")
             git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
