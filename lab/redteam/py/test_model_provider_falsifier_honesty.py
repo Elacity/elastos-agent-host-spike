@@ -3,7 +3,8 @@
 Grade row 10 (local model ops) scores those three ids. The printed report
 states that sentence on a clean commit, a missing commit, and a problem
 list. This probe still judges every provider entry on this base. An id
-captured before a removal is reported absent. Each ``old`` anchor still
+captured before a removal is reported absent, and so is a base id the live
+file drops before the first snapshot read. Each ``old`` anchor still
 has to occur once, on the updated text, the way ``falsify.py`` applies
 it. The required ids are the provider ids at the pinned base, so MP02, MP05,
 and MP11 stay required and a deleted non-score id is reported too. The selftest and PV
@@ -28,6 +29,7 @@ Run: python3 -I -m unittest discover -s lab/redteam/py
 
 import copy
 import functools
+import json
 import sys
 import types
 import unittest
@@ -404,6 +406,34 @@ class ModelProviderFalsifierHonesty(unittest.TestCase):
             return original.encode()
 
         self.assertEqual(anchors_of([entry], read), [])
+
+    def test_base_id_deleted_before_the_first_read(self):
+        """MP08 deleted before the first snapshot read is still an ``id`` problem.
+
+        The pinned base list does not follow the live file. Rebuilding it
+        from the provider entries that read returns would report no problem.
+        """
+        path = REPO / MODEL_FILE
+        original = path.read_bytes()
+        document = load_provider_document(original)
+        listed = document["falsifiers"]
+        self.assertEqual(len([entry for entry in listed if entry.get("id") == "MP08"]), 1)
+        kept = [entry for entry in listed if entry.get("id") != "MP08"]
+        self.assertEqual(len(kept), len(listed) - 1)
+
+        provider_base.cache_clear()
+        try:
+            path.write_text(
+                json.dumps({**document, "falsifiers": kept}), encoding="utf-8")
+            _snapshot, _data, entries = provider_base()
+            self.assertNotIn("MP08", [entry["id"] for entry in entries])
+            self.assertEqual(row_problems(entries, base_required()), [Problem(
+                "id", "MP08", MODEL_FILE,
+                "MP08 is absent from the provider entries")])
+        finally:
+            path.write_bytes(original)
+            provider_base.cache_clear()
+        self.assertEqual(path.read_bytes(), original)
 
     def test_report_names_the_bytes_it_read(self):
         """The report names the snapshot commit, the bytes this run read, and the three score ids.
