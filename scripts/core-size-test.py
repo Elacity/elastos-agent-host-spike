@@ -51,7 +51,7 @@ def extent(source):
 
 
 def counts(source, path="src/lib.rs"):
-    return core_size.count([(path, source)])
+    return core_size.count({path: source})
 
 
 class CountTest(unittest.TestCase):
@@ -121,10 +121,30 @@ class CountTest(unittest.TestCase):
                          {"total": 2, "tests": 0, "comments": 1, "blank": 0, "code": 1})
         self.assertEqual(counts("static X: u8 = f(\n    0\n);\n")["code"], 3)
 
-    def test_test_files(self):
-        for path in ("tests/integration.rs", "src/tests.rs", "src/io_test.rs"):
-            self.assertEqual(counts("fn a() {}\n", path)["tests"], 1, path)
-        self.assertEqual(counts("fn a() {}\n", "src/contests.rs")["code"], 1)
+    def test_the_module_tree_decides_what_is_test(self):
+        tree = {"src/lib.rs": "mod production_test;\n#[cfg(test)]\nmod tests;\n",
+                "src/production_test.rs": "pub fn production() {}\n", "src/tests.rs": "fn t() {}\n",
+                "tests/integration.rs": "fn i() {}\n"}
+        self.assertEqual(core_size.count(tree), {"total": 6, "tests": 4, "comments": 0, "blank": 0, "code": 2})
+
+    def test_module_paths_resolve_like_rustc(self):
+        tree = {"src/lib.rs": 'mod a;\n#[path = "elsewhere/p.rs"]\nmod p;\n'
+                              "#[cfg(test)]\nmod tests {\n    mod helpers;\n}\n",
+                "src/a.rs": "mod b;\n", "src/a/b.rs": "fn b() {}\n", "src/elsewhere/p.rs": "mod q;\n",
+                "src/elsewhere/q.rs": "fn q() {}\n", "src/tests/helpers.rs": "fn h() {}\n"}
+        self.assertEqual(core_size.count(tree), {"total": 12, "tests": 5, "comments": 0, "blank": 0, "code": 7})
+        both = {"src/lib.rs": 'mod shared;\n#[cfg(test)]\n#[path = "shared.rs"]\nmod again;\n',
+                "src/shared.rs": "fn s() {}\n"}
+        self.assertEqual(core_size.count(both)["code"], 2)
+
+    def test_files_the_module_tree_cannot_place_are_refused(self):
+        cases = {"src/orphan.rs: the module tree does not reach it": {"src/orphan.rs": "fn o() {}\n"},
+                 "src/lib.rs:1: mod gone resolves to 0 files": {"src/lib.rs": "mod gone;\n"},
+                 "src/lib.rs:1: mod a resolves to 2 files": {"src/lib.rs": "mod a;\n", "src/a.rs": "",
+                                                             "src/a/mod.rs": ""}}
+        for message, tree in cases.items():
+            with self.assertRaisesRegex(core_size.Refusal, message):
+                core_size.count({"src/lib.rs": "mod production;\n", "src/production.rs": "", **tree})
 
 
 class ItemExtentTest(unittest.TestCase):

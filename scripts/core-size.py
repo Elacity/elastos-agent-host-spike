@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Count the Runtime core (elastos/crates/elastos-runtime) as tests, comments, blank lines and code.
 
-Test lines: files under a tests/ directory or named tests.rs or *_test.rs, and every item behind
-#[cfg(test)] or #[cfg(all(test, ...))], from the attribute through the item's end. Code lines hold
+Test lines: files under the crate's tests/ directory (integration tests), modules declared only
+under a test cfg (the module tree is followed from src/lib.rs and the binary roots), and every item
+behind a cfg that holds only in tests, from its attributes through its end. Code lines hold
 any code token, wherever comments sit on them, or begin inside a multi-line string literal. Comment
 lines hold only comments or lie inside a block comment. Blank lines are blank.
 
@@ -34,11 +35,6 @@ class Refusal(Exception):
     def __init__(self, message, line=None):
         super().__init__(message)
         self.line = line
-
-
-def is_test_file(path):
-    parts = path.split("/")
-    return "tests" in parts[:-1] or parts[-1] == "tests.rs" or parts[-1].endswith("_test.rs")
 
 
 def lex(text):
@@ -272,22 +268,57 @@ def path_attribute(attrs):
     return None
 
 
-def count(files):
-    """files: (path inside the crate, text) pairs. Returns the line totals."""
+def module_tree(tree, parsed):
+    """{path: True when only test code declares it} for every file the module tree reaches."""
+    reached, queue = {}, [(root, False, True) for root in crate_roots(tree)]
+    while queue:
+        path, test, owns_dir = queue.pop()  # owns_dir: lib.rs, main.rs, mod.rs and #[path] files
+        if path in reached and (test or not reached[path]):
+            continue
+        reached[path] = test
+        here = posixpath.dirname(path)
+        for name, attrs, line, mod_test, inline in parsed(path)[3]:
+            folder = posixpath.join(here if owns_dir else path[:-3], *inline)
+            given = path_attribute(attrs)
+            if given is not None:
+                options = [posixpath.normpath(posixpath.join(folder if inline else here, given))]
+            else:
+                options = [f"{folder}/{name}.rs", f"{folder}/{name}/mod.rs"]
+            options = [option for option in options if option in tree]
+            if len(options) != 1:
+                raise Refusal(f"{CRATE}/{path}:{line + 1}: mod {name} resolves to {len(options)} files")
+            queue.append((options[0], test or mod_test, given is not None or options[0].endswith("/mod.rs")))
+    return reached
+
+
+def count(tree):
+    """tree: {path inside the crate: text} for its .rs files and Cargo.toml. Returns the line totals."""
+    analysed = {}
+
+    def parsed(path):
+        if path not in analysed:
+            tokens, starts = lex(tree[path])
+            try:
+                analysed[path] = (tokens, starts) + analyse(tokens)
+            except Refusal as error:
+                where = f"{CRATE}/{path}" + ("" if error.line is None else f":{error.line + 1}")
+                raise Refusal(f"{where}: {error}") from None
+        return analysed[path]
+
+    reached = module_tree(tree, parsed)
     totals = dict.fromkeys(("total", "tests", "comments", "blank", "code"), 0)
-    for path, text in files:
-        lines = text.split("\n")
+    for path in sorted(path for path in tree if path.endswith(".rs")):
+        lines = tree[path].split("\n")
         if lines[-1] == "":
             lines.pop()
         totals["total"] += len(lines)
-        if is_test_file(path):
+        if path.startswith("tests/") or reached.get(path):
             totals["tests"] += len(lines)
             continue
-        tokens, starts = lex(text)
-        try:
-            tests, mods = analyse(tokens)
-        except Refusal as error:
-            raise Refusal(f"{CRATE}/{path}:{error.line + 1}: {error}") from None
+        if path not in reached:
+            raise Refusal(f"{CRATE}/{path}: the module tree does not reach it; core-size.py will not guess"
+                          " whether it is compiled")
+        tokens, starts, tests, mods = parsed(path)
         # A line with any code token on it is code, wherever its comments sit.
         code = {line for line, kind, value in tokens if kind != "comment"}
         notes = {line for line, kind, value in tokens if kind == "comment"}
@@ -303,18 +334,20 @@ def git(root, *args):
                           encoding="utf-8", errors="replace").stdout
 
 
+def counted(path):
+    return path.endswith(".rs") or path == f"{CRATE}/Cargo.toml"
+
+
 def worktree_files(root):
     listed = git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", CRATE)
-    for path in sorted(set(filter(None, listed.split("\0")))):
-        if path.endswith(".rs") and (root / path).is_file():
-            yield path[len(CRATE) + 1:], (root / path).read_text(encoding="utf-8", errors="replace")
+    return {path[len(CRATE) + 1:]: (root / path).read_text(encoding="utf-8", errors="replace")
+            for path in set(filter(None, listed.split("\0"))) if counted(path) and (root / path).is_file()}
 
 
 def ref_files(root, ref):
     listed = git(root, "ls-tree", "-r", "-z", "--name-only", ref, "--", CRATE)
-    for path in sorted(filter(None, listed.split("\0"))):
-        if path.endswith(".rs"):
-            yield path[len(CRATE) + 1:], git(root, "show", f"{ref}:{path}")
+    return {path[len(CRATE) + 1:]: git(root, "show", f"{ref}:{path}")
+            for path in filter(None, listed.split("\0")) if counted(path)}
 
 
 def read_budget(text):
