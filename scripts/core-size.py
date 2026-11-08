@@ -372,7 +372,7 @@ def plain_path(value):
     """The path in a string literal token. Anything but a plain relative ASCII path (letters, digits,
     _ . - and /, no escape, no segment starting with a dot, so no ..) is refused, not decoded."""
     text = literal_text(value)
-    if text is None or "\\" in value or not PLAIN_PATH.fullmatch(text):
+    if text is None or not PLAIN_PATH.fullmatch(text):  # the character set leaves no room for escapes
         raise Refusal(f"path {value} is not a plain relative ASCII path: core-size.py will not guess the file")
     return text
 
