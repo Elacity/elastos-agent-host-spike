@@ -368,7 +368,7 @@ class UpstreamTest(unittest.TestCase):
         requests = []
 
         def redirect_then_outage(request, timeout=None):
-            clock.advance(min(29, timeout))  # a reply cannot arrive after its own timeout
+            clock.advance(min(29, timeout))  # One bounded blocking operation per request.
             requests.append(timeout)
             if len(requests) % 2:
                 raise urllib.error.HTTPError(url, 302, "Found", {"Location": url + "?again"}, io.BytesIO())
@@ -393,16 +393,17 @@ class UpstreamTest(unittest.TestCase):
 
         def slow_outage(request, timeout=None):
             seen.append((timeout, upstream.TOTAL_DEADLINE_SECONDS - clock.seconds))
-            clock.advance(40)  # this attempt overruns its 30 s socket timeout
+            clock.advance(min(40, upstream.TOTAL_DEADLINE_SECONDS - clock.seconds))
             raise urllib.error.HTTPError(url, 504, "Gateway Time-out", {}, io.BytesIO())
 
         with patch.object(upstream.urllib.request, "build_opener") as build, \
                 patch.object(upstream.time, "monotonic", clock), \
                 patch.object(upstream.time, "sleep", side_effect=clock.advance):
             build.return_value.open.side_effect = slow_outage
-            with self.assertRaises(urllib.error.HTTPError):
+            with self.assertRaisesRegex(ValueError, "360 s deadline"):
                 upstream.cached_input(source, self.cache)
         self.assertTrue(seen)
+        self.assertEqual(clock.seconds, 360)
         for timeout, left in seen:
             self.assertLessEqual(timeout, 30)
             self.assertLessEqual(timeout, left)
@@ -433,6 +434,40 @@ class UpstreamTest(unittest.TestCase):
         reply = upstream.http.client.HTTPResponse(Socket())
         reply.begin()
         return reply
+
+    def test_slow_http_body_obeys_whole_fetch_deadline(self):
+        data, clock = b"payload bytes", self.Clock()
+        source = {"url": "https://upstream.example.test/input", "max_bytes": 13,
+                  "checksum": "sha256:" + hashlib.sha256(data).hexdigest()}
+        timeouts = []
+
+        class Body(io.BytesIO):
+            def read1(inner, size=-1):
+                if inner.tell() == len(inner.getvalue()):
+                    return b""
+                timeouts.append(upstream.signal.getitimer(upstream.signal.ITIMER_REAL)[0])
+                clock.advance(29)  # The reviewer's 13 bytes take 377 simulated seconds.
+                return super().read(1)
+
+            def read(inner, size=-1):
+                return b"".join(iter(lambda: inner.read1(1), b""))
+
+        class Socket:
+            def makefile(inner, mode):
+                return Body(b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n" + data)
+
+        reply = upstream.http.client.HTTPResponse(Socket())
+        reply.begin()
+        with patch.object(upstream.urllib.request, "build_opener") as build, \
+                patch.object(upstream.time, "monotonic", clock):
+            build.return_value.open.return_value = reply
+            with self.assertRaisesRegex(ValueError, r"upstream.example.test/input.*377 s.*360 s deadline"):
+                upstream.cached_input(source, self.cache)
+        self.assertEqual(len(timeouts), 13)
+        for index, timeout in enumerate(timeouts):
+            self.assertLessEqual(timeout, 360 - index * 29)
+        self.assertEqual(list(self.cache.iterdir()), [])
+        self.assertTrue(reply.closed)
 
     def test_body_short_of_content_length_is_retried_and_full_wrong_body_is_not(self):
         data = b"payload bytes"

@@ -6,6 +6,7 @@ owns the package checksum; release publication supplies its Carrier CID.
 """
 
 import argparse
+from contextlib import contextmanager
 import gzip
 import hashlib
 import http.client
@@ -16,6 +17,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import signal
 import stat
 import sys
 import tarfile
@@ -151,6 +153,39 @@ OPENER_TIMEOUT_SECONDS = 30
 TOTAL_DEADLINE_SECONDS = 360
 
 
+def time_left(source, deadline, clock):
+    remaining = deadline - clock()
+    if remaining <= 0:
+        raise ValueError(f"upstream fetch of {source['url']} gave up after "
+                         f"{TOTAL_DEADLINE_SECONDS - remaining:.0f} s: "
+                         f"{TOTAL_DEADLINE_SECONDS} s deadline")
+    return remaining
+
+
+@contextmanager
+def fetch_deadline(source, deadline, clock):
+    """The build CLI runs on the POSIX main thread; interrupt even trickling I/O."""
+    def expired(*_):
+        elapsed = TOTAL_DEADLINE_SECONDS - (deadline - clock())
+        raise ValueError(f"upstream fetch of {source['url']} gave up after "
+                         f"{elapsed:.0f} s: {TOTAL_DEADLINE_SECONDS} s deadline")
+
+    started = time.monotonic()
+    remaining = time_left(source, deadline, clock)
+    previous_handler = signal.signal(signal.SIGALRM, expired)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, remaining)
+    try:
+        yield
+        time_left(source, deadline, clock)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        delay, interval = previous_timer
+        if delay:
+            signal.setitimer(signal.ITIMER_REAL,
+                             max(0.000001, delay - (time.monotonic() - started)), interval)
+
+
 def response(source, deadline=None, clock=None):
     """Only HTTPS redirects to recipe-owned hosts; each response has a bound.
 
@@ -193,10 +228,18 @@ def response(source, deadline=None, clock=None):
     raise ValueError("too many upstream redirects")
 
 
-def copy_into(stream, output, algorithm, maximum):
+def copy_into(stream, output, algorithm, maximum, source=None, deadline=None, clock=None):
     value, size = hashlib.new(algorithm), 0
     with stream:
-        while chunk := stream.read(CHUNK):
+        while True:
+            if deadline is not None:
+                signal.setitimer(signal.ITIMER_REAL, time_left(source, deadline, clock))
+            read = stream.read1 if isinstance(stream, http.client.HTTPResponse) else stream.read
+            chunk = read(CHUNK)
+            if deadline is not None:
+                time_left(source, deadline, clock)
+            if not chunk:
+                break
             size += len(chunk)
             if size > maximum:
                 raise ValueError("upstream input exceeds its recorded size bound")
@@ -216,7 +259,8 @@ def copy_into(stream, output, algorithm, maximum):
 # short to ride out a burst. A total deadline of 360 s bounds the whole fetch:
 # an opener or body timeout covers one blocking operation, and a redirect chain
 # can open several requests per attempt, so elapsed time is checked before every
-# attempt and every retry sleep and each request gets the time left as its timeout.
+# attempt, retry sleep and body read. A timer interrupts blocking work at the
+# deadline, including headers and trickling bodies that outlast a socket timeout.
 RETRY_DELAYS = (5, 10, 20, 40, 60)
 
 
@@ -229,14 +273,21 @@ def fetch(source, output, algorithm, delays=RETRY_DELAYS, clock=None):
         return copy_into(regular(source["path"]).open("rb"), output, algorithm, source["max_bytes"])
     clock = time.monotonic if clock is None else clock
     started = clock()
+    with fetch_deadline(source, started + TOTAL_DEADLINE_SECONDS, clock):
+        return fetch_attempts(source, output, algorithm, delays, clock, started)
+
+
+def fetch_attempts(source, output, algorithm, delays, clock, started):
     for attempt in range(len(delays) + 1):
         elapsed = clock() - started
         if elapsed >= TOTAL_DEADLINE_SECONDS:
             raise ValueError(f"upstream fetch of {source['url']} gave up after {elapsed:.0f} s")
         try:
             return copy_into(response(source, started + TOTAL_DEADLINE_SECONDS, clock),
-                             output, algorithm, source["max_bytes"])
+                             output, algorithm, source["max_bytes"], source,
+                             started + TOTAL_DEADLINE_SECONDS, clock)
         except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
+            time_left(source, started + TOTAL_DEADLINE_SECONDS, clock)
             if not transient(error) or attempt == len(delays):
                 raise
             if isinstance(error, urllib.error.HTTPError):
