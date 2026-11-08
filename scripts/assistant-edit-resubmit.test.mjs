@@ -377,7 +377,7 @@ test("Edit/resubmit and New chat reset a reader who left the end", async t => {
   await app.send("Write a long answer", "Last paragraph of the reply.");
   await presented(app.frame);
   await settled(app.frame);
-  await app.frame.locator("#agent-harness-stream").evaluate(el => el.scrollBy(0, -400));
+  await app.frame.locator("#agent-harness-stream").evaluate(el => { el.dispatchEvent(new WheelEvent("wheel", { deltaY: -400 })); el.scrollBy(0, -400); });
   await settled(app.frame);
   assert.ok((await scrollState(app.frame)).fromBottom > 300);
   const form = await app.startEdit(0);
@@ -385,7 +385,7 @@ test("Edit/resubmit and New chat reset a reader who left the end", async t => {
   await presented(app.frame);
   await settled(app.frame);
   assert.ok((await scrollState(app.frame)).fromBottom <= 8, "the revised reply follows to the end");
-  await app.frame.locator("#agent-harness-stream").evaluate(el => el.scrollBy(0, -400));
+  await app.frame.locator("#agent-harness-stream").evaluate(el => { el.dispatchEvent(new WheelEvent("wheel", { deltaY: -400 })); el.scrollBy(0, -400); });
   await settled(app.frame);
   await app.frame.locator("#agent-harness-new-chat").click();
   await app.frame.locator(".agent-harness-empty").waitFor({ state: "visible" });

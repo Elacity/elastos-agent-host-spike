@@ -47,19 +47,18 @@ let streamFollowCleanup = null;
 /* A reader within this distance of the end is at the end. */
 export const READER_AT_END_PX = 8;
 let transcriptFollow = null;
-const ownTranscriptScrolls = new WeakMap();
-
-/* Instant writes coalesce to one scroll event. Consume its actual position;
-   a reader movement before delivery takes ownership of that event instead. */
 export function pinTranscriptToEnd(scroller) {
   if (!scroller) return 0;
-  const before = scroller.scrollTop;
   scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
-  if (scroller.scrollTop !== before) ownTranscriptScrolls.set(scroller, scroller.scrollTop);
   return scroller.scrollTop;
 }
 
 export function followTranscriptToEnd(scroller) {
+  if (transcriptFollow?.atEnd) return pinTranscriptToEnd(scroller);
+  return scroller?.scrollTop || 0;
+}
+
+export function jumpTranscriptToEnd(scroller) {
   transcriptFollow?.reset();
   return pinTranscriptToEnd(scroller);
 }
@@ -67,75 +66,67 @@ export function followTranscriptToEnd(scroller) {
 function observeTranscript(scroller, content) {
   if (!scroller || !content || transcriptFollow) return;
   let atEnd = true;
-  let frame = 0;
-  let clientHeight = scroller.clientHeight;
-  let hadScrollRange = scroller.scrollHeight > clientHeight;
-  let lastTop = scroller.scrollTop;
-  // The native anchor owns layout clamps even when shrink and growth coalesce
-  // before a scroll event. It is eligible only while the reader is at the end.
-  const anchor = document.createElement("div");
-  anchor.id = "agent-transcript-end";
-  anchor.ariaHidden = "true";
-  scroller.append(anchor);
+  let towardEnd = false;
+  let dragging = false;
+  let touchY = 0;
   const showFollow = () => {
-    anchor.style.overflowAnchor = atEnd ? "auto" : "none";
     scroller.classList.toggle("is-follow-bottom", atEnd && scroller.classList.contains("is-live-streaming"));
     updateJumpToLatestVisibility();
   };
-  const readAtEnd = () => {
-    // Native anchoring has applied layout when geometry is read. Reader input
-    // in a rAF can precede its scroll event; check the end contract here too.
-    const client = scroller.clientHeight;
-    // A shorter viewport leaves its exact lost height below the native anchor.
-    const resizeGap = Math.max(0, clientHeight - client);
-    const end = scroller.scrollHeight - client;
-    // Native anchoring starts after the first scrollable layout.
-    const top = scroller.scrollTop;
-    // Resizing the scrollport suppresses native anchoring for that layout.
-    // An unchanged position still belongs to layout, including content growth.
-    const resizeWithoutMovement = client !== clientHeight && top === lastTop;
-    const atLayoutEnd = !hadScrollRange || end - top <= (atEnd ? resizeGap : 0) + READER_AT_END_PX
-      || (atEnd && resizeWithoutMovement);
-    hadScrollRange = end > 0;
-    clientHeight = client;
-    lastTop = top;
-    return atLayoutEnd;
-  };
-  const pinFollowing = () => {
-    const atLayoutEnd = readAtEnd();
-    atEnd = atEnd && atLayoutEnd;
-    if (atEnd) lastTop = pinTranscriptToEnd(scroller);
+  const nearEnd = () => scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= READER_AT_END_PX;
+  // Reader input owns follow state. Layout only pins an existing follower.
+  const readerInput = (toward) => {
+    towardEnd = toward;
+    atEnd = toward && (atEnd || nearEnd());
     showFollow();
   };
-  const layout = () => {
-    if (frame) return;
-    frame = requestAnimationFrame(() => {
-      frame = 0;
-      pinFollowing();
-    });
+  const pinFollowing = () => {
+    if (atEnd) pinTranscriptToEnd(scroller);
+    showFollow();
   };
   transcriptFollow = {
     get atEnd() { return atEnd; },
-    layout,
-    reset() { atEnd = true; showFollow(); layout(); },
+    reset() { atEnd = true; towardEnd = false; pinFollowing(); },
   };
-  scroller.addEventListener("scroll", () => {
-    const ownTop = ownTranscriptScrolls.get(scroller);
-    ownTranscriptScrolls.delete(scroller);
-    if (ownTop === scroller.scrollTop) { lastTop = scroller.scrollTop; return; }
-    atEnd = readAtEnd();
-    // A coalesced layout scroll must land before its resize record is consumed.
-    // Ordinary reader steps inside the end band keep their native animation.
-    if (atEnd && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop > READER_AT_END_PX) {
-      lastTop = pinTranscriptToEnd(scroller);
+  scroller.addEventListener("wheel", event => {
+    if (event.deltaY && !event.ctrlKey) readerInput(event.deltaY > 0);
+  }, { passive: true });
+  scroller.addEventListener("touchstart", event => { touchY = event.touches[0].clientY; }, { passive: true });
+  scroller.addEventListener("touchmove", event => {
+    const y = event.touches[0].clientY;
+    if (y !== touchY) readerInput(y < touchY);
+    touchY = y;
+  }, { passive: true });
+  scroller.addEventListener("pointerdown", event => {
+    const box = scroller.getBoundingClientRect();
+    if (event.target === scroller && (event.clientX >= box.right - 16 || event.clientX <= box.left + 16)) {
+      dragging = true;
+      readerInput(false);
     }
+  });
+  document.addEventListener("pointerup", () => {
+    if (!dragging) return;
+    dragging = false;
+    readerInput(true);
+  });
+  document.addEventListener("keydown", event => {
+    if (event.defaultPrevented || event.target.closest?.("input, textarea, select, [contenteditable], button")) return;
+    if (!scroller.contains(event.target) && event.target !== document.body) return;
+    if (["PageUp", "Home", "ArrowUp"].includes(event.key) || (event.key === " " && event.shiftKey)) readerInput(false);
+    if (["PageDown", "End", "ArrowDown"].includes(event.key) || (event.key === " " && !event.shiftKey)) readerInput(true);
+  });
+  document.addEventListener("keydown", event => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") readerInput(false);
+  });
+  scroller.addEventListener("scroll", () => {
+    if (towardEnd && !dragging && nearEnd()) atEnd = true;
     showFollow();
   }, { passive: true });
+  scroller.addEventListener("scrollend", () => { towardEnd = false; });
   const resize = new ResizeObserver(pinFollowing);
   resize.observe(scroller);
   resize.observe(content);
-  new MutationObserver(layout).observe(content, { childList: true, subtree: true, characterData: true, attributes: true });
-  layout();
+  pinFollowing();
 }
 
 /** Canonical live-turn buffers. The DOM is never the source of truth. */
@@ -1114,7 +1105,7 @@ function clearVisibleTranscript() {
      survive column.replaceChildren() and make New chat look like a no-op. */
   if (scroll && scroll !== column) {
     for (const node of [...scroll.children]) {
-      if (node === column || node.id === "agent-harness-stream-column" || node.id === "agent-transcript-end") {
+      if (node === column || node.id === "agent-harness-stream-column") {
         continue;
       }
       node.remove();
@@ -1517,7 +1508,7 @@ export function appendMessage(
   row.dataset.role = role;
   if (role === "agent") {
     for (const prior of stream.querySelectorAll(".agent-msg-agent.is-newest-reply")) {
-      prior.classList.remove("is-newest-reply");
+      if (transcriptFollow?.atEnd) prior.classList.remove("is-newest-reply");
     }
     row.classList.add("is-newest-reply");
   }
@@ -2299,7 +2290,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     return Boolean(node && (answerRow?.contains(node) || progressEl?.contains(node)));
   };
 
-  const followAfterFlush = () => transcriptFollow?.layout();
+  const followAfterFlush = () => followTranscriptToEnd(host.streamScrollEl?.());
   const scroller = host.streamScrollEl?.();
   const onVisibility = () => {
     if (!streamTabHidden() && hiddenBuffered && generation === ctx.streamGeneration) {

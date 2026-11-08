@@ -75,9 +75,8 @@ import {
   regenerateLastAgentTurn,
   updateJumpToLatestVisibility,
   ensureJumpToLatest,
-  pinTranscriptToEnd,
   followTranscriptToEnd,
-  READER_AT_END_PX,
+  jumpTranscriptToEnd,
   setStreamStatus,
   openCodeArtifact,
   refreshEmptyModelHint,
@@ -450,12 +449,6 @@ function syncComposerGeometry({ clearanceOnly = false } = {}) {
   if (columnKey === lastComposerColumnKey && clearance === lastComposerClearance) {
     return;
   }
-  /* Measured before the writes: a reader at the end stays at the end, so the
-     newest message and the turn's status line stay above the composer as it
-     grows. */
-  const scroller = streamScrollEl();
-  const atEnd = Boolean(scroller) &&
-    scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= READER_AT_END_PX;
   composerGeometrySyncing = true;
   const root = document.documentElement;
   if (clearance !== lastComposerClearance) {
@@ -467,9 +460,7 @@ function syncComposerGeometry({ clearanceOnly = false } = {}) {
     root.style.setProperty("--agent-column-left", `${left}px`);
     lastComposerColumnKey = columnKey;
   }
-  if (atEnd) {
-    pinTranscriptToEnd(scroller);
-  }
+  scrollStreamToEnd();
   requestAnimationFrame(() => {
     composerGeometrySyncing = false;
   });
@@ -575,7 +566,7 @@ function clearEmptyState() {
   document.querySelector(".agent-harness-empty")?.remove();
 }
 
-/** Jump and transcript changes reset the shared follow rule. */
+/** Appends preserve the reader's follow choice. */
 function scrollStreamToEnd() {
   followTranscriptToEnd(streamScrollEl());
 }
@@ -1596,7 +1587,7 @@ export function bindAgentHarness() {
     }
     if (event.target.closest?.("[data-agent-jump-latest]")) {
       event.preventDefault();
-      scrollStreamToEnd();
+      jumpTranscriptToEnd(streamScrollEl());
       updateJumpToLatestVisibility();
       return;
     }

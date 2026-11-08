@@ -428,6 +428,25 @@ try {
     await page.waitForTimeout(1500);
     await atEnd();
   };
+  stage = "reader leaves during the status line";
+  await input.fill("Read earlier messages before the first chunk");
+  await input.press("Enter");
+  await room.locator(".agent-progress:not([hidden])").last().waitFor();
+  const point = await gutter();
+  await page.mouse.move(point.x, point.y);
+  await page.mouse.wheel(0, -400);
+  await page.waitForTimeout(400);
+  const held = await scrollState();
+  assert.ok(held.fromEnd > 300, "the reader leaves during the status line");
+  const first = fixture.runs.get(`run-sent-${fixture.runs.size}`);
+  first.push({ sequence: 1, kind: "reasoning_delta", data: { text: "Checking the garden plan" } });
+  first.push({ sequence: 2, kind: "text_delta", data: { text: "The first chunk keeps the reader's place." } });
+  first.push({ sequence: 3, kind: "completed", data: {} });
+  await room.locator('.agent-msg-agent[data-stream-phase="presentation_done"]').filter({ hasText: "The first chunk keeps" }).waitFor();
+  await settled();
+  seen.firstChunk = { before: held, after: await scrollState() };
+  assert.equal(seen.firstChunk.after.top, held.top, JSON.stringify(seen.firstChunk));
+
   const readerMovesUp = async (label, move, prepare = async () => {}, { sampleAfter = false } = {}) => {
     stage = `a reader who moves up with ${label} while a reply streams`;
     const runId = `run-sent-${fixture.runs.size + 1}`;
@@ -531,6 +550,7 @@ try {
   const scrollFindMatchIntoView = () => frame.evaluate(() => {
     const scroller = document.querySelector("#agent-harness-stream");
     const before = scroller.scrollTop;
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "f", metaKey: true, bubbles: true }));
     document.querySelector("#agent-composer-input").focus({ preventScroll: true });
     const found = window.find("Choose the site", false, false, true);
     const sel = document.getSelection();
@@ -625,7 +645,10 @@ try {
       // reversal then scrolls the reader away from the end.
       await frame.evaluate(() => {
         const scroller = document.querySelector("#agent-harness-stream");
+        scroller.dispatchEvent(Object.assign(new Event("touchstart"), { touches: [{ clientY: 500 }] }));
+        scroller.dispatchEvent(Object.assign(new Event("touchmove"), { touches: [{ clientY: 200 }] }));
         scroller.scrollBy(0, 900);
+        scroller.dispatchEvent(Object.assign(new Event("touchmove"), { touches: [{ clientY: 400 }] }));
         scroller.scrollBy(0, -680);
       });
       afterTouch = await scrollState();
@@ -684,7 +707,7 @@ try {
     const s = document.querySelector("#agent-harness-stream");
     const c = document.querySelector("#agent-harness-stream-column");
     window.__geometryStyles = [s.style.cssText, c.style.cssText];
-    Object.assign(s.style, { height: "400px", maxHeight: "400px", flex: "none", padding: "0px" });
+    Object.assign(s.style, { height: "400px", maxHeight: "400px", flex: "none", padding: "0px", overflowAnchor: "none" });
     Object.assign(c.style, { height: "2600px", minHeight: "0px", overflow: "hidden" });
   });
   const restoreGeometry = () => frame.evaluate(() => {
@@ -711,6 +734,7 @@ try {
       const s = document.querySelector("#agent-harness-stream");
       const c = document.querySelector("#agent-harness-stream-column");
       let clamped = null;
+      if (kind.includes("reader") || kind === "small-steps") s.dispatchEvent(new WheelEvent("wheel", { deltaY: -16, bubbles: true }));
       if (kind === "small-steps") {
         const steps = [];
         for (let i = 0; i < 3; i += 1) {
@@ -815,7 +839,7 @@ try {
 
   stage = "Jump to latest before the finished paint";
   const jumpComplete = await startReply("End of the Jump regression reply.");
-  await frame.evaluate(() => document.querySelector("#agent-harness-stream").scrollBy(0, -600));
+  await frame.evaluate(() => { const s = document.querySelector("#agent-harness-stream"); s.dispatchEvent(new WheelEvent("wheel", { deltaY: -500 })); s.scrollBy(0, -600); });
   await settled();
   await holdPaint();
   jumpComplete();
@@ -835,13 +859,13 @@ try {
   await finishPaint();
   await frame.waitForFunction(() => typeof window.__cleanupReply === "function");
   await settled();
-  await frame.evaluate(() => document.querySelector("#agent-harness-stream").scrollBy(0, -500));
+  await frame.evaluate(() => { const s = document.querySelector("#agent-harness-stream"); s.dispatchEvent(new WheelEvent("wheel", { deltaY: -500 })); s.scrollBy(0, -500); });
   await settled();
   assert.equal((await scrollState()).jump, true);
-  await frame.evaluate(() => { const s = document.querySelector("#agent-harness-stream"); s.scrollTop = s.scrollHeight; });
+  await frame.evaluate(() => { const s = document.querySelector("#agent-harness-stream"); s.dispatchEvent(new WheelEvent("wheel", { deltaY: s.scrollHeight })); s.scrollTop = s.scrollHeight; });
   await settled();
   await runCompletionFrame();
-  await frame.evaluate(() => document.querySelector("#agent-harness-stream").scrollBy(0, -500));
+  await frame.evaluate(() => { const s = document.querySelector("#agent-harness-stream"); s.dispatchEvent(new WheelEvent("wheel", { deltaY: -500 })); s.scrollBy(0, -500); });
   await settled();
   assert.equal((await scrollState()).jump, true, "returning then leaving the end still shows Jump");
   seen.resume = await scrollState();
