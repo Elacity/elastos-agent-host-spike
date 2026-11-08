@@ -210,8 +210,8 @@ require_supported_rust() {
     fi
     major="${BASH_REMATCH[1]}"
     minor="${BASH_REMATCH[2]}"
-    if (( major < 1 || (major == 1 && minor < 91) )); then
-        echo "Rust 1.91 or newer is required; found ${version}." >&2
+    if (( major < 1 || (major == 1 && minor < 95) )); then
+        echo "Rust 1.95 or newer is required; found ${version}." >&2
         exit 1
     fi
 }

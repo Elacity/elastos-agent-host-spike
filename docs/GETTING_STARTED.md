@@ -60,7 +60,7 @@ control, WASM or microVM `run`, and non-interactive capsule work. Data
 
 Prerequisites:
 
-- Rust 1.91 or newer
+- Rust 1.95 or newer
 - Git
 - `just`, installed with `cargo install just`
 - Linux with KVM only when working on crosvm or microVM paths

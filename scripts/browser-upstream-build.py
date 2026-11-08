@@ -385,7 +385,7 @@ def build_browser_native(recipe, payload, cache, upstream):
             # retain its sources/licences, then compile with network disabled.
             # The pinned tree owns vendor/generic path crates. Keep Cargo's
             # replaceable registry output separate from those source members.
-            vendor = subprocess.run(['cargo', '+1.91.0', 'vendor', '--locked', '--versioned-dirs', 'registry-vendor'],
+            vendor = subprocess.run(['cargo', '+1.95.0', 'vendor', '--locked', '--versioned-dirs', 'registry-vendor'],
                                     cwd=source, env=env, check=True, capture_output=True, text=True)
             config = source / '.cargo/config.toml'
             config.parent.mkdir(exist_ok=True)
@@ -398,7 +398,7 @@ def build_browser_native(recipe, payload, cache, upstream):
                        + str(work) + '=/usr/src/elastos-browser -L native=' + str(libcap / 'libcap'))
             env['CC_aarch64_unknown_linux_musl'] = env['CC']
             env['CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER'] = env['CC']
-            subprocess.run(['cargo', '+1.91.0', 'build', '--locked', '--offline', '--release',
+            subprocess.run(['cargo', '+1.95.0', 'build', '--locked', '--offline', '--release',
                             '--target', target, '--no-default-features', '--features', 'net',
                             '--bin', 'crosvm', '-j', jobs], cwd=source, env=env, check=True)
             binaries['crosvm'] = source / 'target' / target / 'release/crosvm'

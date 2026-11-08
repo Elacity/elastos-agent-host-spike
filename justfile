@@ -97,7 +97,7 @@ test-ci-local-prepush:
 # It copies the working tree and installs Node for integration tests.
 ci-test-elastos:
     tar --no-xattrs --no-mac-metadata --no-fflags --exclude='.git' --exclude='target' --exclude='target-capsules' --exclude='target-build' --exclude='*/target' --exclude='capsules/*/target' -cf - . | \
-      docker run --rm -i -e RUSTFLAGS="-D warnings" -e CARGO_TERM_COLOR=always rust:1.91-bookworm bash -c '\
+      docker run --rm -i -e RUSTFLAGS="-D warnings" -e CARGO_TERM_COLOR=always rust:1.95-bookworm bash -c '\
         mkdir /w && tar -xf - -C /w && cd /w && cargo --version >/dev/null && \
         apt-get update -qq >/dev/null && apt-get install -y -qq nodejs >/dev/null && node --version && \
         useradd -m ci && chown -R ci:ci /w && \
@@ -114,7 +114,7 @@ ci-test-elastos:
 # Cold Debian container check for test-capsules when Docker is available.
 ci-test-capsules:
     tar --no-xattrs --no-mac-metadata --no-fflags --exclude='.git' --exclude='target' --exclude='target-capsules' --exclude='target-build' --exclude='*/target' --exclude='capsules/*/target' -cf - . | \
-      docker run --rm -i -e RUSTFLAGS="-D warnings" -e CARGO_TERM_COLOR=always rust:1.91-bookworm bash -c '\
+      docker run --rm -i -e RUSTFLAGS="-D warnings" -e CARGO_TERM_COLOR=always rust:1.95-bookworm bash -c '\
         mkdir /w && tar -xf - -C /w && cd /w && cargo --version >/dev/null && \
         useradd -m ci && chown -R ci:ci /w && \
         su -s /bin/bash ci -c "export PATH=/usr/local/cargo/bin:\$PATH RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/home/ci/.cargo RUSTFLAGS=\"-D warnings\" && cd /w && \
@@ -129,7 +129,7 @@ ci-test-capsules:
 # native ARM64 or emulated x86-64; GitHub runs Ubuntu 24.04 for acceptance.
 ci-source-home-linux arch='arm64':
     tar --no-xattrs --no-mac-metadata --no-fflags --exclude='.git' --exclude='target' --exclude='target-capsules' --exclude='target-build' --exclude='*/target' --exclude='capsules/*/target' -cf - . | \
-      docker run --rm -i --platform linux/{{arch}} -e CARGO_TERM_COLOR=never rust:1.91-bookworm bash -c '\
+      docker run --rm -i --platform linux/{{arch}} -e CARGO_TERM_COLOR=never rust:1.95-bookworm bash -c '\
         mkdir /w && tar -xf - -C /w && cd /w && \
         apt-get update -qq >/dev/null && apt-get install -y -qq coturn e2fsprogs ffmpeg nodejs git jq musl-tools nasm pkg-config >/dev/null && \
         rustup target add wasm32-unknown-unknown "$(uname -m)-unknown-linux-musl" >/dev/null 2>&1 && \

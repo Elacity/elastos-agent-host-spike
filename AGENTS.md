@@ -481,7 +481,7 @@ already installs `just` (`cargo install just`) and the `wasm32-unknown-unknown`
 Rust target; do not re-document dependency installation here.
 
 - Toolchain: Rust is pinned by [rust-toolchain.toml](rust-toolchain.toml)
-  (1.91.0 with `rustfmt`/`clippy`) and `rustup` auto-syncs it on first cargo
+  (1.95.0 with `rustfmt`/`clippy`) and `rustup` auto-syncs it on first cargo
   use. `wasm32-unknown-unknown` is the capsule Component target; the release
   scripts also add it on demand via `ensure_rust_target_installed`.
 - Core gate has no JS/Python package deps: the `.mjs` checks in `just verify`

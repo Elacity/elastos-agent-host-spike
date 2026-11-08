@@ -387,7 +387,7 @@ class BrowserUpstreamBuildTest(unittest.TestCase):
             calls = []
             def run(args, **kwargs):
                 calls.append(args)
-                if args[:3] == ['cargo', '+1.91.0', 'vendor']:
+                if args[:3] == ['cargo', '+1.95.0', 'vendor']:
                     directory = kwargs['cwd'] / args[-1]
                     if directory.exists():
                         import shutil
@@ -395,7 +395,7 @@ class BrowserUpstreamBuildTest(unittest.TestCase):
                     directory.mkdir()
                     (directory / 'registry-crate.txt').write_bytes(b'locked registry fixture')
                     return subprocess.CompletedProcess(args, 0, '[source.vendored-sources]\ndirectory="registry-vendor"\n', '')
-                if args[:3] == ['cargo', '+1.91.0', 'build']:
+                if args[:3] == ['cargo', '+1.95.0', 'build']:
                     src, env = kwargs['cwd'], kwargs['env']
                     self.assertEqual((src / 'vendor/generic/crypto/Cargo.toml').read_bytes(), b'workspace path crate')
                     self.assertNotIn('MINIJAIL_DEFAULT_RET_LOG', env)

@@ -19,7 +19,7 @@
 # ~30 unrelated binaries and 33 app capsules for the full-home topology.
 # Direct `cargo build` of just the 4 workspaces this role needs instead.
 # Base images are pinned to their multi-arch index digests (amd64 CI, arm64 dev).
-FROM rust:1.91-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33 AS builder
+FROM rust:1.95-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1 AS builder
 
 ARG APP_UID=10001
 ARG APP_GID=10001

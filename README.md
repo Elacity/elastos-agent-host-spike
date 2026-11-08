@@ -78,7 +78,7 @@ staging and Browser VM work.
 
 ## Build from source
 
-The workspace requires Rust 1.91 or newer.
+The workspace requires Rust 1.95 or newer.
 
 ```bash
 cargo install just
