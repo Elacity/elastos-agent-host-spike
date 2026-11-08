@@ -22,8 +22,6 @@ ROOT = Path(__file__).resolve().parent.parent
 CRATE, BUDGET = "elastos/crates/elastos-runtime", "elastos/CORE-BUDGET"
 SLACK = 50  # the budget may sit at most this far above the code; further, the check fails
 OPEN, CLOSE = ("{", "(", "["), ("}", ")", "]")
-ITEM_WORDS = {"fn", "mod", "impl", "struct", "enum", "trait", "union", "const", "static", "type",
-              "use", "extern", "async", "unsafe", "macro_rules", "let", "default"}
 CHAR = re.compile(r"'(\\(u\{[0-9a-fA-F]*\}|x..|.)|[^\\\n])'")
 LIFETIME, WORD, RAW = re.compile(r"'\w*"), re.compile(r"\w+"), re.compile(r'#*"')
 STRING, BLOCK = re.compile(r'"(?:\\.|[^"\\])*"?', re.S), re.compile(r"/\*|\*/")
@@ -192,46 +190,59 @@ def item_extent(vals, i, end):
     raise Refusal(f"{kind} without a body or ;")
 
 
-def cfg_test_spans(tokens):
-    """Yield (first_line, last_line) for each item behind #[cfg(test)] or #[cfg(all(test, ...))]."""
-    vals = [t[2] for t in tokens] + [""] * 4
-    for k, value in enumerate(vals[:len(tokens)]):
-        inner = vals[k + 1] == "!"
-        head = k + 1 + inner
-        if value != "#" or vals[head] != "[":
-            continue
-        end = closer(vals, head)
+def parse_items(vals, lines, i, end, test, found):
+    """Walk the items in vals[i:end]: a module, impl, trait or extern body. Test items go to
+    found['spans'] as line ranges, every attribute read to found['attrs'], and outline module
+    declarations to found['mods']."""
+    while vals[i] == "#" and vals[i + 1] == "!":  # inner attributes cover the rest of the body
+        close = closer(vals, i + 2)
+        found["attrs"].add(i)
+        if not test and attr_is_test(vals, i + 2, close):
+            found["spans"].append((lines[i], lines[end - 1]))
+            test = True
+        i = close + 1
+    while i < end:
+        start, item_test = i, test
         try:
-            test = attr_is_test(vals, head, end)
+            while vals[i] == "#":
+                close = closer(vals, i + 1)
+                found["attrs"].add(i)
+                item_test = item_test or attr_is_test(vals, i + 1, close)
+                i = close + 1
+            last, kind, name, body = item_extent(vals, i, end)
+            if last >= end:
+                raise Refusal(f"{kind} item does not end inside its block")
         except Refusal as error:
-            raise Refusal(str(error), tokens[k][0]) from None
-        if test:
-            yield tokens[k][0], item_end(tokens, vals, end + 1, inner)
+            error.line = lines[min(start, len(lines) - 1)] if error.line is None else error.line
+            raise
+        if item_test and not test:
+            found["spans"].append((lines[start], lines[last]))
+        if kind == "mod" and body is None:
+            found["mods"].append((name, vals[start:i], lines[i], item_test))
+        if body and kind in ("mod", "impl", "trait", "extern"):
+            parse_items(vals, lines, body[0] + 1, body[1], item_test, found)
+        i = last + 1
 
 
-def item_end(tokens, vals, j, inner):
-    """Line of the last token of the item that starts at tokens[j]."""
-    p = j  # Step over further attributes, comments and pub(...) to the item's first word.
-    while p < len(tokens) and (tokens[p][1] == "comment" or vals[p] in ("#", "!", "pub")):
-        p += 1
-        if p < len(tokens) and vals[p] in ("[", "("):
-            p = closer(vals, p) + 1
-    # Fields, variants, match arms and statements also end at a comma outside <...>.
-    field = not inner and not (p < len(vals) and vals[p] in ITEM_WORDS)
-    depth, angle, arrow, last = 0, 0, False, tokens[j - 1][0]
-    for line, kind, value in tokens[j:]:
-        if kind == "comment":
-            continue
-        if value in CLOSE and depth == 0:  # the enclosing block closes: the item ended before
-            return last
-        last = line
-        depth += (value in OPEN) - (value in CLOSE)
-        if field and value in ("<", ">") and not arrow:
-            angle += 1 if value == "<" else -1
-        arrow = value in ("-", "=")
-        if depth == 0 and not inner and (value in (";", "}") or (field and value == "," and angle <= 0)):
-            return line
-    return last
+def analyse(tokens):
+    """(test lines, outline module declarations) of one file's tokens. A test cfg outside item
+    position (on a field, variant, match arm, statement or expression) is refused."""
+    code = [t for t in tokens if t[1] != "comment"]
+    vals, lines = [t[2] for t in code] + [""] * 4, [t[0] for t in code]
+    found = {"spans": [], "attrs": set(), "mods": []}
+    parse_items(vals, lines, 0, len(code), False, found)
+    tests = {n for a, b in found["spans"] for n in range(a, b + 1)}
+    for k in range(len(code)):
+        open_ = k + 1 + (vals[k + 1] == "!")
+        if vals[k] == "#" and k not in found["attrs"] and lines[k] not in tests and vals[open_] == "[":
+            try:
+                refuse = attr_is_test(vals, open_, closer(vals, open_))
+            except Refusal as error:
+                raise Refusal(str(error), lines[k]) from None
+            if refuse:
+                raise Refusal("test cfg on a field, variant, match arm, statement or expression:"
+                              " core-size.py will not guess where it ends", lines[k])
+    return tests, found["mods"]
 
 
 def count(files):
@@ -247,7 +258,7 @@ def count(files):
             continue
         tokens, starts = lex(text)
         try:
-            tests = {n for a, b in cfg_test_spans(tokens) for n in range(a, b + 1)}
+            tests, mods = analyse(tokens)
         except Refusal as error:
             raise Refusal(f"{CRATE}/{path}:{error.line + 1}: {error}") from None
         # A line with any code token on it is code, wherever its comments sit.

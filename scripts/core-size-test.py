@@ -82,7 +82,7 @@ class CountTest(unittest.TestCase):
                          {"total": 6, "tests": 0, "comments": 5, "blank": 0, "code": 1})
 
     def test_code_line_with_trailing_comment_is_code(self):
-        source = "// leading comment\nlet x = 1; // trailing comment\nlet y = 2; /* trailing */\n"
+        source = "// leading comment\nconst X: u8 = 1; // trailing comment\nconst Y: u8 = 2; /* trailing */\n"
         self.assertEqual(counts(source),
                          {"total": 3, "tests": 0, "comments": 1, "blank": 0, "code": 2})
 
@@ -90,7 +90,7 @@ class CountTest(unittest.TestCase):
         self.assertEqual(counts("/* comment */ fn production() {}\n")["code"], 1)
         self.assertEqual(counts("/*\n*/ fn production() {}\n"),
                          {"total": 2, "tests": 0, "comments": 1, "blank": 0, "code": 1})
-        self.assertEqual(counts("let x = f(\n    0\n);\n")["code"], 3)
+        self.assertEqual(counts("static X: u8 = f(\n    0\n);\n")["code"], 3)
 
     def test_test_files(self):
         for path in ("tests/integration.rs", "src/tests.rs", "src/io_test.rs"):
