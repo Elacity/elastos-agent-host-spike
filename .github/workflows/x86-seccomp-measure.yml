@@ -26,18 +26,6 @@ jobs:
       - name: build the confine tests
         working-directory: capsules/wallet-provider
         run: cargo test --test confine --no-run
-      - name: trace the failing did journey
+      - name: run the whole confine suite on x86-64
         working-directory: capsules/wallet-provider
-        run: |
-          mkdir -p "$RUNNER_TEMP/tr"
-          strace -ff -s 160 -o "$RUNNER_TEMP/tr/t" \
-            cargo test --test confine linux_did_journey_runs_under_the_seccomp_allow_list -- --exact --test-threads=1 || true
-          cd "$RUNNER_TEMP/tr"
-          for f in $(grep -l "Cannot allocate TLS" t.* | head -3); do
-            echo "=== $f (the provider that died)"
-            cat "$f"
-            echo "=== refused calls in $f"
-            grep -E "= -1 E(PERM|ACCES|NOSYS)" "$f" || echo none
-          done
-          echo "=== the provider binary"
-          file "$(grep -ho 'execve("[^"]*did-provider[^"]*"' t.* | head -1 | cut -d'"' -f2)" || true
+        run: cargo test --test confine --no-fail-fast -- --test-threads=2
