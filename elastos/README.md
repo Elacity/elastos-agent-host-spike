@@ -82,8 +82,10 @@ wherever its comments or test items sit. Where the counter cannot tell, it
 refuses and exits 2 naming the file and line: a test cfg on a match arm,
 statement, call argument or tuple field (test struct fields and enum variants
 are counted), a file the module tree does not reach, a module declared in a
-function body or macro, an `include!` of a computed path, or a cfg_attr that
-sets cfg or path. To grow the core, raise `CORE-BUDGET` in the same
+function body or macro, an `include!` of a computed path, an `include!` or
+`#[path]` that is not a plain relative ASCII path (no escapes, no `..`), a raw
+identifier such as `r#include`, a Cargo.toml target not written as a plain
+`[lib]` or `[[bin]]` table, or a cfg_attr that sets cfg or path. To grow the core, raise `CORE-BUDGET` in the same
 pull request, so reviewers see the growth. The budget ratchets down: when the
 core falls more than 50 lines below it, the check fails until the same pull
 request lowers the budget to the new count, so freed room cannot be spent
