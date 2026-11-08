@@ -1058,6 +1058,7 @@ def classify_lines(lines):
     through its closer, and owns that whole line. Only neutral lines can open
     a fence or become a heading; comment markers in a fence are literal text.
     Inline comments must close on their own line or classification is refused.
+    A comment that closes and reopens on one line is refused as ambiguous.
     """
     records = []
     fence = None
@@ -1069,6 +1070,8 @@ def classify_lines(lines):
             fence = fence if width > 3 else _fence_after(line, fence)
             records.append((FENCE, None, ""))
             continue
+        if (comment or width <= 3) and re.search(r"-->.*<!--", line):
+            raise ValueError("refuse: comment closes and reopens on line %d" % number)
         if comment:
             comment = "-->" not in line
             records.append((COMMENT, None, ""))

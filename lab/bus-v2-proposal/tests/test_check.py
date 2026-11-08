@@ -3905,7 +3905,7 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(check.proposal_refusals(falsifier), [
             "refuse: unclosed inline HTML comment at line 1",
         ])
-        for opener in ("Some text <!--", "### title <!--", "text <!-- closed --> <!--"):
+        for opener in ("Some text <!--", "### title <!--"):
             with self.subTest(opener=opener):
                 body = (self._section_0() + opener + "\n## 1. Agent identity\n-->\n"
                         + self._propose_line("B2", "another call"))
@@ -3921,9 +3921,30 @@ class CitationCheckTests(unittest.TestCase):
                 lines = [" " * indent + "<!--", "## hidden", "-->", "## next"]
                 self.assertEqual([kind for kind, _, _ in check.classify_lines(lines)],
                                  ["comment", "comment", "comment", "heading"])
-        for lines in (["<!-- closed --> text <!--", "## next"],
-                      ["<!--", "--> text <!--", "## next"]):
-            self.assertEqual(check.classify_lines(lines)[-1], ("heading", 2, "next"))
+
+    def test_comment_closes_and_reopens_on_one_line_is_refused(self):
+        falsifier = "<!-- closed --> text <!--\npropose: hidden call\n-->\npropose: after"
+        self.assertEqual(check.proposal_refusals(falsifier), [
+            "refuse: comment closes and reopens on line 1",
+        ])
+        for opener in ("<!-- closed --> text <!--", "<!--\n--> text <!--",
+                       "text <!-- closed --> <!--"):
+            with self.subTest(opener=opener):
+                body = self._section_0() + opener + "\n" + self._propose_line("B2", "another call")
+                number = len(self._section_0().splitlines()) + len(opener.splitlines())
+                self.assertEqual(check.proposal_refusals(body), [
+                    "refuse: comment closes and reopens on line %d" % number,
+                ])
+                with self.assertRaisesRegex(ValueError,
+                        "^refuse: comment closes and reopens on line %d$"
+                        % len(opener.splitlines())):
+                    check.classify_lines((opener + "\n## next").splitlines())
+        self.assertEqual(check.classify_lines([
+            "<!-- closed -->", "## 1. Agent identity", "propose: after",
+        ]), [
+            ("comment", None, ""), ("heading", 2, "1. Agent identity"),
+            ("text", None, "propose: after"),
+        ])
 
     def test_indented_comment_opener_leaves_section_1_visible(self):
         for indent in ("    ", "     ", "        ", "\t", " \t"):
