@@ -14,6 +14,7 @@ pub(in crate::api) struct HomeLaunchTokenContext {
     pub session_id: String,
     pub proof_binding_id: Option<String>,
     pub grant_id: String,
+    pub root: crate::auth::ResolvedPrincipalRoot,
 }
 
 impl HomeLaunchTokenContext {
@@ -32,13 +33,19 @@ impl HomeLaunchTokenContext {
     pub(in crate::api) fn grant_id(&self) -> &str {
         &self.grant_id
     }
+
+    /// The root this context resolved before it existed. Consumers take it
+    /// from here; they never derive a root again from the principal id.
+    pub(in crate::api) fn root(&self) -> &crate::auth::ResolvedPrincipalRoot {
+        &self.root
+    }
 }
 
 impl HomeLaunchTokenContext {
-    /// `resolved()` is the one production constructor. The root is resolved and
-    /// refuses before a context exists; the next change stores it.
+    /// `resolved()` is the one production constructor: the root is resolved and
+    /// refuses before a context exists, and it is stored here.
     pub(in crate::api) fn resolved(
-        _root: crate::auth::ResolvedPrincipalRoot,
+        root: crate::auth::ResolvedPrincipalRoot,
         principal_id: String,
         session_id: String,
         proof_binding_id: Option<String>,
@@ -49,21 +56,25 @@ impl HomeLaunchTokenContext {
             session_id,
             proof_binding_id,
             grant_id,
+            root,
         }
     }
 }
 
 #[cfg(test)]
 impl HomeLaunchTokenContext {
-    /// Test-only: production builds only through `resolved`.
+    /// Test-only: production builds only through `resolved`. The fixture root is
+    /// visibly a test root, never a stored record's root.
     pub(in crate::api) fn for_test(
         principal_id: impl Into<String>,
         session_id: impl Into<String>,
         proof_binding_id: Option<String>,
         grant_id: impl Into<String>,
     ) -> Self {
+        let principal_id = principal_id.into();
         Self {
-            principal_id: principal_id.into(),
+            root: crate::auth::ResolvedPrincipalRoot::for_test_principal(&principal_id),
+            principal_id,
             session_id: session_id.into(),
             proof_binding_id,
             grant_id: grant_id.into(),
@@ -631,7 +642,7 @@ fn launch_principal_root(
 }
 
 pub(in crate::api) fn runtime_wallet_authority(
-    data_dir: &std::path::Path,
+    _data_dir: &std::path::Path,
     required: &RequiredHomeLaunchToken,
 ) -> anyhow::Result<RuntimeWalletAuthority> {
     let context = VerifiedWalletInvocationContext::new(
@@ -643,7 +654,7 @@ pub(in crate::api) fn runtime_wallet_authority(
         required.launch_id.clone(),
     )
     .map_err(|err| anyhow::anyhow!("invalid verified Wallet authority: {err}"))?;
-    let root = wallet_principal_root(data_dir, required.context.principal_id())?;
+    let root = required.context.root().clone();
     Ok(RuntimeWalletAuthority { context, root })
 }
 

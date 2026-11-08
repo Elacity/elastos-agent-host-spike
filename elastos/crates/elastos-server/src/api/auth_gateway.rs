@@ -3594,12 +3594,7 @@ pub(in crate::api) fn verified_wallet_link_context(
     if verified.actor() != app {
         anyhow::bail!("wallet connector launch actor mismatch");
     }
-    let context = super::gateway::HomeLaunchTokenContext {
-        principal_id: verified.principal_id().to_string(),
-        session_id: verified.session_id().to_string(),
-        proof_binding_id: verified.proof_binding_id().map(ToString::to_string),
-        grant_id: verified.grant_id().to_string(),
-    };
+    let context = authority.home_launch_context();
     super::gateway::ensure_wallet_connector_configured(&state.data_dir, app)?;
     if context.proof_binding_id().is_none() {
         anyhow::bail!("missing proof-bound auth session");
@@ -4301,12 +4296,13 @@ pub(in crate::api) async fn evm_verify_for_wallet_link(
         &state.data_dir,
         &app,
         &app,
-        &super::gateway::HomeLaunchTokenContext {
-            principal_id: session.principal_id.clone(),
-            session_id: session.session_id.clone(),
-            proof_binding_id: Some(session.proof_binding_id.clone()),
-            grant_id: session.grant_id.clone(),
-        },
+        &super::gateway::HomeLaunchTokenContext::resolved(
+            context.root().clone(),
+            session.principal_id.clone(),
+            session.session_id.clone(),
+            Some(session.proof_binding_id.clone()),
+            session.grant_id.clone(),
+        ),
     )?;
     Ok(EvmVerifyResponse {
         schema: "elastos.auth.evm.verify/v1".to_string(),
@@ -4512,12 +4508,13 @@ pub(in crate::api) async fn btc_verify_for_wallet_link(
         &state.data_dir,
         &app,
         &app,
-        &super::gateway::HomeLaunchTokenContext {
-            principal_id: session.principal_id.clone(),
-            session_id: session.session_id.clone(),
-            proof_binding_id: Some(session.proof_binding_id.clone()),
-            grant_id: session.grant_id.clone(),
-        },
+        &super::gateway::HomeLaunchTokenContext::resolved(
+            context.root().clone(),
+            session.principal_id.clone(),
+            session.session_id.clone(),
+            Some(session.proof_binding_id.clone()),
+            session.grant_id.clone(),
+        ),
     )?;
     Ok(BtcVerifyResponse {
         schema: "elastos.auth.btc.verify/v1".to_string(),
