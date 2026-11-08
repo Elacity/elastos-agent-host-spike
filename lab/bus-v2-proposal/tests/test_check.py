@@ -3863,6 +3863,34 @@ class CitationCheckTests(unittest.TestCase):
             self._section_0() + "pro<!-- hidden -->pose: rubbish\n"
         )), [])
 
+    def test_heading_proposal_in_live_draft_is_refused(self):
+        root = check.worktree_root()
+        draft = check.load_draft(root)
+        self.assertIsNotNone(draft)
+        broken = draft + "\n### propose: rubbish\n"
+        with patch.object(check, "load_draft", return_value=broken):
+            self.assertEqual(check.problems(root), [
+                "refuse: propose line outside section 0 at line %d"
+                % len(broken.splitlines()),
+            ])
+
+    def test_heading_proposal_is_checked_at_each_level(self):
+        for level in range(1, 7):
+            for proposal in ("propose: rubbish", "<!-- propose: rubbish -->"):
+                with self.subTest(level=level, proposal=proposal):
+                    body = self._section_0() + "#" * level + " " + proposal + "\n"
+                    number = len(body.splitlines()) + 1
+                    if proposal.startswith("<!--"):
+                        reason = "at line %d is in an HTML comment" % number
+                    elif level <= 2:
+                        reason = "outside section 0 at line %d" % number
+                    else:
+                        reason = ("at line %d is not a proposal "
+                                  "(missing Name:, Inputs:, Refusal:, Owner:)" % number)
+                    self.assertEqual(check.problems(self._bare_draft(body)), [
+                        "refuse: propose line " + reason,
+                    ])
+
     def test_indented_propose_line_outside_section_0_is_refused(self):
         # Three spaces is not code, but it is still outside section 0.
         second = (

@@ -1196,7 +1196,6 @@ def proposal_refusals(text):
             found = PROPOSE_GROUP.match(text)
             if found is not None and level == 3 and start <= index < end:
                 group = found.group(1)
-            continue
         found = PROPOSE_LINE.search(line)
         if found is None:
             continue
