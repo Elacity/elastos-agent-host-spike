@@ -241,6 +241,71 @@ async fn test_browser_open_missing_and_forged_tokens_stay_generic_at_the_front_d
     }
 }
 
+#[tokio::test]
+async fn test_other_app_expired_and_inactive_tokens_stay_generic_on_browser_routes() {
+    for case in ["expired", "inactive"] {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = passkey_authority(dir.path());
+        let token = app_token_for_authority(dir.path(), CHAT_ROOM_CAPSULE_ID, &authority);
+        let context =
+            runtime_wallet_authority_for_app_token(dir.path(), CHAT_ROOM_CAPSULE_ID, &token)
+                .home_launch_context();
+        let token = if case == "expired" {
+            issue_expired_home_launch_token_with_context(dir.path(), CHAT_ROOM_CAPSULE_ID, &context)
+                .unwrap()
+        } else {
+            let now = crate::auth::now_ts();
+            let mut grant =
+                crate::auth::load_active_session_grant(dir.path(), &context.session_id, now)
+                    .unwrap();
+            grant.expires_at = now;
+            crate::auth::store_session_grant(dir.path(), grant).unwrap();
+            token
+        };
+        let app = browser_test_router(dir.path());
+        for (method, uri) in [
+            ("GET", "/api/apps/browser/summary"),
+            ("POST", "/api/apps/browser/open"),
+        ] {
+            let mut request = test_browser_request("localhost:61180", "null")
+                .method(method)
+                .uri(uri)
+                .header("x-elastos-home-token", &token);
+            if method == "POST" {
+                request = request.header(CONTENT_TYPE, "application/json");
+            }
+            let body = if method == "POST" {
+                Body::from(
+                    r#"{"url":"https://example.com/","display_mode":"webrtc_remote_display","guarantee_level":"operator_rbi","async_open":true}"#,
+                )
+            } else {
+                Body::empty()
+            };
+            let response = app
+                .clone()
+                .oneshot(request.body(body).unwrap())
+                .await
+                .unwrap();
+            let label = format!("{case} {method} {uri}");
+            let allow_origin = response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{label}");
+            let bytes = axum::body::to_bytes(response.into_body(), 32768)
+                .await
+                .unwrap();
+            assert_eq!(
+                bytes.as_ref(),
+                b"Gateway request requires an admitted host and caller",
+                "{label}"
+            );
+            assert!(allow_origin.is_none(), "{label}");
+        }
+    }
+}
+
 #[derive(Clone)]
 struct BrowserOpenLogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
 

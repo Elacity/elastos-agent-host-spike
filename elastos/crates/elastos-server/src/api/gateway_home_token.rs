@@ -516,6 +516,46 @@ pub(in crate::api) fn home_launch_token_needs_reopen(err: &anyhow::Error) -> boo
     )
 }
 
+/// Home can renew only a signature-checked Browser launch token.
+/// The actor allow-list runs before expiry, so another app's token cannot
+/// surface `HomeLaunchTokenError` through this check.
+pub(in crate::api) fn browser_launch_reopen_error(
+    data_dir: &std::path::Path,
+    headers: &HeaderMap,
+) -> Option<anyhow::Error> {
+    let err = require_signed_browser_launch(data_dir, headers).err()?;
+    if home_launch_token_needs_reopen(&err) {
+        Some(err)
+    } else {
+        None
+    }
+}
+
+fn require_signed_browser_launch(
+    data_dir: &std::path::Path,
+    headers: &HeaderMap,
+) -> anyhow::Result<()> {
+    require_home_launch_token_for_any_from_with_origin(
+        data_dir,
+        headers,
+        &[BROWSER_CAPSULE_ID],
+        None,
+        presented_launch_origin_policy(headers),
+    )
+    .map(|_| ())
+}
+
+fn presented_launch_origin_policy(headers: &HeaderMap) -> HomeLaunchOriginPolicy {
+    if headers.contains_key("origin")
+        || headers.contains_key("referer")
+        || headers.contains_key("sec-fetch-site")
+    {
+        HomeLaunchOriginPolicy::Browser
+    } else {
+        HomeLaunchOriginPolicy::InternalShell
+    }
+}
+
 /// Verify a launch before body extraction. The handler retains its actor gate.
 pub(super) fn require_gateway_launch(
     data_dir: &std::path::Path,
@@ -532,19 +572,12 @@ pub(super) fn require_gateway_launch(
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&token)?;
     let envelope: HomeLaunchTokenEnvelope = serde_json::from_slice(&bytes)?;
     let actor = &envelope.payload.launch_context.executable_actor;
-    let browser = headers.contains_key("origin")
-        || headers.contains_key("referer")
-        || headers.contains_key("sec-fetch-site");
     require_home_launch_token_for_any_from_with_origin(
         data_dir,
         headers,
         &[actor],
         None,
-        if browser {
-            HomeLaunchOriginPolicy::Browser
-        } else {
-            HomeLaunchOriginPolicy::InternalShell
-        },
+        presented_launch_origin_policy(headers),
     )
     .map(|_| ())
 }

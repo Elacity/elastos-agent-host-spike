@@ -268,17 +268,21 @@ pub(super) async fn gateway_admission(
             return response;
         }
     }
-    // Browser reopens from Home only when it can read this answer. A missing
-    // or forged token stays the generic refusal, and so does every other route.
+    // Home reopens Browser only for a signed Browser launch token that expired
+    // or lost its session. Another app's token stays the generic refusal, and
+    // so does every other route.
     let mut browser_launch_renewal = None;
     if !public && !sign_in && !ticket && !runtime_session {
         match gateway_home_token::require_gateway_launch(&state.data_dir, headers) {
             Ok(()) => {}
-            Err(err)
-                if browser_api_path(path)
-                    && gateway_home_token::home_launch_token_needs_reopen(&err) =>
-            {
-                browser_launch_renewal = Some(gateway_provider_error_response("browser", err));
+            Err(_) if browser_api_path(path) => {
+                if let Some(err) =
+                    gateway_home_token::browser_launch_reopen_error(&state.data_dir, headers)
+                {
+                    browser_launch_renewal = Some(gateway_provider_error_response("browser", err));
+                } else {
+                    return refused();
+                }
             }
             Err(_) => return refused(),
         }
