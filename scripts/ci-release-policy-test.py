@@ -179,6 +179,8 @@ def run_compile_cache_fixture(source, download_status=0, server_status=0,
 CASES = [
     ("push", "refs/heads/main", "branch", "", True),
     ("push", "refs/heads/develop", "branch", "", True),
+    ("push", "refs/heads/spike/agent-host", "branch", "", True),
+    ("schedule", "refs/heads/spike/agent-host", "branch", "", True),
     ("push", "refs/heads/v-work", "branch", "", True),
     ("push", "refs/tags/v0.7.1", "tag", "", False),
     ("push", "refs/tags/candidate", "tag", "", False),
@@ -192,9 +194,19 @@ CASES = [
     ("workflow_dispatch", "refs/heads/main", "branch", "a" * 40, False),
     ("workflow_dispatch", "refs/tags/v0.7.1", "tag", "main", False),
 ]
-# Pushes to these branches run every trusted proof; only develop writes caches.
+# Pushes to these branches run every trusted proof.
 SAVING_REFS = {"refs/heads/develop", "refs/heads/main"}
-CACHE_SAVING_REF = "refs/heads/develop"
+# The only (event, ref) runs that write shared caches: trusted pushes to the default
+# branch spike/agent-host, and to develop if it exists. Every other run restores only.
+CACHE_WRITERS = {("push", "refs/heads/spike/agent-host"), ("push", "refs/heads/develop")}
+# Shapes no writer guard may admit: other pushes, queues, dispatches and every pull request.
+NON_WRITER_CASES = [
+    ("push", "refs/heads/feature", "branch", "", True),
+    ("push", "refs/heads/spike/agent-host-copy", "branch", "", True),
+    ("merge_group", "refs/heads/gh-readonly-queue/spike/agent-host/pr-2-abc", "branch", "", True),
+    ("workflow_dispatch", "refs/heads/spike/agent-host", "branch", "", True),
+    ("pull_request", "refs/heads/spike/agent-host", "branch", "", True),
+]
 RUST_CACHE_KEY = "-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}"
 # rustsec/rustsec release cargo-audit/v0.22.2, x86_64-unknown-linux-musl archive.
 AUDIT_ARCHIVE_SHA256 = "7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428"
@@ -437,7 +449,7 @@ def validate_cache_credential_scope(source, action):
 
 
 def validate_cache_writers(source):
-    """Only develop pushes write any shared cache; every other run restores only."""
+    """Only CACHE_WRITERS runs write any shared cache; every other run restores only."""
     if re.search(r"type=gha|cache-to", source):
         raise AssertionError("BuildKit layers bypass pinned-hash checks; no remote layer cache")
     workflow_jobs = jobs(source)
@@ -445,7 +457,7 @@ def validate_cache_writers(source):
                if "actions/cache/save@" in step or "Swatinem/rust-cache@" in step]
     if not writers:
         raise AssertionError("missing cache writers")
-    for event, ref, ref_type, override, _ in [*CASES, ("push", "refs/heads/feature", "branch", "", True)]:
+    for event, ref, ref_type, override, _ in [*CASES, *NON_WRITER_CASES]:
         context = event_context(
             event, ref, ref_type, override,
             **{"env.CI_USE_CACHE": "true", "steps.should-run.outputs.run": "true",
@@ -453,13 +465,32 @@ def validate_cache_writers(source):
                "steps.previous-release-cache.outputs.cache-hit": "false",
                "steps.apt-prerequisites.outputs.changed": "true"})
         context["env.CI_SAVE_CACHE"] = str(evaluate(field(source, "CI_SAVE_CACHE"), context)).lower()
-        trusted = event == "push" and ref == CACHE_SAVING_REF
+        trusted = (event, ref) in CACHE_WRITERS
         if (context["env.CI_SAVE_CACHE"] == "true") != trusted:
             raise AssertionError(f"CI_SAVE_CACHE on {event} {ref}")
         for job, step in writers:
             guard = field(step, "save-if" if "Swatinem/rust-cache@" in step else "if")
             if evaluate(guard, context) and not trusted:
                 raise AssertionError(f"{job} saves a cache on {event} {ref}")
+
+
+def validate_pull_requests_restore_only(source):
+    """A pull_request run, from a branch, a lane or a fork, never saves a cache, even on a miss."""
+    workflow_jobs = jobs(source)
+    for head_ref in ("feature", "spark/lane", "batch/20261108"):
+        context = event_context("pull_request", "refs/pull/7/merge", "branch", "", head_ref,
+                                **{"env.CI_USE_CACHE": "true", "steps.should-run.outputs.run": "true", **NO_CACHE_HIT})
+        if evaluate(field(source, "CI_SAVE_CACHE"), context):
+            raise AssertionError(f"a pull_request run sets CI_SAVE_CACHE ({head_ref})")
+        context["env.CI_SAVE_CACHE"] = "false"
+        for job in workflow_jobs:
+            for step in steps(job, workflow_jobs):
+                if "actions/cache@" in step:
+                    raise AssertionError(f"a pull_request run saves a cache: {job} uses actions/cache")
+                if "actions/cache/save@" in step or "Swatinem/rust-cache@" in step:
+                    guard = field(step, "save-if" if "Swatinem/rust-cache@" in step else "if")
+                    if evaluate(guard, context):
+                        raise AssertionError(f"a pull_request run saves a cache: {job} ({head_ref})")
 
 
 def validate_rust_cache_keys(source):
@@ -1409,7 +1440,7 @@ class ReleasePolicyTests(unittest.TestCase):
                 self.assertEqual(use_cache, cached)
                 context["env.CI_USE_CACHE"] = str(use_cache).lower()
                 save = evaluate(field(SOURCE, "CI_SAVE_CACHE"), context)
-                self.assertEqual(save, event == "push" and ref == CACHE_SAVING_REF)
+                self.assertEqual(save, (event, ref) in CACHE_WRITERS)
                 context["env.CI_SAVE_CACHE"] = str(save).lower()
                 context.update(NO_CACHE_HIT)
                 for paths in ("true", "false"):
@@ -1423,8 +1454,7 @@ class ReleasePolicyTests(unittest.TestCase):
                                 allowed = job_runs(job, context)
                                 expected = allowed and cached and (job != "custody-harness-smoke" or should_run)
                                 if "actions/cache/save@" in step:
-                                    expected = expected and (event == "push" and ref == "refs/heads/develop"
-                                                             if job == "engine-llama-arm64" else save)
+                                    expected = expected and save
                                     if step.startswith("name: save verified Kubo inputs\n"):
                                         expected = expected and kubo_hit != "true"
                                     if step.startswith("name: save Ubuntu prerequisite archives\n"):
@@ -1449,7 +1479,7 @@ class ReleasePolicyTests(unittest.TestCase):
                 continue
             for changed in ("true", "false", ""):
                 values = {**context, "steps.filter.outputs.custody": changed,
-                          "env.CI_SAVE_CACHE": str(event == "push" and ref == CACHE_SAVING_REF).lower()}
+                          "env.CI_SAVE_CACHE": str((event, ref) in CACHE_WRITERS).lower()}
                 command = re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda match: values[match[1]], script)
                 with tempfile.TemporaryDirectory() as root:
                     output = Path(root) / "output"
@@ -1511,7 +1541,8 @@ class ReleasePolicyTests(unittest.TestCase):
                 context = event_context(event, ref, **{"github.workflow": "CI", "github.run_id": run_id})
                 groups.append(re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda match: str(evaluate(match[1], context)), group))
                 self.assertEqual(evaluate(field(concurrency, "cancel-in-progress"), context), event == "pull_request")
-            self.assertEqual(len(set(groups)), 1 if event == "pull_request" else 3)
+            shared = event == "pull_request" or (event, ref) == ("push", "refs/heads/spike/agent-host")
+            self.assertEqual(len(set(groups)), 1 if shared else 3)
         # Pushes to spike/agent-host share one group that never cancels a started run: a burst of merges
         # queues the newest commit only, and a running post-merge macOS job finishes.
         for event, ref, shared in (("push", "refs/heads/spike/agent-host", True),
@@ -1578,6 +1609,18 @@ class ReleasePolicyTests(unittest.TestCase):
                 steps("source-home-linux-arm64", jobs(SOURCE.replace(old, new, 1)))
 
     def test_pull_requests_never_save_shared_caches(self):
+        validate_pull_requests_restore_only(SOURCE)
+        writer = "CI_SAVE_CACHE: ${{ github.event_name == 'push' && "
+        mutations = {
+            "pull requests set CI_SAVE_CACHE": SOURCE.replace(writer, writer.replace("${{ ", "${{ github.event_name == 'pull_request' || "), 1),
+            "a Rust cache saves on PRs": SOURCE.replace("save-if: ${{ env.CI_SAVE_CACHE == 'true' }}", "save-if: true", 1),
+            "an engine save drops the writer guard": SOURCE.replace(
+                "if: env.CI_USE_CACHE == 'true' && env.CI_SAVE_CACHE == 'true' && steps.engine-cache", "if: env.CI_USE_CACHE == 'true' && steps.engine-cache", 1),
+        }
+        for name, changed in mutations.items():
+            self.assertNotEqual(changed, SOURCE, name)
+            with self.subTest(mutation=name), self.assertRaisesRegex(AssertionError, "a pull_request run"):
+                validate_pull_requests_restore_only(changed)
         for job in JOBS:
             for step in steps(job):
                 if "Swatinem/rust-cache@" in step:
@@ -1699,13 +1742,16 @@ class ReleasePolicyTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     validate_cache_guards(injected)
 
-    def test_only_develop_pushes_write_caches(self):
+    def test_only_trusted_default_branch_runs_write_caches(self):
         validate_cache_writers(SOURCE)
+        writers = "(github.ref == 'refs/heads/spike/agent-host' || github.ref == 'refs/heads/develop')"
         mutations = {
-            "main writes": SOURCE.replace("github.ref == 'refs/heads/develop' }}",
-                                          "(github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') }}", 1),
-            "every push writes": SOURCE.replace("github.event_name == 'push' && github.ref == 'refs/heads/develop' }}",
-                                                "github.event_name == 'push' }}", 1),
+            "main writes": SOURCE.replace(writers, writers[:-1] + " || github.ref == 'refs/heads/main')", 1),
+            "every push writes": SOURCE.replace("github.event_name == 'push' && " + writers, "github.event_name == 'push'", 1),
+            "spike/agent-host stops writing": SOURCE.replace("github.ref == 'refs/heads/spike/agent-host' || github.ref == 'refs/heads/develop'",
+                                                             "github.ref == 'refs/heads/develop'", 1),
+            "a ref prefix writes": SOURCE.replace("github.ref == 'refs/heads/spike/agent-host' ||",
+                                                  "startsWith(github.ref, 'refs/heads/spike/agent-host') ||", 1),
             "a Rust cache saves on PRs": SOURCE.replace("save-if: ${{ env.CI_SAVE_CACHE == 'true' }}", "save-if: true", 1),
             "a save ignores the writer guard": SOURCE.replace(
                 "if: env.CI_USE_CACHE == 'true' && env.CI_SAVE_CACHE == 'true' && steps.kubo-cache",
@@ -1934,7 +1980,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertIn("if: always()", upload)
         self.assertIn("name: linux-cli-update-hop-receipt", upload)
 
-    def test_engine_cache_has_exact_recipe_key_and_develop_only_writers(self):
+    def test_engine_cache_has_exact_recipe_key_and_trusted_writers_only(self):
         restore, = [step for step in steps("engine-llama-arm64") if "actions/cache/restore@" in step]
         save, = [step for step in steps("engine-llama-arm64") if "actions/cache/save@" in step]
         self.assertEqual(field(restore, "key"), "${{ steps.engine-recipe.outputs.cache-key }}")
@@ -1946,8 +1992,9 @@ class ReleasePolicyTests(unittest.TestCase):
                     event, ref, ref_type, override,
                     **{"env.CI_USE_CACHE": str(cached).lower(),
                        "steps.engine-cache.outputs.cache-hit": hit})
+                context["env.CI_SAVE_CACHE"] = str((event, ref) in CACHE_WRITERS).lower()
                 self.assertEqual(evaluate(field(save, "if"), context),
-                                 cached and event == "push" and ref == "refs/heads/develop" and hit == "false")
+                                 cached and (event, ref) in CACHE_WRITERS and hit == "false")
         self.assertEqual(field(JOBS["engine-llama-arm64"], "image"),
                          field(JOBS["engine-llama-arm64"], "BUILD_CONTAINER_IMAGE"))
         self.assertIn('apt-get install -y -qq --no-install-recommends "${tools[@]}"',

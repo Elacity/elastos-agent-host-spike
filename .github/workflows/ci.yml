@@ -8,8 +8,8 @@ on:
         required: false
         default: ""
   push:
-    # develop pushes keep the shared build caches warm for every PR into develop.
-    # spike/agent-host pushes run source-home-macos after merge (Sash, 29 Oct 2026).
+    # spike/agent-host, the default branch every PR targets, keeps the shared build caches
+    # warm and runs source-home-macos after merge (Sash, 29 Oct 2026).
     branches: [main, develop, spike/agent-host]
     tags: ["v*"]
   schedule:
@@ -38,9 +38,9 @@ env:
   CI_LLAMA_ARM64_SHA256: a92e404708feae91cbede43322e445971450de8a204f4ff51502a7f42f5df8b8
   # An explicit dispatch ref may select a tag independently of the workflow ref.
   CI_USE_CACHE: ${{ github.ref_type != 'tag' && !(github.event_name == 'workflow_dispatch' && inputs.ref != '') }}
-  # Only develop pushes write shared caches (Rust, apt, Kubo, engine). PR,
-  # merge-queue and main runs only read them.
-  CI_SAVE_CACHE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/develop' }}
+  # Only trusted pushes to spike/agent-host (or develop, if it exists) write shared
+  # caches (Rust, apt, Kubo, engine). PR, merge-queue, dispatch and main runs only read them.
+  CI_SAVE_CACHE: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/spike/agent-host' || github.ref == 'refs/heads/develop') }}
 
 jobs:
   # Fast, compile-free gate: formatting and script-based source proofs.
@@ -146,8 +146,9 @@ jobs:
           done
           exit "$failed"
 
-  # One reviewed input per Linux architecture. PRs restore their develop base's cache;
-  # only a develop push can save a verified recipe result in this namespace.
+  # One reviewed input per Linux architecture. PRs restore their base's cache; only a
+  # CI_SAVE_CACHE run can save a verified recipe result in this namespace, whose
+  # develop- prefix release-package.yml shares.
   engine-llama-amd64:
     name: engine-llama-amd64
     runs-on: ubuntu-24.04
@@ -200,7 +201,7 @@ jobs:
       - name: verify accepted AMD64 engine archive
         run: bash scripts/build/build-llama-server-bundle.sh --platform linux-amd64 --verify-archive "$RUNNER_TEMP/llama-amd64-bundle"
       - name: save pinned AMD64 engine
-        if: env.CI_USE_CACHE == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/develop' && steps.engine-cache.outputs.cache-hit != 'true'
+        if: env.CI_USE_CACHE == 'true' && env.CI_SAVE_CACHE == 'true' && steps.engine-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ runner.temp }}/llama-amd64-bundle
@@ -269,7 +270,7 @@ jobs:
       - name: verify accepted ARM64 engine archive
         run: bash scripts/build/build-llama-server-bundle.sh --verify-archive "$RUNNER_TEMP/llama-arm64-bundle"
       - name: save pinned ARM64 engine
-        if: env.CI_USE_CACHE == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/develop' && steps.engine-cache.outputs.cache-hit != 'true'
+        if: env.CI_USE_CACHE == 'true' && env.CI_SAVE_CACHE == 'true' && steps.engine-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ runner.temp }}/llama-arm64-bundle
