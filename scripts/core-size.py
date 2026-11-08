@@ -30,6 +30,8 @@ ROOT = Path(__file__).resolve().parent.parent
 CRATE, BUDGET = "elastos/crates/elastos-runtime", "elastos/CORE-BUDGET"
 SLACK = 50  # the budget may sit at most this far above the code; further, the check fails
 MODES = ("enforce", "advisory")  # CORE_BUDGET_MODE: whether a failed budget verdict fails --check
+READ_NAMES = {"include", "mod", "cfg", "cfg_attr", "path", "test", "all", "any", "not", "macro_rules"}
+PLAIN_PATH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*")  # no escapes, no ..
 OPEN, CLOSE = ("{", "(", "["), ("}", ")", "]")
 CHAR = re.compile(r"'(\\(u\{[0-9a-fA-F]*\}|x..|.)|[^\\\n])'")
 LIFETIME, WORD, RAW = re.compile(r"'\w*"), re.compile(r"\w+"), re.compile(r'#*"')
@@ -230,7 +232,7 @@ def parse_items(vals, lines, i, end, test, found, inline=()):
         if kind == "mod" and body is None:
             found["mods"].append((name, vals[start:i], lines[i], item_test, inline))
             found["mod_tokens"].add(i + vals[i:last].index("mod"))
-        elif kind == "mod" and path_attribute(vals[start:i]) is not None:
+        elif kind == "mod" and ["#", "[", "path"] in [vals[k:k + 3] for k in range(start, i)]:
             raise Refusal("#[path] on an inline module: core-size.py does not follow it", lines[start])
         if body and kind in ("struct", "union", "enum") and not item_test:
             parse_fields(vals, lines, body[0], body[1], kind == "enum", found)
@@ -273,8 +275,16 @@ def analyse(tokens):
     or parameter) is refused."""
     code = [t for t in tokens if t[1] != "comment"]
     vals, lines = [t[2] for t in code] + [""] * 4, [t[0] for t in code]
+    for k in range(len(code)):  # names the counter reads are read in their plain spelling only
+        if vals[k].startswith("r#") and (vals[k][2:] in READ_NAMES or vals[k - 1] == "mod"):
+            raise Refusal(f"raw identifier {vals[k]}: core-size.py reads only the plain spelling", lines[k])
     found = {"spans": [], "attrs": set(), "mods": [], "mod_tokens": set(), "includes": []}
     parse_items(vals, lines, 0, len(code), False, found)
+    for name, attrs, line, mod_test, inline in found["mods"]:
+        try:
+            path_attribute(attrs)
+        except Refusal as error:
+            raise Refusal(str(error), line) from None
     tests = {k for a, b in found["spans"] for k in range(a, b + 1)}
     for k in range(len(code)):  # module and source inclusions the item walk did not see are refused
         outline = vals[k] == "mod" and re.fullmatch(r"\w+", vals[k + 1]) and vals[k + 2] == ";"
@@ -282,10 +292,13 @@ def analyse(tokens):
             raise Refusal("module declared in a function body, block or macro: core-size.py does not follow it",
                           lines[k])
         if vals[k] == "include" and vals[k + 1] == "!":
-            target = literal_text(vals[k + 3]) if vals[k + 2] in OPEN and closer(vals, k + 2) == k + 4 else None
-            if target is None:
+            target = vals[k + 3] if vals[k + 2] in OPEN and closer(vals, k + 2) == k + 4 else ""
+            if literal_text(target) is None:
                 raise Refusal("include! of a path that is not one string literal", lines[k])
-            found["includes"].append((target, lines[k], k in tests))
+            try:
+                found["includes"].append((plain_path(target), lines[k], k in tests))
+            except Refusal as error:
+                raise Refusal(str(error), lines[k]) from None
     for k in range(len(code)):
         open_ = k + 1 + (vals[k + 1] == "!")
         if vals[k] == "#" and k not in found["attrs"] and k not in tests and vals[open_] == "[":
@@ -313,16 +326,25 @@ def crate_roots(tree):
 
 
 def literal_text(value):
-    """The text of a plain or raw string literal token, or None for any other token."""
+    """The text between the quotes of a plain or raw string literal token, or None for any other token."""
     raw, plain = re.fullmatch(r'r(#*)"(.*)"\1', value, re.S), re.fullmatch(r'"(.*)"', value, re.S)
-    return raw.group(2) if raw else re.sub(r"\\(.)", r"\1", plain.group(1)) if plain else None
+    return raw.group(2) if raw else plain.group(1) if plain else None
+
+
+def plain_path(value):
+    """The path in a string literal token. Anything but a plain relative ASCII path (letters, digits,
+    _ . - and /, no escape, no segment starting with a dot, so no ..) is refused, not decoded."""
+    text = literal_text(value)
+    if text is None or "\\" in value or not PLAIN_PATH.fullmatch(text):
+        raise Refusal(f"path {value} is not a plain relative ASCII path: core-size.py will not guess the file")
+    return text
 
 
 def path_attribute(attrs):
     """The #[path = "..."] of a module declaration's attributes, or None."""
     for k in range(len(attrs) - 5):
         if attrs[k:k + 4] == ["#", "[", "path", "="] and attrs[k + 5] == "]":
-            return literal_text(attrs[k + 4])
+            return plain_path(attrs[k + 4])
     return None
 
 

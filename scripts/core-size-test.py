@@ -162,7 +162,8 @@ class CountTest(unittest.TestCase):
 
     def test_production_reach_beats_the_tests_directory(self):
         production = "pub fn production() {}\n"
-        tree = {"src/lib.rs": '#[path = "../tests/production.rs"]\npub mod production;\n',
+        tree = {"Cargo.toml": '[lib]\npath = "lib.rs"\n',
+                "lib.rs": '#[path = "tests/production.rs"]\npub mod production;\n',
                 "tests/production.rs": production, "tests/integration.rs": "fn i() {}\n"}
         self.assertEqual(core_size.count(tree), {"total": 4, "tests": 1, "comments": 0, "blank": 0, "code": 3})
         target = {"Cargo.toml": '[lib]\npath = "tests/production.rs"\n', "tests/production.rs": production}
@@ -176,6 +177,29 @@ class CountTest(unittest.TestCase):
         self.assertEqual(core_size.count(tree)["code"], 2)
         tree = {"src/lib.rs": '#[cfg(test)]\nmod t {\n    include!("helpers.rs");\n}\n', "src/helpers.rs": production}
         self.assertEqual(core_size.count(tree)["tests"], 5)
+
+    def test_raw_identifiers_and_unplain_paths_are_refused(self):
+        hidden = "pub fn production() {}\n"
+        cases = [  # (message, tree); Codex's round-3 inputs first
+            ("src/lib.rs:1: raw identifier r#include",
+             {"src/lib.rs": 'r#include!("hidden.inc");\n', "src/hidden.inc": hidden}),
+            ("src/lib.rs:4: raw identifier r#hidden",
+             {"src/lib.rs": "#[cfg(test)]\nmod hidden;\nfn f() {\n    mod r#hidden;\n}\n", "src/hidden.rs": hidden}),
+            ("src/lib.rs:1: raw identifier r#cfg", {"src/lib.rs": "#[r#cfg(test)]\nfn t() {}\n"}),
+            (r"src/lib.rs:1: path .*x68idden.inc. is not a plain",
+             {"src/lib.rs": 'include!("../tests/\\x68idden.inc");\n', "tests/hidden.inc": hidden,
+              "tests/x68idden.inc": ""}),
+            (r"src/lib.rs:2: path .*a.*x2eb.rs. is not a plain",
+             {"src/lib.rs": '#[path = "a\\x2eb.rs"]\nmod a;\n', "src/a.b.rs": "", "src/ax2eb.rs": ""}),
+            (r"src/lib.rs:2: path .*b.*c.rs.* is not a plain", {"src/lib.rs": '#[path = r"b\\c.rs"]\nmod a;\n'}),
+            ("src/lib.rs:1: path .*caf\u00e9.rs. is not a plain",
+             {"src/lib.rs": 'include!("caf\u00e9.rs");\n', "src/caf\u00e9.rs": ""}),
+            ("src/lib.rs:1: path .*/x.rs. is not a plain", {"src/lib.rs": 'include!("/x.rs");\n'}),
+        ]
+        for message, tree in cases:
+            with self.assertRaisesRegex(core_size.Refusal, message, msg=tree["src/lib.rs"]):
+                core_size.count(tree)
+        self.assertEqual(core_size.count({"src/lib.rs": "struct S {\n    r#type: u8,\n}\n"})["code"], 3)
 
     def test_inclusions_it_cannot_follow_are_refused(self):
         cases = {  # message: tree
