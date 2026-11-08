@@ -2087,8 +2087,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         elastos_identity::load_or_create_did(dir.path()).unwrap();
         let grant = r1_unstored_grant(dir.path(), "person:local:r1-no-record");
-        let err =
-            issue_home_launch_token_for_auth_grant(dir.path(), HOME_CAPSULE_ID, &grant).unwrap_err();
+        let err = issue_home_launch_token_for_auth_grant(dir.path(), HOME_CAPSULE_ID, &grant)
+            .unwrap_err();
         assert_eq!(err.to_string(), "Home launch principal root unresolved");
     }
 
