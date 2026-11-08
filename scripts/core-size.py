@@ -21,12 +21,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CRATE, BUDGET = "elastos/crates/elastos-runtime", "elastos/CORE-BUDGET"
 SLACK = 50  # the budget may sit at most this far above the code; further, the check fails
-OPEN, CLOSE = "{([", "})]"
+OPEN, CLOSE = ("{", "(", "["), ("}", ")", "]")
 ITEM_WORDS = {"fn", "mod", "impl", "struct", "enum", "trait", "union", "const", "static", "type",
               "use", "extern", "async", "unsafe", "macro_rules", "let", "default"}
 CHAR = re.compile(r"'(\\(u\{[0-9a-fA-F]*\}|x..|.)|[^\\\n])'")
 LIFETIME, WORD, RAW = re.compile(r"'\w*"), re.compile(r"\w+"), re.compile(r'#*"')
 STRING, BLOCK = re.compile(r'"(?:\\.|[^"\\])*"?', re.S), re.compile(r"/\*|\*/")
+
+
+class Refusal(Exception):
+    """A construct the counter will not guess at. The check exits 2 and names its file and line."""
+
+    def __init__(self, message, line=None):
+        super().__init__(message)
+        self.line = line
 
 
 def is_test_file(path):
@@ -101,33 +109,67 @@ def closer(vals, p):
     return len(vals) - 1
 
 
+def predicate(vals, p):
+    """Read the cfg predicate at vals[p]: (holds only in tests, never holds in tests, next index)."""
+    word = vals[p]
+    if word in ("all", "any", "not") and vals[p + 1] == "(":
+        end, q, parts = closer(vals, p + 1), p + 2, []
+        while q < end:
+            needs, bars, q = predicate(vals, q)
+            parts.append((needs, bars))
+            if vals[q] not in (",", ")"):
+                raise Refusal(f"cannot read the cfg predicate at {vals[q]!r}")
+            q += vals[q] == ","
+        needs, bars = [part[0] for part in parts], [part[1] for part in parts]
+        if word == "not":
+            if len(parts) != 1:
+                raise Refusal("not() takes one cfg predicate")
+            return bars[0], needs[0], end + 1
+        # all() needs test when any part does; any() only when every part does (an empty any() never holds).
+        return (any(needs), any(bars), end + 1) if word == "all" else (all(needs), all(bars), end + 1)
+    if vals[p + 1] == "=":
+        return False, False, p + 3
+    if not re.fullmatch(r"\w+", word):
+        raise Refusal(f"cannot read the cfg predicate at {word!r}")
+    return word == "test", False, p + 1
+
+
+def attr_is_test(vals, open_, close):
+    """Whether the attribute whose [ is vals[open_] is a cfg that holds only in tests."""
+    if vals[open_ + 1] == "cfg_attr" and {"cfg", "path"} & set(vals[open_ + 2:close]):
+        raise Refusal("cfg_attr that sets cfg or path: the counter will not guess when it applies")
+    if vals[open_ + 1] != "cfg" or vals[open_ + 2] != "(":
+        return False
+    needs, _, q = predicate(vals, open_ + 3)
+    q += vals[q] == ","
+    if q != close - 1:
+        raise Refusal("cfg() takes one predicate")
+    return needs
+
+
 def cfg_test_spans(tokens):
     """Yield (first_line, last_line) for each item behind #[cfg(test)] or #[cfg(all(test, ...))]."""
-    vals = [t[2] for t in tokens]
-    for k, value in enumerate(vals):
-        inner = vals[k + 1:k + 2] == ["!"]
+    vals = [t[2] for t in tokens] + [""] * 4
+    for k, value in enumerate(vals[:len(tokens)]):
+        inner = vals[k + 1] == "!"
         head = k + 1 + inner
-        if value != "#" or vals[head:head + 3] != ["[", "cfg", "("]:
+        if value != "#" or vals[head] != "[":
             continue
         end = closer(vals, head)
-        args = vals[head + 3:end - 1]
-        if args[:2] == ["all", "("] and closer(args, 1) == len(args) - 1:
-            depth, top = 0, []
-            for a in args[2:-1]:
-                depth -= a in CLOSE
-                top += [a] if depth == 0 else []
-                depth += a in OPEN
-            args = ["test"] if "test" in top else args
-        if args == ["test"]:
+        try:
+            test = attr_is_test(vals, head, end)
+        except Refusal as error:
+            raise Refusal(str(error), tokens[k][0]) from None
+        if test:
             yield tokens[k][0], item_end(tokens, vals, end + 1, inner)
 
 
 def item_end(tokens, vals, j, inner):
     """Line of the last token of the item that starts at tokens[j]."""
     p = j  # Step over further attributes, comments and pub(...) to the item's first word.
-    while p < len(vals) and (tokens[p][1] == "comment" or vals[p] in ("#", "!", "pub")):
+    while p < len(tokens) and (tokens[p][1] == "comment" or vals[p] in ("#", "!", "pub")):
         p += 1
-        if p < len(vals) and vals[p] in ("[", "("):
+        if p < len(tokens) and vals[p] in ("[", "("):
             p = closer(vals, p) + 1
     # Fields, variants, match arms and statements also end at a comma outside <...>.
     field = not inner and not (p < len(vals) and vals[p] in ITEM_WORDS)
@@ -159,7 +201,10 @@ def count(files):
             totals["tests"] += len(lines)
             continue
         tokens, starts = lex(text)
-        tests = {n for a, b in cfg_test_spans(tokens) for n in range(a, b + 1)}
+        try:
+            tests = {n for a, b in cfg_test_spans(tokens) for n in range(a, b + 1)}
+        except Refusal as error:
+            raise Refusal(f"{CRATE}/{path}:{error.line + 1}: {error}") from None
         # A line with any code token on it is code, wherever its comments sit.
         code = {line for line, kind, value in tokens if kind != "comment"}
         notes = {line for line, kind, value in tokens if kind == "comment"}
@@ -192,7 +237,7 @@ def ref_files(root, ref):
 def read_budget(text):
     values = [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
     if len(values) != 1 or not values[0].isdigit():
-        raise SystemExit(f"{BUDGET} must hold exactly one integer line besides # comments")
+        raise Refusal(f"{BUDGET} must hold exactly one integer line besides # comments")
     return int(values[0])
 
 
@@ -209,7 +254,7 @@ def check(root, totals, base):
         try:
             point = git(root, "merge-base", base, "HEAD").strip()
         except subprocess.CalledProcessError as error:
-            raise SystemExit(f"no merge base of {base} and HEAD (fetch the base with history): {error.stderr.strip()}")
+            raise Refusal(f"no merge base of {base} and HEAD (fetch the base with history): {error.stderr.strip()}")
         before = count(ref_files(root, point))["code"]
         try:
             old = read_budget(git(root, "show", f"{point}:{BUDGET}"))
@@ -241,9 +286,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.base and not args.check:
         parser.error("--base needs --check")
-    totals = count(worktree_files(args.root))
-    print(json.dumps(totals) if args.json else table(totals), end="\n" if args.json else "")
-    return check(args.root, totals, args.base) if args.check else 0
+    try:
+        totals = count(worktree_files(args.root))
+        print(json.dumps(totals) if args.json else table(totals), end="\n" if args.json else "")
+        return check(args.root, totals, args.base) if args.check else 0
+    except Refusal as error:
+        print(f"core-size: refused: {error}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

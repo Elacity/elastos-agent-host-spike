@@ -56,6 +56,19 @@ class CountTest(unittest.TestCase):
         self.assertEqual(counts(source)["tests"], 6)
         self.assertEqual(counts(source.replace("test,", "feature = \"test\","))["tests"], 0)
 
+    def test_every_cfg_spelling_that_holds_only_in_tests(self):
+        for cfg in ("test,", "all(all(test), unix)", "any(test, all(test, unix),)", "not(not(test))",
+                    "all(\n    unix,\n    test\n)"):
+            source = f"#[cfg({cfg})]\nfn test_only() {{}}\nfn production() {{}}\n"
+            self.assertEqual(counts(source)["code"], 1, cfg)
+        for cfg in ("any(test, unix)", "not(test)", "all(unix, feature = \"test\")", "testing"):
+            self.assertEqual(counts(f"#[cfg({cfg})]\nfn production() {{}}\n")["code"], 2, cfg)
+
+    def test_unreadable_cfg_is_refused_with_its_line(self):
+        for attribute in ("#[cfg(test test)]", "#[cfg_attr(unix, cfg(test))]", "#[cfg(not(test, unix))]"):
+            with self.assertRaisesRegex(core_size.Refusal, r"^elastos/crates/elastos-runtime/src/lib.rs:2: "):
+                counts(f"fn production() {{}}\n{attribute}\nfn other() {{}}\n")
+
     def test_block_comments(self):
         self.assertEqual(counts(BLOCK_COMMENTS),
                          {"total": 6, "tests": 0, "comments": 5, "blank": 0, "code": 1})
@@ -114,6 +127,14 @@ class CheckTest(unittest.TestCase):
         self.assertIn("FAIL: core code is 12 lines, above the budget of 10", output)
         self.write(10, budget=10)
         self.assertEqual(self.run_check()[0], 0)
+
+    def test_refusal_exits_2_naming_file_and_line(self):
+        source = self.root / core_size.CRATE / "src/lib.rs"
+        source.write_text("fn production() {}\n#[cfg_attr(unix, cfg(test))]\nfn other() {}\n")
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            self.assertEqual(self.run_check()[0], 2)
+        self.assertIn("refused: elastos/crates/elastos-runtime/src/lib.rs:2: cfg_attr", errors.getvalue())
 
     def test_ratchet_fails_when_more_than_50_below(self):
         self.write(10, budget=61)
