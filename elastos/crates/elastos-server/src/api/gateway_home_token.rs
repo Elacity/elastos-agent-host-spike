@@ -34,8 +34,9 @@ impl HomeLaunchTokenContext {
         &self.grant_id
     }
 
-    /// The root this context resolved before it existed. Consumers take it
-    /// from here; they never derive a root again from the principal id.
+    /// The root this context resolved before it existed. R1's issuer and
+    /// verifier read it here; the remaining G1 callers still use the
+    /// principal-id rule until R2-R4 switch them.
     pub(in crate::api) fn root(&self) -> &crate::auth::ResolvedPrincipalRoot {
         &self.root
     }
