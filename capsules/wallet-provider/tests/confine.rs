@@ -6772,8 +6772,9 @@ impl SeccompInstruction {
 /// programs stay byte-equal. `clone`, `clone3` and `socketpair` are not here: they
 /// take the argument-checked rules in `seccomp_program_with_thread_rules`.
 /// `epoll_wait` is the x86-64 form of `epoll_pwait`, named by a run on GitHub's
-/// x86-64 runner whose filter logged instead of refusing; aarch64 has no
-/// `epoll_wait`, so its list is unchanged.
+/// x86-64 runner whose filter logged instead of refusing (run 42448113772);
+/// dropped alone there, both model journeys failed (run 42454795461). aarch64
+/// has no `epoll_wait`, so its list is unchanged.
 const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[
     "brk",
     "epoll_create1",
@@ -7466,9 +7467,11 @@ const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
 /// `/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2` that the `O_PATH` open follows,
 /// then `libc.so.6` and `libgcc_s.so.1`. did and wallet do not map `libm.so.6`
 /// there; the model provider does, so the shared table carries it as aarch64's
-/// does. Each entry was dropped alone on that runner (run 42454795461): without
-/// the interpreter, `libc.so.6` or `libgcc_s.so.1` every provider's file-row
-/// start failed, and without `libm.so.6` only the model's did.
+/// does. The model's start first failed without it (run 42448388508). Each entry
+/// was then dropped alone on that runner, from this model leg's tree, which
+/// carries `libm.so.6` (run 42454795461): without the interpreter, `libc.so.6` or
+/// `libgcc_s.so.1` every provider's file-row start failed, and without
+/// `libm.so.6` only the model's did.
 #[cfg(target_arch = "x86_64")]
 const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
     (
@@ -9208,6 +9211,17 @@ fn seccomp_program_denies_by_default_and_lists_no_undeclared_call() {
     // aarch64 cell none, checked on every OS, so an accidental `None` cannot
     // drop a row from both the builder and its checks. On x86-64 Linux each
     // number must also be the one libc gives.
+    // Every other row is shared, so it must hold both numbers: a `None` there
+    // would make the builders skip the call on that architecture, and the
+    // one-ALLOW-per-syscall check above would agree with the shortened list.
+    for (name, x86_64, aarch64) in SECCOMP_SYSCALL_NUMBERS {
+        if !X86_64_ONLY_SYSCALLS.contains(name) {
+            assert!(
+                x86_64.is_some() && aarch64.is_some(),
+                "{name} is a shared row, so both its cells must hold a number"
+            );
+        }
+    }
     for name in X86_64_ONLY_SYSCALLS {
         assert!(
             seccomp_syscall_number(name, 0xc000_003e).is_some(),
@@ -13072,9 +13086,10 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
     // it. On GitHub's ubuntu-24.04 runner (x86-64, kernel 7.0.0-1017-azure,
     // glibc 2.39) the did journey, traced with strace -ff, failed at
     // arch_prctl(ARCH_SET_FS, 0x7f937e346780) = -1 EACCES, and glibc exited 127
-    // with "Cannot allocate TLS block" (8 Nov, run 42446019401). The call sets
-    // only the calling thread's own registers and mappings, so it reaches no
-    // other process.
+    // with "Cannot allocate TLS block" (8 Nov, run 42446019401). The row admits
+    // the whole call, as the mmap and mprotect rows do, not only ARCH_SET_FS:
+    // it also covers the GS base, CPUID faulting, vDSO mapping, shadow-stack and
+    // AMX-permission operations. Each of those acts on the calling task only.
     // With that row the same journeys then took SIGSEGV: the provider's check of
     // its standard descriptors calls poll on x86-64, where aarch64 calls ppoll,
     // and poll([{fd=0}, {fd=1}, {fd=2}], 3, 0) = -1 EACCES made it abort

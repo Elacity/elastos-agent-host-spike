@@ -12,8 +12,9 @@ seccomp part is a generated allow list and a recorded wallet Linux run in which
 the refused calls answer the filter's own marker. The did caller uses the same
 path. The file-row installer is the one Linux launch: it installs the Landlock
 ruleset and then the seccomp filter, and the one record carries a Landlock step.
-The file row of "The contract on Linux" passes for did and wallet on one recorded
-host, named in "The file row". The model provider has no Linux run yet.
+The file row of "The contract on Linux" passes for did, wallet and the model
+provider on the recorded aarch64 host named in "The file row", and on GitHub's
+x86-64 runner.
 `confine.sb` stays each provider's one oracle. The contract is shared, so its
 Linux mapping is written once here, beside the one contract check (P10). The
 Linux policy that the Runtime would generate from the same approved declared
@@ -74,7 +75,11 @@ x86-64 runner (run 42447514431), and each was then dropped alone under the real
 filter (run 42454795461): without `mkdir` did, wallet and model fail to create
 their storage, and without `unlink` wallet's init fails. The same run dropped
 `access`, which glibc also calls there, and every journey still passed, so it is
-not admitted.
+not admitted. The storage row is shared, so did and the model also receive
+`unlink`, though only wallet failed without it; each already holds `unlinkat`,
+which does the same thing. The model also admits `epoll_wait` on x86-64, the
+older form of `epoll_pwait`: a logging filter named it (run 42448113772), and with
+it dropped alone both model journeys failed (run 42454795461).
 
 The head forms (`(version 1)`, `(deny default)`) and the deny forms grant
 nothing, so they take no row and add no syscall. An allow form with no row is a
@@ -429,10 +434,11 @@ is decided here. `install_landlock` is the one kernel caller of that order.
 
 ## The file row
 
-The file row passes for `wallet-provider` and `did-provider` on one recorded host,
-under the lab stand-in. This is not the Runtime, and it does not count toward
-B4-R. `linux` stays out of `DECLARED_CONFINED_OS`: the model provider has no Linux
-run, and the departures under "What this does not cover" stay open too.
+The file row passes for `wallet-provider`, `did-provider` and `model-provider` on
+the recorded aarch64 host and on GitHub's x86-64 runner, under the lab stand-in.
+This is not the Runtime, and it does not count toward B4-R. `linux` stays out of
+`DECLARED_CONFINED_OS`: the departures under "What this does not cover" stay open,
+and B4's Linux cells are credited per architecture and boundary, not flipped.
 
     host: linux/aarch64, Ubuntu 24.04.5 in UTM, kernel 7.0.0-42-generic, Landlock ABI 8
     rustc 1.91.0, binary sha256 e567baad76790ac298a9aa951cb6689a4de0d31c58b97409e92076eeef127160
