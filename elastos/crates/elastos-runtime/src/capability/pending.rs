@@ -551,12 +551,6 @@ impl PendingRequestStore {
             .collect()
     }
 
-    /// Mark a granted request as revoked by the user
-    pub async fn revoke_request(&self, request_id: &str) {
-        self.revoke_request_by(request_id, "Revoked by user", Settler::Shell)
-            .await
-    }
-
     /// Mark a granted request as revoked, recording who settled it. This
     /// changes the request record only; `CapabilityManager::revoke` revokes
     /// the token itself.
@@ -654,7 +648,9 @@ mod tests {
             .create_request(SessionId::from_string("session-2"), resource, Action::Read)
             .await;
         let revoked = granted_request(&store).await;
-        store.revoke_request(&revoked).await;
+        store
+            .revoke_request_by(&revoked, "Revoked by user", Settler::Shell)
+            .await;
         let other = granted_request(&store).await;
         store
             .requests
@@ -683,16 +679,12 @@ mod tests {
     #[tokio::test]
     async fn revocations_record_their_settler() {
         let store = create_test_store();
-        let by_user = granted_request(&store).await;
         let by_runtime = granted_request(&store).await;
         let by_epoch = granted_request(&store).await;
-        store.revoke_request(&by_user).await;
         store
             .revoke_request_by(&by_runtime, "instance ended", Settler::Runtime)
             .await;
         store.revoke_all_granted().await;
-        let user = store.get_request(&by_user).await.unwrap();
-        assert_eq!(settler(&user), Some(Settler::Shell));
         let runtime = store.get_request(&by_runtime).await.unwrap();
         assert_eq!(settler(&runtime), Some(Settler::Runtime));
         let epoch = store.get_request(&by_epoch).await.unwrap();

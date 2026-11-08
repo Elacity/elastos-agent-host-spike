@@ -494,7 +494,10 @@ pub async fn revoke_capability(
                 .await;
 
             // Mark the request as revoked in the pending store
-            state.pending_store.revoke_request(&request_id).await;
+            state
+                .pending_store
+                .revoke_request_by(&request_id, "Revoked by user", Settler::Shell)
+                .await;
 
             Ok(Json(RevokeCapabilityOutput {
                 success: true,
@@ -800,6 +803,32 @@ mod tests {
         let output = deny_request(State(state.clone()), shell, Json(input)).await;
         assert!(output.unwrap().0.success);
         assert_eq!(settler(&state, request.id.as_str()).await, Settler::Shell);
+    }
+
+    #[tokio::test]
+    async fn shell_revoke_route_records_the_shell_as_settler() {
+        let state = test_state();
+        let session = elastos_runtime::session::SessionId::from_string("capsule-1");
+        let resource = ResourceId::new("elastos://content/publish");
+        let request = state
+            .pending_store
+            .create_request(session, resource.clone(), Action::Write)
+            .await;
+        let id = request.id.to_string();
+        let constraints = TokenConstraints::default();
+        let token =
+            state
+                .capability_manager
+                .grant("capsule-1", resource, Action::Write, constraints, None);
+        let store = &state.pending_store;
+        store
+            .grant_request(&id, token, GrantDuration::Session)
+            .await
+            .unwrap();
+        let shell = Extension(Session::new_shell("shell-vm".to_string()));
+        let output = revoke_capability(State(state.clone()), shell, Path(id.clone())).await;
+        assert!(output.unwrap().0.success);
+        assert_eq!(settler(&state, &id).await, Settler::Shell);
     }
 
     #[tokio::test]
