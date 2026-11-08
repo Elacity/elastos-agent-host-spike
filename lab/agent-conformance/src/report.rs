@@ -524,7 +524,21 @@ pub fn write_run(
     receipt: &Path,
     gaps: Option<&str>,
 ) -> RunReport {
-    let mut report = render_run(listed, output, cargo_ok, git, gaps);
+    write_reviewed_run(listed, output, cargo_ok, git, None, receipt, gaps)
+}
+
+/// `write_run` with the reviews of the tested commit. Review binding is its own
+/// table row and receipt field; it does not change the suite's command result.
+pub fn write_reviewed_run(
+    listed: &str,
+    output: &str,
+    cargo_ok: bool,
+    git: Result<GitIdentity, &str>,
+    reviews: Option<&[Review]>,
+    receipt: &Path,
+    gaps: Option<&str>,
+) -> RunReport {
+    let mut report = render_reviewed_run(listed, output, cargo_ok, git, reviews, gaps);
     let written = write_exclusive(receipt, &report.receipt_bytes);
     report.receipt_written = written.is_ok();
     if let Err(reason) = written {
@@ -546,6 +560,17 @@ pub fn render_run(
     git: Result<GitIdentity, &str>,
     gaps: Option<&str>,
 ) -> RunReport {
+    render_reviewed_run(listed, output, cargo_ok, git, None, gaps)
+}
+
+pub fn render_reviewed_run(
+    listed: &str,
+    output: &str,
+    cargo_ok: bool,
+    git: Result<GitIdentity, &str>,
+    reviews: Option<&[Review]>,
+    gaps: Option<&str>,
+) -> RunReport {
     let mut evidence = Evidence::parse(listed, output, gaps);
     let (mut table, suite_ok) = evidence.table(cargo_ok);
     evidence.require_identities();
@@ -563,6 +588,12 @@ pub fn render_run(
         "versions_receipt (A14) | PASS\n"
     } else {
         "versions_receipt (A14) | FAIL\n"
+    });
+    let unbound = review_failures(reviews, git.as_ref());
+    table.push_str(if unbound.is_empty() {
+        "review_binding (A14) | PASS\n"
+    } else {
+        "review_binding (A14) | FAIL\n"
     });
     let outcome = if !suite_ok {
         "FAIL"
@@ -583,6 +614,9 @@ pub fn render_run(
         "probes": evidence.identities.launched.values().collect::<Vec<_>>(),
         "build_only_probes": evidence.identities.built.values().collect::<Vec<_>>(),
         "missing_or_invalid": evidence.failures,
+        "reviews": reviews,
+        "review_status": if unbound.is_empty() { "bound" } else { "unbound" },
+        "review_failures": unbound,
         "cargo_success": cargo_ok,
         "suite_outcome": outcome,
         "command_success": suite_ok && complete,

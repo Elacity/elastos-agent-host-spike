@@ -1212,3 +1212,49 @@ fn review_failures_name_each_unbound_review() {
     ];
     assert!(fails(Some(&both), &git).is_empty());
 }
+
+fn reviewed(
+    git: GitIdentity,
+    reviews: Option<&[agent_conformance::report::Review]>,
+) -> (agent_conformance::report::RunReport, Value) {
+    let (observations, _) = synthetic(1, false);
+    let report = agent_conformance::report::render_reviewed_run(
+        &format!("{LIVE}: test\n"),
+        &output(&observations),
+        true,
+        Ok(git),
+        reviews,
+        Some(""),
+    );
+    let document = serde_json::from_slice(&report.receipt_bytes).unwrap();
+    (report, document)
+}
+
+#[test]
+fn receipt_records_review_binding_beside_command_success() {
+    let (_, git) = synthetic(1, false);
+    let (report, document) = reviewed(git.clone(), None);
+    assert!(report.table.contains("review_binding (A14) | FAIL\n"));
+    assert_eq!(document["review_status"], "unbound");
+    assert_eq!(
+        document["review_failures"],
+        serde_json::json!(["missing review"])
+    );
+    assert_eq!(document["reviews"], Value::Null);
+    // Review binding is its own row; the suite's command result stays.
+    assert!(report.passed, "{:?}", report.failures);
+    assert!(report.table.contains("versions_receipt (A14) | PASS\n"));
+    assert_eq!(document["command_success"], true);
+
+    let reviews = [
+        review("codex", "pass", &git.commit),
+        review("claude", "pass", &git.commit),
+    ];
+    let (report, document) = reviewed(git, Some(&reviews));
+    assert!(report.passed, "{:?}", report.failures);
+    assert!(report.table.contains("review_binding (A14) | PASS\n"));
+    assert_eq!(document["review_status"], "bound");
+    assert_eq!(document["review_failures"], serde_json::json!([]));
+    assert_eq!(document["reviews"], serde_json::to_value(&reviews).unwrap());
+    assert_eq!(document["report"]["table"], report.table);
+}
