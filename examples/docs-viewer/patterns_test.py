@@ -9,17 +9,28 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "capsule-kit" / "falsify"))
 import falsify_kit as kit  # noqa: E402
 
-CONFLICT_RULE = (
-    "Bus v2 `bus-error` has `conflict`, which v1 does not. "
-    "A v1 refusal is not mapped to `conflict`."
-)
+CONFLICT_RULE = "Bus v2 `bus-error` has `conflict`, which v1 does not."
 FOLDER_RULE = (
     "`verify.sh` cds into the `bus2` directory before the `cargo` commands for that guest, "
     "because `rustup` reads the toolchain from the current folder, not from `--manifest-path`."
 )
 BUS2_CD = '    cd "${VIEWER_DIR}/bus2"\n'
-CONFLICT_ARM = '        | BusError::Conflict(why)\n'
+CONFLICT_ARM = (
+    '        BusError::Conflict(why) => format!("in conflict: {why}"),\n'
+)
+READ_FAILURE_ARM = (
+    '        | BusError::Internal(why) => format!("could not be read: {why}"),\n'
+)
 GUEST = HERE / "bus2" / "guests" / "docs" / "src" / "lib.rs"
+V2_WIT = HERE.parent / "bus2-proof" / "wit" / "bus2.wit"
+V1_WIT = HERE.parent.parent / "elastos" / "wit" / "elastos-bus-v1.wit"
+
+
+def bus_error_variant(path):
+    variants = re.findall(r"variant bus-error \{([^}]*)\}", path.read_text())
+    if len(variants) != 1:
+        raise AssertionError(f"{path} does not declare one bus-error variant")
+    return variants[0]
 
 
 class PatternsTests(unittest.TestCase):
@@ -46,14 +57,17 @@ class PatternsTests(unittest.TestCase):
         self.assertLess(source.index(f"{gate} --falsify"), source.index(check))
         self.assertLess(source.index(f"{check} --falsify"), source.index(BUS2_CD))
 
-    def test_bus_v2_conflict_is_named_and_is_not_a_v1_error(self):
-        """bus v2 conflict is named and is not a v1 error"""
+    def test_bus_v2_conflict_is_named(self):
+        """bus v2 conflict is named"""
         self.check_rule(CONFLICT_RULE)
+        self.assertIn("conflict(string)", bus_error_variant(V2_WIT))
+        self.assertNotIn("conflict", bus_error_variant(V1_WIT))
         source = GUEST.read_text()
         reasons = re.findall(r"^fn reason\(error: &BusError\) -> String \{\n.*?^\}",
                              source, re.M | re.S)
         self.assertEqual(len(reasons), 1)
         self.assertEqual(reasons[0].count(CONFLICT_ARM), 1)
+        self.assertEqual(reasons[0].count(READ_FAILURE_ARM), 1)
         self.assertEqual(source.count(CONFLICT_ARM), 1)
 
 
@@ -83,10 +97,11 @@ if __name__ == "__main__":
                 ["PatternsTests.test_the_bus2_checks_run_from_the_bus2_folder"],
             ),
             (
-                "the bus2 reason omits conflict",
+                "the bus2 reason makes conflict a plain read failure",
                 GUEST,
-                [(CONFLICT_ARM, "")],
-                ["PatternsTests.test_bus_v2_conflict_is_named_and_is_not_a_v1_error"],
+                [(CONFLICT_ARM,
+                  '        BusError::Conflict(why) => format!("could not be read: {why}"),\n')],
+                ["PatternsTests.test_bus_v2_conflict_is_named"],
             ),
         ]
         kit.main([(cases, None, test_fails, None, True, failing_tests)], args=[],

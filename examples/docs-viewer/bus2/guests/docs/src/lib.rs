@@ -91,12 +91,13 @@ async fn read_document(uri: &str) -> Result<Result<Vec<u8>, String>, BusError> {
 
 fn reason(error: &BusError) -> String {
     match error {
+        // Bus v2 names a conflict; it is not one of the read failures.
+        BusError::Conflict(why) => format!("in conflict: {why}"),
         BusError::Denied(why)
         | BusError::NotFound(why)
         | BusError::Invalid(why)
         | BusError::Unavailable(why)
         | BusError::Timeout(why)
-        | BusError::Conflict(why)
         | BusError::Internal(why) => format!("could not be read: {why}"),
     }
 }
