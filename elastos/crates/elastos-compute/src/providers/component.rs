@@ -3,10 +3,10 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::RwLock;
 use wasmtime::component::{bindgen, Component, HasSelf, Linker};
-use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
+use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, WasmFeatures};
 
 use elastos_common::{
     CapsuleId, CapsuleManifest, CapsuleRuntimeAbi, CapsuleStatus, CapsuleType, ElastosError, Result,
@@ -77,13 +77,29 @@ impl ComponentProvider {
         self.bridge_principals.write().await.remove(capsule_id);
     }
 
+    /// The one engine every component in this process compiles and runs on.
+    /// The v1 ABI uses none of these proposals, so they are off here as well as
+    /// compiled out of the build (`threads`, `gc`, `stack-switching` in Cargo.toml).
     fn engine() -> Result<Engine> {
-        let mut config = Config::new();
-        config.wasm_component_model(true);
-        config.consume_fuel(true);
-        Engine::new(&config).map_err(|err| {
-            ElastosError::Compute(format!("Failed to configure component engine: {err}"))
-        })
+        static ENGINE: OnceLock<std::result::Result<Engine, String>> = OnceLock::new();
+        ENGINE
+            .get_or_init(|| {
+                let mut config = Config::new();
+                config.wasm_component_model(true);
+                config.consume_fuel(true);
+                config.wasm_features(
+                    WasmFeatures::THREADS
+                        | WasmFeatures::SHARED_EVERYTHING_THREADS
+                        | WasmFeatures::GC
+                        | WasmFeatures::STACK_SWITCHING,
+                    false,
+                );
+                Engine::new(&config).map_err(|err| err.to_string())
+            })
+            .clone()
+            .map_err(|err| {
+                ElastosError::Compute(format!("Failed to configure component engine: {err}"))
+            })
     }
 
     fn store_limits() -> StoreLimits {
@@ -437,6 +453,38 @@ mod tests {
 
     fn json_line(line: &str) -> serde_json::Value {
         serde_json::from_str(line).expect("captured bridge line must be JSON")
+    }
+
+    /// A component holding one core module with one memory of one page.
+    /// `shared` marks the memory shared, which only the threads proposal allows.
+    fn component_with_memory(shared: bool) -> Vec<u8> {
+        let limits = if shared { 0x03 } else { 0x01 }; // has a maximum, and shared
+        let memory_section = [0x05, 0x04, 0x01, limits, 0x01, 0x01];
+        let module = [b"\0asm\x01\0\0\0".as_slice(), &memory_section].concat();
+        let mut component = b"\0asm\x0d\0\x01\0".to_vec();
+        component.extend([0x01, module.len() as u8]); // a core module section
+        component.extend(module);
+        component
+    }
+
+    #[test]
+    fn every_load_shares_one_engine() {
+        let first = ComponentProvider::engine().expect("component engine");
+        let second = ComponentProvider::engine().expect("component engine");
+        assert!(
+            Engine::same(&first, &second),
+            "each load must compile on the one process engine"
+        );
+    }
+
+    #[test]
+    fn engine_refuses_a_threads_module() {
+        let engine = ComponentProvider::engine().expect("component engine");
+        Component::new(&engine, component_with_memory(false))
+            .expect("the same component with an unshared memory compiles");
+        let err = Component::new(&engine, component_with_memory(true))
+            .expect_err("a shared memory needs the threads proposal, which is off");
+        assert!(format!("{err:?}").contains("threads"), "{err:?}");
     }
 
     #[test]
