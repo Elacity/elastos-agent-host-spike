@@ -3550,6 +3550,66 @@ class CitationCheckTests(unittest.TestCase):
             ],
         )
 
+    def test_propose_line_with_empty_fields_is_refused(self):
+        # A label with no value states nothing, though its text is visible.
+        empty = (
+            "propose: . Name: grant handle. Inputs: . Refusal: . Owner: ."
+        )
+        body = self._section_0().replace(
+            self._propose_line("A5", "grant handle"), empty + "\n"
+        )
+        line = body.splitlines().index(empty) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: propose line at line %d is not a proposal "
+                "(missing Inputs:, Refusal:, Owner:)" % line,
+                "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
+            ],
+        )
+
+    def test_propose_line_with_commented_fields_is_refused(self):
+        # A comment hides its text, so a visible propose line with commented
+        # fields states no field.
+        hidden = (
+            "propose: <!-- . Name: grant handle. Inputs: fixture inputs."
+            " Refusal: fixture refusal. Owner: fixture owner. -->"
+        )
+        body = self._section_0().replace(
+            self._propose_line("A5", "grant handle"), hidden + "\n"
+        )
+        line = body.splitlines().index(hidden) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: propose line at line %d is not a proposal "
+                "(missing Name:, Inputs:, Refusal:, Owner:)" % line,
+                "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
+            ],
+        )
+
+    def test_propose_line_opening_a_fence_is_refused(self):
+        # The line that opens a fence is inside it: its text is code.
+        opening = (
+            "```propose: fixture grant handle. Name: grant handle. Inputs:"
+            " fixture inputs. Refusal: fixture refusal. Owner: fixture owner."
+        )
+        hidden = opening + "\n```\n"
+        body = self._section_0().replace(
+            self._propose_line("A5", "grant handle"), hidden
+        )
+        line = body.splitlines().index(opening) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: propose line at line %d is in a fenced code block" % line,
+                "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
+            ],
+        )
+
     def test_propose_line_indented_as_code_is_refused(self):
         # Four spaces make a code block, not a proposal.
         indented = "    " + self._propose_line("A5", "grant handle")

@@ -6,6 +6,7 @@ One parser. ``problems`` is the only function that decides a citation.
 import bisect
 import re
 import subprocess
+import unicodedata
 from pathlib import Path
 
 # One line: the prefix, a space, and forty lowercase hex digits.
@@ -1089,6 +1090,52 @@ def _comment_at(line, stop, open_comment):
     return open_comment
 
 
+def _has_value(text):
+    """True when TEXT holds a character that is neither space nor punctuation."""
+    for char in text:
+        if not char.isspace() and not unicodedata.category(char).startswith("P"):
+            return True
+    return False
+
+
+def _strip_comments(line, open_comment):
+    """Return LINE without its HTML comment spans, reading OPEN_COMMENT first."""
+    pieces = []
+    index = 0
+    while index < len(line):
+        if open_comment:
+            found = line.find("-->", index)
+            if found < 0:
+                return "".join(pieces)
+            open_comment = False
+            index = found + 3
+        else:
+            found = line.find("<!--", index)
+            if found < 0:
+                pieces.append(line[index:])
+                return "".join(pieces)
+            pieces.append(line[index:found])
+            open_comment = True
+            index = found + 4
+    return "".join(pieces)
+
+
+def _empty_fields(line):
+    """Return, in label order, the fields of LINE that hold no value."""
+    positions = []
+    for part in PROPOSE_PARTS:
+        found = line.find(part)
+        if found >= 0:
+            positions.append((found, part))
+    positions.sort()
+    empty = set(part for part in PROPOSE_PARTS if line.find(part) < 0)
+    for index, (found, part) in enumerate(positions):
+        stop = positions[index + 1][0] if index + 1 < len(positions) else len(line)
+        if not _has_value(line[found + len(part):stop]):
+            empty.add(part)
+    return [part for part in PROPOSE_PARTS if part in empty]
+
+
 def proposal_refusals(text):
     """Return one refusal per missing section, incomplete call or stray proposal.
 
@@ -1133,7 +1180,7 @@ def proposal_refusals(text):
         if found is None:
             continue
         number = index + 1
-        if fence_before is not None:
+        if fence_before is not None or fence_before != fence:
             refusals.append(
                 "refuse: propose line at line %d is in a fenced code block"
                 % number
@@ -1154,8 +1201,15 @@ def proposal_refusals(text):
                 "refuse: propose line outside section 0 at line %d" % number
             )
             continue
-        name = PROPOSE_NAME.search(stripped)
-        missing = [part for part in PROPOSE_PARTS if part not in stripped]
+        cleaned = _strip_comments(line, comment_before)
+        parsed = cleaned.strip()
+        name = PROPOSE_NAME.search(parsed)
+        missing = _empty_fields(parsed)
+        body = parsed[PROPOSE_LINE.search(parsed).end():]
+        labels = [body.find(part) for part in PROPOSE_PARTS if part in body]
+        preamble = body[:min(labels)] if labels else body
+        if not preamble.strip() and len(missing) < len(PROPOSE_PARTS):
+            missing.append("the proposal text")
         if name is None and "Name:" not in missing:
             missing.append("Name:")
         if missing:
