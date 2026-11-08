@@ -4,6 +4,7 @@ import base64
 import os
 import hashlib
 import io
+import itertools
 import json
 from pathlib import Path
 import re
@@ -37,7 +38,15 @@ FULL_PROOF_JOBS = {
 SPARK_SKIP = "!(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))"
 # Jobs that run only after merge (pushes and the nightly schedule), never on a PR, batch or baseline run.
 POST_MERGE_JOBS = {"source-home-macos"}
+# Jobs that run only on a pull request.
+PR_ONLY_JOBS = {"pr-substance"}
 POST_MERGE_GUARD = "${{ github.event_name == 'push' || github.event_name == 'schedule' }}"
+# Every job the required check sums up: all but itself and cancel-on-failure.
+REQUIRED_NEEDS = ("source-gate", "fork-gate", "pr-substance", "test-behaviour", "cargo-audit", "core-size", "engine-llama-amd64",
+                  "engine-llama-arm64",
+                  "lint", "lab-standin", "test-elastos", "test-capsules", "custody-harness-smoke", "release-upstream-paths",
+                  "release-upstream-assets", "source-home-linux", "source-home-linux-arm64", "source-home-macos",
+                  "update-hop-linux")
 # Read the fixed job/step indentation used here; actionlint checks YAML syntax.
 def jobs(source):
     return dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)",
@@ -179,6 +188,8 @@ def run_compile_cache_fixture(source, download_status=0, server_status=0,
 CASES = [
     ("push", "refs/heads/main", "branch", "", True),
     ("push", "refs/heads/develop", "branch", "", True),
+    ("push", "refs/heads/spike/agent-host", "branch", "", True),
+    ("schedule", "refs/heads/spike/agent-host", "branch", "", True),
     ("push", "refs/heads/v-work", "branch", "", True),
     ("push", "refs/tags/v0.7.1", "tag", "", False),
     ("push", "refs/tags/candidate", "tag", "", False),
@@ -192,9 +203,28 @@ CASES = [
     ("workflow_dispatch", "refs/heads/main", "branch", "a" * 40, False),
     ("workflow_dispatch", "refs/tags/v0.7.1", "tag", "main", False),
 ]
-# Pushes to these branches run every trusted proof; only develop writes caches.
-SAVING_REFS = {"refs/heads/develop", "refs/heads/main"}
-CACHE_SAVING_REF = "refs/heads/develop"
+# Pushes to these branches run every trusted proof.
+SAVING_REFS = {"refs/heads/spike/agent-host", "refs/heads/develop", "refs/heads/main"}
+# The only (event, ref) runs that write shared caches: trusted pushes to the default
+# branch spike/agent-host (and to develop if it exists), and the nightly on spike/agent-host.
+CACHE_WRITERS = {("push", "refs/heads/spike/agent-host"), ("push", "refs/heads/develop"),
+                 ("schedule", "refs/heads/spike/agent-host")}
+# The writer condition, spelled out in github context in every save guard.
+TRUSTED_WRITER = ("(github.event_name == 'push' && (github.ref == 'refs/heads/spike/agent-host' || "
+                  "github.ref == 'refs/heads/develop')) || (github.event_name == 'schedule' && "
+                  "github.ref == 'refs/heads/spike/agent-host')")
+# Shapes no writer guard may admit: other pushes, queues, dispatches and every pull request.
+NON_WRITER_CASES = [
+    ("push", "refs/heads/feature", "branch", "", True),
+    ("push", "refs/heads/spike/agent-host-copy", "branch", "", True),
+    ("merge_group", "refs/heads/gh-readonly-queue/spike/agent-host/pr-2-abc", "branch", "", True),
+    ("workflow_dispatch", "refs/heads/spike/agent-host", "branch", "", True),
+    ("pull_request", "refs/heads/spike/agent-host", "branch", "", True),
+    ("schedule", "refs/heads/main", "branch", "", True),
+]
+# Linux journey jobs build the PR profile on the nightly too, so its caches match PR runs;
+# macOS, which no PR runs, keeps the shipped profile on every push and nightly.
+NIGHTLY_PR_PROFILE_JOBS = {"source-home-linux", "source-home-linux-arm64", "update-hop-linux"}
 RUST_CACHE_KEY = "-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}"
 # rustsec/rustsec release cargo-audit/v0.22.2, x86_64-unknown-linux-musl archive.
 AUDIT_ARCHIVE_SHA256 = "7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428"
@@ -387,14 +417,14 @@ def validate_cache_guards(source):
             if not CACHE_RE.search(step):
                 continue
             guard = field(step, "if")
-            if "env.CI_USE_CACHE == 'true'" not in guard:
+            # A save is guarded by the trusted writer condition, which no uncached run meets.
+            if "env.CI_USE_CACHE == 'true'" not in guard and not guard.startswith(f"({TRUSTED_WRITER}) && "):
                 raise AssertionError(f"unguarded cache in {job}")
             for event, ref, ref_type, override, cached in CASES:
                 if cached:
                     continue
                 context = event_context(event, ref, ref_type, override, **NO_CACHE_HIT)
-                for name in ("CI_USE_CACHE", "CI_SAVE_CACHE"):
-                    context["env." + name] = str(evaluate(field(source, name), context)).lower()
+                context["env.CI_USE_CACHE"] = str(evaluate(field(source, "CI_USE_CACHE"), context)).lower()
                 context["steps.should-run.outputs.run"] = str(custody_should_run(source, context, "true")).lower()
                 if job_runs(job, context, workflow_jobs) and evaluate(guard, context):
                     raise AssertionError(f"cache guard permits uncached build in {job}")
@@ -436,30 +466,104 @@ def validate_cache_credential_scope(source, action):
     return scripts.pop()
 
 
+def save_sites(source):
+    """Every step that can write the Actions cache, with the guard that decides it."""
+    workflow_jobs = jobs(source)
+    sites = []
+    for job in workflow_jobs:
+        for step in steps(job, workflow_jobs):
+            if "actions/cache@" in step:
+                raise AssertionError(f"{job} uses actions/cache, which saves on every run")
+            if "actions/cache/save@" in step or "Swatinem/rust-cache@" in step:
+                guard = field(step, "save-if" if "Swatinem/rust-cache@" in step else "if")
+                sites.append((job, guard.removeprefix("${{").removesuffix("}}").strip()))
+    if not sites:
+        raise AssertionError("missing cache writers")
+    return sites
+
+
+def adversarial_contexts(guard, context):
+    """The github context, with every value a step or input could set given each value."""
+    names = sorted(set(re.findall(r"(?:env|steps|needs|inputs|matrix)\.[\w.-]+", guard)))
+    for values in itertools.product(("true", "false", ""), repeat=len(names)):
+        yield {**context, **dict(zip(names, values))}
+
+
 def validate_cache_writers(source):
-    """Only develop pushes write any shared cache; every other run restores only."""
+    """Only CACHE_WRITERS runs write any shared cache, decided by github context alone."""
     if re.search(r"type=gha|cache-to", source):
         raise AssertionError("BuildKit layers bypass pinned-hash checks; no remote layer cache")
-    workflow_jobs = jobs(source)
-    writers = [(job, step) for job in workflow_jobs for step in steps(job, workflow_jobs)
-               if "actions/cache/save@" in step or "Swatinem/rust-cache@" in step]
-    if not writers:
-        raise AssertionError("missing cache writers")
-    for event, ref, ref_type, override, _ in [*CASES, ("push", "refs/heads/feature", "branch", "", True)]:
-        context = event_context(
-            event, ref, ref_type, override,
-            **{"env.CI_USE_CACHE": "true", "steps.should-run.outputs.run": "true",
-               "steps.engine-cache.outputs.cache-hit": "false", "steps.kubo-cache.outputs.cache-hit": "false",
-               "steps.previous-release-cache.outputs.cache-hit": "false",
-               "steps.apt-prerequisites.outputs.changed": "true"})
-        context["env.CI_SAVE_CACHE"] = str(evaluate(field(source, "CI_SAVE_CACHE"), context)).lower()
-        trusted = event == "push" and ref == CACHE_SAVING_REF
-        if (context["env.CI_SAVE_CACHE"] == "true") != trusted:
-            raise AssertionError(f"CI_SAVE_CACHE on {event} {ref}")
-        for job, step in writers:
-            guard = field(step, "save-if" if "Swatinem/rust-cache@" in step else "if")
-            if evaluate(guard, context) and not trusted:
-                raise AssertionError(f"{job} saves a cache on {event} {ref}")
+    for job, guard in save_sites(source):
+        # A step can set env through GITHUB_ENV; only github context is fixed for the run.
+        if re.search(r"\b(?:env|inputs|vars|needs|matrix)\.", guard):
+            raise AssertionError(f"save guard in {job} reads context a step or input can change: {guard}")
+        # Step outputs may only narrow the writer condition, never widen it.
+        if guard != TRUSTED_WRITER and not (guard.startswith(f"({TRUSTED_WRITER}) && ")
+                                            and "||" not in guard[len(TRUSTED_WRITER) + 2:]):
+            raise AssertionError(f"save guard in {job} is not the trusted writer condition: {guard}")
+        for event, ref, ref_type, override, _ in [*CASES, *NON_WRITER_CASES]:
+            context = event_context(event, ref, ref_type, override)
+            if (event, ref) not in CACHE_WRITERS:
+                if any(evaluate(guard, values) for values in adversarial_contexts(guard, context)):
+                    raise AssertionError(f"{job} saves a cache on {event} {ref}")
+            elif not evaluate(guard, {**context, **NO_CACHE_HIT}):
+                raise AssertionError(f"{job} never saves on {event} {ref}")
+
+
+def validate_pull_requests_restore_only(source):
+    """A pull_request run, from a branch, a lane or a fork, never saves a cache, whatever
+    its own steps write to GITHUB_ENV or their outputs."""
+    for head_ref in ("feature", "spark/lane", "batch/20261108"):
+        context = event_context("pull_request", "refs/pull/7/merge", "branch", "", head_ref)
+        for job, guard in save_sites(source):
+            if any(evaluate(guard, values) for values in adversarial_contexts(guard, context)):
+                raise AssertionError(f"a pull_request run saves a cache: {job} ({head_ref})")
+
+
+# Every action implementation any workflow uses, by exact commit, with what it can write to
+# the Actions cache. Each was read at that commit; a new commit fails until it is reviewed
+# here: a newer release can cache on its own (setup-node v6 caches npm without a cache input).
+NO_CACHE, GUARDED, CACHE_INPUT_OFF, CACHE_BINARY_OFF = "no cache", "guarded save", "cache input off", "cache-binary off"
+REVIEWED_ACTIONS = {
+    "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09": NO_CACHE,
+    "actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4": NO_CACHE,
+    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02": NO_CACHE,
+    "actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0": NO_CACHE,
+    "actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830": NO_CACHE,
+    "actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a": NO_CACHE,
+    "dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad": NO_CACHE,
+    "dtolnay/rust-toolchain@72504271e02fb719eb4eb3eaece3a8e3d06f57c0": NO_CACHE,
+    "dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067": NO_CACHE,
+    # Writers whose guard save_sites checks: ci.yml only.
+    "actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830": GUARDED,
+    "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6": GUARDED,
+    # v4 caches only when a cache input names a package manager.
+    "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020": CACHE_INPUT_OFF,
+    # Saves its binary unless cache-binary is false.
+    "docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f": CACHE_BINARY_OFF,
+}
+WORKFLOWS = sorted(WORKFLOW.parent.glob("*.yml"))
+
+
+def validate_no_indirect_cache_writers(sources):
+    """Only the guarded save sites can write the Actions cache, in any workflow."""
+    for name, source in sources.items():
+        workflow_jobs = jobs(source)
+        blocks = [step for job in workflow_jobs for step in steps(job, workflow_jobs)]
+        for action in re.findall(r"(?m)^\s*(?:- )?uses: (\S+)", source):
+            if action == LOCAL_CACHE_ACTION:
+                continue  # sccache on local disk; validate_cache_credential_scope forbids its GHA backend
+            if action not in REVIEWED_ACTIONS:
+                raise AssertionError(f"{name} uses an unreviewed action implementation that may write the Actions cache: {action}")
+            if REVIEWED_ACTIONS[action] == GUARDED and name != "ci.yml":
+                raise AssertionError(f"{name} writes a cache outside ci.yml's guarded saves: {action}")
+        for step in blocks:
+            action = re.search(r"(?m)^\s*(?:- )?uses: (\S+)", step)
+            policy = REVIEWED_ACTIONS.get(action[1]) if action else None
+            if policy == CACHE_INPUT_OFF and re.search(r"(?m)^\s+cache(?:-dependency-path)?:", step):
+                raise AssertionError(f"{name}: setup-node caches, and saves from every run that has a cache input")
+            if policy == CACHE_BINARY_OFF and "          cache-binary: false\n" not in step:
+                raise AssertionError(f"{name}: setup-buildx saves its binary to the Actions cache unless cache-binary is false")
 
 
 def validate_rust_cache_keys(source):
@@ -623,7 +727,8 @@ def validate_journey_builds(source, release_source):
                 raise AssertionError(f"missing journey profile setting: {job} {key}")
         for event, ref, ref_type, override, _ in CASES:
             context = event_context(event, ref, ref_type, override)
-            expected = event in ("pull_request", "merge_group") or (event == "push" and ref == "refs/heads/develop")
+            expected = event in ("pull_request", "merge_group") or (event == "push" and ref == "refs/heads/develop") \
+                or (event == "schedule" and job in NIGHTLY_PR_PROFILE_JOBS)
             if evaluate(field(profile, "if"), context) != expected:
                 raise AssertionError(f"journey profile changes shipped build: {job} {event} {ref}")
         cache, = [step for step in job_steps if "Swatinem/rust-cache@" in step]
@@ -785,12 +890,12 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertIn("\n  schedule:\n", triggers)
         context = event_context("merge_group", "refs/heads/gh-readonly-queue/develop/pr-1")
         for job in JOBS:
-            if job == "cancel-on-failure":
+            if job in ("cancel-on-failure", "fork-gate", "required"):
                 continue
             guard = re.search(r"(?m)^    if: (.*)$", JOBS[job])
             if job == "release-upstream-assets":
                 self.assertTrue(upstream_assets_run(SOURCE, context, ""), job)
-            elif job in POST_MERGE_JOBS:
+            elif job in POST_MERGE_JOBS | PR_ONLY_JOBS:
                 self.assertFalse(evaluate(guard[1], context), job)
             elif guard:
                 self.assertTrue(evaluate(guard[1], context), job)
@@ -799,7 +904,6 @@ class ReleasePolicyTests(unittest.TestCase):
                              "${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}")
         for event, ref, ref_type, override, _ in CASES:
             context = event_context(event, ref, ref_type, override)
-            context["env.CI_SAVE_CACHE"] = str(evaluate(field(SOURCE, "CI_SAVE_CACHE"), context)).lower()
             expected_job = event in ("merge_group", "workflow_dispatch", "pull_request") or \
                 (event == "push" and ref in SAVING_REFS)
             self.assertEqual(job_runs("custody-harness-smoke", context), expected_job)
@@ -827,7 +931,8 @@ class ReleasePolicyTests(unittest.TestCase):
             job_level_if("custody-harness-smoke"),
             "(github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || "
             "github.event_name == 'merge_group' || (github.event_name == 'push' && "
-            "(github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'))) && " + SPARK_SKIP)
+            "(github.ref == 'refs/heads/spike/agent-host' || github.ref == 'refs/heads/develop' || "
+            "github.ref == 'refs/heads/main'))) && " + SPARK_SKIP)
         self.assertEqual(
             job_level_if("release-upstream-assets"),
             "(needs.release-upstream-paths.outputs.run == 'true') && " + SPARK_SKIP)
@@ -1193,6 +1298,8 @@ class ReleasePolicyTests(unittest.TestCase):
 
     def test_journey_build_policy_rejects_profile_leaks_and_split_targets(self):
         release = (WORKFLOW.parent / "release-package.yml").read_text()
+        shipped = "if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'push'"
+        nightly = "if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'schedule' ||"
         mutations = (
             SOURCE.replace('CARGO_PROFILE_RELEASE_LTO=false', 'CARGO_PROFILE_RELEASE_LTO=true', 1),
             SOURCE.replace('CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16', 'CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1', 1),
@@ -1212,6 +1319,9 @@ class ReleasePolicyTests(unittest.TestCase):
                            'journey artifacts start fresh.\n          cache-targets: true', 1),
             SOURCE.replace('scripts/setup-source-home.sh 2>&1', 'CARGO_TARGET_DIR=other scripts/setup-source-home.sh 2>&1', 1),
             SOURCE.replace('  lint:\n', '  lint:\n    env:\n      CARGO_PROFILE_RELEASE_LTO: "false"\n', 1),
+            # The nightly Linux journeys stop warming PR caches, or macOS loses its shipped nightly build.
+            SOURCE.replace(nightly, nightly.replace(" github.event_name == 'schedule' ||", ""), 1),
+            SOURCE.replace(shipped, shipped.replace(" ||", " || github.event_name == 'schedule' ||", 1), 1),
         )
         for index, changed in enumerate(mutations):
             self.assertNotEqual(changed, SOURCE)
@@ -1408,9 +1518,7 @@ class ReleasePolicyTests(unittest.TestCase):
                 use_cache = evaluate(field(SOURCE, "CI_USE_CACHE"), context)
                 self.assertEqual(use_cache, cached)
                 context["env.CI_USE_CACHE"] = str(use_cache).lower()
-                save = evaluate(field(SOURCE, "CI_SAVE_CACHE"), context)
-                self.assertEqual(save, event == "push" and ref == CACHE_SAVING_REF)
-                context["env.CI_SAVE_CACHE"] = str(save).lower()
+                save = (event, ref) in CACHE_WRITERS
                 context.update(NO_CACHE_HIT)
                 for paths in ("true", "false"):
                     should_run = custody_should_run(SOURCE, context, paths)
@@ -1423,8 +1531,7 @@ class ReleasePolicyTests(unittest.TestCase):
                                 allowed = job_runs(job, context)
                                 expected = allowed and cached and (job != "custody-harness-smoke" or should_run)
                                 if "actions/cache/save@" in step:
-                                    expected = expected and (event == "push" and ref == "refs/heads/develop"
-                                                             if job == "engine-llama-arm64" else save)
+                                    expected = expected and save
                                     if step.startswith("name: save verified Kubo inputs\n"):
                                         expected = expected and kubo_hit != "true"
                                     if step.startswith("name: save Ubuntu prerequisite archives\n"):
@@ -1434,7 +1541,7 @@ class ReleasePolicyTests(unittest.TestCase):
 
     def test_custody_smoke_always_runs_on_develop_and_filters_only_prs(self):
         self.assertNotIn("changes", list(JOBS))
-        self.assertEqual(field(JOBS["custody-harness-smoke"], "needs"), "source-gate")
+        self.assertEqual(field(JOBS["custody-harness-smoke"], "needs"), "fork-gate")
         filter_step, = [step for step in steps("custody-harness-smoke") if "id: filter" in step]
         self.assertEqual(field(filter_step, "if"), "github.event_name == 'pull_request'")
         self.assertEqual(field(filter_step, "uses"), "dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3")
@@ -1448,8 +1555,7 @@ class ReleasePolicyTests(unittest.TestCase):
             if not eligible:
                 continue
             for changed in ("true", "false", ""):
-                values = {**context, "steps.filter.outputs.custody": changed,
-                          "env.CI_SAVE_CACHE": str(event == "push" and ref == CACHE_SAVING_REF).lower()}
+                values = {**context, "steps.filter.outputs.custody": changed}
                 command = re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda match: values[match[1]], script)
                 with tempfile.TemporaryDirectory() as root:
                     output = Path(root) / "output"
@@ -1511,7 +1617,8 @@ class ReleasePolicyTests(unittest.TestCase):
                 context = event_context(event, ref, **{"github.workflow": "CI", "github.run_id": run_id})
                 groups.append(re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda match: str(evaluate(match[1], context)), group))
                 self.assertEqual(evaluate(field(concurrency, "cancel-in-progress"), context), event == "pull_request")
-            self.assertEqual(len(set(groups)), 1 if event == "pull_request" else 3)
+            shared = event == "pull_request" or (event, ref) == ("push", "refs/heads/spike/agent-host")
+            self.assertEqual(len(set(groups)), 1 if shared else 3)
         # Pushes to spike/agent-host share one group that never cancels a started run: a burst of merges
         # queues the newest commit only, and a running post-merge macOS job finishes.
         for event, ref, shared in (("push", "refs/heads/spike/agent-host", True),
@@ -1578,10 +1685,25 @@ class ReleasePolicyTests(unittest.TestCase):
                 steps("source-home-linux-arm64", jobs(SOURCE.replace(old, new, 1)))
 
     def test_pull_requests_never_save_shared_caches(self):
+        validate_pull_requests_restore_only(SOURCE)
+        writer = "save-if: ${{ " + TRUSTED_WRITER + " }}"
+        mutations = {
+            "pull requests join the writers": SOURCE.replace(
+                "save-if: ${{ ", "save-if: ${{ github.event_name == 'pull_request' || ", 1),
+            "a Rust cache saves on PRs": SOURCE.replace(writer, "save-if: true", 1),
+            "a save reads env, which a PR step can set": SOURCE.replace(
+                writer, "save-if: ${{ env.CI_SAVE_CACHE == 'true' }}", 1),
+            "an engine save drops the writer guard": SOURCE.replace(
+                f"if: ({TRUSTED_WRITER}) && steps.engine-cache", "if: steps.engine-cache", 1),
+        }
+        for name, changed in mutations.items():
+            self.assertNotEqual(changed, SOURCE, name)
+            with self.subTest(mutation=name), self.assertRaisesRegex(AssertionError, "a pull_request run"):
+                validate_pull_requests_restore_only(changed)
         for job in JOBS:
             for step in steps(job):
                 if "Swatinem/rust-cache@" in step:
-                    self.assertEqual(field(step, "save-if"), "${{ env.CI_SAVE_CACHE == 'true' }}",
+                    self.assertEqual(field(step, "save-if"), "${{ " + TRUSTED_WRITER + " }}",
                                      f"rust-cache in {job} must use the trusted writer guard")
                 if "actions/cache@" in step:
                     self.fail(f"{job} uses actions/cache, which also saves from PR runs")
@@ -1699,17 +1821,27 @@ class ReleasePolicyTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     validate_cache_guards(injected)
 
-    def test_only_develop_pushes_write_caches(self):
+    def test_only_trusted_default_branch_runs_write_caches(self):
         validate_cache_writers(SOURCE)
+        writers = "(github.ref == 'refs/heads/spike/agent-host' || github.ref == 'refs/heads/develop')"
         mutations = {
-            "main writes": SOURCE.replace("github.ref == 'refs/heads/develop' }}",
-                                          "(github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') }}", 1),
-            "every push writes": SOURCE.replace("github.event_name == 'push' && github.ref == 'refs/heads/develop' }}",
-                                                "github.event_name == 'push' }}", 1),
-            "a Rust cache saves on PRs": SOURCE.replace("save-if: ${{ env.CI_SAVE_CACHE == 'true' }}", "save-if: true", 1),
+            "main writes": SOURCE.replace(writers, writers[:-1] + " || github.ref == 'refs/heads/main')", 1),
+            "every push writes": SOURCE.replace("github.event_name == 'push' && " + writers, "github.event_name == 'push'", 1),
+            "spike/agent-host stops writing": SOURCE.replace("github.ref == 'refs/heads/spike/agent-host' || github.ref == 'refs/heads/develop'",
+                                                             "github.ref == 'refs/heads/develop'", 1),
+            "a ref prefix writes": SOURCE.replace("github.ref == 'refs/heads/spike/agent-host' ||",
+                                                  "startsWith(github.ref, 'refs/heads/spike/agent-host') ||", 1),
+            "any nightly writes": SOURCE.replace("(github.event_name == 'schedule' && github.ref == 'refs/heads/spike/agent-host')",
+                                                 "github.event_name == 'schedule'", 1),
+            "the nightly stops writing": SOURCE.replace(" || (github.event_name == 'schedule' && github.ref == 'refs/heads/spike/agent-host')", "", 1),
+            "a Rust cache saves on PRs": SOURCE.replace("save-if: ${{ " + TRUSTED_WRITER + " }}", "save-if: true", 1),
             "a save ignores the writer guard": SOURCE.replace(
-                "if: env.CI_USE_CACHE == 'true' && env.CI_SAVE_CACHE == 'true' && steps.kubo-cache",
-                "if: env.CI_USE_CACHE == 'true' && steps.kubo-cache", 1),
+                f"if: ({TRUSTED_WRITER}) && steps.kubo-cache", "if: steps.kubo-cache", 1),
+            "a save reads env": SOURCE.replace(
+                f"if: ({TRUSTED_WRITER}) && steps.kubo-cache", "if: env.CI_SAVE_CACHE == 'true' && steps.kubo-cache", 1),
+            "a step output widens a save": SOURCE.replace(
+                f"if: ({TRUSTED_WRITER}) && steps.kubo-cache.outputs.cache-hit != 'true'",
+                f"if: ({TRUSTED_WRITER}) || steps.kubo-cache.outputs.cache-hit != 'true'", 1),
             "BuildKit restores remote layers": SOURCE.replace(
                 "            --load \\\n", "            --cache-from type=gha \\\n            --load \\\n", 1),
         }
@@ -1717,6 +1849,26 @@ class ReleasePolicyTests(unittest.TestCase):
             self.assertNotEqual(changed, SOURCE, name)
             with self.subTest(mutation=name), self.assertRaises(AssertionError):
                 validate_cache_writers(changed)
+
+    def test_no_action_writes_the_cache_outside_the_guarded_saves(self):
+        sources = {path.name: path.read_text() for path in WORKFLOWS}
+        self.assertEqual(set(sources), {"canary-holder-linux.yml", "ci.yml", "release-package.yml"})
+        validate_no_indirect_cache_writers(sources)
+        node = "      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4\n        with:\n"
+        save = "      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4\n"
+        mutations = {
+            "setup-node caches npm": ("ci.yml", SOURCE.replace(node, node + "          cache: npm\n", 1)),
+            "setup-buildx caches its binary": ("ci.yml", SOURCE.replace("          cache-binary: false\n", "", 1)),
+            "an unreviewed action": ("ci.yml", SOURCE.replace(
+                node, "      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5\n" + node, 1)),
+            "setup-node v6, which caches npm without a cache input": ("ci.yml", SOURCE.replace(
+                node, node.replace("49933ea5288caeca8642d1e84afbd3f7d6820020 # v4", "249970729cb0ef3589644e2896645e5dc5ba9c38 # v6"), 1)),
+            "a cache save in another workflow": ("canary-holder-linux.yml", sources["canary-holder-linux.yml"] + save),
+        }
+        for name, (path, changed) in mutations.items():
+            self.assertNotEqual(changed, sources[path], name)
+            with self.subTest(mutation=name), self.assertRaisesRegex(AssertionError, "cache"):
+                validate_no_indirect_cache_writers({**sources, path: changed})
 
     def test_rust_cache_keys_bind_every_lockfile_and_the_toolchain(self):
         validate_rust_cache_keys(SOURCE)
@@ -1760,6 +1912,9 @@ class ReleasePolicyTests(unittest.TestCase):
     def test_github_runners_and_check_names_stay_fixed(self):
         expected = {
             "source-gate": ("source-gate", "ubuntu-24.04"),
+            "fork-gate": ("fork-gate", "ubuntu-24.04"),
+            "pr-substance": ("pr-substance", "ubuntu-24.04"),
+            "required": ("required", "ubuntu-24.04"),
             "engine-llama-arm64": ("engine-llama-arm64", "ubuntu-24.04-arm"),
             "engine-llama-amd64": ("engine-llama-amd64", "ubuntu-24.04"),
             "lint": ("lint", "ubuntu-24.04"),
@@ -1825,6 +1980,121 @@ class ReleasePolicyTests(unittest.TestCase):
             cancels = (root / "cancels").read_text().splitlines() if (root / "cancels").exists() else []
             return result.returncode, cancels, len(polls) - len(list(queue.iterdir()))
 
+    def test_compile_jobs_start_beside_the_source_gate(self):
+        # The whole job graph. Only these two wait for source-gate: test-behaviour is not a
+        # compile job, and post-merge macOS has no cancel-on-failure to stop it. Compile jobs
+        # wait for fork-gate, which holds them only on a fork pull request.
+        expected = {
+            "source-gate": None, "fork-gate": None, "pr-substance": None, "cargo-audit": None, "core-size": None, "test-behaviour": "source-gate",
+            "engine-llama-amd64": "fork-gate", "engine-llama-arm64": "fork-gate", "lint": "fork-gate",
+            "lab-standin": "fork-gate", "test-elastos": "fork-gate", "test-capsules": "fork-gate",
+            "custody-harness-smoke": "fork-gate",
+            "release-upstream-paths": None, "release-upstream-assets": "[release-upstream-paths, engine-llama-arm64]",
+            "source-home-linux": "engine-llama-amd64", "source-home-linux-arm64": "engine-llama-arm64",
+            "source-home-macos": "source-gate", "update-hop-linux": "fork-gate", "cancel-on-failure": None,
+            "required": "[source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, "
+                        "lint, lab-standin, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, "
+                        "release-upstream-assets, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux]",
+        }
+        graph = {job: (re.search(r"(?m)^    needs: (.+)$", block) or [None, None])[1] for job, block in JOBS.items()}
+        self.assertEqual(graph, expected)
+        # source-gate has no outputs to wait for, and its failure fails the run.
+        self.assertNotRegex(JOBS["source-gate"], r"(?m)^    (?:outputs|if|continue-on-error):")
+        self.assertNotIn("needs.source-gate", SOURCE)
+
+    def run_fork_gate(self, conclusions):
+        """Run fork-gate's wait against successive source-gate conclusions; return (status, polls used)."""
+        step, = steps("fork-gate")
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shims, queue = root / "shims", root / "polls"
+            shims.mkdir()
+            queue.mkdir()
+            for index, conclusion in enumerate(conclusions):
+                (queue / f"{index:03}").write_text(json.dumps({"jobs": [
+                    {"name": "lint", "conclusion": None}, {"name": "source-gate", "conclusion": conclusion}]}))
+            (shims / "sleep").write_text("#!/bin/bash\n")
+            (shims / "gh").write_text(textwrap.dedent("""\
+                #!/bin/bash
+                next="$(ls "$POLL_DIR" | sort | sed -n 1p)"
+                [ -n "$next" ] || exit 9
+                jq -r "$4" "$POLL_DIR/$next" && rm "$POLL_DIR/$next"
+                """))
+            for shim in shims.iterdir():
+                shim.chmod(0o700)
+            result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10,
+                                    env={**os.environ, "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}",
+                                         "GITHUB_REPOSITORY": "Elacity/elastos-runtime", "GITHUB_RUN_ID": "7",
+                                         "GITHUB_RUN_ATTEMPT": "1", "POLL_DIR": str(queue)})
+            return result.returncode, len(conclusions) - len(list(queue.iterdir()))
+
+    def test_fork_pull_requests_compile_only_after_a_passing_source_gate(self):
+        step, = steps("fork-gate")
+        self.assertNotIn("actions/checkout@", JOBS["fork-gate"])
+        self.assertNotRegex(JOBS["fork-gate"], r"(?m)^    (?:if|needs):")
+        for event, ref, ref_type, override, _ in CASES:
+            for head in ("Elacity/elastos-runtime", "someone/fork"):
+                context = event_context(event, ref, ref_type, override, **{
+                    "github.repository": "Elacity/elastos-runtime", "github.event.pull_request.head.repo.full_name": head})
+                self.assertEqual(evaluate(field(step, "if"), context), event == "pull_request" and head == "someone/fork",
+                                 f"fork-gate waits only on a fork pull request ({event}, {head})")
+        self.assertEqual(self.run_fork_gate([None, None, "success"]), (0, 3))
+        for conclusion in ("failure", "timed_out", "cancelled", "skipped"):
+            self.assertEqual(self.run_fork_gate([None, conclusion, "success"]), (1, 2),
+                             f"a source-gate {conclusion} must stop a fork pull request's compile jobs")
+
+    def run_required(self, context, results, upstream="false"):
+        """Run the required job's check as Actions would for this context; return its exit status."""
+        step, = steps("required")
+        env = {name: str(evaluate(field(step, name), context)).lower()
+               for name in ("SPARK_PULL_REQUEST", "POST_MERGE", "PULL_REQUEST", "CUSTODY_EVENT")}
+        needs = {job: {"result": "success", "outputs": {}} for job in REQUIRED_NEEDS}
+        needs["release-upstream-paths"]["outputs"]["run"] = upstream
+        for job, result in results.items():
+            needs[job]["result"] = result
+        # The run block is its 10-space lines; the next job's leading comment follows it.
+        script = textwrap.dedent(re.match(r"(?:(?: {10}[^\n]*)?\n)*", step.split("        run: |\n", 1)[1])[0])
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30,
+                              env={**os.environ, **env, "NEEDS": json.dumps(needs)}).returncode
+
+    def test_every_job_is_in_required(self):
+        # A job added to ci.yml must join required's needs; only the run controller stays out.
+        needed = set(field(JOBS["required"], "needs").strip("[]").split(", "))
+        missing = set(JOBS) - {"required", "cancel-on-failure"} - needed
+        self.assertFalse(missing, f"jobs the required check does not need: {sorted(missing)}")
+        self.assertNotIn("cancel-on-failure", needed)
+
+    def test_required_fails_unless_every_job_passed_or_was_skipped_by_its_guard(self):
+        self.assertEqual(field(JOBS["required"], "if"), "always()")
+        self.assertNotIn("actions/checkout@", JOBS["required"])
+        self.assertEqual(set(REQUIRED_NEEDS), set(JOBS) - {"required", "cancel-on-failure"})
+        # The cases below run against REQUIRED_NEEDS, so the job must need exactly those.
+        self.assertEqual(field(JOBS["required"], "needs"), "[" + ", ".join(REQUIRED_NEEDS) + "]")
+        pr, spark = event_context("pull_request", "refs/pull/9/merge"), event_context("pull_request", "refs/pull/9/merge", head_ref="spark/lane")
+        push, nightly = event_context("push", "refs/heads/spike/agent-host"), event_context("schedule", "refs/heads/spike/agent-host")
+        mac, assets = {"source-home-macos": "skipped"}, {"release-upstream-assets": "skipped"}
+        skipped_full = {job: "skipped" for job in FULL_PROOF_JOBS}
+        cases = [
+            ("ordinary PR", pr, {**mac, **assets}, "false", 0),
+            ("PR whose upstream inputs changed", pr, mac, "true", 0),
+            ("spark lane PR", spark, skipped_full, "false", 0),
+            ("push", push, {**assets, "pr-substance": "skipped"}, "false", 0),
+            ("nightly", nightly, {**assets, "pr-substance": "skipped", "custody-harness-smoke": "skipped"}, "false", 0),
+            ("a comment-only PR", pr, {**mac, **assets, "pr-substance": "failure"}, "false", 1),
+            ("pr-substance skipped on a PR", pr, {**mac, **assets, "pr-substance": "skipped"}, "false", 1),
+            ("failed source-gate skips test-behaviour", pr, {**mac, **assets, "source-gate": "failure", "test-behaviour": "skipped"}, "false", 1),
+            ("fork PR whose gate failed", pr, {**mac, **assets, "source-gate": "failure", "fork-gate": "failure",
+                                               **{job: "skipped" for job in FULL_PROOF_JOBS | {"lint", "lab-standin"}}}, "false", 1),
+            ("a full proof skipped on an ordinary PR", pr, {**mac, **assets, "test-elastos": "skipped"}, "false", 1),
+            ("macOS skipped after merge", push, {**mac, **assets}, "false", 1),
+            ("upstream assets skipped though their inputs changed", pr, {**mac, **assets}, "true", 1),
+            ("a cancelled job", pr, {**mac, **assets, "lint": "cancelled"}, "false", 1),
+            ("custody skipped on a PR", pr, {**mac, **assets, "custody-harness-smoke": "skipped"}, "false", 1),
+        ]
+        for name, context, results, upstream, expected in cases:
+            self.assertEqual(self.run_required(context, results, upstream), expected, name)
+
     def test_pull_request_runs_cancel_at_the_first_failed_job(self):
         watcher = JOBS["cancel-on-failure"]
         self.assertNotIn("actions/checkout@", watcher)
@@ -1844,6 +2114,16 @@ class ReleasePolicyTests(unittest.TestCase):
             status, cancels, used = self.run_cancel_watcher(
                 [[watch, gate, macos], [watch, gate, ("lint", "completed", conclusion), macos]])
             self.assertEqual((status, cancels, used), (0, ["repos/Elacity/elastos-runtime/actions/runs/7/cancel"], 2))
+        # A failed source-gate cancels the compile jobs that start beside it; a watcher that
+        # ignored it would see them finish and exit after two quiet polls, cancelling nothing.
+        for conclusion in ("failure", "timed_out"):
+            gate_failed = ("source-gate", "completed", conclusion)
+            finished = [watch, gate_failed, ("lint", "completed", "success")]
+            status, cancels, used = self.run_cancel_watcher(
+                [[watch, gate_failed, ("lint", "in_progress", None),
+                  ("source-home-linux (ubuntu-24.04)", "in_progress", None)], finished, finished])
+            self.assertEqual((status, cancels, used), (0, ["repos/Elacity/elastos-runtime/actions/runs/7/cancel"], 1),
+                             f"a source-gate {conclusion} must cancel the pull request run")
         # A completed gate before dependent jobs appear is not the end of the run.
         done = [watch, gate, ("source-home-macos", "completed", "success"), ("lint", "completed", "cancelled")]
         status, cancels, used = self.run_cancel_watcher([[watch, gate], [watch, gate, macos], done, done])
@@ -1960,7 +2240,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertIn("if: always()", upload)
         self.assertIn("name: linux-cli-update-hop-receipt", upload)
 
-    def test_engine_cache_has_exact_recipe_key_and_develop_only_writers(self):
+    def test_engine_cache_has_exact_recipe_key_and_trusted_writers_only(self):
         restore, = [step for step in steps("engine-llama-arm64") if "actions/cache/restore@" in step]
         save, = [step for step in steps("engine-llama-arm64") if "actions/cache/save@" in step]
         self.assertEqual(field(restore, "key"), "${{ steps.engine-recipe.outputs.cache-key }}")
@@ -1973,7 +2253,7 @@ class ReleasePolicyTests(unittest.TestCase):
                     **{"env.CI_USE_CACHE": str(cached).lower(),
                        "steps.engine-cache.outputs.cache-hit": hit})
                 self.assertEqual(evaluate(field(save, "if"), context),
-                                 cached and event == "push" and ref == "refs/heads/develop" and hit == "false")
+                                 cached and (event, ref) in CACHE_WRITERS and hit == "false")
         self.assertEqual(field(JOBS["engine-llama-arm64"], "image"),
                          field(JOBS["engine-llama-arm64"], "BUILD_CONTAINER_IMAGE"))
         self.assertIn('apt-get install -y -qq --no-install-recommends "${tools[@]}"',
@@ -2021,9 +2301,8 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertNotIn("RECIPE_COMMIT: ${{ github.sha }}", JOBS["engine-llama-arm64"])
 
     def test_engine_consumers_gate_the_current_run_input_with_shared_pin(self):
-        self.assertEqual(field(JOBS["source-home-linux"], "needs"), "[source-gate, engine-llama-amd64]")
-        self.assertEqual(field(JOBS["source-home-linux-arm64"], "needs"),
-                         "[source-gate, engine-llama-arm64]")
+        self.assertEqual(field(JOBS["source-home-linux"], "needs"), "engine-llama-amd64")
+        self.assertEqual(field(JOBS["source-home-linux-arm64"], "needs"), "engine-llama-arm64")
         download, = [step for step in steps("source-home-linux-arm64") if "actions/download-artifact@" in step and "name: llama-arm64-bundle" in step]
         self.assertIn("name: llama-arm64-bundle", download)
         self.assertEqual(field(download, "if"), "matrix.os == 'ubuntu-22.04-arm'")
