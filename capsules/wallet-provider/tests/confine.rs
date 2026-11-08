@@ -18568,9 +18568,9 @@ fn generated_did_and_wallet_profiles_match_their_committed_oracles() {
 /// Fails when a file outside test code names the lab generator or writer.
 ///
 /// A file may name `generate_profile` or `write_generated_profile` only when
-/// its path relative to `root` has a component exactly `tests`, its file name
-/// ends in `falsifiers.json`, or its extension is `md`. Every other file
-/// fails. The walk reads every regular file as bytes, so a non-UTF-8 file is
+/// its path relative to `root` has a component exactly `tests`, its path is
+/// one of the two falsifier lists that name it, or its extension is `md`.
+/// Every other file fails. The walk reads every regular file as bytes, so a non-UTF-8 file is
 /// read, not skipped, and matches each name as a plain byte substring, so a
 /// longer name that contains one also fails (P11). It does not follow symbolic
 /// links. It skips `.git` (git data), `node_modules` (dependency build output)
@@ -18581,6 +18581,13 @@ fn generated_did_and_wallet_profiles_match_their_committed_oracles() {
 /// offending path, relative to `root` and sorted, with the reason.
 fn check_lab_generator_names(root: &Path) -> Result<usize, String> {
     const NAMES: [&[u8]; 2] = [b"generate_profile", b"write_generated_profile"];
+    /// The two falsifier lists that name the lab generator, by their exact
+    /// repository-relative paths. A file with a similar name elsewhere is not
+    /// test code.
+    const FALSIFIER_LISTS: [&str; 2] = [
+        "capsules/model-provider/confine-falsifiers.json",
+        "capsules/wallet-provider/falsifiers.json",
+    ];
     let mut pending = vec![root.to_path_buf()];
     let mut read = 0usize;
     let mut offending: Vec<PathBuf> = Vec::new();
@@ -18616,9 +18623,10 @@ fn check_lab_generator_names(root: &Path) -> Result<usize, String> {
             let in_tests = relative
                 .components()
                 .any(|component| component.as_os_str().to_str() == Some("tests"));
-            let file_name = path.file_name().and_then(|name| name.to_str());
             let extension = path.extension().and_then(|extension| extension.to_str());
-            let is_falsifier_list = file_name.is_some_and(|name| name.ends_with("falsifiers.json"));
+            let is_falsifier_list = relative
+                .to_str()
+                .is_some_and(|path| FALSIFIER_LISTS.contains(&path));
             if in_tests || is_falsifier_list || extension == Some("md") {
                 continue;
             }
@@ -18660,13 +18668,15 @@ fn lab_generator_is_named_only_in_test_code() {
 /// A non-test file that names the lab generator is refused, and the exempt
 /// files and build output are not.
 ///
-/// The fixture holds `src/main.rs` and `elastos/x.py` naming the generator and
-/// writer, the exempt `tests` path, `falsifiers.json` and `confine-falsifiers.json`
-/// names and `md` extension, and a
-/// `target/` file naming it. The refusal names exactly the first two, sorted;
-/// after they are removed the check returns `Ok`. A longer name that contains
-/// `generate_profile` and a non-UTF-8 file naming it are then each refused,
-/// because the check matches plain bytes and reads every file as bytes.
+/// The fixture holds `src/main.rs`, `elastos/x.py`, `src/falsifiers.json`,
+/// `src/notfalsifiers.json`, `elastos/x-falsifiers.json` and a
+/// `runtime-falsifiers.json` under `src/` naming the generator and writer,
+/// the two exact falsifier lists that may name them, the exempt `tests` path
+/// and `md` extension, and a `target/` file naming the generator. The refusal
+/// names exactly the six, sorted; after they are removed the check returns
+/// `Ok`. A longer name that contains `generate_profile` and a non-UTF-8 file
+/// naming it are then each refused, because the check matches plain bytes and
+/// reads every file as bytes.
 #[test]
 fn lab_generator_name_check_refuses_a_non_test_file() {
     let root = tempfile::tempdir().expect("temporary repository root");
@@ -18674,16 +18684,23 @@ fn lab_generator_name_check_refuses_a_non_test_file() {
     let files = [
         ("src/main.rs", "fn main() { generate_profile(); }\n"),
         ("elastos/x.py", "write_generated_profile(path)\n"),
+        (
+            "capsules/wallet-provider/src/runtime-falsifiers.json",
+            "{\"about\": \"generate_profile\"}\n",
+        ),
+        ("elastos/x-falsifiers.json", "generate_profile\n"),
+        ("src/falsifiers.json", "generate_profile\n"),
+        ("src/notfalsifiers.json", "generate_profile\n"),
+        (
+            "capsules/model-provider/confine-falsifiers.json",
+            "{\"about\": \"generate_profile\"}\n",
+        ),
+        (
+            "capsules/wallet-provider/falsifiers.json",
+            "{\"about\": \"write_generated_profile\"}\n",
+        ),
         ("crate/tests/a.rs", "generate_profile\n"),
         ("crate/src/tests/b.rs", "write_generated_profile\n"),
-        (
-            "crate/falsifiers.json",
-            "{\"about\": \"generate_profile\"}\n",
-        ),
-        (
-            "crate/confine-falsifiers.json",
-            "{\"about\": \"generate_profile\"}\n",
-        ),
         ("crate/README.md", "generate_profile\n"),
         ("target/debug/planted.rs", "generate_profile\n"),
     ];
@@ -18697,11 +18714,24 @@ fn lab_generator_name_check_refuses_a_non_test_file() {
         .expect_err("a non-test file that names the generator must be refused");
     assert_eq!(
         refusal,
-        "elastos/x.py names the lab generator, which is test code only\n\
-         src/main.rs names the lab generator, which is test code only"
+        "capsules/wallet-provider/src/runtime-falsifiers.json names the lab generator, which is \
+         test code only\n\
+         elastos/x-falsifiers.json names the lab generator, which is test code only\n\
+         elastos/x.py names the lab generator, which is test code only\n\
+         src/falsifiers.json names the lab generator, which is test code only\n\
+         src/main.rs names the lab generator, which is test code only\n\
+         src/notfalsifiers.json names the lab generator, which is test code only"
     );
-    fs::remove_file(root.join("elastos/x.py")).expect("remove the python fixture");
-    fs::remove_file(root.join("src/main.rs")).expect("remove the rust fixture");
+    for path in [
+        "capsules/wallet-provider/src/runtime-falsifiers.json",
+        "elastos/x-falsifiers.json",
+        "elastos/x.py",
+        "src/falsifiers.json",
+        "src/main.rs",
+        "src/notfalsifiers.json",
+    ] {
+        fs::remove_file(root.join(path)).expect("remove a refused fixture");
+    }
     assert_eq!(
         check_lab_generator_names(root).expect("only test code and build output remain"),
         5

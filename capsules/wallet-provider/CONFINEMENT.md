@@ -82,8 +82,10 @@ the same file by `#[path]`, and
 profile with the model oracle.
 The lab generator and writer are test code only, and
 `lab_generator_is_named_only_in_test_code` fails if a file outside test code
-names either, so the Runtime keeps one profile generator (P10). A falsifier
-list ends in `falsifiers.json` and is test code.
+names either, so the Runtime keeps one profile generator (P10). The check
+exempts exactly `capsules/wallet-provider/falsifiers.json` and
+`capsules/model-provider/confine-falsifiers.json`, the two falsifier lists
+that name the generator or writer.
 The one contract check, `check_profile_contract`, holds every oracle
 to these terms, and the generated profile meets them too: `(version 1)` first,
 `(deny default)` second, an explicit `(deny network*)`, no `(allow default)`,
