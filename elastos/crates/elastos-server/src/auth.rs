@@ -374,16 +374,31 @@ fn audit_chain_activation_mutex(data_dir: &Path) -> &'static Mutex<()> {
 }
 
 #[cfg(test)]
+fn hold_static_mutex_until_release(
+    mutex: &'static std::sync::Mutex<()>,
+    ready: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+    cleanup_after: std::time::Duration,
+) {
+    let _guard = mutex.lock().expect("lock");
+    ready.send(()).expect("lock holder is ready");
+    release
+        .recv_timeout(cleanup_after)
+        .expect("lock release signal");
+}
+
+#[cfg(test)]
 pub(crate) fn hold_audit_activation_lock_for_test(
     data_dir: &Path,
     ready: std::sync::mpsc::Sender<()>,
     release: std::sync::mpsc::Receiver<()>,
 ) {
-    let _guard = audit_chain_activation_mutex(data_dir)
-        .lock()
-        .expect("audit activation lock");
-    let _ = ready.send(());
-    let _ = release.recv_timeout(std::time::Duration::from_secs(20));
+    hold_static_mutex_until_release(
+        audit_chain_activation_mutex(data_dir),
+        ready,
+        release,
+        std::time::Duration::from_secs(20),
+    );
 }
 
 fn principal_root_object_mutation_lock(data_dir: &Path) -> &'static Mutex<()> {
@@ -396,11 +411,40 @@ pub(crate) fn hold_principal_root_lock_for_test(
     ready: std::sync::mpsc::Sender<()>,
     release: std::sync::mpsc::Receiver<()>,
 ) {
-    let _guard = principal_root_object_mutation_lock(data_dir)
-        .lock()
-        .expect("principal-root lock");
-    let _ = ready.send(());
-    let _ = release.recv_timeout(std::time::Duration::from_secs(20));
+    hold_static_mutex_until_release(
+        principal_root_object_mutation_lock(data_dir),
+        ready,
+        release,
+        std::time::Duration::from_secs(20),
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn a_lock_holder_fails_without_the_release_signal() {
+    static FIXTURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (_release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        hold_static_mutex_until_release(
+            &FIXTURE,
+            ready_tx,
+            release_rx,
+            std::time::Duration::from_millis(50),
+        );
+    });
+    ready_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("holder acquired the lock");
+    let err = holder
+        .join()
+        .expect_err("missing release signal must fail the holder");
+    let message = err
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| err.downcast_ref::<&str>().copied())
+        .unwrap_or("");
+    assert!(message.contains("release signal"), "panic text: {message}");
 }
 
 fn verified_auth_state_cache() -> &'static Mutex<HashMap<PathBuf, VerifiedAuthStateCacheEntry>> {
