@@ -1922,6 +1922,7 @@ mod tests {
             authority.home_launch_context().principal_id,
             context.principal_id
         );
+        assert_eq!(authority.home_launch_context().root(), context.root());
 
         headers.insert(axum::http::header::ORIGIN, "null".parse().unwrap());
         assert!(require_internal_shell_runtime_wallet_authority(
@@ -1979,5 +1980,83 @@ mod tests {
         let control = build(stored.principal_id.clone()).unwrap();
         let launched = control.home_launch_context();
         assert_eq!(launched.principal_id(), stored.principal_id);
+        // R1: the wallet authority's context carries the root the token
+        // resolved, not a second derivation.
+        assert_eq!(
+            launched.root(),
+            &crate::auth::ResolvedPrincipalRoot::resolve(
+                dir.path(),
+                dir.path(),
+                &stored.principal_id
+            )
+            .unwrap()
+        );
+    }
+
+    /// R1: the local context stores the device root, and a launch token rebuilt
+    /// from the wire keeps it. Same Users root as before.
+    #[test]
+    fn r1_local_context_and_token_verification_keep_the_device_users_root() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let context = local_home_launch_token_context(data_dir.path()).unwrap();
+        let users_root = crate::auth::principal_localhost_root(context.principal_id());
+        context
+            .root()
+            .owns_object_uri(&format!("{users_root}/Documents/a.txt"))
+            .unwrap();
+        let token =
+            issue_home_launch_token_with_context(data_dir.path(), HOME_CAPSULE_ID, &context)
+                .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-elastos-home-token", token.parse().unwrap());
+        headers.insert("host", "localhost:61180".parse().unwrap());
+        headers.insert("origin", "http://localhost:61180".parse().unwrap());
+        let verified = require_home_token_context(data_dir.path(), &headers).unwrap();
+        assert_eq!(verified, context);
+        assert_eq!(verified.root(), context.root());
+    }
+
+    /// R1: an auth-grant launch stores the stored Human's root, the same Users
+    /// root the id rule gave before.
+    #[test]
+    fn r1_auth_grant_launch_keeps_the_stored_humans_users_root() {
+        use elastos_runtime::auth::AuthSessionGrantV1;
+
+        let dir = tempfile::tempdir().unwrap();
+        elastos_identity::load_or_create_did(dir.path()).unwrap();
+        let now = now_ts();
+        let record = crate::auth::store_test_human_principal(dir.path(), "person:local:r1-human");
+        let grant = AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: "grant:r1-human".to_string(),
+            session_id: "auth:r1-human".to_string(),
+            principal_id: record.principal_id.clone(),
+            proof_binding_id: record.proof_binding_id.clone(),
+            issued_at: now,
+            expires_at: now + HOME_LAUNCH_TOKEN_TTL_SECS,
+            apps: vec![HOME_CAPSULE_ID.to_string()],
+        };
+        crate::auth::store_session_grant(dir.path(), grant.clone()).unwrap();
+        let token =
+            issue_home_launch_token_for_auth_grant(dir.path(), HOME_CAPSULE_ID, &grant).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-elastos-home-token", token.parse().unwrap());
+        headers.insert("host", "localhost:61180".parse().unwrap());
+        headers.insert("origin", "http://localhost:61180".parse().unwrap());
+        let verified = require_home_token_context(dir.path(), &headers).unwrap();
+        let stored = crate::auth::ResolvedPrincipalRoot::resolve(
+            dir.path(),
+            dir.path(),
+            &record.principal_id,
+        )
+        .unwrap();
+        assert_eq!(verified.root(), &stored);
+        verified
+            .root()
+            .owns_object_uri(&format!(
+                "{}/Documents/a.txt",
+                crate::auth::principal_localhost_root(&record.principal_id)
+            ))
+            .unwrap();
     }
 }
