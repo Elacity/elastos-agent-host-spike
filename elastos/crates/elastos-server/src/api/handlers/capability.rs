@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use elastos_common::localhost::{is_supported_resource_scheme, is_system_only_backend_resource};
 use elastos_runtime::capability::{
     pending::PendingRequestStore, Action, CapabilityManager, GrantDuration, PolicyEvaluator,
-    PolicyOutcome, ResourceId, TokenConstraints,
+    PolicyOutcome, ResourceId, Settler, TokenConstraints,
 };
 use elastos_runtime::session::Session;
 
@@ -396,7 +396,7 @@ pub async fn deny_request(
 
     state
         .pending_store
-        .deny_request(&input.request_id, &reason)
+        .deny_request_by(&input.request_id, &reason, Settler::Shell)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
@@ -774,6 +774,32 @@ mod tests {
                 audit_log,
             )),
         }
+    }
+
+    async fn settler(state: &CapabilityState, id: &str) -> Settler {
+        match state.pending_store.get_request(id).await.unwrap().status {
+            elastos_runtime::capability::RequestStatus::Denied { settled_by, .. } => settled_by,
+            other => panic!("request {id} is not denied: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_deny_route_records_the_shell_as_settler() {
+        let state = test_state();
+        let session = elastos_runtime::session::SessionId::from_string("capsule-1");
+        let resource = ResourceId::new("elastos://content/publish");
+        let request = state
+            .pending_store
+            .create_request(session, resource, Action::Write)
+            .await;
+        let input = DenyRequestInput {
+            request_id: request.id.to_string(),
+            reason: None,
+        };
+        let shell = Extension(Session::new_shell("shell-vm".to_string()));
+        let output = deny_request(State(state.clone()), shell, Json(input)).await;
+        assert!(output.unwrap().0.success);
+        assert_eq!(settler(&state, request.id.as_str()).await, Settler::Shell);
     }
 
     #[tokio::test]

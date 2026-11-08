@@ -539,7 +539,9 @@ mod tests {
     };
     use elastos_compute::{CapsuleInfo, ComputeProvider};
     use elastos_runtime::capability::pending::GrantDuration;
-    use elastos_runtime::capability::{CapabilityManager, CapabilityStore, TokenConstraints};
+    use elastos_runtime::capability::{
+        CapabilityManager, CapabilityStore, Settler, TokenConstraints,
+    };
     use elastos_runtime::primitives::audit::{AuditEvent, AuditLog};
     use elastos_runtime::primitives::metrics::MetricsManager;
     use elastos_runtime::provider::{
@@ -1364,7 +1366,7 @@ mod tests {
             let pending = next_pending(&fx.pending_store).await;
             assert_eq!(pending.resource.as_str(), journal);
             fx.pending_store
-                .deny_request(pending.id.as_str(), "not now")
+                .deny_request_by(pending.id.as_str(), "not now", Settler::Shell)
                 .await
                 .unwrap();
         }

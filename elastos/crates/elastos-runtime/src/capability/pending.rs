@@ -394,12 +394,6 @@ impl PendingRequestStore {
         Ok(())
     }
 
-    /// Deny a pending request on the shell's decision
-    pub async fn deny_request(&self, request_id: &str, reason: &str) -> Result<(), String> {
-        self.deny_request_by(request_id, reason, Settler::Shell)
-            .await
-    }
-
     /// Deny a pending request, recording who settled it
     pub async fn deny_request_by(
         &self,
@@ -790,7 +784,7 @@ mod tests {
 
         // Deny the request
         let result = store
-            .deny_request(request.id.as_str(), "User denied access")
+            .deny_request_by(request.id.as_str(), "User denied access", Settler::Shell)
             .await;
         assert!(result.is_ok());
 

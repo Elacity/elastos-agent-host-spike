@@ -14,7 +14,7 @@ use std::sync::Arc;
 use elastos_runtime::capability::evaluator::ShellPassthroughVerifier;
 use elastos_runtime::capability::{
     Action, AutoGrantVerifier, CapabilityManager, CapabilityStore, GrantDuration,
-    PendingRequestStore, PolicyEvaluator, PolicyOutcome, ResourceId, RulesVerifier,
+    PendingRequestStore, PolicyEvaluator, PolicyOutcome, ResourceId, RulesVerifier, Settler,
     TokenConstraints,
 };
 use elastos_runtime::content::{ContentResolver, NullFetcher, ResolverConfig};
@@ -233,7 +233,11 @@ async fn test_deny_capability_request() {
 
     // Deny the request
     let result = pending_store
-        .deny_request(&request.id.to_string(), "Access denied by policy")
+        .deny_request_by(
+            &request.id.to_string(),
+            "Access denied by policy",
+            Settler::Shell,
+        )
         .await;
 
     assert!(result.is_ok());
@@ -246,7 +250,7 @@ async fn test_deny_capability_request() {
     match &updated.status {
         elastos_runtime::capability::RequestStatus::Denied { reason, settled_by } => {
             assert_eq!(reason, "Access denied by policy");
-            assert_eq!(*settled_by, elastos_runtime::capability::Settler::Shell);
+            assert_eq!(*settled_by, Settler::Shell);
         }
         _ => panic!("Expected Denied status"),
     }
@@ -276,7 +280,7 @@ async fn test_deny_nonexistent_request_fails() {
     let (_, _, pending_store) = create_test_infra();
 
     let result = pending_store
-        .deny_request("nonexistent-request-id", "Denied")
+        .deny_request_by("nonexistent-request-id", "Denied", Settler::Shell)
         .await;
 
     assert!(result.is_err());
@@ -341,13 +345,13 @@ async fn test_cannot_deny_already_denied_request() {
 
     // First deny should succeed
     let result1 = pending_store
-        .deny_request(&request.id.to_string(), "Denied")
+        .deny_request_by(&request.id.to_string(), "Denied", Settler::Shell)
         .await;
     assert!(result1.is_ok());
 
     // Second deny should fail
     let result2 = pending_store
-        .deny_request(&request.id.to_string(), "Denied again")
+        .deny_request_by(&request.id.to_string(), "Denied again", Settler::Shell)
         .await;
     assert!(result2.is_err());
 }
