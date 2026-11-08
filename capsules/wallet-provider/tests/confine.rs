@@ -8140,6 +8140,11 @@ impl std::fmt::Display for SeccompLaunchWriteFailure {
 /// the run. `mount`, `ptrace`, `bpf` and `keyctl` are in no entry here and in no
 /// table row, so the default decision is the only answer they receive.
 ///
+/// That drop-one method is the aarch64 host's and covers every entry but two.
+/// `arch_prctl` and `poll` exist only on x86-64: each was named by the x86-64
+/// journey failing without it on GitHub's runner and passing with it (runs
+/// 42446019401 and 42447112526).
+///
 /// The table is data and makes no kernel call, so it is compiled on every OS
 /// where the list's launch set is compared; the install that reads it stays
 /// Linux-only.
