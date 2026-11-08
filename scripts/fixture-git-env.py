@@ -65,10 +65,11 @@ def shared_config(checkout):
 
 
 def repo_state(repo):
-    """HEAD, the index's sha256 and every work-tree file's bytes."""
+    """HEAD, the index's sha256, the config's bytes and every work-tree file's bytes."""
     head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], env=fixture_git_env(Path(repo).parent),
                           check=True, capture_output=True, text=True).stdout.strip()
     index = hashlib.sha256((Path(repo) / ".git" / "index").read_bytes()).hexdigest()
+    config = (Path(repo) / ".git" / "config").read_bytes()
     files = {path.relative_to(repo).as_posix(): path.read_bytes() for path in sorted(Path(repo).rglob("*"))
              if path.is_file() and ".git" not in path.relative_to(repo).parts}
-    return head, index, files
+    return head, index, config, files

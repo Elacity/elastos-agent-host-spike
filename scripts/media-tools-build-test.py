@@ -65,8 +65,26 @@ class SourcePinTest(unittest.TestCase):
             self.assertEqual(log, f"{self.commit} fixture\n", "the fixture repo lacks its one commit")
             self.assertEqual(fixture_git.shared_config(Path(__file__).parent), config, "the checkout's shared git config changed")
 
+    def test_fetch_ignores_the_callers_git_dir(self):
+        """``fetch``'s temporary bare repo stays out of an exported ``GIT_DIR``."""
+        with tempfile.TemporaryDirectory() as scratch:
+            victim, pointed = fixture_git.victim_repo(scratch)
+            before = fixture_git.repo_state(victim)
+            config = fixture_git.shared_config(Path(__file__).parent)
+            # `init --bare` refuses a separate work tree, so one GIT_DIR is enough.
+            with patch.dict(os.environ, {"GIT_DIR": pointed["GIT_DIR"]}):
+                try:
+                    self.fetch()
+                except (subprocess.CalledProcessError, ValueError) as error:  # judged below, after the victim
+                    self.commit = f"no fixture fetch: {error}"
+            self.assertEqual(fixture_git.repo_state(victim), before, "a builder git command wrote to GIT_DIR's repo")
+            self.assertEqual(fixture_git.shared_config(Path(__file__).parent), config,
+                             "the checkout's shared git config changed")
+            self.assertTrue(self.archive.is_file(), f"the fixture fetch produced no archive: {self.commit}")
+
     def fetch(self, digest=None):
-        builder.fetch_source(self.archive, self.repo.as_uri(), digest or self.digest)
+        builder.fetch_source(self.archive, self.repo.as_uri(), digest or self.digest,
+                             env=fixture_git.fixture_git_env(self.root))
 
     def test_repeated_fetch_preserves_source_license_and_modes(self):
         self.fetch()
