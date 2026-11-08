@@ -446,9 +446,17 @@ fn run_calls_dispatch_with_the_bus_caller() {
     let source = include_str!("lib.rs");
     let dispatch =
         "        let response = dispatch_principal(&mut host.lock().unwrap(), line, capsule, principal);";
+    let callback = "move |line, capsule, principal| {";
     assert_eq!(source.matches(dispatch).count(), 1);
-    assert!(source.contains("move |line, capsule, principal| {\n"));
-    assert!(source.contains(dispatch));
+    assert_eq!(source.matches(callback).count(), 1);
+    let first_statement = source
+        .split_once(callback)
+        .expect("the bus hostcall callback is present")
+        .1
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("//"));
+    assert_eq!(first_statement, Some(dispatch.trim()));
     assert!(!source.contains("let principal = principal.unwrap_or_default();"));
     assert!(!source.contains("_capsule, _principal"));
 }

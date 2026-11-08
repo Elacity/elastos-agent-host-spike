@@ -47,6 +47,10 @@ CASES = [
      "        let response = dispatch_principal(&mut host.lock().unwrap(), line, capsule, principal);",
      "        let response = host.lock().unwrap().answer(line);",
      "run_calls_dispatch_with_the_bus_caller"),
+    ("stand-in dispatch text kept only in a comment", "lib.rs",
+     "        let response = dispatch_principal(&mut host.lock().unwrap(), line, capsule, principal);",
+     "        //        let response = dispatch_principal(&mut host.lock().unwrap(), line, capsule, principal);\n        let response = host.lock().unwrap().answer(line);",
+     "run_calls_dispatch_with_the_bus_caller"),
     # This test code stands in for the Runtime's launch by CID, which does not exist yet.
     ("stand-in loaded instance recorded after start", "lib.rs",
      "    record_loaded_instance(&mut bridge.lock().unwrap(), &handle.id.0);\n    let result = provider.start(&handle).await.map_err(|err| err.to_string());",
@@ -81,7 +85,7 @@ def main():
     ]
     kit.main(
         [(cases, build, test_fails, None, True, test_failures)],
-        done="all 9 stand-in guard falsifiers caught",
+        done="all 10 stand-in guard falsifiers caught",
     )
 
 
