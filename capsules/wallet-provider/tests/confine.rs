@@ -7434,10 +7434,11 @@ struct LandlockRuleset {
 ///
 /// On the Linux host measured for the stopped file-row branch, a ruleset that
 /// grants `EXECUTE` on the bound wallet binary alone makes `execve` fail
-/// `EACCES` (13) before the provider's first instruction. These four paths are
-/// the aarch64 loader and the libraries that binary maps. Each entry carries
-/// `EXECUTE | READ_FILE`. The note after each path is the failure that named it
-/// when that entry alone was dropped from a working ruleset on that host:
+/// `EACCES` (13) before the provider's first instruction. These three paths are
+/// the aarch64 loader and the two libraries both binaries map. Each entry
+/// carries `EXECUTE | READ_FILE`. The note after each path is the failure that
+/// named it when that entry alone was dropped from a working ruleset on that
+/// host:
 ///
 /// - `/lib/ld-linux-aarch64.so.1`: without `EXECUTE` the loader cannot be
 ///   entered, and `execve` answers `EACCES` (13) before the provider's first
@@ -7448,9 +7449,10 @@ struct LandlockRuleset {
 /// - `/lib/aarch64-linux-gnu/libgcc_s.so.1`: without `READ_FILE` the loader
 ///   fails to map `libgcc_s.so.1` and exits with `error while loading shared
 ///   libraries: libgcc_s.so.1: cannot open shared object file`.
-/// - `/lib/aarch64-linux-gnu/libm.so.6`: without `READ_FILE` the loader fails
-///   to map `libm.so.6` and exits with `error while loading shared libraries:
-///   libm.so.6: cannot open shared object file`.
+///
+/// The model maps `libm.so.6` as well; that entry is in
+/// `MODEL_LANDLOCK_LOADER_PATHS` below, so did and wallet keep no rule for a
+/// library they do not load.
 ///
 /// That drop-one measurement was not repeated against each binary on the host
 /// `CONFINEMENT-LINUX.md` names; the run there shows the list is enough for both.
@@ -7474,22 +7476,26 @@ const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
         "without READ_FILE here the loader fails to map libgcc_s.so.1 and exits with \
          `error while loading shared libraries: libgcc_s.so.1: cannot open shared object file`",
     ),
-    (
-        "/lib/aarch64-linux-gnu/libm.so.6",
-        "without READ_FILE here the loader fails to map libm.so.6 and exits with \
-         `error while loading shared libraries: libm.so.6: cannot open shared object file`",
-    ),
 ];
 
-/// The x86-64 loader and the libraries both providers map there, read from
+/// The model's extra aarch64 loader entry: it maps `libm.so.6`, which did and
+/// wallet do not.
+#[cfg(not(target_arch = "x86_64"))]
+const MODEL_LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[(
+    "/lib/aarch64-linux-gnu/libm.so.6",
+    "without READ_FILE here the loader fails to map libm.so.6 and exits with \
+     `error while loading shared libraries: libm.so.6: cannot open shared object file`",
+)];
+
+/// The x86-64 loader and the two libraries both providers map there, read from
 /// `readelf -l` and `ldd` on GitHub's ubuntu-24.04 runner (glibc 2.39, run
 /// 42447112526): the interpreter `/lib64/ld-linux-x86-64.so.2`, a link to
 /// `/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2` that the `O_PATH` open follows,
 /// then `libc.so.6` and `libgcc_s.so.1`. did and wallet do not map `libm.so.6`
-/// there; the model provider does, so the shared table carries it as aarch64's
-/// does. The model's start first failed without it (run 42448388508). Each entry
-/// was then dropped alone on that runner, from this model leg's tree, which
-/// carries `libm.so.6` (run 42454795461): without the interpreter, `libc.so.6` or
+/// there; the model provider does, and its entry is
+/// `MODEL_LANDLOCK_LOADER_PATHS` below. The model's start first failed without it
+/// (run 42448388508). Each entry was then dropped alone on that runner, from this
+/// model leg's tree (run 42454795461): without the interpreter, `libc.so.6` or
 /// `libgcc_s.so.1` every provider's file-row start failed, and without
 /// `libm.so.6` only the model's did.
 #[cfg(target_arch = "x86_64")]
@@ -7507,13 +7513,27 @@ const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
         "/lib/x86_64-linux-gnu/libgcc_s.so.1",
         "ldd on both x86-64 providers names libgcc_s.so.1; the loader maps it with READ_FILE",
     ),
-    (
-        "/lib/x86_64-linux-gnu/libm.so.6",
-        "without READ_FILE here the x86-64 model provider exits 127 with `error while \
-         loading shared libraries: libm.so.6: cannot open shared object file`; did and \
-         wallet do not map it",
-    ),
 ];
+
+/// The model's extra x86-64 loader entry: it maps `libm.so.6`, which did and
+/// wallet do not.
+#[cfg(target_arch = "x86_64")]
+const MODEL_LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[(
+    "/lib/x86_64-linux-gnu/libm.so.6",
+    "without READ_FILE here the x86-64 model provider exits 127 with `error while \
+     loading shared libraries: libm.so.6: cannot open shared object file`; did and \
+     wallet do not map it",
+)];
+
+/// The loader paths a launch of `name` passes: the shared entries every
+/// dynamically linked provider maps, plus the model's `libm` entry.
+fn landlock_loader_paths(name: &str) -> Vec<(&'static str, &'static str)> {
+    let mut paths = LANDLOCK_LOADER_PATHS.to_vec();
+    if name == MODEL_PROVIDER {
+        paths.extend_from_slice(MODEL_LANDLOCK_LOADER_PATHS);
+    }
+    paths
+}
 
 /// The one builder of a provider's Landlock file row: the ruleset of `name`,
 /// rendered from the profile `generate_profile` produces from `declared` and read
@@ -7540,7 +7560,7 @@ const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
 /// The loader entries are added only where the provider needs them, which is
 /// every launch of a dynamically linked provider; the builder takes them as an
 /// input so a test can build a ruleset without them and read the difference.
-/// A launch of the real binary passes `LANDLOCK_LOADER_PATHS`. A test that
+/// A launch of the real binary passes `landlock_loader_paths(name)`. A test that
 /// reads the declared rows alone passes an empty list.
 fn landlock_path_rules(
     name: &str,
@@ -8316,8 +8336,10 @@ fn landlock_install_record_decodes_each_failed_step() {
 /// Wallet's ruleset names each measured loader entry with `EXECUTE | READ_FILE`,
 /// and the storage-root rule keeps the eight rights the declared row carries.
 /// The test builds the ruleset from wallet's committed declared-rights file
-/// through `landlock_path_rules` and `LANDLOCK_LOADER_PATHS`. It starts no
-/// process and calls no kernel, so it runs on every OS.
+/// through `landlock_path_rules` and `LANDLOCK_LOADER_PATHS`. It then requires
+/// the model's launch list to be the shared entries plus its `libm` entry, and
+/// did's and wallet's to hold no `libm` entry. It starts no process and calls no
+/// kernel, so it runs on every OS.
 ///
 /// Falsifier: WP212 adds the loader entry without `READ_FILE`, so this test
 /// fails on the rule's rights.
@@ -8371,6 +8393,33 @@ fn landlock_ruleset_names_each_measured_loader_entry() {
             | LANDLOCK_ACCESS_FS_TRUNCATE,
         "the storage-root rule must keep the eight rights the declared row carries"
     );
+
+    // The model alone maps `libm`, so its launch list carries the shared
+    // entries and one model-only entry, and did and wallet carry none.
+    for name in [DID_PROVIDER, WALLET_PROVIDER] {
+        assert!(
+            landlock_loader_paths(name)
+                .iter()
+                .all(|(path, _)| !path.contains("libm.so.6")),
+            "{name} must carry no libm loader entry"
+        );
+    }
+    let model = landlock_loader_paths(MODEL_PROVIDER);
+    assert_eq!(
+        model.len(),
+        LANDLOCK_LOADER_PATHS.len() + MODEL_LANDLOCK_LOADER_PATHS.len(),
+        "the model list must carry the shared entries and the model-only entry"
+    );
+    for (path, _) in MODEL_LANDLOCK_LOADER_PATHS {
+        assert!(
+            path.contains("libm.so.6"),
+            "the model's extra entry must be libm: {path}"
+        );
+        assert!(
+            model.iter().any(|(candidate, _)| *candidate == *path),
+            "the model list must carry {path}"
+        );
+    }
 }
 
 /// The one install record writer, and it makes no kernel call: it writes the
@@ -12840,7 +12889,8 @@ fn landlock_file_row_journey(
 #[test]
 fn linux_wallet_file_row_is_refused_outside_storage_root() {
     let binary = Path::new(PROVIDER_BINARY);
-    let fixture = landlock_file_fixture(WALLET_PROVIDER, binary, LANDLOCK_LOADER_PATHS);
+    let loader = landlock_loader_paths(WALLET_PROVIDER);
+    let fixture = landlock_file_fixture(WALLET_PROVIDER, binary, &loader);
     landlock_file_row_journey(
         WALLET_PROVIDER,
         binary,
@@ -12892,7 +12942,8 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
 #[test]
 fn linux_did_file_row_is_refused_outside_storage_root() {
     let binary = provider_binary(DID_PROVIDER);
-    let fixture = landlock_file_fixture(DID_PROVIDER, binary, LANDLOCK_LOADER_PATHS);
+    let loader = landlock_loader_paths(DID_PROVIDER);
+    let fixture = landlock_file_fixture(DID_PROVIDER, binary, &loader);
     let label = "did-provider landlock file row";
     landlock_file_row_journey(
         DID_PROVIDER,
@@ -12947,7 +12998,8 @@ fn linux_did_file_row_is_refused_outside_storage_root() {
 #[test]
 fn linux_model_file_row_is_refused_outside_storage_root() {
     let binary = provider_binary(MODEL_PROVIDER);
-    let fixture = landlock_file_fixture(MODEL_PROVIDER, binary, LANDLOCK_LOADER_PATHS);
+    let loader = landlock_loader_paths(MODEL_PROVIDER);
+    let fixture = landlock_file_fixture(MODEL_PROVIDER, binary, &loader);
     landlock_file_row_journey(
         MODEL_PROVIDER,
         binary,

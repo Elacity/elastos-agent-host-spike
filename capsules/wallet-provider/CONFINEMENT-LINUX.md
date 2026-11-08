@@ -522,21 +522,19 @@ against each binary on this host; the run shows only that they are enough for bo
 providers on this distribution. Other distributions may keep them elsewhere, in
 which case the start is refused rather than unconfined.
 
+The model's `libm.so.6` entry is model-only: `landlock_loader_paths` appends
+`MODEL_LANDLOCK_LOADER_PATHS` for that provider alone.
+
 Two departures from "The frame" below stay open, so this row is lab evidence and
 not the designed policy:
 
-- **The loader.** This dynamic build needs its interpreter and three libraries,
+- **The loader.** This dynamic build needs its interpreter and library rules,
   where the frame allows no library rule. With the interpreter executable and
   `execve` on the list, a compromised provider could run a file it can read, such
   as one from its own `STORAGE_ROOT`, through the interpreter. That program runs
   under the same ruleset and filter, so it gains no path or syscall, but "only the
   bound executable runs" does not hold. A no-loader build removes it. Found by the
   night shift's did work (draft #1546).
-- **One loader table for every provider.** On x86-64 the model maps `libm.so.6`
-  and did and wallet do not, but the table is shared, so did and wallet also get
-  `READ_FILE` and `EXECUTE` on it. It is a world-readable system library, and a
-  file run through it stays under the same ruleset and filter. A per-provider
-  table, or a no-loader build, would remove it.
 - **Namespaces and the capability drop** stay unbuilt, so the frame's PID, IPC,
   mount and network rows are not carried here.
 
