@@ -353,11 +353,18 @@ both lists then answer `wallet-provider` and the did case fails.
   status`, `left: 0`, `right: 2`. That run did not exercise an inherited filter.
   The current test installs the inherited fixture first. Its required plant
   failure is `an inherited filter alone must not satisfy the launcher's own install`,
-  with equal before/after answers. This additional Linux run is NOT RUN in the
-  repair session, which runs on macOS. To exercise it, replace
-  `install_seccomp(&allow)` in `start_under_linux_policy` with `Ok(())`, then run
+  with equal before/after answers. Run on 8 Nov 2026 at `1e17701a` on the
+  aarch64 VM (kernel 7.0.0-42-generic, umask 022): with the launcher's
+  `install_seccomp(&allow)` replaced by `Ok(())` and the inherited fixture's and
+  the probe's installs intact, the fixture reported `Seccomp: 2 (inherited)` and
+  both the wallet and the did journey failed on `an inherited filter alone must
+  not satisfy the launcher's own install`, `left: -22`, `right: -22`; the file
+  was then restored to the same sha256. Receipt
+  `~/Sparks/office/evidence/b4-x86/pr1548-1e17701a-aarch64.log`, sha256
+  `43e21fdf0d79011d98179f281a79dfd70d7dfc649c4b338a0ff044e097895f0c`, which also
+  holds the WP218-WP220 and WP245 plant runs. To repeat it, make that
+  replacement in `start_under_linux_policy`, then run
   `cargo test --locked --manifest-path capsules/wallet-provider/Cargo.toml --test confine linux_wallet_journey_runs_under_the_seccomp_allow_list -- --exact --nocapture`.
-  The inherited fixture's install and the probe's install stay intact.
 - WP177 writes the named outside sibling in `status`'s ok arm, so the journey
   finds `ElastOS/SystemServices/seccomp-outside-write` present and fails with
   `the named sibling outside STORAGE_ROOT must stay absent after the run`. That
@@ -372,9 +379,10 @@ both lists then answer `wallet-provider` and the did case fails.
   `an inherited filter alone must not satisfy the launcher's own install`; and the
   outside-write plant makes it find `seccomp-outside-write` beside `STORAGE_PARENT`
   and fail on `the named sibling outside STORAGE_ROOT must stay absent after the
-  run`. The earlier did plant results used the wider policy and need a fresh
-  run after the shared policy requirement is resolved. Neither Linux plant can
-  print a CAUGHT line on the Mac.
+  run`. The skip-install plant on the did caller ran with the wallet one above
+  and failed the same way; the outside-write plant on did has not been rerun
+  under the current policy. Neither Linux plant can print a CAUGHT line on the
+  Mac.
 
 The earlier WP166 and WP167 plants were CAUGHT on the Mac, in
 `seccomp_keyctl_probe_supplies_every_argument_without_creation` and
@@ -469,7 +477,9 @@ Three things in the host decide whether these rows can run:
   with `the Landlock ABI cannot express the default-denial file rights`. That is
   the fail-closed rule working, and it is not a test bug.
 - `umask 022`. Ubuntu's default `umask 002` leaves group-writable test folders,
-  which did's identity store correctly refuses.
+  which did's identity store correctly refuses. The receipt script sets
+  `umask 022` before every command; receipts before `1e17701a` printed the login
+  shell's `0002` in their header, not the value their commands ran with.
 - A Linux run. On macOS these tests do not compile in, so a Mac gate says nothing
   about them.
 
