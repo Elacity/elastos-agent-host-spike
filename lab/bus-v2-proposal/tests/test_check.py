@@ -3597,7 +3597,7 @@ class CitationCheckTests(unittest.TestCase):
             check.problems(self._bare_draft(body)),
             [
                 "refuse: propose line at line %d is not a proposal "
-                "(missing Inputs:, Refusal:, Owner:)" % line,
+                "(missing Inputs:, Refusal:, Owner:, the proposal text)" % line,
                 "refuse: section 0 has no propose line for A5",
                 "refuse: section 0 has no proposal named grant handle under A5",
             ],

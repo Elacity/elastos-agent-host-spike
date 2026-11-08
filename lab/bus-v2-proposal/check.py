@@ -1111,9 +1111,10 @@ def _fence_after(line, fence):
 
 
 def _has_value(text):
-    """True when TEXT holds a character that is neither space nor punctuation."""
+    """True when TEXT holds a letter or digit outside category Cf."""
     for char in text:
-        if not char.isspace() and not unicodedata.category(char).startswith("P"):
+        category = unicodedata.category(char)
+        if category != "Cf" and category[0] in "LN":
             return True
     return False
 
@@ -1145,11 +1146,15 @@ def _empty_fields(line):
     """Return, in label order, the fields of LINE that hold no value."""
     positions = []
     for part in PROPOSE_PARTS:
-        found = line.find(part)
-        if found >= 0:
+        start = 0
+        while True:
+            found = line.find(part, start)
+            if found < 0:
+                break
             positions.append((found, part))
+            start = found + len(part)
     positions.sort()
-    empty = set(part for part in PROPOSE_PARTS if line.find(part) < 0)
+    empty = set(PROPOSE_PARTS) - set(part for _, part in positions)
     for index, (found, part) in enumerate(positions):
         stop = positions[index + 1][0] if index + 1 < len(positions) else len(line)
         if not _has_value(line[found + len(part):stop]):
@@ -1219,7 +1224,7 @@ def proposal_refusals(text):
         body = parsed[PROPOSE_LINE.search(parsed).end():]
         labels = [body.find(part) for part in PROPOSE_PARTS if part in body]
         preamble = body[:min(labels)] if labels else body
-        if not preamble.strip() and len(missing) < len(PROPOSE_PARTS):
+        if not _has_value(preamble) and len(missing) < len(PROPOSE_PARTS):
             missing.append("the proposal text")
         if name is None and "Name:" not in missing:
             missing.append("Name:")
