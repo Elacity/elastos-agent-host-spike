@@ -4,16 +4,13 @@ test: ledger::model_forged_identity_does_not_pick_the_reserve_ceiling
 --- old
         let key = self.ceiling_key(request.handle);
 --- new
-        let stored = self
-            .grants
-            .get(&request.handle)
-            .expect("resolved grant")
-            .record
-            .identity
-            .clone();
-        let key = request
-            .forged_identity
-            .clone()
-            .filter(|forged| self.grants.values().any(|grant| grant.record.identity == *forged))
-            .unwrap_or(stored);
+        let other = request.forged_identity.as_deref().and_then(|forged| {
+            self.grants
+                .iter()
+                .find(|(handle, grant)| {
+                    **handle != request.handle && grant.record.identity == forged
+                })
+                .map(|(handle, _)| self.ceiling_key(*handle))
+        });
+        let key = other.unwrap_or_else(|| self.ceiling_key(request.handle));
 --- end
