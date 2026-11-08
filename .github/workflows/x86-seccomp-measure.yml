@@ -28,22 +28,6 @@ jobs:
       - name: build the confine tests
         working-directory: capsules/wallet-provider
         run: cargo test --test confine --no-run
-      - name: drop one permission at a time under the real filter
-        working-directory: capsules/wallet-provider
-        run: |
-          cargo test --test confine --no-run -q 2>/dev/null || true
-          J="linux_did_journey_runs_under_the_seccomp_allow_list linux_wallet_journey_runs_under_the_seccomp_allow_list linux_model_journey_runs_under_the_seccomp_allow_list linux_did_file_row_is_refused_outside_storage_root linux_wallet_file_row_is_refused_outside_storage_root linux_model_file_row_is_refused_outside_storage_root"
-          for item in syscall:arch_prctl syscall:poll syscall:mkdir syscall:unlink syscall:access syscall:epoll_wait loader:/lib64/ld-linux-x86-64.so.2 loader:/lib/x86_64-linux-gnu/libc.so.6 loader:/lib/x86_64-linux-gnu/libgcc_s.so.1 loader:/lib/x86_64-linux-gnu/libm.so.6; do
-            (cd ../.. && python3 .github/drop-one.py "${item%%:*}" "${item#*:}")
-            echo "=== without $item"
-            for t in $J; do
-              out=$(cargo test --test confine "$t" -- --exact --test-threads=1 2>&1 || true)
-              if echo "$out" | grep -q "test result: ok. 1 passed"; then echo "  pass  $t"; else
-                why=$(echo "$out" | grep -oE "(standard error: .{0,140}|init answered .{0,140}|must answer: .{0,140}|child signal: [^;]*|could not be added with errno [0-9]+)" | head -1)
-                echo "  FAIL  $t :: $why"; fi
-            done
-            git checkout -q -- tests/confine.rs
-          done
       - name: run the whole confine suite on x86-64
         working-directory: capsules/wallet-provider
         run: cargo test --test confine --no-fail-fast -- --test-threads=2 2>&1 | grep -E "test result|FAILED|panicked" -A1 | cut -c1-200; cargo test --test confine linux_model_file_row_is_refused_outside_storage_root -- --exact 2>&1 | grep -oE "(child exit|child signal|standard error).{0,400}" || true
