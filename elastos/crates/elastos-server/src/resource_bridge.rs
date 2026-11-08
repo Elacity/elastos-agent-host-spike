@@ -4373,8 +4373,11 @@ mod tests {
             .contains("local runtime data directory"));
     }
 
-    /// The provider's ownership rule: a run is read only by the principal
-    /// and capsule its binding names (`assert_run_owner`).
+    /// Stands in for the model-provider capsule, which this crate cannot link
+    /// (its own workspace; its library exports only `run_main`). A run is
+    /// created from the contract's create binding under the contract's run
+    /// id, and reached only by the principal and capsule that created it:
+    /// `assert_run_owner` in capsules/model-provider/src/state.rs.
     #[derive(Default)]
     struct OwnedRunsModelProvider {
         requests: Mutex<Vec<serde_json::Value>>,
@@ -4396,26 +4399,46 @@ mod tests {
             &self,
             request: &serde_json::Value,
         ) -> Result<serde_json::Value, ProviderError> {
+            use elastos_model_contract::{RuntimeAccessBinding, RuntimeCreateBinding};
             self.requests.lock().await.push(request.clone());
-            let field = |key: &str| request["runtime_binding"][key].as_str().unwrap_or("");
-            let caller = (
-                field("principal_id").to_string(),
-                field("capsule_id").to_string(),
-            );
-            let run_id = request["run_id"].as_str().unwrap_or("");
+            let refused = |code: &str| serde_json::json!({"status": "error", "code": code});
+            let binding = request["runtime_binding"].clone();
+            let field = |key: &str| request[key].as_str().unwrap_or("");
+            if request["op"] == "runs_create" {
+                let created = serde_json::from_value::<RuntimeCreateBinding>(binding)
+                    .ok()
+                    .filter(|b| {
+                        let input = &request["input"];
+                        b.validate(field("offer_id"), field("operation"), input)
+                            .is_ok()
+                    });
+                let Some(created) = created else {
+                    return Ok(refused("invalid_request"));
+                };
+                let run_id = elastos_model_contract::model_run_id(&created);
+                let owner = (created.principal_id, created.capsule_id);
+                self.owners.lock().await.insert(run_id.clone(), owner);
+                return Ok(serde_json::json!({"status": "ok", "data": {"run_id": run_id}}));
+            }
+            let run_id = field("run_id");
+            let access = serde_json::from_value::<RuntimeAccessBinding>(binding)
+                .ok()
+                .filter(|b| b.validate(run_id).is_ok());
+            let Some(access) = access else {
+                return Ok(refused("invalid_request"));
+            };
             Ok(match self.owners.lock().await.get(run_id) {
-                Some(owner) if *owner != caller => {
-                    serde_json::json!({"status": "error", "code": "unauthorized_run_access"})
+                None => refused("run_not_found"),
+                Some(owner) if *owner != (access.principal_id, access.capsule_id) => {
+                    refused("unauthorized_run_access")
                 }
-                _ => serde_json::json!({"status": "ok", "data": {"run_id": run_id}}),
+                Some(_) => serde_json::json!({"status": "ok", "data": {"run_id": run_id}}),
             })
         }
     }
 
     const ALICE: &str = "person:local:alice";
     const BOB: &str = "person:local:bob";
-    const ALICE_RUN: &str =
-        "run:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     async fn model_bus(
         principal: Option<&str>,
@@ -4478,17 +4501,45 @@ mod tests {
         assert!(grant.starts_with("capability:"), "{grant}");
     }
 
+    /// Alice's capsule creates a run on the Bus and can get, stream and
+    /// cancel it. Bob in the same capsule, and Alice in another capsule, are
+    /// refused each of those even with a valid body binding naming hers.
     #[tokio::test]
-    async fn another_principals_bus_capsule_cannot_read_a_run() {
-        let (ctx, provider, _temp) = model_bus(Some(BOB), "capsule-b").await;
-        let mut owners = provider.owners.lock().await;
-        owners.insert(ALICE_RUN.into(), (ALICE.into(), "capsule-x".into()));
-        drop(owners);
-        let body = serde_json::json!({"run_id": ALICE_RUN, "request_id": "model-v1:1:n2",
-            "runtime_binding": {"principal_id": ALICE, "capsule_id": "capsule-x"}});
-        let response = model_invoke(&ctx, "runs_get", Action::Read, body).await;
-        let result = &response["response"]["result"];
-        assert_eq!(result["code"], "unauthorized_run_access", "{response}");
+    async fn a_bus_run_answers_only_the_principal_and_capsule_that_created_it() {
+        let (alice, _provider, _temp) = model_bus(Some(ALICE), "capsule-x").await;
+        let created = model_invoke(&alice, "runs_create", Action::Execute, model_create("m")).await;
+        let run_id = created["response"]["result"]["data"]["run_id"].clone();
+        let run_id = run_id.as_str().expect("created run id").to_string();
+        let forged = elastos_model_contract::RuntimeAccessBinding {
+            schema: elastos_model_contract::RUNTIME_ACCESS_BINDING_SCHEMA.to_string(),
+            principal_id: ALICE.into(),
+            session_id: "capsule-x".into(),
+            capsule_id: "capsule-x".into(),
+            grant_id: "capability:forged".into(),
+            request_id: "model-v1:1:n2".into(),
+            run_id: run_id.clone(),
+        };
+        let body = serde_json::json!({"run_id": run_id, "request_id": "model-v1:1:n2",
+            "runtime_binding": forged});
+        let (mut bob, mut elsewhere) = (alice.clone(), alice.clone());
+        bob.principal_id = Some(BOB.to_string());
+        elsewhere.capsule_id = "capsule-y".to_string();
+        for (op, action) in [
+            ("runs_get", Action::Read),
+            ("runs_events", Action::Read),
+            ("runs_cancel", Action::Execute),
+        ] {
+            for intruder in [&bob, &elsewhere] {
+                let response = model_invoke(intruder, op, action, body.clone()).await;
+                let code = &response["response"]["result"]["code"];
+                assert_eq!(code, "unauthorized_run_access", "{op}: {response}");
+            }
+            let response = model_invoke(&alice, op, action, body.clone()).await;
+            assert_eq!(
+                response["response"]["result"]["status"], "ok",
+                "{op}: {response}"
+            );
+        }
     }
 
     #[tokio::test]
