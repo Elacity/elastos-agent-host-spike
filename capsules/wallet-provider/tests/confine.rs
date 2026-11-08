@@ -10751,12 +10751,14 @@ fn seccomp_allow_list_names_the_provider_it_was_built_for() {
 /// `MODEL_RUNTIME_ESSENTIALS` or `SECCOMP_SYSCALL_NUMBERS`, so a plant that
 /// widens one of those tables cannot also widen this check. Each call reaches
 /// another task, another process's memory, the kernel, a filesystem, a
-/// namespace, a keyring or a kernel-instrumentation interface.
+/// namespace, a keyring or a kernel-instrumentation interface. On a Linux host
+/// `model_syscall_lists_match_libc` compares that host's column with libc.
 const MODEL_FORBIDDEN_CALLS: &[(&str, u32, u32)] = &[
     ("ptrace", 101, 117),
     ("process_vm_readv", 310, 270),
     ("process_vm_writev", 311, 271),
-    ("kexec_load", 320, 104),
+    ("kexec_load", 246, 104),
+    ("kexec_file_load", 320, 294),
     ("init_module", 175, 105),
     ("finit_module", 313, 273),
     ("bpf", 321, 280),
@@ -10897,6 +10899,55 @@ fn seccomp_numbers_let_run(program: &[SeccompInstruction], audit_arch: u32) -> V
     candidates.dedup();
     candidates.retain(|&number| runs(program, 0, None, [number, audit_arch]));
     candidates
+}
+
+/// On a Linux host, each row of that architecture's model allow list and each
+/// forbidden call's number there is the number `libc::SYS_*` gives, so neither
+/// literal list can name a call by another call's number.
+#[cfg(target_os = "linux")]
+#[test]
+fn model_syscall_lists_match_libc() {
+    macro_rules! against_libc {
+        ($($name:ident = $number:literal,)*) => {
+            &[$((stringify!($name), $number, libc::$name as u32),)*]
+        };
+    }
+    #[cfg(target_arch = "x86_64")]
+    let allowed: &[(&str, u32, u32)] = model_allowed_x86_64!(against_libc);
+    #[cfg(target_arch = "aarch64")]
+    let allowed: &[(&str, u32, u32)] = model_allowed_aarch64!(against_libc);
+    for (name, number, libc_number) in allowed {
+        assert_eq!(
+            number, libc_number,
+            "the model allow list's {name} must be libc's"
+        );
+    }
+    macro_rules! libc_numbers {
+        ($($name:ident,)*) => {
+            [$((stringify!($name), libc::$name as u32),)*]
+        };
+    }
+    let libc_forbidden = libc_numbers! {
+        SYS_ptrace, SYS_process_vm_readv, SYS_process_vm_writev, SYS_kexec_load,
+        SYS_kexec_file_load, SYS_init_module, SYS_finit_module, SYS_bpf, SYS_mount, SYS_umount2,
+        SYS_pivot_root, SYS_unshare, SYS_setns, SYS_keyctl, SYS_add_key, SYS_request_key,
+        SYS_perf_event_open, SYS_userfaultfd,
+    };
+    assert_eq!(libc_forbidden.len(), MODEL_FORBIDDEN_CALLS.len());
+    for (call, x86_64, aarch64) in MODEL_FORBIDDEN_CALLS {
+        let number = if cfg!(target_arch = "x86_64") {
+            x86_64
+        } else {
+            aarch64
+        };
+        let libc_name = format!("SYS_{call}");
+        let libc_number = libc_forbidden.iter().find(|(name, _)| **name == libc_name);
+        assert_eq!(
+            libc_number.map(|(_, number)| number),
+            Some(number),
+            "the forbidden list's {call} must be libc's number"
+        );
+    }
 }
 
 /// The model's final program lets run exactly the listed calls on each
