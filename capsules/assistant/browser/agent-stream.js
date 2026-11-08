@@ -2385,12 +2385,32 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
   };
   window.addEventListener("resize", onResizeFollow, { passive: true });
 
+  let followReleased = false;
   const releaseFollow = () => {
+    if (followReleased) return;
+    followReleased = true;
     if (streamFollowCleanup === releaseFollow) streamFollowCleanup = null;
-    /* The pin's frame must finish with the full reply still laid out. */
-    window.requestAnimationFrame(() => answerRow?.classList.remove("is-finalizing"));
-    stickToBottom = false;
-    endScrollTop = null;
+    /* The first content-visibility frame uses contain-intrinsic-size.
+       Record the laid-out box first. The 400px fallback clamps a reader
+       who was at the end. Follow stays on until the pin after that. */
+    const row = answerRow;
+    if (row?.isConnected) {
+      const height = row.offsetHeight;
+      const width = row.offsetWidth;
+      if (height > 0 && width > 0) {
+        row.style.containIntrinsicSize = `auto ${width}px auto ${height}px`;
+      }
+      row.classList.remove("is-finalizing");
+      if (height > 0 && row.offsetHeight + 1 < height) {
+        row.style.containIntrinsicSize = "";
+        row.classList.add("is-finalizing");
+      }
+    }
+    const following = Boolean(stickToBottom && scroller && generation === ctx.streamGeneration);
+    if (following) {
+      scroller.scrollTop = scroller.scrollHeight;
+      noteScrollPosition();
+    }
     if (followRaf) {
       window.cancelAnimationFrame(followRaf);
       followRaf = 0;
@@ -2413,6 +2433,20 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       scroller?.classList.remove("is-live-streaming", "is-follow-bottom");
       updateJumpToLatestVisibility();
     }
+    if (!following) {
+      stickToBottom = false;
+      endScrollTop = null;
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      if (stickToBottom && scroller && generation === ctx.streamGeneration) {
+        scroller.scrollTop = scroller.scrollHeight;
+        noteScrollPosition();
+      }
+      stickToBottom = false;
+      endScrollTop = null;
+      if (generation === ctx.streamGeneration) updateJumpToLatestVisibility();
+    });
   };
   streamFollowCleanup = releaseFollow;
 
