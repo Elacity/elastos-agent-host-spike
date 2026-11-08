@@ -6285,6 +6285,7 @@ const STARTUP_RULES: [&str; 2] = [
 const MODEL_ROOT_READ_RULE: &str = r#"(allow file-read-data (literal "/"))"#;
 /// The calls a process makes reading the root directory at startup.
 const ROOT_READ_SYSCALLS: &[&str] = &[
+    "access",
     "faccessat",
     "fstat",
     "getdents64",
@@ -6567,6 +6568,7 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
     (
         SHARED_RULES[1],
         &[
+            "access",
             "faccessat",
             "fstat",
             "getdents64",
@@ -6584,6 +6586,7 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
     (
         SHARED_RULES[2],
         &[
+            "access",
             "faccessat",
             "fchmod",
             "fdatasync",
@@ -6593,6 +6596,7 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
             "getdents64",
             "linkat",
             "lseek",
+            "mkdir",
             "mkdirat",
             "newfstatat",
             "openat",
@@ -6604,6 +6608,7 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
             "readv",
             "renameat2",
             "statx",
+            "unlink",
             "unlinkat",
             "write",
             "writev",
@@ -6625,6 +6630,8 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
 /// so each keeps the default decision, and the journey's sweep proves the
 /// refusal on the Linux host.
 const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
+    // x86-64 only: aarch64 sets its thread pointer without a call.
+    ("arch_prctl", Some(158), None),
     ("bpf", Some(321), Some(280)),
     ("brk", Some(12), Some(214)),
     ("clone", Some(56), Some(220)),
@@ -6639,6 +6646,8 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("execveat", Some(322), Some(281)),
     ("exit", Some(60), Some(93)),
     ("exit_group", Some(231), Some(94)),
+    // x86-64 only, the older form of faccessat that glibc calls there.
+    ("access", Some(21), None),
     ("faccessat", Some(269), Some(48)),
     ("fchmod", Some(91), Some(52)),
     ("fcntl", Some(72), Some(25)),
@@ -6655,6 +6664,8 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("linkat", Some(265), Some(37)),
     ("lseek", Some(8), Some(62)),
     ("madvise", Some(28), Some(233)),
+    // x86-64 only, the older form of mkdirat that glibc calls there.
+    ("mkdir", Some(83), None),
     ("mkdirat", Some(258), Some(34)),
     ("mmap", Some(9), Some(222)),
     ("mount", Some(165), Some(40)),
@@ -6664,6 +6675,8 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("openat", Some(257), Some(56)),
     ("openat2", Some(437), Some(437)),
     ("pidfd_getfd", Some(438), Some(438)),
+    // x86-64 only: aarch64 has ppoll alone.
+    ("poll", Some(7), None),
     ("ppoll", Some(271), Some(73)),
     ("pread64", Some(17), Some(67)),
     ("prlimit64", Some(302), Some(261)),
@@ -6689,6 +6702,8 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("statx", Some(332), Some(291)),
     ("sysinfo", Some(99), Some(179)),
     ("uname", Some(63), Some(160)),
+    // x86-64 only, the older form of unlinkat that glibc calls there.
+    ("unlink", Some(87), None),
     ("unlinkat", Some(263), Some(35)),
     ("write", Some(1), Some(64)),
     ("writev", Some(20), Some(66)),
@@ -6861,6 +6876,9 @@ impl SeccompAllowList {
             .map(|(syscall, _)| *syscall)
             .chain(runtime.iter().copied())
         {
+            if seccomp_syscall_number(syscall, self.audit_arch).is_none() {
+                continue;
+            }
             if !syscalls.contains(&syscall) {
                 syscalls.push(syscall);
             }
@@ -6936,6 +6954,11 @@ fn seccomp_allow_list_from_declared_rights(
             ));
         };
         for syscall in row.1 {
+            // A row may name an older call one architecture alone has; a
+            // target without it admits nothing for that name.
+            if seccomp_syscall_number(syscall, SECCOMP_AUDIT_ARCH).is_none() {
+                continue;
+            }
             if !syscalls.contains(syscall) {
                 syscalls.push(syscall);
             }
@@ -7405,6 +7428,7 @@ struct LandlockRuleset {
 /// `CONFINEMENT-LINUX.md` names; the run there shows the list is enough for both.
 /// The paths stay here so the ruleset the installer would apply is the one the
 /// Mac test reads. The table is compiled on every OS.
+#[cfg(not(target_arch = "x86_64"))]
 const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
     (
         "/lib/ld-linux-aarch64.so.1",
@@ -7426,6 +7450,30 @@ const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
         "/lib/aarch64-linux-gnu/libm.so.6",
         "without READ_FILE here the loader fails to map libm.so.6 and exits with \
          `error while loading shared libraries: libm.so.6: cannot open shared object file`",
+    ),
+];
+
+/// The x86-64 loader and the libraries both providers map there, read from
+/// `readelf -l` and `ldd` on GitHub's ubuntu-24.04 runner (glibc 2.39, run
+/// 42447112526): the interpreter `/lib64/ld-linux-x86-64.so.2`, a link to
+/// `/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2` that the `O_PATH` open follows,
+/// then `libc.so.6` and `libgcc_s.so.1`. Neither binary maps `libm.so.6` there,
+/// so it takes no rule. The drop-one measurement the aarch64 entries carry has
+/// not been made on x86-64; each note says what the entry is for.
+#[cfg(target_arch = "x86_64")]
+const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
+    (
+        "/lib64/ld-linux-x86-64.so.2",
+        "the interpreter both x86-64 providers name in PT_INTERP; execve needs \
+         EXECUTE here to enter it and READ_FILE for it to map itself",
+    ),
+    (
+        "/lib/x86_64-linux-gnu/libc.so.6",
+        "ldd on both x86-64 providers names libc.so.6; the loader maps it with READ_FILE",
+    ),
+    (
+        "/lib/x86_64-linux-gnu/libgcc_s.so.1",
+        "ldd on both x86-64 providers names libgcc_s.so.1; the loader maps it with READ_FILE",
     ),
 ];
 
@@ -8343,6 +8391,12 @@ impl std::fmt::Display for SeccompLaunchWriteFailure {
 /// Linux-only.
 const LAUNCH_ESSENTIALS: &[(&str, &str)] = &[
     (
+        "arch_prctl",
+        "arch_prctl(ARCH_SET_FS, 0x7f937e346780) refused as the loader set up \
+         thread-local storage on x86-64, after which glibc exited 127 with \
+         \"Cannot allocate TLS block\"",
+    ),
+    (
         "close",
         "close(3) refused in the loader, before the first mapping",
     ),
@@ -8367,6 +8421,12 @@ const LAUNCH_ESSENTIALS: &[(&str, &str)] = &[
         "ppoll",
         "ppoll([{fd=0, events=0}, {fd=1, events=0}, {fd=2, events=0}], 3, {tv_sec=0, \
          tv_nsec=0}, NULL, 0) refused while the provider waits",
+    ),
+    (
+        "poll",
+        "poll([{fd=0, events=0}, {fd=1, events=0}, {fd=2, events=0}], 3, 0) refused \
+         on x86-64 while the provider checks its standard descriptors, after which \
+         it aborted and, with tgkill refused, took SIGSEGV",
     ),
     (
         "rt_sigaction",
@@ -12956,6 +13016,29 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
     // `libgcc_s.so.1: cannot close file descriptor`, an unclean exit, a `rand`
     // seed panic, `SIGSEGV`, `libgcc_s.so.1: cannot change memory protections`,
     // `SIGTRAP`, and `assertion failed: signal(libc::SIGPIPE, handler)`.
+    //
+    // arch_prctl exists only on x86-64, so the aarch64 run above could not name
+    // it. On GitHub's ubuntu-24.04 runner (x86-64, kernel 7.0.0-1017-azure,
+    // glibc 2.39) the did journey, traced with strace -ff, failed at
+    // arch_prctl(ARCH_SET_FS, 0x7f937e346780) = -1 EACCES, and glibc exited 127
+    // with "Cannot allocate TLS block" (8 Nov, run 42446019401). The call sets
+    // only the calling thread's own registers and mappings, so it reaches no
+    // other process.
+    // With that row the same journeys then took SIGSEGV: the provider's check of
+    // its standard descriptors calls poll on x86-64, where aarch64 calls ppoll,
+    // and poll([{fd=0}, {fd=1}, {fd=2}], 3, 0) = -1 EACCES made it abort
+    // (run 42447112526). Every other refused call in that trace (brk,
+    // set_tid_address, set_robust_list, rseq, prlimit64, munmap) is one the
+    // aarch64 run also refuses and the provider tolerates.
+    // Then the providers started and their storage calls were refused. A run
+    // whose filter logged instead of refusing (measure branch only, run
+    // 42447514431) named the x86-64 calls the list lacked: mkdir (83), unlink
+    // (87) and access (21), the older forms of mkdirat, unlinkat and faccessat
+    // that glibc calls on x86-64 and that aarch64 does not have. Each joins the
+    // rows that hold its newer form. The other logged calls (brk, fcntl,
+    // getpid, munmap, prlimit64, rseq, sched_getaffinity, set_robust_list,
+    // set_tid_address, sigaltstack) exist on both and are refused on aarch64
+    // too, so they stay out.
 
     let allow = seccomp_probe_list(name).unwrap_or_else(|err| panic!("{err}"));
     assert_eq!(
@@ -15153,7 +15236,7 @@ fn linux_inexact_row_count_problems(document_name: &str, document: &str) -> Vec<
 
 /// The count a line states before `phrase`, as digits or as a number word.
 ///
-/// The document writes `Five rows have no exact Linux rule`, so the count is the
+/// The document writes `Six rows have no exact Linux rule`, so the count is the
 /// last word before the phrase. A line whose text before the phrase states no
 /// digits and no number word answers `None`, which the caller refuses instead of
 /// reading the count as zero.
@@ -20003,7 +20086,7 @@ fn linux_contract_table_check_refuses_each_bad_table() {
             None
         )),
         vec![format!(
-            "{WALLET_PROVIDER} CONFINEMENT-LINUX.md: the table has 5 rows whose exactness starts \
+            "{WALLET_PROVIDER} CONFINEMENT-LINUX.md: the table has 6 rows whose exactness starts \
              No exact match, the opening line states 3, and {LINUX_INEXACT_HEADING} holds {bullets} \
              bullets, and the one count must be one number",
             bullets = inexact_bullets(&inexact)
@@ -20013,12 +20096,12 @@ fn linux_contract_table_check_refuses_each_bad_table() {
     assert_eq!(
         count(&tables.table(
             &rows,
-            Some("Five rows have no exact Linux rule."),
-            Some("- One bullet, where the table has five such rows.")
+            Some("Six rows have no exact Linux rule."),
+            Some("- One bullet, where the table has six such rows.")
         )),
         vec![format!(
-            "{WALLET_PROVIDER} CONFINEMENT-LINUX.md: the table has 5 rows whose exactness starts \
-             No exact match, the opening line states 5, and {LINUX_INEXACT_HEADING} holds 1 \
+            "{WALLET_PROVIDER} CONFINEMENT-LINUX.md: the table has 6 rows whose exactness starts \
+             No exact match, the opening line states 6, and {LINUX_INEXACT_HEADING} holds 1 \
              bullets, and the one count must be one number"
         )],
         "a bullet list that disagrees with the table must be refused"
@@ -20237,8 +20320,8 @@ impl LinuxContractTables {
                     WALLET_PROVIDER,
                     &self.table(
                         &rows,
-                        Some("Five rows have no exact Linux rule."),
-                        Some("- One bullet, where the table has five such rows."),
+                        Some("Six rows have no exact Linux rule."),
+                        Some("- One bullet, where the table has six such rows."),
                     ),
                 ),
             ),
@@ -20246,14 +20329,14 @@ impl LinuxContractTables {
                 "a document with no count line",
                 linux_inexact_row_count_problems(
                     WALLET_PROVIDER,
-                    // Five bullets, one per inexact row, and no line states the
+                    // Six bullets, one per inexact row, and no line states the
                     // count, so only the missing-line refusal can answer here.
                     &self.table(
                         &rows,
                         None,
                         Some(
                             "- One bullet per inexact row.\n- The second.\n- The third.\n\
-                             - The fourth.\n- The fifth.",
+                             - The fourth.\n- The fifth.\n- The sixth.",
                         ),
                     ),
                 ),
