@@ -464,6 +464,23 @@ def _span_target(span):
     return rel, int(number)
 
 
+def citation_line(text, marker):
+    """Return the 1-based draft line that holds MARKER, or None when absent."""
+    for number, line in enumerate(text.splitlines(), 1):
+        if marker in line:
+            return number
+    return None
+
+
+def citation_has_no_block(text, marker):
+    """True when the draft cites MARKER once and no indented block follows it.
+
+    A marker the draft does not cite is not this rule: a short draft cites only
+    a few spans, so an absent marker leaves the next target to run.
+    """
+    return text.count(marker) == 1 and not _remainders(text, marker)
+
+
 def _remainders(text, marker):
     """Return the indented remainders after MARKER, in order."""
     lines = text.splitlines()
@@ -1004,8 +1021,10 @@ def _quote_refusal(root, text, sha, target, refused_spans=frozenset()):
 
     The pin already refused this citation, or the marker it reads, with a
     structural reason: one citation has one reason, so no quote refusal runs.
-    The walk has no remainder for MARKER: no refusal, and the next target runs.
-    The marker is not one line: refused before the line read. The pinned line is
+    The marker stands once with no indented block under it: the citation has no
+    quoted block, refused with its draft line before the line read. The draft
+    does not cite MARKER: no refusal, and the next target runs. The marker is
+    not one line: refused before the line read. The pinned line is
     absent, or no window holds the cited line: the quotation is not in the pin.
     The comparison fails, including a zero score: the quotation does not match.
     """
@@ -1014,6 +1033,11 @@ def _quote_refusal(root, text, sha, target, refused_spans=frozenset()):
         return None
     if text.count(marker) > 1:
         return "refuse: quoted line is not one line: " + marker.strip("`")
+    if citation_has_no_block(text, marker):
+        return "refuse: citation %s at line %s has no quoted block" % (
+            span,
+            citation_line(text, marker),
+        )
     if not _remainders(text, marker):
         return None
     rel, number = _span_target(span)
@@ -1412,6 +1436,7 @@ def problems(root):
         for span in _spans(text):
             match = CITATION.fullmatch(span)
             if match is None:
+                # Deliberate: only path:line backtick spans are citations.
                 continue
             reason = _refusal(root, match, sha)
             if reason is not None:

@@ -4828,7 +4828,7 @@ class CitationCheckTests(unittest.TestCase):
     def test_draft_without_the_owned_span_adds_no_quote_refusal(self):
         bodies = (
             "Open `pkg/kept.rs:1`.\n\n    /// Not the owned quote.\n",
-            "`" + OWNED_SPAN + "` states the journal root.\n\n  /// Two-space indent.\n",
+            "`pkg/kept.rs:1` names a kept line; the owned span is absent.\n",
         )
         for body in bodies:
             root = self._draft(
@@ -4839,6 +4839,52 @@ class CitationCheckTests(unittest.TestCase):
                 },
             )
             self.assertEqual(check.problems(root), [], body)
+
+    def test_citation_without_a_quoted_block_is_refused(self):
+        # The marker stands once with no four-space indented line under it: the
+        # citation has no quoted block, refused with the draft line it stands on.
+        bodies = (
+            "`" + OWNED_SPAN + "` states the journal root.\n",
+            "`" + OWNED_SPAN + "` states the journal root.\n\n  /// Not a block.\n",
+        )
+        files = {OWNED_REL: self._source(OWNED_QUOTE)}
+        for body in bodies:
+            self.assertEqual(
+                check.problems(self._draft(body, files)),
+                [
+                    "refuse: citation "
+                    + OWNED_SPAN
+                    + " at line 2 has no quoted block"
+                ],
+            )
+
+    def test_citation_with_its_quoted_block_passes(self):
+        # The same citation with its four-space quotation under it is scored and
+        # adds no refusal. The owned block holds both lines the walk reads.
+        body = self._quote_body(OWNED_QUOTE, NEXT_QUOTE)
+        files = {OWNED_REL: self._source(OWNED_QUOTE, NEXT_QUOTE)}
+        self.assertEqual(check.problems(self._draft(body, files)), [])
+
+    def test_non_citation_backtick_span_adds_no_refusal(self):
+        # A backtick span that names no path:line is not a citation, so the
+        # gate skips it and the absent block under it stays silent.
+        body = (
+            "The `Runtime` keeps the `Users/self` name.\n"
+            "\n"
+            "    Runtime::start()\n"
+        )
+        self.assertEqual(check.problems(self._draft(body, {})), [])
+
+    def test_falsifier_citation_without_a_block_is_caught(self):
+        # A helper that never reports a missing block drops the new refusal, so
+        # the blockless citation adds no line and this test fails.
+        self._caught(
+            "citation_has_no_block",
+            lambda text, marker: False,
+            self.test_citation_without_a_quoted_block_is_refused,
+            "has no quoted block",
+            "CAUGHT citation-has-no-block",
+        )
 
     def test_quote_refusal_waits_for_a_known_pin(self):
         body = self._quote_body(OWNED_QUOTE + "x")
@@ -5114,7 +5160,7 @@ class CitationCheckTests(unittest.TestCase):
         )
         self.assertEqual(check.problems(root), [])
 
-    def test_deny_span_without_an_indented_line_adds_no_refusal(self):
+    def test_deny_span_without_an_indented_line_is_refused(self):
         body = (
             "`"
             + DENY_SPAN
@@ -5122,8 +5168,9 @@ class CitationCheckTests(unittest.TestCase):
             "\n"
             "The block follows.\n"
         )
+        expected = "refuse: citation " + DENY_SPAN + " at line 2 has no quoted block"
         got, reads = self._pinned_reads(body, {DENY_REL: self._deny_source()})
-        self.assertEqual(got, [])
+        self.assertEqual(got, [expected])
         self.assertEqual(reads, [])
 
     def test_deny_quoted_line_absent_from_the_pinned_commit_is_refused(self):
@@ -5625,11 +5672,12 @@ class CitationCheckTests(unittest.TestCase):
         )
         self.assertEqual(check.problems(root), [])
 
-    def test_grant_span_without_an_indented_line_adds_no_refusal(self):
+    def test_grant_span_without_an_indented_line_is_refused(self):
+        expected = "refuse: citation " + GRANT_SPAN + " at line 2 has no quoted block"
         got, reads = self._pinned_reads(
             self._grant_block(count=0), {GRANT_REL: self._journal_source()}
         )
-        self.assertEqual(got, [])
+        self.assertEqual(got, [expected])
         self.assertEqual(reads, [])
 
     def test_grant_quoted_line_absent_from_the_pinned_commit_is_refused(self):
@@ -5850,12 +5898,13 @@ class CitationCheckTests(unittest.TestCase):
         )
         self.assertEqual(check.problems(root), [])
 
-    def test_write_span_without_an_indented_line_adds_no_write_refusal(self):
+    def test_write_span_without_an_indented_line_is_refused(self):
+        expected = "refuse: citation " + WRITE_SPAN + " at line 2 has no quoted block"
         got, reads = self._pinned_reads(
             self._ask_block(count=0, spans=(WRITE_SPAN,)),
             {ASK_REL: self._ask_source()},
         )
-        self.assertEqual(got, [])
+        self.assertEqual(got, [expected])
         self.assertEqual(reads, [])
 
     def test_write_quoted_line_absent_from_the_pinned_commit_is_refused(self):
@@ -6491,11 +6540,14 @@ class CitationCheckTests(unittest.TestCase):
         )
         self.assertEqual(check.problems(root), [])
 
-    def test_kind_read_span_without_an_indented_line_adds_no_refusal(self):
+    def test_kind_read_span_without_an_indented_line_is_refused(self):
+        expected = (
+            "refuse: citation " + KIND_READ_SPAN + " at line 2 has no quoted block"
+        )
         got, reads = self._pinned_reads(
             self._kind_block(count=0), {KIND_REL: self._kind_source()}
         )
-        self.assertEqual(got, [])
+        self.assertEqual(got, [expected])
         self.assertEqual(reads, [])
 
     def test_kind_read_quoted_line_absent_from_the_pinned_commit_is_refused(self):
@@ -7048,15 +7100,15 @@ class CitationCheckTests(unittest.TestCase):
                 name,
             )
 
-    def test_kind_line_span_without_an_indented_line_adds_no_refusal(self):
+    def test_kind_line_span_without_an_indented_line_is_refused(self):
+        # Each one-line arm stands alone with no indented line under it, so the
+        # arm is refused on its own draft line and the walk reads nothing.
         for name, number, span, quote, index in KIND_LINE_ARMS:
-            body = self._kind_line_body(spans=[span], indented=False)
+            body = self._kind_line_body(block="", spans=[span], indented=False)
+            expected = "refuse: citation %s at line 2 has no quoted block" % span
             got, reads = self._pinned_reads(body, {KIND_REL: self._kind_source()})
-            self.assertEqual(got, [], name)
-            present = self._present_decisions(body)
-            self.assertEqual(
-                reads, [other for other in present if other != number], name
-            )
+            self.assertEqual(got, [expected], name)
+            self.assertEqual(reads, [], name)
 
     def test_kind_edit_mismatch_stops_the_run_decision(self):
         body = self._kind_line_body(
@@ -7489,10 +7541,13 @@ class CitationCheckTests(unittest.TestCase):
                 span,
             )
 
-    def test_file_ask_span_without_an_indented_line_adds_no_refusal(self):
+    def test_file_ask_span_without_an_indented_line_is_refused(self):
+        expected = (
+            "refuse: citation " + OBSERVE_SPAN + " at line 2 has no quoted block"
+        )
         body = self._file_ask_body(indented=False)
         got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
-        self.assertEqual(got, [])
+        self.assertEqual(got, [expected])
         self.assertEqual(reads, [])
 
     def test_file_ask_quoted_line_past_the_pin_is_refused(self):
@@ -7925,12 +7980,15 @@ class CitationCheckTests(unittest.TestCase):
             self.assertEqual(got, [], index)
             self.assertEqual(reads, [IS_WRITE_NUMBER], index)
 
-    def test_edit_walks_without_an_indented_line_add_no_refusal(self):
+    def test_edit_walks_without_an_indented_line_are_refused(self):
+        expected = (
+            "refuse: citation " + OBSERVE_SPAN + " at line 2 has no quoted block"
+        )
         got, reads = self._pinned_reads(
             self._edit_walk_body(indented=False),
             {OWNED_REL: self._file_ask_source()},
         )
-        self.assertEqual(got, [])
+        self.assertEqual(got, [expected])
         self.assertEqual(reads, [])
 
     def test_edit_walk_quoted_line_past_the_pin_is_refused(self):
@@ -8402,12 +8460,15 @@ class CitationCheckTests(unittest.TestCase):
                 reads, [WRITE_ACTION_NUMBER, DEFAULT_ACTION_NUMBER], index
             )
 
-    def test_provider_spans_without_an_indented_line_add_no_refusal(self):
+    def test_provider_spans_without_an_indented_line_are_refused(self):
+        expected = (
+            "refuse: citation " + SCHEME_SPAN + " at line 2 has no quoted block"
+        )
         got, reads = self._pinned_reads(
             self._provider_body(indented=False),
             {PROVIDER_REL: self._provider_source()},
         )
-        self.assertEqual(got, [])
+        self.assertEqual(got, [expected])
         self.assertEqual(reads, [])
 
     def test_provider_quoted_line_absent_from_the_pinned_commit_is_refused(self):
@@ -8839,12 +8900,15 @@ class CitationCheckTests(unittest.TestCase):
             reads, [BODY_DOC_NUMBER, CREATE_ONLY_NUMBER, PRESENT_REVISION_NUMBER]
         )
 
-    def test_run_body_spans_without_an_indented_line_add_no_refusal(self):
+    def test_run_body_spans_without_an_indented_line_are_refused(self):
+        expected = (
+            "refuse: citation " + NO_PROCESS_SPAN + " at line 2 has no quoted block"
+        )
         got, reads = self._pinned_reads(
             self._file_ask_body(groups=["run", "write_body"], indented=False),
             {OWNED_REL: self._file_ask_source()},
         )
-        self.assertEqual(got, [])
+        self.assertEqual(got, [expected])
         self.assertEqual(reads, [])
 
     def test_run_body_quoted_line_past_the_pin_is_refused(self):
@@ -9439,11 +9503,16 @@ class CitationCheckTests(unittest.TestCase):
         body = self._append_body(groups=["doc"])
         self.assertEqual(check.write_invoke_quote(body), WRITE_INVOKE_QUOTE)
 
-    def test_append_spans_without_an_indented_line_add_no_refusal(self):
+    def test_append_spans_without_an_indented_line_are_refused(self):
+        expected = (
+            "refuse: citation "
+            + APPEND_CONDITION_SPAN
+            + " at line 2 has no quoted block"
+        )
         got, reads = self._pinned_reads(
             self._append_body(indented=False), {OWNED_REL: self._append_source()}
         )
-        self.assertEqual(got, [])
+        self.assertEqual(got, [expected])
         self.assertEqual(reads, [])
 
     def test_append_quoted_line_past_the_pin_is_refused(self):
@@ -10287,11 +10356,14 @@ class CitationCheckTests(unittest.TestCase):
                 reads, [other for other in HOSTED_READ_ORDER if other != number], span
             )
 
-    def test_hosted_span_without_an_indented_line_adds_no_refusal(self):
+    def test_hosted_span_without_an_indented_line_is_refused(self):
+        expected = (
+            "refuse: citation " + NO_WRITE_SPAN + " at line 2 has no quoted block"
+        )
         got, reads = self._pinned_reads(
             self._hosted_body(indented=False), self._hosted_files()
         )
-        self.assertEqual(got, [])
+        self.assertEqual(got, [expected])
         self.assertEqual(reads, [])
 
     def test_hosted_quoted_line_past_the_pin_is_refused(self):
