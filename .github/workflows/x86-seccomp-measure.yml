@@ -37,7 +37,7 @@ jobs:
             (cd ../.. && python3 .github/drop-one.py "${item%%:*}" "${item#*:}")
             echo "=== without $item"
             for t in $J; do
-              out=$(cargo test --test confine "$t" -- --exact --test-threads=1 2>&1)
+              out=$(cargo test --test confine "$t" -- --exact --test-threads=1 2>&1 || true)
               if echo "$out" | grep -q "test result: ok. 1 passed"; then echo "  pass  $t"; else
                 why=$(echo "$out" | grep -oE "(standard error: .{0,140}|init answered .{0,140}|must answer: .{0,140}|child signal: [^;]*|could not be added with errno [0-9]+)" | head -1)
                 echo "  FAIL  $t :: $why"; fi
