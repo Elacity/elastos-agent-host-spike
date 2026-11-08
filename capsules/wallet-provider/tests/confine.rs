@@ -6661,9 +6661,8 @@ impl SeccompInstruction {
 
 /// The value the filter returns for a refused call: `SECCOMP_RET_ERRNO` with
 /// the deny marker.
-// MEASURE BRANCH ONLY: SECCOMP_RET_LOG, so every call the list lacks runs and is logged.
 const fn seccomp_deny_return() -> u32 {
-    0x7ffc_0000
+    0x0005_0000 | SECCOMP_DENY_ERRNO as u32
 }
 
 /// The generated Linux policy of one provider: the provider name, the audit

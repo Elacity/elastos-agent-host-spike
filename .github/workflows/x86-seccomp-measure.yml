@@ -26,16 +26,27 @@ jobs:
       - name: build the confine tests
         working-directory: capsules/wallet-provider
         run: cargo test --test confine --no-run
-      - name: log every call the list lacks (the filter logs instead of refusing)
+      - name: run the whole confine suite on x86-64
+        working-directory: capsules/wallet-provider
+        run: cargo test --test confine --no-fail-fast -- --test-threads=2 2>&1 | grep -E "test result|FAILED" || true
+      - name: trace the wallet journey
         working-directory: capsules/wallet-provider
         run: |
-          cat /proc/sys/kernel/seccomp/actions_logged
-          sudo sysctl -qw kernel.printk_ratelimit=0 kernel.printk_ratelimit_burst=100000
-          sudo dmesg -C
-          for t in linux_did_journey_runs_under_the_seccomp_allow_list linux_wallet_journey_runs_under_the_seccomp_allow_list linux_did_file_row_is_refused_outside_storage_root linux_wallet_file_row_is_refused_outside_storage_root; do
-            cargo test --test confine "$t" -- --exact --test-threads=1 2>&1 | grep -E "test result|panicked" -A1 | cut -c1-300 || true
+          mkdir -p "$RUNNER_TEMP/tr"
+          strace -ff -s 160 -o "$RUNNER_TEMP/tr/t" \
+            cargo test --test confine linux_wallet_journey_runs_under_the_seccomp_allow_list -- --exact --test-threads=1 || true
+          cd "$RUNNER_TEMP/tr"
+          for f in $(grep -l 'execve(".*/wallet-provider"' t.* | head -2); do
+            echo "=== $f (the provider)"
+            tail -45 "$f"
+            echo "=== refused in $f"
+            grep -E "= -1 E(ACCES|NOSYS)" "$f" || echo none
           done
-          echo "=== logged calls by process"
-          sudo dmesg | grep -E "type=1326|seccomp" | grep -oE 'comm="[^"]*".*syscall=[0-9]+' | sed -E 's/ exe=.*sig=[0-9]+//; s/ arch=[0-9a-f]+//' | sed -E 's/(comm="[^"]*").*(syscall=[0-9]+)/\1 \2/' | sort | uniq -c | sort -rn
-          echo "=== raw sample"
-          sudo dmesg | grep -E "type=1326" | head -5
+      - name: loader files the providers map on this host
+        run: |
+          for b in capsules/wallet-provider/target/debug/wallet-provider capsules/did-provider/target/debug/did-provider; do
+            echo "=== $b"
+            readelf -l "$b" | grep -i interpreter || true
+            ldd "$b" || true
+          done
+          ls -l /lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 || true
