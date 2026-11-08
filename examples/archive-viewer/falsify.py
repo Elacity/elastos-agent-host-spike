@@ -12,6 +12,14 @@ must still pass, so a mutant proves its own rule only. The file is restored
 from its saved bytes afterwards, also on error or Ctrl-C.
 The runner is the capsule kit's (`examples/capsule-kit/falsify`).
 
+`restore_interrupted_plants` recovers the source files a killed run left
+planted, for `SNAPSHOT_FILES`. Known limits: it copies the snapshot over the
+sources unconditionally, because that snapshot holds only clean bytes and
+cannot tell a source edited after a kill from the bytes a plant left, so an
+edit made after a kill is lost. The kit owner
+`examples/capsule-kit/surface/page-client.js`, which the page client mutants
+rewrite in place, is outside this snapshot.
+
 F-numbers here are the design's (examples/archive-viewer/DESIGN.md, "Falsifier
 plan"); the core covers F1, F2, F4, F5, F6, F6b, F6c, F7 to F17, F19 to F25,
 F26 to F28, F29 to F31, F32, F33, F40 to F42. The lettered cases F6d to F6f,
@@ -30,11 +38,19 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "capsule-kit" / "falsify"))
 import falsify_kit as kit  # noqa: E402
 
-SNAPSHOT_FILES = ("src/lib.rs", "src/zip.rs", "src/preview.rs", "src/request.rs")
+SNAPSHOT_FILES = (
+    "src/lib.rs",
+    "src/zip.rs",
+    "src/preview.rs",
+    "src/request.rs",
+    "surface/browser/reader.js",
+    "surface/browser/page-client.js",
+    "surface/browser/docs-render.js",
+)
 
 
 def restore_interrupted_plants(root=HERE):
-    """Restore a complete snapshot left by an interrupted verification run."""
+    """Restore the snapshot left by an interrupted verification run."""
     snapshot = pathlib.Path(root) / ".verify-snapshot"
     if not (snapshot / "INCOMPLETE").exists():
         return

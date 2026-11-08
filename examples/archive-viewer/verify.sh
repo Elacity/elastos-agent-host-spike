@@ -21,12 +21,15 @@ REPO_ROOT="$(cd "${VIEWER_DIR}/../.." && pwd)"
 WIT="${REPO_ROOT}/elastos/wit/elastos-bus-v1.wit"
 export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
 
-snapshot_keep=0
 host_log=""
 runtime_log=""
 
 snapshot_cleanup() {
-    if [[ $snapshot_keep -eq 0 ]]; then
+    # On a signal, Bash runs this EXIT trap in a subshell while the handler
+    # runs, and that copy sees status 0 and no marker. Only the main shell
+    # (BASHPID = $$) decides; the handler leaves a marker file instead of a
+    # variable, because a subshell's variable would not reach this trap.
+    if [[ "$BASHPID" -eq "$$" && ! -e "${VIEWER_DIR}/.verify-snapshot-keep" ]]; then
         rm -rf "${VIEWER_DIR}/.verify-snapshot"
     fi
     rm -f "$host_log" "$runtime_log"
@@ -34,9 +37,9 @@ snapshot_cleanup() {
 
 install_snapshot_traps() {
     trap snapshot_cleanup EXIT
-    trap 'snapshot_keep=1; exit 143' TERM
-    trap 'snapshot_keep=1; exit 130' INT
-    trap 'snapshot_keep=1; exit 129' HUP
+    trap 'touch "${VIEWER_DIR}/.verify-snapshot-keep"; exit 143' TERM
+    trap 'touch "${VIEWER_DIR}/.verify-snapshot-keep"; exit 130' INT
+    trap 'touch "${VIEWER_DIR}/.verify-snapshot-keep"; exit 129' HUP
 }
 
 RUNTIME=0
@@ -86,6 +89,7 @@ for name in SNAPSHOT_FILES:
     shutil.copyfile(HERE / name, saved)
 (snapshot / "INCOMPLETE").write_text("verification in progress\n")
 PY
+rm -f "${VIEWER_DIR}/.verify-snapshot-keep"
 install_snapshot_traps
 
 python3 -I "${REPO_ROOT}/examples/capsule-kit/scripts/check-manifest.py" \

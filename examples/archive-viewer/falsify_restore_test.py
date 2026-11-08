@@ -30,7 +30,6 @@ def snapshot_shell():
         functions.append(match.group())
     return '''set -euo pipefail
 VIEWER_DIR="$1"
-snapshot_keep=0
 host_log="$VIEWER_DIR/host.log"
 runtime_log="$VIEWER_DIR/runtime.log"
 touch "$host_log" "$runtime_log"
@@ -165,14 +164,29 @@ def test_fails(name):
 
 if __name__ == "__main__":
     if "--falsify" in sys.argv[1:]:
-        cases = [(
-            "an interrupted plant is left in the source",
-            HERE / "falsify.py",
-            [("def restore_interrupted_plants(root=HERE):\n",
-              "def restore_interrupted_plants(root=HERE):\n    return\n")],
-            ["RestoreTests.test_a_killed_falsifier_does_not_stay_planted"],
-        )]
+        cases = [
+            (
+                "a normal failure leaves the snapshot",
+                HERE / "verify.sh",
+                [('        rm -rf "${VIEWER_DIR}/.verify-snapshot"\n', "        :\n")],
+                ["RestoreTests.test_a_normal_failure_removes_the_snapshot"],
+            ),
+            (
+                "a signal removes the snapshot",
+                HERE / "verify.sh",
+                [("    trap 'touch \"${VIEWER_DIR}/.verify-snapshot-keep\"; exit 143' TERM\n",
+                  "    trap 'exit 143' TERM\n")],
+                ["RestoreTests.test_a_signal_keeps_the_clean_snapshot"],
+            ),
+            (
+                "an interrupted plant is left in the source",
+                HERE / "falsify.py",
+                [("def restore_interrupted_plants(root=HERE):\n",
+                  "def restore_interrupted_plants(root=HERE):\n    return\n")],
+                ["RestoreTests.test_a_killed_falsifier_does_not_stay_planted"],
+            ),
+        ]
         kit.main([(cases, None, test_fails, None, True, failing_tests)], args=[],
-                 done="all 1 archive restore falsifiers caught")
+                 done="all 3 archive restore falsifiers caught")
     else:
         unittest.main(verbosity=2)
