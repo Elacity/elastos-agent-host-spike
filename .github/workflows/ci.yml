@@ -48,7 +48,8 @@ env:
 jobs:
   # Fast, compile-free gate: formatting and script-based source proofs.
   # Compile jobs start beside it rather than after it; a failure here still
-  # fails the run, and cancel-on-failure stops a pull request run at once.
+  # fails the run, cancel-on-failure stops a same-repository pull request run at
+  # once, and a fork pull request's compile jobs wait for it through fork-gate.
   source-gate:
     name: source-gate
     runs-on: ubuntu-24.04
@@ -76,6 +77,33 @@ jobs:
         run: ./scripts/test-source-gate.sh product-ui
       - name: release artifact source proofs
         run: ./scripts/test-source-gate.sh release
+
+  # cancel-on-failure cannot run for a fork pull request (its token cannot cancel), so
+  # there the compile jobs wait here for source-gate's verdict and are skipped when it
+  # fails. Every other run passes this job at once and compiles beside the gate.
+  fork-gate:
+    name: fork-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+    steps:
+      - name: wait for source-gate on a fork pull request
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          jobs="repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100"
+          while true; do
+            # An unreadable listing waits again; the job timeout bounds the wait.
+            conclusion="$(gh api "$jobs" --jq '[.jobs[] | select(.name == "source-gate")][0].conclusion // "pending"')" || conclusion=pending
+            case "$conclusion" in
+              success) exit 0 ;;
+              pending) sleep 15 ;;
+              *) echo "::error::source-gate concluded $conclusion; this fork pull request's compile jobs are skipped"; exit 1 ;;
+            esac
+          done
 
   test-behaviour:
     name: test-behaviour
@@ -158,6 +186,7 @@ jobs:
     # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
     if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
     timeout-minutes: 45
+    needs: fork-gate
     container:
       image: ubuntu@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
     defaults:
@@ -226,6 +255,7 @@ jobs:
     # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
     if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
     timeout-minutes: 45
+    needs: fork-gate
     container:
       image: ubuntu@sha256:1cc7bb38a74c0e126716646e47c0b3c5c139547d386d5ff7a64cf3ea316ca523
     defaults:
@@ -292,6 +322,7 @@ jobs:
     name: lint
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    needs: fork-gate
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -349,6 +380,7 @@ jobs:
     name: lab-standin
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    needs: fork-gate
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -380,6 +412,7 @@ jobs:
     # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
     if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
     timeout-minutes: 60
+    needs: fork-gate
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -467,6 +500,7 @@ jobs:
     # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
     if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
     timeout-minutes: 45
+    needs: fork-gate
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -577,6 +611,7 @@ jobs:
     name: custody-harness-smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    needs: fork-gate
     if: (github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'push' && (github.ref == 'refs/heads/spike/agent-host' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'))) && !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))
     # The top-level `permissions: contents: read` above zeroes every other
     # scope for every job; dorny/paths-filter resolves a pull_request's
@@ -1415,6 +1450,7 @@ jobs:
     if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
     # Source-home with the hop builds may take 45 minutes and the update journey 75.
     timeout-minutes: 150
+    needs: fork-gate
     env:
       CI_APT_PACKAGES: coturn e2fsprogs ffmpeg musl-tools nasm pkg-config
     steps:

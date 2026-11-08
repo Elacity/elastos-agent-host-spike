@@ -870,7 +870,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertIn("\n  schedule:\n", triggers)
         context = event_context("merge_group", "refs/heads/gh-readonly-queue/develop/pr-1")
         for job in JOBS:
-            if job == "cancel-on-failure":
+            if job in ("cancel-on-failure", "fork-gate"):
                 continue
             guard = re.search(r"(?m)^    if: (.*)$", JOBS[job])
             if job == "release-upstream-assets":
@@ -1521,7 +1521,7 @@ class ReleasePolicyTests(unittest.TestCase):
 
     def test_custody_smoke_always_runs_on_develop_and_filters_only_prs(self):
         self.assertNotIn("changes", list(JOBS))
-        self.assertNotRegex(JOBS["custody-harness-smoke"], r"(?m)^    needs:")
+        self.assertEqual(field(JOBS["custody-harness-smoke"], "needs"), "fork-gate")
         filter_step, = [step for step in steps("custody-harness-smoke") if "id: filter" in step]
         self.assertEqual(field(filter_step, "if"), "github.event_name == 'pull_request'")
         self.assertEqual(field(filter_step, "uses"), "dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3")
@@ -1890,6 +1890,7 @@ class ReleasePolicyTests(unittest.TestCase):
     def test_github_runners_and_check_names_stay_fixed(self):
         expected = {
             "source-gate": ("source-gate", "ubuntu-24.04"),
+            "fork-gate": ("fork-gate", "ubuntu-24.04"),
             "engine-llama-arm64": ("engine-llama-arm64", "ubuntu-24.04-arm"),
             "engine-llama-amd64": ("engine-llama-amd64", "ubuntu-24.04"),
             "lint": ("lint", "ubuntu-24.04"),
@@ -1954,20 +1955,64 @@ class ReleasePolicyTests(unittest.TestCase):
 
     def test_compile_jobs_start_beside_the_source_gate(self):
         # The whole job graph. Only these two wait for source-gate: test-behaviour is not a
-        # compile job, and post-merge macOS has no cancel-on-failure to stop it.
+        # compile job, and post-merge macOS has no cancel-on-failure to stop it. Compile jobs
+        # wait for fork-gate, which holds them only on a fork pull request.
         expected = {
-            "source-gate": None, "cargo-audit": None, "test-behaviour": "source-gate",
-            "engine-llama-amd64": None, "engine-llama-arm64": None, "lint": None, "lab-standin": None,
-            "test-elastos": None, "test-capsules": None, "custody-harness-smoke": None,
+            "source-gate": None, "fork-gate": None, "cargo-audit": None, "test-behaviour": "source-gate",
+            "engine-llama-amd64": "fork-gate", "engine-llama-arm64": "fork-gate", "lint": "fork-gate",
+            "lab-standin": "fork-gate", "test-elastos": "fork-gate", "test-capsules": "fork-gate",
+            "custody-harness-smoke": "fork-gate",
             "release-upstream-paths": None, "release-upstream-assets": "[release-upstream-paths, engine-llama-arm64]",
             "source-home-linux": "engine-llama-amd64", "source-home-linux-arm64": "engine-llama-arm64",
-            "source-home-macos": "source-gate", "update-hop-linux": None, "cancel-on-failure": None,
+            "source-home-macos": "source-gate", "update-hop-linux": "fork-gate", "cancel-on-failure": None,
         }
         graph = {job: (re.search(r"(?m)^    needs: (.+)$", block) or [None, None])[1] for job, block in JOBS.items()}
         self.assertEqual(graph, expected)
         # source-gate has no outputs to wait for, and its failure fails the run.
         self.assertNotRegex(JOBS["source-gate"], r"(?m)^    (?:outputs|if|continue-on-error):")
         self.assertNotIn("needs.source-gate", SOURCE)
+
+    def run_fork_gate(self, conclusions):
+        """Run fork-gate's wait against successive source-gate conclusions; return (status, polls used)."""
+        step, = steps("fork-gate")
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shims, queue = root / "shims", root / "polls"
+            shims.mkdir()
+            queue.mkdir()
+            for index, conclusion in enumerate(conclusions):
+                (queue / f"{index:03}").write_text(json.dumps({"jobs": [
+                    {"name": "lint", "conclusion": None}, {"name": "source-gate", "conclusion": conclusion}]}))
+            (shims / "sleep").write_text("#!/bin/bash\n")
+            (shims / "gh").write_text(textwrap.dedent("""\
+                #!/bin/bash
+                next="$(ls "$POLL_DIR" | sort | sed -n 1p)"
+                [ -n "$next" ] || exit 9
+                jq -r "$4" "$POLL_DIR/$next" && rm "$POLL_DIR/$next"
+                """))
+            for shim in shims.iterdir():
+                shim.chmod(0o700)
+            result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10,
+                                    env={**os.environ, "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}",
+                                         "GITHUB_REPOSITORY": "Elacity/elastos-runtime", "GITHUB_RUN_ID": "7",
+                                         "GITHUB_RUN_ATTEMPT": "1", "POLL_DIR": str(queue)})
+            return result.returncode, len(conclusions) - len(list(queue.iterdir()))
+
+    def test_fork_pull_requests_compile_only_after_a_passing_source_gate(self):
+        step, = steps("fork-gate")
+        self.assertNotIn("actions/checkout@", JOBS["fork-gate"])
+        self.assertNotRegex(JOBS["fork-gate"], r"(?m)^    (?:if|needs):")
+        for event, ref, ref_type, override, _ in CASES:
+            for head in ("Elacity/elastos-runtime", "someone/fork"):
+                context = event_context(event, ref, ref_type, override, **{
+                    "github.repository": "Elacity/elastos-runtime", "github.event.pull_request.head.repo.full_name": head})
+                self.assertEqual(evaluate(field(step, "if"), context), event == "pull_request" and head == "someone/fork",
+                                 f"fork-gate waits only on a fork pull request ({event}, {head})")
+        self.assertEqual(self.run_fork_gate([None, None, "success"]), (0, 3))
+        for conclusion in ("failure", "timed_out", "cancelled", "skipped"):
+            self.assertEqual(self.run_fork_gate([None, conclusion, "success"]), (1, 2),
+                             f"a source-gate {conclusion} must stop a fork pull request's compile jobs")
 
     def test_pull_request_runs_cancel_at_the_first_failed_job(self):
         watcher = JOBS["cancel-on-failure"]
