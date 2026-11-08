@@ -147,17 +147,31 @@ def transient(error):
     return isinstance(error, (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead))
 
 
-def response(source):
-    """Only HTTPS redirects to recipe-owned hosts; each response has a bound."""
+OPENER_TIMEOUT_SECONDS = 30
+TOTAL_DEADLINE_SECONDS = 360
+
+
+def response(source, deadline=None, clock=None):
+    """Only HTTPS redirects to recipe-owned hosts; each response has a bound.
+
+    One attempt can open several requests through redirects, so with `deadline`
+    each request is bounded by the time left as well as by OPENER_TIMEOUT_SECONDS."""
+    clock = time.monotonic if clock is None else clock
     url = source["url"]
     allowed = {validate_url(url), *source.get("redirect_hosts", [])}
     opener = urllib.request.build_opener(NoRedirect())
     for hop in range(6):
         if validate_url(url) not in allowed:
             raise ValueError("upstream redirect host is outside the recorded allowlist")
+        timeout = OPENER_TIMEOUT_SECONDS
+        if deadline is not None:
+            timeout = min(timeout, deadline - clock())
+            if timeout <= 0:
+                elapsed = TOTAL_DEADLINE_SECONDS - (deadline - clock())
+                raise ValueError(f"upstream fetch of {source['url']} passed its {TOTAL_DEADLINE_SECONDS} s deadline after {elapsed:.0f} s")
         request = urllib.request.Request(url, headers={"User-Agent": "ElastOS-release-input", "Accept-Encoding": "identity"})
         try:
-            reply = opener.open(request, timeout=30)
+            reply = opener.open(request, timeout=timeout)
         except urllib.error.HTTPError as error:
             if error.code not in (301, 302, 303, 307, 308) or hop == 5:
                 error.close()
@@ -199,30 +213,41 @@ def copy_into(stream, output, algorithm, maximum):
 
 # Six attempts with 135 s of waiting between them. GitHub release downloads
 # returned intermittent 504s for over an hour on 8 Nov 2026; 2 + 4 + 8 s was too
-# short to ride out a burst. With the 30 s open timeout, a source that never
-# answers gives up in under six minutes.
+# short to ride out a burst. A total deadline of 360 s bounds the whole fetch:
+# an opener or body timeout covers one blocking operation, and a redirect chain
+# can open several requests per attempt, so elapsed time is checked before every
+# attempt and every retry sleep and each request gets the time left as its timeout.
 RETRY_DELAYS = (5, 10, 20, 40, 60)
 
 
-def fetch(source, output, algorithm, delays=RETRY_DELAYS):
+def fetch(source, output, algorithm, delays=RETRY_DELAYS, clock=None):
     """A transient failure anywhere in the download (open or body) restarts it from
     byte zero after each delay in turn: a release build fetches dozens of upstream
     inputs, and one 504 failed a 60-minute job. Other 4xx, redirects outside the
     allowlist, size bounds and checksum mismatches are never retried."""
     if "path" in source:
         return copy_into(regular(source["path"]).open("rb"), output, algorithm, source["max_bytes"])
+    clock = time.monotonic if clock is None else clock
+    started = clock()
     for attempt in range(len(delays) + 1):
+        elapsed = clock() - started
+        if elapsed >= TOTAL_DEADLINE_SECONDS:
+            raise ValueError(f"upstream fetch of {source['url']} gave up after {elapsed:.0f} s")
         try:
-            return copy_into(response(source), output, algorithm, source["max_bytes"])
+            return copy_into(response(source, started + TOTAL_DEADLINE_SECONDS, clock),
+                             output, algorithm, source["max_bytes"])
         except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
             if not transient(error) or attempt == len(delays):
                 raise
             if isinstance(error, urllib.error.HTTPError):
                 error.close()
+            output.seek(0)
+            output.truncate()
+            elapsed = clock() - started
+            if elapsed + delays[attempt] >= TOTAL_DEADLINE_SECONDS:
+                raise ValueError(f"upstream fetch of {source['url']} gave up after {elapsed:.0f} s: a {delays[attempt]} s wait would pass the {TOTAL_DEADLINE_SECONDS} s deadline")
             print(f"upstream fetch attempt {attempt + 1} failed ({error}); retrying in {delays[attempt]} s",
                   file=sys.stderr, flush=True)
-        output.seek(0)
-        output.truncate()
         time.sleep(delays[attempt])
     raise AssertionError("unreachable")
 
