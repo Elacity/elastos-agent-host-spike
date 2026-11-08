@@ -12,10 +12,13 @@ lines hold only comments or lie inside a block comment. Blank lines are blank.
   core-size.py --check           fail (exit 1) when code is above elastos/CORE-BUDGET or 50+ below it
   core-size.py --report          print that verdict without failing on it
   --base R                       with either, also show the change since the merge base of R and HEAD
-A construct the counter will not guess at, or a missing base, exits 2 in every mode.
+CORE_BUDGET_MODE=advisory turns a failed --check verdict into a ::warning:: annotation and a line in
+$GITHUB_STEP_SUMMARY, exiting 0; enforce (the default) exits 1. A construct the counter will not
+guess at, a missing base or an unknown CORE_BUDGET_MODE exits 2 in every mode.
 """
 import argparse
 import json
+import os
 import posixpath
 import re
 import subprocess
@@ -25,6 +28,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CRATE, BUDGET = "elastos/crates/elastos-runtime", "elastos/CORE-BUDGET"
 SLACK = 50  # the budget may sit at most this far above the code; further, the check fails
+MODES = ("enforce", "advisory")  # CORE_BUDGET_MODE: whether a failed budget verdict fails --check
 OPEN, CLOSE = ("{", "(", "["), ("}", ")", "]")
 CHAR = re.compile(r"'(\\(u\{[0-9a-fA-F]*\}|x..|.)|[^\\\n])'")
 LIFETIME, WORD, RAW = re.compile(r"'\w*"), re.compile(r"\w+"), re.compile(r'#*"')
@@ -395,7 +399,8 @@ def table(totals):
 
 
 def check(root, totals, base):
-    """Print the verdict against the budget and, with base, the change since base; return the exit."""
+    """Print the verdict against the budget and, with base, the change since base. Return the exit
+    status and the failing verdict, or None when the core is within its budget."""
     code, budget = totals["code"], read_budget((root / BUDGET).read_text())
     notes = []
     if base:
@@ -422,7 +427,7 @@ def check(root, totals, base):
     else:
         notes.append(f"OK: core code is {code} lines, within the budget of {budget} in {BUDGET}.")
     print("".join(f"\n- {note}" for note in notes))
-    return 1 if failed else 0
+    return (1, notes[-1]) if failed else (0, None)
 
 
 def main(argv=None):
@@ -436,9 +441,18 @@ def main(argv=None):
     if args.base and not (args.check or args.report):
         parser.error("--base needs --check or --report")
     try:
+        mode = os.environ.get("CORE_BUDGET_MODE", "enforce")
+        if mode not in MODES:
+            raise Refusal(f"CORE_BUDGET_MODE must be enforce or advisory, not {mode!r}")
         totals = count(worktree_files(args.root))
         print(json.dumps(totals) if args.json else table(totals), end="\n" if args.json else "")
-        status = check(args.root, totals, args.base) if args.check or args.report else 0
+        status, verdict = check(args.root, totals, args.base) if args.check or args.report else (0, None)
+        if args.check and verdict and mode == "advisory":  # warn, do not fail, until the budget enforces
+            print(f"::warning title=core-size budget (advisory)::{verdict}")
+            if os.environ.get("GITHUB_STEP_SUMMARY"):
+                with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                    summary.write(f"\n- Advisory only (CORE_BUDGET_MODE=advisory), not failing: {verdict}\n")
+            return 0
         return status if args.check else 0
     except Refusal as error:
         print(f"core-size: refused: {error}", file=sys.stderr)

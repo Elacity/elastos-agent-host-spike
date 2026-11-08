@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("core_size", Path(__file__).with_name("core-size.py"))
@@ -207,6 +208,12 @@ class CheckTest(unittest.TestCase):
         directory = tempfile.TemporaryDirectory(prefix="core-size-")
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
+        self.summary = self.root / "step-summary.md"
+        # The CI job sets CORE_BUDGET_MODE=advisory; each test chooses its own mode.
+        self.environment = mock.patch.dict(os.environ, {"CORE_BUDGET_MODE": "enforce",
+                                                        "GITHUB_STEP_SUMMARY": str(self.summary)})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
         self.git("init", "-q", "-b", "main")
         self.write(10, budget=10)
         self.commit("base")
@@ -247,13 +254,41 @@ class CheckTest(unittest.TestCase):
             self.assertEqual(core_size.main(["--report", "--root", str(self.root)]), 0)
         self.assertIn("FAIL: core code is 12 lines", output.getvalue())
 
+    def test_advisory_mode_warns_and_exits_0(self):
+        os.environ["CORE_BUDGET_MODE"] = "advisory"
+        for lines, budget, verdict in ((12, 10, "FAIL: core code is 12 lines, above the budget of 10"),
+                                       (10, 61, "FAIL: core code is 10 lines, 51 below the budget of 61:"
+                                                " lower elastos/CORE-BUDGET to 10")):
+            self.write(lines, budget)
+            status, output = self.run_check()
+            self.assertEqual(status, 0)
+            self.assertIn(f"::warning title=core-size budget (advisory)::{verdict}", output)
+            self.assertIn(f"- Advisory only (CORE_BUDGET_MODE=advisory), not failing: {verdict}",
+                          self.summary.read_text())
+        self.write(10, budget=10)
+        self.assertNotIn("::warning", self.run_check()[1])
+
+    def test_enforce_mode_fails_and_an_unknown_mode_is_refused(self):
+        self.write(12, budget=10)
+        self.assertEqual(self.run_check()[0], 1)
+        self.assertFalse(self.summary.exists())
+        for mode in ("advisery", ""):
+            os.environ["CORE_BUDGET_MODE"] = mode
+            errors = io.StringIO()
+            with contextlib.redirect_stderr(errors):
+                self.assertEqual(self.run_check()[0], 2)
+                self.assertEqual(core_size.main(["--report", "--root", str(self.root)]), 2)
+            self.assertIn(f"CORE_BUDGET_MODE must be enforce or advisory, not {mode!r}", errors.getvalue())
+
     def test_refusal_exits_2_naming_file_and_line(self):
         source = self.root / core_size.CRATE / "src/lib.rs"
         source.write_text("fn production() {}\n#[cfg_attr(unix, cfg(test))]\nfn other() {}\n")
-        errors = io.StringIO()
-        with contextlib.redirect_stderr(errors):
-            self.assertEqual(self.run_check()[0], 2)
-        self.assertIn("refused: elastos/crates/elastos-runtime/src/lib.rs:2: cfg_attr", errors.getvalue())
+        for mode in core_size.MODES:  # a counter that cannot read the core is broken, not advisory
+            os.environ["CORE_BUDGET_MODE"] = mode
+            errors = io.StringIO()
+            with contextlib.redirect_stderr(errors):
+                self.assertEqual(self.run_check()[0], 2, mode)
+            self.assertIn("refused: elastos/crates/elastos-runtime/src/lib.rs:2: cfg_attr", errors.getvalue())
 
     def test_ratchet_fails_when_more_than_50_below(self):
         self.write(10, budget=61)
