@@ -3120,7 +3120,6 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn owner_only_mode_and_directory_sync_failures_stay_corrupt() {
-        use std::os::unix::fs::PermissionsExt;
         let root = temp_root("mode-and-sync-failures");
         fs::create_dir(&root).unwrap();
 

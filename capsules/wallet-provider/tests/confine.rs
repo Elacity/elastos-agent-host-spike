@@ -683,11 +683,13 @@ fn model_hosted_offer() -> Value {
 }
 
 /// One `init` request for `name` at `base`, built from the one config above.
+#[cfg(target_os = "linux")]
 fn provider_init_request(name: &str, base: &Path) -> Value {
     json!({ "op": "init", "config": provider_init_config(name, base) })
 }
 
 /// `init` and `status` report the model provider with its one offer ready.
+#[cfg(target_os = "linux")]
 fn assert_serving(data: &Value) {
     assert_eq!(data["provider"], MODEL_PROVIDER, "{data}");
     assert_eq!(data["offers_ready"], 1, "{data}");
