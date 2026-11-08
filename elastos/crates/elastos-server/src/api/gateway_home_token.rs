@@ -316,14 +316,27 @@ pub(crate) fn issue_home_launch_token_for_auth_grant(
     app: &str,
     grant: &elastos_runtime::auth::AuthSessionGrantV1,
 ) -> anyhow::Result<String> {
-    if !grant.apps.iter().any(|allowed| allowed == app) {
-        anyhow::bail!("auth session grant is not authorized for app");
-    }
     let root = launch_principal_root(
         data_dir,
         &home_launch_auth_data_dir(data_dir),
         &grant.principal_id,
     )?;
+    issue_home_launch_token_for_verified_grant(data_dir, app, grant, root)
+}
+
+/// The same issuer for a grant whose root verified recovery material proves,
+/// not a stored record. The recovery import issues its replacement grant
+/// before the recovered record is committed, so the caller passes the root the
+/// verified Recovery Kit established.
+pub(in crate::api) fn issue_home_launch_token_for_verified_grant(
+    data_dir: &std::path::Path,
+    app: &str,
+    grant: &elastos_runtime::auth::AuthSessionGrantV1,
+    root: crate::auth::ResolvedPrincipalRoot,
+) -> anyhow::Result<String> {
+    if !grant.apps.iter().any(|allowed| allowed == app) {
+        anyhow::bail!("auth session grant is not authorized for app");
+    }
     issue_home_launch_token_with_context(
         data_dir,
         app,

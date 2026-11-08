@@ -39,7 +39,8 @@ use sha2::{Digest, Sha256};
 use super::gateway::{
     consume_passkey_step_up_token, home_session_cookie_header_for_token,
     is_wallet_connector_capsule_id, issue_home_launch_token_for_auth_grant,
-    require_home_launch_token_binding, require_runtime_wallet_authority, runtime_wallet_authority,
+    issue_home_launch_token_for_verified_grant, require_home_launch_token_binding,
+    require_runtime_wallet_authority, runtime_wallet_authority,
     GatewayState, RuntimeWalletAdapter, RuntimeWalletAuthority, HOME_CAPSULE_ID, HOME_ROUTE,
 };
 
@@ -3112,12 +3113,21 @@ async fn recovery_kit_import_inner(
             &state.data_dir,
             crate::auth::RecoveryReassignmentTestFault::TokenPreparation,
         )?;
-        let home_token =
-            issue_home_launch_token_for_auth_grant(&state.data_dir, HOME_CAPSULE_ID, &grant)?;
-        let system_token = issue_home_launch_token_for_auth_grant(
+        let root = crate::auth::ResolvedPrincipalRoot::verified_recovery_kit(
+            &kit.principal_id,
+            &kit.localhost_root,
+        )?;
+        let home_token = issue_home_launch_token_for_verified_grant(
+            &state.data_dir,
+            HOME_CAPSULE_ID,
+            &grant,
+            root.clone(),
+        )?;
+        let system_token = issue_home_launch_token_for_verified_grant(
             &state.data_dir,
             super::gateway::SYSTEM_CAPSULE_ID,
             &grant,
+            root,
         )?;
         let signed_audit_event = crate::auth::sign_audit_event(
             &state.data_dir,

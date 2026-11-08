@@ -7234,9 +7234,24 @@ impl ResolvedPrincipalRoot {
         )))
     }
 
+    /// The root that verified Recovery Kit material proves for its principal.
+    /// The kit is verified and bound to these values before this is built, and
+    /// only the principal's canonical root is accepted, so no id-rule guess
+    /// enters. The import path uses it for the grant it issues before the
+    /// recovered record is committed.
+    pub(crate) fn verified_recovery_kit(
+        principal_id: &str,
+        localhost_root: &str,
+    ) -> anyhow::Result<Self> {
+        if localhost_root != principal_localhost_root(principal_id) {
+            anyhow::bail!("recovery kit root is not canonical for its principal");
+        }
+        Ok(Self(RootArm::Local(localhost_root.to_string())))
+    }
+
     /// Test-only root for a fixture principal (A5-P2a-ii-0b's two
-    /// `from_verified_context` test constructors). Production's only
-    /// constructor is `resolve`.
+    /// `from_verified_context` test constructors). Production builds roots
+    /// through `resolve` or verified recovery material.
     #[cfg(test)]
     pub(crate) fn for_test_principal(principal_id: &str) -> Self {
         Self(RootArm::Local(format!("test-root/{principal_id}")))

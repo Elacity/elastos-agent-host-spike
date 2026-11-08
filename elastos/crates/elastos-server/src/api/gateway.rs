@@ -152,6 +152,7 @@ pub(crate) use gateway_home_token::RuntimeWalletAuthority;
 pub(super) use gateway_home_token::{
     home_browser_origin, home_launch_token_header, home_session_clear_cookie_header,
     home_session_cookie_header_for_token, issue_home_launch_token_for_auth_grant,
+    issue_home_launch_token_for_verified_grant,
     issue_home_projection_launch_token_with_context, require_carried_home_launch_token,
     require_home_launch_token, require_home_launch_token_binding,
     require_home_launch_token_context, require_home_launch_token_for_any_app_context,
