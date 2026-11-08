@@ -46,6 +46,15 @@ pub async fn provider_proxy(
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid JSON body: {}", e)))?
     };
     request["op"] = Value::String(op.clone());
+    // This route has no principal to stamp a model run binding from; runs go
+    // through the gateway or the in-Runtime Bus, which stamp one.
+    if scheme == "model" && op != "offers_list" {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "principal_context_required: model runs require a principal-scoped launch context"
+                .to_string(),
+        ));
+    }
 
     // Build capability resource
     let resource = build_capability_resource(&scheme, &op, &request)
@@ -783,6 +792,32 @@ mod tests {
 
         assert_eq!(err.0, StatusCode::FORBIDDEN);
         assert!(provider.requests.lock().await.is_empty());
+    }
+
+    /// This route has no principal, so it refuses every model run operation
+    /// before the provider, whatever binding the body names.
+    #[tokio::test]
+    async fn provider_proxy_refuses_model_runs_without_a_principal() {
+        let run = format!("run:sha256:{}", "a".repeat(64));
+        let body = serde_json::json!({"run_id": run, "request_id": "model-v1:1:n",
+            "offer_id": "m", "operation": "text.generate", "input": {},
+            "runtime_binding": {"principal_id": "person:local:alice"}})
+        .to_string();
+        for op in ["runs_create", "runs_get", "runs_events", "runs_cancel"] {
+            let (provider, result) = proxy_as_shell("model", op, HeaderMap::new(), &body).await;
+            let (status, message) = result.expect_err(op);
+            assert_eq!(status, StatusCode::FORBIDDEN, "{op}");
+            assert!(
+                message.starts_with("principal_context_required"),
+                "{message}"
+            );
+            assert!(provider.requests.lock().await.is_empty(), "{op}");
+        }
+        let (provider, result) =
+            proxy_as_shell("model", "offers_list", HeaderMap::new(), "{}").await;
+        let Json(reply) = result.expect("offers_list still dispatches");
+        assert_eq!(reply["status"], "ok", "{reply}");
+        assert_eq!(provider.requests.lock().await.len(), 1);
     }
 
     #[tokio::test]
