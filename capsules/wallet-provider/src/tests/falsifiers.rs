@@ -330,7 +330,9 @@ use std::process::Command;
 /// in did's document, so the cross-crate read passes. Both are CAUGHT on the
 /// Mac by `every_declared_test_is_cited_in_its_own_documents`.
 /// WP244 keeps the directories a failed publish created, so a retry answers ok.
-const EXPECTED_FALSIFIERS: usize = 224;
+/// WP245 makes the provider chooser answer wallet's binary for did. WP246 and
+/// WP247 skip the pinned-claim check in the seccomp and the Landlock builder.
+const EXPECTED_FALSIFIERS: usize = 227;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

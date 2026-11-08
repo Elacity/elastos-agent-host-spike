@@ -75,8 +75,11 @@ profile from the declared-rights file and the contract head, and
 `generated_did_and_wallet_profiles_match_their_committed_oracles` requires it
 to equal this oracle; the Runtime's own generator and its comparison are not
 built and stay in `elastos/`, outside this lane.
-This file is the one lab generator for did, wallet and model: each test crate
-includes it by `#[path]` and never copies it (P10).
+This file is the lab generator for did and wallet: wallet's `tests/confine.rs`
+includes it by `#[path]` and never copies it (P10). The model crate's own
+confine tests still build their profile with a separate `standin_profile` in
+`capsules/model-provider/tests/confine/main.rs`; moving them onto this file is
+open follow-up work.
 The lab generator and writer are test code only, and
 `lab_generator_is_named_only_in_test_code` fails if a file outside test code
 names either, so the Runtime keeps one profile generator (P10).
