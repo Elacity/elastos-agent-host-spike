@@ -1919,11 +1919,14 @@ class ReleasePolicyTests(unittest.TestCase):
             status, cancels, used = self.run_cancel_watcher(
                 [[watch, gate, macos], [watch, gate, ("lint", "completed", conclusion), macos]])
             self.assertEqual((status, cancels, used), (0, ["repos/Elacity/elastos-runtime/actions/runs/7/cancel"], 2))
-        # A failed source-gate cancels the compile jobs that start beside it.
+        # A failed source-gate cancels the compile jobs that start beside it; a watcher that
+        # ignored it would see them finish and exit after two quiet polls, cancelling nothing.
         for conclusion in ("failure", "timed_out"):
+            gate_failed = ("source-gate", "completed", conclusion)
+            finished = [watch, gate_failed, ("lint", "completed", "success")]
             status, cancels, used = self.run_cancel_watcher(
-                [[watch, ("source-gate", "completed", conclusion), ("lint", "in_progress", None),
-                  ("source-home-linux (ubuntu-24.04)", "in_progress", None)]])
+                [[watch, gate_failed, ("lint", "in_progress", None),
+                  ("source-home-linux (ubuntu-24.04)", "in_progress", None)], finished, finished])
             self.assertEqual((status, cancels, used), (0, ["repos/Elacity/elastos-runtime/actions/runs/7/cancel"], 1),
                              f"a source-gate {conclusion} must cancel the pull request run")
         # A completed gate before dependent jobs appear is not the end of the run.
