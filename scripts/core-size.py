@@ -2,9 +2,9 @@
 """Count the Runtime core (elastos/crates/elastos-runtime) as tests, comments, blank lines and code.
 
 Test lines: files under a tests/ directory or named tests.rs or *_test.rs, and every item behind
-#[cfg(test)] or #[cfg(all(test, ...))], from the attribute through the item's end. Comment lines
-start with // or /*, or lie inside a block comment. Blank lines are blank. Code is everything
-else, including a line that begins inside a multi-line string literal.
+#[cfg(test)] or #[cfg(all(test, ...))], from the attribute through the item's end. Code lines hold
+any code token, wherever comments sit on them, or begin inside a multi-line string literal. Comment
+lines hold only comments or lie inside a block comment. Blank lines are blank.
 
   core-size.py                   a short table
   core-size.py --json            {"total", "tests", "comments", "blank", "code"}
@@ -82,6 +82,7 @@ def lex(text):
                 tokens.append((line, "word", word))
                 i += len(word)
         elif c.isdigit():
+            tokens.append((line, "literal", WORD.match(text, i).group()))
             i = WORD.match(text, i).end()
         else:
             if not c.isspace():
@@ -159,13 +160,12 @@ def count(files):
             continue
         tokens, starts = lex(text)
         tests = {n for a, b in cfg_test_spans(tokens) for n in range(a, b + 1)}
-        first = {}
-        for line, kind, value in tokens:
-            first.setdefault(line, kind)
-        for n, body in enumerate(lines):
-            kind = ("tests" if n in tests else "comments" if starts[n] == "comment" else
-                    "code" if starts[n] == "string" else "blank" if not body.strip() else
-                    "comments" if first.get(n) == "comment" else "code")
+        # A line with any code token on it is code, wherever its comments sit.
+        code = {line for line, kind, value in tokens if kind != "comment"}
+        notes = {line for line, kind, value in tokens if kind == "comment"}
+        for n in range(len(lines)):
+            kind = ("tests" if n in tests else "code" if n in code or starts[n] == "string" else
+                    "comments" if n in notes or starts[n] == "comment" else "blank")
             totals[kind] += 1
     return totals
 

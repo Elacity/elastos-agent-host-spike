@@ -65,6 +65,12 @@ class CountTest(unittest.TestCase):
         self.assertEqual(counts(source),
                          {"total": 3, "tests": 0, "comments": 1, "blank": 0, "code": 2})
 
+    def test_code_after_a_leading_block_comment_is_code(self):
+        self.assertEqual(counts("/* comment */ fn production() {}\n")["code"], 1)
+        self.assertEqual(counts("/*\n*/ fn production() {}\n"),
+                         {"total": 2, "tests": 0, "comments": 1, "blank": 0, "code": 1})
+        self.assertEqual(counts("let x = f(\n    0\n);\n")["code"], 3)
+
     def test_test_files(self):
         for path in ("tests/integration.rs", "src/tests.rs", "src/io_test.rs"):
             self.assertEqual(counts("fn a() {}\n", path)["tests"], 1, path)
