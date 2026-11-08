@@ -3820,6 +3820,22 @@
       "tests": [
         "seccomp_model_program_equals_its_golden_copy"
       ]
+    },
+    {
+      "id": "WP256",
+      "title": "the shared SeccompInstruction::jump constructor turns the F_DUPFD_CLOEXEC equality into a bit test, so fcntl commands 2, 4 and 15 are allowed while a golden read through that constructor would still agree",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> Self {\n        Self { code, jt, jf, k }\n    }",
+          "new": "    const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> Self {\n        let code = if code == 0x15 && k == 1030 { 0x45 } else { code };\n        Self { code, jt, jf, k }\n    }"
+        }
+      ],
+      "tests": [
+        "seccomp_model_program_equals_its_golden_copy"
+      ]
     }
   ]
 }

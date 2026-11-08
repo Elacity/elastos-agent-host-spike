@@ -1705,6 +1705,10 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   runs it. `seccomp_model_program_equals_its_golden_copy` checks this rule.
 - WP255: The `clone` rule's miss jump lands on its allow, so every number after
   it is allowed. `seccomp_model_program_equals_its_golden_copy` checks this rule.
+- WP256: The shared `SeccompInstruction::jump` constructor turns the
+  `F_DUPFD_CLOEXEC` equality into a bit test, so `fcntl` commands 2, 4 and 15
+  are allowed. The golden is read as plain integers, not through that
+  constructor, so `seccomp_model_program_equals_its_golden_copy` checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

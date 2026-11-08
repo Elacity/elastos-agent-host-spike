@@ -10993,20 +10993,23 @@ fn model_syscall_lists_match_libc() {
         if label.starts_with("SYS_") {
             let row = allowed.iter().chain([&clone3]).find(|row| row.0 == label);
             let libc_number = row.unwrap_or_else(|| panic!("the golden's {label} has no libc row"));
-            assert_eq!(at.code, SECCOMP_BPF_JEQ_K, "{comment}");
+            assert_eq!(at[0], 0x15, "a call's line must be a JEQ: {comment}");
             assert_eq!(
-                at.k, libc_number.2,
+                at[3], libc_number.2,
                 "the golden's {label} must be libc's number"
             );
-        } else if at.code == SECCOMP_BPF_JEQ_K {
+        } else if at[0] == 0x15 {
             assert!(label.starts_with("arg") || label == "arch", "{comment}");
         }
     }
 }
 
 /// The checked-in golden copy of the model's final program for `audit_arch`,
-/// one instruction per line as `code jt jf k  # comment`, with each comment.
-fn model_seccomp_golden(audit_arch: u32) -> Vec<(SeccompInstruction, &'static str)> {
+/// one instruction per line as `code jt jf k  # comment`, read as four plain
+/// integers and the comment. It builds no `SeccompInstruction` and calls nothing
+/// the builder uses, so a defect in the builder's constructors cannot also change
+/// what the golden says.
+fn model_seccomp_golden(audit_arch: u32) -> Vec<([u32; 4], &'static str)> {
     let text = match audit_arch {
         0xc000_003e => include_str!("model-seccomp-x86_64.golden"),
         0xc000_00b7 => include_str!("model-seccomp-aarch64.golden"),
@@ -11031,12 +11034,11 @@ fn model_seccomp_golden(audit_arch: u32) -> Vec<(SeccompInstruction, &'static st
             let [code, jt, jf, k] = fields[..] else {
                 panic!("golden line {line:?} must hold code, jt, jf and k")
             };
-            let narrow = |value: u32| u8::try_from(value).expect("a jump offset fits a byte");
-            let code = u16::try_from(code).expect("a code fits 16 bits");
-            (
-                SeccompInstruction::jump(code, k, narrow(jt), narrow(jf)),
-                comment,
-            )
+            assert!(
+                code <= 0xffff && jt <= 0xff && jf <= 0xff,
+                "{line:?} is out of range"
+            );
+            ([code, jt, jf, k], comment)
         })
         .collect()
 }
@@ -11051,7 +11053,10 @@ fn model_seccomp_golden(audit_arch: u32) -> Vec<(SeccompInstruction, &'static st
 /// Falsifiers: WP248, WP249 and WP250 add `ptrace`, `pidfd_getfd` and a
 /// `JEQ 246`; WP252 admits `fcntl` command 2; WP253 loosens the `futex` mask;
 /// WP254 makes `clone3` return `SECCOMP_RET_LOG`; WP255 retargets the `clone`
-/// rule's jump. Each makes the program differ from its golden copy.
+/// rule's jump. Each makes the program differ from its golden copy. WP256
+/// changes the shared `SeccompInstruction::jump` constructor so `F_DUPFD_CLOEXEC`
+/// becomes a bit test; the golden is read without that constructor, so it
+/// still says `JEQ` and this test fails.
 #[test]
 fn seccomp_model_program_equals_its_golden_copy() {
     let host = seccomp_probe_list(MODEL_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
@@ -11065,7 +11070,13 @@ fn seccomp_model_program_equals_its_golden_copy() {
                 "{arch_name} must render the launch's"
             );
         }
-        let golden: Vec<SeccompInstruction> = model_seccomp_golden(arch)
+        // Both sides are plain integers: the rendered program's four fields read
+        // directly, and the golden's own parse.
+        let program: Vec<[u32; 4]> = program
+            .iter()
+            .map(|at| [u32::from(at.code), u32::from(at.jt), u32::from(at.jf), at.k])
+            .collect();
+        let golden: Vec<[u32; 4]> = model_seccomp_golden(arch)
             .into_iter()
             .map(|(at, _)| at)
             .collect();
@@ -11073,7 +11084,7 @@ fn seccomp_model_program_equals_its_golden_copy() {
         assert!(
             first.is_none(),
             "the {arch_name} model program must equal its golden copy: it has {} instructions \
-             and the golden {}, and instruction {first:?} differs: {:?} against {:?}",
+             and the golden {}, and instruction {first:?} differs, in hex: {:x?} against {:x?}",
             program.len(),
             golden.len(),
             first.and_then(|i| program.get(i)),
