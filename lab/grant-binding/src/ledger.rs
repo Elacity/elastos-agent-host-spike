@@ -126,7 +126,7 @@ impl std::fmt::Display for ReserveRefuse {
             ReserveRefuse::SumOverflow { .. } => {
                 formatter.write_str("reservation sum does not fit in u64")
             }
-            ReserveRefuse::NoCeiling => formatter.write_str("identity has no ceiling"),
+            ReserveRefuse::NoCeiling => formatter.write_str("grant has no ceiling"),
             ReserveRefuse::Binding(refusal) => refusal.fmt(formatter),
         }
     }
@@ -2076,7 +2076,7 @@ fn model_reserve_before_admit_is_refused() {
         .reserve(&call, &guest(handle), 1)
         .expect_err("reserve before admit");
     assert_eq!(refusal, ReserveRefuse::NoCeiling);
-    assert_eq!(refusal.to_string(), "identity has no ceiling");
+    assert_eq!(refusal.to_string(), "grant has no ceiling");
     let after_refusal = books(&verifier);
     assert_eq!(after_refusal.held, 0);
     assert_eq!(after_refusal.charged, 0);
@@ -4569,7 +4569,7 @@ fn model_unasked_agent_does_not_inherit_the_last_admit() {
         .reserve(&third_call, &third_request, 40)
         .expect_err("an unasked agent has no ceiling");
     assert_eq!(refusal, ReserveRefuse::NoCeiling);
-    assert_eq!(refusal.to_string(), "identity has no ceiling");
+    assert_eq!(refusal.to_string(), "grant has no ceiling");
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
     assert_eq!(after.held, 1);
@@ -4585,7 +4585,7 @@ fn model_empty_ceilings_map_has_no_ceiling() {
         .reserve(&call, &guest(handle), 1)
         .expect_err("an empty ceilings map has no ceiling");
     assert_eq!(refusal, ReserveRefuse::NoCeiling);
-    assert_eq!(refusal.to_string(), "identity has no ceiling");
+    assert_eq!(refusal.to_string(), "grant has no ceiling");
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
     assert_eq!(after.held, 0);
