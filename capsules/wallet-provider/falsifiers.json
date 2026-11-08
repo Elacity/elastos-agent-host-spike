@@ -2059,7 +2059,7 @@
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
           "old": "        if let Some(executable) = message[\"executable\"].as_str() {\n            return Ok(PathBuf::from(executable));\n        }",
-          "new": "        if message[\"executable\"].as_str().is_some() {\n            return Ok(did_provider_dir().join(\"target/debug/did-provider\"));\n        }"
+          "new": "        if message[\"executable\"].as_str().is_some() {\n            return Ok(provider_dir(DID_PROVIDER).join(\"target/debug/did-provider\"));\n        }"
         }
       ],
       "tests": [
