@@ -66,12 +66,12 @@ class CountTest(unittest.TestCase):
         self.assertEqual(counts(source.replace("test,", "feature = \"test\","))["tests"], 0)
 
     def test_every_cfg_spelling_that_holds_only_in_tests(self):
-        for cfg in ("test,", "all(all(test), unix)", "any(test, all(test, unix),)", "not(not(test))", "all(test, not(unix))",
-                    "all(\n    unix,\n    test\n)"):
+        for cfg in ("test,", "all(all(test), unix)", "any(test, all(test, unix),)", "not(not(test))",
+                    "all(test, not(unix))", "all(\n    unix,\n    test\n)"):
             source = f"#[cfg({cfg})]\nfn test_only() {{}}\nfn production() {{}}\n"
             self.assertEqual(counts(source)["code"], 1, cfg)
-        for cfg in ("any(test, unix)", "not(test)", "all(unix, feature = \"test\")", "testing", "not(any())",
-                    "not(all(not(test), feature = \"off\"))", "all()", "any(not(test), test)"):
+        for cfg in ("any(test, unix)", "not(test)", "all(unix, feature = \"test\")", "testing",
+                    "not(any())", "not(all(not(test), feature = \"off\"))", "all()", "any(not(test), test)"):
             self.assertEqual(counts(f"#[cfg({cfg})]\nfn production() {{}}\n")["code"], 2, cfg)
 
     def test_unreadable_cfg_is_refused_with_its_line(self):
@@ -102,6 +102,18 @@ class CountTest(unittest.TestCase):
             "struct S {\n    #[cfg(test)]\n    hook: HashMap<\n        u8,\n        u8,\n    >,\n"
             "    live: u8,\n}\n": (5, 3),
             "enum E {\n    A,\n    #[cfg(test)]\n    B(u8),\n    C { a: Vec<u8> },\n}\n": (2, 4),
+        }
+        for source, (tests, code) in cases.items():
+            totals = counts(source)
+            self.assertEqual((totals["tests"], totals["code"]), (tests, code), source)
+
+    def test_production_tokens_on_a_test_line_are_code(self):
+        cases = {  # source: (test lines, code lines); Codex's same-line inputs, and a string inside a test item
+            "#[cfg(test)] fn t() {} pub fn production() {}\n": (0, 1),
+            "#[cfg(test)]\nfn t() {\n}  pub fn production() {}\n": (2, 1),
+            "struct S {\n    #[cfg(test)] hook: u8, live: u8,\n}\n": (0, 3),
+            '#[cfg(test)]\nconst S: &str = "a\nb";\nfn p() {}\n': (3, 1),
+            'const S: &str = "a\nb";\n': (0, 2),
         }
         for source, (tests, code) in cases.items():
             totals = counts(source)

@@ -17,6 +17,7 @@ $GITHUB_STEP_SUMMARY, exiting 0; enforce (the default) exits 1. A construct the 
 guess at, a missing base or an unknown CORE_BUDGET_MODE exits 2 in every mode.
 """
 import argparse
+import bisect
 import json
 import os
 import posixpath
@@ -201,13 +202,13 @@ def item_extent(vals, i, end):
 
 def parse_items(vals, lines, i, end, test, found, inline=()):
     """Walk the items in vals[i:end]: a module, impl, trait or extern body. Test items go to
-    found['spans'] as line ranges, every attribute read to found['attrs'], and outline module
+    found['spans'] as token ranges, every attribute read to found['attrs'], and outline module
     declarations to found['mods']."""
     while vals[i] == "#" and vals[i + 1] == "!":  # inner attributes cover the rest of the body
         close = closer(vals, i + 2)
         found["attrs"].add(i)
         if not test and attr_is_test(vals, i + 2, close):
-            found["spans"].append((lines[i], lines[end - 1]))
+            found["spans"].append((i, end - 1))
             test = True
         i = close + 1
     while i < end:
@@ -225,7 +226,7 @@ def parse_items(vals, lines, i, end, test, found, inline=()):
             error.line = lines[min(start, len(lines) - 1)] if error.line is None else error.line
             raise
         if item_test and not test:
-            found["spans"].append((lines[start], lines[last]))
+            found["spans"].append((start, last))
         if kind == "mod" and body is None:
             found["mods"].append((name, vals[start:i], lines[i], item_test, inline))
         if body and kind in ("struct", "union", "enum") and not item_test:
@@ -259,21 +260,22 @@ def parse_fields(vals, lines, open_, close, enum, found):
                               lines[start])
             q += 1
         if test:
-            found["spans"].append((lines[start], lines[min(q, close - 1)]))
+            found["spans"].append((start, min(q, close - 1)))
         i = q + 1
 
 
 def analyse(tokens):
-    """(test lines, outline module declarations) of one file's tokens. A test cfg anywhere else (a
-    match arm, statement, expression, tuple field or parameter) is refused."""
+    """(test token indexes, test spans, outline module declarations) of one file's tokens, indexing
+    its non-comment tokens. A test cfg anywhere else (a match arm, statement, expression, tuple field
+    or parameter) is refused."""
     code = [t for t in tokens if t[1] != "comment"]
     vals, lines = [t[2] for t in code] + [""] * 4, [t[0] for t in code]
     found = {"spans": [], "attrs": set(), "mods": []}
     parse_items(vals, lines, 0, len(code), False, found)
-    tests = {n for a, b in found["spans"] for n in range(a, b + 1)}
+    tests = {k for a, b in found["spans"] for k in range(a, b + 1)}
     for k in range(len(code)):
         open_ = k + 1 + (vals[k + 1] == "!")
-        if vals[k] == "#" and k not in found["attrs"] and lines[k] not in tests and vals[open_] == "[":
+        if vals[k] == "#" and k not in found["attrs"] and k not in tests and vals[open_] == "[":
             try:
                 refuse = attr_is_test(vals, open_, closer(vals, open_))
             except Refusal as error:
@@ -281,7 +283,7 @@ def analyse(tokens):
             if refuse:
                 raise Refusal("test cfg on a match arm, statement, expression, tuple field or parameter:"
                               " core-size.py will not guess where it ends", lines[k])
-    return tests, found["mods"]
+    return tests, found["spans"], found["mods"]
 
 
 def crate_roots(tree):
@@ -316,7 +318,7 @@ def module_tree(tree, parsed):
             continue
         reached[path] = test
         here = posixpath.dirname(path)
-        for name, attrs, line, mod_test, inline in parsed(path)[3]:
+        for name, attrs, line, mod_test, inline in parsed(path)[4]:
             folder = posixpath.join(here if owns_dir else path[:-3], *inline)
             given = path_attribute(attrs)
             if given is not None:
@@ -357,12 +359,17 @@ def count(tree):
         if path not in reached:
             raise Refusal(f"{CRATE}/{path}: the module tree does not reach it; core-size.py will not guess"
                           " whether it is compiled")
-        tokens, starts, tests, mods = parsed(path)
-        # A line with any code token on it is code, wherever its comments sit.
-        code = {line for line, kind, value in tokens if kind != "comment"}
+        tokens, starts, tests, spans, mods = parsed(path)
+        code = [token for token in tokens if token[1] != "comment"]
+        firsts = [token[0] for token in code]
+        # A line with any production token on it is code, wherever its comments or test items sit.
+        live = {code[k][0] for k in range(len(code)) if k not in tests}
+        dead = {code[k][0] for k in tests} | {n for a, b in spans for n in range(code[a][0], code[b][0] + 1)}
         notes = {line for line, kind, value in tokens if kind == "comment"}
         for n in range(len(lines)):
-            kind = ("tests" if n in tests else "code" if n in code or starts[n] == "string" else
+            if starts[n] == "string":  # the line continues the literal that is the last token before it
+                (live if bisect.bisect_left(firsts, n) - 1 not in tests else dead).add(n)
+            kind = ("code" if n in live else "tests" if n in dead else
                     "comments" if n in notes or starts[n] == "comment" else "blank")
             totals[kind] += 1
     return totals
