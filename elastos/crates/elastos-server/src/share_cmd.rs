@@ -309,6 +309,9 @@ mod tests {
     /// a file where the Home storage directory belongs.
     #[tokio::test]
     async fn open_defaults_storage_to_home() {
+        // As `main` does, so a planted default reaches the assertion, not a
+        // missing-provider panic in the serve path.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let _guard = HOME_CMD_ENV_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
@@ -322,7 +325,7 @@ mod tests {
         std::fs::write(&storage, b"not a directory").unwrap();
         let open = super::open_capsule_dir(temp.path().to_path_buf(), "127.0.0.1:0", false);
         let deadline = std::time::Duration::from_secs(60);
-        // A spawned task turns a panic past the storage step into an outcome.
+        // A spawned task turns any panic past the storage step into an outcome.
         let outcome = tokio::time::timeout(deadline, tokio::spawn(open)).await;
         let expected = format!("cannot open storage {}", storage.display());
         let refused = matches!(&outcome, Ok(Ok(Err(e))) if e.to_string().contains(&expected));
