@@ -18618,8 +18618,7 @@ fn check_lab_generator_names(root: &Path) -> Result<usize, String> {
                 .any(|component| component.as_os_str().to_str() == Some("tests"));
             let file_name = path.file_name().and_then(|name| name.to_str());
             let extension = path.extension().and_then(|extension| extension.to_str());
-            let is_falsifier_list =
-                file_name.is_some_and(|name| name.ends_with("falsifiers.json"));
+            let is_falsifier_list = file_name.is_some_and(|name| name.ends_with("falsifiers.json"));
             if in_tests || is_falsifier_list || extension == Some("md") {
                 continue;
             }
