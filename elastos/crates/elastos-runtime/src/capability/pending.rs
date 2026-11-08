@@ -543,16 +543,22 @@ impl PendingRequestStore {
             .collect()
     }
 
-    /// Mark a granted request as revoked
-    ///
-    /// This changes the status to Denied with reason "Revoked"
+    /// Mark a granted request as revoked by the user
     pub async fn revoke_request(&self, request_id: &str) {
+        self.revoke_request_by(request_id, "Revoked by user", Settler::Shell)
+            .await
+    }
+
+    /// Mark a granted request as revoked, recording who settled it. This
+    /// changes the request record only; `CapabilityManager::revoke` revokes
+    /// the token itself.
+    pub async fn revoke_request_by(&self, request_id: &str, reason: &str, settled_by: Settler) {
         let mut requests = self.requests.write().await;
         if let Some(request) = requests.get_mut(request_id) {
             if request.is_granted() {
                 request.status = RequestStatus::Denied {
-                    reason: "Revoked by user".to_string(),
-                    settled_by: Settler::Shell,
+                    reason: reason.to_string(),
+                    settled_by,
                 };
 
                 // Audit
@@ -561,7 +567,7 @@ impl PendingRequestStore {
                         timestamp: SecureTimestamp::now(),
                         request_id: request_id.to_string(),
                         session_id: request.session_id.to_string(),
-                        reason: "Revoked by user".to_string(),
+                        reason: reason.to_string(),
                     });
             }
         }
@@ -606,6 +612,48 @@ mod tests {
             RequestStatus::Denied { settled_by, .. } => Some(settled_by),
             _ => None,
         }
+    }
+
+    async fn granted_request(store: &PendingRequestStore) -> String {
+        let resource = ResourceId::new("localhost://Users/self/Documents/test");
+        let session = SessionId::from_string("session-1");
+        let request = store
+            .create_request(session, resource.clone(), Action::Read)
+            .await;
+        let token = CapabilityToken::new(
+            "test-capsule".to_string(),
+            [0u8; 32],
+            resource,
+            Action::Read,
+            Default::default(),
+            SecureTimestamp::now(),
+            None,
+        );
+        let id = request.id.0;
+        store
+            .grant_request(&id, token, GrantDuration::Session)
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn revocations_record_their_settler() {
+        let store = create_test_store();
+        let by_user = granted_request(&store).await;
+        let by_runtime = granted_request(&store).await;
+        let by_epoch = granted_request(&store).await;
+        store.revoke_request(&by_user).await;
+        store
+            .revoke_request_by(&by_runtime, "instance ended", Settler::Runtime)
+            .await;
+        store.revoke_all_granted().await;
+        let user = store.get_request(&by_user).await.unwrap();
+        assert_eq!(settler(&user), Some(Settler::Shell));
+        let runtime = store.get_request(&by_runtime).await.unwrap();
+        assert_eq!(settler(&runtime), Some(Settler::Runtime));
+        let epoch = store.get_request(&by_epoch).await.unwrap();
+        assert_eq!(settler(&epoch), Some(Settler::Shell));
     }
 
     #[tokio::test]
