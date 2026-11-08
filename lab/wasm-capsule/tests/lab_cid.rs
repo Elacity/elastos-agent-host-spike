@@ -9,7 +9,7 @@
 
 mod common;
 
-use common::build::{fixture_git, lane_dir, lane_paths, TempDir};
+use common::build::{fixture_git, git_without_inherited_vars, lane_dir, lane_paths, TempDir};
 use common::MODULE_BUNDLE_LAB_CID;
 use elastos_common::{CapsuleManifest, CapsuleType};
 use std::fs;
@@ -145,6 +145,18 @@ fn victim_state(tmp: &TempDir, victim: &Path) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec
     )
 }
 
+/// The bytes of the common config of the real repository holding this lane.
+fn shared_config() -> Vec<u8> {
+    let common = git_without_inherited_vars()
+        .current_dir(lane_dir())
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()
+        .expect("run git in the lane")
+        .stdout;
+    let common = String::from_utf8(common).expect("a UTF-8 common dir");
+    fs::read(Path::new(common.trim()).join("config")).expect("read the shared git config")
+}
+
 #[test]
 fn fixture_git_ignores_the_callers_git_dir() {
     // A hook or `git rebase --exec` exports GIT_DIR and GIT_WORK_TREE. The
@@ -177,6 +189,7 @@ fn fixture_git_ignores_the_callers_git_dir() {
     }
     fs::write(victim.join("plain.md"), "victim untracked\n").expect("write the untracked file");
     let before = victim_state(&tmp, &victim);
+    let config = shared_config();
     let child = Command::new(std::env::current_exe().expect("the test binary path"))
         .args(["--exact", "lane_files_reads_names_git_would_quote"])
         .env("GIT_DIR", victim.join(".git"))
@@ -193,6 +206,11 @@ fn fixture_git_ignores_the_callers_git_dir() {
         "the fixture test failed while GIT_DIR named another repo:\n{}\n{}",
         String::from_utf8_lossy(&child.stdout),
         String::from_utf8_lossy(&child.stderr)
+    );
+    assert_eq!(
+        shared_config(),
+        config,
+        "the checkout's shared git config changed"
     );
 }
 

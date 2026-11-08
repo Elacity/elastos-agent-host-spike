@@ -52,6 +52,18 @@ def victim_repo(root, untracked=("untracked.txt",)):
     return repo, {"GIT_DIR": str(repo / ".git"), "GIT_WORK_TREE": str(repo)}
 
 
+def shared_config(checkout):
+    """The bytes of the common config of the real repository holding ``checkout``.
+
+    A hostile-GIT_DIR test reads it before and after: a leaked ``git init --bare``
+    or ``git config`` there changes every worktree that shares it.
+    """
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    common = subprocess.run(["git", "-C", str(checkout), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                            env=env, check=True, capture_output=True, text=True).stdout.strip()
+    return (Path(common) / "config").read_bytes()
+
+
 def repo_state(repo):
     """HEAD, the index's sha256 and every work-tree file's bytes."""
     head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], env=fixture_git_env(Path(repo).parent),

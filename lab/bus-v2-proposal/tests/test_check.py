@@ -2514,6 +2514,7 @@ class CitationCheckTests(unittest.TestCase):
         victim_root = self._temp_root()
         victim, pointed = fixture_git.victim_repo(victim_root)
         before = fixture_git.repo_state(victim)
+        config = fixture_git.shared_config(Path(__file__).parent)
         root = self._temp_root()
         self._write(root, "fixture\n", {})
         with mock.patch.dict(os.environ, pointed):
@@ -2525,6 +2526,7 @@ class CitationCheckTests(unittest.TestCase):
         log = subprocess.run(["git", "-C", str(root), "log", "--format=%H %s"], check=True, text=True,
                              capture_output=True, env=fixture_git.fixture_git_env(root)).stdout
         self.assertEqual(log, sha + " fixture\n", "the fixture repo lacks its one commit")
+        self.assertEqual(fixture_git.shared_config(Path(__file__).parent), config, "the checkout's shared git config changed")
 
     def _assert_one(self, body, files, expected):
         got = check.problems(self._draft(body, files))

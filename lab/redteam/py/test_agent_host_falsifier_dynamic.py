@@ -806,6 +806,7 @@ class AgentHostDynamicChecks(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             victim, pointed = fixture_git.victim_repo(Path(tmp) / "victim-root", untracked=("pin.txt",))
             before = fixture_git.repo_state(victim)
+            config = fixture_git.shared_config(REPO)
             repo = Path(tmp).resolve() / "repo"
             repo.mkdir()
             with mock.patch.dict(os.environ, pointed):
@@ -817,6 +818,7 @@ class AgentHostDynamicChecks(unittest.TestCase):
             log = subprocess.run(["git", "-C", str(repo), "log", "--format=%s"], capture_output=True,
                                  text=True, env=fixture_git.fixture_git_env(tmp)).stdout
             self.assertEqual(log, "pin\n", "the fixture repo lacks its one commit")
+            self.assertEqual(fixture_git.shared_config(REPO), config, "the checkout's shared git config changed")
 
     def test_host_count_comes_from_the_document(self):
         document = {"falsifiers": [

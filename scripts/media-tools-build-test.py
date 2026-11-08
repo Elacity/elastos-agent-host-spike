@@ -53,6 +53,7 @@ class SourcePinTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as scratch:
             victim, pointed = fixture_git.victim_repo(scratch, untracked=("COPYING", "configure"))
             before = fixture_git.repo_state(victim)
+            config = fixture_git.shared_config(Path(__file__).parent)
             with patch.dict(os.environ, pointed):
                 try:
                     self.setUp()  # a second fixture, built while GIT_DIR names the victim
@@ -62,6 +63,7 @@ class SourcePinTest(unittest.TestCase):
             log = subprocess.run(["git", "-C", str(self.repo), "log", "--format=%H %s"], capture_output=True,
                                  text=True, env=fixture_git.fixture_git_env(self.root)).stdout
             self.assertEqual(log, f"{self.commit} fixture\n", "the fixture repo lacks its one commit")
+            self.assertEqual(fixture_git.shared_config(Path(__file__).parent), config, "the checkout's shared git config changed")
 
     def fetch(self, digest=None):
         builder.fetch_source(self.archive, self.repo.as_uri(), digest or self.digest)

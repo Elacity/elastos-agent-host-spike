@@ -59,7 +59,7 @@ const LANE_SOURCE_ENTRIES: &[&str] = &[
 /// `git` with no inherited `GIT_*` variable. git ignores the working directory
 /// when GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_COMMON_DIR or
 /// GIT_OBJECT_DIRECTORY is set, as it is inside hooks and `git rebase --exec`.
-fn git_without_inherited_vars() -> Command {
+pub fn git_without_inherited_vars() -> Command {
     let mut command = Command::new("git");
     for (key, _) in std::env::vars_os() {
         if key.as_encoded_bytes().starts_with(b"GIT_") {
