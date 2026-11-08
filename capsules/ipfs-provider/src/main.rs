@@ -2066,8 +2066,7 @@ fn directory_root(resp: ureq::Response) -> Result<String, String> {
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .filter(|entry| entry["Name"].as_str().unwrap_or("").is_empty())
         .filter_map(|entry| entry["Hash"].as_str().map(str::to_owned))
-        .filter(|hash| !hash.is_empty())
-        .next_back()
+        .rfind(|hash| !hash.is_empty())
         .ok_or_else(|| "No root CID in IPFS response".to_string())
 }
 
