@@ -2309,6 +2309,50 @@ async fn shared_hosted_offer_denies_fresh_creates_and_recovers_without_losing_ol
 }
 
 #[tokio::test]
+async fn an_active_grant_stays_active_while_another_home_holds_the_audit_lock() {
+    let fx = TwoRuntimes::start().await;
+    let other = tempfile::tempdir().unwrap();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let other_path = other.path().to_path_buf();
+    let holder = std::thread::spawn(move || {
+        crate::auth::hold_audit_activation_lock_for_test(&other_path, ready_tx, release_rx);
+    });
+    ready_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("other home acquired the audit lock");
+    let created = fx
+        .create_run("during-other-home-audit-lock", "qwen-local")
+        .await;
+    let _ = release_tx.send(());
+    holder.join().expect("audit lock holder");
+    assert_eq!(created["ok"], true, "{created}");
+    fx.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_active_grant_stays_active_while_another_home_holds_the_principal_root_lock() {
+    let fx = TwoRuntimes::start().await;
+    let other = tempfile::tempdir().unwrap();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let other_path = other.path().to_path_buf();
+    let holder = std::thread::spawn(move || {
+        crate::auth::hold_principal_root_lock_for_test(&other_path, ready_tx, release_rx);
+    });
+    ready_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("other home acquired the principal-root lock");
+    let created = fx
+        .create_run("during-other-home-principal-root-lock", "qwen-local")
+        .await;
+    let _ = release_tx.send(());
+    holder.join().expect("principal-root lock holder");
+    assert_eq!(created["ok"], true, "{created}");
+    fx.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_hosted_grant_serves_only_while_its_provider_is_an_admin() {
     use crate::api::model_provider_config::{HostedAiProvider, HostedOfferSave};
     let fx = TwoRuntimes::start().await;
