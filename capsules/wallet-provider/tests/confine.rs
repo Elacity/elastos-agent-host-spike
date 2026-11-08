@@ -6580,6 +6580,8 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("openat", Some(257), Some(56)),
     ("openat2", Some(437), Some(437)),
     ("pidfd_getfd", Some(438), Some(438)),
+    // x86-64 only: aarch64 has ppoll alone.
+    ("poll", Some(7), None),
     ("ppoll", Some(271), Some(73)),
     ("pread64", Some(17), Some(67)),
     ("process_vm_readv", Some(310), Some(270)),
@@ -7160,6 +7162,7 @@ struct LandlockRuleset {
 /// `CONFINEMENT-LINUX.md` names; the run there shows the list is enough for both.
 /// The paths stay here so the ruleset the installer would apply is the one the
 /// Mac test reads. The table is compiled on every OS.
+#[cfg(not(target_arch = "x86_64"))]
 const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
     (
         "/lib/ld-linux-aarch64.so.1",
@@ -7181,6 +7184,30 @@ const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
         "/lib/aarch64-linux-gnu/libm.so.6",
         "without READ_FILE here the loader fails to map libm.so.6 and exits with \
          `error while loading shared libraries: libm.so.6: cannot open shared object file`",
+    ),
+];
+
+/// The x86-64 loader and the libraries both providers map there, read from
+/// `readelf -l` and `ldd` on GitHub's ubuntu-24.04 runner (glibc 2.39, run
+/// 42447112526): the interpreter `/lib64/ld-linux-x86-64.so.2`, a link to
+/// `/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2` that the `O_PATH` open follows,
+/// then `libc.so.6` and `libgcc_s.so.1`. Neither binary maps `libm.so.6` there,
+/// so it takes no rule. The drop-one measurement the aarch64 entries carry has
+/// not been made on x86-64; each note says what the entry is for.
+#[cfg(target_arch = "x86_64")]
+const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
+    (
+        "/lib64/ld-linux-x86-64.so.2",
+        "the interpreter both x86-64 providers name in PT_INTERP; execve needs \
+         EXECUTE here to enter it and READ_FILE for it to map itself",
+    ),
+    (
+        "/lib/x86_64-linux-gnu/libc.so.6",
+        "ldd on both x86-64 providers names libc.so.6; the loader maps it with READ_FILE",
+    ),
+    (
+        "/lib/x86_64-linux-gnu/libgcc_s.so.1",
+        "ldd on both x86-64 providers names libgcc_s.so.1; the loader maps it with READ_FILE",
     ),
 ];
 
@@ -8128,6 +8155,12 @@ const LAUNCH_ESSENTIALS: &[(&str, &str)] = &[
         "ppoll",
         "ppoll([{fd=0, events=0}, {fd=1, events=0}, {fd=2, events=0}], 3, {tv_sec=0, \
          tv_nsec=0}, NULL, 0) refused while the provider waits",
+    ),
+    (
+        "poll",
+        "poll([{fd=0, events=0}, {fd=1, events=0}, {fd=2, events=0}], 3, 0) refused \
+         on x86-64 while the provider checks its standard descriptors, after which \
+         it aborted and, with tgkill refused, took SIGSEGV",
     ),
     (
         "rt_sigaction",
@@ -12635,6 +12668,12 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
     // with "Cannot allocate TLS block" (8 Nov, run 42446019401). The call sets
     // only the calling thread's own registers and mappings, so it reaches no
     // other process.
+    // With that row the same journeys then took SIGSEGV: the provider's check of
+    // its standard descriptors calls poll on x86-64, where aarch64 calls ppoll,
+    // and poll([{fd=0}, {fd=1}, {fd=2}], 3, 0) = -1 EACCES made it abort
+    // (run 42447112526). Every other refused call in that trace (brk,
+    // set_tid_address, set_robust_list, rseq, prlimit64, munmap) is one the
+    // aarch64 run also refuses and the provider tolerates.
 
     let allow = seccomp_probe_list(name).unwrap_or_else(|err| panic!("{err}"));
     assert_eq!(
