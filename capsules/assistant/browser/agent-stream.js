@@ -66,19 +66,38 @@ export function jumpTranscriptToEnd(scroller) {
 function observeTranscript(scroller, content) {
   if (!scroller || !content || transcriptFollow) return;
   let atEnd = true;
-  let towardEnd = false;
+  let readerPending = false;
+  let readerMoved = false;
   let dragging = false;
+  let settleFrame = 0;
+  const hasScrollend = "onscrollend" in scroller;
   let touchY = 0;
   const showFollow = () => {
     scroller.classList.toggle("is-follow-bottom", atEnd && scroller.classList.contains("is-live-streaming"));
     updateJumpToLatestVisibility();
   };
   const nearEnd = () => scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= READER_AT_END_PX;
-  // Reader input owns follow state. Layout only pins an existing follower.
+  // Input can leave follow. Only a settled reader scroll can return to it.
   const readerInput = (toward) => {
-    towardEnd = toward;
-    atEnd = toward && (atEnd || nearEnd());
+    readerPending = true;
+    readerMoved = false;
+    window.cancelAnimationFrame(settleFrame);
+    if (!toward) atEnd = false;
     showFollow();
+  };
+  const settleReader = () => {
+    if (dragging || !readerPending || !readerMoved) return;
+    readerPending = false;
+    atEnd = nearEnd();
+    showFollow();
+  };
+  const nextFrameSettled = () => {
+    window.cancelAnimationFrame(settleFrame);
+    const top = scroller.scrollTop;
+    settleFrame = window.requestAnimationFrame(() => {
+      if (scroller.scrollTop !== top) nextFrameSettled();
+      else settleReader();
+    });
   };
   const pinFollowing = () => {
     if (atEnd) pinTranscriptToEnd(scroller);
@@ -86,7 +105,7 @@ function observeTranscript(scroller, content) {
   };
   transcriptFollow = {
     get atEnd() { return atEnd; },
-    reset() { atEnd = true; towardEnd = false; pinFollowing(); },
+    reset() { atEnd = true; readerPending = false; window.cancelAnimationFrame(settleFrame); pinFollowing(); },
   };
   scroller.addEventListener("wheel", event => {
     if (event.deltaY && !event.ctrlKey) readerInput(event.deltaY > 0);
@@ -97,21 +116,19 @@ function observeTranscript(scroller, content) {
     if (y !== touchY) readerInput(y < touchY);
     touchY = y;
   }, { passive: true });
-  scroller.addEventListener("pointerdown", event => {
-    const box = scroller.getBoundingClientRect();
-    if (event.target === scroller && (event.clientX >= box.right - 16 || event.clientX <= box.left + 16)) {
-      dragging = true;
-      readerInput(false);
-    }
+  scroller.addEventListener("pointerdown", () => {
+    dragging = true;
+    readerInput(false);
   });
-  document.addEventListener("pointerup", () => {
+  const releasePointer = () => {
     if (!dragging) return;
     dragging = false;
-    readerInput(true);
-  });
+    if (!hasScrollend) nextFrameSettled();
+  };
+  document.addEventListener("pointerup", releasePointer);
+  document.addEventListener("pointercancel", releasePointer);
   document.addEventListener("keydown", event => {
-    if (event.defaultPrevented || event.target.closest?.("input, textarea, select, [contenteditable], button")) return;
-    if (!scroller.contains(event.target) && event.target !== document.body) return;
+    if (event.defaultPrevented || event.target.closest?.("input, textarea, select, [contenteditable]")) return;
     if (["PageUp", "Home", "ArrowUp"].includes(event.key) || (event.key === " " && event.shiftKey)) readerInput(false);
     if (["PageDown", "End", "ArrowDown"].includes(event.key) || (event.key === " " && !event.shiftKey)) readerInput(true);
   });
@@ -119,10 +136,13 @@ function observeTranscript(scroller, content) {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") readerInput(false);
   });
   scroller.addEventListener("scroll", () => {
-    if (towardEnd && !dragging && nearEnd()) atEnd = true;
+    if (readerPending) {
+      readerMoved = true;
+      if (!hasScrollend) nextFrameSettled();
+    }
     showFollow();
   }, { passive: true });
-  scroller.addEventListener("scrollend", () => { towardEnd = false; });
+  scroller.addEventListener("scrollend", nextFrameSettled);
   const resize = new ResizeObserver(pinFollowing);
   resize.observe(scroller);
   resize.observe(content);

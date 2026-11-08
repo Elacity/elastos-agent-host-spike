@@ -419,12 +419,14 @@ try {
     const column = document.querySelector("#agent-harness-stream-column").getBoundingClientRect();
     return { x: Math.round((column.left + scroller.left) / 2), y: Math.round(scroller.top + scroller.height / 3) };
   });
-  // The transcript takes the keyboard after a click a while ago: only the
-  // keys that follow move the reader.
-  const clickTranscriptAWhileAgo = async () => {
-    const point = await gutter();
-    assert.ok(point.x >= 8, `the transcript has room beside the messages: ${JSON.stringify(point)}`);
-    await page.mouse.click(point.x, point.y);
+  // Focus prepares keyboard scrolling without a pointer press, which leaves
+  // follow. The keys below then own the reader movement.
+  const focusTranscriptAWhileAgo = async () => {
+    await frame.evaluate(() => {
+      const scroller = document.querySelector("#agent-harness-stream");
+      scroller.tabIndex = -1;
+      scroller.focus({ preventScroll: true });
+    });
     await page.waitForTimeout(1500);
     await atEnd();
   };
@@ -533,18 +535,18 @@ try {
       await pushChunk();
     }
   }, async () => {
-    await clickTranscriptAWhileAgo();
+    await focusTranscriptAWhileAgo();
     const point = await gutter();
     await page.mouse.move(point.x, point.y);
   });
   seen.pageUpMovedPx = await readerMovesUp("PageUp", async () => {
     await page.keyboard.press("PageUp");
-  }, clickTranscriptAWhileAgo);
+  }, focusTranscriptAWhileAgo);
   seen.shiftSpaceMovedPx = await readerMovesUp("Shift+Space", async (pushChunk) => {
     // More words arrive while the page-up scroll is still moving.
     await page.keyboard.press("Shift+Space");
     for (let i = 0; i < 4; i += 1) await pushChunk();
-  }, clickTranscriptAWhileAgo);
+  }, focusTranscriptAWhileAgo);
   // Headless Chromium's window.find selects the match and does not scroll.
   // The Find bar scrolls that match into view. Do the same scroll here.
   const scrollFindMatchIntoView = () => frame.evaluate(() => {

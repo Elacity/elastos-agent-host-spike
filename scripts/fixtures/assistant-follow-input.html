@@ -1,0 +1,166 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Assistant follow input regression</title>
+<link rel="stylesheet" href="/capsules/assistant/browser/agent-harness.css">
+<style>
+  html, body { margin: 0; }
+  #viewport { position: relative; width: 520px; height: 420px; }
+</style>
+<div id="viewport" class="agent-harness-stream-viewport">
+  <div id="agent-harness-stream" class="agent-harness-stream">
+    <div id="agent-harness-stream-column" class="agent-harness-stream-column">
+      <button id="message">Copy message</button><input><textarea></textarea><select><option>One</option></select><span contenteditable>Draft</span>
+    </div>
+  </div>
+</div>
+<script type="module">
+  const s = document.querySelector("#agent-harness-stream");
+  const c = document.querySelector("#agent-harness-stream-column");
+  const viewport = document.querySelector("#viewport");
+  const fallback = new URLSearchParams(location.search).has("fallback");
+  if (fallback) {
+    // Exercise the missing-scrollend path in each real engine.
+    for (let proto = s; proto; proto = Object.getPrototypeOf(proto)) delete proto.onscrollend;
+    s.addEventListener("scrollend", event => event.stopImmediatePropagation(), true);
+  }
+  const mod = await import("/capsules/assistant/browser/agent-stream.js");
+  mod.bindAgentStream({}, { streamScrollEl: () => s, streamEl: () => c, streamViewportEl: () => viewport });
+  Object.assign(s.style, { height: "400px", maxHeight: "400px", width: "480px", padding: "0px",
+    flex: "none", overflowAnchor: "none", webkitMaskImage: "none", maskImage: "none" });
+  s.classList.add("is-live-streaming");
+  mod.ensureJumpToLatest();
+  const result = { phase: "done", fallback, nativeScrollend: "onscrollend" in s, cases: {}, failures: [] };
+  const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 150))));
+  const snap = () => ({ top: s.scrollTop, fromEnd: s.scrollHeight - s.clientHeight - s.scrollTop,
+    follow: s.classList.contains("is-follow-bottom"), jump: !viewport.querySelector("[data-agent-jump-latest]").hidden });
+  const expect = (ok, label) => { if (!ok) result.failures.push(label); };
+  let sampling = true;
+  let jumpWhileFollowing = 0;
+  const sample = () => {
+    if (!sampling) return;
+    const state = snap();
+    if (state.follow && state.jump) jumpWhileFollowing++;
+    requestAnimationFrame(sample);
+  };
+  requestAnimationFrame(sample);
+  const wheel = deltaY => s.dispatchEvent(new WheelEvent("wheel", { deltaY, bubbles: true }));
+  const key = (target, key, shiftKey = false) => target.dispatchEvent(new KeyboardEvent("keydown", { key, shiftKey, bubbles: true }));
+  const pointer = type => {
+    const b = s.getBoundingClientRect();
+    s.dispatchEvent(new PointerEvent(type, { bubbles: true, clientX: b.right - 3, clientY: b.bottom - 14 }));
+  };
+  const reset = async () => { c.style.height = "2600px"; mod.jumpTranscriptToEnd(s); await settle(); };
+  const grow = async () => { c.style.height = `${c.offsetHeight + 100}px`; mod.followTranscriptToEnd(s); await settle(); return snap(); };
+  const heldGrowth = async label => {
+    await settle();
+    const held = snap();
+    const after = await grow();
+    result.cases[label] = { held, after };
+    expect(held.fromEnd > 8 && !held.follow && held.jump && after.top === held.top, label);
+  };
+  const followingGrowth = async label => {
+    await settle();
+    const held = snap();
+    const after = await grow();
+    result.cases[label] = { held, after };
+    expect(held.follow && !held.jump && after.follow && !after.jump && after.fromEnd <= 8, label);
+  };
+  try {
+    const control = document.createElement("div");
+    control.style.cssText = "position:absolute;left:600px;top:0;height:400px;width:100px;overflow:auto;overflow-anchor:none";
+    const content = control.appendChild(document.createElement("div"));
+    content.style.height = "2600px";
+    document.body.append(control);
+    control.scrollTop = control.scrollHeight;
+    content.style.height = "2700px";
+    await settle();
+    result.controlGap = control.scrollHeight - control.clientHeight - control.scrollTop;
+    expect(result.controlGap === 100, "control without pin stays 100px short");
+    control.remove();
+    await reset();
+    const box = s.getBoundingClientRect();
+    // The host drives a native scrollbar drag, CGEvent on system WKWebView.
+    const trusted = await new Promise(resolve => {
+      window.__continue = resolve;
+      window.__drag = { x: box.x, y: box.y, width: box.width, height: box.height };
+      window.webkit?.messageHandlers.probe.postMessage(JSON.stringify({ phase: "drag", rect: window.__drag }));
+    });
+    expect(trusted, "native scrollbar driver available");
+    await heldGrowth("native scrollbar away then growth");
+
+    await reset();
+    pointer("pointerdown"); pointer("pointerup");
+    // WebKit can deliver the drag's scroll after release, as measured by review.
+    await new Promise(requestAnimationFrame);
+    s.scrollBy(0, -450);
+    await heldGrowth("scrollbar scroll after release then growth");
+
+    await reset();
+    c.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    expect(!snap().follow, "pointerdown within transcript leaves follow");
+    c.dispatchEvent(new PointerEvent("pointercancel", { bubbles: true }));
+    s.scrollBy(0, -400);
+    await heldGrowth("cancelled pointer then scroll away and growth");
+
+    for (const name of ["PageUp", "Home", "ArrowUp", "Shift+Space"]) {
+      await reset();
+      const button = document.querySelector("#message");
+      button.focus({ preventScroll: true });
+      key(button, name === "Shift+Space" ? " " : name, name === "Shift+Space");
+      s.scrollBy(0, name === "Home" ? -s.scrollHeight : -400);
+      await heldGrowth(`${name} on focused message button then growth`);
+    }
+    await reset();
+    wheel(-180); wheel(2);
+    result.cases["wheel before movement"] = snap();
+    expect(!snap().follow, "downward wheel cannot resume before movement");
+    s.scrollBy(0, -178);
+    await heldGrowth("downward wheel lands 178px short then growth");
+
+    await reset();
+    wheel(-9);
+    for (let step = 0; step < 3; step++) {
+      const moved = new Promise(resolve => s.addEventListener("scroll", resolve, { once: true }));
+      s.scrollBy(0, -3);
+      await moved;
+    }
+    c.style.height = "2700px";
+    await heldGrowth("small steps accumulate past 8px before growth");
+
+    for (const input of ["wheel", "drag"]) {
+      for (const distance of [8, 9]) {
+        await reset();
+        wheel(-400); s.scrollBy(0, -400); await settle();
+        if (input === "wheel") wheel(400 - distance);
+        else { pointer("pointerdown"); pointer("pointerup"); }
+        s.scrollTop = s.scrollHeight - s.clientHeight - distance;
+        if (distance === 8) await followingGrowth(`${input} settles within 8px then growth`);
+        else await heldGrowth(`${input} settles 9px short then growth`);
+      }
+    }
+    for (const selector of ["input", "textarea", "select", "[contenteditable]"]) {
+      await reset();
+      const target = c.querySelector(selector);
+      target.focus({ preventScroll: true }); key(target, "PageUp");
+      await followingGrowth(`${selector} keeps follow`);
+    }
+    await reset();
+    await followingGrowth("growth");
+    await reset();
+    c.style.height = "2300px"; await settle(); c.style.height = "2400px";
+    await followingGrowth("clamp then growth");
+    for (const distance of [16, 400]) {
+      await reset(); wheel(-distance); s.scrollBy(0, -distance);
+      // A first chunk can precede the scroll event.
+      c.style.height = "2720px"; mod.followTranscriptToEnd(s);
+      await heldGrowth(`${distance}px reader and first chunk`);
+    }
+    mod.jumpTranscriptToEnd(s);
+    await followingGrowth("Jump to latest");
+  } catch (error) { result.failures.push(String(error.stack || error)); }
+  sampling = false;
+  result.jumpWhileFollowing = jumpWhileFollowing;
+  expect(jumpWhileFollowing === 0, "Jump stays hidden on every following frame");
+  window.__report = result;
+  window.webkit?.messageHandlers.probe.postMessage(JSON.stringify(result));
+</script>
