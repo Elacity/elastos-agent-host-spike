@@ -317,6 +317,28 @@ class ModuleHelpersTest(unittest.TestCase):
             core_size.count({"Cargo.toml": "[lib]\npath = 'tests/production.rs'\n", "src/lib.rs": "",
                              "tests/production.rs": "pub fn production() {}\n"})
 
+    def test_commented_target_headers_read_alike_with_and_without_tomllib(self):
+        growth = "".join(f"pub fn p{n}() {{}}\n" for n in range(60))
+        read = [  # the reviewers' inputs: a trailing comment on the header must not drop the target
+            ('[[bin]] # tool\nname = "growth"\npath = "tests/growth.rs"\n', "tests/growth.rs"),
+            ('[lib] # runtime\npath = "tests/production.rs"\n', "tests/production.rs"),
+            ('[lib] # library\npath = "tests/production.rs" # the root\n', "tests/production.rs"),
+        ]
+        refused = ['[lib] junk\npath = "tests/production.rs"\n', '[lib]]\npath = "tests/production.rs"\n',
+                   '"lib"."path" = "tests/production.rs"\n']
+        for reader in (core_size.tomllib, None):  # None: no tomllib, as on Python 3.9
+            with mock.patch.object(core_size, "tomllib", reader):
+                for manifest, path in read:
+                    try:
+                        totals = core_size.count({"Cargo.toml": manifest, "src/lib.rs": "", path: growth})
+                        result = (totals["code"], totals["tests"])
+                    except core_size.Refusal as error:
+                        result = f"refused: {error}"
+                    self.assertEqual(result, (60, 0), (manifest, reader))
+                for manifest in refused:
+                    with self.assertRaisesRegex(core_size.Refusal, r"Cargo.toml:1: ", msg=(manifest, reader)):
+                        core_size.count({"Cargo.toml": manifest, "src/lib.rs": "", "tests/production.rs": growth})
+
     def test_path_attribute(self):
         for attribute, expected in (('#[path = "a/b.rs"]', "a/b.rs"), ('#[path = r#"c.rs"#]', "c.rs"),
                                     ('#[doc = "x"]', None)):

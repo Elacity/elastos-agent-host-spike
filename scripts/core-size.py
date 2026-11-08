@@ -36,6 +36,9 @@ CRATE, BUDGET = "elastos/crates/elastos-runtime", "elastos/CORE-BUDGET"
 SLACK = 50  # the budget may sit at most this far above the code; further, the check fails
 MODES = ("enforce", "advisory")  # CORE_BUDGET_MODE: whether a failed budget verdict fails --check
 READ_NAMES = {"include", "mod", "cfg", "cfg_attr", "path", "test", "all", "any", "not", "macro_rules"}
+TOML_KEY = r"""\s*(?:[A-Za-z0-9_-]+|"[^"\\\n]*"|'[^'\n]*')\s*"""
+TOML_TABLE = rf"{TOML_KEY}(?:\.{TOML_KEY})*"  # a table header: bare or quoted keys joined by dots
+HEADER = re.compile(rf"(\[\[{TOML_TABLE}\]\]|\[{TOML_TABLE}\])\s*(?:#.*)?")  # an ordinary trailing comment
 PLAIN_PATH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*")  # no escapes, no ..
 OPEN, CLOSE = ("{", "(", "["), ("}", ")", "]")
 CHAR = re.compile(r"'(\\(u\{[0-9a-fA-F]*\}|x..|.)|[^\\\n])'")
@@ -327,9 +330,13 @@ def cargo_targets(text):
             raise Refusal(f"{CRATE}/Cargo.toml:{number}: {what}: core-size.py reads only `[lib]` and `[[bin]]`"
                           ' tables with bare keys and a plain `path = "..."`')
         if line.startswith("["):
-            if re.sub(r"[\s\"'\[\]]", "", line).split(".")[0] in ("lib", "bin") and line not in ("[lib]", "[[bin]]"):
-                refuse(f"target table written as {line}")
-            section = line
+            header = HEADER.fullmatch(line)
+            if not header:  # what follows a header must be readable, or the next table would go unseen
+                refuse(f"table header written as {line}")
+            section = header.group(1) if header else line
+            target = re.sub(r"[\s\"'\[\]]", "", section).split(".")[0] in ("lib", "bin")
+            if target and section not in ("[lib]", "[[bin]]"):
+                refuse(f"target table written as {section}")
         elif re.match(r"""["']?(lib|bin)["']?\s*[.=]""", line):
             refuse("target defined by a dotted key or inline table")
         elif section in ("[lib]", "[[bin]]") and line and not line.startswith("#"):
