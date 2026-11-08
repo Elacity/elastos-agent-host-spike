@@ -77,6 +77,35 @@ class CountTest(unittest.TestCase):
             with self.assertRaisesRegex(core_size.Refusal, r"^elastos/crates/elastos-runtime/src/lib.rs:2: "):
                 counts(f"fn production() {{}}\n{attribute}\nfn other() {{}}\n")
 
+    def test_test_items_end_where_the_item_ends(self):
+        cases = {  # source: (test lines, code lines)
+            "#[cfg(test)]\nconst T: usize = if true {\n    1\n} else {\n    2\n};\nfn production() {}\n": (6, 1),
+            "#[cfg(test)]\nfn f() -> S<{ 1 }> {\n    S\n}\nfn production() {}\n": (4, 1),
+            "#[derive(Debug)]\n#[cfg(test)]\nstruct T {\n    a: u8,\n}\nfn production() {}\n": (5, 1),
+            "impl S {\n    #[cfg(test)]\n    fn helper() {}\n    fn live() {}\n}\n": (2, 3),
+            "#![cfg(test)]\nfn a() {}\nfn b() {}\n": (3, 0),
+            "#[cfg(test)]\nmod tests {\n    struct S {\n        #[cfg(test)]\n        a: u8,\n    }\n}\n"
+            "fn f() {}\n": (7, 1),
+        }
+        for source, (tests, code) in cases.items():
+            totals = counts(source)
+            self.assertEqual((totals["tests"], totals["code"]), (tests, code), source)
+
+    def test_test_cfg_on_fields_arms_and_statements_is_refused(self):
+        cases = {  # the reviewers' inputs: guessing here hid the production field or arm after it
+            "pub fn f(x: u8) -> u8 {\n    match x {\n        #[cfg(test)]\n        0 if x < 2 => 1,\n"
+            "        _ => 2,\n    }\n}\n": 3,
+            "fn f(x: u8) -> u8 {\n    match x {\n        #[cfg(test)]\n        0 => if x > 1 {\n"
+            "            1\n        } else {\n            2\n        },\n        _ => 3,\n    }\n}\n": 3,
+            "struct S {\n    #[cfg(test)]\n    default: u8,\n    live: u8,\n}\n": 2,
+            "struct S {\n    #[cfg(test)]\n    hook: [u8; { 4 }],\n    live: u8,\n}\n": 2,
+            "enum E {\n    A,\n    #[cfg(test)]\n    B(u8),\n    C,\n}\n": 3,
+            "fn f() {\n    #[cfg(test)]\n    check();\n    live();\n}\n": 2,
+        }
+        for source, line in cases.items():
+            with self.assertRaisesRegex(core_size.Refusal, rf"src/lib.rs:{line}: test cfg on a field", msg=source):
+                counts(source)
+
     def test_block_comments(self):
         self.assertEqual(counts(BLOCK_COMMENTS),
                          {"total": 6, "tests": 0, "comments": 5, "blank": 0, "code": 1})
