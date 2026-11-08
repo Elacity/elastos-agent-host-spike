@@ -739,7 +739,7 @@ jobs:
             platform: linux-arm64
             host: linux
             target: aarch64-unknown-linux-musl
-          - os: macos-14
+          - os: macos-15
             platform: darwin-arm64
             host: darwin
             target: aarch64-apple-darwin
@@ -1088,7 +1088,7 @@ jobs:
 
   source-home-macos:
     name: source-home-macos
-    runs-on: macos-14
+    runs-on: macos-15
     # macOS runs after merge only: on pushes (spike/agent-host, main, develop, tags) and the nightly schedule.
     # It no longer gates lane PRs, batch PRs or workflow_dispatch baselines; a red post-merge run is
     # routed back to the lane whose PR caused it by the orchestrator.
@@ -1248,7 +1248,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
-          name: source-home-journeys-macos-14
+          name: source-home-journeys-macos-15
           path: |
             ${{ runner.temp }}/source-home-journeys/**/*.json
             ${{ runner.temp }}/source-home-journeys/**/*.png
