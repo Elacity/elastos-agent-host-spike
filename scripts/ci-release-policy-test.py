@@ -38,9 +38,11 @@ FULL_PROOF_JOBS = {
 SPARK_SKIP = "!(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))"
 # Jobs that run only after merge (pushes and the nightly schedule), never on a PR, batch or baseline run.
 POST_MERGE_JOBS = {"source-home-macos"}
+# Jobs that run only on a pull request.
+PR_ONLY_JOBS = {"pr-substance"}
 POST_MERGE_GUARD = "${{ github.event_name == 'push' || github.event_name == 'schedule' }}"
 # Every job the required check sums up: all but itself and cancel-on-failure.
-REQUIRED_NEEDS = ("source-gate", "fork-gate", "test-behaviour", "cargo-audit", "engine-llama-amd64", "engine-llama-arm64",
+REQUIRED_NEEDS = ("source-gate", "fork-gate", "pr-substance", "test-behaviour", "cargo-audit", "engine-llama-amd64", "engine-llama-arm64",
                   "lint", "lab-standin", "test-elastos", "test-capsules", "custody-harness-smoke", "release-upstream-paths",
                   "release-upstream-assets", "source-home-linux", "source-home-linux-arm64", "source-home-macos",
                   "update-hop-linux")
@@ -880,7 +882,7 @@ class ReleasePolicyTests(unittest.TestCase):
             guard = re.search(r"(?m)^    if: (.*)$", JOBS[job])
             if job == "release-upstream-assets":
                 self.assertTrue(upstream_assets_run(SOURCE, context, ""), job)
-            elif job in POST_MERGE_JOBS:
+            elif job in POST_MERGE_JOBS | PR_ONLY_JOBS:
                 self.assertFalse(evaluate(guard[1], context), job)
             elif guard:
                 self.assertTrue(evaluate(guard[1], context), job)
@@ -1837,7 +1839,7 @@ class ReleasePolicyTests(unittest.TestCase):
 
     def test_no_action_writes_the_cache_outside_the_guarded_saves(self):
         sources = {path.name: path.read_text() for path in WORKFLOWS}
-        self.assertEqual(set(sources), {"canary-holder-linux.yml", "ci.yml", "pr-substance.yml", "release-package.yml"})
+        self.assertEqual(set(sources), {"canary-holder-linux.yml", "ci.yml", "release-package.yml"})
         validate_no_indirect_cache_writers(sources)
         node = "      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4\n        with:\n"
         save = "      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4\n"
@@ -1846,7 +1848,7 @@ class ReleasePolicyTests(unittest.TestCase):
             "setup-buildx caches its binary": ("ci.yml", SOURCE.replace("          cache-binary: false\n", "", 1)),
             "an unreviewed action": ("ci.yml", SOURCE.replace(
                 node, "      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5\n" + node, 1)),
-            "a cache save in another workflow": ("pr-substance.yml", sources["pr-substance.yml"] + save),
+            "a cache save in another workflow": ("canary-holder-linux.yml", sources["canary-holder-linux.yml"] + save),
         }
         for name, (path, changed) in mutations.items():
             self.assertNotEqual(changed, sources[path], name)
@@ -1896,6 +1898,7 @@ class ReleasePolicyTests(unittest.TestCase):
         expected = {
             "source-gate": ("source-gate", "ubuntu-24.04"),
             "fork-gate": ("fork-gate", "ubuntu-24.04"),
+            "pr-substance": ("pr-substance", "ubuntu-24.04"),
             "required": ("required", "ubuntu-24.04"),
             "engine-llama-arm64": ("engine-llama-arm64", "ubuntu-24.04-arm"),
             "engine-llama-amd64": ("engine-llama-amd64", "ubuntu-24.04"),
@@ -1964,14 +1967,14 @@ class ReleasePolicyTests(unittest.TestCase):
         # compile job, and post-merge macOS has no cancel-on-failure to stop it. Compile jobs
         # wait for fork-gate, which holds them only on a fork pull request.
         expected = {
-            "source-gate": None, "fork-gate": None, "cargo-audit": None, "test-behaviour": "source-gate",
+            "source-gate": None, "fork-gate": None, "pr-substance": None, "cargo-audit": None, "test-behaviour": "source-gate",
             "engine-llama-amd64": "fork-gate", "engine-llama-arm64": "fork-gate", "lint": "fork-gate",
             "lab-standin": "fork-gate", "test-elastos": "fork-gate", "test-capsules": "fork-gate",
             "custody-harness-smoke": "fork-gate",
             "release-upstream-paths": None, "release-upstream-assets": "[release-upstream-paths, engine-llama-arm64]",
             "source-home-linux": "engine-llama-amd64", "source-home-linux-arm64": "engine-llama-arm64",
             "source-home-macos": "source-gate", "update-hop-linux": "fork-gate", "cancel-on-failure": None,
-            "required": "[source-gate, fork-gate, test-behaviour, cargo-audit, engine-llama-amd64, engine-llama-arm64, "
+            "required": "[source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, engine-llama-amd64, engine-llama-arm64, "
                         "lint, lab-standin, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, "
                         "release-upstream-assets, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux]",
         }
@@ -2027,7 +2030,7 @@ class ReleasePolicyTests(unittest.TestCase):
         """Run the required job's check as Actions would for this context; return its exit status."""
         step, = steps("required")
         env = {name: str(evaluate(field(step, name), context)).lower()
-               for name in ("SPARK_PULL_REQUEST", "POST_MERGE", "CUSTODY_EVENT")}
+               for name in ("SPARK_PULL_REQUEST", "POST_MERGE", "PULL_REQUEST", "CUSTODY_EVENT")}
         needs = {job: {"result": "success", "outputs": {}} for job in REQUIRED_NEEDS}
         needs["release-upstream-paths"]["outputs"]["run"] = upstream
         for job, result in results.items():
@@ -2036,6 +2039,13 @@ class ReleasePolicyTests(unittest.TestCase):
         script = textwrap.dedent(re.match(r"(?:(?: {10}[^\n]*)?\n)*", step.split("        run: |\n", 1)[1])[0])
         return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30,
                               env={**os.environ, **env, "NEEDS": json.dumps(needs)}).returncode
+
+    def test_every_job_is_in_required(self):
+        # A job added to ci.yml must join required's needs; only the run controller stays out.
+        needed = set(field(JOBS["required"], "needs").strip("[]").split(", "))
+        missing = set(JOBS) - {"required", "cancel-on-failure"} - needed
+        self.assertFalse(missing, f"jobs the required check does not need: {sorted(missing)}")
+        self.assertNotIn("cancel-on-failure", needed)
 
     def test_required_fails_unless_every_job_passed_or_was_skipped_by_its_guard(self):
         self.assertEqual(field(JOBS["required"], "if"), "always()")
@@ -2051,8 +2061,10 @@ class ReleasePolicyTests(unittest.TestCase):
             ("ordinary PR", pr, {**mac, **assets}, "false", 0),
             ("PR whose upstream inputs changed", pr, mac, "true", 0),
             ("spark lane PR", spark, skipped_full, "false", 0),
-            ("push", push, assets, "false", 0),
-            ("nightly", nightly, {**assets, "custody-harness-smoke": "skipped"}, "false", 0),
+            ("push", push, {**assets, "pr-substance": "skipped"}, "false", 0),
+            ("nightly", nightly, {**assets, "pr-substance": "skipped", "custody-harness-smoke": "skipped"}, "false", 0),
+            ("a comment-only PR", pr, {**mac, **assets, "pr-substance": "failure"}, "false", 1),
+            ("pr-substance skipped on a PR", pr, {**mac, **assets, "pr-substance": "skipped"}, "false", 1),
             ("failed source-gate skips test-behaviour", pr, {**mac, **assets, "source-gate": "failure", "test-behaviour": "skipped"}, "false", 1),
             ("fork PR whose gate failed", pr, {**mac, **assets, "source-gate": "failure", "fork-gate": "failure",
                                                **{job: "skipped" for job in FULL_PROOF_JOBS | {"lint", "lab-standin"}}}, "false", 1),

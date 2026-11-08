@@ -105,6 +105,26 @@ jobs:
             esac
           done
 
+  # Blocks low-substance agent PRs, e.g. #670 "That comment is a comment" and tiny
+  # spark/* "Cite ..." markdown-only merges counted as progress. It ran in its own
+  # workflow until the required job had to sum it up too.
+  pr-substance:
+    name: pr-substance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+          fetch-depth: 0
+      - name: refuse comment-only and citation-only PRs
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: python3 scripts/pr-substance.py
+
   test-behaviour:
     name: test-behaviour
     runs-on: ubuntu-24.04
@@ -1679,13 +1699,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: always()
-    needs: [source-gate, fork-gate, test-behaviour, cargo-audit, engine-llama-amd64, engine-llama-arm64, lint, lab-standin, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, release-upstream-assets, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux]
+    needs: [source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, engine-llama-amd64, engine-llama-arm64, lint, lab-standin, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, release-upstream-assets, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux]
     steps:
       - name: every job passed or was skipped by its own guard
         env:
           NEEDS: ${{ toJSON(needs) }}
           SPARK_PULL_REQUEST: ${{ github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/') }}
           POST_MERGE: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
+          PULL_REQUEST: ${{ github.event_name == 'pull_request' }}
           CUSTODY_EVENT: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'push' && (github.ref == 'refs/heads/spike/agent-host' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main')) }}
         run: |
           python3 -I -S - <<'PY'
@@ -1696,6 +1717,8 @@ jobs:
                         "custody-harness-smoke", "release-upstream-paths", "release-upstream-assets",
                         "source-home-linux", "source-home-linux-arm64", "source-home-macos", "update-hop-linux"}
           may_skip = set(full_proof) if os.environ["SPARK_PULL_REQUEST"] == "true" else set()
+          if os.environ["PULL_REQUEST"] != "true":
+              may_skip.add("pr-substance")
           if os.environ["POST_MERGE"] != "true":
               may_skip.add("source-home-macos")
           if os.environ["CUSTODY_EVENT"] != "true":
