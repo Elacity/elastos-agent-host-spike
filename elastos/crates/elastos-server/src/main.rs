@@ -2288,7 +2288,11 @@ pub(crate) fn open_browser(url: &str) {
 pub(crate) async fn create_runtime(
     storage_path: impl AsRef<std::path::Path>,
 ) -> anyhow::Result<Runtime> {
-    let storage = Arc::new(LocalFSProvider::new(storage_path.as_ref().to_path_buf()).await?);
+    let path = storage_path.as_ref();
+    let storage = LocalFSProvider::new(path.to_path_buf())
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot open storage {}: {e}", path.display()))?;
+    let storage = Arc::new(storage);
 
     // Components have a dedicated provider; host-specific VM providers remain
     // behind the same Runtime compute contract.
