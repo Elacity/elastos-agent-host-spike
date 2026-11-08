@@ -512,6 +512,40 @@ def validate_pull_requests_restore_only(source):
                 raise AssertionError(f"a pull_request run saves a cache: {job} ({head_ref})")
 
 
+# Every action any workflow uses, by what it can write to the Actions cache. A new action
+# fails until it is reviewed here; checkout and the artifact actions use no cache.
+NO_CACHE_ACTIONS = {"actions/checkout", "actions/upload-artifact", "actions/download-artifact",
+                    "actions/cache/restore", "actions/attest-build-provenance", "dorny/paths-filter",
+                    "dtolnay/rust-toolchain"}
+# Writers whose guard save_sites checks: ci.yml only.
+GUARDED_ACTIONS = {"actions/cache/save", "Swatinem/rust-cache"}
+# Actions with their own cache, each pinned off: setup-node v4 caches only with `cache`,
+# setup-buildx saves its binary unless cache-binary is false.
+CACHE_OFF = {"actions/setup-node": r"(?m)^\s+cache(?:-dependency-path)?:",
+             "docker/setup-buildx-action": None}
+WORKFLOWS = sorted(WORKFLOW.parent.glob("*.yml"))
+
+
+def validate_no_indirect_cache_writers(sources):
+    """Only the guarded save sites can write the Actions cache, in any workflow."""
+    for name, source in sources.items():
+        workflow_jobs = jobs(source)
+        blocks = [step for job in workflow_jobs for step in steps(job, workflow_jobs)]
+        for action in re.findall(r"(?m)^\s*(?:- )?uses: (\S+)", source):
+            action = action.split("@")[0]
+            if action == LOCAL_CACHE_ACTION:
+                continue  # sccache on local disk; validate_cache_credential_scope forbids its GHA backend
+            if action in GUARDED_ACTIONS and name != "ci.yml":
+                raise AssertionError(f"{name} writes a cache outside ci.yml's guarded saves: {action}")
+            if action not in NO_CACHE_ACTIONS | GUARDED_ACTIONS | set(CACHE_OFF):
+                raise AssertionError(f"{name} uses an unreviewed action that may write the Actions cache: {action}")
+        for step in blocks:
+            if "uses: actions/setup-node@" in step and re.search(CACHE_OFF["actions/setup-node"], step):
+                raise AssertionError(f"{name}: setup-node caches, and saves from every run that has a cache input")
+            if "uses: docker/setup-buildx-action@" in step and "          cache-binary: false\n" not in step:
+                raise AssertionError(f"{name}: setup-buildx saves its binary to the Actions cache unless cache-binary is false")
+
+
 def validate_rust_cache_keys(source):
     """A Rust cache restores only under the same lockfiles and toolchain, even by prefix."""
     workflow_jobs = jobs(source)
@@ -1795,6 +1829,24 @@ class ReleasePolicyTests(unittest.TestCase):
             self.assertNotEqual(changed, SOURCE, name)
             with self.subTest(mutation=name), self.assertRaises(AssertionError):
                 validate_cache_writers(changed)
+
+    def test_no_action_writes_the_cache_outside_the_guarded_saves(self):
+        sources = {path.name: path.read_text() for path in WORKFLOWS}
+        self.assertEqual(set(sources), {"canary-holder-linux.yml", "ci.yml", "pr-substance.yml", "release-package.yml"})
+        validate_no_indirect_cache_writers(sources)
+        node = "      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4\n        with:\n"
+        save = "      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4\n"
+        mutations = {
+            "setup-node caches npm": ("ci.yml", SOURCE.replace(node, node + "          cache: npm\n", 1)),
+            "setup-buildx caches its binary": ("ci.yml", SOURCE.replace("          cache-binary: false\n", "", 1)),
+            "an unreviewed action": ("ci.yml", SOURCE.replace(
+                node, "      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5\n" + node, 1)),
+            "a cache save in another workflow": ("pr-substance.yml", sources["pr-substance.yml"] + save),
+        }
+        for name, (path, changed) in mutations.items():
+            self.assertNotEqual(changed, sources[path], name)
+            with self.subTest(mutation=name), self.assertRaisesRegex(AssertionError, "cache"):
+                validate_no_indirect_cache_writers({**sources, path: changed})
 
     def test_rust_cache_keys_bind_every_lockfile_and_the_toolchain(self):
         validate_rust_cache_keys(SOURCE)
