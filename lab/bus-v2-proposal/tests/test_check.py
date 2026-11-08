@@ -24,33 +24,56 @@ IDENTITY = {
 }
 
 # Every fixture draft carries this section 0, so a citation rule is the only
-# reason its fixture adds. Each group heading holds one propose line.
+# reason its fixture adds. Each of the six core calls has its own propose line,
+# named by its Name: field.
 PROPOSAL_SKELETON = (
     "## 0. What this proposes\n"
     "\n"
     "This section states each proposal once.\n"
     "\n"
     "### A3. Agent identity\n"
-    "propose: fixture A3.\n"
+    "propose: fixture agent principal. Name: agent principal. Inputs: fixture "
+    "inputs. Refusal: fixture refusal. Owner: fixture owner. A3 stays open.\n"
+    "propose: fixture owned journal root. Name: owned journal root. Inputs: "
+    "fixture inputs. Refusal: fixture refusal. Owner: fixture owner. A3 stays "
+    "open.\n"
     "Evidence: section 7, A3.\n"
     "\n"
     "### A4. Model operations\n"
-    "propose: fixture A4.\n"
+    "propose: fixture hosted model call. Name: hosted model call. Inputs: "
+    "fixture inputs. Refusal: fixture refusal. Owner: fixture owner. A4 stays "
+    "open.\n"
     "Evidence: section 7, A4.\n"
     "\n"
     "### A5. Grant handle\n"
-    "propose: fixture A5.\n"
+    "propose: fixture grant handle. Name: grant handle. Inputs: fixture inputs. "
+    "Refusal: fixture refusal. Owner: fixture owner. A5 stays open.\n"
     "Evidence: section 7, A5.\n"
     "\n"
     "### A7. Usage reservation\n"
-    "propose: fixture A7.\n"
+    "propose: fixture usage reservation. Name: usage reservation. Inputs: "
+    "fixture inputs. Refusal: fixture refusal. Owner: fixture owner. A7 stays "
+    "open.\n"
     "Evidence: section 7, A7.\n"
     "\n"
     "### B2. Typed operations\n"
-    "propose: fixture B2.\n"
+    "propose: fixture typed operation. Name: typed operation. Inputs: fixture "
+    "inputs. Refusal: fixture refusal. Owner: fixture owner. B2 stays open.\n"
     "Evidence: section 7, B2.\n"
     "\n"
 )
+
+# The expected core calls and groups, stated literally so that removing one
+# from the production constant fails a test here.
+PROPOSAL_CALLS = (
+    ("A3", "agent principal"),
+    ("A3", "owned journal root"),
+    ("A4", "hosted model call"),
+    ("A5", "grant handle"),
+    ("A7", "usage reservation"),
+    ("B2", "typed operation"),
+)
+PROPOSAL_GROUPS = ("A3", "A5", "A7", "B2")
 
 OWNED_REL = "examples/agent-host/src/lib.rs"
 OWNED_NUMBER = 3754
@@ -2537,12 +2560,22 @@ class CitationCheckTests(unittest.TestCase):
             self._commit_all(root)
         return root
 
+    def _propose_line(self, group, call):
+        """One complete propose line, named by its Name: field."""
+        return (
+            "propose: fixture " + call + ". Name: " + call
+            + ". Inputs: fixture inputs. Refusal: fixture refusal."
+            + " Owner: fixture owner. " + group + " stays open.\n"
+        )
+
     def _section_0(self, groups=("A3", "A4", "A5", "A7", "B2")):
-        """A valid section 0 with one propose line under each group heading."""
+        """A valid section 0 with one complete propose line per core call."""
         parts = ["## 0. What this proposes\n", "\n"]
         for name in groups:
             parts.append("### " + name + ". Fixture group\n")
-            parts.append("propose: fixture " + name + ".\n")
+            for group, call in PROPOSAL_CALLS:
+                if group == name:
+                    parts.append(self._propose_line(group, call))
             parts.append("Evidence: section 7, " + name + ".\n\n")
         return "".join(parts)
 
@@ -3390,13 +3423,119 @@ class CitationCheckTests(unittest.TestCase):
     def test_section_0_needs_a_propose_line_for_each_required_group(self):
         # Each required core call keeps its own propose line under its heading.
         groups = ("A3", "A4", "A5", "A7", "B2")
-        for name in check.PROPOSE_REQUIRED:
+        for name in ("A3", "A5", "A7", "B2"):
             body = self._section_0([group for group in groups if group != name])
             self.assertEqual(
                 check.problems(self._bare_draft(body)),
                 ["refuse: section 0 has no propose line for " + name],
                 name,
             )
+
+    def test_section_0_needs_the_named_proposal_for_each_core_call(self):
+        # A group with another call does not stand in for a missing call.
+        for group, call in PROPOSAL_CALLS:
+            body = self._section_0().replace(
+                "Name: " + call + ".", "Name: another call."
+            )
+            self.assertEqual(
+                check.problems(self._bare_draft(body)),
+                [
+                    "refuse: section 0 has no proposal named "
+                    + call
+                    + " under "
+                    + group
+                ],
+                call,
+            )
+
+    def test_production_requires_the_six_named_core_calls(self):
+        # Stated here, not read back from production: dropping a call fails.
+        self.assertEqual(
+            tuple(check.PROPOSE_CALLS),
+            (
+                ("A3", "agent principal"),
+                ("A3", "owned journal root"),
+                ("A4", "hosted model call"),
+                ("A5", "grant handle"),
+                ("A7", "usage reservation"),
+                ("B2", "typed operation"),
+            ),
+        )
+        self.assertEqual(tuple(check.PROPOSE_REQUIRED), ("A3", "A5", "A7", "B2"))
+
+    def test_bare_propose_line_is_refused(self):
+        # A heading with nothing under it states no proposal.
+        body = self._section_0().replace(
+            self._propose_line("A5", "grant handle"), "propose:\n"
+        )
+        line = body.splitlines().index("propose:") + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: propose line at line %d is not a proposal "
+                "(missing Name:, Inputs:, Refusal:, Owner:)" % line,
+                "refuse: section 0 has no propose line for A5",
+            ],
+        )
+
+    def test_propose_line_in_a_fenced_block_is_refused(self):
+        # A fenced block holds code, not the proposal Anders reads.
+        hidden = "```\n" + self._propose_line("A5", "grant handle") + "```\n"
+        body = self._section_0().replace(
+            self._propose_line("A5", "grant handle"), hidden
+        )
+        line = body.splitlines().index(self._propose_line("A5", "grant handle").strip()) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: propose line at line %d is in a fenced code block" % line,
+                "refuse: section 0 has no propose line for A5",
+            ],
+        )
+
+    def test_propose_line_in_an_html_comment_is_refused(self):
+        # An HTML comment does not render, so it states nothing.
+        hidden = "<!-- " + self._propose_line("A5", "grant handle").strip() + " -->\n"
+        body = self._section_0().replace(
+            self._propose_line("A5", "grant handle"), hidden
+        )
+        line = body.splitlines().index(hidden.strip()) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: propose line at line %d is in an HTML comment" % line,
+                "refuse: section 0 has no propose line for A5",
+            ],
+        )
+
+    def test_propose_line_indented_as_code_is_refused(self):
+        # Four spaces make a code block, not a proposal.
+        indented = "    " + self._propose_line("A5", "grant handle")
+        body = self._section_0().replace(
+            self._propose_line("A5", "grant handle"), indented
+        )
+        line = body.splitlines().index(indented.rstrip("\n")) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: propose line at line %d is indented as code" % line,
+                "refuse: section 0 has no propose line for A5",
+            ],
+        )
+
+    def test_indented_propose_line_outside_section_0_is_refused(self):
+        # Three spaces is not code, but it is still outside section 0.
+        second = (
+            "   propose: a second spelling. Name: another call. Inputs: fixture "
+            "inputs. Refusal: fixture refusal. Owner: fixture owner. B2 stays "
+            "open."
+        )
+        body = self._section_0() + "## 7. Open questions\n\n" + second + "\n"
+        line = body.splitlines().index(second) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            ["refuse: propose line outside section 0 at line " + str(line)],
+        )
 
     def test_propose_line_outside_section_0_is_refused(self):
         # One rule has one spelling: section 0 holds the proposal, and section 7

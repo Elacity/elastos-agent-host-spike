@@ -24,7 +24,23 @@ DRAFT = Path("lab/bus-v2-proposal/CORE-CALLS-PROPOSAL.md")
 SECTION_0 = "## 0. What this proposes"
 SECTION_1 = "## 1. Agent identity"
 PROPOSE = "propose:"
+PROPOSE_LINE = re.compile(r"(?<![A-Za-z0-9_])propose:")
 PROPOSE_GROUP = re.compile(r"^### (A3|A4|A5|A7|B2)\. ")
+PROPOSE_PARTS = ("Name:", "Inputs:", "Refusal:", "Owner:")
+PROPOSE_NAME = re.compile(r"(?:^|\. )Name: ([^.]+)\.")
+
+# The six core calls. Each one owns one propose line, named by its Name: field,
+# so a group with two calls cannot pass on one of them.
+PROPOSE_CALLS = (
+    ("A3", "agent principal"),
+    ("A3", "owned journal root"),
+    ("A4", "hosted model call"),
+    ("A5", "grant handle"),
+    ("A7", "usage reservation"),
+    ("B2", "typed operation"),
+)
+
+# The groups that must hold at least one propose line.
 PROPOSE_REQUIRED = ("A3", "A5", "A7", "B2")
 
 # The one owned citation. Its quotation stays unchecked until a slice owns it.
@@ -1039,12 +1055,48 @@ def section_0_bounds(lines):
     return start, end
 
 
-def proposal_refusals(text):
-    """Return one refusal per missing section, missing proposal or stray proposal.
+def _fence_after(line, fence):
+    """Return the fence still open after this line: (char, count) or None."""
+    stripped = line.strip()
+    if fence is None:
+        for char in ("`", "~"):
+            if stripped.startswith(char * 3):
+                return char, len(stripped) - len(stripped.lstrip(char))
+        return None
+    char, count = fence
+    if len(stripped) >= count and stripped == char * len(stripped):
+        return None
+    return fence
 
-    Section 0 sits before section 1 and holds at least one propose line under
-    each required group heading. Every other propose line is a second spelling
-    of a rule, so it is refused.
+
+def _comment_at(line, stop, open_comment):
+    """Return whether an HTML comment is open at character STOP of this line."""
+    index = 0
+    limit = min(stop, len(line))
+    while index < limit:
+        if open_comment:
+            found = line.find("-->", index)
+            if found < 0 or found >= limit:
+                return True
+            open_comment = False
+            index = found + 3
+        else:
+            found = line.find("<!--", index)
+            if found < 0 or found >= limit:
+                return False
+            open_comment = True
+            index = found + 4
+    return open_comment
+
+
+def proposal_refusals(text):
+    """Return one refusal per missing section, incomplete call or stray proposal.
+
+    Section 0 sits before section 1 and holds one complete propose line for
+    each of the six named core calls, under the heading of its group. Only a
+    line at the left margin outside a fence and outside an HTML comment is a
+    proposal; a line in a fence, in a comment or indented as code is refused by
+    its own reason, and a propose line outside section 0 is refused.
     """
     lines = text.splitlines()
     bounds = section_0_bounds(lines)
@@ -1057,22 +1109,76 @@ def proposal_refusals(text):
             if index < start:
                 refusals.append("refuse: section 0 is not before section 1")
             break
-    found = {name: 0 for name in PROPOSE_REQUIRED}
+    names = {group: set() for group, _ in PROPOSE_CALLS}
+    proposed = set()
     group = None
-    for index in range(start + 1, end):
-        line = lines[index]
-        heading = PROPOSE_GROUP.match(line.strip())
-        if heading is not None:
-            group = heading.group(1)
-        elif line.startswith(PROPOSE) and group in found:
-            found[group] += 1
-    for name in PROPOSE_REQUIRED:
-        if not found[name]:
-            refusals.append("refuse: section 0 has no propose line for " + name)
+    fence = None
+    comment = False
     for index, line in enumerate(lines):
-        if line.startswith(PROPOSE) and not start <= index < end:
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        fence_before = fence
+        comment_before = comment
+        fence = _fence_after(line, fence)
+        comment = _comment_at(line, len(line), comment)
+        heading = PROPOSE_GROUP.match(stripped)
+        if (
+            heading is not None
+            and start <= index < end
+            and fence_before is None
+            and not _comment_at(line, indent, comment_before)
+        ):
+            group = heading.group(1)
+        found = PROPOSE_LINE.search(line)
+        if found is None:
+            continue
+        number = index + 1
+        if fence_before is not None:
             refusals.append(
-                "refuse: propose line outside section 0 at line " + str(index + 1)
+                "refuse: propose line at line %d is in a fenced code block"
+                % number
+            )
+            continue
+        if _comment_at(line, found.start(), comment_before):
+            refusals.append(
+                "refuse: propose line at line %d is in an HTML comment" % number
+            )
+            continue
+        if line.startswith("\t") or indent >= 4:
+            refusals.append(
+                "refuse: propose line at line %d is indented as code" % number
+            )
+            continue
+        if not start <= index < end:
+            refusals.append(
+                "refuse: propose line outside section 0 at line %d" % number
+            )
+            continue
+        name = PROPOSE_NAME.search(stripped)
+        missing = [part for part in PROPOSE_PARTS if part not in stripped]
+        if name is None and "Name:" not in missing:
+            missing.append("Name:")
+        if missing:
+            refusals.append(
+                "refuse: propose line at line %d is not a proposal (missing %s)"
+                % (number, ", ".join(missing))
+            )
+            continue
+        if name is not None and group in names:
+            proposed.add(group)
+            names[group].add(name.group(1).strip().casefold())
+    for name in PROPOSE_REQUIRED:
+        if name not in proposed:
+            refusals.append("refuse: section 0 has no propose line for " + name)
+    for group, call in PROPOSE_CALLS:
+        if group not in proposed:
+            continue
+        if call.casefold() not in names[group]:
+            refusals.append(
+                "refuse: section 0 has no proposal named "
+                + call
+                + " under "
+                + group
             )
     return refusals
 
