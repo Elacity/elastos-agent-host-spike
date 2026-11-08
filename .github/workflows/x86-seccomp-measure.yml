@@ -30,7 +30,7 @@ jobs:
         run: cargo test --test confine --no-run
       - name: run the whole confine suite on x86-64
         working-directory: capsules/wallet-provider
-        run: cargo test --test confine --no-fail-fast -- --test-threads=2 2>&1 | grep -E "test result|FAILED|panicked" -A1 | cut -c1-400 || true
+        run: cargo test --test confine --no-fail-fast -- --test-threads=2 2>&1 | grep -E "test result|FAILED|panicked" -A1 | cut -c1-200; cargo test --test confine linux_model_file_row_is_refused_outside_storage_root -- --exact 2>&1 | grep -oE "(child exit|child signal|standard error).{0,400}" || true
       - name: log every call the model journey lacks (runner-only patch, logs instead of refusing)
         working-directory: capsules/wallet-provider
         run: |
