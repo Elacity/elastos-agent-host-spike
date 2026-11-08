@@ -7463,8 +7463,9 @@ const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
 /// `readelf -l` and `ldd` on GitHub's ubuntu-24.04 runner (glibc 2.39, run
 /// 42447112526): the interpreter `/lib64/ld-linux-x86-64.so.2`, a link to
 /// `/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2` that the `O_PATH` open follows,
-/// then `libc.so.6` and `libgcc_s.so.1`. Neither binary maps `libm.so.6` there,
-/// so it takes no rule. The drop-one measurement the aarch64 entries carry has
+/// then `libc.so.6` and `libgcc_s.so.1`. did and wallet do not map `libm.so.6`
+/// there; the model provider does, and its file-row start without it exited 127
+/// (run 42448388508), so the shared table carries it as aarch64's does. The drop-one measurement the aarch64 entries carry has
 /// not been made on x86-64; each note says what the entry is for.
 #[cfg(target_arch = "x86_64")]
 const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
@@ -7480,6 +7481,12 @@ const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
     (
         "/lib/x86_64-linux-gnu/libgcc_s.so.1",
         "ldd on both x86-64 providers names libgcc_s.so.1; the loader maps it with READ_FILE",
+    ),
+    (
+        "/lib/x86_64-linux-gnu/libm.so.6",
+        "without READ_FILE here the x86-64 model provider exits 127 with `error while \
+         loading shared libraries: libm.so.6: cannot open shared object file`; did and \
+         wallet do not map it",
     ),
 ];
 
