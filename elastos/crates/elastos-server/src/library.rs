@@ -2483,7 +2483,7 @@ fn write_runtime_json_with_root(
     crate::auth::write_principal_root_object(
         data_dir,
         principal_id,
-        &root,
+        root,
         uri,
         &path,
         &serde_json::to_vec_pretty(value)?,
