@@ -2506,6 +2506,8 @@ fn read_runtime_json_dir<T: serde::de::DeserializeOwned>(
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
+    #[cfg(test)]
+    r5a_tests::record_runtime_json_dir_read(data_dir, dir_uri);
     entries
         .filter_map(Result::ok)
         .map(|entry| entry.file_name().to_string_lossy().to_string())
@@ -10797,7 +10799,30 @@ mod publish_tests {
 mod r5a_tests {
     use super::*;
     use crate::auth::{r4_fixture, PrincipalKind};
+    use std::collections::HashMap;
+    use std::sync::LazyLock;
     use std::sync::Mutex;
+
+    static RUNTIME_JSON_DIR_READS: LazyLock<Mutex<HashMap<PathBuf, Vec<String>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(super) fn record_runtime_json_dir_read(data_dir: &Path, uri: &str) {
+        RUNTIME_JSON_DIR_READS
+            .lock()
+            .unwrap()
+            .entry(data_dir.to_path_buf())
+            .or_default()
+            .push(uri.to_string());
+    }
+
+    fn runtime_json_dir_reads(data_dir: &Path) -> Vec<String> {
+        RUNTIME_JSON_DIR_READS
+            .lock()
+            .unwrap()
+            .get(data_dir)
+            .cloned()
+            .unwrap_or_default()
+    }
 
     fn home(kind: PrincipalKind) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -10855,12 +10880,24 @@ mod r5a_tests {
     #[test]
     fn empty_trash_uses_the_stored_agent_root_end_to_end() {
         let agent = home(PrincipalKind::Agent);
+        let agent_uri = format!("{}/.Trash/agent.txt", r4_fixture::AGENT_ROOT);
+        let agent_path = rooted_localhost_fs_path(agent.path(), &agent_uri).unwrap();
+        fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
+        fs::write(&agent_path, b"agent trash").unwrap();
+        let id_uri = format!("{}/.Trash/id-rule.txt", r4_fixture::HUMAN_ROOT);
+        let id_path = rooted_localhost_fs_path(agent.path(), &id_uri).unwrap();
+        fs::create_dir_all(id_path.parent().unwrap()).unwrap();
+        fs::write(&id_path, b"id-rule trash").unwrap();
+        // Until R5b fixes library_target, the stored Agent root refuses here.
+        // An id-rule swap removes the Users decoy before the later event refusal.
         let result = handle_library_request(
             agent.path(),
             ObjectProviderRequest::EmptyTrash {
                 principal_id: r4_fixture::ID.into(),
             },
         );
+        assert_eq!(fs::read(&agent_path).unwrap_or_default(), b"agent trash");
+        assert_eq!(fs::read(&id_path).unwrap_or_default(), b"id-rule trash");
         assert!(
             result
                 .as_ref()
@@ -10947,7 +10984,14 @@ mod r5a_tests {
         }
         let absent = tempfile::tempdir().unwrap();
         let uri = format!("{}/R5a/read.json", r4_fixture::HUMAN_ROOT);
+        let path = rooted_localhost_fs_path(absent.path(), &uri).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, br#"{"site":4}"#).unwrap();
         let result = read_runtime_json::<Value>(absent.path(), r4_fixture::ID, &uri);
+        assert!(
+            result.is_err(),
+            "read an unstored principal's JSON: {result:?}"
+        );
         assert!(
             result
                 .as_ref()
@@ -10999,6 +11043,21 @@ mod r5a_tests {
             assert_eq!(records[0].object_uri, format!("{root}/Documents/r5a.txt"));
         }
         let absent = tempfile::tempdir().unwrap();
+        let dir_uri = format!("{}/{LIBRARY_RUNTIME_DIR}/Published", r4_fixture::HUMAN_ROOT);
+        let uri = format!("{dir_uri}/r5a.json");
+        let path = rooted_localhost_fs_path(absent.path(), &uri).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "schema": "elastos.library.publish/v1",
+                "object_uri": format!("{}/Documents/r5a.txt", r4_fixture::HUMAN_ROOT),
+                "cid": "cid-r5a", "published_at": 1,
+                "receipt": {}, "availability": {},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let warnings = Arc::new(Mutex::new(Vec::new()));
         let writer = WarningWriter(warnings.clone());
         let subscriber = tracing_subscriber::fmt()
@@ -11010,6 +11069,9 @@ mod r5a_tests {
         tracing::subscriber::with_default(subscriber, || {
             assert!(publish_records(absent.path(), r4_fixture::ID).is_empty());
         });
+        // The nested read_runtime_json also resolves the principal, so a
+        // fallback can scan this directory yet still return an empty list.
+        assert!(!runtime_json_dir_reads(absent.path()).contains(&dir_uri));
         let warning = String::from_utf8(warnings.lock().unwrap().clone()).unwrap();
         assert!(
             warning.contains("skipping unresolved publish-record principal")
