@@ -26,6 +26,7 @@ until ! cmp -s "$file" "$backup"; do
   fi
   sleep 0.05
 done
+echo "profile planted; sending SIGTERM to the plant"
 kill -TERM "$pid"
 wait "$pid"
 rc=$?
