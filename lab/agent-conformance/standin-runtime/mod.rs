@@ -1174,13 +1174,53 @@ impl StandIn {
         caller: Caller<'_>,
         scope: Option<&str>,
     ) -> Result<Value, (u16, String)> {
-        if let Some(scope) = scope {
-            if scope != LIVE_SCOPE {
-                return Err((400, format!("unknown capability list scope: {scope}")));
+        match scope {
+            None => Ok(self.render_plain(caller)),
+            Some(LIVE_SCOPE) => {
+                require_shell(caller)?;
+                Ok(self.render_all_live())
             }
-            require_shell(caller)?;
+            Some(scope) => Err((400, format!("unknown capability list scope: {scope}"))),
         }
-        Ok(self.render(caller))
+    }
+
+    /// The plain route. A shell sees every live grant; a client sees its own.
+    fn render_plain(&self, caller: Caller<'_>) -> Value {
+        match caller {
+            Caller::Shell => self.render_all_live(),
+            Caller::Client { .. } => self.render_own(caller),
+        }
+    }
+
+    /// A caller's own session: five fields per entry and no `scope` key. A
+    /// shell is not a session that holds a grant, so its own answer is empty.
+    fn render_own(&self, caller: Caller<'_>) -> Value {
+        let mut grants = match caller {
+            Caller::Shell => Vec::new(),
+            Caller::Client { .. } => self.kept(caller),
+        };
+        grants.sort_by(|left, right| left.request_id.cmp(&right.request_id));
+        let capabilities = grants
+            .iter()
+            .map(|grant| entry(grant, false))
+            .collect::<Vec<_>>();
+        json!({ "capabilities": capabilities })
+    }
+
+    /// The shell's all-sessions view: every live grant, six fields per entry
+    /// with its session, sorted by session then request.
+    fn render_all_live(&self) -> Value {
+        let mut grants = self.kept(Caller::Shell);
+        grants.sort_by(|left, right| {
+            left.session_id
+                .cmp(&right.session_id)
+                .then(left.request_id.cmp(&right.request_id))
+        });
+        let capabilities = grants
+            .iter()
+            .map(|grant| entry(grant, true))
+            .collect::<Vec<_>>();
+        json!({ "scope": LIVE_SCOPE, "capabilities": capabilities })
     }
 
     /// `POST /api/capability/validate`.
@@ -1949,25 +1989,6 @@ impl StandIn {
             .unwrap_or(RESIDENT_WORLD)
     }
 
-    fn render(&self, caller: Caller<'_>) -> Value {
-        let mut grants = self.kept(caller);
-        let shell = matches!(caller, Caller::Shell);
-        if shell {
-            grants.sort_by(|left, right| {
-                left.session_id
-                    .cmp(&right.session_id)
-                    .then(left.request_id.cmp(&right.request_id))
-            });
-        } else {
-            grants.sort_by(|left, right| left.request_id.cmp(&right.request_id));
-        }
-        let capabilities = grants
-            .iter()
-            .map(|grant| entry(grant, shell))
-            .collect::<Vec<_>>();
-        body(shell, capabilities)
-    }
-
     /// One filter. A grant stays when its life is `Live`. An ended session stays.
     fn kept(&self, caller: Caller<'_>) -> Vec<&Grant> {
         self.grants
@@ -2027,17 +2048,6 @@ fn entry(grant: &Grant, include_session: bool) -> Value {
     fields.insert("duration".to_owned(), json!(grant.duration));
     fields.insert("granted_at".to_owned(), json!(grant.granted_at));
     Value::Object(fields)
-}
-
-fn body(shell: bool, capabilities: Vec<Value>) -> Value {
-    if shell {
-        json!({
-            "scope": LIVE_SCOPE,
-            "capabilities": capabilities,
-        })
-    } else {
-        json!({ "capabilities": capabilities })
-    }
 }
 
 fn request_entry(request: &Request) -> Value {
