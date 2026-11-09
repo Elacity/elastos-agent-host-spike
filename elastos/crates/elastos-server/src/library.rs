@@ -2465,6 +2465,16 @@ fn write_runtime_json(
     let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
         .localhost_root()
         .to_string();
+    write_runtime_json_with_root(data_dir, principal_id, &root, uri, value)
+}
+
+fn write_runtime_json_with_root(
+    data_dir: &Path,
+    principal_id: &str,
+    root: &str,
+    uri: &str,
+    value: &impl Serialize,
+) -> anyhow::Result<()> {
     let path =
         rooted_localhost_fs_path(data_dir, uri).ok_or_else(|| anyhow!("invalid Library path"))?;
     if let Some(parent) = path.parent() {
@@ -2488,9 +2498,18 @@ fn read_runtime_json<T: serde::de::DeserializeOwned>(
     let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
         .localhost_root()
         .to_string();
+    read_runtime_json_with_root(data_dir, principal_id, &root, uri)
+}
+
+fn read_runtime_json_with_root<T: serde::de::DeserializeOwned>(
+    data_dir: &Path,
+    principal_id: &str,
+    root: &str,
+    uri: &str,
+) -> anyhow::Result<T> {
     let path =
         rooted_localhost_fs_path(data_dir, uri).ok_or_else(|| anyhow!("invalid Library path"))?;
-    let bytes = crate::auth::read_principal_root_object(data_dir, principal_id, &root, uri, &path)?;
+    let bytes = crate::auth::read_principal_root_object(data_dir, principal_id, root, uri, &path)?;
     Ok(serde_json::from_slice(&bytes)?)
 }
 
@@ -8203,9 +8222,10 @@ fn read_publish_record(
     let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
         .localhost_root()
         .to_string();
-    read_runtime_json(
+    read_runtime_json_with_root(
         data_dir,
         principal_id,
+        &root,
         &publish_record_uri(&root, object_uri),
     )
 }
@@ -8225,9 +8245,10 @@ fn write_publish_record(
     let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
         .localhost_root()
         .to_string();
-    write_runtime_json(
+    write_runtime_json_with_root(
         data_dir,
         principal_id,
+        &root,
         &publish_record_uri(&root, &record.object_uri),
         record,
     )?;
