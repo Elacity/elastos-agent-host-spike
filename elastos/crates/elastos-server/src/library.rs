@@ -11279,4 +11279,42 @@ mod r5a_tests {
             "{result:?}"
         );
     }
+
+    fn event(root: &str) -> LibraryEvent {
+        LibraryEvent {
+            schema: LIBRARY_EVENT_SCHEMA.into(),
+            event_id: "r5b-event".into(),
+            op: "write".into(),
+            uri: format!("{root}/Documents/e.txt"),
+            at: 1,
+            details: json!({}),
+        }
+    }
+
+    #[test]
+    fn library_event_filter_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            write_library_events(dir.path(), r4_fixture::ID, &[event(root)]).unwrap();
+            let filter = format!("{root}/Documents/e.txt");
+            let result = library_events(dir.path(), r4_fixture::ID, Some(&filter), None, None);
+            assert!(
+                result
+                    .as_ref()
+                    .is_ok_and(|values| values.len() == 1 && values[0].uri == filter),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let result = library_events(dir.path(), r4_fixture::ID, None, None, None);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+    }
 }
