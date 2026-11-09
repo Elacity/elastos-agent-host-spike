@@ -2462,7 +2462,9 @@ fn write_runtime_json(
     uri: &str,
     value: &impl Serialize,
 ) -> anyhow::Result<()> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     let path =
         rooted_localhost_fs_path(data_dir, uri).ok_or_else(|| anyhow!("invalid Library path"))?;
     if let Some(parent) = path.parent() {
@@ -10815,6 +10817,30 @@ mod r5a_tests {
                 principal_id: r4_fixture::ID.into(),
             },
         );
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_json_write_uses_the_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let uri = format!("{root}/.AppData/LocalHost/.Runtime/Library/R5a/write.json");
+            let result = write_runtime_json(dir.path(), r4_fixture::ID, &uri, &json!({"site": 3}));
+            assert!(result.is_ok(), "{root}: {result:?}");
+            let path = rooted_localhost_fs_path(dir.path(), &uri).unwrap();
+            assert!(path.is_file(), "{uri}");
+        }
+        let absent = tempfile::tempdir().unwrap();
+        let uri = format!("{}/R5a/write.json", r4_fixture::HUMAN_ROOT);
+        let result = write_runtime_json(absent.path(), r4_fixture::ID, &uri, &json!({}));
         assert!(
             result
                 .as_ref()
