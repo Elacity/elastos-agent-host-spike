@@ -7631,7 +7631,7 @@ fn object_uri_is_under_root(localhost_root: &str, object_uri: &str) -> bool {
 }
 
 /// The stored record for `principal_id`, or None when none is stored.
-fn stored_principal_record(
+pub(crate) fn stored_principal_record(
     data_dir: &Path,
     principal_id: &str,
 ) -> anyhow::Result<Option<PrincipalRecord>> {
