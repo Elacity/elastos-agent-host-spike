@@ -11316,17 +11316,19 @@ mod r5a_tests {
             );
         }
         let dir = tempfile::tempdir().unwrap();
-        let result = read_publish_record(
-            dir.path(),
-            r4_fixture::ID,
-            &published(r4_fixture::HUMAN_ROOT).object_uri,
-        );
+        let record = published(r4_fixture::HUMAN_ROOT);
+        let id_uri = publish_record_uri(r4_fixture::HUMAN_ROOT, &record.object_uri);
+        let bytes = serde_json::to_vec(&record).unwrap();
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, &bytes);
+        let result = read_publish_record(dir.path(), r4_fixture::ID, &record.object_uri);
         assert!(
             result
                 .as_ref()
                 .is_err_and(|e| e.to_string().contains("has no stored record")),
             "{result:?}"
         );
+        assert_eq!(fs::read(&id_path).unwrap_or_default(), bytes);
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
     }
 
     #[test]
@@ -11348,17 +11350,21 @@ mod r5a_tests {
             );
         }
         let dir = tempfile::tempdir().unwrap();
-        let result = write_publish_record(
-            dir.path(),
-            r4_fixture::ID,
-            &published(r4_fixture::HUMAN_ROOT),
-        );
+        let record = published(r4_fixture::HUMAN_ROOT);
+        let id_uri = publish_record_uri(r4_fixture::HUMAN_ROOT, &record.object_uri);
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule publish record");
+        let result = write_publish_record(dir.path(), r4_fixture::ID, &record);
         assert!(
             result
                 .as_ref()
                 .is_err_and(|e| e.to_string().contains("has no stored record")),
             "{result:?}"
         );
+        assert_eq!(
+            fs::read(&id_path).unwrap_or_default(),
+            b"id-rule publish record"
+        );
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
 
     #[test]
@@ -11377,16 +11383,19 @@ mod r5a_tests {
             assert!(result.is_ok() && !path.exists(), "{uri}: {result:?}");
         }
         let dir = tempfile::tempdir().unwrap();
-        let result = remove_publish_record(
-            dir.path(),
-            r4_fixture::ID,
-            &published(r4_fixture::HUMAN_ROOT).object_uri,
-        );
+        let record = published(r4_fixture::HUMAN_ROOT);
+        let id_uri = publish_record_uri(r4_fixture::HUMAN_ROOT, &record.object_uri);
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule publish record");
+        let result = remove_publish_record(dir.path(), r4_fixture::ID, &record.object_uri);
         assert!(
             result
                 .as_ref()
                 .is_err_and(|e| e.to_string().contains("has no stored record")),
             "{result:?}"
+        );
+        assert_eq!(
+            fs::read(&id_path).unwrap_or_default(),
+            b"id-rule publish record"
         );
     }
 
