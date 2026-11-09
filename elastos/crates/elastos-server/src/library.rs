@@ -11317,4 +11317,29 @@ mod r5a_tests {
             "{result:?}"
         );
     }
+
+    #[test]
+    fn library_event_read_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            write_library_events(dir.path(), r4_fixture::ID, &[event(root)]).unwrap();
+            let result = read_library_events(dir.path(), r4_fixture::ID);
+            assert!(
+                result.as_ref().is_ok_and(|values| values.len() == 1
+                    && values[0].uri == format!("{root}/Documents/e.txt")),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let result = read_library_events(dir.path(), r4_fixture::ID);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+    }
 }
