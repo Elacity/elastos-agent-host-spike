@@ -8571,7 +8571,9 @@ fn append_library_event(
 }
 
 fn read_library_events(data_dir: &Path, principal_id: &str) -> anyhow::Result<Vec<LibraryEvent>> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     let event_uri = library_event_log_uri(&root);
     let event_path = rooted_localhost_fs_path(data_dir, &event_uri)
         .ok_or_else(|| anyhow!("invalid library event log path"))?;
