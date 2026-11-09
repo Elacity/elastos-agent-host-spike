@@ -7235,10 +7235,11 @@ impl ResolvedPrincipalRoot {
     }
 
     /// The root that verified Recovery Kit material proves for its principal.
-    /// The kit is verified and bound to these values before this is built, and
-    /// only the principal's canonical root is accepted, so no id-rule guess
-    /// enters. The import path uses it for the grant it issues before the
-    /// recovered record is committed.
+    /// The kit's principal and root are verified and bound before this is
+    /// built, and the constructor accepts only the canonical root for that
+    /// principal, so a kit cannot name another principal's localhost path. The
+    /// import path uses it for the grant it issues before the recovered record
+    /// is committed.
     pub(crate) fn verified_recovery_kit(
         principal_id: &str,
         localhost_root: &str,
@@ -16127,6 +16128,28 @@ pub(crate) mod tests {
             ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), "person:local:nobody");
         assert!(resolved.is_err());
         assert!(!data_dir.path().join("identity").exists());
+    }
+
+    /// R1: the recovery constructor accepts only the canonical root for its
+    /// principal, so verified kit material cannot name another principal's
+    /// localhost path. The import caller refuses the same mismatch earlier;
+    /// this row calls the constructor directly, so removing its compare alone
+    /// turns the second assertion red.
+    #[test]
+    fn resolved_recovery_kit_root_refuses_a_non_canonical_root() {
+        let principal = "person:local:recovery-fixture";
+        let canonical = principal_localhost_root(principal);
+        assert!(
+            ResolvedPrincipalRoot::verified_recovery_kit(principal, &canonical).is_ok(),
+            "the principal's canonical root is accepted"
+        );
+        let other = principal_localhost_root("person:local:recovery-other");
+        assert_ne!(other, canonical);
+        let refused = ResolvedPrincipalRoot::verified_recovery_kit(principal, &other).unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "recovery kit root is not canonical for its principal"
+        );
     }
 
     #[test]
