@@ -1694,6 +1694,60 @@ mod denial_authority {
             .to_path_buf()
         }
 
+        /// Records an approved model request under the root the context
+        /// carries, the way the Runtime records one for that principal.
+        fn write_requests_state_for(&self, context: &HomeLaunchTokenContext) {
+            let data_dir = self.owner.path();
+            let principal_id = context.principal_id();
+            let root = context.root().localhost_root();
+            let uri = format!("{root}/.AppData/ElastOS/Home/services-requests.json");
+            let path = elastos_common::localhost::rooted_localhost_fs_path(data_dir, &uri).unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let now = now_ts();
+            let state = json!({
+                "schema": "elastos.services.requests/v1",
+                "principal_id": principal_id,
+                "localhost_root": root,
+                "updated_at": now,
+                "requests": { REQUEST_ID: {
+                    "request_id": REQUEST_ID,
+                    "offer_id": "local:provider:model",
+                    "service_uri": "elastos://peer/model",
+                    "service_kind": "remote_model",
+                    "service_display_name": "Mac model",
+                    "requester_peer_id": self.seed_node.endpoint.id().to_string(),
+                    "requester_did": self.seed_did,
+                    "requester_display_name": "Seed",
+                    "created_at": now,
+                    "updated_at": now,
+                    "status": "approved",
+                    "authenticated_request": true,
+                    "grant_expires_at": now + 3600,
+                } },
+            });
+            crate::auth::write_principal_root_object(
+                data_dir,
+                principal_id,
+                root,
+                &uri,
+                &path,
+                &serde_json::to_vec_pretty(&state).unwrap(),
+            )
+            .unwrap();
+        }
+
+        fn recorded_requests_state(&self, context: &HomeLaunchTokenContext) -> Value {
+            let path = elastos_common::localhost::rooted_localhost_fs_path(
+                self.owner.path(),
+                &format!(
+                    "{}/.AppData/ElastOS/Home/services-requests.json",
+                    context.root().localhost_root()
+                ),
+            )
+            .unwrap();
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+        }
+
         fn owner_inbox_app(&self) -> axum::Router {
             let mut state = test_state(self.owner.path());
             state.provider_registry = Some(self.registry.clone());
@@ -1782,6 +1836,40 @@ mod denial_authority {
         assert_eq!(cancel["runtime_binding"]["grant_id"], fx.grant_id);
         let refused = fx.create_run("seed-req-after", "qwen-local").await;
         assert_eq!(refused["code"], "denied", "{refused}");
+        fx.shutdown().await;
+    }
+
+    /// A subordinate gateway trusts its parent's DID. Launch verification
+    /// builds that parent-signed token's root with `verified_device_signer`,
+    /// which MUST NOT resolve, and a device principal has no stored record.
+    /// The decision must use the verified root: save the denial there and
+    /// cancel the open run.
+    #[tokio::test]
+    async fn a_parent_signed_device_owner_records_its_denial_and_cancels_the_open_run() {
+        let fx = TwoRuntimes::start().await;
+        let open = fx.create_run("seed-req-open", "qwen-local").await;
+        assert_eq!(open["ok"], true, "{open}");
+        let open_run_id = run_id_for(&fx.remote_principal(), "seed-req-open");
+        // The parent's DID is not this host's device key: a subordinate gateway
+        // trusts it through ELASTOS_HOME_LAUNCH_TRUSTED_SIGNER_DID only.
+        let parent_did = "did:key:z6MkParentSigner";
+        let context = HomeLaunchTokenContext::resolved(
+            crate::auth::ResolvedPrincipalRoot::verified_device_signer(parent_did),
+            format!("device:{parent_did}"),
+            "auth:local:parent".to_string(),
+            None,
+            "grant:local:parent".to_string(),
+        );
+        fx.write_requests_state_for(&context);
+        let result = fx.deny_as(&context).await;
+        assert!(result.is_err(), "delivery failure surfaces: {result:?}");
+        assert_eq!(
+            fx.recorded_requests_state(&context)["requests"][REQUEST_ID]["status"],
+            "denied"
+        );
+        let cancel = fx.last_provider_call().await;
+        assert_eq!(cancel["op"], "runs_cancel");
+        assert_eq!(cancel["run_id"], open_run_id);
         fx.shutdown().await;
     }
 
