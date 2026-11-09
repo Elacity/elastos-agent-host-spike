@@ -432,6 +432,9 @@ pub struct Controller {
     pub decisions: Decisions,
     overlap: Option<Overlap>,
     requests: Vec<Value>,
+    /// Request ids this controller granted. They end through the existing
+    /// shell revoke route before the cleanup census reads the live view.
+    minted: Vec<String>,
 }
 
 /// One attached client session on the run client's attach route.
@@ -498,6 +501,7 @@ impl Controller {
             decisions: Decisions::default(),
             overlap: None,
             requests: Vec::new(),
+            minted: Vec::new(),
         })
     }
 
@@ -803,6 +807,7 @@ impl Controller {
                     }),
                 )?;
                 require_success(&response)?;
+                self.minted.push(field(request, "request_id")?.to_owned());
                 self.credentials.push(field(&response, "token")?.to_owned());
                 self.used.insert(index);
                 self.decisions.granted += 1;
@@ -967,6 +972,7 @@ impl Controller {
             }),
         )?;
         require_success(&granted)?;
+        self.minted.push(request_id.to_owned());
         self.remember(field(&granted, "token")?)?;
         let status = self.exchange(
             session.bearer_index,
@@ -1184,12 +1190,35 @@ impl Controller {
         )
     }
 
+    /// End every grant this fixture minted through the existing shell revoke
+    /// route, so the live view the census reads holds no fixture grant.
+    fn revoke_minted(&mut self) -> Result<()> {
+        for request_id in std::mem::take(&mut self.minted) {
+            if !request_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            {
+                return Err("minted request id is not a single path segment");
+            }
+            let response = self.call(
+                "DELETE",
+                &format!("/api/capability/{request_id}"),
+                &Value::Null,
+            )?;
+            if response["success"] != true {
+                return Err("fixture grant revoke did not succeed");
+            }
+        }
+        Ok(())
+    }
+
     /// Exercise the caller's actual census wiring with one shell-owned pending
     /// control. Deny that control, then take the final empty-pending census.
     pub fn check_cleanup_wiring(
         &mut self,
         check: impl Fn(&Self) -> Result<&'static str>,
     ) -> Result<&'static str> {
+        self.revoke_minted()?;
         check(self)?;
         let request = self.call(
             "POST",
@@ -1514,6 +1543,7 @@ pub fn assert_memory_surfaces() {
         decisions: Decisions::default(),
         overlap: None,
         requests: Vec::new(),
+        minted: Vec::new(),
     };
     let home = ThrowawayHome::new().unwrap();
     assert_eq!(
@@ -2372,6 +2402,7 @@ mod tests {
             decisions: Decisions::default(),
             overlap: None,
             requests: Vec::new(),
+            minted: Vec::new(),
         }
     }
 
@@ -2556,6 +2587,7 @@ mod tests {
             decisions: Decisions::default(),
             overlap: None,
             requests: Vec::new(),
+            minted: Vec::new(),
         };
         assert_eq!(
             controller.remember_client_bearer(
@@ -2902,6 +2934,7 @@ mod tests {
             decisions: Decisions::default(),
             overlap: Some(overlap),
             requests: Vec::new(),
+            minted: Vec::new(),
         };
         let completions: Vec<_> = [9, 0]
             .into_iter()
@@ -3021,6 +3054,7 @@ mod tests {
             decisions: Decisions::default(),
             overlap: Some(overlap),
             requests: Vec::new(),
+            minted: Vec::new(),
         };
         let mut running = RunningInstances::start(&[], None).unwrap();
         let result = controller.poll(&mut running);
@@ -3120,6 +3154,7 @@ mod tests {
             decisions: Decisions::default(),
             overlap: Some(Overlap::new()),
             requests: Vec::new(),
+            minted: Vec::new(),
         };
         let lines = [
             "instance overlap: synthetic",
@@ -3191,6 +3226,7 @@ mod tests {
             decisions: Decisions::default(),
             overlap: None,
             requests: Vec::new(),
+            minted: Vec::new(),
         };
         assert!(controller
             .check_bytes(b"ordinary output", Surface::Stdout)
