@@ -20,11 +20,15 @@ if [ "${1:-}" = inputs ]; then
     npm install --prefix "$core" --no-save --package-lock=false playwright-core@1.59.1 node@24.21.0
   fi
   # Tests use both SDK pins; keep both browser builds in the shared cache.
+  # The 1.60 pin installs the headless shell. Default headless launches use it.
+  # The core pin installs full Chromium. Product smokes click through that binary.
+  # The same install keeps the matching headless shell. Launches that do not
+  # name an executable use that shell.
   export PLAYWRIGHT_SKIP_BROWSER_GC=1
   # --with-deps installs Linux system libraries and needs root; CI only.
   "${browser}/node_modules/.bin/playwright" install chromium --only-shell ${CI:+--with-deps}
   # The 1.59.1 installer stalls extracting Chromium under Node 26.
-  "${core}/node_modules/node/bin/node" "${core}/node_modules/playwright-core/cli.js" install chromium-headless-shell
+  "${core}/node_modules/node/bin/node" "${core}/node_modules/playwright-core/cli.js" install chromium
   exit 0
 fi
 
