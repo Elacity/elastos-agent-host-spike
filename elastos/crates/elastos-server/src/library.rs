@@ -8463,7 +8463,9 @@ fn remove_publish_record(
     principal_id: &str,
     object_uri: &str,
 ) -> anyhow::Result<()> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     remove_runtime_file(data_dir, &publish_record_uri(&root, object_uri))
 }
 
