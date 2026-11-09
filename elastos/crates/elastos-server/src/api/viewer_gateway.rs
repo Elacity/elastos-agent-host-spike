@@ -754,6 +754,17 @@ fn viewer_storage_target(
         anyhow::bail!("viewer capsule not found");
     }
     let context = require_viewer_bound_launch_token_context(data_dir, headers, &viewer, &capsule)?;
+    viewer_storage_target_for_context(data_dir, &context, &viewer, &capsule, scope, name)
+}
+
+fn viewer_storage_target_for_context(
+    data_dir: &FsPath,
+    context: &HomeLaunchTokenContext,
+    viewer: &str,
+    capsule: &str,
+    scope: &str,
+    name: &str,
+) -> anyhow::Result<ViewerStorageTarget> {
     let root_uri = viewer_storage_root_uri(data_dir, &context, &viewer, &capsule)?;
     let root = rooted_localhost_fs_path(data_dir, &root_uri)
         .ok_or_else(|| anyhow::anyhow!("invalid viewer storage root"))?;
@@ -775,7 +786,7 @@ fn viewer_storage_target(
         anyhow::bail!("viewer storage does not support .AppData/Agents/ (agent journals)");
     }
     let principal_id = context.principal_id().to_string();
-    let localhost_root = viewer_target_root(&context);
+    let localhost_root = viewer_target_root(context);
     Ok(ViewerStorageTarget {
         path: dir.join(file_name),
         principal_id,
@@ -924,6 +935,84 @@ mod r4_root_tests {
     use super::*;
     use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
     use crate::auth::PrincipalKind;
+
+    fn active_viewer(data_dir: &FsPath) {
+        let capsule = data_dir.join("capsules/documents");
+        std::fs::create_dir_all(capsule.join("browser")).unwrap();
+        std::fs::write(capsule.join("browser/index.html"), "viewer").unwrap();
+        std::fs::write(
+            capsule.join("capsule.json"),
+            serde_json::to_vec(&json!({
+                "schema": "elastos.capsule/v1", "name": "documents", "version": "0.1.0",
+                "author": "elastos", "role": "viewer", "type": "wasm",
+                "entrypoint": "browser/index.html",
+                "permissions": {"storage": ["localhost://Users/self/Documents/*"]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            data_dir.join("components.json"),
+            serde_json::to_vec(&json!({"external": {"documents": {
+                "install_path": "capsules/documents", "platforms": {}
+            }}, "capsules": {}, "profiles": {}}))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn r4_viewer_target_and_storage_grant_reach_agent_root() {
+        let dir = tempfile::tempdir().unwrap();
+        store(dir.path(), PrincipalKind::Agent);
+        active_viewer(dir.path());
+        let root = crate::auth::ResolvedPrincipalRoot::resolve(dir.path(), dir.path(), ID).unwrap();
+        let context = HomeLaunchTokenContext::resolved(
+            root,
+            ID.into(),
+            "session".into(),
+            None,
+            "grant".into(),
+        );
+        let uri = viewer_storage_root_uri(dir.path(), &context, "documents", "documents")
+            .expect("R4 viewer grant reaches stored Agent root");
+        assert_eq!(
+            uri,
+            format!("{AGENT_ROOT}/Documents"),
+            "R4 viewer grant root"
+        );
+        let target = viewer_storage_target_for_context(
+            dir.path(),
+            &context,
+            "documents",
+            "documents",
+            "save",
+            "note.md",
+        )
+        .expect("R4 viewer target reaches stored Agent root");
+        assert_eq!(target.localhost_root, AGENT_ROOT, "R4 viewer target root");
+        assert_eq!(target.object_uri, format!("{AGENT_ROOT}/Documents/note.md"));
+    }
+
+    #[test]
+    fn r4_remote_viewer_storage_refuses_empty_root() {
+        let dir = tempfile::tempdir().unwrap();
+        active_viewer(dir.path());
+        let id = "remote:00000000000000000000000000000000";
+        let context = HomeLaunchTokenContext::resolved(
+            crate::auth::ResolvedPrincipalRoot::remote(id).unwrap(),
+            id.into(),
+            "session".into(),
+            None,
+            "grant".into(),
+        );
+        assert_eq!(
+            viewer_storage_root_uri(dir.path(), &context, "documents", "documents")
+                .unwrap_err()
+                .to_string(),
+            "invalid viewer storage root"
+        );
+    }
 
     #[test]
     fn r4_viewer_uses_context_root_at_all_three_sites() {

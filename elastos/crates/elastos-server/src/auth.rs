@@ -11012,19 +11012,23 @@ pub(crate) mod r4_fixture {
 
     pub fn store(data_dir: &Path, kind: PrincipalKind) {
         store_test_human_principal(data_dir, ID);
+        let root = match kind {
+            PrincipalKind::Human => HUMAN_ROOT,
+            PrincipalKind::Agent => AGENT_ROOT,
+        };
+        set_kind(data_dir, ID, kind, root);
+    }
+
+    pub fn set_kind(data_dir: &Path, principal_id: &str, kind: PrincipalKind, root: &str) {
         // As in the auth Agent tests: change the stored fixture under the lock.
         mutate_auth_state(data_dir, |state| {
             let record = state
                 .principals
                 .iter_mut()
-                .find(|p| p.principal_id == ID)
+                .find(|p| p.principal_id == principal_id)
                 .unwrap();
             record.kind = kind;
-            record.localhost_root = match kind {
-                PrincipalKind::Human => HUMAN_ROOT,
-                PrincipalKind::Agent => AGENT_ROOT,
-            }
-            .to_string();
+            record.localhost_root = root.to_string();
             Ok(())
         })
         .unwrap();
