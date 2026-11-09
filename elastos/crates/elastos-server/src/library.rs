@@ -2485,7 +2485,9 @@ fn read_runtime_json<T: serde::de::DeserializeOwned>(
     principal_id: &str,
     uri: &str,
 ) -> anyhow::Result<T> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     let path =
         rooted_localhost_fs_path(data_dir, uri).ok_or_else(|| anyhow!("invalid Library path"))?;
     let bytes = crate::auth::read_principal_root_object(data_dir, principal_id, &root, uri, &path)?;
@@ -10841,6 +10843,42 @@ mod r5a_tests {
         let absent = tempfile::tempdir().unwrap();
         let uri = format!("{}/R5a/write.json", r4_fixture::HUMAN_ROOT);
         let result = write_runtime_json(absent.path(), r4_fixture::ID, &uri, &json!({}));
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_json_read_uses_the_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let uri = format!("{root}/.AppData/LocalHost/.Runtime/Library/R5a/read.json");
+            let path = rooted_localhost_fs_path(dir.path(), &uri).unwrap();
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            crate::auth::write_principal_root_object(
+                dir.path(),
+                r4_fixture::ID,
+                root,
+                &uri,
+                &path,
+                br#"{"site":4}"#,
+            )
+            .unwrap();
+            let result: anyhow::Result<Value> = read_runtime_json(dir.path(), r4_fixture::ID, &uri);
+            assert!(
+                result.as_ref().is_ok_and(|value| value["site"] == 4),
+                "{uri}: {result:?}"
+            );
+        }
+        let absent = tempfile::tempdir().unwrap();
+        let uri = format!("{}/R5a/read.json", r4_fixture::HUMAN_ROOT);
+        let result = read_runtime_json::<Value>(absent.path(), r4_fixture::ID, &uri);
         assert!(
             result
                 .as_ref()
