@@ -736,9 +736,13 @@ fn documents_validate_principal_id(principal_id: &str) -> anyhow::Result<&str> {
     Ok(principal_id)
 }
 
-fn documents_principal_root_uri(principal_id: &str) -> anyhow::Result<String> {
+fn documents_principal_root_uri(data_dir: &Path, principal_id: &str) -> anyhow::Result<String> {
     documents_validate_principal_id(principal_id)?;
-    Ok(crate::auth::principal_localhost_root(principal_id))
+    Ok(
+        crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+            .localhost_root()
+            .to_string(),
+    )
 }
 
 pub(crate) fn principal_root_protected_object_inventory(
@@ -752,7 +756,7 @@ pub(crate) fn principal_root_protected_object_inventory(
 }
 
 fn documents_root(data_dir: &Path, principal_id: &str) -> anyhow::Result<PathBuf> {
-    let root_uri = documents_principal_root_uri(principal_id)?;
+    let root_uri = documents_principal_root_uri(data_dir, principal_id)?;
     let rooted_path = root_uri
         .strip_prefix("localhost://")
         .ok_or_else(|| anyhow!("invalid documents root"))?;
@@ -772,10 +776,14 @@ fn documents_metadata_path(data_dir: &Path, doc_did: &str) -> anyhow::Result<Pat
         .join("document.json"))
 }
 
-fn documents_working_copy_uri(principal_id: &str, file_name: &str) -> anyhow::Result<String> {
+fn documents_working_copy_uri(
+    data_dir: &Path,
+    principal_id: &str,
+    file_name: &str,
+) -> anyhow::Result<String> {
     Ok(format!(
         "{}/Documents/{file_name}",
-        documents_principal_root_uri(principal_id)?
+        documents_principal_root_uri(data_dir, principal_id)?
     ))
 }
 
@@ -980,7 +988,7 @@ fn documents_load_body(
     let body = objects
         .read(
             principal_id,
-            &crate::auth::principal_localhost_root(principal_id),
+            &documents_principal_root_uri(data_dir, principal_id)?,
             &metadata.working_copy_uri,
             &documents_body_path(data_dir, principal_id, &metadata.file_name)?,
         )
@@ -1003,10 +1011,10 @@ fn documents_write_body(
     body: &str,
 ) -> anyhow::Result<()> {
     let data_dir = objects.data_dir();
-    let working_copy_uri = documents_working_copy_uri(principal_id, file_name)?;
+    let working_copy_uri = documents_working_copy_uri(data_dir, principal_id, file_name)?;
     objects.write(
         principal_id,
-        &crate::auth::principal_localhost_root(principal_id),
+        &documents_principal_root_uri(data_dir, principal_id)?,
         &working_copy_uri,
         &documents_body_path(data_dir, principal_id, file_name)?,
         body.as_bytes(),
@@ -1115,7 +1123,7 @@ fn documents_load_summary(data_dir: &Path, principal_id: &str) -> anyhow::Result
             .iter()
             .map(|metadata| metadata.file_name.as_str())
             .collect(),
-        base_uri: documents_working_copy_uri(principal_id, "")?,
+        base_uri: documents_working_copy_uri(data_dir, principal_id, "")?,
         visited: 0,
         files: Vec::new(),
     };
@@ -1247,7 +1255,7 @@ fn documents_create_local(
         owner_did,
         title,
         file_name: file_name.clone(),
-        working_copy_uri: documents_working_copy_uri(principal_id, &file_name)?,
+        working_copy_uri: documents_working_copy_uri(data_dir, principal_id, &file_name)?,
         created_at: ts,
         updated_at: ts,
         latest_published_cid: None,
@@ -1335,7 +1343,7 @@ pub fn documents_save_as_local(
         owner_did,
         title,
         file_name: file_name.clone(),
-        working_copy_uri: documents_working_copy_uri(principal_id, &file_name)?,
+        working_copy_uri: documents_working_copy_uri(data_dir, principal_id, &file_name)?,
         created_at: ts,
         updated_at: ts,
         latest_published_cid: None,
@@ -1386,7 +1394,7 @@ pub fn documents_import_chat_attachment_local(
         owner_did,
         title,
         file_name: file_name.clone(),
-        working_copy_uri: documents_working_copy_uri(principal_id, &file_name)?,
+        working_copy_uri: documents_working_copy_uri(data_dir, principal_id, &file_name)?,
         created_at: ts,
         updated_at: ts,
         latest_published_cid: None,
