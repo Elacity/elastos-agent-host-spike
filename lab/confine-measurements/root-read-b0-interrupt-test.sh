@@ -1,7 +1,9 @@
 #!/bin/bash
 # Proves the plant restores the profile when it is interrupted after the plant.
 # Starts the wallet `data` plant, waits until the profile differs from HEAD,
-# sends SIGTERM, then checks the profile and the tree are restored.
+# sends SIGTERM, then checks the profile and the tree are restored and that the
+# plant exited 143, the status its TERM trap sets. Any other plant status means
+# the run was not interrupted, so a normal-path restore cannot pass this test.
 set -u
 root=$(cd "$(dirname "$0")/../.." && pwd) || exit 2
 cd "$root" || exit 2
@@ -32,5 +34,6 @@ wait "$pid"
 rc=$?
 cmp "$backup" "$file" || { echo "profile differs after interruption" >&2; exit 5; }
 git diff --quiet -- "$file" || { echo "profile changed after interruption" >&2; exit 6; }
+[ "$rc" -eq 143 ] || { echo "plant exit=$rc, not 143: the plant was not interrupted" >&2; exit 7; }
 echo "interrupted plant exit=$rc; profile restored and tree clean"
 exit 0
