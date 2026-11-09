@@ -494,7 +494,7 @@ fn observe_runtime_device_key_file_identity(
     )
 }
 
-fn invalidate_verified_auth_state_cache(data_dir: &Path) {
+pub(crate) fn invalidate_verified_auth_state_cache(data_dir: &Path) {
     let key = auth_state_cache_key(data_dir);
     if let Ok(mut cache) = verified_auth_state_cache().lock() {
         cache.remove(&key);
@@ -658,7 +658,7 @@ fn run_verified_auth_state_cache_fill_hook(data_dir: &Path) -> anyhow::Result<()
 }
 
 #[cfg(test)]
-fn install_verified_auth_state_cache_hit_hook(
+pub(crate) fn install_verified_auth_state_cache_hit_hook(
     data_dir: &Path,
 ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
     let key = auth_state_cache_key(data_dir);
