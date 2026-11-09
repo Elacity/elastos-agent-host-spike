@@ -288,6 +288,10 @@ pub struct StandIn {
     /// kept as its error, so every later storage call answers with it.
     home_fd: Option<Result<OwnedFd, (u16, String)>>,
     grants: Vec<Grant>,
+    /// Request ids this stand-in's grant route minted, in mint order. A
+    /// `seed_grant` entry does not join it: that grant is present in the store
+    /// but was not minted by this run, so the A12 census treats it as foreign.
+    minted: BTreeSet<String>,
     requests: Vec<Request>,
     admitted: Vec<Admitted>,
     instances: Vec<Instance>,
@@ -321,6 +325,7 @@ impl StandIn {
             home: None,
             home_fd: None,
             grants: Vec::new(),
+            minted: BTreeSet::new(),
             requests: Vec::new(),
             admitted: Vec::new(),
             instances: Vec::new(),
@@ -751,13 +756,11 @@ impl StandIn {
         });
     }
 
-    /// Lab test seam, not a route: every request id this stand-in stores.
-    /// The A12 census compares its live view with this set.
+    /// Lab test seam, not a route: the request ids this stand-in's grant
+    /// route minted. The A12 census compares its live view with this set, so a
+    /// grant the run did not mint (a `seed_grant` entry) stays foreign.
     pub fn minted_grant_ids(&self) -> BTreeSet<String> {
-        self.grants
-            .iter()
-            .map(|grant| grant.request_id.clone())
-            .collect()
+        self.minted.clone()
     }
 
     /// Lab test seam, not a route.
@@ -1147,6 +1150,7 @@ impl StandIn {
             .expect("the grant route just stored this request's grant")
             .plan = minted;
         self.bind_stored_grant(&request_id)?;
+        self.minted.insert(request_id.clone());
         Ok(json!({ "success": true }))
     }
 

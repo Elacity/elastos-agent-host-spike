@@ -1515,6 +1515,22 @@
       ]
     },
     {
+      "id": "F-standin-a12-foreign",
+      "title": "treat every stored grant id as one this run minted",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/standin-runtime/mod.rs",
+          "old": "        self.minted.clone()",
+          "new": "        self.grants\n            .iter()\n            .map(|grant| grant.request_id.clone())\n            .collect()"
+        }
+      ],
+      "tests": [
+        "standin_a12_census_refuses_a_foreign_seeded_grant"
+      ]
+    },
+    {
       "id": "F-standin-shell-granted",
       "title": "widen the plain view to every session's granted records",
       "command": "agent-conformance",
