@@ -15,7 +15,7 @@ use elastos_common::localhost::{is_supported_resource_scheme, is_system_only_bac
 use elastos_runtime::capability::{
     pending::{PendingCapabilityRequest, PendingRequestStore},
     Action, CapabilityManager, CapabilityStore, GrantDuration, PolicyEvaluator, PolicyOutcome,
-    ResourceId, Settler, TokenConstraints,
+    RequestStatus, ResourceId, Settler, TokenConstraints,
 };
 use elastos_runtime::session::Session;
 
@@ -414,6 +414,9 @@ pub async fn deny_request(
 #[derive(Debug, Serialize)]
 pub struct CapabilityOutput {
     pub request_id: String,
+    /// The grant's session. Only the `all_sessions_live` view names it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub resource: String,
     pub action: String,
     pub duration: String,
@@ -422,7 +425,75 @@ pub struct CapabilityOutput {
 
 #[derive(Debug, Serialize)]
 pub struct ListCapabilitiesOutput {
+    /// `all_sessions_live` on the scoped view; absent on the default view.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<&'static str>,
     pub capabilities: Vec<CapabilityOutput>,
+}
+
+/// The one `?scope=` value: live grants across every session, shell only.
+const LIVE_SCOPE: &str = "all_sessions_live";
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListCapabilitiesQuery {
+    pub scope: Option<String>,
+}
+
+fn capability_output(
+    r: &PendingCapabilityRequest,
+    session_id: Option<String>,
+) -> Option<CapabilityOutput> {
+    let RequestStatus::Granted { duration, .. } = &r.status else {
+        return None;
+    };
+    Some(CapabilityOutput {
+        request_id: r.id.to_string(),
+        session_id,
+        resource: r.resource.to_string(),
+        action: r.action.to_string(),
+        duration: duration.to_string(),
+        granted_at: r.requested_at.unix_secs, // Use requested_at as proxy for granted_at
+    })
+}
+
+/// A granted record whose token still authorises: not revoked by id, not
+/// spent, not past its expiry, and minted in the current epoch.
+async fn is_live(store: &CapabilityStore, r: &PendingCapabilityRequest) -> bool {
+    let Some(token) = r.granted_token() else {
+        return false;
+    };
+    let spent = match token.constraints().max_uses() {
+        Some(max_uses) => store.has_exceeded_uses(token.id(), max_uses).await,
+        None => false,
+    };
+    let expired = token.expiry().is_some_and(|expiry| expiry.is_expired());
+    !store.is_token_revoked(token.id()).await
+        && !spent
+        && !expired
+        && store.is_epoch_valid(token.constraints().epoch())
+}
+
+/// Every session's live grants, sorted by session then request id.
+async fn live_capabilities(state: &CapabilityState) -> ListCapabilitiesOutput {
+    let mut live = Vec::new();
+    for r in state.pending_store.list_granted().await {
+        if is_live(&state.capability_store, &r).await {
+            live.push(r);
+        }
+    }
+    live.sort_by(|a, b| {
+        let key = |r: &PendingCapabilityRequest| (r.session_id.to_string(), r.id.to_string());
+        key(a).cmp(&key(b))
+    });
+    let capabilities = live
+        .iter()
+        .filter_map(|r| capability_output(r, Some(r.session_id.to_string())))
+        .collect();
+    ListCapabilitiesOutput {
+        scope: Some(LIVE_SCOPE),
+        capabilities,
+    }
 }
 
 /// One session's granted requests, projected from the Runtime's global list.
@@ -438,34 +509,37 @@ async fn session_granted(
 
 /// GET /api/capability/list
 ///
-/// List active capabilities for the current session.
+/// List active capabilities for the current session. `?scope=all_sessions_live`
+/// lists live grants across every session, for a shell session only.
 pub async fn list_capabilities(
     State(state): State<CapabilityState>,
     Extension(session): Extension<Session>,
-) -> Json<ListCapabilitiesOutput> {
+    Query(query): Query<ListCapabilitiesQuery>,
+) -> Result<Json<ListCapabilitiesOutput>, (StatusCode, String)> {
+    if let Some(scope) = query.scope {
+        if scope != LIVE_SCOPE {
+            let reason = format!("unknown capability list scope: {scope}");
+            return Err((StatusCode::BAD_REQUEST, reason));
+        }
+        if !session.is_shell() {
+            let reason = "This endpoint requires shell privileges".to_string();
+            return Err((StatusCode::FORBIDDEN, reason));
+        }
+        return Ok(Json(live_capabilities(&state).await));
+    }
     // Get granted requests for this session
     let session_id = session.id.to_string();
     let granted_requests = session_granted(&state.pending_store, &session_id).await;
 
     let capabilities = granted_requests
-        .into_iter()
-        .filter_map(|r| {
-            if let elastos_runtime::capability::RequestStatus::Granted { duration, .. } = &r.status
-            {
-                Some(CapabilityOutput {
-                    request_id: r.id.to_string(),
-                    resource: r.resource.to_string(),
-                    action: r.action.to_string(),
-                    duration: duration.to_string(),
-                    granted_at: r.requested_at.unix_secs, // Use requested_at as proxy for granted_at
-                })
-            } else {
-                None
-            }
-        })
+        .iter()
+        .filter_map(|r| capability_output(r, None))
         .collect();
 
-    Json(ListCapabilitiesOutput { capabilities })
+    Ok(Json(ListCapabilitiesOutput {
+        scope: None,
+        capabilities,
+    }))
 }
 
 // === Revoke Capability (Shell Only) ===
@@ -873,8 +947,10 @@ mod tests {
                 .unwrap();
             ids.push(id);
         }
-        let listed = list_capabilities(State(state.clone()), Extension(a.clone())).await;
+        let query = Query(ListCapabilitiesQuery { scope: None });
+        let listed = list_capabilities(State(state.clone()), Extension(a.clone()), query).await;
         let listed: Vec<_> = listed
+            .unwrap()
             .0
             .capabilities
             .into_iter()
