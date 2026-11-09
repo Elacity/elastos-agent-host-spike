@@ -106,12 +106,12 @@ mod tests {
         let (b_pending, b_grant, b_token) = seed(&state, "session-b").await;
         settle_and_revoke(&state, "session-a", "stopped").await;
 
-        for id in [&a_pending, &a_grant] {
+        for (row, id) in [("A pending", &a_pending), ("A grant", &a_grant)] {
             let RequestStatus::Denied { reason, settled_by } = status(&state, id).await else {
-                panic!("A request {id} is not denied");
+                panic!("{row} {id} is not denied");
             };
-            assert_eq!(settled_by, Settler::Runtime, "A settler for {id}");
-            assert_eq!(reason, "instance ended: stopped", "A reason for {id}");
+            assert_eq!(settled_by, Settler::Runtime, "{row} settler");
+            assert_eq!(reason, "instance ended: stopped", "{row} reason");
         }
         let a_check = validate(&state, "session-a", &a_token).await;
         assert_eq!(a_check, Err(ValidationError::TokenRevoked), "A token");
