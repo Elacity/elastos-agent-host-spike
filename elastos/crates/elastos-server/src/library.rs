@@ -10820,9 +10820,12 @@ mod r5a_tests {
                 uri: None,
             },
         );
-        let listed = result.unwrap();
-        assert_eq!(listed["uri"], r4_fixture::AGENT_ROOT);
-        assert_eq!(listed["objects"], json!([]));
+        assert!(
+            result.as_ref().is_ok_and(
+                |value| value["uri"] == r4_fixture::AGENT_ROOT && value["objects"] == json!([])
+            ),
+            "{result:?}"
+        );
         let human = home(PrincipalKind::Human);
         let listed = handle_library_request(
             human.path(),
@@ -10858,7 +10861,12 @@ mod r5a_tests {
                 principal_id: r4_fixture::ID.into(),
             },
         );
-        assert_eq!(result.unwrap()["deleted_count"], 0);
+        assert!(
+            result
+                .as_ref()
+                .is_ok_and(|value| value["deleted_count"] == 0),
+            "{result:?}"
+        );
         let events = read_library_events(agent.path(), r4_fixture::ID).unwrap();
         assert_eq!(
             events.last().unwrap().uri,
