@@ -686,26 +686,59 @@ mod tests {
     use super::*;
     use elastos_runtime::primitives::audit::AuditEvent;
 
-    /// A5-S3c-0b, presence: a stored Agent's presence grant file names its
-    /// own UsersAI root. Expected-fail: the id rule. Flipped by A5-S3c-3a.
+    /// A5-S3c-0b: the presence grant file names the stored Agent root.
     #[test]
-    #[ignore = "expected-fail until A5-S3c-3a"]
     fn a_stored_agents_presence_grant_file_is_under_its_usersai_root() {
-        let data_dir = tempfile::tempdir().unwrap();
-        let id = "person:local:s3c-agent-presence";
-        crate::auth::store_test_human_principal(data_dir.path(), id);
-        crate::auth::tests::mint_agent_record(data_dir.path(), id, None);
-        let root = crate::auth::principal_stored_localhost_root(Some(data_dir.path()), id).unwrap();
-        assert!(root.starts_with("localhost://UsersAI/"), "{root}");
-        let file = load_file(data_dir.path(), id).unwrap();
-        assert_eq!(file.localhost_root, root);
-        assert!(
-            object_uri(data_dir.path(), id)
-                .unwrap()
-                .starts_with(&format!("{root}/")),
-            "{}",
-            object_uri(data_dir.path(), id).unwrap()
+        use crate::auth::r4_fixture::{AGENT_ROOT, ID};
+        let data_dir = r6_grant_home(crate::auth::PrincipalKind::Agent, false);
+        let file = load_file(data_dir.path(), ID).unwrap();
+        assert_eq!(file.localhost_root, AGENT_ROOT);
+        assert_eq!(
+            object_uri(data_dir.path(), ID).unwrap(),
+            format!("{AGENT_ROOT}/{PRESENCE_GRANT_OBJECT}")
         );
+    }
+
+    fn r6_grant_home(kind: crate::auth::PrincipalKind, existing: bool) -> tempfile::TempDir {
+        use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
+        let dir = tempfile::tempdir().unwrap();
+        store(dir.path(), kind);
+        let root = if kind == crate::auth::PrincipalKind::Agent {
+            AGENT_ROOT
+        } else {
+            HUMAN_ROOT
+        };
+        crate::auth::store_test_principal_root_protection_for(dir.path(), ID, root);
+        if existing {
+            let path = elastos_common::localhost::rooted_localhost_fs_path(
+                dir.path(),
+                &format!("{root}/{PRESENCE_GRANT_OBJECT}"),
+            )
+            .unwrap();
+            crate::auth::create_owner_only_dir_all(dir.path(), path.parent().unwrap()).unwrap();
+            let file = PresenceGrantFile {
+                schema: PRESENCE_GRANT_SCHEMA.into(),
+                principal_id: ID.into(),
+                localhost_root: root.into(),
+                grants: vec![],
+                requests: vec![PresenceRequest {
+                    scope: scope(),
+                    status: PresenceStatus::Requested,
+                    at: 7,
+                }],
+            };
+            let uri = format!("{root}/{PRESENCE_GRANT_OBJECT}");
+            crate::auth::write_principal_root_object(
+                dir.path(),
+                ID,
+                root,
+                &uri,
+                &path,
+                &serde_json::to_vec(&file).unwrap(),
+            )
+            .unwrap();
+        }
+        dir
     }
 
     const ME: &str = "did:key:zMe";
@@ -719,6 +752,7 @@ mod tests {
         }
         let principal = "person:local:presence-grant-test".to_string();
         for person in [principal.as_str(), SECOND, OTHER] {
+            crate::auth::store_test_human_principal(temp.path(), person);
             crate::auth::store_test_principal_root_protection(temp.path(), person);
         }
         (temp, principal)
