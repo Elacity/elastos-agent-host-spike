@@ -2703,3 +2703,64 @@ pub(super) fn room_service_join_error_response(err: tokio::task::JoinError) -> R
         .into_response()
 }
 
+/// R2 rows: the chat-room profile authority reads the root the launch context
+/// resolved, so a principal with no stored record is refused instead of served
+/// from the principal-id rule.
+#[cfg(test)]
+mod stored_root_tests {
+    use super::*;
+
+    fn stored_context(
+        data_dir: &std::path::Path,
+        principal_id: &str,
+    ) -> HomeLaunchTokenContext {
+        let root =
+            crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id).unwrap();
+        HomeLaunchTokenContext::resolved(
+            root,
+            principal_id.to_string(),
+            "session".to_string(),
+            None,
+            "grant".to_string(),
+        )
+    }
+
+    #[test]
+    fn an_unstored_room_principal_is_refused_instead_of_served_from_the_id_rule_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:room-no-stored-record";
+        let context = HomeLaunchTokenContext::for_test(principal_id, "session", None, "grant");
+        assert!(
+            crate::auth::principal_stored_localhost_root(Some(temp.path()), principal_id).is_err(),
+            "the fixture principal has no stored record"
+        );
+        let id_rule_root = crate::auth::principal_localhost_root(principal_id);
+        assert!(
+            crate::collaboration_profile_authority::profile_authority_path(
+                temp.path(),
+                &id_rule_root
+            )
+            .is_ok(),
+            "the id rule names a root this Home accepts"
+        );
+        let err = trusted_chat_room_profile_authority(temp.path(), &context).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid profile authority root"),
+            "the fixture root has no stored record: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_stored_room_principal_keeps_todays_profile_decision() {
+        let temp = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:room-stored-record";
+        let record = crate::auth::store_test_human_principal(temp.path(), principal_id);
+        let context = stored_context(temp.path(), &record.principal_id);
+        assert_eq!(
+            trusted_chat_room_profile_authority(temp.path(), &context)
+                .unwrap_err()
+                .to_string(),
+            "signed Profile is unavailable"
+        );
+    }
+}
