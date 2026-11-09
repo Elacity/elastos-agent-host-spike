@@ -11428,6 +11428,12 @@ mod r5a_tests {
             );
         }
         let dir = tempfile::tempdir().unwrap();
+        let id_uri = library_event_log_uri(r4_fixture::HUMAN_ROOT);
+        let bytes = format!(
+            "{}\n",
+            serde_json::to_string(&event(r4_fixture::HUMAN_ROOT)).unwrap()
+        );
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, bytes.as_bytes());
         let result = library_events(dir.path(), r4_fixture::ID, None, None, None);
         assert!(
             result
@@ -11435,6 +11441,8 @@ mod r5a_tests {
                 .is_err_and(|e| e.to_string().contains("has no stored record")),
             "{result:?}"
         );
+        assert_eq!(fs::read(&id_path).unwrap_or_default(), bytes.as_bytes());
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
     }
 
     #[test]
@@ -11453,6 +11461,12 @@ mod r5a_tests {
             );
         }
         let dir = tempfile::tempdir().unwrap();
+        let id_uri = library_event_log_uri(r4_fixture::HUMAN_ROOT);
+        let bytes = format!(
+            "{}\n",
+            serde_json::to_string(&event(r4_fixture::HUMAN_ROOT)).unwrap()
+        );
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, bytes.as_bytes());
         let result = read_library_events(dir.path(), r4_fixture::ID);
         assert!(
             result
@@ -11460,6 +11474,8 @@ mod r5a_tests {
                 .is_err_and(|e| e.to_string().contains("has no stored record")),
             "{result:?}"
         );
+        assert_eq!(fs::read(&id_path).unwrap_or_default(), bytes.as_bytes());
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
     }
 
     #[test]
@@ -11480,6 +11496,8 @@ mod r5a_tests {
             );
         }
         let dir = tempfile::tempdir().unwrap();
+        let id_uri = library_event_log_uri(r4_fixture::HUMAN_ROOT);
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule event log");
         let result =
             write_library_events(dir.path(), r4_fixture::ID, &[event(r4_fixture::HUMAN_ROOT)]);
         assert!(
@@ -11488,6 +11506,8 @@ mod r5a_tests {
                 .is_err_and(|e| e.to_string().contains("has no stored record")),
             "{result:?}"
         );
+        assert_eq!(fs::read(&id_path).unwrap_or_default(), b"id-rule event log");
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
 
     #[test]
