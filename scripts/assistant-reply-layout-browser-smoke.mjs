@@ -202,8 +202,10 @@ let beforeClamp, launchScriptDir;
 const pageErrors = [];
 try {
   server.listen(0, "127.0.0.1"); await once(server, "listening");
+  // Keep the native overlay thumb visible: this smoke tests dragging it,
+  // while Chromium's auto-hide animation can remove its pointer hit target.
   const launch = { headless: true, ignoreDefaultArgs: ["--hide-scrollbars"],
-    args: ["--enable-features=OverlayScrollbar"],
+    args: ["--enable-features=OverlayScrollbar", "--disable-features=ScrollbarAnimations"],
     ...productSmokeLaunchOptions() };
   if (process.platform === "darwin") {
     // Cocoa needs a separate value argument; Playwright only accepts switches.
@@ -586,9 +588,6 @@ try {
     // its draggable area, even when the scrollbar uses no layout gutter.
     const startY = Math.round(box.y + box.height - 20);
     const endY = Math.round(box.y + Math.max(24, box.height * 0.12));
-    // Re-enter the scrollport to reveal its auto-hidden native scrollbar.
-    // Moving within the scrollport can leave Linux Chromium's thumb hidden.
-    await page.mouse.move(x, box.y + box.height + 1);
     await page.mouse.move(x, startY);
     await page.waitForTimeout(120);
     await page.mouse.down();
