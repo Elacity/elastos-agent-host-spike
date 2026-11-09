@@ -438,18 +438,16 @@ impl PendingRequestStore {
             .collect()
     }
 
-    /// List granted requests across every session, read-only, for the shell.
+    /// List the request records the store still holds, in every session and
+    /// every state, read-only, for the shell. Callers filter by state.
     ///
-    /// This is request history, not a token inventory: `cleanup_old` can drop
-    /// a granted record whose token is still live. Epoch, expiry and use count
-    /// are checked by `CapabilityManager` and `CapabilityStore`, not here.
-    pub async fn list_granted(&self) -> Vec<PendingCapabilityRequest> {
+    /// These are the records held now, not a full history: `cleanup_old` and
+    /// the capacity guard drop resolved records, including a granted record
+    /// whose token is still live. Epoch, expiry and use count are checked by
+    /// `CapabilityManager` and `CapabilityStore`, not here.
+    pub async fn list_requests(&self) -> Vec<PendingCapabilityRequest> {
         let requests = self.requests.read().await;
-        requests
-            .values()
-            .filter(|r| r.is_granted())
-            .cloned()
-            .collect()
+        requests.values().cloned().collect()
     }
 
     /// List pending requests for a specific session
@@ -630,7 +628,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_granted_lists_only_granted_requests_in_every_session() {
+    async fn list_requests_lists_every_held_record_in_every_session() {
         let store = create_test_store();
         let first = granted_request(&store, "session-1").await;
         let resource = ResourceId::new("localhost://Users/self/Documents/test");
@@ -645,13 +643,13 @@ mod tests {
         let other_session = store.get_request(&other).await.unwrap().session_id;
         assert_eq!(other_session.0, "session-3");
         let mut ids: Vec<String> = store
-            .list_granted()
+            .list_requests()
             .await
             .into_iter()
             .map(|r| r.id.0)
             .collect();
         ids.sort();
-        let mut want = vec![first, other];
+        let mut want = vec![first, pending.id.0.clone(), revoked, other];
         want.sort();
         assert_eq!(ids, want);
         assert!(store
