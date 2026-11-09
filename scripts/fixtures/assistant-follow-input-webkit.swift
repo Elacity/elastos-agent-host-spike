@@ -27,7 +27,7 @@ final class Probe: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     NSApp.activate(ignoringOtherApps: true)
     let url = URL(string: url)!
     web.load(URLRequest(url: url))
-    DispatchQueue.main.asyncAfter(deadline: .now() + 55) {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 180) {
       fputs("timeout\n", stderr)
       exit(2)
     }
@@ -80,8 +80,9 @@ final class Probe: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
   }
 
   func post(_ point: CGPoint, _ type: CGEventType) {
-    CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)?
-      .post(tap: .cghidEventTap)
+    let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)
+    event?.flags = []
+    event?.post(tap: .cghidEventTap)
   }
 
   func pump(_ seconds: Double) {
@@ -94,6 +95,39 @@ final class Probe: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     case "drag-away": drag(rect, fromTop: false)
     case "drag-back": drag(rect, fromTop: true)
     case "select": select(rect)
+    case "hold", "release":
+      let content = obj["content"] as? Bool ?? false
+      let x = CGFloat(rect["x"] ?? 0) + CGFloat(rect["width"] ?? 0) - (content ? 40 : 3)
+      let y = CGFloat(rect["y"] ?? 0) + CGFloat(rect["height"] ?? 0) - 14
+      let point = cgPoint(viewX: x, viewY: y)
+      post(point, .mouseMoved)
+      pump(0.05)
+      post(point, obj["phase"] as? String == "hold" ? .leftMouseDown : .leftMouseUp)
+    case "wheel":
+      let point = cgPoint(viewX: CGFloat(rect["x"] ?? 0) + 120, viewY: CGFloat(rect["y"] ?? 0) + 180)
+      post(point, .mouseMoved)
+      pump(0.08)
+      let deltas = obj["deltas"] as? [Int] ?? []
+      let momentum = obj["momentum"] as? Bool == true
+      func wheel(_ delta: Int, phase: Int64 = 0, momentumPhase: Int64 = 0) {
+        let source = CGEventSource(stateID: .hidSystemState)
+        let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 1,
+          wheel1: Int32(-delta), wheel2: 0, wheel3: 0)
+        event?.flags = []
+        event?.location = point
+        event?.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+        event?.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)
+        event?.setIntegerValueField(.scrollWheelEventMomentumPhase, value: momentumPhase)
+        event?.post(tap: .cghidEventTap)
+      }
+      for (index, delta) in deltas.enumerated() {
+        if momentum && index > 0 { wheel(delta, momentumPhase: 2) }
+        else { wheel(delta, phase: index == 0 ? 1 : 2) }
+        if momentum && index == 0 { pump(0.03); wheel(0, phase: 4) }
+        pump(Double(obj["gapMs"] as? Int ?? 20) / 1000)
+      }
+      if momentum { wheel(0, momentumPhase: 4) }
+      else { wheel(0, phase: 4) }
     case "key": press(obj["key"] as? String ?? "PageUp")
     default: break
     }
@@ -147,11 +181,14 @@ final class Probe: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     case "ArrowUp": code = 126
     case "End": code = 119
     case "PageDown": code = 121
+    case "Shift+Space": code = 49
     default: code = 116
     }
     let source = CGEventSource(stateID: .hidSystemState)
     let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true)
     let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false)
+    down?.flags = name == "Shift+Space" ? .maskShift : []
+    up?.flags = []
     down?.post(tap: .cghidEventTap)
     pump(0.05)
     up?.post(tap: .cghidEventTap)

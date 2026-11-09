@@ -50,6 +50,7 @@ let transcriptFollow = null;
 export function pinTranscriptToEnd(scroller) {
   if (!scroller) return 0;
   scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
+  transcriptFollow?.didPin(scroller);
   return scroller.scrollTop;
 }
 
@@ -67,6 +68,11 @@ function observeTranscript(scroller, content) {
   if (!scroller || !content || transcriptFollow) return;
   let atEnd = true;
   let readerPending = false;
+  let lastScrollTop = scroller.scrollTop;
+  let lastScrollMax = scroller.scrollHeight - scroller.clientHeight;
+  let readerStartTop = 0;
+  let readerMoved = false;
+  let readerWasFollowing = false;
   let dragging = false;
   let touching = false;
   const heldKeys = new Set();
@@ -85,13 +91,24 @@ function observeTranscript(scroller, content) {
     const top = scroller.scrollTop;
     settleTimer = window.setTimeout(() => {
       if (dragging || touching || heldKeys.size || !readerPending) return;
+      readerMoved ||= scroller.scrollTop !== readerStartTop;
       if (scroller.scrollTop !== top) { waitForReader(); return; }
       readerPending = false;
-      atEnd = nearEnd();
+      lastScrollMax = scroller.scrollHeight - scroller.clientHeight;
+      // A stationary press can span reply growth. Restore its follow and pin;
+      // a reader who was already away keeps that position.
+      atEnd = readerMoved ? nearEnd() : readerWasFollowing || nearEnd();
+      if (!readerMoved && atEnd) pinTranscriptToEnd(scroller);
       showFollow();
     }, 150);
   };
   const readerInput = () => {
+    if (!readerPending) {
+      readerStartTop = scroller.scrollTop;
+      // Compositor scrolling can precede delivery of the wheel event.
+      readerMoved = readerStartTop !== lastScrollTop;
+      readerWasFollowing = atEnd;
+    }
     readerPending = true;
     atEnd = false;
     waitForReader();
@@ -103,6 +120,11 @@ function observeTranscript(scroller, content) {
   };
   transcriptFollow = {
     get atEnd() { return atEnd; },
+    didPin(target) {
+      if (target !== scroller) return;
+      lastScrollTop = scroller.scrollTop;
+      lastScrollMax = scroller.scrollHeight - scroller.clientHeight;
+    },
     reset() { atEnd = true; readerPending = false; window.clearTimeout(settleTimer); pinFollowing(); },
   };
   scroller.addEventListener("wheel", event => {
@@ -151,6 +173,16 @@ function observeTranscript(scroller, content) {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") readerInput();
   });
   scroller.addEventListener("scroll", () => {
+    // Momentum can continue after a quiet gap closed the input gesture.
+    // A smaller range can clamp the scroll before ResizeObserver pins it.
+    const max = scroller.scrollHeight - scroller.clientHeight;
+    if (!readerPending && atEnd && !nearEnd() && max >= lastScrollMax) {
+      readerInput();
+      readerMoved = true;
+    }
+    if (readerPending) readerMoved ||= scroller.scrollTop !== readerStartTop;
+    lastScrollTop = scroller.scrollTop;
+    lastScrollMax = max;
     waitForReader();
     showFollow();
   }, { passive: true });

@@ -6,6 +6,10 @@
   html, body { margin: 0; }
   #viewport { position: relative; width: 520px; height: 420px; }
   #agent-harness-stream-column { position: relative; }
+  #agent-harness-stream-column > input { position: absolute; left: 24px; bottom: 200px; width: 80px; }
+  #agent-harness-stream-column > textarea { position: absolute; left: 120px; bottom: 200px; width: 100px; height: 40px; }
+  #agent-harness-stream-column > select { position: absolute; left: 240px; bottom: 200px; }
+  #agent-harness-stream-column > [contenteditable] { position: absolute; left: 320px; bottom: 200px; }
   #selection { position: absolute; bottom: 24px; left: 24px; white-space: nowrap; user-select: text; -webkit-user-select: text; }
 </style>
 <div id="viewport" class="agent-harness-stream-viewport">
@@ -20,6 +24,7 @@
   const s = document.querySelector("#agent-harness-stream");
   const c = document.querySelector("#agent-harness-stream-column");
   const viewport = document.querySelector("#viewport");
+  const matrix = new URLSearchParams(location.search).has("matrix");
   const fallback = new URLSearchParams(location.search).has("fallback");
   const swallow = new URLSearchParams(location.search).has("swallow");
   if (fallback) {
@@ -28,23 +33,72 @@
   }
   if (fallback || swallow) s.addEventListener("scrollend", event => event.stopImmediatePropagation(), true);
   const mod = await import("/capsules/assistant/browser/agent-stream.js");
-  mod.bindAgentStream({}, { streamScrollEl: () => s, streamEl: () => c, streamViewportEl: () => viewport });
+  const context = { followUpQueue: [], streamGeneration: 0, activeSessionId: "follow-fixture", sessions: [{
+    id: "follow-fixture", messages: [], lastTurn: { turnId: "follow-fixture", providerRunId: "follow-fixture",
+      state: "streaming", startedAt: Date.now() },
+  }] };
+  mod.bindAgentStream(context, { streamScrollEl: () => s, streamEl: () => c, streamViewportEl: () => viewport,
+    clearEmptyState() {}, scrollStreamToEnd() {} });
   Object.assign(s.style, { height: "400px", maxHeight: "400px", width: "480px", padding: "0px",
     flex: "none", overflowAnchor: "none", webkitMaskImage: "none", maskImage: "none" });
   s.classList.add("is-live-streaming");
   mod.ensureJumpToLatest();
-  const result = { phase: "done", fallback, swallow, nativeScrollend: "onscrollend" in s, cases: {}, failures: [] };
+  const result = { userAgent: navigator.userAgent, matrix, phase: "done", fallback, swallow, nativeScrollend: "onscrollend" in s, cases: {}, failures: [] };
+  window.addEventListener("error", event => result.failures.push(event.message));
+  window.addEventListener("unhandledrejection", event => result.failures.push(String(event.reason)));
   const frames = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   const settle = async () => { await frames(); await new Promise(resolve => setTimeout(resolve, 180)); };
   const snap = () => ({ top: s.scrollTop, fromEnd: s.scrollHeight - s.clientHeight - s.scrollTop,
     follow: s.classList.contains("is-follow-bottom"), jump: !viewport.querySelector("[data-agent-jump-latest]").hidden });
-  const expect = (ok, label) => { if (!ok) result.failures.push(label); };
+  const expect = (ok, label) => {
+    result.checks ||= {};
+    result.checks[label] = Boolean(ok);
+    if (!ok) result.failures.push(label);
+  };
+  const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+  let sequence = 0;
+  let delivered = 0;
+  let chunk = "reply ";
+  let completed = false;
+  if (matrix) {
+    // Exercise each revision's real live-turn path. Only the model service is a fixture.
+    const fetchAsset = window.fetch.bind(window);
+    window.fetch = async (url, init) => {
+      const path = new URL(url, location.href).pathname;
+      if (path === "/api/provider/model/runs_get") return Response.json({ run_id: "follow-fixture" });
+      if (path === "/api/provider/model/runs_events") {
+        while (delivered === sequence) await delay(10);
+        delivered = sequence;
+        return Response.json({ events: [{ sequence, kind: completed ? "completed" : "text_delta", data: completed ? {} : { text: chunk } }],
+          next_cursor: sequence, has_more: false });
+      }
+      return fetchAsset(url, init);
+    };
+    mod.startTurnForPrompt("");
+  }
+  const flush = async () => {
+    if (!matrix) { mod.followTranscriptToEnd(s); return; }
+    sequence++;
+    const deadline = performance.now() + 3000;
+    while (mod.getLiveTurnCanonical().appliedSeq < sequence) {
+      if (performance.now() > deadline) throw new Error("live turn did not flush");
+      await delay(10);
+    }
+    await frames();
+  };
+  const jump = () => {
+    if (mod.jumpTranscriptToEnd) mod.jumpTranscriptToEnd(s);
+    else viewport.querySelector("[data-agent-jump-latest]").click();
+  };
   let sampling = true;
   let jumpWhileFollowing = 0;
+  let watchFlash = false;
+  const flashFrames = [];
   const sample = () => {
     if (!sampling) return;
     const state = snap();
     if (state.follow && state.jump) jumpWhileFollowing++;
+    if (watchFlash && state.jump) flashFrames.push(state);
     requestAnimationFrame(sample);
   };
   requestAnimationFrame(sample);
@@ -57,8 +111,14 @@
     const b = s.getBoundingClientRect();
     s.dispatchEvent(new PointerEvent(type, { bubbles: true, clientX: b.right - 3, clientY: b.bottom - 14 }));
   };
-  const reset = async () => { c.style.height = "2600px"; mod.jumpTranscriptToEnd(s); await frames(); };
-  const grow = async () => { c.style.height = `${c.offsetHeight + 100}px`; mod.followTranscriptToEnd(s); await settle(); return snap(); };
+  const reset = async () => {
+    getSelection().removeAllRanges();
+    document.activeElement.blur();
+    s.style.height = "400px";
+    c.style.height = "2600px";
+    jump(); await frames();
+  };
+  const grow = async () => { c.style.height = `${c.offsetHeight + 100}px`; await flush(); await settle(); return snap(); };
   const heldGrowth = async label => {
     await settle();
     const held = snap();
@@ -85,8 +145,16 @@
     result.controlGap = control.scrollHeight - control.clientHeight - control.scrollTop;
     expect(result.controlGap === 100, "control without pin stays 100px short");
     control.remove();
+    if (matrix) {
+      await flush();
+      // Geometry is controlled; rendering and follow listeners remain the real module.
+      c.querySelector(".agent-msg-agent").style.cssText = "position:absolute;top:0;left:0";
+      for (const node of c.querySelectorAll(".agent-progress")) node.style.cssText = "position:absolute;top:0;left:0";
+    }
     await reset();
     const native = async (phase, extra = {}, element = s) => {
+      const firstEvent = events.length;
+      const before = snap();
       const box = element.getBoundingClientRect();
       const request = { phase, ...extra, rect: { x: box.x, y: box.y, width: box.width, height: box.height } };
       (result.nativeInputs ||= []).push(request);
@@ -99,12 +167,20 @@
       window.__input = null;
       // WKWebView dispatches native events after the script-message handler returns.
       // Allow the key animation and its 150 ms quiet period to finish.
-      await new Promise(resolve => setTimeout(resolve, 650));
+      await delay(extra.waitMs ?? 650);
+      const received = events.slice(firstEvent);
+      if (phase === "key") {
+        const keyName = extra.key === "Shift+Space" ? " " : extra.key;
+        expect(received.some(e => e.type === "keydown" && e.trusted && e.key === keyName
+          && e.shift === (extra.key === "Shift+Space") && !e.ctrl && !e.meta && !e.alt),
+          `trusted ${extra.key} with requested modifiers received`);
+      }
+      (result.inputEvidence ||= []).push({ phase, extra, before, after: snap(), events: received });
     };
     const events = [];
-    for (const name of ["keydown", "keyup", "pointerdown", "pointerup", "scroll", "scrollend"]) {
+    for (const name of ["keydown", "keyup", "pointerdown", "pointerup", "wheel", "scroll", "scrollend"]) {
       document.addEventListener(name, event => events.push({ type: name, key: event.key,
-        trusted: event.isTrusted, target: event.target.id, x: event.clientX, y: event.clientY, top: s.scrollTop, follow: snap().follow }), true);
+        time: performance.now(), shift: event.shiftKey, ctrl: event.ctrlKey, meta: event.metaKey, alt: event.altKey, deltaY: event.deltaY, trusted: event.isTrusted, target: event.target.id, x: event.clientX, y: event.clientY, top: s.scrollTop, follow: snap().follow }), true);
     }
     const focusMessage = () => document.querySelector("#message").focus({ preventScroll: true });
     await native("drag-away");
@@ -162,15 +238,32 @@
     pointer("pointerup");
     await followingGrowth("scroll ends before pointerup then growth");
 
-    // Early scrollend plus a still frame is a deterministic version of the
-    // first 1px of the system PageUp animation, on both engines.
+    // A late scroll after a quiet gap must leave follow again. Native wheels
+    // can coalesce, so control the two positions and keep actual scroll events.
     await reset(); key(document.querySelector("#message"), "PageUp");
     s.scrollBy(0, -1); s.dispatchEvent(new Event("scrollend"));
-    await new Promise(resolve => setTimeout(resolve, 60));
+    await new Promise(resolve => setTimeout(resolve, 220));
     const quietGap = snap();
-    expect(!quietGap.follow, "early scrollend keeps gesture open");
-    s.scrollBy(0, -359);
-    await heldGrowth("early scrollend then remaining animation and growth");
+    result.cases["quiet gap within 8px"] = quietGap;
+    s.scrollBy(0, -80);
+    await heldGrowth("1px then 220ms quiet then 80px and growth");
+
+    await reset();
+    events.length = 0;
+    const holdTop = s.scrollTop;
+    await native("hold", { waitMs: 250 });
+    const duringHold = snap();
+    c.style.height = "2750px";
+    await frames();
+    const duringHoldGrowth = snap();
+    await native("release", { waitMs: 450 });
+    result.cases["stationary scrollbar hold with 150px growth"] = { duringHold, duringHoldGrowth, after: snap(), events: events.slice() };
+    expect(duringHold.top === holdTop && duringHoldGrowth.top === holdTop,
+      "stationary hold has no scroll movement before release");
+    expect(events.some(e => e.type === "pointerdown" && e.trusted) && events.some(e => e.type === "pointerup" && e.trusted),
+      "trusted stationary scrollbar press received");
+    expect(snap().fromEnd === 0 && snap().follow && !snap().jump,
+      "stationary scrollbar hold with 150px growth");
 
     await reset();
     pointer("pointerdown"); pointer("pointerup");
@@ -225,9 +318,9 @@
     await reset();
     wheel(2);
     const beforeGrowth = s.scrollTop;
-    c.style.height = "2700px"; mod.followTranscriptToEnd(s);
+    c.style.height = "2700px"; if (!matrix) mod.followTranscriptToEnd(s);
     expect(s.scrollTop === beforeGrowth && !snap().follow, "growth never pins during a downward gesture");
-    await heldGrowth("growth during open gesture");
+    await followingGrowth("no-scroll gesture with growth restores follow");
 
     await reset();
     key(document.body, "PageUp"); s.scrollBy(0, -400);
@@ -252,6 +345,59 @@
       target.focus({ preventScroll: true }); key(target, "PageUp");
       await followingGrowth(`${selector} keeps follow`);
     }
+    if (matrix) {
+      for (const selector of ["input", "textarea", "select", "[contenteditable]"]) {
+        for (const name of ["PageUp", "Home", "ArrowUp"]) {
+          await reset(); c.querySelector(selector).focus({ preventScroll: true });
+          await native("key", { key: name });
+          await followingGrowth(`native ${name} in ${selector}`);
+        }
+      }
+      for (const name of ["ArrowUp", "Shift+Space"]) {
+        await reset(); focusMessage();
+        await native("key", { key: name });
+        await heldGrowth(`native ${name} on message button`);
+      }
+      await reset(); document.activeElement.blur();
+      await native("key", { key: "PageUp" });
+      await heldGrowth("native PageUp on body");
+      await reset();
+      await native("wheel", { deltas: [-80, -60, -40, -20] });
+      await heldGrowth("native wheel flick away");
+      await native("wheel", { deltas: [70] });
+      await heldGrowth("native downward wheel stops short");
+      await native("wheel", { deltas: [3000] });
+      await followingGrowth("native wheel return to end");
+      await reset();
+      await native("wheel", { deltas: [-80, -60, -40], momentum: true, gapMs: 220 });
+      await heldGrowth("native momentum wheels with 220ms posting gaps");
+      await reset();
+      await native("wheel", { deltas: [-236] });
+      await native("wheel", { deltas: [-6, -40], gapMs: 220 });
+      await heldGrowth("native wheel gap already far from end");
+      await reset(); s.scrollBy(0, -400);
+      await heldGrowth("scroll without an input event then growth");
+      await reset(); wheel(-1); s.scrollBy(0, -1); await delay(220);
+      await followingGrowth("1px then quiet and growth without a second scroll");
+      await reset();
+      c.style.height = "2300px"; s.scrollTop; c.style.height = "2400px";
+      await flush(); await followingGrowth("clamp and growth in one task");
+      await reset(); s.style.height = "320px";
+      await flush(); await followingGrowth("composer resize while following");
+      await reset(); await native("wheel", { deltas: [-400] });
+      const composerTop = s.scrollTop;
+      s.style.height = "320px"; await flush();
+      expect(s.scrollTop === composerTop, "composer resize preserves reader position");
+      await heldGrowth("composer resize after reader leaves");
+      await reset(); await native("wheel", { deltas: [-500] });
+      const finishTop = s.scrollTop;
+      // Hold in the content, so the scrollbar track cannot page as a side effect.
+      await native("hold", { content: true, waitMs: 250 });
+      c.style.height = "2780px"; await flush();
+      expect(s.scrollTop === finishTop && !snap().follow, "finish while reader holds away preserves position");
+      await native("release", { content: true });
+      await heldGrowth("finish while reader holds away");
+    }
     await reset();
     await followingGrowth("growth");
     await reset();
@@ -260,11 +406,35 @@
     for (const distance of [16, 400]) {
       await reset(); wheel(-distance); s.scrollBy(0, -distance);
       // A first chunk can precede the scroll event.
-      c.style.height = "2720px"; mod.followTranscriptToEnd(s);
+      c.style.height = "2720px"; await flush();
       await heldGrowth(`${distance}px reader and first chunk`);
     }
-    mod.jumpTranscriptToEnd(s);
+    jump();
     await followingGrowth("Jump to latest");
+    if (matrix) {
+      await reset();
+      c.style.height = "auto";
+      const spacer = document.createElement("div");
+      spacer.style.height = "2600px"; c.prepend(spacer);
+      c.querySelector(".agent-msg-agent").style.cssText = "";
+      for (const node of c.querySelectorAll(".agent-progress")) node.style.cssText = "";
+      jump(); await settle();
+      watchFlash = true;
+      chunk = "\n\n## A streamed reply\n\n" + "A sentence that fills the reply while it grows. ".repeat(30);
+      for (let i = 0; i < 6; i++) await flush();
+      completed = true; sequence++;
+      const deadline = performance.now() + 4000;
+      while (context.turnBusy || mod.getLiveTurnCanonical().phase !== "presentation_done") {
+        if (performance.now() > deadline) break;
+        await delay(20);
+      }
+      await delay(500); await frames(); watchFlash = false;
+      result.cases["stream growth and completion without Jump flash"] = { flashFrames, after: snap(),
+        phase: mod.getLiveTurnCanonical().phase, turn: context.sessions[0].lastTurn };
+      expect(!context.turnBusy && !context.sessions[0].lastTurn.error, "stream completes successfully");
+      expect(flashFrames.length === 0 && snap().fromEnd <= 8 && !snap().jump,
+        "stream growth and completion without Jump flash");
+    }
   } catch (error) { result.failures.push(String(error.stack || error)); }
   sampling = false;
   result.jumpWhileFollowing = jumpWhileFollowing;
