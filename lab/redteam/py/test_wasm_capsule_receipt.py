@@ -57,6 +57,7 @@ not carry those lines, so the probe prints this one.
 
 import contextlib
 import hashlib
+import importlib
 import io
 import os
 import shlex
@@ -73,6 +74,10 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 LANE_DIR = REPO_ROOT / "lab" / "wasm-capsule"
 TOOLS_BUILD = LANE_DIR / "tools" / "build"
 LOCKFILE = LANE_DIR / "Cargo.lock"
+_GIT_ENV_SPEC = importlib.util.spec_from_file_location(
+    "fixture_git_env", REPO_ROOT / "scripts" / "fixture-git-env.py")
+fixture_git = importlib.util.module_from_spec(_GIT_ENV_SPEC)
+_GIT_ENV_SPEC.loader.exec_module(fixture_git)
 
 FINDING_ID = "wasm-capsule-lab-001"
 CONTENT_FINDING_ID = "wasm-capsule-lab-002"
@@ -371,14 +376,22 @@ def parse_receipt(text):
     return fields
 
 
-def git(*args):
-    """One line of git output from this repo, or why it is unknown."""
+def git(*args, root=REPO_ROOT):
+    """One line of git output from this repo, or why it is unknown.
+
+    An inherited GIT_DIR would redirect the read to another repository, and
+    an optional index lock would let ``status`` rewrite that repository's
+    index; both are cleared, so this reads ``root`` and writes nothing.
+    """
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env["GIT_OPTIONAL_LOCKS"] = "0"
     try:
         proc = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), *args],
+            ["git", "-C", str(root), *args],
             capture_output=True,
             text=True,
             timeout=QUERY_TIMEOUT_S,
+            env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         return f"unknown ({error})"
@@ -415,6 +428,42 @@ def snapshot():
             "lab/wasm-capsule/tools/build",
         ),
     )
+
+
+class SnapshotIsolationTest(unittest.TestCase):
+    """A read of this checkout leaves another repository and this index alone."""
+
+    @staticmethod
+    def stale_victim(scratch):
+        """A victim repository with a stale tracked file under the snapshot's
+        pathspec, so a status refresh would rewrite its index."""
+        victim, pointed = fixture_git.victim_repo(scratch, untracked=())
+        stale = victim / "lab/wasm-capsule/stale.txt"
+        stale.parent.mkdir(parents=True)
+        stale.write_text("stale\n")
+        env = fixture_git.fixture_git_env(scratch, dict.fromkeys(fixture_git.IDENTITY, "victim"))
+        for args in (("add", "lab/wasm-capsule/stale.txt"), ("commit", "-q", "-m", "stale")):
+            subprocess.run(["git", "-C", str(victim), *args], env=env, check=True, capture_output=True)
+        os.utime(stale, (1, 1))  # the index's stat data no longer matches the file
+        return victim, pointed
+
+    def test_snapshot_leaves_a_caller_git_dir_repository_unchanged(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            victim, pointed = self.stale_victim(scratch)
+            before = fixture_git.repo_state(victim)
+            config = fixture_git.shared_config(REPO_ROOT)
+            with mock.patch.dict(os.environ, pointed):
+                attribution = snapshot()
+            self.assertEqual(fixture_git.repo_state(victim), before, "a receipt read wrote to GIT_DIR's repo")
+            self.assertEqual(fixture_git.shared_config(REPO_ROOT), config, "the checkout's shared git config changed")
+            self.assertNotEqual(attribution.head, before[0], "the snapshot read GIT_DIR's repository")
+
+    def test_status_read_leaves_the_fixture_index_unchanged(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            victim, _ = self.stale_victim(scratch)
+            before = (victim / ".git" / "index").read_bytes()
+            git("status", "--porcelain", "--", "lab/wasm-capsule", root=victim)
+            self.assertEqual((victim / ".git" / "index").read_bytes(), before, "a status read rewrote the index")
 
 
 def evidence(builds, attribution, *, finding_id=FINDING_ID, heading=True):

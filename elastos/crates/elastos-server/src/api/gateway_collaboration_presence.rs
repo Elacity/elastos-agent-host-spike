@@ -783,6 +783,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn r4_presence_pass_skips_remote_principal_before_root_lookup() {
+        const REMOTE: &str = "remote:9c2e4a6b8d0f13572468ace0bdf13579";
+        const LOCAL: &str = "person:local:d27da763b7a38c5ef54051faf2ce09ef";
+        let child = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        for dir in [child.path(), parent.path()] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        elastos_identity::load_or_create_did(child.path()).unwrap();
+        elastos_identity::load_or_create_did(parent.path()).unwrap();
+        let now = crate::auth::now_ts();
+        let role = crate::auth::RuntimePrincipalRole::Admin;
+        let mut local = None;
+        for (credential, id) in [("r4-presence-remote", REMOTE), ("r4-presence-agent", LOCAL)] {
+            let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
+                elastos_runtime::auth::PasskeyWebAuthnBinding {
+                    credential_id: credential.into(),
+                    public_key: "r4-key".into(),
+                    sign_count: 1,
+                    user_verified: true,
+                    origin: "https://elastos.elacitylabs.com".into(),
+                    rp_id: "elastos.elacitylabs.com".into(),
+                    created_at: now,
+                    last_used_at: now,
+                    revoked_at: None,
+                },
+            );
+            let upsert = |dir: &std::path::Path, binding| {
+                crate::auth::upsert_principal_for_binding_as_role_named(
+                    dir,
+                    binding,
+                    id.into(),
+                    role,
+                    Some("R4"),
+                    now,
+                )
+                .unwrap()
+            };
+            let record = upsert(child.path(), binding);
+            if id == LOCAL {
+                upsert(parent.path(), record.proof_binding.clone());
+                local = Some(record);
+            }
+        }
+        let local = local.unwrap();
+        let protection = crate::auth::store_test_principal_root_protection(child.path(), LOCAL);
+        let profile = crate::collaboration_profile_authority::update_profile_authority(
+            child.path(),
+            LOCAL,
+            &protection.localhost_root,
+            &local.proof_binding_id,
+            "R4",
+            None,
+            now,
+        )
+        .unwrap();
+        let _auth_dir =
+            super::super::gateway_home_token::set_test_home_launch_auth_data_dir(parent.path());
+        let chat = crate::collaboration_product::test_chat_product_port(
+            child.path(),
+            "r4-rm",
+            "community",
+        );
+        let authority = crate::collaboration_presence_grant::test_authority();
+        let port = crate::collaboration_presence::CollaborationPresenceProductPort::new(
+            chat.test_core().clone(),
+        )
+        .unwrap()
+        .with_presence_authority(authority.clone());
+        crate::collaboration_presence_grant::set_presence_grant(
+            &authority,
+            child.path(),
+            LOCAL,
+            &profile.document().profile_did,
+            &port.presence_scope(),
+            crate::collaboration_presence_grant::PresenceDecision::Always,
+            now,
+        )
+        .await
+        .unwrap();
+        let result = publish_runtime_owned_presence_pass(child.path(), &port, now).await;
+        assert!(
+            matches!(result, Ok((1, false))),
+            "R4 presence skips the remote principal and publishes the local one: {result:?}"
+        );
+        let pending = port.pending_outgoing_presences(now).unwrap();
+        let senders: Vec<&str> = pending.iter().map(|p| p.sender_profile_did()).collect();
+        assert_eq!(senders, [profile.document().profile_did.as_str()]);
+    }
+
+    #[tokio::test]
     async fn r4_presence_pass_uses_agent_root() {
         const ID: &str = "person:local:d27da763b7a38c5ef54051faf2ce09ef";
         const AGENT_ROOT: &str = "localhost://UsersAI/5dca74bd48d800a148776e87";

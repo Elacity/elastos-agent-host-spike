@@ -22,7 +22,7 @@ pub async fn settle_and_revoke(state: &CapabilityState, session_id: &str, cause:
             tracing::debug!("settle {session_id}: {err}");
         }
     }
-    for request in store.list_granted().await {
+    for request in store.list_requests().await {
         if request.session_id.as_str() != session_id {
             continue;
         }
@@ -53,9 +53,13 @@ mod tests {
     fn state() -> CapabilityState {
         let audit = Arc::new(AuditLog::new());
         let tokens = Arc::new(CapabilityStore::new());
-        let manager =
-            CapabilityManager::new(tokens, audit.clone(), Arc::new(MetricsManager::new()));
+        let manager = CapabilityManager::new(
+            tokens.clone(),
+            audit.clone(),
+            Arc::new(MetricsManager::new()),
+        );
         CapabilityState {
+            capability_store: tokens,
             pending_store: Arc::new(PendingRequestStore::new(audit.clone())),
             capability_manager: Arc::new(manager),
             policy_evaluator: Arc::new(PolicyEvaluator::new(

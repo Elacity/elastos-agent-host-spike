@@ -21,6 +21,11 @@ CAPSULE_RECEIPT = Path("receipts/source-home-capsules.json")
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
+git_env_spec = importlib.util.spec_from_file_location("fixture_git_env", Path(__file__).with_name("fixture-git-env.py"))
+fixture_git = importlib.util.module_from_spec(git_env_spec)
+git_env_spec.loader.exec_module(fixture_git)
+
+
 def load_installer():
     spec = importlib.util.spec_from_file_location("source_home_installer", INSTALLER)
     module = importlib.util.module_from_spec(spec)
@@ -28,10 +33,11 @@ def load_installer():
     return module
 
 
-def run(command, cwd=None, check=True):
+def run(command, cwd=None, check=True, env=None):
     result = subprocess.run(
         command,
         cwd=cwd,
+        env=env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -63,8 +69,9 @@ def write(path, value, mode=0o600):
 def initialize_source(root):
     root.mkdir(mode=0o700)
     write(root / "tracked.txt", b"source\n", 0o600)
-    run(["git", "init", "-q"], cwd=root)
-    run(["git", "add", "tracked.txt"], cwd=root)
+    env = fixture_git.fixture_git_env(root.parent)
+    run(["git", "init", "-q"], cwd=root, env=env)
+    run(["git", "add", "tracked.txt"], cwd=root, env=env)
     run(
         [
             "git",
@@ -78,6 +85,7 @@ def initialize_source(root):
             "fixture",
         ],
         cwd=root,
+        env=env,
     )
 
 
@@ -112,7 +120,7 @@ def invoke(source, data, built, check=True):
 
 
 def git_value(source, revision):
-    return run(["git", "rev-parse", revision], cwd=source).stdout.strip()
+    return run(["git", "rev-parse", revision], cwd=source, env=fixture_git.fixture_git_env(source.parent)).stdout.strip()
 
 
 def snapshot(root):
