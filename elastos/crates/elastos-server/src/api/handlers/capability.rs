@@ -1138,6 +1138,73 @@ mod tests {
         );
     }
 
+    /// Waits on the clock (a condition with a deadline, no sleep) until every
+    /// held record is older than the capacity cleanup's 0 s retention.
+    async fn age_past_capacity_retention(store: &PendingRequestStore) {
+        let held = store.list_requests().await;
+        let newest = held.iter().map(|r| r.requested_at.unix_secs).max().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while elastos_common::SecureTimestamp::now().unix_secs <= newest {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the clock passed the newest second"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn dead_grants_at_capacity_are_retired_and_a_new_request_is_admitted() {
+        use elastos_runtime::capability::pending::{MAX_PENDING_PER_SESSION, MAX_PENDING_REQUESTS};
+        let state = test_state();
+        let (store, manager) = (
+            state.pending_store.clone(),
+            state.capability_manager.clone(),
+        );
+        let resource = ResourceId::new("elastos://content/publish");
+        let (old_epoch, _) = grant_in(&state, "session-dead", None, None).await;
+        manager.revoke_all("key rotated");
+        let (live, _) = grant_in(&state, "session-live", None, None).await;
+        let (revoked, token) = grant_in(&state, "session-dead", None, None).await;
+        manager.revoke(*token.id(), "operator detached").await;
+        let mut spent = Vec::new();
+        for n in 0..MAX_PENDING_REQUESTS - 3 {
+            let session = format!("spent-{}", n / MAX_PENDING_PER_SESSION);
+            let (id, token) = grant_in(&state, &session, Some(1), None).await;
+            let used = manager.validate(&token, &session, Action::Write, &resource, None);
+            used.await.expect("the once grant is used");
+            spent.push(id);
+        }
+        assert_eq!(store.list_requests().await.len(), MAX_PENDING_REQUESTS);
+        age_past_capacity_retention(&store).await;
+
+        let input = RequestCapabilityInput {
+            resource: "elastos://content/publish".to_string(),
+            action: "write".to_string(),
+            reason: String::new(),
+        };
+        let client = Extension(Session::new_capsule("vm-new".to_string()));
+        let reply = request_capability(State(state.clone()), client, Json(input)).await;
+        let held = store.list_requests().await;
+        let held: Vec<String> = held.iter().map(|r| r.id.to_string()).collect();
+        let retired = spent.iter().all(|id| !held.contains(id));
+        assert!(retired, "every spent once grant is retired");
+        assert!(!held.contains(&revoked), "a grant revoked by id is retired");
+        assert!(
+            !held.contains(&old_epoch),
+            "a grant from an old epoch is retired"
+        );
+        assert!(
+            held.contains(&live),
+            "a grant that can still validate stays"
+        );
+        let status = reply.unwrap().0.status;
+        assert_eq!(
+            status, "pending",
+            "the new request is admitted after cleanup"
+        );
+    }
+
     #[tokio::test]
     async fn capacity_cleanup_leaves_a_working_grant_in_the_live_view() {
         use elastos_runtime::capability::pending::{MAX_PENDING_PER_SESSION, MAX_PENDING_REQUESTS};
