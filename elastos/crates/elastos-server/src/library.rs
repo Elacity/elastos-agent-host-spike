@@ -1283,7 +1283,7 @@ fn handle_library_request(
 ) -> anyhow::Result<Value> {
     match request {
         ObjectProviderRequest::Roots { principal_id } => {
-            Ok(json!({ "roots": library_roots(data_dir, &principal_id) }))
+            Ok(json!({ "roots": library_roots(data_dir, &principal_id)? }))
         }
         ObjectProviderRequest::List { principal_id, uri } => {
             let root =
@@ -4075,13 +4075,15 @@ fn library_object(data_dir: &Path, principal_id: &str, uri: &str) -> anyhow::Res
     // its times are unknown (0).
     let metadata = match fs::metadata(&target.path) {
         Ok(metadata) => Some(metadata),
-        Err(err)
-            if err.kind() == std::io::ErrorKind::NotFound
-                && library_roots(data_dir, principal_id)
-                    .iter()
-                    .any(|root| root.uri == target.uri) =>
-        {
-            None
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if library_roots(data_dir, principal_id)?
+                .iter()
+                .any(|root| root.uri == target.uri)
+            {
+                None
+            } else {
+                return Err(err.into());
+            }
         }
         Err(err) => return Err(err.into()),
     };
@@ -7760,7 +7762,7 @@ fn shared_access_open_contract(
     })
 }
 
-fn library_roots(data_dir: &Path, principal_id: &str) -> Vec<LibraryRoot> {
+fn library_roots(data_dir: &Path, principal_id: &str) -> anyhow::Result<Vec<LibraryRoot>> {
     let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
         .localhost_root()
         .to_string();
@@ -7830,7 +7832,7 @@ fn library_roots(data_dir: &Path, principal_id: &str) -> Vec<LibraryRoot> {
             "item_count": item_count,
         })),
     });
-    roots
+    Ok(roots)
 }
 
 fn root_item_state(data_dir: &Path, principal_id: &str, uri: &str) -> (bool, usize) {
