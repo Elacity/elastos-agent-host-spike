@@ -9417,6 +9417,40 @@ async fn test_browser_operator_uncertain_input_is_revoked_by_the_runtime() {
 }
 
 #[tokio::test]
+async fn test_browser_operator_admission_at_capacity_retires_spent_grants() {
+    use elastos_runtime::capability::pending::MAX_PENDING_REQUESTS;
+    use elastos_runtime::primitives::audit::AuditLog;
+    use elastos_runtime::session::{SessionRegistry, SessionType};
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = Arc::new(SessionRegistry::new(Arc::new(AuditLog::new())));
+    let service = register_browser_operator_sessions(dir.path(), sessions.clone());
+    let operator = sessions.create_session(SessionType::Capsule, None).await;
+    service
+        .seed_spent_grants_for_test(MAX_PENDING_REQUESTS)
+        .await;
+    // Capacity cleanup drops records older than 0 s. Wait on the clock (a
+    // condition with a deadline, no sleep) until the seeded ones are.
+    let seeded = elastos_common::SecureTimestamp::now().unix_secs;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while elastos_common::SecureTimestamp::now().unix_secs <= seeded {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the clock passed the seeded second"
+        );
+        tokio::task::yield_now().await;
+    }
+    let app = gateway_router(browser_engine_attached_test_state(dir.path()).await);
+    let uri = "/api/apps/browser/pages/page-1/operator-requests";
+    let request = json!({"schema":"elastos.browser.operator-request/v1","document_generation":"a".repeat(32),"actions":["click"],"duration_ms":30000,"max_actions":1,"reason":"Click control"});
+    let (status, body) = operator_request(app, "POST", uri, &operator.token, None, request).await;
+    assert_eq!(
+        (status, body["status"].clone()),
+        (StatusCode::OK, json!("pending")),
+        "operator admission retires spent grants at capacity and admits the request"
+    );
+}
+
+#[tokio::test]
 async fn test_browser_operator_late_input_cannot_publish_after_owner_close() {
     use elastos_runtime::{
         primitives::audit::AuditLog,

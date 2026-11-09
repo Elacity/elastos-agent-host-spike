@@ -442,9 +442,11 @@ impl PendingRequestStore {
     /// every state, read-only, for the shell. Callers filter by state.
     ///
     /// These are the records held now, not a full history: `cleanup_old` and
-    /// the capacity guard drop resolved records, including a granted record
-    /// whose token is still live. Epoch, expiry and use count are checked by
-    /// `CapabilityManager` and `CapabilityStore`, not here.
+    /// the capacity guard drop old denied and expired records, and a granted
+    /// record once its token's expiry has passed. An unexpired granted record
+    /// stays unless its holder settles it first: the server, at capacity,
+    /// denies each grant that `CapabilityManager::can_still_validate` refuses
+    /// (spent, revoked by id, old epoch), and cleanup then drops it.
     pub async fn list_requests(&self) -> Vec<PendingCapabilityRequest> {
         let requests = self.requests.read().await;
         requests.values().cloned().collect()
@@ -498,7 +500,10 @@ impl PendingRequestStore {
 
     /// Remove old completed/expired requests
     ///
-    /// Keeps requests for `retention_secs` after they're resolved
+    /// Keeps requests for `retention_secs` after they're resolved. A granted
+    /// record whose token has not expired is kept at any age, so the shell's
+    /// views never lose a grant that can still validate; it leaves once it is
+    /// revoked (and so denied) or its token expires.
     pub async fn cleanup_old(&self, retention_secs: u64) -> usize {
         let now = SecureTimestamp::now();
         let mut removed = Vec::new();
@@ -509,6 +514,12 @@ impl PendingRequestStore {
                 // Keep pending requests
                 if matches!(request.status, RequestStatus::Pending) {
                     return true;
+                }
+                // Keep a grant whose token has not expired: it can still validate
+                if let Some(token) = request.granted_token() {
+                    if !token.expiry().is_some_and(|expiry| expiry.is_expired()) {
+                        return true;
+                    }
                 }
 
                 // Remove old resolved requests
@@ -657,6 +668,69 @@ mod tests {
             .await
             .unwrap()
             .is_pending());
+    }
+
+    #[tokio::test]
+    async fn capacity_cleanup_keeps_an_old_grant_whose_token_has_not_expired() {
+        let store = create_test_store();
+        let live = granted_request(&store, "session-grant").await;
+        let resource = ResourceId::new("localhost://Users/self/Documents/test");
+        let session = SessionId::from_string("session-grant");
+        let request = store.create_request(session, resource.clone(), Action::Read);
+        let lapsed = request.await.id.0;
+        let past = Some(SecureTimestamp::at(1));
+        let token = CapabilityToken::new(
+            "test-capsule".to_string(),
+            [0u8; 32],
+            resource.clone(),
+            Action::Read,
+            Default::default(),
+            SecureTimestamp::now(),
+            past,
+        );
+        let session_grant = GrantDuration::Session;
+        store
+            .grant_request(&lapsed, token, session_grant)
+            .await
+            .unwrap();
+        // Age both records past any retention through their timestamps, not a wait.
+        for id in [&live, &lapsed] {
+            let mut requests = store.requests.write().await;
+            requests.get_mut(id).unwrap().requested_at = SecureTimestamp::at(1);
+        }
+        for n in 0..MAX_PENDING_REQUESTS - 2 {
+            let session = SessionId::from_string(format!("fill-{}", n / MAX_PENDING_PER_SESSION));
+            store
+                .create_request(session, resource.clone(), Action::Read)
+                .await;
+        }
+        assert_eq!(store.list_requests().await.len(), MAX_PENDING_REQUESTS);
+
+        let extra = SessionId::from_string("session-extra");
+        let first = store.create_request(extra.clone(), resource.clone(), Action::Read);
+        let first = first.await;
+        let held = store.list_requests().await;
+        let kept = held.iter().any(|r| r.id.0 == live && r.is_granted());
+        assert!(
+            kept,
+            "capacity cleanup keeps an aged grant whose token has not expired"
+        );
+        let dropped = held.iter().all(|r| r.id.0 != lapsed);
+        assert!(
+            dropped,
+            "capacity cleanup drops an aged grant whose token has expired"
+        );
+        assert!(
+            first.is_pending(),
+            "the room the lapsed grant left takes one request"
+        );
+        let second = store.create_request(extra, resource, Action::Read).await;
+        let full = matches!(&second.status, RequestStatus::Denied { reason, settled_by: Settler::Runtime }
+            if reason == "Too many pending requests");
+        assert!(
+            full,
+            "the store, still full of live records, refuses the next request"
+        );
     }
 
     #[tokio::test]
