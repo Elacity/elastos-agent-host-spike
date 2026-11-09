@@ -11395,4 +11395,27 @@ mod r5a_tests {
             "{result:?}"
         );
     }
+
+    #[test]
+    fn localhost_spaces_pointer_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let result = localhost_space_pointer_object(dir.path(), r4_fixture::ID);
+            assert!(
+                result.as_ref().is_ok_and(|object| object.uri == root),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let result = localhost_space_pointer_object(dir.path(), r4_fixture::ID);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+    }
 }
