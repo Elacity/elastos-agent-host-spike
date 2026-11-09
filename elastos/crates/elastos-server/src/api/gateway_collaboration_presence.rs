@@ -549,7 +549,7 @@ async fn publish_runtime_owned_presence_pass(
     let mut nobody_granted = true;
     let scope = port.presence_scope();
     for principal in crate::auth::active_passkey_principals(data_dir)? {
-        let localhost_root = crate::auth::principal_localhost_root(&principal.principal_id);
+        let localhost_root = runtime_presence_principal_root(data_dir, &principal.principal_id)?;
         let Some(profile) = crate::collaboration_profile_authority::load_profile_authority(
             data_dir,
             &principal.principal_id,
@@ -596,6 +596,17 @@ async fn publish_runtime_owned_presence_pass(
         published = published.saturating_add(1);
     }
     Ok((published, nobody_granted))
+}
+
+fn runtime_presence_principal_root(
+    data_dir: &std::path::Path,
+    principal_id: &str,
+) -> anyhow::Result<String> {
+    Ok(
+        super::gateway_home_token::wallet_principal_root(data_dir, principal_id)?
+            .localhost_root()
+            .to_string(),
+    )
 }
 
 /// The one question every publisher asks: may this publisher announce this
@@ -658,6 +669,31 @@ fn presence_heartbeat_request_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn r4_runtime_presence_uses_stored_root() {
+        use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
+        use crate::auth::PrincipalKind;
+        let missing = tempfile::tempdir().unwrap();
+        assert_eq!(
+            runtime_presence_principal_root(missing.path(), ID)
+                .unwrap_err()
+                .to_string(),
+            "Wallet authority principal root unresolved"
+        );
+        for (kind, expected) in [
+            (PrincipalKind::Agent, AGENT_ROOT),
+            (PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            store(dir.path(), kind);
+            assert_eq!(
+                runtime_presence_principal_root(dir.path(), ID).unwrap(),
+                expected,
+                "R4 runtime presence root"
+            );
+        }
+    }
+
     use crate::collaboration_profile_authority::signed_profile_document_for_test;
     use ed25519_dalek::SigningKey;
     use elastos_runtime::signature::generate_keypair;
