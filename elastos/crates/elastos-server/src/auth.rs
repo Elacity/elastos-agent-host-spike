@@ -7451,10 +7451,10 @@ fn principal_kind_localhost_root(principal_id: &str, kind: PrincipalKind) -> Str
     }
 }
 
-/// The root a principal owns, chosen by the kind its stored record was minted
-/// with (A5-S3, rong-ruling-a5-s3-0025 C3). A legacy record with no kind field
-/// reads as Human; no data dir, a missing record, or a state that does not load
-/// refuses.
+/// The root a principal owns. Human records retain their stored root, including
+/// a migrated root; Agent records use the root of their minted kind (A5-S3,
+/// rong-ruling-a5-s3-0025 C3). A legacy record with no kind field reads as
+/// Human. A missing record or unreadable state refuses.
 pub(crate) fn principal_stored_localhost_root(
     data_dir: Option<&Path>,
     principal_id: &str,
@@ -7464,7 +7464,13 @@ pub(crate) fn principal_stored_localhost_root(
     let record = stored.map_err(|err| err.to_string())?.ok_or_else(|| {
         format!("principal '{principal_id}' has no stored record; its root cannot be chosen")
     })?;
-    Ok(principal_kind_localhost_root(principal_id, record.kind))
+    match record.kind {
+        PrincipalKind::Human if record.localhost_root.starts_with("localhost://Users/") => {
+            Ok(record.localhost_root)
+        }
+        PrincipalKind::Human => Err("stored human principal root is invalid".to_string()),
+        PrincipalKind::Agent => Ok(principal_kind_localhost_root(principal_id, record.kind)),
+    }
 }
 
 /// A principal's root, resolved once where the principal is bound (C6 P1,
@@ -7533,6 +7539,18 @@ impl ResolvedPrincipalRoot {
             anyhow::bail!("recovery kit root is not canonical for its principal");
         }
         Ok(Self(RootArm::Local(localhost_root.to_string())))
+    }
+
+    /// A recovered record already binds this kit to its stored root. The
+    /// importer's Human-kind gate owns eligibility for reassignment.
+    pub(crate) fn verified_stored_recovery_kit(
+        record: &PrincipalRecord,
+        kit: &RecoveryKitV1,
+    ) -> anyhow::Result<Self> {
+        if record.principal_id != kit.principal_id || record.localhost_root != kit.localhost_root {
+            anyhow::bail!("recovery kit does not match the stored principal root");
+        }
+        Ok(Self(RootArm::Local(kit.localhost_root.clone())))
     }
 
     /// Test-only root for a fixture principal (A5-P2a-ii-0b's two
@@ -7649,14 +7667,24 @@ fn stored_principal_kind(data_dir: &Path, principal_id: &str) -> anyhow::Result<
         .map_or(PrincipalKind::Human, |principal| principal.kind))
 }
 
-/// Binds an object URI to the root of the record's persisted kind, so an
-/// agent's `localhost://UsersAI/` root is accepted only for an agent record.
+/// Binds an object URI to the stored Human root or the minted Agent root.
 fn validate_principal_root_object_binding_in_state(
     data_dir: &Path,
     principal_id: &str,
     localhost_root: &str,
     object_uri: &str,
 ) -> anyhow::Result<()> {
+    if let Some(record) = stored_principal_record(data_dir, principal_id)? {
+        if record.kind == PrincipalKind::Human {
+            if !record.localhost_root.starts_with("localhost://Users/")
+                || localhost_root != record.localhost_root
+                || !object_uri_is_under_root(localhost_root, object_uri)
+            {
+                anyhow::bail!("principal localhost root must be the stored human root");
+            }
+            return Ok(());
+        }
+    }
     let kind = stored_principal_kind(data_dir, principal_id)?;
     validate_principal_root_object_binding_for_kind(
         principal_id,
@@ -16372,12 +16400,13 @@ pub(crate) mod tests {
         // The valid row: once the record is Human again, the same file and
         // its protection serve its own root.
         mutate_auth_state(data_dir.path(), |state| {
-            state
+            let record = state
                 .principals
                 .iter_mut()
                 .find(|principal| principal.principal_id == human.principal_id)
-                .unwrap()
-                .kind = PrincipalKind::Human;
+                .unwrap();
+            record.kind = PrincipalKind::Human;
+            record.localhost_root = root.clone();
             Ok(())
         })
         .unwrap();
