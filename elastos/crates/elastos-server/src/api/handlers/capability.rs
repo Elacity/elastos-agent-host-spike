@@ -1123,6 +1123,56 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn capacity_cleanup_leaves_a_working_grant_in_the_live_view() {
+        use elastos_runtime::capability::pending::{MAX_PENDING_PER_SESSION, MAX_PENDING_REQUESTS};
+        use elastos_runtime::session::SessionId;
+        let state = test_state();
+        let store = state.pending_store.clone();
+        let (live, token) = grant_in(&state, "session-grant", None, None).await;
+        let granted_at = store
+            .get_request(&live)
+            .await
+            .unwrap()
+            .requested_at
+            .unix_secs;
+        // Capacity cleanup drops records older than 0 s. Wait on the clock
+        // (a condition with a deadline, no sleep) until this one is.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while elastos_common::SecureTimestamp::now().unix_secs <= granted_at {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the clock passed the grant's second"
+            );
+            tokio::task::yield_now().await;
+        }
+        let resource = ResourceId::new("elastos://content/publish");
+        for n in 0..MAX_PENDING_REQUESTS - 1 {
+            let session = SessionId::from_string(format!("fill-{}", n / MAX_PENDING_PER_SESSION));
+            store
+                .create_request(session, resource.clone(), Action::Write)
+                .await;
+        }
+        let extra = SessionId::from_string("session-extra");
+        let refused = store
+            .create_request(extra, resource.clone(), Action::Write)
+            .await;
+
+        let (_, ids) = live_view(&state).await;
+        let message = "the live view still lists a grant that validates, after capacity cleanup";
+        assert_eq!(ids, vec![live.clone()], "{message}");
+        let held = store.list_requests().await;
+        let listed = held.iter().any(|r| r.id.as_str() == live && r.is_granted());
+        assert!(listed, "list_requests still holds the grant's record");
+        let manager = &state.capability_manager;
+        let valid = manager.validate(&token, "session-grant", Action::Write, &resource, None);
+        valid.await.expect("the grant still validates");
+        assert!(
+            refused.is_denied(),
+            "the store, still full, refuses the extra request"
+        );
+    }
+
     /// The lab stand-in's shell-only reason, written out independently.
     const SHELL_REASON: &str = "This endpoint requires shell privileges";
 
