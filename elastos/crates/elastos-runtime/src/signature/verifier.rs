@@ -427,4 +427,97 @@ mod tests {
             .unwrap()
             .is_some());
     }
+
+    /// S0-compat: a one-entry map signed at the parent commit still verifies.
+    #[test]
+    fn pre_s0_one_entry_provider_signature_still_verifies() {
+        const SIGNED: &str = r#"{"schema":"elastos.capsule/v1","version":"0.1.0","name":"legacy-one-provider","description":null,"author":null,"role":"app","type":"wasm","runtime_abi":null,"bus_contract":null,"wit_world_sha256":null,"execution":null,"projections":[],"entrypoint":"main.wasm","requires":[],"provides":null,"authority":null,"capabilities":[],"interfaces":[],"resources":{"memory_mb":64,"cpu_shares":100,"gpu":false},"permissions":{"host_process":false,"guest_network":false,"storage":[],"messaging":[]},"microvm":null,"providers":{"local":"built-in"},"icon":null,"viewer":null,"signature":"UbUqTHh5HA7mIWlILZ29Em9IG6wrJ21gmZ6il57cSHPcjFOYm7AwM5qeiXYi/5WHaRIh/28ozMxP9I4C9MwxBQ=="}"#;
+        const KEY_HEX: &str = "0d7550754e0800a5d237eef5826035766b9b3e5a15868a940ab289958788e3b0";
+        let manifest: CapsuleManifest = serde_json::from_str(SIGNED).unwrap();
+        let mut verifier = SignatureVerifier::new();
+        verifier.add_trusted_key_hex(KEY_HEX).unwrap();
+        assert!(verifier
+            .verify_capsule(&manifest, &hash_content(b"legacy entrypoint"))
+            .unwrap()
+            .is_some());
+    }
+
+    fn provider_manifest(pairs: &[(&str, &str)]) -> CapsuleManifest {
+        let mut manifest = create_test_manifest();
+        manifest.providers = Some(
+            pairs
+                .iter()
+                .map(|(scheme, source)| (scheme.to_string(), source.to_string()))
+                .collect(),
+        );
+        manifest
+    }
+
+    /// S0: the signing bytes put provider keys in map order.
+    #[test]
+    fn signed_multi_provider_manifest_verifies_after_a_parse() {
+        let content = b"multi provider content";
+        let manifest = provider_manifest(&[
+            ("zeta", "z"),
+            ("mu", "m"),
+            ("beta", "b"),
+            ("alpha", "a"),
+            ("eta", "e"),
+            ("kappa", "k"),
+        ]);
+        let signed_bytes = serde_json::to_string(&manifest).unwrap();
+        assert!(signed_bytes.contains(
+            r#""providers":{"alpha":"a","beta":"b","eta":"e","kappa":"k","mu":"m","zeta":"z"}"#
+        ));
+        let key = SigningKey::from_bytes(&[0x33; 32]);
+        let mut message = Sha256::digest(signed_bytes.as_bytes()).to_vec();
+        message.extend_from_slice(&hash_content(content));
+        let mut parsed: CapsuleManifest = serde_json::from_str(&signed_bytes).unwrap();
+        parsed.signature = Some(BASE64.encode(key.sign(&message).to_bytes()));
+        let mut verifier = SignatureVerifier::new();
+        verifier.add_trusted_key(key.verifying_key()).unwrap();
+        assert!(verifier
+            .verify_capsule(&parsed, &hash_content(content))
+            .unwrap()
+            .is_some());
+    }
+
+    /// S0-multi: a signature over a legacy hash order is refused; re-signing verifies.
+    #[test]
+    fn legacy_order_multi_provider_signature_is_refused_and_re_signs() {
+        let content = b"legacy order content";
+        let sorted =
+            r#""providers":{"alpha":"a","beta":"b","eta":"e","kappa":"k","mu":"m","zeta":"z"}"#;
+        let unsorted =
+            r#""providers":{"zeta":"z","mu":"m","beta":"b","alpha":"a","eta":"e","kappa":"k"}"#;
+        let manifest = provider_manifest(&[
+            ("alpha", "a"),
+            ("beta", "b"),
+            ("eta", "e"),
+            ("kappa", "k"),
+            ("mu", "m"),
+            ("zeta", "z"),
+        ]);
+        let legacy_bytes = serde_json::to_string(&manifest)
+            .unwrap()
+            .replace(sorted, unsorted);
+        let key = SigningKey::from_bytes(&[0x34; 32]);
+        let mut message = Sha256::digest(legacy_bytes.as_bytes()).to_vec();
+        message.extend_from_slice(&hash_content(content));
+        let mut parsed: CapsuleManifest = serde_json::from_str(&legacy_bytes).unwrap();
+        parsed.signature = Some(BASE64.encode(key.sign(&message).to_bytes()));
+        let mut verifier = SignatureVerifier::new();
+        verifier.add_trusted_key(key.verifying_key()).unwrap();
+        assert_eq!(
+            verifier
+                .verify_capsule(&parsed, &hash_content(content))
+                .unwrap(),
+            None
+        );
+        sign_capsule(&key, &mut parsed, &hash_content(content)).unwrap();
+        assert!(verifier
+            .verify_capsule(&parsed, &hash_content(content))
+            .unwrap()
+            .is_some());
+    }
 }

@@ -2059,7 +2059,7 @@
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
           "old": "        if let Some(executable) = message[\"executable\"].as_str() {\n            return Ok(PathBuf::from(executable));\n        }",
-          "new": "        if message[\"executable\"].as_str().is_some() {\n            return Ok(did_provider_dir().join(\"target/debug/did-provider\"));\n        }"
+          "new": "        if message[\"executable\"].as_str().is_some() {\n            return Ok(provider_dir(DID_PROVIDER).join(\"target/debug/did-provider\"));\n        }"
         }
       ],
       "tests": [
@@ -2074,7 +2074,7 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "        other => panic!(\n            \"the stand-in serves only {DID_PROVIDER} and {WALLET_PROVIDER}, \\\n             so {other} has no storage root layout\"\n        ),",
+          "old": "        other => panic!(\n            \"the stand-in serves only {DID_PROVIDER}, {WALLET_PROVIDER} and {MODEL_PROVIDER}, \\\n             so {other} has no storage root layout\"\n        ),",
           "new": "        _ => wallet_dir(base),"
         }
       ],
@@ -2570,8 +2570,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "    if SECCOMP_AUDIT_ARCH == 0 {",
-          "new": "    // WP160 admits close without any allow form selecting it.\n    syscalls.push(\"close\");\n    if SECCOMP_AUDIT_ARCH == 0 {"
+          "old": "    if audit_arch == 0 {",
+          "new": "    // WP160 admits close without any allow form selecting it.\n    syscalls.push(\"close\");\n    if audit_arch == 0 {"
         }
       ],
       "tests": [
@@ -2698,8 +2698,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "fn seccomp_probe_list(name: &str) -> Result<SeccompAllowList, String> {\n    let declared = read_declared_rights(name, &declared_rights_path(name))?;\n    seccomp_allow_list_from_declared_rights(name, &declared)\n        .map(|allow| allow.with_launch_essentials())\n}",
-          "new": "fn seccomp_probe_list(_: &str) -> Result<SeccompAllowList, String> {\n    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))?;\n    seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &declared)\n        .map(|allow| allow.with_launch_essentials())\n}"
+          "old": "fn seccomp_probe_list(name: &str) -> Result<SeccompAllowList, String> {\n    seccomp_probe_list_for_arch(name, SECCOMP_AUDIT_ARCH)\n}",
+          "new": "fn seccomp_probe_list(_: &str) -> Result<SeccompAllowList, String> {\n    seccomp_probe_list_for_arch(WALLET_PROVIDER, SECCOMP_AUDIT_ARCH)\n}"
         }
       ],
       "tests": [
@@ -3647,8 +3647,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "    let binary = if name == DID_PROVIDER {\n        did_provider_binary()\n    } else {\n        Path::new(PROVIDER_BINARY)\n    };",
-          "new": "    let binary = if name == \"no-such-provider\" {\n        did_provider_binary()\n    } else {\n        Path::new(PROVIDER_BINARY)\n    };"
+          "old": "        DID_PROVIDER => provider_binary(DID_PROVIDER),",
+          "new": "        DID_PROVIDER => Path::new(PROVIDER_BINARY),"
         }
       ],
       "tests": [
@@ -3686,6 +3686,155 @@
       ],
       "tests": [
         "builders_refuse_a_pinned_form_claimed_by_another_id"
+      ]
+    },
+    {
+      "id": "WP248",
+      "title": "the model runtime table admits ptrace, so the model's final program tests ptrace's number",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[\n    \"epoll_create1\",",
+          "new": "const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[\n    \"ptrace\",\n    \"epoll_create1\","
+        }
+      ],
+      "tests": [
+        "seccomp_model_program_admits_no_forbidden_call_on_either_architecture",
+        "seccomp_model_program_lets_run_exactly_the_listed_calls",
+        "seccomp_model_program_equals_its_golden_copy"
+      ]
+    },
+    {
+      "id": "WP249",
+      "title": "the model runtime table admits pidfd_getfd, a call the forbidden list does not name, so only the allowlist equality sees the model's program let it run",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    \"munmap\",\n    \"rseq\",\n];",
+          "new": "    \"munmap\",\n    \"pidfd_getfd\",\n    \"rseq\",\n];"
+        }
+      ],
+      "tests": [
+        "seccomp_model_program_lets_run_exactly_the_listed_calls",
+        "seccomp_model_program_equals_its_golden_copy"
+      ]
+    },
+    {
+      "id": "WP250",
+      "title": "the model's thread rules gain a JEQ 246 with an ALLOW behind it, so the x86-64 program lets kexec_load run under no name",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    program.pop();\n    program.extend([\n",
+          "new": "    program.pop();\n    program.extend([\n        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, 246, 0, 1),\n        allow,\n"
+        }
+      ],
+      "tests": [
+        "seccomp_model_program_lets_run_exactly_the_listed_calls",
+        "seccomp_model_program_admits_no_forbidden_call_on_either_architecture",
+        "seccomp_model_program_equals_its_golden_copy"
+      ]
+    },
+    {
+      "id": "WP251",
+      "title": "the x86-64 libm users table gains wallet, so the grant would widen while the old test skipped every listed user",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "const LIBM_LOADER_USERS_X86_64: &[&str] = &[MODEL_PROVIDER];",
+          "new": "const LIBM_LOADER_USERS_X86_64: &[&str] = &[MODEL_PROVIDER, WALLET_PROVIDER];"
+        }
+      ],
+      "tests": [
+        "landlock_ruleset_names_each_measured_loader_entry"
+      ]
+    },
+    {
+      "id": "WP252",
+      "title": "the fcntl rule also admits command 2 (F_SETFD), an argument widening that adds no syscall number",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number(\"fcntl\"), 0, 5),\n        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG1_LOW),\n",
+          "new": "        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number(\"fcntl\"), 0, 6),\n        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG1_LOW),\n        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, 2, 2, 0),\n"
+        }
+      ],
+      "tests": [
+        "seccomp_model_program_equals_its_golden_copy"
+      ]
+    },
+    {
+      "id": "WP253",
+      "title": "the futex rule masks its op with 1 instead of FUTEX_CMD_MASK, so every op reads as wait or wake",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        SeccompInstruction::stmt(SECCOMP_BPF_AND_K, LINUX_FUTEX_CMD_MASK),",
+          "new": "        SeccompInstruction::stmt(SECCOMP_BPF_AND_K, 0x1),"
+        }
+      ],
+      "tests": [
+        "seccomp_model_program_equals_its_golden_copy"
+      ]
+    },
+    {
+      "id": "WP254",
+      "title": "clone3 returns SECCOMP_RET_LOG instead of ENOSYS, so the kernel runs it and a new process can start",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        SeccompInstruction::stmt(SECCOMP_BPF_RET_K, SECCOMP_RET_ENOSYS),",
+          "new": "        SeccompInstruction::stmt(SECCOMP_BPF_RET_K, 0x7ffc_0000),"
+        }
+      ],
+      "tests": [
+        "seccomp_model_program_equals_its_golden_copy"
+      ]
+    },
+    {
+      "id": "WP255",
+      "title": "the clone rule's miss jump lands on its allow instead of the next rule, so every later number is allowed",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number(\"clone\"), 0, 4),",
+          "new": "        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number(\"clone\"), 0, 2),"
+        }
+      ],
+      "tests": [
+        "seccomp_model_program_equals_its_golden_copy"
+      ]
+    },
+    {
+      "id": "WP256",
+      "title": "the shared SeccompInstruction::jump constructor turns the F_DUPFD_CLOEXEC equality into a bit test, so fcntl commands 2, 4 and 15 are allowed while a golden read through that constructor would still agree",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> Self {\n        Self { code, jt, jf, k }\n    }",
+          "new": "    const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> Self {\n        let code = if code == 0x15 && k == 1030 { 0x45 } else { code };\n        Self { code, jt, jf, k }\n    }"
+        }
+      ],
+      "tests": [
+        "seccomp_model_program_equals_its_golden_copy"
       ]
     }
   ]

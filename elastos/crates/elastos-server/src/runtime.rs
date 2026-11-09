@@ -252,6 +252,18 @@ impl Runtime {
         args: Vec<String>,
         principal_id: Option<String>,
     ) -> Result<CapsuleHandle> {
+        self.run_local_with_signer(path, args, principal_id)
+            .await
+            .map(|(handle, _signer)| handle)
+    }
+
+    /// Load and run a capsule, also returning the signer admission verified.
+    pub(crate) async fn run_local_with_signer(
+        &self,
+        path: &Path,
+        args: Vec<String>,
+        principal_id: Option<String>,
+    ) -> Result<(CapsuleHandle, Signer)> {
         // Read manifest
         let manifest_path = path.join("capsule.json");
         let manifest_data = tokio::fs::read_to_string(&manifest_path)
@@ -291,7 +303,7 @@ impl Runtime {
         self.check_provider_dependencies(&manifest).await?;
 
         // Verify signature if verifier is configured
-        let _signer = self.verify_capsule_signature(&manifest, path).await?;
+        let signer = self.verify_capsule_signature(&manifest, path).await?;
         crate::component::validate_component_capsule(path, &manifest).await?;
 
         // Find a compute provider that supports this capsule type
@@ -337,7 +349,7 @@ impl Runtime {
         }
         start?;
 
-        Ok(handle)
+        Ok((handle, signer))
     }
 
     /// Check that all providers required by a capsule are registered
@@ -530,7 +542,7 @@ impl Runtime {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use async_trait::async_trait;
     use elastos_common::{
@@ -539,7 +551,9 @@ mod tests {
     };
     use elastos_compute::{CapsuleInfo, ComputeProvider};
     use elastos_runtime::capability::pending::GrantDuration;
-    use elastos_runtime::capability::{CapabilityManager, CapabilityStore, TokenConstraints};
+    use elastos_runtime::capability::{
+        CapabilityManager, CapabilityStore, Settler, TokenConstraints,
+    };
     use elastos_runtime::primitives::audit::{AuditEvent, AuditLog};
     use elastos_runtime::primitives::metrics::MetricsManager;
     use elastos_runtime::provider::{
@@ -553,7 +567,7 @@ mod tests {
         ComponentTypeSection, InstanceType,
     };
 
-    struct NoopComputeProvider;
+    pub(crate) struct NoopComputeProvider;
 
     #[async_trait]
     impl ComputeProvider for NoopComputeProvider {
@@ -665,7 +679,7 @@ mod tests {
         }
     }
 
-    async fn test_runtime() -> (Runtime, tempfile::TempDir) {
+    pub(crate) async fn test_runtime() -> (Runtime, tempfile::TempDir) {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage = Arc::new(
             LocalFSProvider::new(temp_dir.path().to_path_buf())
@@ -1364,7 +1378,7 @@ mod tests {
             let pending = next_pending(&fx.pending_store).await;
             assert_eq!(pending.resource.as_str(), journal);
             fx.pending_store
-                .deny_request(pending.id.as_str(), "not now")
+                .deny_request_by(pending.id.as_str(), "not now", Settler::Shell)
                 .await
                 .unwrap();
         }

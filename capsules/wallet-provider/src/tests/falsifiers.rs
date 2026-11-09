@@ -189,7 +189,7 @@ use std::process::Command;
 /// the appended allow form because no declared right names it; the suite never
 /// starts. Task 101's
 /// WP128
-/// returns `did_provider_dir().join("target/debug/did-provider")` from the one
+/// returns `provider_dir(DID_PROVIDER).join("target/debug/did-provider")` from the one
 /// build-output reader instead of the reported `executable`, so
 /// `did_binary_is_the_executable_the_build_reports` fails on its fixture path
 /// while `standin_launcher_finds_the_built_did_binary` alone still passes
@@ -332,7 +332,19 @@ use std::process::Command;
 /// WP244 keeps the directories a failed publish created, so a retry answers ok.
 /// WP245 makes the provider chooser answer wallet's binary for did. WP246 and
 /// WP247 skip the pinned-claim check in the seccomp and the Landlock builder.
-const EXPECTED_FALSIFIERS: usize = 227;
+/// WP248 adds `ptrace` to `MODEL_RUNTIME_ESSENTIALS`, so the model's final
+/// program admits it and both the fixed forbidden-call check and the allowlist
+/// equality fail. WP249 adds `pidfd_getfd` there, which only the allowlist
+/// equality catches. WP250 puts a `JEQ 246` with an `ALLOW` behind it in the
+/// model's thread rules, which both checks catch on the x86-64 program.
+/// WP251 adds wallet to the x86-64 `libm` users, so the per-architecture set
+/// check in `landlock_ruleset_names_each_measured_loader_entry` fails.
+/// WP252 admits `fcntl` command 2, WP253 loosens the `futex` mask, WP254 makes
+/// `clone3` return `SECCOMP_RET_LOG` and WP255 retargets the `clone` rule's
+/// jump; `seccomp_model_program_equals_its_golden_copy` catches each. WP256
+/// changes the shared `SeccompInstruction::jump` constructor, which the golden
+/// reader does not use, so the same test catches it.
+const EXPECTED_FALSIFIERS: usize = 236;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
