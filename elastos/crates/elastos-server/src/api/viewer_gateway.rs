@@ -765,7 +765,7 @@ fn viewer_storage_target_for_context(
     scope: &str,
     name: &str,
 ) -> anyhow::Result<ViewerStorageTarget> {
-    let root_uri = viewer_storage_root_uri(data_dir, &context, &viewer, &capsule)?;
+    let root_uri = viewer_storage_root_uri(data_dir, context, viewer, capsule)?;
     let root = rooted_localhost_fs_path(data_dir, &root_uri)
         .ok_or_else(|| anyhow::anyhow!("invalid viewer storage root"))?;
     let file_name = clean_storage_file_name(name)?;
