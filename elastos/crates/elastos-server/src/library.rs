@@ -3695,7 +3695,9 @@ fn localhost_space_pointer_object(
     data_dir: &Path,
     principal_id: &str,
 ) -> anyhow::Result<LibraryObject> {
-    let uri = crate::auth::principal_localhost_root(principal_id);
+    let uri = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     let target = library_target(data_dir, principal_id, &uri)?;
     let metadata = fs::metadata(&target.path).ok();
     let modified_at = metadata
