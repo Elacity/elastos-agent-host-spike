@@ -7499,6 +7499,16 @@ impl ResolvedPrincipalRoot {
             .map_err(|err| anyhow!(err))
     }
 
+    /// The localhost root this principal owns. A remote principal owns no
+    /// localhost path, so it has the empty root: every path resolver refuses
+    /// an empty root, and no caller falls back to the principal-id rule.
+    pub(crate) fn localhost_root(&self) -> &str {
+        match &self.0 {
+            RootArm::Local(root) => root,
+            RootArm::Remote => "",
+        }
+    }
+
     /// The device arm for a launch token whose signature already verified
     /// against `did`, the Runtime's trusted signer. A subordinate Runtime
     /// trusts its parent's DID without holding that device key, so this takes

@@ -95,10 +95,10 @@ pub(super) async fn put(
 
 fn object_location(
     data_dir: &Path,
-    principal_id: &str,
+    context: &HomeLaunchTokenContext,
     relative: &str,
 ) -> anyhow::Result<(String, PathBuf)> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+    let root = context.root().localhost_root();
     let uri = format!("{root}/{relative}");
     let path = rooted_localhost_fs_path(data_dir, &uri)
         .ok_or_else(|| anyhow::anyhow!("invalid Assistant workspace object root"))?;
@@ -111,17 +111,17 @@ fn optional_object(
     relative: &str,
     max_bytes: usize,
 ) -> anyhow::Result<Option<Vec<u8>>> {
-    let (uri, path) = object_location(data_dir, context.principal_id(), relative)?;
+    let (uri, path) = object_location(data_dir, context, relative)?;
     match std::fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
         Ok(_) => {}
     }
-    let root = crate::auth::principal_localhost_root(context.principal_id());
+    let root = context.root().localhost_root();
     let bytes = crate::auth::read_principal_root_object(
         data_dir,
         context.principal_id(),
-        &root,
+        root,
         &uri,
         &path,
     )?;
@@ -184,8 +184,7 @@ pub(super) fn legacy_home_agent(
     anyhow::ensure!(
         state.schema == HOME_BROWSER_STATE_SCHEMA
             && state.principal_id == context.principal_id()
-            && state.localhost_root
-                == crate::auth::principal_localhost_root(context.principal_id()),
+            && state.localhost_root == context.root().localhost_root(),
         "invalid legacy Home workspace identity"
     );
     if let Some(session) = raw.get("session").filter(|value| !value.is_null()) {
@@ -301,12 +300,12 @@ fn save(
         "Assistant workspace including retained sources exceeds {} bytes",
         MAX_BYTES
     );
-    let (uri, path) = object_location(data_dir, context.principal_id(), RELATIVE_PATH)?;
-    let root = crate::auth::principal_localhost_root(context.principal_id());
+    let (uri, path) = object_location(data_dir, context, RELATIVE_PATH)?;
+    let root = context.root().localhost_root();
     crate::auth::write_protected_principal_root_object(
         data_dir,
         context.principal_id(),
-        &root,
+        root,
         &uri,
         &path,
         &bytes,

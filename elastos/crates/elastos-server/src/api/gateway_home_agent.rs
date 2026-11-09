@@ -79,7 +79,7 @@ pub(super) fn principal_root_protected_object_inventory(
 fn home_agent_workspace_uri(context: &HomeLaunchTokenContext) -> String {
     format!(
         "{}/{HOME_AGENT_WORKSPACE_RELATIVE_ROOT}/{HOME_AGENT_WORKSPACE_FILE}",
-        crate::auth::principal_localhost_root(context.principal_id())
+        context.root().localhost_root()
     )
 }
 
@@ -112,11 +112,11 @@ fn load_home_agent_workspace(
         Err(err) => return Err(err.into()),
     }
     let principal_id = context.principal_id();
-    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    let localhost_root = context.root().localhost_root();
     let bytes = crate::auth::read_principal_root_object(
         data_dir,
         principal_id,
-        &localhost_root,
+        localhost_root,
         &home_agent_workspace_uri(context),
         &path,
     )?;
@@ -153,11 +153,11 @@ fn save_home_agent_workspace(
     validate_workspace_bytes(&bytes)?;
     let path = home_agent_workspace_path(data_dir, context)?;
     let principal_id = context.principal_id();
-    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    let localhost_root = context.root().localhost_root();
     crate::auth::write_protected_principal_root_object(
         data_dir,
         principal_id,
-        &localhost_root,
+        localhost_root,
         &home_agent_workspace_uri(context),
         &path,
         &bytes,
