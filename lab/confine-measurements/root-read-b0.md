@@ -55,8 +55,12 @@ copy inside the next test binary. The receipt also runs
 `root-read-b0-interrupt-test.sh`, which plants the wallet profile, sends SIGTERM
 while the suite is running, and proves the profile and the tree are restored.
 
-Every test in each suite therefore has a recorded result under each candidate
-form:
+Each plant run records a result for every test in that provider's suite
+(receipt lines 244, 325, 409, 739, 1133, 1524, 1697, 1954, 2214; bare numbers
+in parentheses below are receipt lines too). The plant
+edits only the provider's `confine.sb`, so only tests that start the provider
+under that file, or read it, run under the candidate form. Tests that build a
+profile from `declared-rights.json` keep the fixture row in every run.
 
 | Provider | `file-read-data` | `file-read-metadata` | no root read |
 |---|---|---|---|
@@ -80,32 +84,73 @@ line fails them by construction:
 - `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
   (`:5546`)
 
-Every test that starts a working provider under the committed profile passes
-under `file-read-data` for all three providers. In the narrower runs those
-starts fail at their start assertion, and the profile-text checks fail as well;
-the receipt lists each failing test and its panic:
+Starts under the committed `confine.sb` pass under `file-read-data`: did 16
+passed (244), wallet failed only the six text checks above (732-737), model 39
+passed (1697). Under `file-read-metadata` and with the line deleted, the tests
+that start the provider under its committed `confine.sb` and wait for an `init`
+answer fail at that answer with SIGABRT:
 
-- did and wallet launch failures:
+- did, 8 per run at `tests/confine.rs:304` (metadata 255-308, none 339-392):
   `provider did not answer request {... "op":"init"} (the response stream
-  ended); child signal: 6 (SIGABRT)`.
-- model launch failures:
+  ended); child signal: 6 (SIGABRT)` (340).
+- wallet, 15 per run at `tests/confine.rs:997` (metadata 756-1102, none
+  1150-1494), with the same message (1151).
+- model, 10 per run (metadata 1767-1805, none 2027-2065):
   `the provider process exited before answering "init": signal: 6 (SIGABRT)`.
+
+Starts from a generated profile read the fixture row (did and wallet
+`file-read*` at `declared-rights.json:25`, model `file-read-data` at `:26`), and
+they pass in the metadata and none runs:
+
+- wallet suite: `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host`
+  starts did and wallet and requires `get_did` and `status` to answer `ok`
+  (`capsules/wallet-provider/tests/confine.rs:4620-4700`); ok at 1080 and 1430.
+  `standin_start_runs_under_the_generated_profile_not_the_committed_file`
+  requires the wallet's `init` refusal `storage_error` (`:5583`); ok at 1035
+  and 1433.
+- model suite: `generated_profile_permits_init_and_denies_the_local_offer`
+  (`tests/confine/main.rs:3987`; ok at 1750 and 2010) and
+  `generated_profile_denies_the_hosted_connect` (`:4200`; ok at 1730 and 1990)
+  require `init` to serve. `standin_launch_uses_the_generated_profile`
+  (`:4261`; ok at 1927 and 2187) requires `init` to answer
+  `journal_access_denied`.
+- The did suite holds no generated-profile start (passing tests 342-395).
+
+The other five model `generated_profile_*` tests fail in those runs at their
+allow-line comparison with the committed file, before any start (none
+1984-2024). `byte_different_file_at_bound_path_starts` passes in every model run
+(1548, 1737, 1997) because it accepts any exit but 65 and 71; its printed
+outcome is signal 6 under metadata and none (1729, 1989).
 
 ## Conclusion
 
-`(allow file-read-data (literal "/"))` is the narrowest measured form that every
-working start in the three macOS suites passes. It is sufficient for did, wallet
-and model, and its removal fails every measured working-start journey at
-startup for each provider, so the form is needed, not merely harmless.
+With the root line deleted from the committed `confine.sb`:
 
-The did and wallet `file-read*` form is broader than necessary. The metadata
-rung is too narrow for every provider, which confirms the model document's
-sentence by measurement.
+| Provider | Fails (list) | Passes that start a provider and need an answer |
+|---|---|---|
+| did | 8 committed-profile starts (400-407) | none (342-395) |
+| wallet | 15 committed-profile starts, 6 text checks (1502-1522) | `standin_c0` (1430), `standin_start_runs_...` (1433) |
+| model | 10 committed-profile starts, 5 generated-profile oracle checks, 3 text checks (2195-2212) the three model starts above (1990, 2010, 2187) |
+
+The narrower conclusion: for starts that load the committed `confine.sb`,
+`(allow file-read-data (literal "/"))` is the narrowest measured form that
+serves did, wallet and model, and removing the line fails those starts at
+`init`, so on those starts the form is needed. The generated-profile starts
+never ran under a candidate; they show the fixture row works and nothing about
+narrowing or deleting it. Unmeasured: did and wallet starts from a generated
+profile whose root row is `file-read-data`, and any generated-profile start
+without a root-read row.
+
+On the committed-profile starts, the did and wallet `file-read*` form is broader
+than they need, and the metadata rung fails them for all three providers, which
+agrees with the model document's sentence.
 
 Proposal for the confinement crate: one platform-baseline row,
 `startup-root-directory`, holding `(allow file-read-data (literal "/"))`, and
 all three providers render that row. The Runtime keys the rule to the baseline
-id, not to a provider name. B0 makes no such change.
+id, not to a provider name. B0 makes no such change. For did and wallet, B0
+measured that row's text only inside the committed `confine.sb`; the row as the
+generator renders it is not measured for them.
 
 ## Limits
 
