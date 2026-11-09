@@ -1136,9 +1136,21 @@ fn standin_a12_census(standin: &StandIn, home: &ThrowawayHome, port: u16) -> Res
     let view = standin
         .get_capability_list(StandInCaller::Shell, Some("all_sessions_live"))
         .map_err(|(_, reason)| reason)?;
-    match grants::live_grant_state(&view, &BTreeSet::new()) {
+    match grants::live_grant_state(&view, &standin.minted_grant_ids()) {
         Ok(grants::GrantCensus::Empty) => {}
-        Ok(state) => return Err(format!("{state:?}")),
+        Ok(grants::GrantCensus::MissingScope) => {
+            return Err("pending:0 grants:BLOCKED(AC-021-GRANTS)".to_owned())
+        }
+        Ok(grants::GrantCensus::Live(ids, foreign)) => {
+            return Err(format!(
+                "live grant {}: {ids:?}",
+                if foreign {
+                    "is not this run's"
+                } else {
+                    "leftover"
+                }
+            ))
+        }
         Err(reason) => return Err(reason.to_owned()),
     }
     let listed = standin

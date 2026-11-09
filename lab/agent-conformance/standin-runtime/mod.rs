@@ -64,6 +64,7 @@ use grant_binding::{
     AdmitRefuse, BudgetAsk, GuestRequest, Handle, InstanceId, Refuse, Rights, Verifier,
 };
 use serde_json::{json, Map, Value};
+use std::collections::BTreeSet;
 use std::os::fd::OwnedFd;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
@@ -748,6 +749,15 @@ impl StandIn {
                 request_id: String::new(),
             },
         });
+    }
+
+    /// Lab test seam, not a route: every request id this stand-in stores.
+    /// The A12 census compares its live view with this set.
+    pub fn minted_grant_ids(&self) -> BTreeSet<String> {
+        self.grants
+            .iter()
+            .map(|grant| grant.request_id.clone())
+            .collect()
     }
 
     /// Lab test seam, not a route.
