@@ -11342,4 +11342,32 @@ mod r5a_tests {
             "{result:?}"
         );
     }
+
+    #[test]
+    fn library_event_write_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let uri = library_event_log_uri(root);
+            let result = write_library_events(dir.path(), r4_fixture::ID, &[event(root)]);
+            assert!(
+                result.is_ok()
+                    && rooted_localhost_fs_path(dir.path(), &uri)
+                        .unwrap()
+                        .is_file(),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let result =
+            write_library_events(dir.path(), r4_fixture::ID, &[event(r4_fixture::HUMAN_ROOT)]);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+    }
 }
