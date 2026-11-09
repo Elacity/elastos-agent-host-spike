@@ -796,15 +796,20 @@ F_LOCK_HASH = Falsifier(
     ("test_receipt_lockfile_sha256_matches_independent_sha256",),
     "the receipt does not name the committed lockfile",
 )
-NO_STD = '#![cfg_attr(target_arch = "wasm32", no_std)]\n'
+# The digest export, which appears once. The plant appends a `#[used]` static
+# after it so `env!("CARGO_MANIFEST_DIR")` is compiled into the wasm: the copy's
+# absolute path then differs between the two reproducibility copies.
+DIGEST_EXPORT = (
+    'pub extern "C" fn digest(n: u32) -> u64 {\n    digest_impl(n)\n}\n'
+)
 F_BUILD_PATH = Falsifier(
     "F-RT003-BUILD-PATH",
     "the capsule embeds its absolute source path (the bug the owner's F-WC1 plants)",
     (
         Edit(
             "capsule/src/lib.rs",
-            NO_STD,
-            NO_STD + '\n#[cfg(target_arch = "wasm32")]\n#[used]\n'
+            DIGEST_EXPORT,
+            DIGEST_EXPORT + '\n#[cfg(target_arch = "wasm32")]\n#[used]\n'
             'static BUILD_DIR: &str = env!("CARGO_MANIFEST_DIR");\n',
         ),
     ),

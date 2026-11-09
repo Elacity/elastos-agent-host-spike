@@ -77,6 +77,8 @@ jobs:
         run: ./scripts/test-source-gate.sh product-ui
       - name: release artifact source proofs
         run: ./scripts/test-source-gate.sh release
+      - name: lab red-team receipt probe
+        run: ./scripts/test-source-gate.sh redteam
 
   # cancel-on-failure cannot run for a fork pull request (its token cannot cancel), so
   # there the compile jobs wait here for source-gate's verdict and are skipped when it
